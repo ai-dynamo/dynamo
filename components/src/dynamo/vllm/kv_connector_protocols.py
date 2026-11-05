@@ -141,7 +141,7 @@ KV_CONNECTOR_PROTOCOLS: Dict[str, Type[KvConnectorProtocol]] = {
 
 # Wrapper connectors that compose sub-connectors under
 # ``kv_connector_extra_config["connectors"]``. ``PdConnector``
-# (kvbm.vllm_integration.connector) subclasses vLLM's ``MultiConnector``
+# (dynamo.vllm.pd_connector) subclasses vLLM's ``MultiConnector``
 # with the same config shape, so both delegate PD coordination to their
 # single PD-capable child.
 MULTI_CONNECTOR_WRAPPERS: Tuple[str, ...] = ("MultiConnector", "PdConnector")

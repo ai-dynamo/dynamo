@@ -15,17 +15,19 @@ use crate::{Endpoint, to_pyerr};
 pub struct KvStateAgentHost {
     endpoint: dynamo_runtime::component::Endpoint,
     max_slots: usize,
+    slots_per_socket: usize,
     inner: Arc<OnceCell<Arc<llm_rs::kv_router::publisher::KvStateAgentHost>>>,
 }
 
 #[pymethods]
 impl KvStateAgentHost {
     #[new]
-    #[pyo3(signature = (endpoint, max_slots=8))]
-    fn new(endpoint: Endpoint, max_slots: usize) -> Self {
+    #[pyo3(signature = (endpoint, max_slots=8, slots_per_socket=1))]
+    fn new(endpoint: Endpoint, max_slots: usize, slots_per_socket: usize) -> Self {
         Self {
             endpoint: endpoint.inner,
             max_slots,
+            slots_per_socket,
             inner: Arc::new(OnceCell::new()),
         }
     }
@@ -33,14 +35,16 @@ impl KvStateAgentHost {
     fn start<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let endpoint = self.endpoint.clone();
         let max_slots = self.max_slots;
+        let slots_per_socket = self.slots_per_socket;
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             inner
                 .get_or_try_init(|| async move {
                     llm_rs::kv_router::publisher::KvStateAgentHost::start(
                         llm_rs::kv_router::publisher::KvStateAgentHostConfig {
                             endpoint,
                             max_slots,
+                            slots_per_socket,
                         },
                     )
                     .await
@@ -53,7 +57,7 @@ impl KvStateAgentHost {
 
     fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             Python::with_gil(|py| {
                 pythonize::pythonize(py, inner.status().as_ref())
                     .map(|value| value.unbind())
@@ -64,14 +68,12 @@ impl KvStateAgentHost {
 
     fn shutdown<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.shutdown().await.map_err(to_pyerr)
-        })
+        crate::future_into_py(py, async move { inner.shutdown().await.map_err(to_pyerr) })
     }
 
     fn wait_terminated<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             inner.wait_terminated().await;
             Ok(())
         })
@@ -94,6 +96,8 @@ struct AttachmentDescriptorInput {
     kv_state_endpoint: String,
     indexer_domain_id: String,
     kv_block_size: u32,
+    #[serde(default)]
+    ingress_protocol: Option<llm_rs::discovery::kv_state_agent::KvStateIngressProtocol>,
     raw_zmq_endpoint: String,
     #[serde(default)]
     raw_topic: String,
@@ -101,6 +105,8 @@ struct AttachmentDescriptorInput {
     image_token_id: Option<u32>,
     #[serde(default)]
     video_token_id: Option<u32>,
+    #[serde(default)]
+    engine_owned_mm_identity: bool,
     #[serde(default)]
     router_hint_source: Option<dynamo_kv_router::protocols::RouterHintSourceMetadata>,
 }
@@ -131,12 +137,14 @@ impl KvStateAttachmentOwner {
                     kv_state_endpoint: input.kv_state_endpoint.parse()?,
                     indexer_domain_id: input.indexer_domain_id.parse()?,
                     kv_block_size: input.kv_block_size,
-                    ingress_protocol:
+                    ingress_protocol: input.ingress_protocol.unwrap_or(
                         llm_rs::discovery::kv_state_agent::KvStateIngressProtocol::VllmResidencyV1,
+                    ),
                     raw_zmq_endpoint: input.raw_zmq_endpoint,
                     raw_topic: input.raw_topic,
                     image_token_id: input.image_token_id,
                     video_token_id: input.video_token_id,
+                    engine_owned_mm_identity: input.engine_owned_mm_identity,
                     router_hint_source: input.router_hint_source,
                 })
             })
@@ -155,7 +163,7 @@ impl KvStateAttachmentOwner {
         let worker_id = self.worker_id;
         let descriptors = self.descriptors.clone();
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             inner
                 .get_or_try_init(|| async move {
                     llm_rs::kv_router::publisher::KvStateAttachmentOwner::start(
@@ -173,9 +181,7 @@ impl KvStateAttachmentOwner {
 
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.close().await.map_err(to_pyerr)
-        })
+        crate::future_into_py(py, async move { inner.close().await.map_err(to_pyerr) })
     }
 }
 

@@ -29,7 +29,6 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 )
@@ -166,7 +165,7 @@ func (h *PodCheckpointRestoreMutator) buildPinnedPodSnapshotRestorePod(
 		h.apiReader,
 		podNamespace,
 		config,
-		expectedWorkerHashForPod(pod),
+		expectedSnapshotCompatibilityHashForPod(pod),
 		checkpoint.ExplicitPodSnapshotUse(),
 	)
 	if err != nil {
@@ -239,7 +238,7 @@ func (h *PodCheckpointRestoreMutator) buildAutomaticSnapshotJobRestorePod(
 		h.apiReader,
 		podNamespace,
 		config,
-		expectedWorkerHashForPod(pod),
+		expectedSnapshotCompatibilityHashForPod(pod),
 		checkpoint.ManagedPodSnapshotUse(ownerUID),
 	)
 	if apierrors.IsNotFound(err) {
@@ -269,14 +268,13 @@ func automaticCandidateUnavailable(
 	return nil, false, fmt.Errorf("automatic restore candidate unavailable: %s", reason)
 }
 
-func expectedWorkerHashForPod(pod *corev1.Pod) *string {
-	if !dynamo.IsWorkerComponent(pod.Labels[consts.KubeLabelDynamoComponentType]) {
-		return nil
-	}
-	workerHash := pod.Labels[consts.KubeLabelDynamoWorkerHash]
-	return &workerHash
+func expectedSnapshotCompatibilityHashForPod(pod *corev1.Pod) string {
+	return pod.Annotations[consts.SnapshotCandidateCompatibilityHashAnnotation]
 }
 
+// shapeNativeRestorePod builds a restore Pod, applies Dynamo's restore policy,
+// and removes private candidate annotations before validating the Snapshot contract.
+// pod and resolved must be non-nil.
 func (h *PodCheckpointRestoreMutator) shapeNativeRestorePod(
 	pod *corev1.Pod,
 	snapshotName string,
@@ -315,7 +313,7 @@ func (h *PodCheckpointRestoreMutator) shapeNativeRestorePod(
 
 	// Candidate-only annotations must not survive onto the restore target. The
 	// standalone Snapshot annotations emitted by the builder are the wire API.
-	removeRestoreCandidateAnnotations(shaped.Annotations)
+	checkpoint.RemoveRestoreCandidateMetadata(shaped.Annotations)
 	if err := podcontract.Validate(shaped, request); err != nil {
 		return nil, fmt.Errorf("validate native restore Pod: %w", err)
 	}
@@ -435,17 +433,4 @@ func isOperandFreePythonInterpreterFlag(argument string) bool {
 	default:
 		return false
 	}
-}
-
-func removeRestoreCandidateAnnotations(annotations map[string]string) {
-	delete(annotations, consts.CheckpointRestoreCandidateAnnotation)
-	delete(annotations, consts.CheckpointNameAnnotation)
-	delete(annotations, consts.RestoreCandidateSourceKindAnnotation)
-	delete(annotations, consts.SnapshotJobCandidateUIDAnnotation)
-	delete(annotations, consts.CheckpointStartupPolicyAnnotation)
-	delete(annotations, consts.SnapshotCandidateUIDAnnotation)
-	delete(annotations, consts.SnapshotCandidateContentAnnotation)
-	delete(annotations, consts.SnapshotCandidateGMSModeAnnotation)
-	delete(annotations, consts.SnapshotCandidateVersionAnnotation)
-	delete(annotations, consts.RestoreCandidateTargetContainersAnnotation)
 }

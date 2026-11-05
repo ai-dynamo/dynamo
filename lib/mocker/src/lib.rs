@@ -8,6 +8,7 @@
 //! requiring actual GPU resources or a full distributed runtime.
 
 pub mod common;
+pub mod config;
 pub mod engine;
 pub(crate) mod engine_adapter;
 pub(crate) mod engine_observations;
@@ -28,7 +29,7 @@ pub mod sglang;
 pub mod placement {
     pub use dynamo_kv_router::config::KvRouterConfig;
 
-    pub use crate::common::protocols::{MockEngineArgs, MockEngineArgsBuilder};
+    pub use crate::config::MockerConfig;
     pub use crate::replay::ReplayPrefillLoadEstimator;
     pub use crate::replay::offline::extensions::kv_events::{
         RouterEventBatch, RouterEventObservation,

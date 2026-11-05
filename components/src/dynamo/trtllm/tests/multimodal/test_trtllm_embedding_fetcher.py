@@ -125,6 +125,75 @@ class TestFetchEmbeddingsFromEncoder:
         assert torch.equal(result[0], embedding1)
 
     @pytest.mark.asyncio
+    async def test_session_scope_partitions_embedding_cache(
+        self, monkeypatch, encoder_cache
+    ):
+        """The same URL in separate sessions must not share an embedding."""
+        monkeypatch.setenv("DYN_MM_IMAGE_CACHE_SESSION_SCOPED", "1")
+        url = "http://example.com/img.jpg"
+        first_embedding = torch.ones(10, 256)
+        second_embedding = torch.ones(10, 256) * 2
+        mock_client = create_mock_encode_client([first_embedding])
+
+        with patch(
+            "dynamo.trtllm.multimodal.embedding_fetcher.extract_embeddings_from_handles",
+            AsyncMock(side_effect=[[first_embedding], [second_embedding]]),
+        ) as extract:
+            first = await fetch_embeddings_from_encoder(
+                [url],
+                {"messages": [], "image_cache_scope": "session-a"},
+                mock_client,
+                encoder_cache,
+            )
+            second = await fetch_embeddings_from_encoder(
+                [url],
+                {"messages": [], "image_cache_scope": "session-b"},
+                mock_client,
+                encoder_cache,
+            )
+            first_again = await fetch_embeddings_from_encoder(
+                [url],
+                {"messages": [], "image_cache_scope": "session-a"},
+                mock_client,
+                encoder_cache,
+            )
+
+        assert extract.await_count == 2
+        assert torch.equal(first[0], first_embedding)
+        assert torch.equal(second[0], second_embedding)
+        assert torch.equal(first_again[0], first_embedding)
+        assert encoder_cache.stats["entries"] == 2
+
+    @pytest.mark.asyncio
+    async def test_session_scoped_embedding_cache_bypasses_without_scope(
+        self, monkeypatch, encoder_cache
+    ):
+        """Missing scope must neither read nor populate the embedding cache."""
+        monkeypatch.setenv("DYN_MM_IMAGE_CACHE_SESSION_SCOPED", "1")
+        url = "http://example.com/img.jpg"
+        embeddings = [torch.ones(10, 256), torch.ones(10, 256) * 2]
+        mock_client = create_mock_encode_client([embeddings[0]])
+
+        with patch(
+            "dynamo.trtllm.multimodal.embedding_fetcher.extract_embeddings_from_handles",
+            AsyncMock(side_effect=[[embeddings[0]], [embeddings[1]]]),
+        ) as extract:
+            first = await fetch_embeddings_from_encoder(
+                [url], {"messages": []}, mock_client, encoder_cache
+            )
+            second = await fetch_embeddings_from_encoder(
+                [url],
+                {"messages": [], "image_cache_scope": " "},
+                mock_client,
+                encoder_cache,
+            )
+
+        assert extract.await_count == 2
+        assert torch.equal(first[0], embeddings[0])
+        assert torch.equal(second[0], embeddings[1])
+        assert encoder_cache.stats["entries"] == 0
+
+    @pytest.mark.asyncio
     async def test_no_cache_returns_disaggregated_params(self):
         """No cache: returns DisaggregatedParams directly, request updated with metadata."""
         request: dict[str, Any] = {"messages": []}

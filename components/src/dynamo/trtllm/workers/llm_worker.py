@@ -40,6 +40,7 @@ from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_taints import register_model_taint_route
+from dynamo.common.snapshot.lifecycle import is_snapshot_enabled
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.media_decoder import build_frontend_image_decoder_options
 from dynamo.common.utils.prometheus import (
@@ -89,7 +90,6 @@ except ImportError:
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 100_000
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
-_TLLM_KV_CACHE_MANAGER_V2_BACKEND_ENV = "TLLM_KV_CACHE_MANAGER_V2_BACKEND"
 
 # TRT-LLM 1.3.0rc21 keeps in-vocab image markers for these validated families.
 # Leave other families unresolved until their KV-event convention is verified.
@@ -138,20 +138,6 @@ def _resolve_streaming_kv_events_config(
     config["endpoint"] = endpoint
     config.setdefault("topic", "")
     return config
-
-
-def _validate_streaming_kv_events_backend() -> None:
-    """Require TensorRT-LLM's Python V2 cache manager for streaming events."""
-    backend = os.environ.get(_TLLM_KV_CACHE_MANAGER_V2_BACKEND_ENV)
-    if backend == "python":
-        return
-    configured = backend if backend is not None else "unset (defaults to cpp)"
-    raise ValueError(
-        "TensorRT-LLM streaming KV events require "
-        f"{_TLLM_KV_CACHE_MANAGER_V2_BACKEND_ENV}=python; current value is "
-        f"{configured!r}. The C++ V2 cache manager cannot host the streaming "
-        "event manager."
-    )
 
 
 def _resolve_model_dir(config: Config) -> str:
@@ -229,6 +215,115 @@ def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
     raise ValueError(
         "--model-loader-extra-config must be a JSON object string or a dict"
     )
+
+
+def _kv_cache_config_to_dict(engine_args: dict) -> dict:
+    """Store kv_cache_config as a dict of its explicitly configured settings.
+
+    Generic defaults stay unset so TRT-LLM can apply model defaults, and a later
+    deep_update merges into the YAML settings instead of replacing the model.
+    """
+    kv_cache_config = engine_args["kv_cache_config"]
+    if isinstance(kv_cache_config, KvCacheConfig):
+        kv_cache_config = kv_cache_config.model_dump(
+            exclude_none=True, exclude_unset=True
+        )
+        engine_args["kv_cache_config"] = kv_cache_config
+    if not isinstance(kv_cache_config, dict):
+        raise TypeError(
+            "kv_cache_config must be a dict or KvCacheConfig, "
+            f"got {type(kv_cache_config).__name__}"
+        )
+    return kv_cache_config
+
+
+def _use_kv_cache_manager_v1(engine_args: dict) -> None:
+    kv_cache_config = engine_args["kv_cache_config"]
+    if isinstance(kv_cache_config, dict):
+        kv_cache_config["use_kv_cache_manager_v2"] = False
+    else:
+        kv_cache_config.use_kv_cache_manager_v2 = False
+
+
+def _explicit_kv_cache_manager_v2(engine_args: dict) -> Any:
+    """Return the configured use_kv_cache_manager_v2, or None when it is unset."""
+    kv_cache_config = engine_args["kv_cache_config"]
+    if isinstance(kv_cache_config, dict):
+        return kv_cache_config.get("use_kv_cache_manager_v2")
+    # The pydantic default (True) is not a user choice.
+    if "use_kv_cache_manager_v2" not in kv_cache_config.model_fields_set:
+        return None
+    return kv_cache_config.use_kv_cache_manager_v2
+
+
+def _cache_transceiver_runtime(engine_args: dict) -> Optional[str]:
+    """Return the transceiver runtime TRT-LLM will create, or None if it creates none.
+
+    TRT-LLM creates a cache transceiver whenever ``backend`` is set, aggregated
+    workers included. An omitted runtime defaults to PYTHON; an explicit null
+    selects the C++ transceiver.
+    """
+    transceiver_config = engine_args.get("cache_transceiver_config")
+    if transceiver_config is None:
+        return None
+    if not isinstance(transceiver_config, dict):
+        transceiver_config = transceiver_config.model_dump(exclude_unset=True)
+    if transceiver_config.get("backend") is None:
+        return None
+    if "transceiver_runtime" not in transceiver_config:
+        return "PYTHON"
+    return transceiver_config["transceiver_runtime"] or "CPP"
+
+
+def _configure_kv_cache_manager(
+    engine_args: dict,
+    config: Config,
+    kv_event_publication_mode: KvEventPublicationMode,
+) -> None:
+    """Pair the KV cache manager with the cache transceiver TRT-LLM will create.
+
+    TRT-LLM pairs KV cache manager v2 only with the PYTHON transceiver and v1
+    only with the CPP transceiver. Dynamo needs v1 for multimodal polled KV
+    events, and TRT-LLM itself falls back to v1 whenever sleep_config is set.
+    The transceiver runtime is never changed here: prefill and decode must use
+    the same one, and a mismatched pair starts cleanly but fails every request.
+    """
+    explicit_v2 = _explicit_kv_cache_manager_v2(engine_args)
+    v1_reasons = []
+    if (
+        config.modality == Modality.MULTIMODAL
+        and kv_event_publication_mode is KvEventPublicationMode.POLLING
+    ):
+        # Polled v2 events carry multimodal digest tokens and synthetic
+        # placeholder ids that the KV router cannot hash.
+        if explicit_v2 not in (None, False):
+            raise ValueError(
+                f"kv_cache_config.use_kv_cache_manager_v2={explicit_v2!r} is not "
+                "supported with polled KV events on multimodal workers; set it to "
+                "false, or drop --publish-kv-events for models that require KV "
+                "cache manager v2."
+            )
+        _use_kv_cache_manager_v1(engine_args)
+        v1_reasons.append("multimodal polled KV events")
+    if engine_args.get("sleep_config") is not None:
+        v1_reasons.append("KV cache sleep (GMS or snapshot)")
+
+    runtime = _cache_transceiver_runtime(engine_args)
+    if runtime is None:
+        return
+    if v1_reasons and runtime != "CPP":
+        raise ValueError(
+            f"{' and '.join(v1_reasons)} use KV cache manager v1, which "
+            "TensorRT-LLM only pairs with the CPP cache transceiver (got "
+            f"transceiver_runtime={runtime!r}). Set "
+            "cache_transceiver_config.transceiver_runtime: CPP and "
+            "kv_cache_config.use_kv_cache_manager_v2: false on both the "
+            "prefill and the decode worker."
+        )
+    if runtime == "CPP" and explicit_v2 is None:
+        # The CPP transceiver only drives v1; follow the configured runtime
+        # rather than TRT-LLM's v2 default.
+        _use_kv_cache_manager_v1(engine_args)
 
 
 def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
@@ -425,18 +520,23 @@ async def init_llm_worker(
         # and `--override-engine-args` are merged over `arg_map` below and can set
         # it back to true for custom instrumentation.
         "return_perf_metrics": False,
-        # Iteration stats drive the metrics-publishing path but are independent
-        # of KV-event publication. TensorRT backend always has this enabled.
-        "enable_iter_perf_stats": config.publish_metrics,
+        # Iteration stats feed the Prometheus surface and the Planner's
+        # forward-pass metrics, so either opt-in needs them. KV events do not:
+        # the engine only produces iteration stats under this flag, at a
+        # measurable per-iteration throughput cost. TensorRT backend always
+        # has this enabled.
+        "enable_iter_perf_stats": (
+            config.publish_metrics or config.publish_forward_pass_metrics
+        ),
         "kv_connector_config": kv_connector_config,
     }
 
     arg_map["load_format"] = engine_load_format
 
     # Enable sleep_config when GMS manages weights — required for GMS
-    # unmap/remap. Conditional because SleepConfig contains unpicklable
-    # lambdas that break MPI-based multi-rank distribution.
-    if config.load_format == "gms":
+    # unmap/remap — and in snapshot mode, which sleeps the KV cache before
+    # capture. The default restore mode discards KV cache contents.
+    if config.load_format == "gms" or is_snapshot_enabled():
         from tensorrt_llm.llmapi.llm_args import SleepConfig
 
         arg_map["sleep_config"] = SleepConfig()
@@ -460,15 +560,24 @@ async def init_llm_worker(
             logging.info(f"Applying engine arg overrides: {overrides}")
 
             _warn_override_collisions(arg_map, overrides)
+            if "kv_cache_config" in overrides:
+                _kv_cache_config_to_dict(arg_map)
             deep_update(arg_map, overrides)
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
 
+    if is_snapshot_enabled():
+        # KV cache manager v1 is the only one qualified for the KV cache sleep that
+        # precedes snapshot capture. Block reuse stays enabled: sleep discards
+        # KV cache contents but keeps the reuse tree, and that tree is empty at
+        # capture because TRT-LLM never stores warmup (dummy) requests for
+        # reuse and Dynamo sends no request before it.
+        _use_kv_cache_manager_v1(arg_map)
+
     streaming_kv_events_config = _resolve_streaming_kv_events_config(arg_map)
     if config.publish_kv_events:
         if streaming_kv_events_config is not None:
-            _validate_streaming_kv_events_backend()
             kv_event_publication_mode = KvEventPublicationMode.STREAMING
         else:
             kv_event_publication_mode = KvEventPublicationMode.POLLING
@@ -487,20 +596,7 @@ async def init_llm_worker(
     if kv_event_publication_mode is KvEventPublicationMode.POLLING:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
         # Add it to kv_cache_config while preserving all settings from YAML
-        current_kv_config = arg_map["kv_cache_config"]
-        if isinstance(current_kv_config, KvCacheConfig):
-            # Convert to a dict while preserving only explicitly configured settings.
-            # Generic defaults must remain unset so TRT-LLM can apply model defaults.
-            current_kv_config = current_kv_config.model_dump(
-                exclude_none=True, exclude_unset=True
-            )
-            arg_map["kv_cache_config"] = current_kv_config
-
-        if not isinstance(current_kv_config, dict):
-            raise TypeError(
-                "kv_cache_config must be a dict or KvCacheConfig, "
-                f"got {type(current_kv_config).__name__}"
-            )
+        current_kv_config = _kv_cache_config_to_dict(arg_map)
 
         # Preserve a user-specified event_buffer_max_size from YAML/overrides;
         # only apply the default when it is unset or zero (TRTLLM's disabled value).
@@ -536,6 +632,18 @@ async def init_llm_worker(
                 arg_map["backend"],
             )
             sys.exit(1)
+
+    _configure_kv_cache_manager(arg_map, config, kv_event_publication_mode)
+    if (
+        config.modality == Modality.MULTIMODAL
+        and kv_event_publication_mode is KvEventPublicationMode.STREAMING
+    ):
+        logging.warning(
+            "Streaming KV events from multimodal requests carry digest tokens the "
+            "KV router cannot decode, so those blocks are not routed on; use "
+            "polled KV events (remove kv_cache_config.kv_events_config) for "
+            "multimodal KV-aware routing."
+        )
 
     trtllm_zmq_bind_endpoint = None  # Endpoint for TensorRT-LLM to bind and publish
     consolidator_output_endpoint = (
@@ -785,11 +893,7 @@ async def init_llm_worker(
         runtime_config.exclude_tools_when_tool_choice_none = (
             config.exclude_tools_when_tool_choice_none
         )
-        runtime_config.set_structural_tag_mode(
-            "on" if config.dyn_enable_structural_tag else "off"
-        )
-        runtime_config.set_structural_tag_scope(config.dyn_structural_tag_scope)
-        runtime_config.set_structural_tag_schema(config.dyn_structural_tag_schema)
+        runtime_config.set_structural_tag(config.structural_tag)
         # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
         runtime_config.enable_local_indexer = (
             config.enable_local_indexer
@@ -989,6 +1093,7 @@ async def init_llm_worker(
         if (
             kv_event_publication_mode is not KvEventPublicationMode.DISABLED
             or config.publish_metrics
+            or config.publish_forward_pass_metrics
         ):
             # Initialize the independently gated KV-event and metrics publishers.
             # Use model as fallback if served_model_name is not provided
@@ -1041,6 +1146,7 @@ async def init_llm_worker(
                 kv_state_endpoint=config.kv_state_endpoint,
                 image_token_id=image_token_id,
                 publish_metrics=config.publish_metrics,
+                publish_forward_pass_metrics=config.publish_forward_pass_metrics,
                 kv_event_publication_mode=kv_event_publication_mode,
                 streaming_kv_events_config=streaming_kv_events_config,
                 streaming_kv_events_gpus_per_node=gpus_per_node,

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 
 from gpu_memory_service.common.locks import GrantedLockType
@@ -67,6 +68,15 @@ def cuda_device_memory_info(device: int) -> tuple[int, int]:
         pynvml.nvmlShutdown()
 
 
+def cuda_device_total_memory(device: int) -> int:
+    """Return the total memory of a CUDA-visible device ordinal."""
+    result, cuda_device = cuda.cuDeviceGet(device)
+    cuda_check_result(result, "cuDeviceGet")
+    result, total = cuda.cuDeviceTotalMem(cuda_device)
+    cuda_check_result(result, "cuDeviceTotalMem")
+    return int(total)
+
+
 def cuda_check_result(result: cuda.CUresult, name: str) -> None:
     if result != cuda.CUresult.CUDA_SUCCESS:
         err_result, err_str = cuda.cuGetErrorString(result)
@@ -112,6 +122,16 @@ def cumem_get_allocation_granularity(device: int) -> int:
     return int(granularity)
 
 
+@functools.cache
+def _gpu_direct_rdma_with_vmm_supported(device: int) -> bool:
+    result, supported = cuda.cuDeviceGetAttribute(
+        cuda.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
+        device,
+    )
+    cuda_check_result(result, "cuDeviceGetAttribute")
+    return bool(supported)
+
+
 def cumem_create_tolerate_oom(size: int, device: int) -> tuple[bool, int]:
     prop = cuda.CUmemAllocationProp()
     prop.type = cuda.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
@@ -120,6 +140,10 @@ def cumem_create_tolerate_oom(size: int, device: int) -> tuple[bool, int]:
     prop.requestedHandleTypes = (
         cuda.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
     )
+    # GPUDirect RDMA (NIXL/UCX dma-buf registration) needs this on exported
+    # memory. Devices without VMM GPUDirect RDMA support reject the flag.
+    if _gpu_direct_rdma_with_vmm_supported(device):
+        prop.allocFlags.gpuDirectRDMACapable = 1
 
     result, handle = cuda.cuMemCreate(size, prop, 0)
     if result == cuda.CUresult.CUDA_SUCCESS:
@@ -327,6 +351,9 @@ class CudaVMM(VMMDevice):
     def device_memory_info(self, device: int) -> tuple[int, int]:
         return cuda_device_memory_info(device)
 
+    def total_memory(self, device: int) -> int:
+        return cuda_device_total_memory(device)
+
     def get_allocation_granularity(self, device: int) -> int:
         return cumem_get_allocation_granularity(device)
 
@@ -343,7 +370,7 @@ class CudaVMM(VMMDevice):
     def export_to_shareable_handle(self, handle: int) -> int:
         return cumem_export_to_shareable_handle(handle)
 
-    def import_shareable_handle_close_fd(self, fd: int) -> int:
+    def import_shareable_handle_close_fd(self, fd: int, import_size: int = 0) -> int:
         return cumem_import_from_shareable_handle_close_fd(fd)
 
     # ----- virtual address space + mapping ----------------------------------

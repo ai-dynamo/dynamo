@@ -51,7 +51,7 @@ These metrics come from the DCGM (Data Center GPU Manager) exporter running as a
 |-------|--------|---------|-------------|
 | **GPU Compute Utilization** | `DCGM_FI_DEV_GPU_UTIL` | Raw value | GPU compute utilization percentage (0-100) for each GPU. Prefill workers show high utilization during prefill phase |
 | **GPU Memory Bandwidth** | `DCGM_FI_DEV_MEM_COPY_UTIL` | Raw value | GPU memory copy bandwidth utilization percentage (0-100). **Spikes indicate KV cache transfers over NIXL**. On single-node deployments, NIXL uses CUDA IPC (GPU→Host→Host→GPU) not direct GPU-to-GPU. Yellow threshold at 60%, red at 80% |
-| **NVLink Bandwidth (GB/s)** | `DCGM_FI_PROF_NVLINK_TX_BYTES` & `DCGM_FI_PROF_NVLINK_RX_BYTES` | `(rate(TX_BYTES[1m]) + rate(RX_BYTES[1m])) / 1e9` | NVLink transfer bandwidth in GB/s (rate of change) per GPU, measured from DCGM profiling metrics. Shows total bidirectional bandwidth (TX + RX). This includes intra-pod TP communication (TP=2 for prefill, TP=4 for decode). Low bandwidth (<1 GB/s) indicates inter-pod NIXL KV cache transfers may be using host memory copies instead of direct NVLink/GPUDirect. Yellow threshold at 5 GB/s, red at 10 GB/s |
+| **NVLink Bandwidth (GB/s)** | `DCGM_FI_PROF_NVLINK_TX_BYTES` & `DCGM_FI_PROF_NVLINK_RX_BYTES` | `(TX_BYTES + RX_BYTES) / 1e9` | NVLink transfer bandwidth in GB/s per GPU, measured from DCGM profiling metrics. DCGM already reports these fields as bytes per second, so no `rate()` is applied. Shows total bidirectional bandwidth (TX + RX). This includes intra-pod TP communication (TP=2 for prefill, TP=4 for decode). NIXL KV transfers are bursty, so a low average does not by itself mean they avoid NVLink; compare with the NIXL transfer metrics before drawing conclusions about the transport. Yellow threshold at 5 GB/s, red at 10 GB/s |
 | **GPU Memory Used** | `DCGM_FI_DEV_FB_USED` | `value / 1024` | GPU framebuffer memory used in GB. Prefill workers allocate KV blocks on decode workers via NIXL |
 
 ### Prefill Worker Metrics (from Prefill Worker Pods)
@@ -97,7 +97,7 @@ These metrics track request processing across all worker pods (prefill and decod
 - **All workers**: Filter by `dynamo_endpoint="generate"` to exclude maintenance operations like `clear_kv_blocks`
 
 ### Important Labels
-- `pod`: Specific pod name (e.g., `llama3-70b-disagg-sn-0-vllmprefillworker-hrnt5`)
+- `pod`: Specific pod name (e.g., `llama3-70b-disagg-sn-0-prefill-hrnt5`)
 - `namespace`: Kubernetes namespace (e.g., `robert`)
 - `dynamo_component`: Component type (`prefill`, `backend`, `frontend`)
 - `dynamo_endpoint`: Endpoint name (`generate`, `clear_kv_blocks`)

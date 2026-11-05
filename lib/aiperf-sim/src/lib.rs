@@ -27,7 +27,7 @@ use aisimulate_core::replay::loadgen::{DynPlacement, SteppableAgg, SteppableRepl
 use aisimulate_core::replay::{ReplayEngineConfig, ReplayEngineFactory};
 use anyhow::{Context, Result};
 use dynamo_mocker::placement::{
-    KvReplayMetadata, KvRouterConfig, KvRouterPlacement, MockEngineArgs, MockEngineArgsBuilder,
+    KvReplayMetadata, KvRouterConfig, KvRouterPlacement, MockerConfig,
     RouterEventObservation,
 };
 
@@ -78,16 +78,16 @@ fn ensure_supported(config: &OfflineEngineConfig) -> Result<u64> {
     Ok(selector_seed)
 }
 
-fn router_args(engine: &ReplayEngineConfig) -> Result<MockEngineArgs> {
+fn router_args(engine: &ReplayEngineConfig) -> Result<MockerConfig> {
     let rank: &EngineConfig = &engine.rank;
-    MockEngineArgsBuilder::default()
-        .block_size(rank.block_size)
-        .num_gpu_blocks(rank.num_gpu_blocks)
-        .enable_prefix_caching(rank.enable_prefix_caching)
-        .max_num_batched_tokens(Some(rank.max_num_batched_tokens))
-        .max_num_seqs(Some(rank.max_num_seqs))
-        .dp_size(engine.dp_size)
-        .build()
+    let mut args = MockerConfig::default();
+    args.block_size = rank.block_size;
+    args.num_gpu_blocks = rank.num_gpu_blocks;
+    args.enable_prefix_caching = rank.enable_prefix_caching;
+    args.max_num_batched_tokens = rank.max_num_batched_tokens;
+    args.max_num_seqs = rank.max_num_seqs;
+    args.dp_size = engine.dp_size;
+    args.normalized()
         .context("projecting the engine configuration onto the Dynamo KV router")
 }
 

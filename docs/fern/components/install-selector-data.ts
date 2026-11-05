@@ -2,15 +2,16 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Install-selector view of the shared release data. Keep release and backend
- * versions in releases.data.ts; this module only formats install commands.
+ * Install-selector view of the release data. Stable and source-build versions
+ * come from releases.data.ts; the nightly dimension comes from the generated
+ * module. This module only formats install commands.
  */
 
+import { NIGHTLY_BACKEND_BUILDS } from "./nightly-selector-data.generated";
 import {
   CURRENT_VERSION,
   CURRENT_WHEEL,
   MAIN_TOT,
-  NIGHTLY_BUILDS,
   RELEASES,
   type BackendPins,
 } from "./releases.data";
@@ -23,6 +24,8 @@ export type InstallEntry = {
   backend_version: string;
   dynamo?: string;
   date?: string;
+  /** Immutable NGC nightly tag backing this entry, when it has one. */
+  tag?: string;
   latest?: boolean;
   source?: boolean;
   note?: string;
@@ -98,36 +101,28 @@ function stableEntries(backend: Backend): InstallEntry[] {
 }
 
 function nightlyEntries(backend: Backend): InstallEntry[] {
-  const backendVersion = pin(MAIN_TOT, backend.id);
-  if (!backendVersion) return [];
-
-  if (!backend.extra) {
-    return [
-      {
-        backend_version: backendVersion,
-        latest: true,
-        note: "Nightly TensorRT-LLM installs use the rolling runtime container; no pinned nightly wheel extra is published.",
-        commands: {
-          container: dockerCommand(`${backend.image}-runtime-nightly`, "latest"),
-        },
+  return NIGHTLY_BACKEND_BUILDS.filter((build) => build.backend === backend.id).map(
+    (build) => ({
+      backend_version: build.backendVersion,
+      dynamo: build.dynamo ?? undefined,
+      date: build.date,
+      tag: build.tag,
+      latest: build.latest,
+      note: build.latest
+        ? `Tip of main, also served by the rolling ${backend.image}-runtime-nightly:latest tag.`
+        : `Newest nightly that shipped ${backend.label} ${build.backendVersion}.`,
+      commands: {
+        // Rolling tag for the newest build, immutable date-sha tag for the rest.
+        container: dockerCommand(
+          `${backend.image}-runtime-nightly`,
+          build.latest ? "latest" : build.tag,
+        ),
+        ...(backend.extra && build.dynamo
+          ? { wheel: nightlyWheelCommand(backend, build.dynamo) }
+          : {}),
       },
-    ];
-  }
-
-  return NIGHTLY_BUILDS.slice(0, 3).map((build, index) => ({
-    backend_version: backendVersion,
-    dynamo: build.version,
-    date: build.date,
-    latest: index === 0,
-    note:
-      index === 0
-        ? "Nightly containers are rolling latest tags; pinned versions apply to wheels."
-        : "Pinned nightly wheel build. Use latest for the rolling runtime container.",
-    commands: {
-      ...(index === 0 ? { container: dockerCommand(`${backend.image}-runtime-nightly`, "latest") } : {}),
-      wheel: nightlyWheelCommand(backend, build.version),
-    },
-  }));
+    }),
+  );
 }
 
 function sourceEntries(backend: Backend): InstallEntry[] {

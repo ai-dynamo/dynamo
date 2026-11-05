@@ -32,7 +32,7 @@ use dynamo_kv_router::protocols::{
     KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
 };
 use dynamo_mocker::placement::{
-    KvReplayMetadata, KvRouterConfig, KvRouterPlacement, MockEngineArgs,
+    KvReplayMetadata, KvRouterConfig, KvRouterPlacement, MockerConfig,
 };
 use uuid::Uuid;
 
@@ -146,11 +146,9 @@ unsafe fn create_impl(request: PlacementCreateRequestV1) -> Result<ConfiguredPla
             .try_into()
             .expect("fixed-size seed"),
     );
-    let engine_args = MockEngineArgs {
-        max_num_seqs: Some(max_running_requests),
-        num_gpu_blocks: total_kv_blocks,
-        ..MockEngineArgs::default()
-    };
+    let mut engine_args = MockerConfig::default();
+    engine_args.max_num_seqs = max_running_requests;
+    engine_args.num_gpu_blocks = total_kv_blocks;
     let router_config = KvRouterConfig {
         router_queue_threshold: Some(0.0),
         ..KvRouterConfig::default()

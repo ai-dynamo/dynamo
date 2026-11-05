@@ -5,13 +5,19 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
+use super::builder::hosted_picker;
+use crate::kv_router::SelectionPolicySource;
+use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_kv_router::{
-    DefaultWorkerSelector, WorkerSelectionPolicy, config::KvRouterConfig,
+    config::KvRouterConfig,
+    plugins::request_classifier::{
+        ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
+    },
     protocols::RoutingConstraints,
 };
 use dynamo_runtime::{
@@ -21,23 +27,24 @@ use dynamo_runtime::{
     distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
     error::{BackendError, ErrorType, match_error_chain},
     pipeline::{
-        AddressedRequest, AsyncEngineContext, Context, ManyIn, Operator, PushRouter, RouterMode,
+        AddressedRequest, AsyncEngineContext, Context, ManyIn, Operator, RouterMode,
         ServerStreamingEngine, StreamingDispatch, context::Controller,
     },
     storage::kv::Selector,
     traits::DistributedRuntimeProvider,
 };
-use tokio::sync::watch;
+use tokio::sync::{Notify, mpsc, watch};
 
 use super::*;
 use crate::{
     http::service::metrics::Metrics,
-    kv_router::RoutingLoadContext,
+    kv_router::{RoutingLoadContext, routing_host::request_guard::RouteObservation},
     local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoraReplicaConfig, LoraRoutingTable, LoraStateTracker},
     migration::Migration,
     protocols::common::{
-        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        extensions::{AgentContextBuilder, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        preprocessor::{MmRoutingInfo, RoutingHints},
         timing::RequestTracker,
     },
 };
@@ -94,19 +101,18 @@ fn classify_response_item_separates_terminal_failures_from_healthy_frames() {
 fn selector_state_remains_owned_by_the_scheduler_actor() {
     fn assert_send_sync<T: Send + Sync>() {}
 
-    assert_send_sync::<RoutingHost<WorkerSelectionPolicy>>();
+    assert_send_sync::<RoutingHost>();
 }
 
 #[test]
 fn builtin_policies_declare_capabilities() {
     for mode in [RouterMode::RoundRobin, RouterMode::Random] {
-        let selector = BuiltinWorkerSelector::new(mode).unwrap();
-        assert_eq!(selector.required_worker_inputs(), WorkerInputs::NONE);
+        assert_eq!(hosted_picker(mode).unwrap().inputs(), WorkerInputs::NONE);
     }
-    for mode in [RouterMode::PowerOfTwoChoices, RouterMode::LeastLoaded] {
-        let selector = BuiltinWorkerSelector::new(mode).unwrap();
-        assert_eq!(selector.required_worker_inputs(), WorkerInputs::OCCUPANCY);
-    }
+    assert_eq!(
+        hosted_picker(RouterMode::LeastLoaded).unwrap().inputs(),
+        WorkerInputs::ACTIVE_REQUESTS
+    );
 }
 
 #[tokio::test]
@@ -123,11 +129,11 @@ async fn builtin_host_constructs_only_declared_capabilities() {
         .endpoint("generate".to_string());
     let client = endpoint.client().await.unwrap();
     let load_context = test_load_context(&client).await;
-    let inner = PushRouter::from_client(client.clone(), RouterMode::RoundRobin)
+    let host = RoutingHost::builder(client.clone(), RouterMode::RoundRobin)
+        .load_context(load_context.clone())
+        .build()
         .await
         .unwrap();
-    let host =
-        RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context.clone()).unwrap();
 
     assert_eq!(host.required_worker_inputs(), WorkerInputs::NONE);
     assert!(host.hosted_occupancy.is_none());
@@ -136,25 +142,26 @@ async fn builtin_host_constructs_only_declared_capabilities() {
 
     client.override_discovered_instances(vec![1, 2]);
     client.override_instance_avail(vec![1, 2]);
-    let inner = PushRouter::from_client(client, RouterMode::PowerOfTwoChoices)
+    let host = RoutingHost::builder(client, RouterMode::LeastLoaded)
+        .load_context(load_context)
+        .build()
         .await
         .unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
-    let RoutingPolicy::Builtin(selector) = &host.policy else {
+    let RoutingPolicy::Hosted(picker) = &host.policy else {
         unreachable!()
     };
-    assert_eq!(host.required_worker_inputs(), WorkerInputs::OCCUPANCY);
+    assert_eq!(host.required_worker_inputs(), WorkerInputs::ACTIVE_REQUESTS);
     assert!(host.hosted_occupancy.is_some());
     let selection = host
         .hosted_occupancy
         .as_ref()
         .unwrap()
-        .select_and_reserve(&host.inner, selector, Some(1))
+        .select_and_reserve(&host.inner, picker, &request(), Some(1))
         .unwrap();
     assert_eq!(selection.worker_id, 1);
     assert_eq!(selection.occupancy, 1);
     assert_eq!(host.inner.occupancy_for_test(1), 1);
-    let mut guard: RequestGuard<DefaultWorkerSelector> = RequestGuard::new_builtin(
+    let mut guard: RequestGuard = RequestGuard::new_builtin(
         Arc::clone(&host.request_metrics),
         selection.worker_id,
         Some(selection.reservation),
@@ -162,10 +169,84 @@ async fn builtin_host_constructs_only_declared_capabilities() {
         &request(),
     );
     assert_eq!(guard.retarget_worker(1), Some(1));
-    guard.abort().await;
+    guard.abort(None).await;
     assert_eq!(host.inner.occupancy_for_test(1), 0);
 
     drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn builder_rejects_inputs_that_do_not_match_the_mode() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builder-validation".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    let lora = || {
+        (
+            Arc::new(LoraFilter::new(
+                LoraRoutingTable::new(),
+                LoraStateTracker::new(),
+            )),
+            Arc::new(LoadEstimator::new()),
+        )
+    };
+
+    let error = RoutingHost::builder(client.clone(), RouterMode::KV)
+        .build()
+        .await
+        .err()
+        .expect("the builder must reject these inputs");
+    assert!(error.to_string().contains("requires a KvRouter"), "{error}");
+
+    let error = RoutingHost::builder(client.clone(), RouterMode::RoundRobin)
+        .build()
+        .await
+        .err()
+        .expect("the builder must reject these inputs");
+    assert!(
+        error.to_string().contains("requires a RoutingLoadContext"),
+        "{error}"
+    );
+
+    let affinity = AffinityCoordinator::new(
+        Duration::from_secs(10),
+        crate::session_affinity::SessionAffinityMode::Soft,
+    )
+    .unwrap();
+    let error = RoutingHost::builder(client.clone(), RouterMode::RoundRobin)
+        .load_context(load_context.clone())
+        .affinity_coordinator(affinity)
+        .lora(lora())
+        .build()
+        .await
+        .err()
+        .expect("the builder must reject these inputs");
+    assert!(
+        error.to_string().contains("cannot both be enabled"),
+        "{error}"
+    );
+
+    let error = RoutingHost::builder(client, RouterMode::LeastLoaded)
+        .load_context(load_context)
+        .lora(lora())
+        .build()
+        .await
+        .err()
+        .expect("the builder must reject these inputs");
+    assert!(
+        error.to_string().contains("unsupported with LeastLoaded"),
+        "{error}"
+    );
+
     runtime.shutdown();
 }
 
@@ -183,21 +264,22 @@ async fn builtin_occupancy_selection_uses_all_selectable_workers() {
         .endpoint("generate".to_string());
     let client = endpoint.client().await.unwrap();
     let load_context = test_load_context(&client).await;
-    let inner = PushRouter::from_client(client.clone(), RouterMode::LeastLoaded)
-        .await
-        .unwrap();
     client.override_discovered_instances(vec![1, 2]);
     client.override_instance_avail(vec![1, 2]);
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
-    let RoutingPolicy::Builtin(selector) = &host.policy else {
+    let host = RoutingHost::builder(client, RouterMode::LeastLoaded)
+        .load_context(load_context)
+        .build()
+        .await
+        .unwrap();
+    let RoutingPolicy::Hosted(picker) = &host.policy else {
         unreachable!()
     };
     let occupancy = host.hosted_occupancy.as_ref().unwrap();
     let first = occupancy
-        .select_and_reserve(&host.inner, selector, Some(1))
+        .select_and_reserve(&host.inner, picker, &request(), Some(1))
         .unwrap();
     let second = occupancy
-        .select_and_reserve(&host.inner, selector, None)
+        .select_and_reserve(&host.inner, picker, &request(), None)
         .unwrap();
 
     assert_eq!(first.worker_id, 1);
@@ -225,17 +307,17 @@ async fn builtin_direct_without_worker_is_invalid_argument() {
         .endpoint("generate".to_string());
     let client = endpoint.client().await.unwrap();
     let load_context = test_load_context(&client).await;
-    let inner = PushRouter::from_client(client, RouterMode::Direct)
-        .await
-        .unwrap();
-    let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
-        inner,
-        load_context,
-        Some(affinity),
+    let affinity = AffinityCoordinator::new(
+        Duration::from_secs(10),
         crate::session_affinity::SessionAffinityMode::Hard,
     )
     .unwrap();
+    let host = RoutingHost::builder(client, RouterMode::Direct)
+        .load_context(load_context)
+        .affinity_coordinator(affinity)
+        .build()
+        .await
+        .unwrap();
 
     let error = host
         .generate(affinity_request("direct-unbound", None))
@@ -268,23 +350,16 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
     let worker_id = client.wait_for_instances().await.unwrap()[0].id();
     let load_context = test_load_context(&client).await;
     let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-    let inner = PushRouter::from_client_with_dispatch(
+    let (host, _) = builtin_host_with_affinity(
         client,
         RouterMode::Direct,
-        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-    )
-    .await
-    .unwrap();
-    let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
-        inner,
+        dispatch.clone(),
         load_context,
-        Some(affinity.clone()),
         crate::session_affinity::SessionAffinityMode::Soft,
     )
-    .unwrap();
+    .await;
     let session_id = SessionAffinityId::new("direct-soft-bound");
-    bind_affinity_target(&host, &session_id, AffinityTarget::worker(worker_id)).await;
+    bind_affinity_target(&host, &session_id, AffinityTarget::new(worker_id, Some(0))).await;
 
     let mut stream = host
         .generate(affinity_request("direct-soft-bound", None))
@@ -293,6 +368,7 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
     while stream.next().await.is_some() {}
 
     assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
+    assert_eq!(dispatch.dp_ranks.lock().unwrap().as_slice(), &[Some(0)]);
     drop(host);
     runtime.shutdown();
 }
@@ -300,6 +376,7 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
 #[derive(Default)]
 struct CompletedBuiltinDispatch {
     worker_ids: Mutex<Vec<u64>>,
+    dp_ranks: Mutex<Vec<Option<u32>>>,
 }
 
 #[async_trait]
@@ -311,7 +388,11 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
         request: SingleIn<AddressedRequest<PreprocessedRequest>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (addressed, context) = request.transfer(());
-        let (_, _, instance) = addressed.into_parts();
+        let (content, _, instance) = addressed.into_parts();
+        self.dp_ranks
+            .lock()
+            .unwrap()
+            .push(content.routing.as_ref().and_then(|routing| routing.dp_rank));
         self.worker_ids
             .lock()
             .unwrap()
@@ -354,33 +435,17 @@ async fn builtin_hard_affinity_ignores_local_inhibition() {
     endpoint.register_endpoint_instance().await.unwrap();
     let worker_id = client.wait_for_instances().await.unwrap()[0].id();
     let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-    let inner = PushRouter::from_client_with_dispatch(
+    let (host, affinity) = builtin_host_with_affinity(
         client.clone(),
         RouterMode::Direct,
-        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-    )
-    .await
-    .unwrap();
-    let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
-        inner,
+        dispatch.clone(),
         load_context,
-        Some(affinity.clone()),
         crate::session_affinity::SessionAffinityMode::Hard,
     )
-    .unwrap();
+    .await;
 
     let session_id = SessionAffinityId::new("local-inhibition");
-    let AffinityAcquire::Initialize(initializer) =
-        affinity.acquire(&session_id, None).await.unwrap()
-    else {
-        panic!("new affinity session must initialize");
-    };
-    drop(
-        initializer
-            .commit(AffinityTarget::worker(worker_id))
-            .unwrap(),
-    );
+    bind_affinity_target(&host, &session_id, AffinityTarget::new(worker_id, Some(1))).await;
 
     client.report_instance_down(worker_id);
     assert!(client.instance_ids().contains(&worker_id));
@@ -394,9 +459,10 @@ async fn builtin_hard_affinity_ignores_local_inhibition() {
     assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
     assert_eq!(
         affinity.query_target(&session_id, None).unwrap(),
-        Some(AffinityTarget::worker(worker_id))
+        Some(AffinityTarget::new(worker_id, Some(1)))
     );
 
+    assert_eq!(dispatch.dp_ranks.lock().unwrap().as_slice(), &[Some(1)]);
     drop(host);
     runtime.shutdown();
 }
@@ -421,13 +487,6 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
     let stale_worker = worker_id.wrapping_add(1);
     client.override_instance_avail(vec![stale_worker, worker_id]);
     let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-    let inner = PushRouter::from_client_with_dispatch(
-        client,
-        RouterMode::RoundRobin,
-        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-    )
-    .await
-    .unwrap();
     let routing_table = LoraRoutingTable::new();
     routing_table.update_allocation(
         "adapter".to_string(),
@@ -441,20 +500,20 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
     );
     let filter = Arc::new(LoraFilter::new(routing_table, LoraStateTracker::new()));
     let estimator = Arc::new(LoadEstimator::new());
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_capabilities(
-        inner,
-        load_context,
-        None,
-        crate::session_affinity::SessionAffinityMode::Hard,
-        Some((filter, Arc::clone(&estimator))),
-    )
-    .unwrap();
+    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
+        .load_context(load_context)
+        .lora((filter, Arc::clone(&estimator)))
+        .dispatch(Arc::clone(&dispatch) as LlmDispatch)
+        .build()
+        .await
+        .unwrap();
 
     let mut base_stream = host.generate(Context::new(request())).await.unwrap();
     while base_stream.next().await.is_some() {}
 
     let mut adapter_request = request();
     adapter_request.routing_mut().lora_name = Some("adapter".to_string());
+    adapter_request.routing_mut().backend_instance_id = Some(stale_worker);
     let mut adapter_stream = host.generate(Context::new(adapter_request)).await.unwrap();
     assert_eq!(estimator.get_inflight_counts().get("adapter"), Some(&1));
     while adapter_stream.next().await.is_some() {}
@@ -497,7 +556,6 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
     for (index, mode) in [
         RouterMode::RoundRobin,
         RouterMode::Random,
-        RouterMode::PowerOfTwoChoices,
         RouterMode::LeastLoaded,
         RouterMode::DeviceAwareWeighted,
         RouterMode::Direct,
@@ -511,21 +569,14 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
         endpoint.register_endpoint_instance().await.unwrap();
         let worker_id = client.wait_for_instances().await.unwrap()[0].id();
         let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-        let inner = PushRouter::from_client_with_dispatch(
+        let (host, affinity) = builtin_host_with_affinity(
             client,
             mode,
-            Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-        )
-        .await
-        .unwrap();
-        let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
-        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
-            inner,
+            dispatch.clone(),
             load_context,
-            Some(affinity.clone()),
             crate::session_affinity::SessionAffinityMode::Hard,
         )
-        .unwrap();
+        .await;
         let session_id = format!("session-{index}");
         let affinity_id = SessionAffinityId::new(session_id.clone());
         let explicit_worker = (mode == RouterMode::Direct).then_some(worker_id);
@@ -556,6 +607,211 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn builtin_soft_affinity_clears_dp_rank_after_worker_fallback() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let component = distributed
+        .namespace("builtin-soft-affinity-rank-fallback".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap();
+
+    for (index, (mode, transport_fallback)) in [
+        (RouterMode::RoundRobin, false),
+        (RouterMode::LeastLoaded, false),
+        (RouterMode::RoundRobin, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let endpoint = component.endpoint(format!("case-{index}"));
+        let mut client = endpoint.client().await.unwrap();
+        tokio::task::yield_now().await;
+        let id = endpoint.id();
+        let instances: Vec<_> = [101, 202]
+            .into_iter()
+            .map(|instance_id| Instance {
+                namespace: id.namespace.clone(),
+                component: id.component.clone(),
+                endpoint: id.name.clone(),
+                instance_id,
+                transport: dynamo_runtime::component::TransportType::Nats(format!(
+                    "rank-fallback.{index}.{instance_id}"
+                )),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .collect();
+        let (source_tx, source_rx) = watch::channel(instances.clone());
+        client.instance_source = Arc::new(source_rx);
+        client.override_discovered_instances(vec![101, 202]);
+        client.override_instance_avail(vec![101, 202]);
+        let load_context = test_load_context(&client).await;
+        let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+        let (host, affinity) = builtin_host_with_affinity(
+            client.clone(),
+            mode,
+            dispatch.clone(),
+            load_context,
+            crate::session_affinity::SessionAffinityMode::Soft,
+        )
+        .await;
+
+        let mut first = affinity_request("rank-fallback", Some(101));
+        first.routing_mut().dp_rank = Some(1);
+        let mut stream = host.generate(first).await.unwrap();
+        while stream.next().await.is_some() {}
+        let mut stream = host
+            .generate(affinity_request("rank-fallback", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(dispatch.dp_ranks.lock().unwrap().as_slice(), &[Some(1); 2]);
+
+        if transport_fallback {
+            // The selection view still contains A, but dispatch can only reach B.
+            source_tx.send(instances[1..].to_vec()).unwrap();
+            assert!(client.is_instance_discovered(101));
+            assert!(!client.is_instance_live(101));
+        } else {
+            client.set_overloaded_instances(&[101]);
+        }
+        let mut stream = host
+            .generate(affinity_request("rank-fallback", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            dispatch.dp_ranks.lock().unwrap().as_slice(),
+            &[Some(1), Some(1), None],
+            "fallback must not inherit the original worker's rank"
+        );
+        assert_eq!(
+            affinity
+                .query_target(&SessionAffinityId::new("rank-fallback"), None)
+                .unwrap(),
+            Some(AffinityTarget::new(101, Some(1))),
+            "worker-only fallback must preserve the known ranked affinity target"
+        );
+
+        let mut stream = host
+            .generate(affinity_request("rank-fallback", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            dispatch.worker_ids.lock().unwrap().as_slice(),
+            &[101, 101, 202, 202]
+        );
+        assert_eq!(
+            dispatch.dp_ranks.lock().unwrap().as_slice(),
+            &[Some(1), Some(1), None, None],
+            "dispatched ranks for {mode:?}, transport_fallback={transport_fallback}"
+        );
+        if transport_fallback {
+            source_tx.send(instances).unwrap();
+        } else {
+            client.set_overloaded_instances(&[]);
+        }
+        let mut stream = host
+            .generate(affinity_request("rank-fallback", None))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(dispatch.worker_ids.lock().unwrap().last(), Some(&101));
+        assert_eq!(dispatch.dp_ranks.lock().unwrap().last(), Some(&Some(1)));
+        drop(host);
+    }
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_soft_affinity_rebinds_after_worker_exit() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let component = distributed
+        .namespace("builtin-soft-affinity-worker-exit".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap();
+
+    for (index, mode) in [RouterMode::RoundRobin, RouterMode::LeastLoaded]
+        .into_iter()
+        .enumerate()
+    {
+        let endpoint = component.endpoint(format!("case-{index}"));
+        let mut client = endpoint.client().await.unwrap();
+        tokio::task::yield_now().await;
+        let id = endpoint.id();
+        let instances: Vec<_> = [101, 202, 303]
+            .into_iter()
+            .map(|instance_id| Instance {
+                namespace: id.namespace.clone(),
+                component: id.component.clone(),
+                endpoint: id.name.clone(),
+                instance_id,
+                transport: dynamo_runtime::component::TransportType::Nats(format!(
+                    "worker-exit.{index}.{instance_id}"
+                )),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .collect();
+        let (source_tx, source_rx) = watch::channel(instances.clone());
+        client.instance_source = Arc::new(source_rx);
+        client.override_discovered_instances(vec![101, 202, 303]);
+        client.override_instance_avail(vec![101, 202, 303]);
+        let load_context = test_load_context(&client).await;
+        let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+        let (host, affinity) = builtin_host_with_affinity(
+            client.clone(),
+            mode,
+            dispatch.clone(),
+            load_context,
+            crate::session_affinity::SessionAffinityMode::Soft,
+        )
+        .await;
+        let session_id = SessionAffinityId::new("worker-exit");
+        bind_affinity_target(&host, &session_id, AffinityTarget::new(101, Some(1))).await;
+
+        source_tx.send(instances[1..].to_vec()).unwrap();
+        client.override_discovered_instances(vec![202, 303]);
+        client.override_instance_avail(vec![202, 303]);
+        let mut first = host
+            .generate(affinity_request("worker-exit", None))
+            .await
+            .unwrap();
+        while first.next().await.is_some() {}
+        let replacement = *dispatch.worker_ids.lock().unwrap().last().unwrap();
+        assert!([202, 303].contains(&replacement));
+        assert_eq!(
+            affinity.query_target(&session_id, None).unwrap(),
+            Some(AffinityTarget::worker(replacement))
+        );
+
+        for _ in 0..2 {
+            let mut stream = host
+                .generate(affinity_request("worker-exit", None))
+                .await
+                .unwrap();
+            while stream.next().await.is_some() {}
+        }
+        assert_eq!(
+            dispatch.worker_ids.lock().unwrap().as_slice(),
+            &[replacement; 3]
+        );
+        assert_eq!(dispatch.dp_ranks.lock().unwrap().as_slice(), &[None; 3]);
+    }
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn builtin_hard_affinity_ignores_overload_while_soft_affinity_falls_back() {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -574,10 +830,11 @@ async fn builtin_hard_affinity_ignores_overload_while_soft_affinity_falls_back()
     client.override_instance_avail(vec![worker_id, fallback_worker_id]);
     client.set_overloaded_instances(&[worker_id]);
     let load_context = test_load_context(&client).await;
-    let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
+    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
+        .load_context(load_context)
+        .build()
         .await
         .unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
     let request = Context::new(request());
 
     let hard = host
@@ -600,7 +857,7 @@ async fn builtin_hard_affinity_ignores_overload_while_soft_affinity_falls_back()
 
 #[tokio::test]
 #[serial_test::serial]
-async fn builtin_direct_fallback_stays_disabled_for_affinity() {
+async fn builtin_direct_distinguishes_unknown_requests_from_stale_affinity() {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
@@ -618,52 +875,47 @@ async fn builtin_direct_fallback_stays_disabled_for_affinity() {
     let stale_worker = real_worker.wrapping_add(1);
     client.override_instance_avail(vec![stale_worker, real_worker]);
     let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-    let inner = PushRouter::from_client_with_dispatch(
+    let (host, affinity) = builtin_host_with_affinity(
         client,
         RouterMode::Direct,
-        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-    )
-    .await
-    .unwrap();
-    let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
-        inner,
+        dispatch.clone(),
         load_context,
-        Some(affinity.clone()),
         crate::session_affinity::SessionAffinityMode::Hard,
     )
-    .unwrap();
+    .await;
 
     let mut standalone = request();
     standalone.routing_mut().backend_instance_id = Some(stale_worker);
-    let mut stream = host.generate(Context::new(standalone)).await.unwrap();
+    let error = host.generate(Context::new(standalone)).await.unwrap_err();
+    assert!(match_error_chain(
+        error.as_ref(),
+        &[ErrorType::InvalidArgument],
+        &[]
+    ));
+    assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+
+    let session_id = SessionAffinityId::new("direct-affinity");
+    bind_affinity_target(&host, &session_id, AffinityTarget::worker(stale_worker)).await;
+    let error = host
+        .generate(affinity_request("direct-affinity", None))
+        .await
+        .unwrap_err();
+    assert!(!match_error_chain(
+        error.as_ref(),
+        &[ErrorType::InvalidArgument],
+        &[]
+    ));
+    assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+    assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
+
+    let mut valid = request();
+    valid.routing_mut().backend_instance_id = Some(real_worker);
+    let mut stream = host.generate(Context::new(valid)).await.unwrap();
     while stream.next().await.is_some() {}
     assert_eq!(
         dispatch.worker_ids.lock().unwrap().as_slice(),
         &[real_worker]
     );
-
-    let session_id = SessionAffinityId::new("direct-affinity");
-    let AffinityAcquire::Initialize(initializer) =
-        affinity.acquire(&session_id, None).await.unwrap()
-    else {
-        panic!("new affinity session must initialize");
-    };
-    drop(
-        initializer
-            .commit(AffinityTarget::worker(stale_worker))
-            .unwrap(),
-    );
-    assert!(
-        host.generate(affinity_request("direct-affinity", Some(stale_worker)))
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        dispatch.worker_ids.lock().unwrap().as_slice(),
-        &[real_worker]
-    );
-    assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
 
     drop(host);
     runtime.shutdown();
@@ -689,13 +941,22 @@ async fn terminal_item_does_not_skip_transport_eof() {
         }),
         Arc::clone(&context),
     );
-    let guard = RequestGuard::new_kv(
-        Arc::clone(router.kv_router()),
+    let guard = RequestGuard::new_kv_with_cleanup(
         Arc::clone(&router.request_metrics),
-        "terminal-drain".to_string(),
-        WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        KvRequestCleanup::new(
+            Arc::clone(router.kv_router()),
+            "terminal-drain".to_string(),
+            WorkerWithDpRank::from_worker_id(0),
+            None,
+        ),
         &request(),
+        RequestPhase::Aggregated,
+        Some(RouteObservation {
+            prompt_tokens: 1,
+            best_router_tokens: 0,
+            selected_router_tokens: 0,
+        }),
+        None,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -708,11 +969,198 @@ async fn terminal_item_does_not_skip_transport_eof() {
     runtime.shutdown();
 }
 
+struct KvHitSnapshot {
+    best: u64,
+    selected: u64,
+    reused: u64,
+}
+
+fn kv_hit_snapshot(metrics: &crate::kv_router::metrics::RouterRequestMetrics) -> KvHitSnapshot {
+    // The fixture request carries no tracker, so the guard labels it `aggregated`.
+    let phase = RequestPhase::Aggregated.as_str();
+    let model = "test";
+    let counter = |h: &prometheus::IntCounterVec| h.with_label_values(&[phase, model]).get();
+    KvHitSnapshot {
+        best: counter(&metrics.kv_best_eligible_cached_prefix_tokens),
+        selected: counter(&metrics.kv_selected_cached_prefix_tokens),
+        reused: counter(&metrics.kv_worker_reused_tokens),
+    }
+}
+
+/// Drive one tracked attempt through the real guard and return the metric deltas.
+async fn run_kv_hit_attempt(final_frame: LLMEngineOutput) -> (KvHitSnapshot, KvHitSnapshot) {
+    let (router, runtime) = router(None).await;
+    let metrics = Arc::clone(&router.request_metrics);
+    let before = kv_hit_snapshot(&metrics);
+    let context = Context::new(()).context();
+    let source = ResponseStream::new(
+        Box::pin(async_stream::stream! {
+            yield Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![7],
+                ..Default::default()
+            });
+            yield Annotated::from_data(final_frame);
+        }),
+        Arc::clone(&context),
+    );
+    let guard = RequestGuard::new_kv_with_cleanup(
+        Arc::clone(&metrics),
+        KvRequestCleanup::new(
+            Arc::clone(router.kv_router()),
+            "kv-hit-attempt".to_string(),
+            WorkerWithDpRank::from_worker_id(0),
+            None,
+        ),
+        &request(),
+        RequestPhase::Aggregated,
+        Some(RouteObservation {
+            prompt_tokens: 100,
+            best_router_tokens: 75,
+            selected_router_tokens: 60,
+        }),
+        None,
+    );
+    let monitored = monitor_response_stream(source, context, guard);
+    tokio::pin!(monitored);
+    while monitored.next().await.is_some() {}
+    let after = kv_hit_snapshot(&metrics);
+    drop(router);
+    runtime.shutdown();
+    (before, after)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_cache_hit_complete_attempt_records_every_stage_once() {
+    let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
+        finish_reason: Some(FinishReason::Stop),
+        engine_data: Some(serde_json::json!({
+            "kv_cache_hit": {
+                "prompt_tokens": 100,
+                "reused_tokens": 85,
+            }
+        })),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(after.best - before.best, 75);
+    assert_eq!(after.selected - before.selected, 60);
+    assert_eq!(after.reused - before.reused, 85);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_cache_hit_attempt_without_worker_report_contributes_zero() {
+    let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
+        finish_reason: Some(FinishReason::Stop),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(after.best - before.best, 75);
+    assert_eq!(after.selected - before.selected, 60);
+    assert_eq!(after.reused - before.reused, 0);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_cache_hit_cancelled_attempt_keeps_reported_reuse() {
+    let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
+        finish_reason: Some(FinishReason::Cancelled),
+        engine_data: Some(serde_json::json!({
+            "kv_cache_hit": {
+                "prompt_tokens": 100,
+                "reused_tokens": 85,
+            }
+        })),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(after.best - before.best, 75);
+    assert_eq!(after.selected - before.selected, 60);
+    assert_eq!(after.reused - before.reused, 85);
+}
+
 fn cancelled_frame() -> Annotated<LLMEngineOutput> {
     Annotated::from_data(LLMEngineOutput {
         finish_reason: Some(FinishReason::Cancelled),
         ..Default::default()
     })
+}
+
+#[rstest::rstest]
+#[case(0)]
+#[case(1)]
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_cache_hit_counts_immediately_once_in_selection_phase(#[case] reused: u64) {
+    let (router, runtime) = router(None).await;
+    let metrics = crate::kv_router::metrics::RouterRequestMetrics::for_test(
+        &dynamo_runtime::MetricsRegistry::new(),
+    );
+    let tracker = Arc::new(RequestTracker::new());
+    let permit = tracker.set_phase(RequestPhase::Prefill).await;
+    let mut req = request();
+    req.tracker = Some(tracker.clone());
+    let mut guard = RequestGuard::new_kv_with_cleanup(
+        metrics.clone(),
+        KvRequestCleanup::new(
+            Arc::clone(router.kv_router()),
+            "phase-test".to_string(),
+            WorkerWithDpRank::from_worker_id(0),
+            None,
+        ),
+        &req,
+        RequestPhase::Prefill,
+        Some(RouteObservation {
+            prompt_tokens: 1,
+            best_router_tokens: 1,
+            selected_router_tokens: 1,
+        }),
+        None,
+    );
+    drop(permit);
+    let _permit = tracker.set_phase(RequestPhase::Decode).await;
+    guard
+        .on_item(&Annotated::from_data(LLMEngineOutput {
+            engine_data: Some(serde_json::json!({"kv_cache_hit": {
+                "prompt_tokens": 1, "reused_tokens": reused
+            }})),
+            ..Default::default()
+        }))
+        .await;
+    assert_eq!(
+        metrics
+            .kv_worker_reused_tokens
+            .with_label_values(&["prefill", "test"])
+            .get(),
+        reused
+    );
+    guard
+        .on_item(&Annotated::from_data(LLMEngineOutput {
+            engine_data: Some(serde_json::json!({"kv_cache_hit": {
+                "prompt_tokens": 1, "reused_tokens": 9
+            }})),
+            ..Default::default()
+        }))
+        .await;
+    guard.abort(None).await;
+    drop(guard);
+    assert_eq!(
+        metrics
+            .kv_worker_reused_tokens
+            .with_label_values(&["prefill", "test"])
+            .get(),
+        reused
+    );
+    assert_eq!(
+        metrics
+            .kv_worker_reused_tokens
+            .with_label_values(&["decode", "test"])
+            .get(),
+        0
+    );
+    drop(router);
+    runtime.shutdown();
 }
 
 fn engine_shutdown_frame() -> Annotated<LLMEngineOutput> {
@@ -758,13 +1206,18 @@ async fn shutdown_cancellation_drains_trailing_engine_shutdown_error() {
         }),
         Arc::clone(&context),
     );
-    let guard = RequestGuard::new_kv(
-        Arc::clone(router.kv_router()),
+    let guard = RequestGuard::new_kv_with_cleanup(
         Arc::clone(&router.request_metrics),
-        "shutdown-drain".to_string(),
-        WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        KvRequestCleanup::new(
+            Arc::clone(router.kv_router()),
+            "shutdown-drain".to_string(),
+            WorkerWithDpRank::from_worker_id(0),
+            None,
+        ),
         &request(),
+        RequestPhase::Aggregated,
+        None,
+        None,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -804,13 +1257,18 @@ async fn client_cancellation_still_ends_stream_without_draining() {
         }),
         Arc::clone(&context),
     );
-    let guard = RequestGuard::new_kv(
-        Arc::clone(router.kv_router()),
+    let guard = RequestGuard::new_kv_with_cleanup(
         Arc::clone(&router.request_metrics),
-        "client-cancelled-drain".to_string(),
-        WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        KvRequestCleanup::new(
+            Arc::clone(router.kv_router()),
+            "client-cancelled-drain".to_string(),
+            WorkerWithDpRank::from_worker_id(0),
+            None,
+        ),
         &request(),
+        RequestPhase::Aggregated,
+        None,
+        None,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -842,13 +1300,18 @@ async fn drain_without_trailing_error_gives_up_at_the_deadline() {
         }),
         Arc::clone(&context),
     );
-    let guard = RequestGuard::new_kv(
-        Arc::clone(router.kv_router()),
+    let guard = RequestGuard::new_kv_with_cleanup(
         Arc::clone(&router.request_metrics),
-        "shutdown-drain-deadline".to_string(),
-        WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        KvRequestCleanup::new(
+            Arc::clone(router.kv_router()),
+            "shutdown-drain-deadline".to_string(),
+            WorkerWithDpRank::from_worker_id(0),
+            None,
+        ),
         &request(),
+        RequestPhase::Aggregated,
+        None,
+        None,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -897,13 +1360,18 @@ async fn trailing_error_within_the_drain_window_still_reaches_migration() {
         }),
         Arc::clone(&context),
     );
-    let guard = RequestGuard::new_kv(
-        Arc::clone(router.kv_router()),
+    let guard = RequestGuard::new_kv_with_cleanup(
         Arc::clone(&router.request_metrics),
-        "drain-window-armed".to_string(),
-        WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        KvRequestCleanup::new(
+            Arc::clone(router.kv_router()),
+            "drain-window-armed".to_string(),
+            WorkerWithDpRank::from_worker_id(0),
+            None,
+        ),
         &request(),
+        RequestPhase::Aggregated,
+        None,
+        None,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -943,13 +1411,18 @@ async fn always_ready_terminals_cannot_starve_the_drain_deadline() {
         }),
         Arc::clone(&context),
     );
-    let guard = RequestGuard::new_kv(
-        Arc::clone(router.kv_router()),
+    let guard = RequestGuard::new_kv_with_cleanup(
         Arc::clone(&router.request_metrics),
-        "starvation-guard".to_string(),
-        WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        KvRequestCleanup::new(
+            Arc::clone(router.kv_router()),
+            "starvation-guard".to_string(),
+            WorkerWithDpRank::from_worker_id(0),
+            None,
+        ),
         &request(),
+        RequestPhase::Aggregated,
+        None,
+        None,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -972,6 +1445,27 @@ async fn always_ready_terminals_cannot_starve_the_drain_deadline() {
     runtime.shutdown();
 }
 
+/// The selection future is nested inside every request future (deeper still
+/// on the disaggregated path). A debug build once overflowed a worker stack
+/// when this grew and `await_with_cleanup_policy` held it by value; keep it
+/// small enough that nesting stays cheap.
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_selection_future_stays_small() {
+    let (router, _runtime) = router_with_workers(None, &[1]).await;
+    let request = Context::with_id_and_metadata(
+        request(),
+        "selection-future-size".to_string(),
+        Default::default(),
+    );
+    let budget = CleanupBudget::default();
+    let future = router.select_with_affinity(&request, RequestPhase::Aggregated, false, &budget);
+    let size = std::mem::size_of_val(&future);
+    drop(future);
+    eprintln!("kv selection future size: {size} bytes");
+    assert!(size < 16 * 1024, "kv selection future is {size} bytes");
+}
+
 /// Transport EOF ends the drain and releases the booking.
 #[tokio::test]
 #[serial_test::serial]
@@ -990,16 +1484,15 @@ async fn shutdown_cancellation_without_trailing_error_still_aborts() {
         .await
         .unwrap();
     let cancelled_worker = selection.worker;
-    let guard = router
-        .track_selection(
-            &cancelled_request,
-            &mut selection,
-            RequestPhase::Aggregated,
-            false,
-            &CleanupBudget::default(),
-        )
-        .await
-        .unwrap();
+    let guard = track_selection(
+        &router,
+        &cancelled_request,
+        &mut selection,
+        RequestPhase::Aggregated,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
     let source = ResponseStream::new(
         Box::pin(stream::once(async { cancelled_frame() })),
         cancelled_request.context().clone(),
@@ -1039,17 +1532,16 @@ async fn shutdown_cancellation_without_trailing_error_still_aborts() {
         .await
         .unwrap();
     assert_eq!(retry_selection.worker, cancelled_worker);
-    let mut retry_guard = router
-        .track_selection(
-            &retry_request,
-            &mut retry_selection,
-            RequestPhase::Aggregated,
-            false,
-            &CleanupBudget::default(),
-        )
-        .await
-        .expect("the booking must be released when the drain reaches transport EOF");
-    retry_guard.abort().await;
+    let mut retry_guard = track_selection(
+        &router,
+        &retry_request,
+        &mut retry_selection,
+        RequestPhase::Aggregated,
+        &CleanupBudget::default(),
+    )
+    .await
+    .expect("the booking must be released when the drain reaches transport EOF");
+    retry_guard.abort(None).await;
 
     drop(router);
     runtime.shutdown();
@@ -1072,16 +1564,15 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
         .await
         .unwrap();
     let failed_worker = failed_selection.worker;
-    let failed_guard = router
-        .track_selection(
-            &failed_request,
-            &mut failed_selection,
-            RequestPhase::Aggregated,
-            false,
-            &CleanupBudget::default(),
-        )
-        .await
-        .unwrap();
+    let failed_guard = track_selection(
+        &router,
+        &failed_request,
+        &mut failed_selection,
+        RequestPhase::Aggregated,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
     let failure = Annotated {
         data: None,
         id: None,
@@ -1119,20 +1610,134 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
         .await
         .unwrap();
     assert_eq!(retry_selection.worker, failed_worker);
-    let mut retry_guard = router
-        .track_selection(
-            &retry_request,
-            &mut retry_selection,
-            RequestPhase::Aggregated,
-            false,
-            &CleanupBudget::default(),
-        )
-        .await
-        .expect("same-worker booking must be released before yielding the error");
-    retry_guard.abort().await;
+    let mut retry_guard = track_selection(
+        &router,
+        &retry_request,
+        &mut retry_selection,
+        RequestPhase::Aggregated,
+        &CleanupBudget::default(),
+    )
+    .await
+    .expect("same-worker booking must be released before yielding the error");
+    retry_guard.abort(None).await;
 
     drop(router);
     runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn output_block_accounting_tracks_grouped_chunks() {
+    for (track_output_blocks, expected_output_tokens, expected_output_blocks) in
+        [(true, None, 3), (true, Some(66), 3), (false, None, 0)]
+    {
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: true,
+            router_track_output_blocks: track_output_blocks,
+            ..Default::default()
+        };
+        let (router, runtime) = router_with_config(
+            None,
+            HashMap::from([(7, ModelRuntimeConfig::default())]),
+            config,
+        )
+        .await;
+        let prompt_tokens = 16_usize;
+        let chunks = [1_usize, 32, 15];
+        let mut input = request();
+        input.token_ids = (1..=prompt_tokens as u32).collect::<Vec<_>>().into();
+        input.routing = Some(RoutingHints {
+            expected_output_tokens,
+            ..Default::default()
+        });
+        let input = Context::new(input);
+        let (mut selection, _) = router
+            .select_with_affinity(
+                &input,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default(),
+            )
+            .await
+            .unwrap();
+        let mut guard = track_selection(
+            &router,
+            &input,
+            &mut selection,
+            RequestPhase::Aggregated,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+        let mut next_token = prompt_tokens as u32 + 1;
+        let initial_loads = router
+            .kv_router()
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        let initial_blocks = initial_loads
+            .iter()
+            .find(|load| load.worker_id == 7 && load.dp_rank == 0)
+            .unwrap()
+            .potential_decode_blocks;
+        for size in &chunks {
+            let token_ids = (next_token..next_token + *size as u32).collect();
+            next_token += *size as u32;
+            guard
+                .on_item(&Annotated::from_data(LLMEngineOutput {
+                    token_ids,
+                    index: Some(0),
+                    ..Default::default()
+                }))
+                .await;
+        }
+        let loads = router
+            .kv_router()
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        let load = loads
+            .iter()
+            .find(|load| load.worker_id == 7 && load.dp_rank == 0)
+            .unwrap();
+        assert_eq!(load.active_requests, 1);
+        // This single-request fixture has no shared prompt blocks, so decay applies
+        // to both prompt and output blocks. Check accounting and OSL propagation here;
+        // the sequence tests check the number of local load observations.
+        // The last boundary is observed at output length 33; OSL 66 gives 0.5 decay.
+        let decay = if expected_output_tokens.is_some() {
+            0.5
+        } else {
+            1.0
+        };
+        let expected_blocks =
+            ((initial_blocks + expected_output_blocks) as f64 * decay).round() as usize;
+        println!(
+            "track_output_blocks={track_output_blocks} prompt_tokens={prompt_tokens} output_tokens=48 block_size=16 chunks={chunks:?} initial_blocks={initial_blocks} observed_blocks={} expected_blocks={expected_blocks}",
+            load.potential_decode_blocks
+        );
+        let observed_blocks = load.potential_decode_blocks;
+        guard.complete().await;
+        let loads = router
+            .kv_router()
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        let load = loads
+            .iter()
+            .find(|load| load.worker_id == 7 && load.dp_rank == 0)
+            .unwrap();
+        assert_eq!(load.active_requests, 0);
+        assert_eq!(load.potential_decode_blocks, 0);
+        drop(router);
+        runtime.shutdown();
+        assert_eq!(
+            observed_blocks, expected_blocks,
+            "incorrect grouped-output accounting with tracking={track_output_blocks}, osl={expected_output_tokens:?}"
+        );
+    }
 }
 
 async fn router(session_affinity_ttl: Option<Duration>) -> (RoutingHost, Runtime) {
@@ -1155,7 +1760,69 @@ async fn router_with_worker_configs(
     session_affinity_ttl: Option<Duration>,
     workers: HashMap<u64, ModelRuntimeConfig>,
 ) -> (RoutingHost, Runtime) {
+    // Keep the large construction future off debug test stacks.
+    Box::pin(router_with_worker_configs_and_classifier(
+        session_affinity_ttl,
+        workers,
+        None::<RecordingClassifier>,
+    ))
+    .await
+}
+
+async fn router_with_classifier(
+    classifier: impl RequestClassifier,
+    session_affinity_ttl: Option<Duration>,
+) -> (RoutingHost, Runtime) {
+    router_with_worker_configs_and_classifier(
+        session_affinity_ttl,
+        HashMap::from([(7, ModelRuntimeConfig::default())]),
+        Some(classifier),
+    )
+    .await
+}
+
+async fn router_with_worker_configs_and_classifier(
+    session_affinity_ttl: Option<Duration>,
+    workers: HashMap<u64, ModelRuntimeConfig>,
+    classifier: Option<impl RequestClassifier>,
+) -> (RoutingHost, Runtime) {
+    let config = KvRouterConfig {
+        skip_initial_worker_wait: true,
+        use_kv_events: false,
+        router_track_active_blocks: false,
+        ..Default::default()
+    };
+    Box::pin(router_with_config_and_classifier(
+        session_affinity_ttl,
+        workers,
+        config,
+        classifier,
+    ))
+    .await
+}
+
+async fn router_with_config(
+    session_affinity_ttl: Option<Duration>,
+    workers: HashMap<u64, ModelRuntimeConfig>,
+    config: KvRouterConfig,
+) -> (RoutingHost, Runtime) {
+    Box::pin(router_with_config_and_classifier(
+        session_affinity_ttl,
+        workers,
+        config,
+        None::<RecordingClassifier>,
+    ))
+    .await
+}
+
+async fn router_with_config_and_classifier(
+    session_affinity_ttl: Option<Duration>,
+    workers: HashMap<u64, ModelRuntimeConfig>,
+    config: KvRouterConfig,
+    classifier: Option<impl RequestClassifier>,
+) -> (RoutingHost, Runtime) {
     let runtime = Runtime::from_current().unwrap();
+    // Each runtime has its own in-memory discovery store, so fixture namespaces can repeat.
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
         .unwrap();
@@ -1168,19 +1835,13 @@ async fn router_with_worker_configs(
     let client = endpoint.client().await.unwrap();
     let worker_ids = workers.keys().copied().collect::<Vec<_>>();
     let (_tx, workers) = watch::channel(workers);
-    let config = KvRouterConfig {
-        skip_initial_worker_wait: true,
-        use_kv_events: false,
-        router_track_active_blocks: false,
-        ..Default::default()
-    };
-    let chooser = KvRouter::new(
+    let mut chooser = KvRouter::new(
         endpoint,
         client.clone(),
         workers,
         None,
         16,
-        DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+        SelectionPolicySource::Registry,
         Some(config),
         None,
         "decode",
@@ -1191,10 +1852,24 @@ async fn router_with_worker_configs(
     )
     .await
     .unwrap();
-    let inner = PushRouter::from_client(client, RouterMode::KV)
+    if let Some(classifier) = classifier {
+        chooser = chooser.with_request_classifier(classifier).unwrap();
+    }
+    let chooser = Arc::new(chooser);
+    let affinity = session_affinity_ttl
+        .map(|ttl| {
+            chooser.affinity_coordinator(ttl, crate::session_affinity::SessionAffinityMode::Hard)
+        })
+        .transpose()
+        .unwrap();
+    let mut router = RoutingHost::builder(client, RouterMode::KV)
+        .kv_router(chooser)
+        .affinity_coordinator(affinity)
+        .build()
         .await
         .unwrap();
-    let router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
+    // Parallel tests must not share the process-global request counters.
+    router.request_metrics = router.request_metrics.with_isolated_counters_for_test();
     router
         .inner
         .client
@@ -1257,6 +1932,15 @@ async fn router_with_recorded_dispatch_and_affinity(
     namespace: &str,
     session_affinity_ttl: Option<Duration>,
 ) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
+    router_with_recorded_dispatch_affinity_and_classifier(namespace, session_affinity_ttl, None)
+        .await
+}
+
+async fn router_with_recorded_dispatch_affinity_and_classifier(
+    namespace: &str,
+    session_affinity_ttl: Option<Duration>,
+    classifier: Option<RecordingClassifier>,
+) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
@@ -1284,7 +1968,7 @@ async fn router_with_recorded_dispatch_and_affinity(
         workers,
         None,
         16,
-        DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+        crate::kv_router::SelectionPolicySource::Registry,
         Some(config),
         None,
         "decode",
@@ -1295,15 +1979,25 @@ async fn router_with_recorded_dispatch_and_affinity(
     )
     .await
     .unwrap();
+    let chooser = match classifier {
+        Some(classifier) => chooser.with_request_classifier(classifier).unwrap(),
+        None => chooser,
+    };
     let dispatch = Arc::new(PendingThenCompletedDispatch::default());
-    let inner = PushRouter::from_client_with_dispatch(
-        client,
-        RouterMode::KV,
-        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-    )
-    .await
-    .unwrap();
-    let router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
+    let chooser = Arc::new(chooser);
+    let affinity = session_affinity_ttl
+        .map(|ttl| {
+            chooser.affinity_coordinator(ttl, crate::session_affinity::SessionAffinityMode::Hard)
+        })
+        .transpose()
+        .unwrap();
+    let router = RoutingHost::builder(client, RouterMode::KV)
+        .kv_router(chooser)
+        .affinity_coordinator(affinity)
+        .dispatch(Arc::clone(&dispatch) as LlmDispatch)
+        .build()
+        .await
+        .unwrap();
     (router, dispatch, worker_id, runtime)
 }
 
@@ -1326,16 +2020,15 @@ async fn admitted_request_stopped_before_dispatch(
         .select_with_affinity(&request, phase, false, &CleanupBudget::default())
         .await
         .unwrap();
-    let guard = router
-        .track_selection(
-            &request,
-            &mut selection,
-            phase,
-            false,
-            &CleanupBudget::default(),
-        )
-        .await
-        .unwrap();
+    let guard = track_selection(
+        router,
+        &request,
+        &mut selection,
+        phase,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
 
     // The client went away while the request was in flight upstream — for the
     // decode leg, while remote prefill was still running.
@@ -1361,7 +2054,14 @@ async fn kv_cancellation_after_admission_still_stops_the_aggregated_dispatch() {
     .await;
 
     let error = router
-        .dispatch_selection(request, selection, guard, &CleanupBudget::default())
+        .dispatch_selection(
+            request,
+            selection,
+            RequestPhase::Aggregated,
+            guard,
+            &CleanupBudget::default(),
+            None,
+        )
         .await
         .expect_err("aggregated dispatch must still be cancelled before it is issued");
     assert!(match_error_chain(
@@ -1378,31 +2078,636 @@ async fn kv_cancellation_after_admission_still_stops_the_aggregated_dispatch() {
     runtime.shutdown();
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ClassifierObservation {
+    Completed(usize),
+    /// The typed cause the plugin received, if the abort carried one.
+    Aborted {
+        cause: Option<ErrorType>,
+    },
+}
+
+fn abort_cause_type(error: &(dyn std::error::Error + 'static)) -> Option<ErrorType> {
+    let mut cause = Some(error);
+    while let Some(current) = cause {
+        if let Some(typed) = current.downcast_ref::<DynamoError>() {
+            return Some(typed.error_type());
+        }
+        cause = current.source();
+    }
+    None
+}
+
+struct RecordingClassifier {
+    calls: Arc<AtomicUsize>,
+    observations: mpsc::UnboundedSender<ClassifierObservation>,
+}
+
+#[async_trait::async_trait]
+impl RequestClassifier for RecordingClassifier {
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async move { Ok(request) })
+    }
+
+    async fn on_event(&mut self, event: ClassifyEvent) {
+        let observation = match event {
+            ClassifyEvent::Completed {
+                context_tokens: Some(context_tokens),
+                ..
+            } => Some(ClassifierObservation::Completed(context_tokens)),
+            ClassifyEvent::Aborted { error, .. } => Some(ClassifierObservation::Aborted {
+                cause: error.as_deref().and_then(|error| abort_cause_type(error)),
+            }),
+            _ => None,
+        };
+        if let Some(observation) = observation {
+            self.observations.send(observation).unwrap();
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("classifier rejected request")]
+struct ClassifierRejected;
+
+struct RejectingClassifier {
+    calls: Arc<AtomicUsize>,
+    observations: mpsc::UnboundedSender<Option<(bool, String)>>,
+}
+
+#[async_trait::async_trait]
+impl RequestClassifier for RejectingClassifier {
+    fn classify(
+        &mut self,
+        _request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async { Err(Box::new(ClassifierRejected) as Box<ClassifierError>) })
+    }
+
+    async fn on_event(&mut self, event: ClassifyEvent) {
+        if let ClassifyEvent::Aborted { error, .. } = event {
+            self.observations
+                .send(error.map(|error| {
+                    (
+                        error.downcast_ref::<ClassifierRejected>().is_some(),
+                        error.to_string(),
+                    )
+                }))
+                .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn classifier_failure_aborts_once_with_original_error() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let (router, runtime) = router_with_classifier(
+        RejectingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        },
+        Some(Duration::from_secs(10)),
+    )
+    .await;
+    let session_id = SessionAffinityId::new("classifier-failure-stale-affinity");
+    bind_affinity_target(&router, &session_id, AffinityTarget::new(7, Some(1))).await;
+    let mut request = Context::new(request());
+    request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+
+    let client_error = match router
+        .select_with_affinity(
+            &request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+    {
+        Ok(_) => panic!("classifier rejection unexpectedly selected a worker"),
+        Err(error) => error,
+    };
+    assert!(!format!("{client_error:#}").contains("classifier rejected request"));
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
+            .await
+            .expect("classifier abort event timed out"),
+        Some(Some((true, "classifier rejected request".to_string())))
+    );
+    assert!(observations_rx.try_recv().is_err());
+
+    drop(router);
+    runtime.shutdown();
+}
+
+struct TypedRejectingClassifier {
+    error_type: ErrorType,
+    calls: Arc<AtomicUsize>,
+    observations: mpsc::UnboundedSender<ClassifierObservation>,
+}
+
+#[async_trait::async_trait]
+impl RequestClassifier for TypedRejectingClassifier {
+    fn classify(
+        &mut self,
+        _request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let error_type = self.error_type;
+        Box::pin(async move {
+            Err(Box::new(
+                DynamoError::builder()
+                    .error_type(error_type)
+                    .message("classifier shed load")
+                    .build(),
+            ) as Box<ClassifierError>)
+        })
+    }
+
+    async fn on_event(&mut self, event: ClassifyEvent) {
+        if let ClassifyEvent::Aborted { error, .. } = event {
+            self.observations
+                .send(ClassifierObservation::Aborted {
+                    cause: error.as_deref().and_then(|error| abort_cause_type(error)),
+                })
+                .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn typed_classifier_rejection_reaches_client_without_migration() {
+    for error_type in [
+        ErrorType::ResourceExhausted,
+        ErrorType::WorkerOverloaded,
+        ErrorType::CannotConnect,
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+        let (router, runtime) = router_with_classifier(
+            TypedRejectingClassifier {
+                error_type,
+                calls: Arc::clone(&calls),
+                observations: observations_tx,
+            },
+            None,
+        )
+        .await;
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(router);
+        let migration = Migration::new(2, None, "test".to_string(), Arc::new(Metrics::new()));
+        let client_error = match migration
+            .generate(Context::new(request()), engine.clone())
+            .await
+        {
+            Ok(_) => panic!("typed rejection unexpectedly selected a worker"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "classifier rejection {error_type:?} must not be retried"
+        );
+        assert!(match_error_chain(client_error.as_ref(), &[error_type], &[]));
+        assert!(format!("{client_error:#}").contains("classifier shed load"));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
+                .await
+                .expect("classifier abort event timed out"),
+            Some(ClassifierObservation::Aborted {
+                cause: Some(error_type),
+            })
+        );
+        assert!(observations_rx.try_recv().is_err());
+
+        drop(engine);
+        runtime.shutdown();
+    }
+}
+
+#[tokio::test]
+async fn stale_affinity_rebind_classifies_once_without_intermediate_abort() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let (router, runtime) = router_with_classifier(
+        RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        },
+        Some(Duration::from_secs(10)),
+    )
+    .await;
+    let session_id = SessionAffinityId::new("classifier-stale-affinity");
+    bind_affinity_target(&router, &session_id, AffinityTarget::new(7, Some(1))).await;
+    let mut request = Context::new(request());
+    request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+
+    let (mut selection, operation) = router
+        .select_with_affinity(
+            &request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert!(observations_rx.try_recv().is_err());
+    let mut lifecycle = selection.request_lifecycle.take().unwrap();
+    lifecycle.observe_context_tokens(1);
+    lifecycle.complete();
+    assert_eq!(
+        observations_rx.recv().await,
+        Some(ClassifierObservation::Completed(1))
+    );
+    router.kv_router().free(request.id()).await.unwrap();
+
+    drop(operation);
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn query_only_selection_bypasses_classifier_and_request_lifecycle() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let (router, runtime) = router_with_classifier(
+        RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        },
+        None,
+    )
+    .await;
+    let request = Context::new(request());
+
+    let (selection, operation) = router
+        .select_with_affinity(
+            &request,
+            RequestPhase::Aggregated,
+            true,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert!(selection.request_lifecycle.is_none());
+    assert!(operation.is_none());
+    drop(selection);
+    assert!(!router.prefill_worker_busy(&request, 0.5).await.unwrap());
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert!(observations_rx.try_recv().is_err());
+
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn planned_route_admission_classifies_and_carries_lifecycle() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let (router, runtime) = router_with_classifier(
+        RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        },
+        None,
+    )
+    .await;
+    let request = Context::new(request());
+
+    let preview = router
+        .preview_kv_route(&request, RequestPhase::Decode)
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 0, "preview is query-only");
+    let mut plan = router
+        .plan_kv_route_from_preview(&request, preview)
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+    let mut lifecycle = plan.selection.request_lifecycle.take().unwrap();
+    lifecycle.observe_context_tokens(1);
+    lifecycle.complete();
+    assert_eq!(
+        observations_rx.recv().await,
+        Some(ClassifierObservation::Completed(1))
+    );
+    router.kv_router().free(request.id()).await.unwrap();
+
+    drop(plan);
+    drop(router);
+    runtime.shutdown();
+}
+
+struct PausingClassifier {
+    entered: Arc<Notify>,
+    resumed: Arc<Notify>,
+}
+
+impl RequestClassifier for PausingClassifier {
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
+        let entered = Arc::clone(&self.entered);
+        let resumed = Arc::clone(&self.resumed);
+        Box::pin(async move {
+            entered.notify_one();
+            resumed.notified().await;
+            Ok(request)
+        })
+    }
+}
+
+#[tokio::test]
+async fn classifier_pause_defers_admission_until_resumed() {
+    let entered = Arc::new(Notify::new());
+    let resumed = Arc::new(Notify::new());
+    let (router, runtime) = router_with_classifier(
+        PausingClassifier {
+            entered: Arc::clone(&entered),
+            resumed: Arc::clone(&resumed),
+        },
+        None,
+    )
+    .await;
+    let router = Arc::new(router);
+    let request = Context::new(request());
+    let request_id = request.id().to_string();
+    let selection = {
+        let router = Arc::clone(&router);
+        tokio::spawn(async move {
+            router
+                .select_with_affinity(
+                    &request,
+                    RequestPhase::Aggregated,
+                    false,
+                    &CleanupBudget::default(),
+                )
+                .await
+        })
+    };
+
+    entered.notified().await;
+    assert!(!selection.is_finished());
+    resumed.notify_one();
+    let (selection, _) = selection.await.unwrap().unwrap();
+    assert!(selection.request_lifecycle.is_some());
+    router.kv_router().free(&request_id).await.unwrap();
+    drop(selection);
+
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn tracked_admission_without_lifecycle_bypasses_classifier() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let (router, runtime) = router_with_classifier(
+        RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        },
+        None,
+    )
+    .await;
+
+    // `find_best_match_details_with_policy_class` with `update_states` is a tracked admission
+    // that never calls `begin_request_lifecycle` — the same funnel as the
+    // Python bindings `best_worker` and the standalone `RouterRequest::New`
+    // path. The plugin would receive no lifecycle events for it, so admission
+    // must use the default queue inputs instead of the classifier.
+    let outcome = router
+        .kv_router()
+        .find_best_match_details_with_policy_class(
+            Some("unregistered-tracked"),
+            &[1, 2, 3, 4],
+            None,
+            None,
+            true,
+            false,
+            None,
+            None,
+            0.0,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            RoutingConstraints::default(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        crate::kv_router::FindBestMatchOutcome::Routed { .. }
+    ));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    router
+        .kv_router()
+        .free("unregistered-tracked")
+        .await
+        .unwrap();
+    assert!(observations_rx.try_recv().is_err());
+
+    drop(router);
+    runtime.shutdown();
+}
+
+struct TokenContractClassifier {
+    classified: mpsc::UnboundedSender<(
+        usize,
+        dynamo_kv_router::plugins::request_classifier::RequestProgress,
+    )>,
+    completed: mpsc::UnboundedSender<usize>,
+}
+
+#[async_trait::async_trait]
+impl RequestClassifier for TokenContractClassifier {
+    fn classify(
+        &mut self,
+        request: ClassifyRequest,
+        _workers: WorkerCandidates<'_>,
+    ) -> ClassifyFuture {
+        self.classified
+            .send((request.isl_tokens(), request.progress().clone()))
+            .unwrap();
+        Box::pin(async move { Ok(request) })
+    }
+
+    async fn on_event(&mut self, event: ClassifyEvent) {
+        if let ClassifyEvent::Completed {
+            context_tokens: Some(context_tokens),
+            ..
+        } = event
+        {
+            self.completed.send(context_tokens).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn classifier_uses_scheduler_token_basis() {
+    let (classified_tx, mut classified_rx) = mpsc::unbounded_channel();
+    let (completed_tx, mut completed_rx) = mpsc::unbounded_channel();
+    let (router, runtime) = router_with_classifier(
+        TokenContractClassifier {
+            classified: classified_tx,
+            completed: completed_tx,
+        },
+        None,
+    )
+    .await;
+    let mut content = request();
+    content.mm_routing_info = Some(MmRoutingInfo {
+        routing_token_ids: vec![1, 2, 3, 4, 5, 0, 0, 0],
+        block_mm_infos: vec![None],
+        expanded_prompt_len: 5,
+    });
+    let request = Context::new(content);
+    let (mut selection, _) = router
+        .select_with_affinity(
+            &request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+    // Classification and the scheduler queue share one token basis: the
+    // routing tokens (`isl_tokens`, 8 here), not the multimodal expanded
+    // prompt length (5), so a pass-through classifier cannot shift queue
+    // bucketing, limits, or DRR cost for multimodal requests.
+    let (input_tokens, progress) = classified_rx.recv().await.unwrap();
+    assert_eq!(input_tokens, 8);
+    assert_eq!(progress.context_tokens(), 8);
+
+    let mut guard = track_selection(
+        &router,
+        &request,
+        &mut selection,
+        RequestPhase::Aggregated,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
+    guard.on_dispatched();
+    let output = LLMEngineOutput {
+        completion_usage: Some(dynamo_protocols::types::CompletionUsage {
+            prompt_tokens: 5,
+            completion_tokens: 6,
+            total_tokens: 11,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        }),
+        ..Default::default()
+    };
+    guard.on_item(&Annotated::from_data(output)).await;
+    assert_eq!(progress.context_tokens(), 11);
+    assert!(completed_rx.try_recv().is_err());
+    guard.complete().await;
+    assert_eq!(completed_rx.recv().await, Some(11));
+
+    drop(router);
+    runtime.shutdown();
+}
+
+/// Build the guard for a selection a test drives by hand. Production routes get
+/// theirs through `dispatch_kv_plan`.
+async fn track_selection(
+    router: &RoutingHost,
+    request: &SingleIn<PreprocessedRequest>,
+    selection: &mut WorkerSelection,
+    phase: RequestPhase,
+    budget: &CleanupBudget,
+) -> Result<RequestGuard, Error> {
+    let cleanup = KvRequestCleanup::new(
+        Arc::clone(router.kv_router()),
+        request.context().id().to_string(),
+        selection.worker,
+        selection.booking.take(),
+    );
+    router
+        .track_planned_selection(request, selection, phase, cleanup, budget)
+        .await
+}
+
 async fn track_request(
     router: &RoutingHost,
-    is_query_only: bool,
 ) -> (SingleIn<PreprocessedRequest>, WorkerSelection, RequestGuard) {
     let request = Context::new(request());
     let (mut selection, _) = router
         .select_with_affinity(
             &request,
             RequestPhase::Aggregated,
-            is_query_only,
+            false,
             &CleanupBudget::default(),
         )
         .await
         .unwrap();
-    let guard = router
-        .track_selection(
-            &request,
-            &mut selection,
-            RequestPhase::Aggregated,
-            is_query_only,
-            &CleanupBudget::default(),
-        )
-        .await
-        .unwrap();
+    let guard = track_selection(
+        router,
+        &request,
+        &mut selection,
+        RequestPhase::Aggregated,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
     (request, selection, guard)
+}
+
+/// Scheduler-reported loads with no prompt, the way the reservation tests read them.
+async fn potential_loads(router: &RoutingHost) -> Vec<dynamo_kv_router::protocols::PotentialLoad> {
+    router
+        .kv_router()
+        .get_potential_loads(&[], None, None, None, None)
+        .await
+        .unwrap()
+}
+
+fn active_requests_for(
+    loads: &[dynamo_kv_router::protocols::PotentialLoad],
+    worker_id: u64,
+    dp_rank: u32,
+) -> usize {
+    loads
+        .iter()
+        .find(|load| load.worker_id == worker_id && load.dp_rank == dp_rank)
+        .expect("selected worker must be reported")
+        .active_requests
+}
+
+/// Preview and admit one decode route, the two stages the plan tests exercise.
+async fn plan_decode_route(
+    router: &RoutingHost,
+    request: &Context<PreprocessedRequest>,
+) -> RoutePlan {
+    let preview = router
+        .preview_kv_route(request, RequestPhase::Decode)
+        .await
+        .expect("decode preview should select one request");
+    router
+        .plan_kv_route_from_preview(request, preview)
+        .await
+        .expect("decode plan should admit one request")
 }
 
 #[tokio::test]
@@ -1410,49 +2715,26 @@ async fn track_request(
 async fn route_plan_from_preview_holds_and_releases_the_decode_reservation() {
     let (router, runtime) = router(None).await;
     let request = Context::new(request());
-    let requests_started_before = router.request_metrics.requests_started_total().get();
 
-    let preview = router
-        .preview_kv_route(&request, RequestPhase::Decode)
-        .await
-        .expect("decode preview should select one request");
-    let plan = router
-        .plan_kv_route_from_preview(&request, preview)
-        .await
-        .expect("decode plan should admit one request");
-    assert_eq!(plan.signals().worker.worker_id, 7);
+    let plan = plan_decode_route(&router, &request).await;
+    assert_eq!(plan.worker().worker_id, 7);
     assert_eq!(
-        router.request_metrics.requests_started_total().get(),
-        requests_started_before,
+        router.request_metrics.requests_started_total.get(),
+        0,
         "a topology decision is not a started request"
     );
-    let admitted_loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
-    assert_eq!(
-        admitted_loads
-            .iter()
-            .find(|load| load.worker_id == 7 && load.dp_rank == 0)
-            .expect("selected worker must be reported")
-            .active_requests,
-        1
-    );
+    let admitted_loads = potential_loads(&router).await;
+    assert_eq!(active_requests_for(&admitted_loads, 7, 0), 1);
 
-    plan.abort().await;
-    let released_loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
+    plan.abort(None).await;
+    let released_loads = potential_loads(&router).await;
     assert!(
         released_loads.iter().all(|load| load.active_requests == 0),
         "abandoned plans must release their scheduler reservation: {released_loads:?}"
     );
     assert_eq!(
-        router.request_metrics.requests_started_total().get(),
-        requests_started_before,
+        router.request_metrics.requests_started_total.get(),
+        0,
         "an abandoned plan must not count as a started request"
     );
 
@@ -1465,23 +2747,15 @@ async fn route_plan_from_preview_holds_and_releases_the_decode_reservation() {
 async fn route_preview_does_not_admit_a_request() {
     let (router, runtime) = router(None).await;
     let request = Context::new(request());
-    let requests_started_before = router.request_metrics.requests_started_total().get();
 
     let preview = router
         .preview_kv_route(&request, RequestPhase::Decode)
         .await
         .expect("decode preview should select one request");
-    assert_eq!(preview.signals().worker.worker_id, 7);
-    let loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
+    assert_eq!(preview.signals.worker.worker_id, 7);
+    let loads = potential_loads(&router).await;
     assert!(loads.iter().all(|load| load.active_requests == 0));
-    assert_eq!(
-        router.request_metrics.requests_started_total().get(),
-        requests_started_before
-    );
+    assert_eq!(router.request_metrics.requests_started_total.get(), 0);
 
     drop(router);
     runtime.shutdown();
@@ -1496,27 +2770,16 @@ async fn route_plan_from_preview_admits_the_previewed_worker() {
         .preview_kv_route(&request, RequestPhase::Decode)
         .await
         .unwrap();
-    let previewed_worker = preview.signals().worker;
+    let previewed_worker = preview.signals.worker;
 
     let plan = router
         .plan_kv_route_from_preview(&request, preview)
         .await
         .unwrap();
-    assert_eq!(plan.signals().worker, previewed_worker);
-    let loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
+    assert_eq!(plan.worker(), previewed_worker);
+    let loads = potential_loads(&router).await;
     assert_eq!(
-        loads
-            .iter()
-            .find(|load| {
-                load.worker_id == previewed_worker.worker_id
-                    && load.dp_rank == previewed_worker.dp_rank
-            })
-            .expect("previewed worker must be reported")
-            .active_requests,
+        active_requests_for(&loads, previewed_worker.worker_id, previewed_worker.dp_rank),
         1
     );
     assert_eq!(
@@ -1524,7 +2787,7 @@ async fn route_plan_from_preview_admits_the_previewed_worker() {
         1
     );
 
-    plan.abort().await;
+    plan.abort(None).await;
     drop(router);
     runtime.shutdown();
 }
@@ -1549,7 +2812,7 @@ async fn route_preview_does_not_acquire_session_affinity() {
     .await
     .expect("preview must not leave affinity initialization pending")
     .unwrap();
-    assert!(matches!(acquisition, AffinityAcquire::Initialize(_)));
+    assert!(matches!(acquisition, Hold::Initialize(_)));
     drop(acquisition);
 
     drop(router);
@@ -1560,27 +2823,12 @@ async fn route_preview_does_not_acquire_session_affinity() {
 #[serial_test::serial]
 async fn planned_dispatch_transfers_the_reservation_to_request_cleanup() {
     let (router, runtime) = router(None).await;
-    let requests_started_before = router.request_metrics.requests_started_total().get();
     let request = Context::new(request());
-    let preview = router
-        .preview_kv_route(&request, RequestPhase::Decode)
-        .await
-        .unwrap();
-    let plan = router
-        .plan_kv_route_from_preview(&request, preview)
-        .await
-        .unwrap();
+    let plan = plan_decode_route(&router, &request).await;
 
     assert!(router.dispatch_kv_plan(request, plan).await.is_err());
-    assert_eq!(
-        router.request_metrics.requests_started_total().get(),
-        requests_started_before + 1
-    );
-    let loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
+    assert_eq!(router.request_metrics.requests_started_total.get(), 1);
+    let loads = potential_loads(&router).await;
     assert!(loads.iter().all(|load| load.active_requests == 0));
 
     drop(router);
@@ -1592,19 +2840,11 @@ async fn planned_dispatch_transfers_the_reservation_to_request_cleanup() {
 async fn prefill_busy_probe_does_not_admit_a_request() {
     let (router, runtime) = router(None).await;
     let request = Context::new(request());
-    let requests_started_before = router.request_metrics.requests_started_total().get();
 
     assert!(!router.prefill_worker_busy(&request, 0.5).await.unwrap());
-    let loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
+    let loads = potential_loads(&router).await;
     assert!(loads.iter().all(|load| load.active_requests == 0));
-    assert_eq!(
-        router.request_metrics.requests_started_total().get(),
-        requests_started_before
-    );
+    assert_eq!(router.request_metrics.requests_started_total.get(), 0);
 
     drop(router);
     runtime.shutdown();
@@ -1625,7 +2865,7 @@ async fn aborted_route_plan_drops_pending_affinity_initialization() {
         .plan_kv_route_from_preview(&request, preview)
         .await
         .unwrap()
-        .abort()
+        .abort(None)
         .await;
 
     let affinity = router.affinity.as_ref().unwrap();
@@ -1636,7 +2876,7 @@ async fn aborted_route_plan_drops_pending_affinity_initialization() {
     .await
     .expect("abandoned plan must not leave affinity initialization pending")
     .unwrap();
-    assert!(matches!(acquisition, AffinityAcquire::Initialize(_)));
+    assert!(matches!(acquisition, Hold::Initialize(_)));
     drop(acquisition);
 
     drop(router);
@@ -1657,8 +2897,6 @@ async fn session_affinity_disabled_does_not_create_coordinator() {
 async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     let (router, runtime) = router(None).await;
     let metrics = router.request_metrics.clone();
-    let started_before = metrics.requests_started_total().get();
-    let completed_before = metrics.requests_total.get();
 
     let controller = Controller::new("pre-admission-cancellation".to_string());
     controller.stop();
@@ -1674,23 +2912,34 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
             .await
             .is_err()
     );
-    assert_eq!(metrics.requests_started_total().get(), started_before);
+    assert_eq!(metrics.requests_started_total.get(), 0);
 
-    let (_, _, mut query_guard) = track_request(&router, true).await;
-    query_guard.abort().await;
-    drop(query_guard);
-    assert_eq!(metrics.requests_started_total().get(), started_before);
+    let (_, selection, mut cancelled_guard) = track_request(&router).await;
 
-    let (_, _, mut cancelled_guard) = track_request(&router, false).await;
-
-    assert_eq!(metrics.requests_started_total().get(), started_before + 1);
-    assert_eq!(metrics.requests_total.get(), completed_before);
+    assert_eq!(metrics.requests_started_total.get(), 1);
+    assert_eq!(metrics.requests_total.get(), 0);
+    // The booking is held from admission until the guard finishes.
+    let loads = potential_loads(&router).await;
+    assert_eq!(
+        loads
+            .iter()
+            .find(|load| load.worker_id == selection.worker.worker_id)
+            .expect("tracked worker must be reported")
+            .active_requests,
+        1,
+        "a tracked request stays booked while its guard is live: {loads:?}"
+    );
 
     // Admission remains counted even when the request aborts before dispatch.
-    cancelled_guard.abort().await;
+    cancelled_guard.abort(None).await;
     drop(cancelled_guard);
-    assert_eq!(metrics.requests_started_total().get(), started_before + 1);
-    assert_eq!(metrics.requests_total.get(), completed_before);
+    assert_eq!(metrics.requests_started_total.get(), 1);
+    assert_eq!(metrics.requests_total.get(), 0);
+    let loads = potential_loads(&router).await;
+    assert!(
+        loads.iter().all(|load| load.active_requests == 0),
+        "an aborted guard frees its booking: {loads:?}"
+    );
 
     let mut failed_input = request();
     failed_input.migration_state = Some(Default::default());
@@ -1706,50 +2955,57 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
         .await
         .unwrap();
     let failed_worker = failed_selection.worker.worker_id;
-    let failed_dispatch_guard = router
-        .track_selection(
-            &failed_request,
-            &mut failed_selection,
-            RequestPhase::Aggregated,
-            false,
-            &CleanupBudget::default(),
-        )
-        .await
-        .unwrap();
+    let failed_dispatch_guard = track_selection(
+        &router,
+        &failed_request,
+        &mut failed_selection,
+        RequestPhase::Aggregated,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
     assert!(
         router
             .dispatch_selection(
                 failed_request,
                 failed_selection,
+                RequestPhase::Aggregated,
                 failed_dispatch_guard,
-                &CleanupBudget::default()
+                &CleanupBudget::default(),
+                None,
             )
             .await
             .is_err()
     );
     assert_eq!(migration_state.excluded_worker_ids(), vec![failed_worker]);
-    assert_eq!(metrics.requests_started_total().get(), started_before + 2);
-    assert_eq!(metrics.requests_total.get(), completed_before);
+    assert_eq!(metrics.requests_started_total.get(), 2);
+    assert_eq!(metrics.requests_total.get(), 0);
 
-    let (_, _, mut completed_guard) = track_request(&router, false).await;
-    completed_guard.start_dispatch("aggregated");
-    completed_guard.mark_dispatched();
-    completed_guard.finish().await;
+    let (completed_request, _, mut completed_guard) = track_request(&router).await;
+    completed_guard.begin_dispatch("aggregated", completed_request.content());
+    completed_guard.on_dispatched();
+    completed_guard.complete().await;
     drop(completed_guard);
-    assert_eq!(metrics.requests_started_total().get(), started_before + 3);
-    assert_eq!(metrics.requests_total.get(), completed_before + 1);
+    assert_eq!(metrics.requests_started_total.get(), 3);
+    assert_eq!(metrics.requests_total.get(), 1);
 
-    let mut builtin_guard = RequestGuard::<DefaultWorkerSelector>::new_builtin(
-        Arc::clone(&metrics),
-        7,
-        None,
-        None,
-        &request(),
-    );
-    assert_eq!(metrics.requests_started_total().get(), started_before + 4);
-    builtin_guard.abort().await;
+    let mut builtin_guard =
+        RequestGuard::new_builtin(Arc::clone(&metrics), 7, None, None, &request());
+    assert_eq!(metrics.requests_started_total.get(), 4);
+    builtin_guard.abort(None).await;
     drop(builtin_guard);
-    assert_eq!(metrics.requests_total.get(), completed_before + 1);
+    assert_eq!(metrics.requests_total.get(), 1);
+
+    let (other_router, other_runtime) = router_with_workers(None, &[8]).await;
+    let (other_request, _, mut other_guard) = track_request(&other_router).await;
+    other_guard.begin_dispatch("aggregated", other_request.content());
+    other_guard.on_dispatched();
+    other_guard.complete().await;
+    drop(other_guard);
+    assert_eq!(metrics.requests_started_total.get(), 4);
+    assert_eq!(metrics.requests_total.get(), 1);
+    drop(other_router);
+    other_runtime.shutdown();
 
     drop(router);
     runtime.shutdown();
@@ -1764,12 +3020,14 @@ async fn session_affinity_post_selection_failures_preserve_binding() {
         worker_id: 7,
         dp_rank: Some(0),
     };
-    let AffinityAcquire::Initialize(initializer) =
-        affinity.acquire(&session_id, None).await.unwrap()
-    else {
+    let Hold::Initialize(initializer) = affinity.acquire(&session_id, None).await.unwrap() else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(original_target).unwrap());
+    drop(
+        initializer
+            .commit(crate::session_affinity::to_table(original_target))
+            .unwrap(),
+    );
 
     let operation = Some(affinity.acquire(&session_id, None).await.unwrap());
     drop(operation);
@@ -1797,7 +3055,7 @@ async fn session_affinity_existing_selection_cancellation_preserves_binding_with
         worker_id: 7,
         dp_rank: Some(0),
     };
-    let AffinityAcquire::Initialize(initializer) = router
+    let Hold::Initialize(initializer) = router
         .affinity
         .as_ref()
         .unwrap()
@@ -1807,7 +3065,11 @@ async fn session_affinity_existing_selection_cancellation_preserves_binding_with
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(original_target).unwrap());
+    drop(
+        initializer
+            .commit(crate::session_affinity::to_table(original_target))
+            .unwrap(),
+    );
 
     let controller = Controller::new("cancelled-selection-request".to_string());
     controller.stop();
@@ -1840,7 +3102,7 @@ async fn session_affinity_existing_selection_cancellation_preserves_binding_with
         Some(original_target)
     );
 
-    let AffinityAcquire::Bound { target, lease } = router
+    let Hold::Bound { target, lease } = router
         .affinity
         .as_ref()
         .unwrap()
@@ -1850,11 +3112,31 @@ async fn session_affinity_existing_selection_cancellation_preserves_binding_with
     else {
         panic!("cancellation must preserve the existing binding");
     };
-    assert_eq!(target, original_target);
+    assert_eq!(target, crate::session_affinity::to_table(original_target));
     drop(lease);
 
     drop(router);
     runtime.shutdown();
+}
+
+/// A builtin host over `inner` whose session-affinity coordinator has a 10s
+/// TTL and binds in `mode`.
+async fn builtin_host_with_affinity(
+    client: Client,
+    router_mode: RouterMode,
+    dispatch: LlmDispatch,
+    load_context: Arc<RoutingLoadContext>,
+    mode: crate::session_affinity::SessionAffinityMode,
+) -> (RoutingHost, AffinityCoordinator) {
+    let affinity = AffinityCoordinator::new(Duration::from_secs(10), mode).unwrap();
+    let host = RoutingHost::builder(client, router_mode)
+        .load_context(load_context)
+        .affinity_coordinator(affinity.clone())
+        .dispatch(dispatch)
+        .build()
+        .await
+        .unwrap();
+    (host, affinity)
 }
 
 async fn bind_affinity_target(
@@ -1862,7 +3144,7 @@ async fn bind_affinity_target(
     session_id: &SessionAffinityId,
     target: AffinityTarget,
 ) {
-    let AffinityAcquire::Initialize(initializer) = router
+    let Hold::Initialize(initializer) = router
         .affinity
         .as_ref()
         .unwrap()
@@ -1872,7 +3154,11 @@ async fn bind_affinity_target(
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(target).unwrap());
+    drop(
+        initializer
+            .commit(crate::session_affinity::to_table(target))
+            .unwrap(),
+    );
 }
 
 #[tokio::test]
@@ -1963,7 +3249,7 @@ async fn stale_affinity_rank_recovers_within_request() {
         .await
         .unwrap();
     assert_eq!(selection.worker, WorkerWithDpRank::new(7, 0));
-    assert!(matches!(operation, Some(AffinityAcquire::Initialize(_))));
+    assert!(matches!(operation, Some(Hold::Initialize(_))));
     router.kv_router().free(request.id()).await.unwrap();
 
     drop(operation);
@@ -2030,7 +3316,7 @@ async fn migration_exclusion_preserves_hard_affinity_without_widening_or_escapin
         worker_id: 7,
         dp_rank: Some(0),
     };
-    let AffinityAcquire::Initialize(initializer) = router
+    let Hold::Initialize(initializer) = router
         .affinity
         .as_ref()
         .unwrap()
@@ -2040,7 +3326,11 @@ async fn migration_exclusion_preserves_hard_affinity_without_widening_or_escapin
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(original_target).unwrap());
+    drop(
+        initializer
+            .commit(crate::session_affinity::to_table(original_target))
+            .unwrap(),
+    );
 
     let mut retry_input = request();
     retry_input.routing_mut().allowed_worker_ids = Some(HashSet::from([7, 8]));
@@ -2260,6 +3550,7 @@ struct MigrationHarness {
 async fn two_worker_migration_harness(
     namespace: &str,
     dispatch: Arc<dyn StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>>,
+    classifier: Option<RecordingClassifier>,
 ) -> MigrationHarness {
     async fn shared_drt(runtime: Runtime, store_path: &std::path::Path) -> DistributedRuntime {
         DistributedRuntime::new(
@@ -2334,13 +3625,13 @@ async fn two_worker_migration_harness(
         router_track_active_blocks: false,
         ..Default::default()
     };
-    let chooser = KvRouter::new_with_worker_role_and_scheduler_load(
+    let mut chooser = KvRouter::new_with_worker_role_and_scheduler_load(
         endpoint,
         client.clone(),
         workers,
         None,
         16,
-        DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+        SelectionPolicySource::Registry,
         Some(config),
         None,
         None,
@@ -2354,26 +3645,24 @@ async fn two_worker_migration_harness(
     )
     .await
     .unwrap();
-    let push_router =
-        PushRouter::from_client_with_dispatch(client.clone(), RouterMode::KV, dispatch)
-            .await
-            .unwrap();
+    if let Some(classifier) = classifier {
+        chooser = chooser.with_request_classifier(classifier).unwrap();
+    }
     let chooser = Arc::new(chooser);
-    let kv_router = Arc::new(
-        RoutingHost::new_with_load_context(
-            push_router,
-            chooser.clone(),
-            load_context,
-            None,
-            crate::session_affinity::SessionAffinityMode::Hard,
-        )
-        .unwrap(),
+    let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> = Arc::new(
+        RoutingHost::builder(client.clone(), RouterMode::KV)
+            .kv_router(chooser.clone())
+            .load_context(load_context)
+            .dispatch(dispatch)
+            .build()
+            .await
+            .unwrap(),
     );
 
     MigrationHarness {
         runtime,
         chooser,
-        engine: kv_router,
+        engine,
         registered_ids,
         _store: store,
         _drts: vec![router_drt, first_worker_drt, second_worker_drt],
@@ -2384,18 +3673,12 @@ async fn two_worker_migration_harness(
 #[serial_test::serial]
 async fn worker_overload_stream_migration_releases_and_reselects() {
     let dispatch = Arc::new(RejectFirstDispatch::default());
-    let harness = two_worker_migration_harness("worker-overload-migration", dispatch.clone()).await;
-    let MigrationHarness {
-        runtime,
-        chooser,
-        engine: next,
-        registered_ids,
-        ..
-    } = &harness;
+    let harness =
+        two_worker_migration_harness("worker-overload-migration", dispatch.clone(), None).await;
     let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
 
     let responses: Vec<_> = migration
-        .generate(Context::new(request()), next.clone())
+        .generate(Context::new(request()), harness.engine.clone())
         .await
         .unwrap()
         .collect()
@@ -2412,11 +3695,12 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
     let failed_worker = attempts[0].0;
     let retried_worker = attempts[1].0;
     assert_ne!(failed_worker, retried_worker);
-    assert!(registered_ids.contains(&failed_worker));
-    assert!(registered_ids.contains(&retried_worker));
+    assert!(harness.registered_ids.contains(&failed_worker));
+    assert!(harness.registered_ids.contains(&retried_worker));
     assert!(attempts[0].1.is_empty());
     assert_eq!(attempts[1].1, vec![failed_worker]);
-    let loads = chooser
+    let loads = harness
+        .chooser
         .get_potential_loads(&[], None, None, None, None)
         .await
         .unwrap();
@@ -2424,7 +3708,333 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
         loads.iter().all(|load| load.active_requests == 0),
         "all scheduler bookings must be released after migration: {loads:?}"
     );
-    runtime.shutdown();
+    harness.runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn stream_migration_retry_continues_one_classifier_lifecycle() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let dispatch = Arc::new(RejectFirstDispatch::default());
+    let harness = two_worker_migration_harness(
+        "stream-migration-classifier-lifecycle",
+        dispatch.clone(),
+        Some(RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        }),
+    )
+    .await;
+    let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
+
+    let responses: Vec<_> = migration
+        .generate(Context::new(request()), harness.engine.clone())
+        .await
+        .unwrap()
+        .collect()
+        .await;
+
+    assert_eq!(responses.len(), 1);
+    assert!(responses[0].error.is_none());
+    let attempts = {
+        let attempts = dispatch.attempts.lock().unwrap();
+        attempts.clone()
+    };
+    assert_eq!(attempts.len(), 2, "the failed stream must be retried once");
+    assert_ne!(attempts[0].0, attempts[1].0);
+
+    // The retry continues the failed attempt's lifecycle, so the plugin must
+    // see exactly one terminal event for the logical request: the retry's
+    // Completed, with no Aborted from the failed stream before it.
+    let observation = tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
+        .await
+        .expect("classifier terminal event timed out")
+        .expect("classifier event channel closed");
+    assert!(
+        matches!(observation, ClassifierObservation::Completed(_)),
+        "the failed stream must not abort the lifecycle Migration retries: {observation:?}"
+    );
+    assert!(
+        observations_rx.try_recv().is_err(),
+        "the logical request must emit exactly one terminal lifecycle event"
+    );
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "the retry must reuse the cached classification"
+    );
+    let loads = harness
+        .chooser
+        .get_potential_loads(&[], None, None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        loads.iter().all(|load| load.active_requests == 0),
+        "both attempt bookings must be released after classifier completion: {loads:?}"
+    );
+    harness.runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn prefill_retry_preserves_parked_decode_classifier_lifecycle() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let (decode, decode_runtime) = Box::pin(router_with_classifier(
+        RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        },
+        None,
+    ))
+    .await;
+    let (prefill, prefill_runtime) = Box::pin(router(None)).await;
+    let mut content = request();
+    content.migration_state = Some(Default::default());
+    let request = Context::new(content);
+
+    let (mut selected, _) = decode
+        .select_with_affinity(
+            &request,
+            RequestPhase::Decode,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+    let mut guard = track_selection(
+        &decode,
+        &request,
+        &mut selected,
+        RequestPhase::Decode,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
+    guard.on_dispatched();
+    assert!(guard.release_for_retry().await);
+    assert!(
+        potential_loads(&decode)
+            .await
+            .iter()
+            .all(|load| load.active_requests == 0)
+    );
+
+    let (mut selected, _) = prefill
+        .select_with_affinity(
+            &request,
+            RequestPhase::Prefill,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        selected.request_lifecycle.is_none(),
+        "prefill must not claim the decode lifecycle"
+    );
+    let mut guard = track_selection(
+        &prefill,
+        &request,
+        &mut selected,
+        RequestPhase::Prefill,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
+    guard.on_dispatched();
+    guard.complete().await;
+
+    let (mut selected, _) = decode
+        .select_with_affinity(
+            &request,
+            RequestPhase::Decode,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+    let mut guard = track_selection(
+        &decode,
+        &request,
+        &mut selected,
+        RequestPhase::Decode,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
+    guard.on_dispatched();
+    guard.complete().await;
+    let observation = tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(observation, ClassifierObservation::Completed(_)));
+    assert!(observations_rx.try_recv().is_err());
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "decode retry reuses its classification"
+    );
+    drop(decode);
+    drop(prefill);
+    decode_runtime.shutdown();
+    prefill_runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn pinned_request_stream_failure_aborts_parked_lifecycle_with_cause() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let dispatch = Arc::new(RejectFirstDispatch::default());
+    let harness = two_worker_migration_harness(
+        "pinned-stream-failure-classifier-lifecycle",
+        dispatch.clone(),
+        Some(RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        }),
+    )
+    .await;
+    let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
+    let pinned = *harness.registered_ids.iter().next().unwrap();
+    let mut content = request();
+    content.routing = Some(RoutingHints {
+        backend_instance_id: Some(pinned),
+        ..Default::default()
+    });
+
+    let responses: Vec<_> = migration
+        .generate(Context::new(content), harness.engine.clone())
+        .await
+        .unwrap()
+        .collect()
+        .await;
+
+    // The failure is type-migratable so the stream host parks the lifecycle,
+    // but the explicit pin vetoes the retry. The plugin must still receive
+    // exactly one terminal event carrying the failure, not a bare Drop abort.
+    assert_eq!(responses.len(), 1);
+    assert!(responses[0].error.is_some());
+    let attempts = dispatch.attempts.lock().unwrap().len();
+    assert_eq!(
+        attempts, 1,
+        "an explicit pin must block the migration retry"
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
+            .await
+            .expect("classifier abort event timed out"),
+        Some(ClassifierObservation::Aborted {
+            cause: Some(ErrorType::WorkerOverloaded),
+        })
+    );
+    assert!(observations_rx.try_recv().is_err());
+    harness.runtime.shutdown();
+}
+
+/// Every attempt fails in-stream with a migratable worker error.
+#[derive(Default)]
+struct AlwaysOverloadedDispatch {
+    attempts: Mutex<Vec<u64>>,
+}
+
+#[async_trait]
+impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
+    for AlwaysOverloadedDispatch
+{
+    async fn generate(
+        &self,
+        request: SingleIn<AddressedRequest<PreprocessedRequest>>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let (addressed, context) = request.transfer(());
+        let (_, _, instance) = addressed.into_parts();
+        self.attempts
+            .lock()
+            .unwrap()
+            .push(instance.expect("selected worker instance").id());
+        let output = Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::WorkerOverloaded)
+                    .message("selected worker is overloaded")
+                    .build(),
+            ),
+        };
+        Ok(ResponseStream::new(
+            Box::pin(stream::once(async move { output })),
+            context.context(),
+        ))
+    }
+
+    async fn generate_bidirectional(
+        &self,
+        _instance: Instance,
+        _address: String,
+        _input: ManyIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        unreachable!("the routing host dispatches unary requests")
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn exhausted_migration_aborts_parked_lifecycle_with_worker_failure() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let dispatch = Arc::new(AlwaysOverloadedDispatch::default());
+    let harness = two_worker_migration_harness(
+        "exhausted-migration-classifier-lifecycle",
+        dispatch.clone(),
+        Some(RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        }),
+    )
+    .await;
+    let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
+
+    let responses: Vec<_> = migration
+        .generate(Context::new(request()), harness.engine.clone())
+        .await
+        .unwrap()
+        .collect()
+        .await;
+
+    // Both attempts fail in-stream and the retry budget is spent. The client
+    // receives the final attempt's worker error, so the classifier's single
+    // terminal event must carry that same failure, not the synthetic
+    // "migration limit exhausted" that retry accounting produces.
+    assert_eq!(
+        dispatch.attempts.lock().unwrap().len(),
+        2,
+        "one migration retry must run before the budget is exhausted"
+    );
+    let error = responses
+        .last()
+        .and_then(|response| response.error.as_ref())
+        .expect("the final worker error reaches the client");
+    assert!(match_error_chain(
+        error,
+        &[ErrorType::WorkerOverloaded],
+        &[]
+    ));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
+            .await
+            .expect("classifier abort event timed out"),
+        Some(ClassifierObservation::Aborted {
+            cause: Some(ErrorType::WorkerOverloaded),
+        })
+    );
+    assert!(observations_rx.try_recv().is_err());
+    harness.runtime.shutdown();
 }
 
 /// A gracefully shutting-down worker: `Cancelled` data frame, then the reason.
@@ -2491,7 +4101,8 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
 #[serial_test::serial]
 async fn engine_shutdown_after_cancel_frame_migrates_and_reselects() {
     let dispatch = Arc::new(ShutdownAfterCancelDispatch::default());
-    let harness = two_worker_migration_harness("engine-shutdown-migration", dispatch.clone()).await;
+    let harness =
+        two_worker_migration_harness("engine-shutdown-migration", dispatch.clone(), None).await;
     let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
 
     let responses: Vec<_> = migration
@@ -2566,14 +4177,12 @@ async fn builtin_host_with_recorded_dispatch(
     let worker_id = client.wait_for_instances().await.unwrap()[0].id();
     let load_context = test_load_context(&client).await;
     let dispatch = Arc::new(PendingThenCompletedDispatch::default());
-    let inner = PushRouter::from_client_with_dispatch(
-        client,
-        mode,
-        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-    )
-    .await
-    .unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
+    let host = RoutingHost::builder(client, mode)
+        .load_context(load_context)
+        .dispatch(Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>)
+        .build()
+        .await
+        .unwrap();
     (host, dispatch, worker_id, runtime)
 }
 
@@ -2762,7 +4371,7 @@ async fn conditional_route_stages_share_one_cleanup_budget() {
         "time spent between stages must come out of the shared budget"
     );
 
-    plan.abort().await;
+    plan.abort(None).await;
     drop(router);
     runtime.shutdown();
 }
@@ -2785,8 +4394,7 @@ async fn kv_stopped_decode_request_survives_a_contended_session_affinity_wait() 
     // leg has to wait rather than take the slot immediately.
     let router = Arc::new(router);
     let coordinator = router.affinity.as_ref().unwrap().clone();
-    let AffinityAcquire::Initialize(holder) = coordinator.acquire(&session_id, None).await.unwrap()
-    else {
+    let Hold::Initialize(holder) = coordinator.acquire(&session_id, None).await.unwrap() else {
         panic!("the first acquisition must initialize the session");
     };
 
@@ -2851,6 +4459,595 @@ async fn kv_stopped_decode_request_without_staged_kv_never_reaches_a_worker() {
         "no worker should have been asked to serve a cancelled bypass request"
     );
 
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn unknown_explicit_workers_are_rejected_before_builtin_dispatch() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let component = distributed
+        .namespace("unknown-explicit-workers")
+        .unwrap()
+        .component("workers")
+        .unwrap();
+    let endpoint = component.endpoint("generate");
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    endpoint.register_endpoint_instance().await.unwrap();
+    let live_worker = client.wait_for_instances().await.unwrap()[0].id();
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
+        .load_context(load_context)
+        .dispatch(Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>)
+        .build()
+        .await
+        .unwrap();
+    let worker_id = live_worker.wrapping_add(1);
+    for (field, phase) in [
+        ("backend_instance_id", RequestPhase::Aggregated),
+        ("decode_worker_id", RequestPhase::Decode),
+        ("prefill_worker_id", RequestPhase::Prefill),
+    ] {
+        let mut content = request();
+        content.routing =
+            Some(serde_json::from_value(serde_json::json!({field: worker_id})).unwrap());
+        let error = host
+            .select_and_dispatch_builtin(Context::new(content), phase, |_, _| Ok(()))
+            .await
+            .unwrap_err();
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().message(),
+            format!("nvext.{field}={worker_id} does not identify a known worker")
+        );
+    }
+    assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+    let mut valid = request();
+    valid.routing_mut().decode_worker_id = Some(live_worker);
+    let mut stream = host.generate(Context::new(valid)).await.unwrap();
+    while stream.next().await.is_some() {}
+    assert_eq!(
+        dispatch.worker_ids.lock().unwrap().as_slice(),
+        &[live_worker]
+    );
+    drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn unknown_explicit_workers_are_rejected_before_kv_admission() {
+    let (host, dispatch, worker_id, runtime) =
+        router_with_recorded_dispatch("unknown-kv-worker").await;
+    let unknown = worker_id.wrapping_add(1);
+    assert!(!host.inner.client.is_instance_live(unknown));
+    for (field, phase) in [
+        ("backend_instance_id", RequestPhase::Aggregated),
+        ("decode_worker_id", RequestPhase::Decode),
+        ("prefill_worker_id", RequestPhase::Prefill),
+    ] {
+        let mut content = request();
+        content.routing =
+            Some(serde_json::from_value(serde_json::json!({field: unknown})).unwrap());
+        let request = Context::new(content);
+        let error = host
+            .select_with_affinity(&request, phase, false, &CleanupBudget::default())
+            .await
+            .err()
+            .expect("unknown worker must fail before admission");
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().message(),
+            format!("nvext.{field}={unknown} does not identify a known worker")
+        );
+        let error = host
+            .preview_kv_route(&request, phase)
+            .await
+            .err()
+            .expect("unknown preview target");
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+    }
+    assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+    assert!(
+        potential_loads(&host)
+            .await
+            .iter()
+            .all(|load| load.active_requests == 0)
+    );
+    drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn explicit_worker_validation_preserves_precedence_and_discovery_membership() {
+    let (host, runtime) = router_with_workers(None, &[u64::MAX]).await;
+    let cases = [
+        (serde_json::json!({}), RequestPhase::Aggregated),
+        (
+            serde_json::json!({"backend_instance_id": null, "decode_worker_id": null,
+            "prefill_worker_id": null, "dp_rank": null}),
+            RequestPhase::Aggregated,
+        ),
+        (
+            serde_json::json!({"backend_instance_id": u64::MAX}),
+            RequestPhase::Prefill,
+        ),
+        (
+            serde_json::json!({"backend_instance_id": u64::MAX, "decode_worker_id": null}),
+            RequestPhase::Decode,
+        ),
+        (
+            serde_json::json!({"backend_instance_id": 42, "decode_worker_id": u64::MAX,
+            "prefill_worker_id": 42}),
+            RequestPhase::Aggregated,
+        ),
+        (
+            serde_json::json!({"backend_instance_id": 42, "decode_worker_id": 42,
+            "prefill_worker_id": u64::MAX}),
+            RequestPhase::Prefill,
+        ),
+    ];
+    host.inner.client.override_instance_avail(vec![]);
+    for (value, phase) in cases {
+        let _: crate::protocols::common::extensions::NvExt =
+            serde_json::from_value(value.clone()).unwrap();
+        let mut content = request();
+        content.routing = Some(serde_json::from_value(value).unwrap());
+        host.validate_explicit_worker(&content, phase).unwrap();
+    }
+    for (field, phase) in [
+        ("decode_worker_id", RequestPhase::Aggregated),
+        ("prefill_worker_id", RequestPhase::Prefill),
+    ] {
+        let mut content = request();
+        content.routing = Some(
+            serde_json::from_value(serde_json::json!({
+                "backend_instance_id": u64::MAX, field: 42
+            }))
+            .unwrap(),
+        );
+        let error = host.validate_explicit_worker(&content, phase).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().message(),
+            format!("nvext.{field}=42 does not identify a known worker")
+        );
+    }
+    drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn explicit_worker_disappearing_after_preview_is_not_revalidated() {
+    let (host, runtime) = router(None).await;
+    let mut content = request();
+    content.routing_mut().decode_worker_id = Some(7);
+    let request = Context::new(content);
+    let preview = host
+        .preview_kv_route(&request, RequestPhase::Decode)
+        .await
+        .unwrap();
+    host.inner.client.override_discovered_instances(vec![]);
+    // A failure after successful selection must keep its service-error classification.
+    let error = match host.plan_kv_route_from_preview(&request, preview).await {
+        Ok(plan) => host.dispatch_kv_plan(request, plan).await.unwrap_err(),
+        Err(error) => error,
+    };
+    assert!(!match_error_chain(
+        error.as_ref(),
+        &[ErrorType::InvalidArgument],
+        &[]
+    ));
+    drop(host);
+    runtime.shutdown();
+}
+
+fn subagent_request(
+    session_id: &str,
+    parent_session_id: Option<&str>,
+) -> SingleIn<PreprocessedRequest> {
+    let mut agent_context = AgentContextBuilder::default();
+    agent_context.session_id(session_id.to_string());
+    if let Some(parent_session_id) = parent_session_id {
+        agent_context.parent_session_id(parent_session_id.to_string());
+    }
+    let mut content = request();
+    content.agent_context = Some(agent_context.build().unwrap());
+    let mut request = Context::new(content);
+    request.insert(
+        SESSION_AFFINITY_CONTEXT_KEY,
+        SessionAffinityId::new(session_id),
+    );
+    request
+}
+
+fn parent_group_id(parent_session_id: &str) -> SessionAffinityId {
+    SessionAffinityId::new(crate::session_affinity::subagent_group_affinity_id(
+        parent_session_id,
+    ))
+}
+
+async fn affinity_mode_host(namespace: &str) -> (Runtime, RoutingHost) {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace(namespace.to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    endpoint.register_endpoint_instance().await.unwrap();
+    client.wait_for_instances().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    let coordinator = AffinityCoordinator::new(
+        Duration::from_secs(60),
+        crate::session_affinity::SessionAffinityMode::Hard,
+    )
+    .unwrap();
+    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
+        .load_context(load_context)
+        .affinity_coordinator(coordinator)
+        .build()
+        .await
+        .unwrap();
+    (runtime, host)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn parent_group_binding_resolves_siblings_to_one_key() {
+    let (runtime, host) = affinity_mode_host("subagent-group-binding").await;
+
+    let key = |request: &SingleIn<PreprocessedRequest>| {
+        host.group_binding_id(request, None, RequestPhase::Decode)
+            .unwrap_or_else(|| {
+                crate::session_affinity::affinity_id(request)
+                    .unwrap()
+                    .unwrap()
+            })
+            .as_str()
+            .to_string()
+    };
+
+    let sibling_a = key(&subagent_request("child-1", Some("parent-1")));
+    let sibling_b = key(&subagent_request("child-2", Some("parent-1")));
+    let other_parent = key(&subagent_request("child-3", Some("parent-2")));
+    let main_agent = key(&subagent_request("parent-1", None));
+
+    assert_eq!(sibling_a, sibling_b);
+    assert_ne!(sibling_a, other_parent);
+    assert_ne!(sibling_a, main_agent);
+    assert_eq!(main_agent, "parent-1");
+
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn parent_group_binding_offers_siblings_the_committed_worker() {
+    let workers = [7u64, 9]
+        .into_iter()
+        .map(|worker_id| (worker_id, ModelRuntimeConfig::default()))
+        .collect();
+    let (router, runtime) =
+        router_with_worker_configs(Some(Duration::from_secs(60)), workers).await;
+
+    let offered = async |request: &SingleIn<PreprocessedRequest>| {
+        router
+            .select_with_session_affinity(
+                request,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default(),
+                |target| std::future::ready(Ok(target)),
+            )
+            .await
+            .unwrap()
+    };
+
+    let first = subagent_request("child-1", Some("parent-1"));
+    let (offered_first, hold) = offered(&first).await;
+    assert_eq!(offered_first, None, "a new group starts unbound");
+    // Commit the group binding and let the request's lease go, as a finished
+    // response stream would.
+    drop(
+        router
+            .affinity
+            .as_ref()
+            .unwrap()
+            .commit(
+                hold.expect("a new session holds"),
+                AffinityTarget::new(7, Some(0)),
+            )
+            .unwrap(),
+    );
+
+    let sibling = subagent_request("child-2", Some("parent-1"));
+    let (offered_sibling, _) = offered(&sibling).await;
+    assert_eq!(offered_sibling, Some(AffinityTarget::new(7, Some(0))));
+
+    let other_parent = subagent_request("child-3", Some("parent-2"));
+    let (offered_other, _) = offered(&other_parent).await;
+    assert_eq!(
+        offered_other, None,
+        "a different parent is a different group"
+    );
+
+    runtime.shutdown();
+}
+
+// A child must reuse its parent's prefill placement without changing decode's sibling group.
+#[tokio::test]
+#[serial_test::serial]
+async fn child_prefill_uses_parent_worker_while_decode_keeps_group_binding() {
+    let workers = [7u64, 9]
+        .into_iter()
+        .map(|worker_id| (worker_id, ModelRuntimeConfig::default()))
+        .collect();
+    let (router, runtime) =
+        router_with_worker_configs(Some(Duration::from_secs(60)), workers).await;
+    let parent = subagent_request("parent-1", None);
+    let (_, hold) = router
+        .select_with_session_affinity(
+            &parent,
+            RequestPhase::Prefill,
+            false,
+            &CleanupBudget::default(),
+            |target| std::future::ready(Ok(target)),
+        )
+        .await
+        .unwrap();
+    drop(
+        router
+            .affinity
+            .as_ref()
+            .unwrap()
+            .commit(
+                hold.expect("a new session holds"),
+                AffinityTarget::new(7, Some(0)),
+            )
+            .unwrap(),
+    );
+
+    let child = subagent_request("child-1", Some("parent-1"));
+    let (selected, hold) = router
+        .select_with_session_affinity(
+            &child,
+            RequestPhase::Prefill,
+            false,
+            &CleanupBudget::default(),
+            |target| std::future::ready(Ok(target)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected, Some(AffinityTarget::new(7, Some(0))));
+    drop(hold);
+    let (decode, hold) = router
+        .select_with_session_affinity(
+            &child,
+            RequestPhase::Decode,
+            false,
+            &CleanupBudget::default(),
+            |target| std::future::ready(Ok(target)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        decode, None,
+        "decode's sibling group must not inherit the parent binding"
+    );
+    drop(hold);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
+    let workers = [7u64, 9]
+        .into_iter()
+        .map(|worker_id| (worker_id, ModelRuntimeConfig::default()))
+        .collect();
+    let (router, runtime) =
+        router_with_worker_configs(Some(Duration::from_secs(60)), workers).await;
+    let affinity = router.affinity.as_ref().unwrap();
+    let group = parent_group_id("parent-1");
+
+    let Hold::Initialize(initializer) = affinity.acquire(&group, None).await.unwrap() else {
+        panic!("the first subagent must initialize the group");
+    };
+    drop(
+        initializer
+            .commit(crate::session_affinity::to_table(AffinityTarget::new(
+                7,
+                Some(0),
+            )))
+            .unwrap(),
+    );
+    assert_eq!(
+        affinity.query_target(&group, None).unwrap(),
+        Some(AffinityTarget::new(7, Some(0)))
+    );
+
+    // Worker 7 leaves the pool. Hard mode must invalidate the dead pin and retry unbound rather
+    // than fail every sibling until the TTL expires.
+    router.inner.client.override_discovered_instances(vec![9]);
+    router.inner.client.override_instance_avail(vec![9]);
+    let sibling = subagent_request("child-2", Some("parent-1"));
+    let (selected, operation) = router
+        .select_with_session_affinity(
+            &sibling,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+            |target: Option<AffinityTarget>| {
+                // The dead pin is rejected at dispatch time; the unbound retry is accepted.
+                std::future::ready(match target {
+                    Some(target) if target.worker_id == 7 => Err(anyhow::anyhow!("worker gone")),
+                    other => Ok(other),
+                })
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected, None, "the retry runs unbound");
+    assert!(matches!(operation, Some(Hold::Initialize(_))));
+    assert_eq!(affinity.query_target(&group, None).unwrap(), None);
+
+    runtime.shutdown();
+}
+
+/// A prefill `prepare` failure gives the booking back before a guard exists, so
+/// the request never counts as started and leaves no load behind.
+#[tokio::test]
+#[serial_test::serial]
+async fn prefill_prepare_failure_releases_the_booking_before_the_request_counts() {
+    let (router, runtime) = router(None).await;
+    let started_before = router.request_metrics.requests_started_total.get();
+    let error = router
+        .select_and_dispatch_prefill(Context::new(request()), |_, _| -> Result<(), Error> {
+            Err(anyhow::anyhow!("prepare failed"))
+        })
+        .await
+        .err()
+        .expect("a failed prepare must fail the request");
+    assert!(format!("{error:#}").contains("prepare failed"));
+    assert_eq!(
+        router.request_metrics.requests_started_total.get(),
+        started_before
+    );
+    assert_eq!(
+        active_requests_for(&potential_loads(&router).await, 7, 0),
+        0
+    );
+    drop(router);
+    runtime.shutdown();
+}
+
+/// Hard affinity bound to one DP rank while the route lands on another: the worker
+/// accepts the send, then the session commit fails. The attempt must be aborted
+/// with that cause for the classifier, release its booking, stop the worker, and
+/// fail the request.
+#[tokio::test]
+#[serial_test::serial]
+async fn affinity_commit_failure_after_the_send_aborts_the_attempt() {
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let (router, dispatch, worker_id, runtime) =
+        router_with_recorded_dispatch_affinity_and_classifier(
+            "kv-affinity-commit-failure",
+            Some(Duration::from_secs(60)),
+            Some(RecordingClassifier {
+                calls: Arc::new(AtomicUsize::new(0)),
+                observations: observations_tx,
+            }),
+        )
+        .await;
+    let session_id = SessionAffinityId::new("commit-failure");
+    bind_affinity_target(
+        &router,
+        &session_id,
+        AffinityTarget::new(worker_id, Some(2)),
+    )
+    .await;
+    let hold = router
+        .affinity
+        .as_ref()
+        .unwrap()
+        .acquire(&session_id, None)
+        .await
+        .unwrap();
+    assert!(matches!(hold, Hold::Bound { .. }));
+
+    let request = Context::new(request());
+    let context = request.context().clone();
+    let mut plan = router
+        .plan_kv_route(
+            &request,
+            RequestPhase::Aggregated,
+            None,
+            CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(plan.worker().dp_rank, 0);
+    plan.affinity = Some(hold);
+
+    assert!(
+        router.dispatch_kv_plan(request, plan).await.is_err(),
+        "a commit that fails after the send must fail the request"
+    );
+    assert_eq!(dispatch.worker_ids.lock().unwrap().clone(), vec![worker_id]);
+    assert!(
+        context.is_stopped(),
+        "the worker must be told to stop generating"
+    );
+    assert_eq!(
+        active_requests_for(&potential_loads(&router).await, worker_id, 0),
+        0
+    );
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
+            .await
+            .expect("classifier abort event timed out"),
+        Some(ClassifierObservation::Aborted { .. })
+    ));
+    drop(router);
+    runtime.shutdown();
+}
+
+/// The committed session lease lives in the request guard: held while the
+/// response stream exists, even past the idle TTL, and released with a refreshed
+/// TTL when the stream is dropped.
+#[tokio::test]
+#[serial_test::serial]
+async fn committed_session_lease_lives_as_long_as_the_response_stream() {
+    let ttl = Duration::from_secs(1);
+    let (router, _dispatch, worker_id, runtime) =
+        router_with_recorded_dispatch_and_affinity("kv-affinity-lease-lifetime", Some(ttl)).await;
+    let affinity = router.affinity.clone().unwrap();
+    let session_id = SessionAffinityId::new("lease-lifetime");
+    let target = AffinityTarget::new(worker_id, Some(0));
+    bind_affinity_target(&router, &session_id, target).await;
+
+    let stream = router
+        .generate(affinity_request("lease-lifetime", None))
+        .await
+        .unwrap();
+    tokio::time::sleep(ttl + Duration::from_millis(300)).await;
+    assert_eq!(
+        affinity.query_target(&session_id, None).unwrap(),
+        Some(target)
+    );
+    let hold = affinity.acquire(&session_id, None).await.unwrap();
+    assert!(matches!(hold, Hold::Bound { .. }));
+    drop(hold);
+
+    drop(stream);
+    assert_eq!(
+        affinity.query_target(&session_id, None).unwrap(),
+        Some(target)
+    );
+    tokio::time::sleep(ttl + Duration::from_millis(300)).await;
+    assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
     drop(router);
     runtime.shutdown();
 }

@@ -1,0 +1,35 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Development and Documentation Skills
+subtitle: "Skills for working inside the Dynamo repository: investigation, proposals, review, and docs."
+---
+
+These skills operate on the repository itself: bug investigation, Dynamo Enhancement Proposals
+(DEPs), code review, continuous integration (CI) triage, and documentation authoring.
+
+Prompts that reach them: "CI failed on my pull request. Tell me whether it is a real regression or
+a flake," or "Draft a Dynamo Enhancement Proposal for the change I just described, then show it to
+me before filing."
+
+<SearchableTable placeholder="Search development skills...">
+
+| Skill | Use for |
+| --- | --- |
+| [`debug-session`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/debug-session) | Start a structured Dynamo bug investigation and maintain a persistent worklog. |
+| [`dep-create`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dep-create) | Create or update a Dynamo Enhancement Proposal (DEP), implementation plan, or retroactive DEP. |
+| [`dep-status`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dep-status) | Check DEP status, list DEPs by lifecycle or area, and find related proposals. |
+| [`dep-update`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dep-update) | Triage a DEP, assign a person in charge, or advance its review and approval state. |
+| [`dynamo-agent-harness`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dynamo-agent-harness) | Drive persistent Claude Code, Codex, or OpenCode sessions through a Dynamo endpoint over Agent Client Protocol (ACP). |
+| [`dynamo-clone-hotpath-audit`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dynamo-clone-hotpath-audit) | Audit Rust hot-path `.clone()` calls and, when requested, remove unnecessary clones. |
+| [`dynamo-docs`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dynamo-docs) | Add, update, move, or remove Dynamo docs, examples, recipes, and translations. |
+| [`dynamo-frontend-benchmark`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dynamo-frontend-benchmark) | Benchmark and profile the Dynamo frontend against mock workers. |
+| [`dynamo-kv-replay-parity`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dynamo-kv-replay-parity) | Validate byte parity and paired performance for offline KV-aware replay changes. |
+| [`fern-components`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/fern-components) | Select and use Fern MDX components when authoring or reviewing docs pages. |
+| [`fern-navigation`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/fern-navigation) | Design or change Fern navigation, tabs, sections, slugs, versions, and redirects. |
+| [`graham-code-review`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/graham-code-review) | Review Rust, systems, networking, or performance-critical changes with strict Dynamo standards. |
+| [`pr-monitor`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/pr-monitor) | Check pull request continuous integration (CI) health, diagnose failed jobs, distinguish regressions from flakes, and flag unexpected skips. |
+| [`repo-codeowners`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/repo-codeowners) | Find who reviews a change, fix a failing `codeowners` check, or change review routing. |
+| [`visual-review`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/visual-review) | Build an interactive HTML code-review dashboard for a pull request, branch diff, or unified diff. |
+
+</SearchableTable>

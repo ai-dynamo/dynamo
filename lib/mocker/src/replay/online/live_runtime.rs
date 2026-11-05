@@ -251,7 +251,7 @@ impl LiveRuntime {
             capture_per_request: replay_options.record_per_request,
             sla: replay_options.sla,
             num_workers,
-            gpus_per_worker: args.aic_gpus_per_worker(),
+            gpus_per_worker: args.ais_gpus_per_worker(),
         };
         let (admission_tx, admission_rx) = mpsc::unbounded_channel();
         let dp_size = usize::try_from(args.dp_size)
@@ -538,7 +538,7 @@ impl LiveRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocols::MockEngineArgs;
+    use crate::common::protocols::MockerConfig;
     use crate::replay::ReplayRouterMode;
 
     /// Every `bail!` in `finish()` -- and every `?` on an internal failure -- drops the session
@@ -554,7 +554,7 @@ mod tests {
         let router = Arc::new(
             ReplayRouter::new(
                 ReplayRouterMode::RoundRobin,
-                &MockEngineArgs::default(),
+                &MockerConfig::default(),
                 None,
                 None,
                 1,

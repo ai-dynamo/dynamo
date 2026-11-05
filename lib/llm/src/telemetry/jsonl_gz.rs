@@ -91,13 +91,25 @@ where
         }
     }
 
+    /// A cloned handle to the writer's input channel, for enqueuing records
+    /// concurrently without holding a lock on the writer. `None` after shutdown.
+    /// Sending on the clone fails once the writer closes admission for shutdown.
+    pub fn sender(&self) -> Option<mpsc::Sender<T>> {
+        self.tx.clone()
+    }
+
     /// Drain all accepted records, flush the active segment, and wait for the
-    /// writer task to exit.
+    /// writer task to exit. Cancelling this wait leaves the task available for a
+    /// subsequent call to await.
     pub async fn shutdown(&mut self) -> anyhow::Result<()> {
         self.tx.take();
         self.shutdown.cancel();
-        if let Some(worker) = self.worker.take() {
-            worker.await.context("gzip jsonl writer task panicked")??;
+        if let Some(worker) = self.worker.as_mut() {
+            // Keep the handle until completion so cancellation of this await
+            // does not prevent a subsequent shutdown from joining the worker.
+            let result = worker.await;
+            self.worker.take();
+            result.context("gzip jsonl writer task panicked")??;
         }
         Ok(())
     }
@@ -266,7 +278,10 @@ async fn run_gzip_writer<T: Serialize>(
         tokio::select! {
             biased;
             _ = shutdown.cancelled() => {
-                while let Ok(rec) = rx.try_recv() {
+                rx.close();
+                // Outstanding permits may still publish after close. Waiting
+                // for None includes them while rejecting new sends.
+                while let Some(rec) = rx.recv().await {
                     if let Err(err) = writer.push(&rec).await {
                         tracing::warn!("gzip jsonl sink dropped record during shutdown: {err}");
                         first_error.get_or_insert(err);
@@ -487,6 +502,74 @@ mod tests {
             .read_to_string(&mut content)
             .expect("gzip segment decompresses");
         content
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_reserved_records_after_cancelled_await() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("shutdown_reserved");
+        let mut writer = JsonlGzipWriter::<TestRecord>::new(
+            path.display().to_string(),
+            JsonlGzipSinkOptions {
+                flush_interval: Duration::from_secs(60),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let sender = writer.sender().unwrap();
+        let permit = sender.clone().reserve_owned().await.unwrap();
+        sender
+            .send(TestRecord {
+                id: 1,
+                name: "queued".into(),
+            })
+            .await
+            .unwrap();
+
+        {
+            let shutdown = writer.shutdown();
+            tokio::pin!(shutdown);
+            tokio::select! {
+                result = &mut shutdown => panic!("shutdown abandoned an outstanding permit: {result:?}"),
+                _ = tokio::time::timeout(Duration::from_secs(5), sender.closed()) => {
+                    assert!(sender.is_closed(), "shutdown must close admission");
+                }
+            }
+            assert!(futures::poll!(&mut shutdown).is_pending());
+        }
+        assert!(
+            sender
+                .send(TestRecord {
+                    id: 3,
+                    name: "rejected".into(),
+                })
+                .await
+                .is_err()
+        );
+
+        let shutdown = writer.shutdown();
+        tokio::pin!(shutdown);
+        assert!(futures::poll!(&mut shutdown).is_pending());
+        permit.send(TestRecord {
+            id: 2,
+            name: "reserved".into(),
+        });
+        tokio::time::timeout(Duration::from_secs(5), shutdown)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let content = read_gzip_jsonl(&segment_path(&path, 0));
+        let ids: Vec<u64> = content
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).unwrap()["event"]["id"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(ids, [1, 2]);
     }
 
     #[tokio::test]

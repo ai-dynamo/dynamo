@@ -10,10 +10,21 @@ from typing import Optional
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.connectors.base import PlannerConnector, is_power_aware_connector
+from dynamo.planner.connectors.base import (
+    PlannerConnector,
+    PowerAwareConnector,
+    is_power_aware_connector,
+    is_startup_aware_connector,
+)
 from dynamo.planner.core.budget import minimum_power_footprint_fits
-from dynamo.planner.core.types import FpmObservations, TrafficObservation
+from dynamo.planner.core.types import (
+    BatchDrainLimitDecision,
+    BatchSchedulingObservation,
+    FpmObservations,
+    TrafficObservation,
+)
 from dynamo.planner.environment.interface import (
+    BatchSchedulingProvider,
     PlannerEnvironment,
     RuntimeNamespaceSource,
 )
@@ -45,7 +56,7 @@ class NoopTrafficMetricsProvider:
     async def collect_traffic(self) -> Optional[TrafficObservation]:
         return None
 
-    def collect_accept_length(self, interval_str: str) -> Optional[float]:
+    async def collect_accept_length(self, interval_str: str) -> Optional[float]:
         del interval_str
         return None
 
@@ -70,6 +81,25 @@ class NoopFpmMetricsProvider:
         return None
 
 
+class NoopBatchSchedulingProvider:
+    """Disabled-state provider that rejects accidental batch actuation."""
+
+    async def initialize(self) -> None:
+        return None
+
+    async def collect(self) -> BatchSchedulingObservation:
+        raise RuntimeError("batch scheduling is not configured")
+
+    async def apply_drain_limits(
+        self, decisions: list[BatchDrainLimitDecision]
+    ) -> None:
+        del decisions
+        raise RuntimeError("batch drain actuation is not configured")
+
+    async def shutdown(self) -> None:
+        return None
+
+
 class PlannerEnvironmentImpl(PlannerEnvironment):
     """Default environment facade consumed by planner core."""
 
@@ -82,6 +112,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         require_decode: bool,
         traffic_provider: Optional[TrafficMetricsProvider] = None,
         fpm_provider: Optional[FpmMetricsProvider] = None,
+        batch_provider: Optional[BatchSchedulingProvider] = None,
         runtime_namespace_source: Optional[RuntimeNamespaceSource] = None,
     ) -> None:
         self.config = config
@@ -90,12 +121,18 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         self.controller = controller
         self.traffic_provider = traffic_provider or NoopTrafficMetricsProvider()
         self.fpm_provider = fpm_provider or NoopFpmMetricsProvider()
+        self.batch_provider = batch_provider or NoopBatchSchedulingProvider()
         self.runtime_namespace_source = runtime_namespace_source
         self._state = DeploymentState()
         self._metrics_state = Metrics()
 
     async def initialize(self) -> None:
         await self.controller.async_init()
+        # Native batch actuation first atomically replaces any surviving Redis
+        # lease with zero and fences the owned DGDSA. Keeping this before the
+        # potentially long deployment-settlement wait prevents stale admission
+        # from surviving a cold Planner restart.
+        await self.batch_provider.initialize()
         defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
         await self.controller.validate_deployment(
             prefill_component_name=(
@@ -145,6 +182,11 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         await self.fpm_provider.refresh(self._state)
         return self._state
 
+    async def refresh_replica_state(self) -> DeploymentState:
+        """Refresh worker counts without repeating model, GPU, or FPM work."""
+        await self._refresh_replica_counts()
+        return self._state
+
     def deployment_state(self) -> DeploymentState:
         return self._state
 
@@ -157,8 +199,8 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     async def collect_traffic(self) -> Optional[TrafficObservation]:
         return await self.traffic_provider.collect_traffic()
 
-    def collect_accept_length(self, interval_str: str) -> Optional[float]:
-        return self.traffic_provider.collect_accept_length(interval_str)
+    async def collect_accept_length(self, interval_str: str) -> Optional[float]:
+        return await self.traffic_provider.collect_accept_length(interval_str)
 
     async def collect_kv_hit_rate_observation(
         self, duration_s: float
@@ -168,13 +210,24 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     def collect_fpm(self) -> FpmObservations:
         return self.fpm_provider.collect_fpm()
 
+    async def collect_batch_scheduling(self) -> BatchSchedulingObservation:
+        return await self.batch_provider.collect()
+
     async def apply_scaling(
         self, targets: list[TargetReplica], blocking: bool = False
     ) -> None:
         await self.controller.set_component_replicas(targets, blocking=blocking)
 
+    async def apply_batch_drain_limits(
+        self, decisions: list[BatchDrainLimitDecision]
+    ) -> None:
+        await self.batch_provider.apply_drain_limits(decisions)
+
     async def shutdown(self) -> None:
-        await self.fpm_provider.shutdown()
+        try:
+            await self.batch_provider.shutdown()
+        finally:
+            await self.fpm_provider.shutdown()
 
     async def _refresh_deployment_state(
         self, deployment: Optional[dict] = None
@@ -491,8 +544,8 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                     f"decode_min_endpoint={decode_min_endpoint} at {d_watts}W "
                     "per replica) exceeds "
                     f"total_gpu_power_limit={budget}W. Raise the budget or lower "
-                    "the endpoint minimums or per-GPU caps on the worker "
-                    "podTemplate annotations."
+                    "the endpoint minimums or per-GPU caps authored on the "
+                    "worker components."
                 ]
             )
 
@@ -507,6 +560,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             if self.require_decode and self._state.decode.info is not None
             else None
         )
+        power_controller: Optional[PowerAwareConnector] = None
         if self.config.enable_power_awareness:
             if not is_power_aware_connector(self.controller):
                 raise DeploymentValidationError(
@@ -519,7 +573,42 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                         "this connector does not."
                     ]
                 )
-            counts = await self.controller.get_power_aware_worker_counts(
+            power_controller = self.controller
+        if is_startup_aware_connector(self.controller):
+            inventory = await self.controller.get_worker_inventory(
+                prefill_component_name=prefill_name,
+                decode_component_name=decode_name,
+            )
+            if inventory is not None:
+                for required, replicas, active, expected, scaling, pending in (
+                    (
+                        self.require_prefill,
+                        self._state.prefill.replicas,
+                        inventory.ready_num_prefill,
+                        inventory.expected_num_prefill,
+                        inventory.prefill_scaling_in_progress,
+                        inventory.pending_num_prefill,
+                    ),
+                    (
+                        self.require_decode,
+                        self._state.decode.replicas,
+                        inventory.ready_num_decode,
+                        inventory.expected_num_decode,
+                        inventory.decode_scaling_in_progress,
+                        inventory.pending_num_decode,
+                    ),
+                ):
+                    if required:
+                        replicas.active = active or 0
+                        replicas.expected = expected
+                        replicas.scaling = scaling
+                        replicas.pending_startup = pending
+                return
+        # Never retain previously verified pending counts after losing access.
+        self._state.prefill.replicas.pending_startup = 0
+        self._state.decode.replicas.pending_startup = 0
+        if power_controller is not None:
+            counts = await power_controller.get_power_aware_worker_counts(
                 prefill_component_name=prefill_name,
                 decode_component_name=decode_name,
             )

@@ -30,7 +30,7 @@ use aisimulate_core::replay::{
     ReplayPromptTokenSource, ReplayRequestContext, ReplayTerminalStatus, SlaThresholds,
 };
 use dynamo_mocker::placement::{
-    KvReplayMetadata, KvRouterConfig, KvRouterPlacement, MockEngineArgs, MockEngineArgsBuilder,
+    KvReplayMetadata, KvRouterConfig, KvRouterPlacement, MockerConfig,
     RouterEventObservation,
 };
 use serde::{Deserialize, Serialize};
@@ -183,16 +183,15 @@ const MAX_PROVIDER_PAYLOAD_BYTES: u64 = 1024 * 1024;
 
 type RouterPlacement = DynPlacement<RouterEventObservation, KvReplayMetadata>;
 
-fn router_args(engine: &ReplayEngineConfig) -> anyhow::Result<MockEngineArgs> {
-    MockEngineArgsBuilder::default()
-        .block_size(engine.rank.block_size)
-        .num_gpu_blocks(engine.rank.num_gpu_blocks)
-        .enable_prefix_caching(engine.rank.enable_prefix_caching)
-        .max_num_batched_tokens(Some(engine.rank.max_num_batched_tokens))
-        .max_num_seqs(Some(engine.rank.max_num_seqs))
-        .dp_size(engine.dp_size)
-        .build()
-        .map_err(Into::into)
+fn router_args(engine: &ReplayEngineConfig) -> anyhow::Result<MockerConfig> {
+    let mut args = MockerConfig::default();
+    args.block_size = engine.rank.block_size;
+    args.num_gpu_blocks = engine.rank.num_gpu_blocks;
+    args.enable_prefix_caching = engine.rank.enable_prefix_caching;
+    args.max_num_batched_tokens = engine.rank.max_num_batched_tokens;
+    args.max_num_seqs = engine.rank.max_num_seqs;
+    args.dp_size = engine.dp_size;
+    args.normalized()
 }
 
 const PROVIDER_ID: &[u8] = b"dynamo.kv-router.monolithic\0";

@@ -89,8 +89,8 @@ The following Kubernetes and local workflows use vLLM. For the aggregated SGLang
             containers:
             - name: main
               image: ${RUNTIME_IMAGE}
-      - name: VllmDecodeWorker
-        type: decode
+      - name: worker
+        type: worker
         replicas: 1
         podTemplate:
           spec:
@@ -228,7 +228,7 @@ The following Kubernetes and local workflows use vLLM. For the aggregated SGLang
         Port-forward the worker system port and POST to `/v1/loras`:
 
         ```bash
-        kubectl port-forward svc/vllm-agg-lora-vllmdecodeworker 9090:9090 -n ${NAMESPACE}
+        kubectl port-forward svc/vllm-agg-lora-worker 9090:9090 -n ${NAMESPACE}
         ```
 
         ```bash
@@ -411,7 +411,7 @@ This section describes the validated vLLM path. KV-aware routing with SGLang LoR
 
 > [!IMPORTANT]
 > With `DYN_LORA_ENABLED`, only KV, random, and round-robin routing are LoRA-aware.
-> Direct, power-of-two, least-loaded, and device-aware-weighted modes fail startup.
+> Direct, least-loaded, and device-aware-weighted modes fail startup.
 > Session affinity with LoRA is supported only in KV mode; random and round-robin
 > plus affinity are rejected.
 

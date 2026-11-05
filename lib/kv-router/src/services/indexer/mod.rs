@@ -32,10 +32,14 @@
 pub mod backend;
 pub mod listener;
 pub mod logging;
+pub mod lookup;
 pub mod metrics;
+pub mod recording;
 pub mod recovery;
 pub mod registry;
 pub mod server;
+#[doc(hidden)]
+pub mod session_updates;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -58,6 +62,8 @@ pub struct IndexerConfig {
     pub workers: Option<String>,
     pub model_name: String,
     pub routing_group: String,
+    /// Initial `workers` derive multimodal pad values from engine identities.
+    pub engine_owned_mm_identity: bool,
     pub peers: Option<String>,
     pub access_log: Option<PathBuf>,
     pub trace_id_header: HeaderName,
@@ -207,6 +213,7 @@ async fn run_common(
                     config.routing_group.clone(),
                     block_size,
                     None,
+                    config.engine_owned_mm_identity,
                 )
                 .await?;
         }

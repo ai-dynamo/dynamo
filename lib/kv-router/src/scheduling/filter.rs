@@ -3,7 +3,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::types::KvSchedulerError;
+use super::policy_config::FullRankCounts;
+use super::types::{KvSchedulerError, WorkerIdSet};
 use crate::protocols::{
     DpRank, RoutingConstraints, WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
@@ -34,14 +35,22 @@ pub enum WorkerEligibilityError {
     RoutingConstraintsUnsatisfied { worker_id: WorkerId },
 }
 
+/// The ranks the request's load projection found past the host's reject thresholds, counted
+/// per worker; present only while at least one worker has a full rank.
+#[derive(Clone, Copy)]
+struct RejectCheck<'a> {
+    full_ranks: &'a FullRankCounts,
+}
+
 #[derive(Clone, Copy)]
 pub struct RoutingEligibility<'a> {
     allowed_worker_ids: Option<&'a HashSet<WorkerId>>,
     overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
-    available_worker_ids: Option<&'a HashSet<WorkerId>>,
+    available_worker_ids: Option<&'a WorkerIdSet>,
     pinned_worker: Option<WorkerWithDpRank>,
     affinity_target: Option<WorkerAffinityTarget>,
     routing_constraints: &'a RoutingConstraints,
+    reject: Option<RejectCheck<'a>>,
 }
 
 impl<'a> RoutingEligibility<'a> {
@@ -59,7 +68,35 @@ impl<'a> RoutingEligibility<'a> {
             pinned_worker,
             affinity_target: None,
             routing_constraints,
+            reject: None,
         }
+    }
+
+    /// Skip workers whose every rank the request's load projection found past the host's
+    /// reject thresholds, exactly like one in the host's overloaded set. The projection pass
+    /// counts full ranks per worker; selection only consults the count.
+    #[inline]
+    pub(crate) fn with_full_worker_ranks(mut self, full_ranks: &'a FullRankCounts) -> Self {
+        if !full_ranks.is_empty() {
+            self.reject = Some(RejectCheck { full_ranks });
+        }
+        self
+    }
+
+    /// Whether every one of the worker's `dp_size` ranks is past the reject thresholds.
+    // TODO: Look into rank granularity: the projection pass already judges every rank, so
+    // selection could skip a full rank instead of a worker whose every rank is full.
+    #[inline]
+    pub(crate) fn is_worker_full(&self, worker_id: WorkerId, dp_size: u32) -> bool {
+        self.reject
+            .is_some_and(|check| check.full_ranks.worker_is_full(worker_id, dp_size))
+    }
+
+    /// Whether some worker has a rank past the reject thresholds, so selection skips any
+    /// worker whose every rank is.
+    #[inline]
+    pub(crate) fn skips_full_workers(&self) -> bool {
+        self.reject.is_some()
     }
 
     #[inline]
@@ -71,10 +108,7 @@ impl<'a> RoutingEligibility<'a> {
     /// Attach hard availability. Unlike transient overload, unavailability is
     /// enforced on every path, including affinity-derived pins.
     #[inline]
-    pub fn with_available_workers(
-        mut self,
-        available_worker_ids: Option<&'a HashSet<WorkerId>>,
-    ) -> Self {
+    pub fn with_available_workers(mut self, available_worker_ids: Option<&'a WorkerIdSet>) -> Self {
         self.available_worker_ids = available_worker_ids;
         self
     }
@@ -139,6 +173,7 @@ impl<'a> RoutingEligibility<'a> {
             && self
                 .routing_constraints
                 .is_compatible_with_worker_taints(config.taints())
+            && !self.is_worker_full(worker_id, config.data_parallel_size())
     }
 
     #[inline]
@@ -213,7 +248,9 @@ impl<'a> RoutingEligibility<'a> {
             });
         }
 
-        if self.is_worker_overloaded(worker.worker_id) {
+        if self.is_worker_overloaded(worker.worker_id)
+            || self.is_worker_full(worker.worker_id, config.data_parallel_size())
+        {
             return Err(WorkerEligibilityError::WorkerOverloaded {
                 worker_id: worker.worker_id,
             });
@@ -252,12 +289,32 @@ impl<'a> RoutingEligibility<'a> {
                 return (dp_start..dp_end).contains(&dp_rank)
                     && predicate(WorkerWithDpRank::new(target.worker_id, dp_rank), config);
             }
-            for dp_rank in dp_start..dp_end {
-                if predicate(WorkerWithDpRank::new(target.worker_id, dp_rank), config) {
-                    return true;
-                }
-            }
-            return false;
+            return any_worker_rank(target.worker_id, config, &mut predicate);
+        }
+
+        // Walk the smaller inclusion set when it is much smaller than the workers. Hash
+        // iteration scans capacity, not length. The half-capacity cutoff is a
+        // conservative heuristic for the extra worker lookups.
+        let allowed = self
+            .allowed_worker_ids
+            .map_or(usize::MAX, |ids| ids.capacity());
+        let available = self
+            .available_worker_ids
+            .map_or(usize::MAX, |ids| ids.capacity());
+        if allowed.min(available) < workers.capacity() / 2 {
+            return if allowed <= available {
+                self.any_listed_worker_rank(
+                    workers,
+                    self.allowed_worker_ids.into_iter().flatten(),
+                    &mut predicate,
+                )
+            } else {
+                self.any_listed_worker_rank(
+                    workers,
+                    self.available_worker_ids.into_iter().flatten(),
+                    &mut predicate,
+                )
+            };
         }
 
         for (&worker_id, config) in workers {
@@ -265,15 +322,35 @@ impl<'a> RoutingEligibility<'a> {
                 continue;
             }
 
-            let dp_start = config.data_parallel_start_rank();
-            let dp_end = dp_start + config.data_parallel_size();
-            for dp_rank in dp_start..dp_end {
-                if predicate(WorkerWithDpRank::new(worker_id, dp_rank), config) {
-                    return true;
-                }
+            if any_worker_rank(worker_id, config, &mut predicate) {
+                return true;
             }
         }
 
+        false
+    }
+
+    /// `any_eligible_worker_rank` over the listed workers only.
+    fn any_listed_worker_rank<'i, C, F>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        worker_ids: impl IntoIterator<Item = &'i WorkerId>,
+        predicate: &mut F,
+    ) -> bool
+    where
+        C: WorkerConfigLike,
+        F: FnMut(WorkerWithDpRank, &C) -> bool,
+    {
+        for &worker_id in worker_ids {
+            let Some(config) = workers.get(&worker_id) else {
+                continue;
+            };
+            if self.allows_worker(worker_id, config)
+                && any_worker_rank(worker_id, config, predicate)
+            {
+                return true;
+            }
+        }
         false
     }
 
@@ -322,7 +399,18 @@ impl<'a> RoutingEligibility<'a> {
     }
 }
 
-fn worker_config_for_rank<C: WorkerConfigLike>(
+#[inline]
+fn any_worker_rank<C, F>(worker_id: WorkerId, config: &C, predicate: &mut F) -> bool
+where
+    C: WorkerConfigLike,
+    F: FnMut(WorkerWithDpRank, &C) -> bool,
+{
+    let dp_start = config.data_parallel_start_rank();
+    let dp_end = dp_start + config.data_parallel_size();
+    (dp_start..dp_end).any(|dp_rank| predicate(WorkerWithDpRank::new(worker_id, dp_rank), config))
+}
+
+pub(super) fn worker_config_for_rank<C: WorkerConfigLike>(
     workers: &HashMap<WorkerId, C>,
     worker: WorkerWithDpRank,
 ) -> Result<&C, WorkerEligibilityError> {
@@ -430,6 +518,62 @@ mod tests {
     }
 
     #[test]
+    fn full_rank_counts_skip_a_worker_only_when_every_rank_is_full() {
+        use super::super::policy_config::BusyThresholds;
+        use crate::plugins::worker_selection::WorkerCapacity;
+        use crate::sequences::WorkerLoadProjection;
+
+        let constraints = RoutingConstraints::default();
+        let config = TestWorkerConfig {
+            dp_size: 2,
+            ..Default::default()
+        };
+        let workers = HashMap::from([(7u64, config.clone())]);
+        let past_limit = WorkerLoadProjection {
+            active_prefill_tokens: 11,
+            ..Default::default()
+        };
+        let count_full = |ranks: &[WorkerWithDpRank]| {
+            let mut counts = FullRankCounts::default();
+            counts.reset(BusyThresholds {
+                prefill_busy_threshold: Some(10),
+                ..Default::default()
+            });
+            for &rank in ranks {
+                counts.record(rank, WorkerCapacity::default(), &past_limit);
+            }
+            counts
+        };
+        let empty = count_full(&[]);
+        let partial = count_full(&[WorkerWithDpRank::new(7, 0)]);
+        let full = count_full(&[WorkerWithDpRank::new(7, 0), WorkerWithDpRank::new(7, 1)]);
+
+        let eligibility = RoutingEligibility::new(None, None, None, &constraints);
+        assert!(
+            eligibility
+                .with_full_worker_ranks(&empty)
+                .allows_worker(7, &config)
+        );
+        assert!(
+            eligibility
+                .with_full_worker_ranks(&partial)
+                .allows_worker(7, &config)
+        );
+        assert!(
+            !eligibility
+                .with_full_worker_ranks(&full)
+                .allows_worker(7, &config)
+        );
+        assert_eq!(
+            eligibility
+                .with_full_worker_ranks(&full)
+                .validate_worker_rank(&workers, WorkerWithDpRank::new(7, 1))
+                .err(),
+            Some(WorkerEligibilityError::WorkerOverloaded { worker_id: 7 })
+        );
+    }
+
+    #[test]
     fn routing_eligibility_rejects_overloaded_worker() {
         let workers = workers();
         let overloaded = HashSet::from([7]);
@@ -449,7 +593,7 @@ mod tests {
         let workers = workers();
         let config = workers.get(&7).unwrap();
         let overloaded = HashSet::from([7]);
-        let available = HashSet::from([8]);
+        let available = WorkerIdSet::from_iter([8]);
         let constraints = RoutingConstraints::default();
         let worker = WorkerWithDpRank::new(7, 3);
         let eligibility =
@@ -462,7 +606,7 @@ mod tests {
             Some(WorkerEligibilityError::WorkerNotRoutable { worker_id: 7 })
         );
 
-        let empty = HashSet::new();
+        let empty = WorkerIdSet::default();
         let authoritative_empty = RoutingEligibility::new(None, None, None, &constraints)
             .with_available_workers(Some(&empty));
         assert!(!authoritative_empty.allows_worker(7, config));
@@ -635,6 +779,60 @@ mod tests {
             ranks,
             vec![WorkerWithDpRank::new(8, 4), WorkerWithDpRank::new(8, 5)]
         );
+    }
+
+    #[test]
+    fn sparse_inclusion_preserves_worker_checks_and_dp_expansion() {
+        let config = TestWorkerConfig {
+            dp_start: 2,
+            dp_size: 2,
+            taints: HashSet::from(["zone-a".to_string()]),
+        };
+        let mut workers: HashMap<_, _> = (0..64).map(|id| (id, config.clone())).collect();
+        workers.get_mut(&1).unwrap().taints.clear();
+        let allowed = HashSet::from([0, 1, 2, 3, 1000]);
+        let available = WorkerIdSet::from_iter([0, 1, 2, 4, 1001]);
+        let overloaded = HashSet::from([2]);
+        let constraints = RoutingConstraints {
+            required_taints: HashSet::from(["zone-a".to_string()]),
+            ..Default::default()
+        };
+        for (allowed, available, expected) in [
+            (Some(&allowed), None, vec![(0, 2), (0, 3), (3, 2), (3, 3)]),
+            (None, Some(&available), vec![(0, 2), (0, 3), (4, 2), (4, 3)]),
+            (Some(&allowed), Some(&available), vec![(0, 2), (0, 3)]),
+        ] {
+            let eligibility =
+                RoutingEligibility::new(allowed, Some(&overloaded), None, &constraints)
+                    .with_available_workers(available);
+            let mut ranks = Vec::new();
+            eligibility.for_each_eligible_worker_rank(&workers, |worker, _| {
+                ranks.push((worker.worker_id, worker.dp_rank));
+            });
+            ranks.sort_unstable();
+            assert_eq!(ranks, expected);
+        }
+    }
+
+    #[test]
+    fn sparse_inclusion_stops_at_first_matching_rank() {
+        let config = TestWorkerConfig {
+            dp_start: 2,
+            dp_size: 3,
+            ..Default::default()
+        };
+        let workers = (0..64).map(|id| (id, config.clone())).collect();
+        let available = WorkerIdSet::from_iter([7, 1000]);
+        let constraints = RoutingConstraints::default();
+        let eligibility = RoutingEligibility::new(None, None, None, &constraints)
+            .with_available_workers(Some(&available));
+        let mut ranks = Vec::new();
+
+        assert!(eligibility.any_eligible_worker_rank(&workers, |worker, _| {
+            ranks.push(worker.dp_rank);
+            worker.dp_rank == 3
+        }));
+        assert_eq!(ranks, vec![2, 3]);
     }
 
     #[test]

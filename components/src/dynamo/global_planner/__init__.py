@@ -16,11 +16,13 @@ Architecture:
 
 Usage:
     DYN_NAMESPACE=global-infra python -m dynamo.global_planner \
-        --managed-namespaces app-ns-1 app-ns-2
+        --config '{"managed_namespaces": ["app-ns-1", "app-ns-2"]}'
 """
 
 __all__ = [
+    "GlobalPlannerConfig",
     "ScaleRequestHandler",
 ]
 
+from dynamo.global_planner.config import GlobalPlannerConfig
 from dynamo.global_planner.scale_handler import ScaleRequestHandler

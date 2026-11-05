@@ -4,21 +4,30 @@
 """Tests for output_formatter.py — modality-specific formatters."""
 
 import base64
+import io
 import sys
+from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+from PIL import Image
+
+from dynamo.common.storage import get_fs
+from dynamo.common.utils.output_modalities import RequestType
 
 try:
     import torch
 
+    from dynamo.common.utils.output_modalities import RequestType
     from dynamo.vllm.omni.output_formatter import (
         AudioAggregateState,
         AudioFormatter,
         AudioStreamState,
         DiffusionFormatter,
+        OutputFormatter,
         TextFormatter,
         _build_completion_usage,
         _error_chunk,
@@ -131,10 +140,83 @@ def _make_diffusion_formatter():
 
 class TestDiffusionFormatterPrepareImages:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("level", [0, 1, 6, 9])
+    @pytest.mark.parametrize("mode", ["RGB", "RGBA"])
+    @pytest.mark.parametrize("response_format", ["b64_json", "url"])
+    async def test_png_compression_preserves_images(
+        self, tmp_path, level, mode, response_format
+    ):
+        formatter = OutputFormatter(
+            "test-model",
+            media_fs=get_fs(tmp_path.as_uri()),
+            image_png_compression_level=level,
+        )
+        images = [
+            Image.new(mode, (16, 12), (20, 40, 60, 80) if mode == "RGBA" else "red"),
+            Image.new(mode, (8, 24), "blue"),
+        ]
+
+        result = await formatter.format(
+            SimpleNamespace(final_output_type="image", images=images),
+            "req-png",
+            request_type=RequestType.IMAGE_GENERATION,
+            response_format=response_format,
+        )
+
+        assert len(result["data"]) == len(images)
+        for item, original in zip(result["data"], images, strict=True):
+            if response_format == "url":
+                assert item["url"].endswith(".png")
+                raw = Path(item["url"].removeprefix("file://")).read_bytes()
+            else:
+                raw = base64.b64decode(item["b64_json"], validate=True)
+            with Image.open(BytesIO(raw)) as decoded:
+                assert decoded.format == "PNG"
+                assert decoded.size == original.size
+                assert decoded.mode == original.mode
+                assert decoded.tobytes() == original.tobytes()
+            with BytesIO() as expected:
+                original.save(expected, format="PNG", compress_level=level)
+                assert raw == expected.getvalue()
+
+    @pytest.mark.asyncio
+    async def test_default_png_encoding_is_unchanged(self):
+        img = Image.new("RGB", (16, 12), "red")
+        urls = await _make_diffusion_formatter()._prepare_images([img], "req-default")
+        with BytesIO() as expected:
+            img.save(expected, format="PNG")
+            assert urls == [
+                "data:image/png;base64,"
+                + base64.b64encode(expected.getvalue()).decode()
+            ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("output_format", ["jpeg", "webp"])
+    async def test_png_compression_leaves_other_encodings_unchanged(
+        self, output_format
+    ):
+        formatter = DiffusionFormatter(
+            model_name="test-model",
+            media_fs=None,
+            media_http_url=None,
+            image_png_compression_level=0,
+        )
+        image = Image.new("RGB", (16, 12), "red")
+        urls = await formatter._prepare_images(
+            [image], "req-other-format", output_format=output_format
+        )
+        with BytesIO() as expected:
+            image.save(expected, format=output_format.upper())
+            assert urls == [
+                f"data:image/{output_format};base64,"
+                + base64.b64encode(expected.getvalue()).decode()
+            ]
+
+    @pytest.mark.asyncio
     async def test_b64_json(self):
         f = _make_diffusion_formatter()
         img = MagicMock()
-        img.save = lambda b, format: b.write(b"fake_png_data")
+        img.save = lambda b, **kwargs: b.write(b"fake_png_data")
         results = await f._prepare_images([img], "req-1", "b64_json")
         assert len(results) == 1
         assert results[0].startswith("data:image/png;base64,")
@@ -143,14 +225,14 @@ class TestDiffusionFormatterPrepareImages:
     async def test_b64_default_when_none(self):
         f = _make_diffusion_formatter()
         img = MagicMock()
-        img.save = lambda b, format: b.write(b"data")
+        img.save = lambda b, **kwargs: b.write(b"data")
         results = await f._prepare_images([img], "req-1", None)
         assert results[0].startswith("data:image/png;base64,")
 
     @pytest.mark.asyncio
     async def test_invalid_format(self):
         f = _make_diffusion_formatter()
-        with pytest.raises(ValueError, match="Invalid response format"):
+        with pytest.raises(ValueError, match="Unsupported response_format"):
             await f._prepare_images([MagicMock()], "req-1", "invalid")
 
     @pytest.mark.asyncio
@@ -158,24 +240,169 @@ class TestDiffusionFormatterPrepareImages:
         f = _make_diffusion_formatter()
         imgs = [MagicMock() for _ in range(3)]
         for img in imgs:
-            img.save = lambda b, format: b.write(b"px")
+            img.save = lambda b, **kwargs: b.write(b"px")
         results = await f._prepare_images(imgs, "req-1", "b64_json")
         assert len(results) == 3
 
 
+def _generated_images(count: int, size: tuple[int, int] = (8, 8)) -> list:
+    """Real PIL images, as the diffusion engine returns them."""
+    return [Image.new("RGB", size, color="red") for _ in range(count)]
+
+
 class TestDiffusionFormatterImage:
+    @pytest.mark.asyncio
+    async def test_b64_outputs_report_decoded_encoding_and_size(self):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        images = [
+            Image.new("RGB", (37, 19), color=(230, 10, 20)),
+            Image.new("RGB", (37, 19), color=(10, 20, 230)),
+        ]
+
+        response = await f._encode_image(
+            images,
+            "req-formats",
+            request_type=RequestType.IMAGE_GENERATION,
+            response_format="b64_json",
+            output_format="png",
+        )
+
+        assert response["output_format"] == "png"
+        assert response["size"] == "37x19"
+        assert "background" not in response
+        assert "quality" not in response
+        assert len(response["data"]) == len(images)
+        for item in response["data"]:
+            encoded = base64.b64decode(item["b64_json"])
+            with Image.open(BytesIO(encoded)) as decoded:
+                assert decoded.format == "PNG"
+                assert decoded.size == (37, 19)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("image_mode", ["RGBA", "P", "RGB", "L"])
+    async def test_jpeg_encodes_transparent_outputs(self, image_mode):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        if image_mode == "RGBA":
+            image = Image.new("RGBA", (12, 9), color=(20, 40, 60, 128))
+            expected_pixel = (137, 147, 157)
+        elif image_mode == "P":
+            image = Image.new("P", (12, 9), color=0)
+            image.putpalette([20, 40, 60] + [0, 0, 0] * 255)
+            image.info["transparency"] = 0
+            expected_pixel = (255, 255, 255)
+        elif image_mode == "RGB":
+            image = Image.new("RGB", (12, 9), color=(20, 40, 60))
+            image.info["transparency"] = (20, 40, 60)
+            expected_pixel = (255, 255, 255)
+        else:
+            image = Image.new("L", (12, 9), color=0)
+            image.info["transparency"] = 0
+            expected_pixel = (255, 255, 255)
+
+        response = await f._encode_image(
+            [image],
+            "req-alpha",
+            request_type=RequestType.IMAGE_GENERATION,
+            response_format="b64_json",
+            output_format="jpeg",
+        )
+
+        encoded = base64.b64decode(response["data"][0]["b64_json"])
+        with Image.open(BytesIO(encoded)) as decoded:
+            assert decoded.format == "JPEG"
+            assert decoded.mode == "RGB"
+            assert decoded.size == (12, 9)
+            assert all(
+                abs(actual - expected) < 12
+                for actual, expected in zip(decoded.getpixel((0, 0)), expected_pixel)
+            )
+
+    @pytest.mark.asyncio
+    async def test_b64_outputs_omit_size_for_mixed_dimensions(self):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        response = await f._encode_image(
+            [Image.new("RGB", (37, 19)), Image.new("RGB", (41, 23))],
+            "req-mixed-size",
+            request_type=RequestType.IMAGE_GENERATION,
+            response_format="b64_json",
+        )
+
+        assert "size" not in response
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("output_format", "file_extension", "pillow_format"),
+        [
+            ("png", "png", "PNG"),
+            ("jpeg", "jpg", "JPEG"),
+            ("webp", "webp", "WEBP"),
+        ],
+    )
+    async def test_url_outputs_upload_matching_media(
+        self, output_format, file_extension, pillow_format
+    ):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        image = Image.new("RGB", (21, 17), color=(70, 80, 90))
+        with patch(
+            "dynamo.vllm.omni.output_formatter.upload_to_fs",
+            return_value="https://media.example/image",
+        ) as upload:
+            response = await f._encode_image(
+                [image],
+                "req-url",
+                request_type=RequestType.IMAGE_GENERATION,
+                response_format="url",
+                output_format=output_format,
+            )
+
+        assert response["data"][0]["url"] == "https://media.example/image"
+        assert response["output_format"] == output_format
+        assert response["size"] == "21x17"
+        storage_path = upload.await_args.args[1]
+        uploaded_bytes = upload.await_args.args[2]
+        assert storage_path.endswith(f".{file_extension}")
+        with Image.open(BytesIO(uploaded_bytes)) as decoded:
+            assert decoded.format == pillow_format
+            assert decoded.size == (21, 17)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("output_format", ["jpg"])
+    async def test_unsupported_image_output_format_is_rejected(self, output_format):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        with pytest.raises(ValueError, match="Unsupported output_format"):
+            await f._encode_image(
+                [Image.new("RGB", (2, 2))],
+                "req-invalid",
+                request_type=RequestType.IMAGE_GENERATION,
+                response_format="b64_json",
+                output_format=output_format,
+            )
+
     @pytest.mark.asyncio
     async def test_chat_completion_format(self):
         from dynamo.common.utils.output_modalities import RequestType
 
         f = _make_diffusion_formatter()
         img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
+        img.save = lambda b, **kwargs: b.write(b"px")
         chunk = await f._encode_image(
             [img], "req-1", request_type=RequestType.CHAT_COMPLETION
         )
         assert chunk["object"] == "chat.completion.chunk"
         assert chunk["choices"][0]["delta"]["content"][0]["type"] == "image_url"
+        # The chat shape is unchanged: image accounting is an images-API field.
+        assert "usage" not in chunk
+        assert "nvext" not in chunk
 
     @pytest.mark.asyncio
     async def test_image_generation_b64_format(self):
@@ -183,7 +410,7 @@ class TestDiffusionFormatterImage:
 
         f = _make_diffusion_formatter()
         img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
+        img.save = lambda b, **kwargs: b.write(b"px")
         chunk = await f._encode_image(
             [img],
             "req-1",
@@ -198,7 +425,7 @@ class TestDiffusionFormatterImage:
 
         f = _make_diffusion_formatter()
         img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
+        img.save = lambda b, **kwargs: b.write(b"px")
         chunk = await f._encode_image(
             [img],
             "req-1",
@@ -206,6 +433,49 @@ class TestDiffusionFormatterImage:
             request_type=RequestType.IMAGE_GENERATION,
         )
         assert chunk["data"][0]["b64_json"] is not None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "requested_steps", [4, None], ids=["steps", "model-default"]
+    )
+    async def test_format_reports_image_accounting_from_an_async_omni_stage_output(
+        self, requested_steps
+    ):
+        """The stage output `AsyncOmni` yields carries the images and the
+        orchestrator's stage metrics, not the step count the engine ran. The
+        accounting counts the images in the output and takes `input_images`
+        and `num_inference_steps` from the handler. Token usage stays unset:
+        a diffusion model has no token counts."""
+        f = _make_diffusion_formatter()
+        # Shaped like `OmniBase._process_single_result`'s return value.
+        stage = SimpleNamespace(
+            request_id="req-1",
+            final_output_type="image",
+            images=_generated_images(2, size=(64, 32)),
+            metrics={
+                "stage_metrics": {"stage_0": {"duration_ms": 12.0}},
+                "stage_id": 0,
+                "final_output_type": "image",
+                "num_tokens_in": 0,
+                "num_tokens_out": 0,
+            },
+        )
+        chunk = await f.format(
+            stage,
+            "req-1",
+            request_type=RequestType.IMAGE_GENERATION,
+            response_format="b64_json",
+            input_images=1,
+            num_inference_steps=requested_steps,
+        )
+        assert len(chunk["data"]) == 2
+        assert "usage" not in chunk
+        assert chunk["size"] == "64x32"
+        assert chunk["output_format"] == "png"
+        expected = {"output_images": 2, "input_images": 1}
+        if requested_steps is not None:
+            expected["num_inference_steps"] = requested_steps
+        assert chunk["nvext"]["usage"] == expected
 
     @pytest.mark.asyncio
     async def test_empty_images_returns_error(self):
@@ -218,9 +488,38 @@ class TestDiffusionFormatterImage:
         assert "Error" in chunk["choices"][0]["delta"]["content"]
 
 
+class TestImageOutputFormat:
+    def test_normalizer_returns_a_value_the_response_model_accepts(self):
+        """The normalizer casts its result to `ImageOutputFormat`; the cast is
+        honest only while the encoder table, the alias, and the generated
+        `NvImagesResponse.output_format` Literal name the same values."""
+        from typing import Literal, get_args, get_origin
+
+        from dynamo.common.protocols.image_protocol import NvImagesResponse
+        from dynamo.vllm.omni.output_formatter import (
+            _IMAGE_OUTPUT_FORMATS,
+            ImageOutputFormat,
+            _normalize_image_output_options,
+        )
+
+        allowed = set(get_args(ImageOutputFormat))
+        assert set(_IMAGE_OUTPUT_FORMATS) == allowed
+
+        response_annotation = NvImagesResponse.model_fields["output_format"].annotation
+        response_literal = next(
+            arg for arg in get_args(response_annotation) if get_origin(arg) is Literal
+        )
+        assert set(get_args(response_literal)) == allowed
+
+        for value in sorted(allowed):
+            assert _normalize_image_output_options(value, None) == value
+            assert _normalize_image_output_options(value.upper(), None) == value
+        assert _normalize_image_output_options(None, None) == "png"
+
+
 class TestDiffusionFormatterVideo:
     @pytest.mark.asyncio
-    async def test_empty_frames_returns_none(self):
+    async def test_empty_frames_returns_video_error(self):
         from dynamo.common.utils.output_modalities import RequestType
 
         f = _make_diffusion_formatter()
@@ -229,7 +528,9 @@ class TestDiffusionFormatterVideo:
         result = await f.format(
             stage, "req-1", request_type=RequestType.VIDEO_GENERATION
         )
-        assert result is None
+        assert result["object"] == "video"
+        assert result["status"] == "failed"
+        assert "No video outputs" in result["error"]
 
     @pytest.mark.asyncio
     async def test_error_returns_failed_status(self):
@@ -243,6 +544,315 @@ class TestDiffusionFormatterVideo:
             chunk = await f._encode_video([MagicMock()], "req-1", fps=16)
         assert chunk["status"] == "failed"
         assert "boom" in chunk["error"]
+
+    @pytest.mark.asyncio
+    async def test_muxes_video_audio_and_reports_metadata(self):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        stage = SimpleNamespace(
+            images=[np.zeros((2, 4, 4, 3), dtype=np.float32)],
+            multimodal_output={
+                "audio": np.zeros((1, 2, 2667), dtype=np.float32),
+                "fps": 24,
+                "audio_sample_rate": 32000,
+            },
+        )
+        with patch(
+            "dynamo.vllm.omni.output_formatter.mux_video_audio_bytes",
+            return_value=b"muxed-mp4",
+        ) as mux:
+            result = await f.format(
+                stage,
+                "req-video-audio",
+                request_type=RequestType.VIDEO_GENERATION,
+                response_format="b64_json",
+            )
+
+        assert result["status"] == "completed"
+        assert result["data"][0]["fps"] == 24
+        assert result["data"][0]["audio_sample_rate"] == 32000
+        assert result["data"][0]["b64_json"] is not None
+        assert mux.call_count == 1
+        assert mux.call_args.args[1].shape == (2, 2667)
+        assert mux.call_args.kwargs["fps"] == 24.0
+        assert mux.call_args.kwargs["audio_sample_rate"] == 32000
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("sample_rate_key", "sample_rate"),
+        [("sample_rate", 22050), ("sampling_rate", 44100), ("sr", 16000)],
+    )
+    async def test_uses_audio_sample_rate_aliases(self, sample_rate_key, sample_rate):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        stage = SimpleNamespace(
+            images=[np.zeros((2, 4, 4, 3), dtype=np.float32)],
+            multimodal_output={
+                "audio": np.zeros(
+                    (1, 2, round(sample_rate * 2 / 16)), dtype=np.float32
+                ),
+                sample_rate_key: sample_rate,
+            },
+        )
+        with patch(
+            "dynamo.vllm.omni.output_formatter.mux_video_audio_bytes",
+            return_value=b"muxed-mp4",
+        ) as mux:
+            result = await f.format(
+                stage,
+                "req-video-audio",
+                request_type=RequestType.VIDEO_GENERATION,
+                response_format="b64_json",
+            )
+
+        assert result["data"][0]["audio_sample_rate"] == sample_rate
+        assert mux.call_args.kwargs["audio_sample_rate"] == sample_rate
+
+    @pytest.mark.asyncio
+    async def test_uses_default_audio_sample_rate_when_metadata_is_absent(self):
+        audio = {"audio": np.zeros((1, 2, 2000), dtype=np.float32)}
+        video = [np.zeros((2, 4, 4, 3), dtype=np.float32)]
+
+        with patch(
+            "dynamo.vllm.omni.output_formatter.mux_video_audio_bytes",
+            return_value=b"muxed-mp4",
+        ) as mux:
+            result = await _make_diffusion_formatter()._encode_video(
+                video,
+                "req-fallback-rate",
+                fps=24,
+                multimodal_output=audio,
+                response_format="b64_json",
+            )
+
+        assert result["data"][0]["audio_sample_rate"] == 24000
+        assert mux.call_args.kwargs["audio_sample_rate"] == 24000
+
+    @pytest.mark.asyncio
+    async def test_returns_every_generated_video(self):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        videos = [np.zeros((2, 4, 4, 3), dtype=np.float32) for _ in range(2)]
+        stage = SimpleNamespace(
+            images=videos,
+            multimodal_output={
+                "audio": np.zeros((2, 2, 2667), dtype=np.float32),
+                "metadata": {
+                    "video": {"fps": 24},
+                    "audio": {"sample_rate": 32000},
+                },
+            },
+        )
+        with patch(
+            "dynamo.vllm.omni.output_formatter.mux_video_audio_bytes",
+            return_value=b"muxed-mp4",
+        ) as mux:
+            result = await f.format(
+                stage,
+                "req-video-audio",
+                request_type=RequestType.VIDEO_GENERATION,
+                response_format="b64_json",
+            )
+
+        assert len(result["data"]) == 2
+        assert mux.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_rejects_mismatched_audio_video_duration_before_mux(self):
+        video = [np.zeros((48, 4, 4, 3), dtype=np.float32)]
+        audio = {
+            "audio": np.zeros((1, 2, 16000), dtype=np.float32),
+            "fps": 24,
+            "audio_sample_rate": 32000,
+        }
+
+        with patch("dynamo.vllm.omni.output_formatter.mux_video_audio_bytes") as mux:
+            result = await _make_diffusion_formatter()._encode_video(
+                video,
+                "req-duration-mismatch",
+                fps=24,
+                multimodal_output=audio,
+                response_format="b64_json",
+            )
+
+        assert result["status"] == "failed"
+        assert "Audio/video duration mismatch" in result["error"]
+        mux.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_positive_fallback_fps_before_encoding(self):
+        with patch("dynamo.vllm.omni.output_formatter.encode_to_video_bytes") as encode:
+            result = await _make_diffusion_formatter()._encode_video(
+                [np.zeros((2, 4, 4, 3), dtype=np.float32)],
+                "req-invalid-fps",
+                fps=0,
+                response_format="b64_json",
+            )
+
+        assert result["status"] == "failed"
+        assert "fps must be greater than zero" in result["error"]
+        encode.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_silent_video_keeps_vp9_encoder(self):
+        f = _make_diffusion_formatter()
+        with (
+            patch(
+                "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+                return_value=b"vp9-mp4",
+            ) as vp9,
+            patch("dynamo.vllm.omni.output_formatter.mux_video_audio_bytes") as mux,
+        ):
+            result = await f._encode_video(
+                [np.zeros((4, 4, 3), dtype=np.float32)],
+                "req-silent",
+                fps=16,
+                response_format="b64_json",
+            )
+
+        assert result["status"] == "completed"
+        assert result["data"][0]["audio_sample_rate"] is None
+        vp9.assert_called_once()
+        mux.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unsupported_output_format_is_rejected(self):
+        f = _make_diffusion_formatter()
+        with pytest.raises(ValueError, match="only 'mp4' is supported"):
+            await f._encode_video(
+                [np.zeros((4, 4, 3), dtype=np.float32)],
+                "req-output-hint",
+                fps=16,
+                response_format="b64_json",
+                output_format="webm",
+            )
+
+    @pytest.mark.asyncio
+    async def test_normalizes_direct_fchw_torch_video(self):
+        f = _make_diffusion_formatter()
+        video = torch.zeros((2, 3, 8, 10), dtype=torch.float32)
+
+        with patch(
+            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            return_value=b"vp9-mp4",
+        ) as encode:
+            result = await f._encode_video(
+                video,
+                "req-tensor",
+                fps=16,
+                response_format="b64_json",
+            )
+
+        assert result["status"] == "completed"
+        frames = encode.call_args.args[0]
+        assert frames.shape == (2, 8, 10, 3)
+        assert frames.dtype == np.uint8
+
+    @pytest.mark.asyncio
+    async def test_splits_direct_bfchw_torch_videos(self):
+        f = _make_diffusion_formatter()
+        videos = torch.zeros((2, 2, 3, 8, 10), dtype=torch.float32)
+
+        with patch(
+            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            return_value=b"vp9-mp4",
+        ) as encode:
+            result = await f._encode_video(
+                videos,
+                "req-tensor-batch",
+                fps=16,
+                response_format="b64_json",
+            )
+
+        assert result["status"] == "completed"
+        assert len(result["data"]) == 2
+        assert encode.call_count == 2
+        assert all(
+            call.args[0].shape == (2, 8, 10, 3) for call in encode.call_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_splits_list_wrapped_bfhwc_numpy_videos(self):
+        f = _make_diffusion_formatter()
+        videos = [np.zeros((2, 2, 8, 10, 3), dtype=np.float32)]
+
+        with patch(
+            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            return_value=b"vp9-mp4",
+        ) as encode:
+            result = await f._encode_video(
+                videos,
+                "req-numpy-batch",
+                fps=16,
+                response_format="b64_json",
+            )
+
+        assert result["status"] == "completed"
+        assert len(result["data"]) == 2
+        assert encode.call_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("as_tensor", [False, True])
+    @pytest.mark.parametrize("num_frames", [2, 8])
+    async def test_normalizes_cfhw_negative_one_to_one_video(
+        self, as_tensor, num_frames
+    ):
+        f = _make_diffusion_formatter()
+        video = np.linspace(-1.0, 1.0, num=3 * num_frames * 16 * 16, dtype=np.float32)
+        video = video.reshape(3, num_frames, 16, 16)
+        if as_tensor:
+            video = torch.from_numpy(video)
+
+        with patch(
+            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            return_value=b"vp9-mp4",
+        ) as encode:
+            result = await f._encode_video(
+                video,
+                "req-cfhw",
+                fps=16,
+                response_format="b64_json",
+            )
+
+        assert result["status"] == "completed"
+        frames = encode.call_args.args[0]
+        assert frames.shape == (num_frames, 16, 16, 3)
+        assert frames.dtype == np.uint8
+        assert frames.min() == 0
+        assert frames.max() == 255
+
+    @pytest.mark.parametrize("shape", [(4, 3, 8, 10), (3, 4, 8, 10)])
+    def test_rejects_ambiguous_channel_first_video(self, shape):
+        with pytest.raises(ValueError, match="Ambiguous channel-first"):
+            DiffusionFormatter._video_to_numpy_frames(np.zeros(shape, dtype=np.float32))
+
+    @pytest.mark.parametrize(
+        "audio",
+        [
+            np.zeros(128, dtype=np.float32),
+            torch.zeros(1, 2, 128),
+            [np.zeros(128, dtype=np.float32)] * 3,
+            tuple(np.zeros(128, dtype=np.float32) for _ in range(3)),
+        ],
+    )
+    def test_rejects_mismatched_audio_batch(self, audio):
+        with pytest.raises(ValueError, match="Expected 2 audio output"):
+            DiffusionFormatter._split_audio_outputs(audio, expected_count=2)
+
+    def test_rejects_batched_audio_for_one_video(self):
+        with pytest.raises(ValueError, match="Expected 1 audio output"):
+            DiffusionFormatter._split_audio_outputs(
+                np.zeros((2, 2, 128), dtype=np.float32), expected_count=1
+            )
+
+    def test_rounds_fractional_positive_fps_metadata(self):
+        assert (
+            DiffusionFormatter._resolve_int_metadata({"fps": 23.976}, "fps", "video")
+            == 24
+        )
 
 
 class TestBuildCompletionUsage:
@@ -484,6 +1094,42 @@ class TestAudioFormatterFormat:
         response = await formatter.format({}, "req-1", **state_arg)
 
         assert response is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [False, True])
+    async def test_delta_metadata_does_not_fail_valid_audio(self, streaming):
+        formatter = AudioFormatter("test", None, None)
+        state = AudioStreamState() if streaming else AudioAggregateState()
+        context = {
+            "audio_stream_state" if streaming else "audio_aggregate_state": state,
+            "output_format": "pcm",
+        }
+        # DELTA output can retain sr after the engine drains the audio key.
+        assert await formatter.format({"sr": 24000}, "req-1", **context) is None
+        response = await formatter.format(
+            {"audio": np.asarray([0.1, 0.2, 0.3], dtype=np.float32), "sr": 24000},
+            "req-1",
+            **context,
+        )
+        assert await formatter.format({"sr": 24000}, "req-1", **context) is None
+        if not streaming:
+            response = await formatter.finish_aggregate(
+                "req-1", state, output_format="pcm"
+            )
+        assert response["status"] == "completed"
+        assert len(base64.b64decode(response["data"][0]["b64_json"])) == 3 * 2
+
+    @pytest.mark.asyncio
+    async def test_delta_metadata_alone_cannot_complete_audio(self):
+        formatter = AudioFormatter("test", None, None)
+        state = AudioAggregateState()
+        assert (
+            await formatter.format({"sr": 24000}, "req-1", audio_aggregate_state=state)
+            is None
+        )
+        response = await formatter.finish_aggregate("req-1", state)
+        assert response["status"] == "failed"
+        assert "No audio generated" in response["error"]
 
     @pytest.mark.asyncio
     async def test_streaming_cumulative_chunks_emit_only_new_audio(self):
@@ -736,6 +1382,159 @@ class TestAudioFormatterFormat:
         assert len(channel_major_chunk) == 44 + 8 * 2 * 2
 
 
+class TestAudioFormatterCumulativeAggregate:
+    """A ``CUMULATIVE`` stage emits the waveform repeatedly, each payload a
+    snapshot of everything decoded so far and some of them empty, so an
+    ``AudioAggregateState(cumulative=True)`` request must answer from the
+    longest snapshot rather than from whichever payload arrived last, or from
+    all of them concatenated. Which requests are cumulative is the handler's
+    call (see ``utils.audio_output_is_cumulative``); these tests set the flag
+    directly."""
+
+    @pytest.fixture
+    def formatter(self):
+        """A bare AudioFormatter with no media sink configured."""
+        return AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+
+    @staticmethod
+    def _payload(samples, sr=24000):
+        """One streamed audio payload holding the given samples."""
+        return {"audio": np.asarray(samples, dtype=np.float32), "sr": sr}
+
+    async def _buffer(self, formatter, payloads, *, cumulative=True):
+        """Feed payloads through format() and return the aggregate state.
+
+        Every buffering call must answer None: the aggregated path emits one
+        response at the end of the stream, from finish_aggregate.
+        """
+        state = AudioAggregateState(cumulative=cumulative)
+        for payload in payloads:
+            response = await formatter.format(
+                payload, "req-1", audio_aggregate_state=state
+            )
+            assert response is None
+        return state
+
+    @staticmethod
+    async def _finish(formatter, state):
+        """Encode the buffered snapshots as raw PCM (2 bytes per sample)."""
+        response = await formatter.finish_aggregate("req-1", state, output_format="pcm")
+        return response, base64.b64decode(response["data"][0]["b64_json"])
+
+    @pytest.mark.asyncio
+    async def test_cumulative_snapshots_are_not_concatenated(self, formatter):
+        """Each payload already contains the earlier audio; joining repeats it."""
+        state = await self._buffer(
+            formatter, [self._payload([0.1, 0.2]), self._payload([0.1, 0.2, 0.3])]
+        )
+
+        assert [chunk.shape for chunk in state.chunks] == [(3,)]
+        _, pcm = await self._finish(formatter, state)
+        assert len(pcm) == 3 * 2
+
+    @pytest.mark.asyncio
+    async def test_incremental_frames_are_still_concatenated(self, formatter):
+        """The de-duplication is scoped to the cumulative flag.
+
+        Models that emit newly decoded frames keep the concatenating path;
+        de-duplicating those would silently drop audio.
+        """
+        state = await self._buffer(
+            formatter,
+            [self._payload([0.1, 0.2]), self._payload([0.1, 0.2, 0.3])],
+            cumulative=False,
+        )
+
+        assert [chunk.shape for chunk in state.chunks] == [(2,), (3,)]
+        _, pcm = await self._finish(formatter, state)
+        assert len(pcm) == 5 * 2
+
+    @pytest.mark.asyncio
+    async def test_cumulative_list_payload_is_taken_whole(self, formatter):
+        """A cumulative list payload must not be sliced by emitted_chunks.
+
+        Tracking the newly appended entries would keep only the first snapshot,
+        since every later snapshot's new entries are the tail of a waveform the
+        keep-longest rule then discards.
+        """
+        first = torch.tensor([0.1, 0.2], dtype=torch.float32)
+        second = torch.tensor([0.3], dtype=torch.float32)
+        state = await self._buffer(
+            formatter,
+            [{"audio": [first], "sr": 24000}, {"audio": [first, second], "sr": 24000}],
+        )
+
+        assert state.emitted_chunks == 0
+        assert [chunk.shape for chunk in state.chunks] == [(3,)]
+
+    @pytest.mark.asyncio
+    async def test_empty_payload_does_not_discard_buffered_audio(self, formatter):
+        """Empty payloads occur mid-stream and carry no waveform."""
+        state = await self._buffer(
+            formatter, [self._payload([0.1, 0.2]), self._payload([])]
+        )
+
+        assert [chunk.shape for chunk in state.chunks] == [(2,)]
+
+    @pytest.mark.asyncio
+    async def test_leading_empty_payload_does_not_become_the_result(self, formatter):
+        """The first payload of a stream can be the empty one."""
+        state = await self._buffer(
+            formatter, [self._payload([]), self._payload([0.1, 0.2])]
+        )
+
+        assert [chunk.shape for chunk in state.chunks] == [(2,)]
+
+    @pytest.mark.asyncio
+    async def test_shorter_late_payload_cannot_truncate_the_result(self, formatter):
+        """Snapshots are kept by length, so a short late one cannot win."""
+        state = await self._buffer(
+            formatter, [self._payload([0.1, 0.2, 0.3]), self._payload([0.1])]
+        )
+
+        assert [chunk.shape for chunk in state.chunks] == [(3,)]
+        _, pcm = await self._finish(formatter, state)
+        assert len(pcm) == 3 * 2
+
+    @pytest.mark.asyncio
+    async def test_payload_without_audio_reports_failure(self, formatter):
+        """A payload carrying no audio key is a broken engine contract."""
+        state = AudioAggregateState(cumulative=True)
+
+        response = await formatter.format(
+            {"sr": 24000}, "req-1", audio_aggregate_state=state
+        )
+
+        assert response["status"] == "failed"
+        assert "No audio data in multimodal_output" in response["error"]
+        assert state.chunks == []
+
+    @pytest.mark.asyncio
+    async def test_buffered_snapshots_encode_to_one_response(self, formatter):
+        """The buffered snapshots encode to a single completed WAV."""
+        state = await self._buffer(
+            formatter, [self._payload([0.1] * 1200), self._payload([0.1] * 2400)]
+        )
+
+        response = await formatter.finish_aggregate("req-1", state, output_format="wav")
+        audio = base64.b64decode(response["data"][0]["b64_json"])
+
+        assert response["status"] == "completed"
+        assert len(response["data"]) == 1
+        assert audio.count(b"RIFF") == 1
+        assert len(audio) == 44 + 2400 * 2
+
+    @pytest.mark.asyncio
+    async def test_no_audio_at_all_is_an_error_not_a_silent_file(self, formatter):
+        """A header-only file would otherwise be reported as a success."""
+        state = await self._buffer(formatter, [self._payload([])])
+
+        response = await formatter.finish_aggregate("req-1", state)
+
+        assert response["status"] == "failed"
+        assert "No audio generated" in response["error"]
+
+
 # ── OutputFormatter dispatcher ─────────────────────────────
 
 
@@ -746,6 +1545,33 @@ class TestOutputFormatter:
 
     # Full ctx matching _generate_openai_mode's call signature
     _FULL_CTX = dict(fps=16, response_format=None, previous_text="", speed=1.0)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("count", [1, 2])
+    async def test_video_labeled_image_request_preserves_pil_outputs(self, count):
+        # Cosmos3 can retain its model-level "video" label for T2I output.
+        # The public image request must still receive lossless PNGs, not MP4.
+        images = [
+            Image.new("RGB", (32, 48), (index * 80, 90, 150)) for index in range(count)
+        ]
+        stage = SimpleNamespace(final_output_type="video", images=images)
+        formatter = OutputFormatter(model_name="test-model")
+
+        response = await formatter.format(
+            stage,
+            "cosmos-image",
+            request_type=RequestType.IMAGE_GENERATION,
+            response_format="b64_json",
+        )
+
+        assert len(response["data"]) == count
+        for expected, item in zip(images, response["data"], strict=True):
+            with Image.open(
+                io.BytesIO(base64.b64decode(item["b64_json"], validate=True))
+            ) as decoded:
+                assert decoded.format == "PNG"
+                assert decoded.size == expected.size
+                assert decoded.tobytes() == expected.tobytes()
 
     @pytest.mark.asyncio
     async def test_routes_text(self):
@@ -770,7 +1596,7 @@ class TestOutputFormatter:
         stage = MagicMock()
         stage.final_output_type = "image"
         img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
+        img.save = lambda b, **kwargs: b.write(b"px")
         stage.images = [img]
         chunk = await f.format(
             stage, "req-1", request_type=RequestType.CHAT_COMPLETION, **self._FULL_CTX

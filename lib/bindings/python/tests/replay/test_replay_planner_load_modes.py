@@ -18,7 +18,7 @@ import threading
 import pytest
 
 from dynamo._core import run_mocker_synthetic_trace_replay
-from dynamo.mocker import MockEngineArgs
+from dynamo.mocker.config import normalize_mocker_config
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 
 from .replay_utils import _vllm_args, _write_trace_and_args
@@ -48,7 +48,9 @@ def test_synthetic_agg_load_modes(load_controller):
         64,
         16,
         8,
-        extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
+        extra_engine_args=normalize_mocker_config(
+            {"engine": {"block_size": 64, "speedup_ratio": 1000.0}}
+        ),
         num_workers=2,
         replay_mode="offline",
         **load_controller,
@@ -76,7 +78,9 @@ def test_synthetic_shared_prefix_closed_loop():
         128,
         8,
         8,
-        extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
+        extra_engine_args=normalize_mocker_config(
+            {"engine": {"block_size": 64, "speedup_ratio": 1000.0}}
+        ),
         num_workers=2,
         replay_concurrency=4,
         replay_mode="offline",
@@ -100,6 +104,54 @@ def test_trace_closed_loop(tmp_path):
     assert report.summary["completed_requests"] == 2
 
 
+@pytest.mark.planner
+def test_active_planner_honors_closed_loop_concurrency(tmp_path):
+    planner_config = {
+        "mode": "agg",
+        "optimization_target": "load",
+        "enable_load_scaling": True,
+        "enable_throughput_scaling": False,
+        "decode_scale_up_kv_rate": 90.0,
+        "decode_scale_down_kv_rate": 10.0,
+        "min_endpoint": 2,
+        "min_gpu_budget": 2,
+        "max_gpu_budget": 2,
+        "load_adjustment_interval_seconds": 1,
+        "scheduling": {"scale_interval_seconds": 0.01},
+        "metric_reporting_prometheus_port": 0,
+        "live_dashboard_port": 0,
+        "report_interval_hours": None,
+        "report_output_dir": str(tmp_path),
+    }
+    engine_args = normalize_mocker_config({"engine": {"block_size": 128}})
+    durations = []
+    for concurrency in (1, 5, None):
+        workload = {
+            "extra_engine_args": engine_args,
+            "num_workers": 2,
+            "replay_mode": "offline",
+            "replay_concurrency": concurrency,
+            "arrival_interval_ms": 0.0 if concurrency is None else None,
+            "turns_per_session": 1,
+            "shared_prefix_ratio": 0.0,
+            "num_prefix_groups": 0,
+            "inter_turn_delay_ms": 0.0,
+        }
+        report = run_synthetic_trace_replay(
+            512, 128, 20, planner_config=planner_config, **workload
+        )
+        control = run_synthetic_trace_replay(512, 128, 20, **workload)
+
+        assert report.summary["completed_requests"] == 20
+        assert report.planner.total_ticks > 0
+        assert report.summary["duration_ms"] == pytest.approx(
+            control.summary["duration_ms"]
+        )
+        durations.append(report.summary["duration_ms"])
+
+    assert all(left > right for left, right in zip(durations, durations[1:]))
+
+
 @pytest.mark.parametrize("callback_method", ["initial_tick_ms", "on_tick"])
 def test_planner_callback_error_preserves_python_exception_type(callback_method):
     # A raising planner callback must propagate its original Python exception
@@ -121,9 +173,8 @@ def test_planner_callback_error_preserves_python_exception_type(callback_method)
             64,
             16,
             8,
-            extra_engine_args=MockEngineArgs(
-                block_size=64,
-                speedup_ratio=1000.0,
+            extra_engine_args=normalize_mocker_config(
+                {"engine": {"block_size": 64, "speedup_ratio": 1000.0}}
             ),
             num_workers=1,
             replay_concurrency=2,
@@ -160,21 +211,28 @@ def test_disabled_policy_is_semantically_identical_to_normal_replay(disagg):
     }
     if disagg:
         kwargs.update(
-            prefill_engine_args=MockEngineArgs(
-                block_size=64,
-                speedup_ratio=1000.0,
-                worker_type="prefill",
+            prefill_engine_args=normalize_mocker_config(
+                {
+                    "engine": {
+                        "block_size": 64,
+                        "speedup_ratio": 1000.0,
+                        "worker_type": "prefill",
+                    }
+                }
             ),
-            decode_engine_args=MockEngineArgs(
-                block_size=64,
-                speedup_ratio=1000.0,
-                worker_type="decode",
+            decode_engine_args=normalize_mocker_config(
+                {
+                    "engine": {
+                        "block_size": 64,
+                        "speedup_ratio": 1000.0,
+                        "worker_type": "decode",
+                    }
+                }
             ),
         )
     else:
-        kwargs["extra_engine_args"] = MockEngineArgs(
-            block_size=64,
-            speedup_ratio=1000.0,
+        kwargs["extra_engine_args"] = normalize_mocker_config(
+            {"engine": {"block_size": 64, "speedup_ratio": 1000.0}}
         )
 
     normal = run_mocker_synthetic_trace_replay(**kwargs)
@@ -200,7 +258,7 @@ def test_scaling_policy_rejects_online_replay_before_dispatch():
             64,
             16,
             8,
-            extra_engine_args=MockEngineArgs(block_size=64),
+            extra_engine_args=normalize_mocker_config({"engine": {"block_size": 64}}),
             replay_mode="online",
             scaling_policy=_DisabledScalingPolicy(),
         )
@@ -227,7 +285,9 @@ def test_normal_replay_releases_gil_for_background_python_thread():
             64,
             16,
             50_000,
-            extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
+            extra_engine_args=normalize_mocker_config(
+                {"engine": {"block_size": 64, "speedup_ratio": 1000.0}}
+            ),
             num_workers=2,
             replay_concurrency=16,
             scaling_policy=None,

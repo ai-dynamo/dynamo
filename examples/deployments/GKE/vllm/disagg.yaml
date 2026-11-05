@@ -15,14 +15,14 @@ spec:
           name: main
     replicas: 1
     type: frontend
-  - name: VllmDecodeWorker
+  - name: decode
     podTemplate:
       spec:
         containers:
         - args:
           - |
-            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
-            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+            export LD_LIBRARY_PATH="/usr/local/nvidia/lib64:$LD_LIBRARY_PATH"
+            export PATH="$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64"
             /sbin/ldconfig
             exec python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode decode
           command:
@@ -39,14 +39,14 @@ spec:
           workingDir: /workspace/examples/backends/vllm
     replicas: 1
     type: decode
-  - name: VllmPrefillWorker
+  - name: prefill
     podTemplate:
       spec:
         containers:
         - args:
           - |
-            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
-            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+            export LD_LIBRARY_PATH="/usr/local/nvidia/lib64:$LD_LIBRARY_PATH"
+            export PATH="$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64"
             /sbin/ldconfig
             exec python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode prefill
           command:

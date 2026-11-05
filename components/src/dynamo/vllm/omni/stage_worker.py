@@ -14,6 +14,7 @@ import shutil
 import tempfile
 import uuid
 from dataclasses import dataclass, replace
+from enum import Enum
 from typing import Any, AsyncGenerator, Iterator
 
 import torch
@@ -25,7 +26,6 @@ from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connec
 from vllm_omni.engine.orchestrator import build_engine_core_request_from_tokens
 from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
-from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
 from vllm_omni.inputs.data import OmniTokensPrompt
 
 from dynamo import prometheus_names
@@ -41,6 +41,7 @@ from dynamo.vllm.omni.utils import (
     ensure_awaited,
     is_empty_payload,
     parse_omni_request,
+    resolve_stage_configs,
     unwrap_connector_payload,
 )
 
@@ -320,9 +321,6 @@ class OmniStageWorker:
             prompt=tokens_prompt,
             params=params,
         )
-        # The token request factory omits duplex-only fields, while the output
-        # processor expects session_id to exist for every registered request.
-        prompt.session_id = None
         # Pre-built EngineCoreRequests skip the output processor registration
         # in _build_add_request_message (the isinstance(prompt, EngineCoreRequest)
         # branch bypasses that block).  Register manually so that the engine's
@@ -481,18 +479,13 @@ async def init_omni_stage(
         getattr(getattr(config, "engine_args", None), "trust_remote_code", False)
     )
 
-    (
-        resolved_stage_configs_path,
-        stage_configs,
-        _omni_lb_policy,
-    ) = load_and_resolve_stage_configs(
+    resolved_path, stage_configs = resolve_stage_configs(
         config.model,
-        kwargs={},
         trust_remote_code=trust_remote_code,
         deploy_config_path=config.stage_configs_path,
     )
     connector_configs_path = _ensure_stage_connectors(
-        resolved_stage_configs_path,
+        resolved_path,
         stage_configs,
     )
     # Only register NixlConnector if it's actually used in stage configs
@@ -586,8 +579,12 @@ def _connector_key(from_stage: int | str, to_stage: int | str) -> tuple[str, str
     return (str(from_stage), str(to_stage))
 
 
-def _uses_nixl_connector(stage_configs_path: str, stage_configs: list[Any]) -> bool:
+def _uses_nixl_connector(
+    stage_configs_path: str | None, stage_configs: list[Any]
+) -> bool:
     """Check if any stage connector uses NixlConnector."""
+    if stage_configs_path is None:
+        return False
     try:
         with open(stage_configs_path) as f:
             raw = f.read()
@@ -620,12 +617,18 @@ def _uses_nixl_connector(stage_configs_path: str, stage_configs: list[Any]) -> b
     if isinstance(runtime, dict) and isinstance(runtime.get("connectors"), dict):
         connectors_list.append(runtime["connectors"])
 
+    for stage in deploy_config.get("stages", []):
+        if isinstance(stage, dict):
+            for key in ("input_connectors", "output_connectors"):
+                if isinstance(stage.get(key), dict):
+                    connectors_list.append(stage[key])
+
     for connectors in connectors_list:
         for connector_config in connectors.values():
             if not isinstance(connector_config, dict):
                 continue
             connector_type = connector_config.get("name", "")
-            if connector_type == "NixlConnector":
+            if connector_type in ("NixlConnector", "DynamoOmniNixlConnector"):
                 return True
 
     return False
@@ -639,8 +642,12 @@ def _load_processor(func_path: str | None) -> Any:
     return getattr(importlib.import_module(module_path), func_name)
 
 
-def _ensure_stage_connectors(stage_configs_path: str, stage_configs: list[Any]) -> str:
+def _ensure_stage_connectors(
+    stage_configs_path: str | None, stage_configs: list[Any]
+) -> str | None:
     """Add default SHM connector edges for stage configs that omit them."""
+    if stage_configs_path is None:
+        return None
     try:
         with open(stage_configs_path) as f:
             deploy_config = yaml.safe_load(f) or {}
@@ -665,6 +672,24 @@ def _ensure_stage_connectors(stage_configs_path: str, stage_configs: list[Any]) 
     }
     connector_name = "connector_of_shared_memory"
     changed = False
+
+    sections = [deploy_config, deploy_config.get("runtime", {})]
+    sections.extend(
+        {"connectors": stage.get(key, {})}
+        for stage in stages
+        if isinstance(stage, dict)
+        for key in ("input_connectors", "output_connectors")
+    )
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        definitions = section.get("connectors", {})
+        if not isinstance(definitions, dict):
+            continue
+        for connector in definitions.values():
+            if isinstance(connector, dict) and connector.get("name") == "NixlConnector":
+                connector["name"] = "DynamoOmniNixlConnector"
+                changed = True
 
     for stage_config in stage_configs:
         to_stage = int(getattr(stage_config, "stage_id", -1))
@@ -706,7 +731,7 @@ def _ensure_stage_connectors(stage_configs_path: str, stage_configs: list[Any]) 
 
     atexit.register(_cleanup_temp_stage_config, tmp_dir)
     logger.info(
-        "Synthesized default SharedMemoryConnector edges in %s from %s",
+        "Prepared stage connectors in %s from %s",
         tmp_path,
         stage_configs_path,
     )
@@ -936,15 +961,31 @@ def _stage_config_to_dict(stage_config: Any, stage_type: str) -> dict:
 
     def _to_plain(obj: Any) -> Any:
         if OmegaConf.is_config(obj):
-            return OmegaConf.to_container(obj, resolve=True)
+            obj = OmegaConf.to_container(obj, resolve=True)
+        if isinstance(obj, Enum):
+            return obj.value
         if hasattr(obj, "__dict__"):
-            return dict(vars(obj))
+            obj = dict(vars(obj))
+        if isinstance(obj, dict):
+            return {key: _to_plain(value) for key, value in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_to_plain(value) for value in obj]
         return obj
+
+    engine_args = _to_plain(stage_config.engine_args)
+    execution_type = getattr(stage_config, "execution_type", None)
+    if execution_type is not None:
+        from vllm_omni.config.omni_config import _STAGE_ENGINE_FIELDS_BY_EXECUTION_TYPE
+
+        deploy_fields = _STAGE_ENGINE_FIELDS_BY_EXECUTION_TYPE[execution_type]
+        engine_args = {
+            key: value for key, value in engine_args.items() if key in deploy_fields
+        }
 
     result: dict = {
         "stage_id": 0,
         "stage_type": stage_type,
-        "engine_args": _to_plain(stage_config.engine_args),
+        "engine_args": engine_args,
         "final_output": True,
         "final_output_type": getattr(stage_config, "final_output_type", "text"),
     }

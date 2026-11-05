@@ -24,7 +24,6 @@ import concurrent.futures
 import io
 import logging
 import os
-import shutil
 from typing import Generator
 
 import pytest
@@ -110,11 +109,6 @@ class VllmPromptEmbedsWorkerProcess(ManagedProcess):
         env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
         log_dir = f"{request.node.name}_{worker_id}"
-
-        try:
-            shutil.rmtree(log_dir)
-        except FileNotFoundError:
-            pass
 
         super().__init__(
             command=command,

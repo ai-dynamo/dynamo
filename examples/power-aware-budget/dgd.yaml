@@ -35,7 +35,7 @@ spec:
               #   enable_power_awareness: true
               #   total_gpu_power_limit: 5200
 
-    - name: VllmPrefillWorker
+    - name: prefill
       type: prefill
       replicas: 2
       podTemplate:
@@ -50,7 +50,7 @@ spec:
                 limits:
                   nvidia.com/gpu: "2"
 
-    - name: VllmDecodeWorker
+    - name: decode
       type: decode
       replicas: 2
       podTemplate:

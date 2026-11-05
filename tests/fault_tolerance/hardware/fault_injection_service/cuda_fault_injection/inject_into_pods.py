@@ -339,6 +339,15 @@ def _patch_service_for_injection(
         print("      ✓ Removed node affinity")
 
 
+def _worker_service_names(services):
+    """Return DGD service names whose declared role is worker."""
+    return [
+        name
+        for name, service in services.items()
+        if service.get("componentType") == "worker"
+    ]
+
+
 def patch_deployment_env(
     deployment_name,
     namespace,
@@ -422,14 +431,18 @@ def patch_deployment_env(
                     {"name": "CUDA_XID_TYPE", "value": str(xid_type)},
                 ]
 
-            # Patch worker services (VllmDecodeWorker and VllmPrefillWorker)
-            services_to_patch = ["VllmDecodeWorker", "VllmPrefillWorker"]
-            patched_services = []
-
             spec = dgd.get("spec", {})
             services = spec.get("services", {}) if spec else {}
             available_services = list(services.keys())
             print(f"    → Available services: {available_services}")
+
+            # Select workers by role so aggregate, disaggregated, and custom
+            # service names remain supported.
+            services_to_patch = _worker_service_names(services)
+            if not services_to_patch:
+                print("    ✗ No worker services found in DynamoGraphDeployment")
+                return False
+            patched_services = []
 
             # Set aggressive update strategy when enabling (allow all pods to update at once)
             # This ensures all pods get CUDA faults, not just the first few

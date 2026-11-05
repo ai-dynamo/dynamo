@@ -193,8 +193,20 @@ class FailoverMetrics:
         with self._lock:
             return self._generate_latest(self._registry).decode("utf-8")
 
+    def _collect_typed(self) -> list:
+        """Same registry, handed over typed for the OTLP export.
+
+        Imported lazily, as ``prometheus_client`` is: this module is only
+        reachable with a Dynamo endpoint in hand.
+        """
+        from dynamo.common.utils.prometheus import get_prometheus_typed
+
+        with self._lock:
+            return get_prometheus_typed(self._registry)
+
     def register(self, endpoint) -> None:
         endpoint.metrics.register_prometheus_expfmt_callback(self._collect)
+        endpoint.metrics.register_prometheus_typed_callback(self._collect_typed)
         logger.info(
             "[Shadow] registered failover metrics (engine=%s, persist=%s)",
             self._engine_id,

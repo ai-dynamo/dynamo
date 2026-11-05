@@ -5,24 +5,18 @@
 
 use std::sync::Arc;
 
-use aisimulate_core::engine::{
-    Backend, EngineConfig, EngineFactory, PreemptionMode as EnginePreemptionMode, SglangConfig,
-    SglangSchedulePolicy, TimingModel, TimingModelConfig, TransferTimingMode,
-    WorkerType as EngineWorkerType,
-};
+use aisimulate_core::engine::{EngineConfig, EngineFactory, TimingModel, TimingModelConfig};
 use aisimulate_core::replay::{ReplayEngineConfig, ReplayEngineFactory, ReplayRoleConfig};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::common::perf_model::PerfModel;
-use crate::common::protocols::{
-    EngineType, KvTransferTimingMode, MockEngineArgs, PreemptionMode, WorkerType,
-};
+use crate::common::protocols::MockerConfig;
 
 /// Fully materialized rank configuration and its optional process-local
 /// external timing provider.
 pub(crate) struct EngineComponents {
-    pub(crate) args: MockEngineArgs,
+    pub(crate) args: MockerConfig,
     pub(crate) rank: EngineConfig,
     pub(crate) timing: Option<Arc<dyn TimingModel>>,
 }
@@ -33,104 +27,37 @@ pub(crate) struct EngineComponents {
 /// Attention-DP size remains a grouped-engine concern and is intentionally not
 /// copied into [`EngineConfig`].
 pub(crate) fn engine_components(
-    args: MockEngineArgs,
+    args: MockerConfig,
     emit_kv_events: bool,
     emit_kv_token_ids: bool,
 ) -> Result<EngineComponents> {
     let args = args
         .normalized()
         .context("invalid Mocker engine arguments")?;
-    let backend = match args.engine_type {
-        EngineType::Vllm => Backend::Vllm,
-        EngineType::Sglang => Backend::Sglang,
-        EngineType::Trtllm => Backend::Trtllm,
-    };
-    let worker_type = match args.worker_type {
-        WorkerType::Aggregated => EngineWorkerType::Aggregated,
-        WorkerType::Prefill => EngineWorkerType::Prefill,
-        WorkerType::Decode => EngineWorkerType::Decode,
-    };
-    let preemption_mode = match args.preemption_mode {
-        PreemptionMode::Lifo => EnginePreemptionMode::Lifo,
-        PreemptionMode::Fifo => EnginePreemptionMode::Fifo,
-    };
-    let kv_transfer_timing_mode = match args.kv_transfer_timing_mode {
-        KvTransferTimingMode::FullPrompt => TransferTimingMode::FullPrompt,
-        KvTransferTimingMode::DestinationMissing => TransferTimingMode::DestinationMissing,
-    };
-    let sglang_args = args.sglang.as_ref();
-    let schedule_policy = match sglang_args.and_then(|sglang| sglang.schedule_policy.as_deref()) {
-        Some("lpm") => SglangSchedulePolicy::Lpm,
-        Some("fifo") | Some("fcfs") | None => SglangSchedulePolicy::Fifo,
-        // Fail closed, like every other conversion in this function. Silently
-        // substituting FIFO meant a typo ("LPM", "longest_prefix") changed which
-        // scheduler was simulated while the run stayed labelled with the policy
-        // the caller asked for -- a wrong benchmark number reported as a warning.
-        Some(other) => anyhow::bail!(
-            "unknown SGLang schedule policy {other:?}; expected \"lpm\", \"fifo\", or \"fcfs\""
-        ),
-    };
-    let sglang = SglangConfig {
-        schedule_policy,
-        max_prefill_tokens: sglang_args
-            .and_then(|sglang| sglang.max_prefill_tokens)
-            .unwrap_or(16_384),
-        chunked_prefill_size: sglang_args
-            .and_then(|sglang| sglang.chunked_prefill_size)
-            .unwrap_or(8_192),
-        clip_max_new_tokens: sglang_args
-            .and_then(|sglang| sglang.clip_max_new_tokens)
-            .unwrap_or(4_096),
-        schedule_conservativeness: sglang_args
-            .and_then(|sglang| sglang.schedule_conservativeness)
-            .unwrap_or(1.0),
-    };
-    let (timing_model, timing) = match args.perf_model.as_ref() {
-        PerfModel::Polynomial => (TimingModelConfig::Polynomial, None),
+    let mut rank = args.engine.engine.clone();
+    rank.emit_kv_events = emit_kv_events;
+    rank.emit_kv_token_ids = emit_kv_token_ids;
+    let timing = match args.perf_model.as_ref() {
+        PerfModel::Polynomial => None,
         PerfModel::Fixed {
             prefill_ms,
             decode_ms,
-        } => (
-            TimingModelConfig::Fixed {
+        } => {
+            rank.timing_model = TimingModelConfig::Fixed {
                 prefill_ms: *prefill_ms,
                 decode_ms: *decode_ms,
-            },
-            None,
-        ),
-        PerfModel::Interpolated { .. } | PerfModel::Aiconfigurator { .. } => (
-            TimingModelConfig::External {
+            };
+            None
+        }
+        PerfModel::Interpolated { .. } | PerfModel::Ais { .. } => {
+            rank.timing_model = TimingModelConfig::External {
                 provider: "dynamo_perf_model".to_string(),
                 config: Value::Null,
-            },
+            };
             Some(Arc::new(DynamoPerfTimingModel {
                 inner: Arc::clone(&args.perf_model),
-            }) as Arc<dyn TimingModel>),
-        ),
-    };
-    let rank = EngineConfig {
-        backend,
-        num_gpu_blocks: args.num_gpu_blocks,
-        block_size: args.block_size,
-        max_model_len: args.max_model_len,
-        max_num_seqs: args.max_num_seqs.unwrap_or(usize::MAX),
-        max_num_batched_tokens: args.max_num_batched_tokens.unwrap_or(usize::MAX),
-        enable_prefix_caching: args.enable_prefix_caching,
-        enable_chunked_prefill: args.enable_chunked_prefill,
-        speedup_ratio: args.speedup_ratio,
-        decode_speedup_ratio: args.decode_speedup_ratio,
-        aic_nextn: args.aic_nextn,
-        aic_nextn_accept_rates: args.aic_nextn_accept_rates.clone(),
-        aic_mtp_seed: args.aic_mtp_seed,
-        worker_type,
-        preemption_mode,
-        emit_kv_events,
-        emit_kv_token_ids,
-        kv_transfer_bytes_per_token: args.kv_bytes_per_token,
-        kv_transfer_bandwidth: args.kv_transfer_bandwidth,
-        kv_transfer_timing_mode,
-        timing_model,
-        sglang,
-        ..EngineConfig::for_backend(backend)
+            }) as Arc<dyn TimingModel>)
+        }
     };
     Ok(EngineComponents { args, rank, timing })
 }
@@ -145,28 +72,26 @@ pub(crate) fn engine_factory(
     }
 }
 
-fn replay_tensor_parallel_size(args: &MockEngineArgs) -> Result<u32> {
-    u32::try_from(args.aic_tp_size.unwrap_or(1))
+fn replay_tensor_parallel_size(args: &MockerConfig) -> Result<u32> {
+    u32::try_from(args.tensor_parallel_size)
         .context("Mocker tensor-parallel size exceeds the Replay contract")
 }
 
 /// Materialize the serializable engine descriptor and process-local timing
 /// provider used by one aggregated Replay invocation.
 pub(crate) fn aggregated_replay_setup(
-    args: &MockEngineArgs,
+    args: &MockerConfig,
 ) -> Result<(ReplayEngineConfig, ReplayEngineFactory)> {
     let components = engine_components(args.clone(), false, false)?;
     let config = ReplayEngineConfig {
-        // `None` everywhere in this file. `MockEngineArgs.num_gpu_blocks` can
-        // come from the caller (`common/protocols.rs`'s `num_gpu_blocks`
-        // builder field) or an estimator, but that provenance collapses into
-        // a plain `usize` by the time it reaches `args.num_gpu_blocks` here --
-        // nothing downstream of this constructor currently reads
-        // `num_gpu_blocks_is_explicit`, so there is no consumer yet to wire
-        // the real value for. Revisit if one starts branching on it.
-        num_gpu_blocks_is_explicit: None,
+        kv_eviction_policy: Default::default(),
         dp_size: components.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&components.args)?,
+        // Mocker does not currently configure prefill context parallelism.
+        prefill_context_parallel_size: 1,
+        // Mocker arguments reach this boundary with a concrete capacity,
+        // whether authored directly or supplied by the Dynamo planner.
+        num_gpu_blocks_is_explicit: Some(true),
         rank: components.rank,
         prefill: None,
         decode: None,
@@ -181,27 +106,31 @@ pub(crate) fn aggregated_replay_setup(
 /// Materialize role-specific descriptors and timing providers for one
 /// disaggregated Replay invocation.
 pub(crate) fn disaggregated_replay_setup(
-    prefill_args: &MockEngineArgs,
-    decode_args: &MockEngineArgs,
+    prefill_args: &MockerConfig,
+    decode_args: &MockerConfig,
 ) -> Result<(ReplayEngineConfig, ReplayEngineFactory)> {
     let prefill = engine_components(prefill_args.clone(), false, false)?;
     let decode = engine_components(decode_args.clone(), false, false)?;
     let prefill_role = ReplayRoleConfig {
-        num_gpu_blocks_is_explicit: None,
         dp_size: prefill.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&prefill.args)?,
+        prefill_context_parallel_size: 1,
+        num_gpu_blocks_is_explicit: Some(true),
         rank: prefill.rank,
     };
     let decode_role = ReplayRoleConfig {
-        num_gpu_blocks_is_explicit: None,
         dp_size: decode.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&decode.args)?,
+        prefill_context_parallel_size: 1,
+        num_gpu_blocks_is_explicit: Some(true),
         rank: decode.rank,
     };
     let config = ReplayEngineConfig {
-        num_gpu_blocks_is_explicit: None,
+        kv_eviction_policy: Default::default(),
         dp_size: prefill_role.dp_size,
         tensor_parallel_size: prefill_role.tensor_parallel_size,
+        prefill_context_parallel_size: prefill_role.prefill_context_parallel_size,
+        num_gpu_blocks_is_explicit: Some(true),
         rank: prefill_role.rank.clone(),
         prefill: Some(prefill_role),
         decode: Some(decode_role),
@@ -252,8 +181,9 @@ mod tests {
     use ndarray_interp::InterpolateError;
 
     use super::*;
-    use crate::common::perf_model::{AicCallback, DecodeInterpolator, PrefillInterpolator};
-    use crate::common::protocols::{SglangArgs, TrtllmArgs};
+    use crate::common::perf_model::{AisCallback, DecodeInterpolator, PrefillInterpolator};
+    use crate::common::protocols::NativeHostOffloadConfig;
+    use aisimulate_core::engine::{Backend, SglangSchedulePolicy};
 
     struct EchoPrefill;
 
@@ -271,9 +201,9 @@ mod tests {
         }
     }
 
-    struct EchoAic;
+    struct EchoAis;
 
-    impl AicCallback for EchoAic {
+    impl AisCallback for EchoAis {
         fn predict_prefill(
             &self,
             batch_size: usize,
@@ -290,52 +220,58 @@ mod tests {
 
     #[test]
     fn vllm_defaults_materialize_once_at_the_shared_boundary() {
-        let args = MockEngineArgs::builder().build().unwrap();
+        let mut args = MockerConfig::from_value(serde_json::json!({})).unwrap();
+        args.kv_transfer_bytes_per_token = Some(4096);
+        args.kv_cache_bytes_per_token = Some(1024);
         let components = engine_components(args, true, true).unwrap();
 
         assert_eq!(components.args.block_size, 64);
         assert_eq!(components.rank.backend, Backend::Vllm);
         assert_eq!(components.rank.block_size, 64);
+        assert_eq!(components.rank.kv_transfer_bytes_per_token, Some(4096));
+        assert_eq!(components.rank.kv_cache_bytes_per_token, Some(1024));
         assert!(components.rank.emit_kv_events);
         assert!(components.rank.emit_kv_token_ids);
         assert_eq!(components.rank.timing_model, TimingModelConfig::Polynomial);
         assert!(components.timing.is_none());
     }
 
-    /// An unrecognized policy used to fall back to FIFO with a `warn!`, so a
-    /// typo silently changed which scheduler was simulated while the run stayed
-    /// labelled with the policy the caller asked for.
     #[test]
-    fn unknown_sglang_schedule_policy_is_rejected_not_downgraded_to_fifo() {
-        let mut args = MockEngineArgs::builder().build().unwrap();
-        args.engine_type = EngineType::Sglang;
-        args.sglang = Some(SglangArgs {
-            schedule_policy: Some("LPM".to_string()),
-            ..SglangArgs::default()
-        });
+    fn replay_json_keeps_transfer_and_cache_geometry_independent() {
+        let args: MockerConfig = serde_json::from_value(serde_json::json!({
+            "engine": {
+                "kv_transfer_bytes_per_token": 4096,
+                "kv_cache_bytes_per_token": 1024,
+            }
+        }))
+        .unwrap();
+        let components = engine_components(args, false, false).unwrap();
+        assert_eq!(components.rank.kv_transfer_bytes_per_token, Some(4096));
+        assert_eq!(components.rank.kv_cache_bytes_per_token, Some(1024));
+    }
 
-        let error = match engine_components(args, false, false) {
-            Ok(_) => panic!("an unknown schedule policy must be rejected"),
-            Err(error) => error,
-        };
-        assert!(
-            error.to_string().contains("unknown SGLang schedule policy"),
-            "{error}"
-        );
+    #[test]
+    fn native_host_offload_preserves_explicit_cache_geometry() {
+        let mut args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "kv_transfer_bytes_per_token": 4096,
+                "kv_cache_bytes_per_token": 2048,
+                "native_host_offload": NativeHostOffloadConfig::new(8)
+            }
+        }))
+        .unwrap();
+        args.kv_transfer_bytes_per_token = Some(8192);
+        let components = engine_components(args, false, false).unwrap();
+        assert_eq!(components.rank.kv_cache_bytes_per_token, Some(2048));
+        assert_eq!(components.rank.kv_transfer_bytes_per_token, Some(8192));
     }
 
     #[test]
     fn backend_specific_fields_match_the_engine_contract() {
-        let mut sglang = MockEngineArgs::builder().build().unwrap();
-        sglang.engine_type = EngineType::Sglang;
-        sglang.sglang = Some(SglangArgs {
-            schedule_policy: Some("lpm".to_string()),
-            page_size: Some(8),
-            max_prefill_tokens: Some(512),
-            chunked_prefill_size: Some(256),
-            clip_max_new_tokens: Some(128),
-            schedule_conservativeness: Some(0.5),
-        });
+        let sglang = MockerConfig::from_json_str(
+            r#"{"engine": {"sglang": {"schedule_policy": "lpm", "max_prefill_tokens": 512, "chunked_prefill_size": 256, "clip_max_new_tokens": 128, "schedule_conservativeness": 0.5}, "backend": "sglang", "block_size": 8}}"#,
+        )
+        .unwrap();
         let components = engine_components(sglang, false, false).unwrap();
         assert_eq!(components.rank.backend, Backend::Sglang);
         assert_eq!(components.rank.block_size, 8);
@@ -345,9 +281,7 @@ mod tests {
         );
         assert_eq!(components.rank.sglang.chunked_prefill_size, 256);
 
-        let mut trtllm = MockEngineArgs::builder().build().unwrap();
-        trtllm.engine_type = EngineType::Trtllm;
-        trtllm.trtllm = Some(TrtllmArgs::default());
+        let trtllm = MockerConfig::from_json_str(r#"{"engine": {"backend": "trtllm"}}"#).unwrap();
         let components = engine_components(trtllm, false, false).unwrap();
         assert_eq!(components.rank.backend, Backend::Trtllm);
         assert_eq!(components.rank.block_size, 32);
@@ -355,7 +289,7 @@ mod tests {
 
     #[test]
     fn polynomial_builds_replay_and_live_engines_without_an_external_provider() {
-        let args = MockEngineArgs::builder().build().unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({})).unwrap();
         let components = engine_components(args.clone(), false, false).unwrap();
         assert_eq!(components.rank.timing_model, TimingModelConfig::Polynomial);
         assert!(components.timing.is_none());
@@ -376,8 +310,8 @@ mod tests {
 
     #[test]
     fn public_fixed_timing_materializes_as_builtin_engine_timing() {
-        let args = MockEngineArgs::from_json_str(
-            r#"{"timing_model":{"type":"fixed","prefill_ms":2.5,"decode_ms":0.5}}"#,
+        let args = MockerConfig::from_json_str(
+            r#"{"engine": {"timing_model": {"type": "fixed", "prefill_ms": 2.5, "decode_ms": 0.5}, "backend": "vllm"}}"#,
         )
         .unwrap();
         let components = engine_components(args, false, false).unwrap();
@@ -393,17 +327,17 @@ mod tests {
     }
 
     #[test]
-    fn npz_and_aic_models_use_the_external_timing_adapter() {
+    fn npz_and_ais_models_use_the_external_timing_adapter() {
         let models = [
             PerfModel::Interpolated {
                 prefill_interp: Arc::new(EchoPrefill),
                 decode_interp: Arc::new(EchoDecode),
             },
-            PerfModel::from_aic_callback(Arc::new(EchoAic)),
+            PerfModel::from_ais_callback(Arc::new(EchoAis)),
         ];
 
         for model in models {
-            let mut args = MockEngineArgs::builder().build().unwrap();
+            let mut args = MockerConfig::from_value(serde_json::json!({})).unwrap();
             args.perf_model = Arc::new(model);
             let components = engine_components(args, false, false).unwrap();
 
@@ -423,9 +357,9 @@ mod tests {
 
     #[test]
     fn disaggregated_roles_resolve_builtin_and_external_timing_independently() {
-        let prefill_args = MockEngineArgs::builder().build().unwrap();
-        let mut decode_args = MockEngineArgs::builder().build().unwrap();
-        decode_args.perf_model = Arc::new(PerfModel::from_aic_callback(Arc::new(EchoAic)));
+        let prefill_args = MockerConfig::from_value(serde_json::json!({})).unwrap();
+        let mut decode_args = MockerConfig::from_value(serde_json::json!({})).unwrap();
+        decode_args.perf_model = Arc::new(PerfModel::from_ais_callback(Arc::new(EchoAis)));
 
         let (config, factory) = disaggregated_replay_setup(&prefill_args, &decode_args).unwrap();
         let prefill = config.prefill.as_ref().unwrap();

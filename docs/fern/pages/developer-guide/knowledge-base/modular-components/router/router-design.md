@@ -70,7 +70,7 @@ The router uses a cost function that combines cache-aware prefill cost, potentia
        - effective_device_credit * device_overlap_blocks
        - host_cache_hit_weight * host_overlap_blocks
        - disk_cache_hit_weight * disk_overlap_blocks
-       - shared_cache_multiplier * shared_beyond_blocks
+       - shared_cache_multiplier * (shared_beyond_blocks + fetchable_blocks)
    ))
    active_request_blocks = decode_active_request_weight * active_requests
    cost = (
@@ -82,6 +82,7 @@ The router uses a cost function that combines cache-aware prefill cost, potentia
    - Lower costs indicate better routing choices
    - `overlap_score_credit` is a finite, nonnegative device-local prefix-overlap credit multiplier
    - `overlap_score_credit_decay_factor` is `1 / (1 + decay * normalized_excess_prefill)`; it is `1` when decay is disabled or the worker has no excess prefill load
+   - `fetchable_blocks` are the prompt blocks a worker could fetch from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), beyond the blocks it holds on device, in host memory, or on disk. The router credits the same source the hint would name, so topology islands apply. The credit lowers only the score; booked prefill still counts these blocks, because a fetch can miss
    - The combined cache credit is clamped so adjusted prefill blocks cannot become negative
    - `prefill_load_scale` controls adjusted prompt-side load relative to potential decode blocks
    - `decode_active_request_weight` defaults to `0`; use a positive value only when decode step latency depends materially on active batch size
@@ -159,7 +160,7 @@ The KVIndexer supports two backend implementations, selected via `--router-event
 
 - **Single-threaded RadixTree** (`--router-event-threads 1`): Events are processed in a dedicated single-threaded tokio runtime via channel-based dispatch. Also supports TTL retention and experimental per-rank capacity-bounded LRU retention for `--no-router-kv-events` approximate mode.
 
-- **ConcurrentRadixTree** (default, `--router-event-threads N` where N > 1): A thread-safe radix tree with a pool of N worker threads for event processing and approximate routing-decision writes (default: 4). Uses sticky worker-rank routing so request acquire, output materialization, release, capacity update, and reset operations share one FIFO. Read operations (`find_matches`) execute concurrently with writes.
+- **ConcurrentRadixTreeCompressed** (default, `--router-event-threads N` where N > 1): A thread-safe compressed radix tree with a pool of N worker threads for event processing and approximate routing-decision writes (default: 4). Uses sticky worker-rank routing so request acquire, output materialization, release, capacity update, and reset operations share one FIFO. Read operations (`find_matches`) execute concurrently with writes.
 
 ### Inter-Router Communication
 
@@ -222,8 +223,9 @@ graph TD
 1. Each worker assigns monotonically increasing event IDs starting from 0
 2. The router tracks the last received event ID per worker
 3. If an event arrives with `event_id > last_id + 1`, the router detects a gap
-4. The router resets that worker rank and requests a full snapshot (`start_event_id=None`, `end_event_id=None`)
-5. On worker discovery (Added event), the router dumps the worker's entire local indexer state
+4. The router keeps the existing index entries for that worker rank and requests events from the next expected ID (`start_event_id=last_id + 1`, `end_event_id=None`)
+5. The worker replies with its buffered events if its event buffer still holds that ID, or with a full tree dump that replaces the rank if the buffer no longer holds it
+6. On worker discovery (Added event), the router dumps the worker's entire local indexer state
 
 **Startup behavior:**
 - When a worker is discovered, the router queries and ingests its full local indexer state

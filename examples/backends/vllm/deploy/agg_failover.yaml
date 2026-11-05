@@ -34,7 +34,7 @@ spec:
   - experimental:
       failover: {}
       gpuMemoryService: {}
-    name: VllmWorker
+    name: worker
     podTemplate:
       spec:
         containers:

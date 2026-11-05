@@ -9,13 +9,14 @@
 //! [`LoraObservedSnapshot`] so a routing decision cannot mix indexes from different
 //! discovery generations.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 
-use crate::kv_router::protocols::WorkerWithDpRank;
-use crate::model_card::LoraInfo;
+use crate::lora::LoraInfo;
+use dynamo_kv_router::protocols::WorkerWithDpRank;
 
 const DEFAULT_MAX_GPU_LORA_COUNT: u32 = 4;
 
@@ -26,9 +27,31 @@ pub struct LoraObservedSnapshot {
     lora_info: HashMap<(String, WorkerWithDpRank), LoraInfo>,
     worker_to_loras: HashMap<WorkerWithDpRank, HashSet<String>>,
     worker_capacity: HashMap<WorkerWithDpRank, u32>,
+    registration_required: HashSet<WorkerWithDpRank>,
 }
 
 impl LoraObservedSnapshot {
+    pub(crate) fn eligible_workers<'a>(
+        &self,
+        lora_name: &str,
+        available: &'a [u64],
+    ) -> Cow<'a, [u64]> {
+        if self.registration_required.is_empty() {
+            return Cow::Borrowed(available);
+        }
+        Cow::Owned(
+            available
+                .iter()
+                .copied()
+                .filter(|id| {
+                    let worker = WorkerWithDpRank::new(*id, 0);
+                    !self.registration_required.contains(&worker)
+                        || self.is_loaded(lora_name, &worker)
+                })
+                .collect(),
+        )
+    }
+
     pub fn incarnation(&self) -> u64 {
         self.incarnation
     }
@@ -106,9 +129,80 @@ impl LoraObservedSnapshot {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct LoraWorkerProjection {
-    pub(crate) capacity: u32,
-    pub(crate) loras: Vec<LoraInfo>,
+pub struct LoraWorkerProjection {
+    pub capacity: u32,
+    pub loras: Vec<LoraInfo>,
+    pub is_registration_required: bool,
+}
+
+#[derive(Default)]
+pub struct LoraWorkerObservation {
+    pub base_capacities: Vec<u32>,
+    pub adapters: HashMap<String, LoraInfo>,
+    pub is_registration_required: bool,
+}
+
+impl LoraWorkerObservation {
+    pub fn into_projection(
+        mut self,
+        worker: WorkerWithDpRank,
+        endpoint: &impl std::fmt::Display,
+    ) -> Option<LoraWorkerProjection> {
+        self.base_capacities.sort_unstable();
+        self.base_capacities.dedup();
+        if self.base_capacities.len() > 1 {
+            tracing::warn!(
+                endpoint = %endpoint,
+                worker_id = worker.worker_id,
+                capacities = ?self.base_capacities,
+                "Base MDCs disagree on LoRA capacity; using the conservative minimum"
+            );
+        }
+        let mut loras = self.adapters.into_values().collect::<Vec<_>>();
+        loras.sort_by(|left, right| left.name.cmp(&right.name));
+        let mut adapter_capacities = loras
+            .iter()
+            .filter_map(|lora| lora.max_gpu_lora_count)
+            .collect::<Vec<_>>();
+        adapter_capacities.sort_unstable();
+        adapter_capacities.dedup();
+        if adapter_capacities.len() > 1 {
+            tracing::warn!(
+                endpoint = %endpoint,
+                worker_id = worker.worker_id,
+                capacities = ?adapter_capacities,
+                "Adapter MDCs disagree on LoRA capacity; using the conservative minimum"
+            );
+        }
+        let capacity = self
+            .base_capacities
+            .first()
+            .copied()
+            .or_else(|| adapter_capacities.first().copied())
+            .or_else(|| (!loras.is_empty()).then_some(DEFAULT_MAX_GPU_LORA_COUNT))
+            .or_else(|| self.is_registration_required.then_some(0))?;
+        Some(LoraWorkerProjection {
+            capacity,
+            loras,
+            is_registration_required: self.is_registration_required,
+        })
+    }
+}
+
+impl LoraWorkerProjection {
+    pub fn merge(&mut self, projection: &Self) {
+        self.capacity = self.capacity.min(projection.capacity);
+        self.is_registration_required |= projection.is_registration_required;
+        self.loras = self
+            .loras
+            .iter()
+            .chain(&projection.loras)
+            .map(|lora| (lora.name.clone(), lora.clone()))
+            .collect::<HashMap<_, _>>()
+            .into_values()
+            .collect();
+        self.loras.sort_by(|left, right| left.name.cmp(&right.name));
+    }
 }
 
 /// Tracks one endpoint's complete observed LoRA state.
@@ -217,21 +311,25 @@ impl LoraStateTracker {
     /// Desired entries are installed before obsolete entries are withdrawn, so lock-free
     /// routing readers never observe an unchanged adapter as temporarily unloaded.
     #[cfg(test)]
-    pub(crate) fn replace_worker_projection(
+    pub fn replace_worker_projection(
         &self,
         worker: WorkerWithDpRank,
         base_capacity: Option<u32>,
         loras: &[LoraInfo],
     ) {
-        let capacity = effective_capacity(worker, base_capacity, loras);
-        let projection = capacity.map(|capacity| LoraWorkerProjection {
-            capacity,
-            loras: loras.to_vec(),
-        });
+        let projection = LoraWorkerObservation {
+            base_capacities: base_capacity.into_iter().collect(),
+            adapters: loras
+                .iter()
+                .map(|lora| (lora.name.clone(), lora.clone()))
+                .collect(),
+            is_registration_required: false,
+        }
+        .into_projection(worker, &"unscoped");
         self.mutate(|next| replace_worker(next, worker, projection));
     }
 
-    pub(crate) fn replace_endpoint_projection(
+    pub fn replace_endpoint_projection(
         &self,
         projections: HashMap<WorkerWithDpRank, LoraWorkerProjection>,
     ) {
@@ -318,42 +416,6 @@ impl LoraStateTracker {
     }
 }
 
-#[cfg(test)]
-fn effective_capacity(
-    worker: WorkerWithDpRank,
-    base_capacity: Option<u32>,
-    loras: &[LoraInfo],
-) -> Option<u32> {
-    if let Some(capacity) = base_capacity {
-        return Some(capacity);
-    }
-    let mut assertions = loras
-        .iter()
-        .filter_map(|lora| lora.max_gpu_lora_count)
-        .collect::<Vec<_>>();
-    assertions.sort_unstable();
-    assertions.dedup();
-    if assertions.len() > 1 {
-        tracing::warn!(
-            worker_id = worker.worker_id,
-            dp_rank = worker.dp_rank,
-            capacities = ?assertions,
-            "LoRA adapter cards disagree on worker capacity; using the conservative minimum"
-        );
-    }
-    assertions.first().copied().or_else(|| {
-        (!loras.is_empty()).then(|| {
-            tracing::warn!(
-                worker_id = worker.worker_id,
-                dp_rank = worker.dp_rank,
-                default = DEFAULT_MAX_GPU_LORA_COUNT,
-                "LoRA MDC carries no max_gpu_lora_count; using compatibility default"
-            );
-            DEFAULT_MAX_GPU_LORA_COUNT
-        })
-    })
-}
-
 fn record_worker_capacity(
     snapshot: &mut LoraObservedSnapshot,
     worker: WorkerWithDpRank,
@@ -401,6 +463,7 @@ fn replace_worker(
         .unwrap_or_default();
     let Some(projection) = projection else {
         snapshot.worker_capacity.remove(&worker);
+        snapshot.registration_required.remove(&worker);
         for name in previous {
             remove_lora(snapshot, worker, &name);
         }
@@ -408,6 +471,11 @@ fn replace_worker(
     };
 
     snapshot.worker_capacity.insert(worker, projection.capacity);
+    if projection.is_registration_required {
+        snapshot.registration_required.insert(worker);
+    } else {
+        snapshot.registration_required.remove(&worker);
+    }
     let desired = projection
         .loras
         .into_iter()
@@ -443,7 +511,7 @@ impl Default for LoraStateTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_card::LoraInfo;
+    use crate::lora::LoraInfo;
 
     fn make_worker(id: u64) -> WorkerWithDpRank {
         WorkerWithDpRank::new(id, 0)
@@ -454,6 +522,78 @@ mod tests {
             name: name.to_string(),
             max_gpu_lora_count: max_count,
         }
+    }
+
+    #[test]
+    fn projection_uses_production_capacity_precedence_and_sorted_adapters() {
+        let observation =
+            |base_capacities, adapters: Vec<LoraInfo>, registration| LoraWorkerObservation {
+                base_capacities,
+                adapters: adapters
+                    .into_iter()
+                    .map(|lora| (lora.name.clone(), lora))
+                    .collect(),
+                is_registration_required: registration,
+            };
+        let adapters = vec![make_lora_info("z", Some(3)), make_lora_info("a", Some(2))];
+        let projected = observation(vec![8, 6, 8], adapters.clone(), true)
+            .into_projection(make_worker(1), &"endpoint")
+            .unwrap();
+        assert_eq!(projected.capacity, 6);
+        assert!(projected.is_registration_required);
+        assert_eq!(
+            projected
+                .loras
+                .iter()
+                .map(|lora| lora.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "z"]
+        );
+        assert_eq!(
+            observation(vec![], adapters, false)
+                .into_projection(make_worker(1), &"endpoint")
+                .unwrap()
+                .capacity,
+            2
+        );
+        assert_eq!(
+            observation(vec![], vec![make_lora_info("a", None)], false)
+                .into_projection(make_worker(1), &"endpoint")
+                .unwrap()
+                .capacity,
+            4
+        );
+        assert_eq!(
+            observation(vec![], vec![], true)
+                .into_projection(make_worker(1), &"endpoint")
+                .unwrap()
+                .capacity,
+            0
+        );
+        assert!(
+            observation(vec![], vec![], false)
+                .into_projection(make_worker(1), &"endpoint")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn projection_union_keeps_conservative_capacity_and_latest_adapter_facts() {
+        let mut projection = LoraWorkerProjection {
+            capacity: 8,
+            loras: vec![make_lora_info("z", Some(8)), make_lora_info("a", Some(8))],
+            is_registration_required: false,
+        };
+        projection.merge(&LoraWorkerProjection {
+            capacity: 4,
+            loras: vec![make_lora_info("a", Some(4))],
+            is_registration_required: true,
+        });
+        assert_eq!(projection.capacity, 4);
+        assert!(projection.is_registration_required);
+        assert_eq!(projection.loras[0].name, "a");
+        assert_eq!(projection.loras[0].max_gpu_lora_count, Some(4));
+        assert_eq!(projection.loras[1].name, "z");
     }
 
     #[test]

@@ -1,19 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_router_policies::DefaultWorkerSelector;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::common::protocols::MockEngineArgs;
+use crate::common::protocols::MockerConfig;
 use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::kv_hints::{WorkerKvTransferKeys, WorkerKvTransferKeysCache};
 use dynamo_kv_router::protocols::{
-    ActiveSequenceEvent, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    ActiveSequenceEvent, DpRank, KvHintTransferWorkerMetadata, WorkerConfigLike, WorkerId,
+    WorkerWithDpRank,
 };
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
-use dynamo_kv_router::sequences::SchedulerLoadSnapshot;
-use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, DefaultWorkerSelector, LocalScheduler, SequencePublisher,
-};
+use dynamo_kv_router::sequences::{LocalWorkerLoad, SchedulerLoadSnapshot};
+use dynamo_kv_router::{ActiveSequencesMultiWorker, LocalScheduler, SequencePublisher};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ReplayNoopPublisher;
@@ -25,15 +27,41 @@ impl SequencePublisher for ReplayNoopPublisher {
 
     fn publish_scheduler_load(&self, _load: SchedulerLoadSnapshot) {}
 
-    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
+    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: LocalWorkerLoad) {}
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// KV fetch hints pair only workers of one type; a replay router serves one pool.
+/// Replay workers report no `kv_transfer_domain` or `topology_domains`, so
+/// production's island rules never apply offline: replay is one transfer island.
+const ROUTER_HINT_WORKER_TYPE: &str = "replay";
+/// Marks a rank as a KV fetch source; replay never dials it.
+const ROUTER_HINT_ENDPOINT: &str = "aisim-replay://worker";
+
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct ReplayWorkerConfig {
     pub(super) max_num_batched_tokens: u64,
     pub(super) total_kv_blocks: u64,
     pub(super) data_parallel_start_rank: u32,
     pub(super) data_parallel_size: u32,
+    hint_capable: bool,
+    /// Derived from the fields above on first use.
+    kv_transfer_keys: WorkerKvTransferKeysCache,
+}
+
+impl ReplayWorkerConfig {
+    /// A worker with these limits that does or does not receive KV fetch hints
+    /// and serve as their source.
+    pub(super) fn with_router_hint(&self, router_hint: bool) -> Self {
+        Self {
+            hint_capable: router_hint,
+            kv_transfer_keys: WorkerKvTransferKeysCache::default(),
+            ..*self
+        }
+    }
+
+    pub(super) fn is_hint_capable(&self) -> bool {
+        self.hint_capable
+    }
 }
 
 impl WorkerConfigLike for ReplayWorkerConfig {
@@ -52,25 +80,46 @@ impl WorkerConfigLike for ReplayWorkerConfig {
     fn total_kv_blocks(&self) -> Option<u64> {
         Some(self.total_kv_blocks)
     }
+
+    fn kv_hint_transfer_metadata_for_dp_rank(
+        &self,
+        dp_rank: DpRank,
+    ) -> Option<KvHintTransferWorkerMetadata<'_>> {
+        let rank = dp_rank.checked_sub(self.data_parallel_start_rank)?;
+        if !self.hint_capable || rank >= self.data_parallel_size {
+            return None;
+        }
+        Some(KvHintTransferWorkerMetadata {
+            worker_type: ROUTER_HINT_WORKER_TYPE,
+            source_control_endpoint: Some(ROUTER_HINT_ENDPOINT),
+        })
+    }
+
+    fn kv_transfer_keys(&self) -> Cow<'_, WorkerKvTransferKeys> {
+        Cow::Borrowed(self.kv_transfer_keys.get_or_init(self))
+    }
 }
 
 pub(super) type ReplayScheduler =
     LocalScheduler<ReplayNoopPublisher, ReplayWorkerConfig, DefaultWorkerSelector>;
 
-pub(in crate::replay) fn replay_worker_config(args: &MockEngineArgs) -> ReplayWorkerConfig {
+pub(in crate::replay) fn replay_worker_config(args: &MockerConfig) -> ReplayWorkerConfig {
     ReplayWorkerConfig {
-        max_num_batched_tokens: args
-            .max_num_batched_tokens
-            .map(|tokens| tokens as u64)
-            .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS),
+        max_num_batched_tokens: if args.max_num_batched_tokens == usize::MAX {
+            DEFAULT_MAX_BATCHED_TOKENS
+        } else {
+            args.max_num_batched_tokens as u64
+        },
         total_kv_blocks: args.num_gpu_blocks as u64,
         data_parallel_start_rank: 0,
         data_parallel_size: args.dp_size.max(1),
+        hint_capable: false,
+        kv_transfer_keys: WorkerKvTransferKeysCache::default(),
     }
 }
 
 pub(super) fn replay_workers_with_configs(
-    args: &MockEngineArgs,
+    args: &MockerConfig,
     num_workers: usize,
 ) -> HashMap<WorkerId, ReplayWorkerConfig> {
     let worker_config = replay_worker_config(args);
@@ -80,7 +129,7 @@ pub(super) fn replay_workers_with_configs(
 }
 
 pub(super) fn replay_slots(
-    args: &MockEngineArgs,
+    args: &MockerConfig,
     workers_with_configs: &HashMap<WorkerId, ReplayWorkerConfig>,
 ) -> Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>> {
     let dp_range = workers_with_configs
@@ -130,18 +179,15 @@ pub(super) fn replay_selector(config: &KvRouterConfig) -> anyhow::Result<Default
 ///
 /// Seeded (`Some(..)`), the selector sorts candidates by `(worker_id, dp_rank)`
 /// first and draws from its own `fastrand::Rng`, so the sequence is a pure
-/// function of the seed and the trace.
-///
-/// The seeded constructor is gated behind `dynamo-kv-router/bench`, which
-/// `dynamo-mocker`'s test/benchmark-only `replay-bench` feature selects. That
-/// gating is deliberate -- `Cargo.toml` states production replay keeps the random
-/// selector -- so this refuses rather than silently downgrading to an unseeded
-/// selector a caller asked not to have. Consumers that need byte-exact replay
-/// (`aiperf-simulate` `mode: offline`) enable `replay-bench` and require a seed.
+/// function of the seed and the trace. Consumers that need byte-exact replay
+/// (`aiperf-simulate` `mode: offline`) require a seed.
 pub(super) fn replay_selector_with_seed(
     config: &KvRouterConfig,
     selector_seed: Option<u64>,
 ) -> anyhow::Result<DefaultWorkerSelector> {
+    if config.request_classifier_config()?.is_some() {
+        anyhow::bail!("offline replay does not support request_classifier plugins");
+    }
     if let Some(instance) = config
         .selected_worker_selection_policy_instance()
         .map_err(anyhow::Error::from)?
@@ -150,23 +196,17 @@ pub(super) fn replay_selector_with_seed(
     }
 
     Ok(match selector_seed {
-        #[cfg(feature = "replay-bench")]
         Some(seed) => DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", seed),
-        #[cfg(not(feature = "replay-bench"))]
-        Some(_) => anyhow::bail!(
-            "a seeded KV-router selector requires the replay-bench feature, which this \
-             binary was not built with"
-        ),
         None => DefaultWorkerSelector::new(Some(config.clone()), "replay"),
     })
 }
 
 pub(crate) fn replay_router_config(
-    args: &MockEngineArgs,
+    args: &MockerConfig,
     router_config: Option<KvRouterConfig>,
 ) -> KvRouterConfig {
     let mut config = router_config.unwrap_or_default();
-    if let Some(policy) = args.router_queue_policy {
+    if let Some(policy) = args.runtime.router_queue_policy {
         config.router_queue_policy = policy;
     }
     config
@@ -175,6 +215,53 @@ pub(crate) fn replay_router_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn router_hint_metadata_covers_each_rank_and_keys_are_built_once() {
+        let template = ReplayWorkerConfig {
+            data_parallel_start_rank: 2,
+            data_parallel_size: 2,
+            ..replay_worker_config(&MockerConfig::default())
+        };
+        assert_eq!(template.kv_hint_transfer_metadata_for_dp_rank(2), None);
+        assert!(template.kv_transfer_keys().target().is_none());
+        let config = template.with_router_hint(true);
+        assert!(config.is_hint_capable());
+        let endpoint = |rank| {
+            config
+                .kv_hint_transfer_metadata_for_dp_rank(rank)
+                .map(|metadata| (metadata.worker_type, metadata.source_control_endpoint))
+        };
+        assert_eq!(endpoint(2), Some(("replay", Some(ROUTER_HINT_ENDPOINT))));
+        assert_eq!(endpoint(3), Some(("replay", Some(ROUTER_HINT_ENDPOINT))));
+        // Ranks outside the worker's range get no metadata.
+        assert_eq!(endpoint(1), None);
+        assert_eq!(endpoint(4), None);
+        // The hint config derives its own keys, not the template's cached ones,
+        // and selections borrow them.
+        let keys = config.kv_transfer_keys();
+        assert!(matches!(keys, Cow::Borrowed(_)));
+        assert_eq!(*keys, WorkerKvTransferKeys::new(&config));
+        assert!(keys.target().is_some());
+    }
+
+    #[test]
+    fn replay_selector_rejects_request_classifier() {
+        let policy = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(policy.path(), "request_classifier: {type: test}").unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy.path().display().to_string()),
+            ..Default::default()
+        };
+        let Err(error) = replay_selector(&config) else {
+            panic!("classifier ignored")
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("offline replay does not support request_classifier")
+        );
+    }
 
     #[test]
     fn replay_selector_rejects_custom_worker_selection() {

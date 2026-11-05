@@ -4,6 +4,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -14,6 +15,15 @@ from dynamo.sglang.capacity import (
     kv_event_block_size,
 )
 
+# SGLang may be absent or partially stubbed during marker-only collection.
+# Keep import errors so the fixture still fails if a registration test runs.
+_register_import_error = None
+try:
+    from dynamo.sglang import register as _register
+except ImportError as exc:
+    _register = None
+    _register_import_error = exc
+
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
@@ -21,6 +31,69 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.fixture
+def register():
+    """Provide registration code only to tests that require SGLang."""
+    if _register_import_error is not None:
+        raise _register_import_error
+    return _register
+
+
+@pytest.mark.parametrize(
+    "parser, skip_tokenizer_init, has_engine, has_tokenizer, supports_gate, think_end_ids, expected",
+    [
+        ("kimi_k3", False, True, True, True, [163588, 39964, 163589], True),
+        (None, False, True, True, True, [163588], False),
+        ("kimi_k3", True, True, True, True, [163588], False),
+        ("kimi_k3", False, False, True, True, [163588], False),
+        ("kimi_k3", False, True, False, True, [163588], False),
+        ("kimi_k3", False, True, True, False, [163588], False),
+        ("kimi_k3", False, True, True, True, [], False),
+    ],
+)
+def test_structural_tag_reasoning_policy_advertises_only_an_available_gate(
+    register,
+    parser,
+    skip_tokenizer_init,
+    has_engine,
+    has_tokenizer,
+    supports_gate,
+    think_end_ids,
+    expected,
+):
+    async def async_generate(*, require_reasoning=False):
+        pass
+
+    async def legacy_async_generate(*, sampling_params=None):
+        pass
+
+    tokenizer = Mock()
+    tokenizer.encode.return_value = think_end_ids
+    engine = (
+        SimpleNamespace(
+            tokenizer_manager=SimpleNamespace(
+                tokenizer=tokenizer if has_tokenizer else None
+            ),
+            async_generate=async_generate if supports_gate else legacy_async_generate,
+        )
+        if has_engine
+        else None
+    )
+    server_args = SimpleNamespace(
+        reasoning_parser=parser, skip_tokenizer_init=skip_tokenizer_init
+    )
+    runtime_config = register.ModelRuntimeConfig()
+
+    register.publish_sglang_structural_tag_reasoning_policy(
+        runtime_config, engine, server_args
+    )
+
+    key = register.TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY
+    assert (key in runtime_config.runtime_data) is expected
+    if expected:
+        assert json.loads(runtime_config.runtime_data[key]) is True
 
 
 @pytest.mark.parametrize(
@@ -135,20 +208,40 @@ def test_token_budget_matches_sglang_policy(
     assert _get_token_budget(engine, server_args) == expected
 
 
-def test_runtime_config_without_engine_omits_token_budget(monkeypatch, caplog):
-    from dynamo.sglang import register
-
+@pytest.mark.parametrize(
+    "disaggregation_mode, runtime_supported, enable_multimodal, capability_expected",
+    [
+        (None, True, False, False),
+        ("null", True, False, False),
+        ("prefill", False, False, False),
+        ("prefill", True, True, False),
+        ("prefill", True, False, True),
+        ("decode", True, False, True),
+    ],
+)
+def test_runtime_config_publishes_supported_disagg_capabilities(
+    register,
+    monkeypatch,
+    caplog,
+    disaggregation_mode,
+    runtime_supported,
+    enable_multimodal,
+    capability_expected,
+):
     server_args = SimpleNamespace(
         allow_auto_truncate=False,
         context_length=4096,
-        disaggregation_mode=None,
+        disaggregation_mode=disaggregation_mode,
         max_prefill_tokens=None,
         page_size=16,
+        reasoning_parser="kimi_k3",
+        skip_tokenizer_init=False,
         speculative_algorithm="NONE",
         speculative_num_steps=None,
     )
     dynamo_args = register.DynamoConfig()
     dynamo_args.enable_local_indexer = False
+    dynamo_args.enable_multimodal = enable_multimodal
     capacity = SimpleNamespace(
         max_num_seqs=None,
         max_num_batched_tokens=None,
@@ -164,12 +257,44 @@ def test_runtime_config_without_engine_omits_token_budget(monkeypatch, caplog):
     monkeypatch.setattr(register, "get_spec_decode_runtime_data", lambda _: None)
     monkeypatch.setattr(register, "_get_mooncake_runtime_data", lambda _: None)
     monkeypatch.setattr(register, "runtime_capacity", lambda *_: capacity)
+    monkeypatch.setattr(
+        register, "supports_disagg_prefill_cancel_anytime", lambda _: runtime_supported
+    )
+    engine = None
+    if runtime_supported:
+
+        async def async_generate(*, require_reasoning=False):
+            pass
+
+        tokenizer = Mock()
+        tokenizer.encode.return_value = [163588, 39964, 163589]
+        engine = SimpleNamespace(
+            async_generate=async_generate,
+            tokenizer_manager=SimpleNamespace(
+                tokenizer=tokenizer,
+                context_len=4096,
+                validate_total_tokens=True,
+                num_reserved_tokens=0,
+                rid_to_state={},
+            ),
+            _scheduler_init_result=SimpleNamespace(scheduler_infos=[{}]),
+        )
 
     runtime_config = asyncio.run(
-        register.get_runtime_config(None, server_args, dynamo_args)
+        register.get_runtime_config(engine, server_args, dynamo_args)
     )
 
-    assert TOKEN_BUDGET_RUNTIME_KEY not in runtime_config.runtime_data
+    assert (
+        TOKEN_BUDGET_RUNTIME_KEY in runtime_config.runtime_data
+    ) is runtime_supported
+    capability = register.DISAGG_PREFILL_CANCEL_ANYTIME_V1
+    assert (capability in runtime_config.runtime_data) is capability_expected
+    if capability_expected:
+        assert json.loads(runtime_config.runtime_data[capability]) is True
+    reasoning_gate = register.TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY
+    assert (reasoning_gate in runtime_config.runtime_data) is (
+        runtime_supported and not enable_multimodal
+    )
     assert "Failed to get runtime config" not in caplog.text
 
 
@@ -236,9 +361,9 @@ def test_hicache_write_through_ignores_fully_overlapped_host_pool():
 
 
 @pytest.mark.asyncio
-async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, caplog):
-    from dynamo.sglang import register
-
+async def test_hicache_publish_failure_preserves_core_capacity(
+    register, monkeypatch, caplog
+):
     server_args = SimpleNamespace(
         allow_auto_truncate=False,
         context_length=4096,
@@ -300,3 +425,197 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
     assert (
         "Failed to attach native offloading capacity from SGLang HiCache" in caplog.text
     )
+
+
+# Expected values follow SGLang MooncakeStore's `config_prefix`: backend tag (when
+# not None) then served model name with "/" -> "-", joined with "_".
+@pytest.mark.parametrize(
+    "extra_config, served_model_name, expected",
+    [
+        ({}, "Qwen/Qwen3-0.6B", "Qwen-Qwen3-0.6B"),
+        ({"extra_backend_tag": "t"}, "Qwen/Qwen3-0.6B", "t_Qwen-Qwen3-0.6B"),
+        ({"extra_backend_tag": ""}, "Qwen/Qwen3-0.6B", "_Qwen-Qwen3-0.6B"),
+        ({"extra_backend_tag": 7}, "Qwen/Qwen3-0.6B", "7_Qwen-Qwen3-0.6B"),
+        ({}, "my-model", "my-model"),
+        ({"extra_backend_tag": "t"}, None, "t"),
+        ({}, None, None),
+    ],
+)
+def test_mooncake_runtime_data_publishes_sglang_key_prefix(
+    register, monkeypatch, extra_config, served_model_name, expected
+):
+    monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
+    server_args = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=json.dumps(extra_config),
+        served_model_name=served_model_name,
+        page_size=64,
+        tp_size=1,
+        pp_size=1,
+        speculative_algorithm=None,
+    )
+
+    runtime_data = register._get_mooncake_runtime_data(server_args)
+
+    assert runtime_data["key_prefix"] == expected
+
+
+@pytest.mark.parametrize(
+    "filename, content",
+    [
+        ("extra.json", '{"extra_backend_tag": "équipe"}'),
+        ("extra.toml", 'extra_backend_tag = "équipe"\n'),
+        ("extra.yaml", "extra_backend_tag: équipe\n"),
+        ("extra.yml", "extra_backend_tag: équipe\n"),
+    ],
+)
+def test_mooncake_key_prefix_reads_at_file_extra_config(
+    register, monkeypatch, tmp_path, filename, content
+):
+    """Preserve UTF-8 cache tags even when text reads default to ASCII."""
+
+    def open_with_ascii_default(path, mode="r", **kwargs):
+        if "b" not in mode:
+            kwargs.setdefault("encoding", "ascii")
+        return open(path, mode, **kwargs)
+
+    config_path = tmp_path / filename
+    config_path.write_bytes(content.encode("utf-8"))
+    monkeypatch.setattr(register, "open", open_with_ascii_default, raising=False)
+    monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
+    server_args = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=f"@{config_path}",
+        served_model_name="Qwen/Qwen3-0.6B",
+        page_size=64,
+        tp_size=1,
+        pp_size=1,
+        speculative_algorithm=None,
+    )
+
+    runtime_data = register._get_mooncake_runtime_data(server_args)
+
+    assert runtime_data["extra_backend_tag"] == "équipe"
+    assert runtime_data["key_prefix"] == "équipe_Qwen-Qwen3-0.6B"
+
+
+@pytest.mark.parametrize("filename", ["missing.json", "extra.ini"])
+def test_unreadable_at_file_extra_config_is_ignored(register, tmp_path, filename):
+    path = tmp_path / filename
+    if filename.endswith(".ini"):
+        path.write_text("extra_backend_tag = t\n")
+
+    assert register._parse_hicache_storage_extra_config(f"@{path}") == {}
+
+
+@pytest.mark.parametrize(
+    "extra_config, file_tenant, env_tenant, expected",
+    [
+        (
+            {"master_server_address": "master", "tenant_id": " tenant-a "},
+            "file",
+            "env",
+            "tenant-a",
+        ),
+        ({"tenant_id": "unused"}, "file", "env", "file"),
+        (
+            {"master_server_address": "master", "tenant_id": None},
+            "file",
+            "env",
+            "default",
+        ),
+        ({}, None, "  ", "default"),
+    ],
+)
+def test_mooncake_runtime_data_publishes_effective_tenant(
+    register, monkeypatch, tmp_path, extra_config, file_tenant, env_tenant, expected
+):
+    monkeypatch.setattr(register, "envs", SimpleNamespace(MOONCAKE_TENANT_ID=object()))
+    monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
+    monkeypatch.delenv("SGLANG_HICACHE_MOONCAKE_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("MOONCAKE_TENANT_ID", raising=False)
+    if file_tenant is not None:
+        config_path = tmp_path / "mooncake.json"
+        config_path.write_text(json.dumps({"tenant_id": file_tenant}))
+        monkeypatch.setenv("SGLANG_HICACHE_MOONCAKE_CONFIG_PATH", str(config_path))
+    if env_tenant is not None:
+        monkeypatch.setenv("MOONCAKE_TENANT_ID", env_tenant)
+    args = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=json.dumps(extra_config),
+        served_model_name="model",
+        page_size=4,
+    )
+    assert register._get_mooncake_runtime_data(args)["tenant_id"] == expected
+
+
+def test_mooncake_tenant_stays_default_without_upstream_support(register, monkeypatch):
+    monkeypatch.setattr(register, "envs", SimpleNamespace())
+    monkeypatch.setenv("MOONCAKE_TENANT_ID", "tenant-a")
+    assert (
+        register._mooncake_tenant_id(
+            {"master_server_address": "master", "tenant_id": "tenant-a"}
+        )
+        == "default"
+    )
+
+
+def test_mooncake_runtime_data_describes_the_direct_linker(register):
+    linker = SimpleNamespace(
+        enable_unified_cache_external_linker=True,
+        unified_cache_external_linker_backend="mooncake",
+        hicache_storage_backend=None,
+        hicache_storage_backend_extra_config=None,
+        model_path="Org/Model",
+        served_model_name="served",
+        page_size=256,
+        tp_size=4,
+    )
+    data = register._get_mooncake_runtime_data(linker)
+    assert data["key_layout"] == "linker"
+    # The linker names keys after model_path, HiCache after served_model_name.
+    assert data["key_prefix"] == "Org-Model"
+    assert data["page_size"] == 256
+
+    # The linker's own config flag wins over the deprecated HiCache extra config.
+    linker_with_config = SimpleNamespace(
+        enable_unified_cache_external_linker=True,
+        unified_cache_external_linker_backend="mooncake",
+        unified_cache_external_linker_config={
+            "master_server_address": "new",
+            "extra_backend_tag": "linker-tag",
+        },
+        hicache_storage_backend=None,
+        hicache_storage_backend_extra_config='{"extra_backend_tag": "old-tag"}',
+        model_path="Org/Model",
+        served_model_name="served",
+    )
+    data = register._get_mooncake_runtime_data(linker_with_config)
+    assert data["extra_backend_tag"] == "linker-tag"
+    assert data["key_prefix"] == "linker-tag_Org-Model"
+
+    # Without the new flag the linker still reads the deprecated extra config.
+    legacy_linker = SimpleNamespace(
+        enable_unified_cache_external_linker=True,
+        unified_cache_external_linker_backend="mooncake",
+        unified_cache_external_linker_config=None,
+        hicache_storage_backend=None,
+        hicache_storage_backend_extra_config='{"extra_backend_tag": "old-tag"}',
+        model_path="Org/Model",
+        served_model_name="served",
+    )
+    data = register._get_mooncake_runtime_data(legacy_linker)
+    assert data["extra_backend_tag"] == "old-tag"
+
+    hicache = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=None,
+        model_path="Org/Model",
+        served_model_name="served",
+    )
+    data = register._get_mooncake_runtime_data(hicache)
+    assert data["key_layout"] == "hicache"
+    assert data["key_prefix"] == "served"
+
+    neither = SimpleNamespace(hicache_storage_backend=None)
+    assert register._get_mooncake_runtime_data(neither) is None

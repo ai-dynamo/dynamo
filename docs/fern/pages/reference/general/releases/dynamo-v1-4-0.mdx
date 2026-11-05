@@ -35,7 +35,7 @@ Breaking changes and deprecations for this release are tracked on the [Deprecati
 
 Pull, deploy, and install with every artifact pinned to the v1.4.0 release set.
 
-<PinnedEnvironment />
+<PinnedEnvironment version="v1.4.0" />
 
 ## Highlights
 
@@ -448,7 +448,7 @@ Dynamo v1.4.0 includes contributions from 127 developers, 29 of whom made their 
 - [@joeltg](https://github.com/joeltg) shared one ZMQ context across all event-plane sockets ([#11246](https://github.com/ai-dynamo/dynamo/pull/11246))
 - [@ssojrani-wq](https://github.com/ssojrani-wq) parsed config.json as JSON5 when deriving max context length ([#11445](https://github.com/ai-dynamo/dynamo/pull/11445))
 - [@renflowerz](https://github.com/renflowerz) restored trace context across the Python chat-processor boundary ([#11480](https://github.com/ai-dynamo/dynamo/pull/11480))
-- [@hdimmfh](https://github.com/hdimmfh) aligned Kubernetes installation examples with the shipped release ([#11486](https://github.com/ai-dynamo/dynamo/pull/11486))
+- [@myeongsu-koo](https://github.com/myeongsu-koo) aligned Kubernetes installation examples with the shipped release ([#11486](https://github.com/ai-dynamo/dynamo/pull/11486))
 - [@RomaA2000](https://github.com/RomaA2000) added GPT-OSS-120B vLLM recipes for B200 and H200 ([#11506](https://github.com/ai-dynamo/dynamo/pull/11506))
 - [@aniskumar-nv](https://github.com/aniskumar-nv) added Python-loadable frontend route extensions ([#11626](https://github.com/ai-dynamo/dynamo/pull/11626))
 - [@alexeldeib](https://github.com/alexeldeib) honored reasoning effort in chat templates ([#11691](https://github.com/ai-dynamo/dynamo/pull/11691))
@@ -506,13 +506,13 @@ The Go alignment applies to the `inference-gateway/epp`, `operator` and `snapsho
 
 #### Summary
 
-Dynamo v1.4.2 is a patch release on top of v1.4.1. It fixes **NIXL loader-path resolution** in the Frontend and SGLang Runtime images, where the Rust NIXL bindings silently ran against non-functional stubs instead of the real library. It also **removes an unused profiling plugin** from the shipped images and tightens dependency pins in the Frontend and Planner images. With this release, Dynamo also introduces **Dynamo Enterprise**: a curated set of release artifacts published for NVIDIA Enterprise Support.
+Dynamo v1.4.2 is a patch release on top of v1.4.1. It fixes **NIXL loader-path resolution** in the Frontend and SGLang Runtime images, where the Rust NIXL bindings silently ran against non-functional stubs instead of the real library. It also **removes an unused profiling plugin** from the shipped images and tightens dependency pins in the Frontend and Planner images. With this release, Dynamo also introduces **Dynamo Enterprise Support**: a curated set of release artifacts published for enterprise support.
 
 **Base Branch**: `release/1.4.2`
 
-#### Dynamo Enterprise
+#### Dynamo Enterprise Support
 
-Starting with v1.4.2, a curated set of Dynamo release artifacts is also published under the `-enterprise` suffix in the [Dynamo Enterprise collection](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/collections/dynamo-enterprise) on NGC. These artifacts are eligible for NVIDIA Enterprise Support under an active NVIDIA AI Enterprise subscription and carry no functional or binary differences from their open-source counterparts. See [Dynamo Enterprise](../../../enterprise/overview.mdx) for scope, supported artifacts, and coverage terms.
+Starting with v1.4.2, a curated set of Dynamo release artifacts is also published under the `-enterprise` suffix in the [Dynamo Enterprise collection](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/collections/dynamo-enterprise) on NGC. These artifacts are eligible for enterprise support under an active NVIDIA AI Enterprise subscription and carry no functional or binary differences from their open-source counterparts. See [Dynamo Enterprise Support](../../../enterprise/overview.mdx) for scope, supported artifacts, and coverage terms.
 
 #### Bug Fixes
 

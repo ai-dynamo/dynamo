@@ -10,6 +10,7 @@ the media loaders, so they run quickly with no network and no vLLM imports.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 import socket
 from pathlib import Path
@@ -18,12 +19,15 @@ from unittest.mock import patch
 
 import pytest
 
-from dynamo.common.http import url_validator
+from dynamo.common.http import HttpStatusError, url_validator
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
+    describe_error_detail,
+    describe_media_source,
     is_blocked_ip,
     validate_local_path,
+    validate_media_reference,
     validate_media_url,
     validate_url,
 )
@@ -129,6 +133,15 @@ def test_python_and_rust_policy_constants_match() -> None:
     assert set(url_validator._BLOCKED_HOSTS) == rust_hosts
 
 
+def test_python_and_rust_data_url_cap_match() -> None:
+    """The frontend and the workers read the same variable and default."""
+    rust_source = _find_rust_media_loader_source().read_text(encoding="utf-8")
+    assert f'"{url_validator.DYN_MM_MAX_DATA_URL_MB}"' in rust_source
+    default = re.search(r"const DEFAULT_MAX_DATA_URL_MB: usize = (\d+);", rust_source)
+    assert default is not None
+    assert int(default.group(1)) == url_validator.DEFAULT_MAX_DATA_URL_MB
+
+
 # ---------------------------------------------------------------------------
 # validate_url() — scheme handling
 # ---------------------------------------------------------------------------
@@ -159,10 +172,80 @@ async def test_validate_url_accepts_data_url_by_default() -> None:
     await validate_url("data:image/png;base64,iVBORw0KGgoAAAA=", STRICT_HTTPS)
 
 
+_MIB = 1024 * 1024
+_DATA_PREFIX = "data:text/plain;base64,"
+
+
+def _data_url(size: int) -> str:
+    """Return an ASCII data: URL of exactly ``size`` characters."""
+    return _DATA_PREFIX + "A" * (size - len(_DATA_PREFIX))
+
+
+async def test_validate_url_rejects_oversized_data_url(monkeypatch) -> None:
+    # The cap is read per call, so a value set after import applies.
+    monkeypatch.setenv("DYN_MM_MAX_DATA_URL_MB", "1")
+    await validate_url(_data_url(_MIB), STRICT_HTTPS)
+    with pytest.raises(
+        UrlValidationError, match="exceeds the 1048576-byte limit"
+    ) as exc_info:
+        await validate_url(_data_url(_MIB + 1), STRICT_HTTPS)
+    assert (
+        "To raise the limit, set DYN_MM_MAX_DATA_URL_MB (in megabytes) "
+        "on both the frontend and the workers." in str(exc_info.value)
+    )
+
+
+async def test_validate_url_measures_data_url_in_utf8_bytes(monkeypatch) -> None:
+    # "é" is one character and two UTF-8 bytes: under the cap in characters,
+    # over it in bytes.
+    monkeypatch.setenv("DYN_MM_MAX_DATA_URL_MB", "1")
+    url = _DATA_PREFIX + "é" * (_MIB // 2)
+    assert len(url) < _MIB < len(url.encode("utf-8"))
+    with pytest.raises(UrlValidationError, match="exceeds"):
+        await validate_url(url, STRICT_HTTPS)
+
+
+async def test_validate_url_measures_data_url_with_lone_surrogate() -> None:
+    # A lone surrogate has no UTF-8 encoding. Measuring it must not raise
+    # UnicodeEncodeError, which callers that catch UrlValidationError miss.
+    await validate_url(_DATA_PREFIX + "\ud800", STRICT_HTTPS)
+
+
+def test_max_data_url_bytes_defaults_when_unset_or_blank(monkeypatch) -> None:
+    monkeypatch.delenv("DYN_MM_MAX_DATA_URL_MB", raising=False)
+    assert url_validator.max_data_url_bytes() == 16 * _MIB
+    monkeypatch.setenv("DYN_MM_MAX_DATA_URL_MB", " ")
+    assert url_validator.max_data_url_bytes() == 16 * _MIB
+
+
+@pytest.mark.parametrize("raw", ["abc", "1.5", "0", "-1"])
+def test_max_data_url_bytes_falls_back_on_bad_value(monkeypatch, caplog, raw) -> None:
+    monkeypatch.setenv("DYN_MM_MAX_DATA_URL_MB", raw)
+    with caplog.at_level(logging.WARNING, logger=url_validator.__name__):
+        assert url_validator.max_data_url_bytes() == 16 * _MIB
+    assert "DYN_MM_MAX_DATA_URL_MB" in caplog.text
+
+
 async def test_validate_url_http_allowed_when_opted_in() -> None:
     policy = PERMISSIVE
     # With public hostname + allow_private_ips=True (keeps DNS out of the test)
     await validate_url("http://example.com/x.png", policy)
+
+
+@pytest.mark.parametrize(
+    "url", ["https://example.com/x.png", "http://example.com/x.png"]
+)
+async def test_validate_url_rejects_remote_when_disabled(url: str) -> None:
+    policy = UrlValidationPolicy(
+        allow_http=True, allow_private_ips=True, allow_remote_urls=False
+    )
+    with pytest.raises(UrlValidationError, match="DYN_MM_ALLOW_REMOTE_URLS=0"):
+        await validate_url(url, policy)
+
+
+async def test_validate_url_accepts_data_url_when_remote_disabled() -> None:
+    policy = UrlValidationPolicy(allow_remote_urls=False)
+    await validate_url("data:image/png;base64,iVBORw0KGgoAAAA=", policy)
 
 
 # ---------------------------------------------------------------------------
@@ -341,11 +424,19 @@ def test_validate_local_path_missing_prefix(tmp_path) -> None:
 def test_policy_from_env_defaults(monkeypatch) -> None:
     monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
     monkeypatch.delenv("DYN_MM_LOCAL_PATH", raising=False)
+    monkeypatch.delenv("DYN_MM_ALLOW_REMOTE_URLS", raising=False)
 
     policy = UrlValidationPolicy.from_env()
     assert policy.allow_http is False
     assert policy.allow_private_ips is False
     assert policy.allowed_local_path is None
+    assert policy.allow_remote_urls is True
+
+
+@pytest.mark.parametrize("raw, expected", [("0", False), ("on", True), ("", True)])
+def test_policy_from_env_allow_remote_urls(monkeypatch, raw, expected) -> None:
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", raw)
+    assert UrlValidationPolicy.from_env().allow_remote_urls is expected
 
 
 def test_policy_from_env_allow_internal(monkeypatch) -> None:
@@ -359,8 +450,8 @@ def test_policy_from_env_allow_internal(monkeypatch) -> None:
 
 
 # Fetch-with-revalidation tests now live in test_http_backends.py where
-# they exercise the backend-neutral facade path against both httpx and
-# aiohttp. See ``test_fetch_with_policy_*``.
+# they exercise the backend-neutral facade path against the aiohttp
+# client. See ``test_fetch_with_policy_*``.
 
 
 # ---------------------------------------------------------------------------
@@ -430,3 +521,249 @@ async def test_validate_media_url_rejects_file_uri_outside_prefix(tmp_path) -> N
 
     with pytest.raises(UrlValidationError, match="outside the allowed directory"):
         await validate_media_url(other.resolve().as_uri(), policy)
+
+
+async def test_validate_media_url_rejects_a_percent_encoded_nul(tmp_path) -> None:
+    """%00 must stay a UrlValidationError, not leak out as a bare ValueError.
+
+    file:// paths are percent-decoded, so %00 reaches Path.resolve() as a real
+    NUL and lstat() raises ValueError rather than OSError. Callers key their
+    4xx-vs-5xx decision on the UrlValidationError type (see image_loader and
+    video_loader), so letting a plain ValueError escape turns a rejected input
+    into a server error.
+    """
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+
+    with pytest.raises(UrlValidationError):
+        await validate_media_url(f"file://{tmp_path}/x%00.png", policy)
+
+
+def test_validate_local_path_bounds_the_path_in_its_message(tmp_path) -> None:
+    """The rejected path is client-supplied and unbounded; the message is not.
+
+    It lands in an error response and in a log line, so one request would
+    otherwise amplify into that much text at every sink.
+    """
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+    path = "/nope/" + "A" * 200_000 + ".png"
+
+    with pytest.raises(UrlValidationError) as excinfo:
+        validate_local_path(path, policy)
+
+    assert len(str(excinfo.value)) < 500
+    assert "200010 chars" in str(excinfo.value)  # true size stays visible
+
+
+def test_validate_local_path_bounds_the_oserror_diagnostic(tmp_path) -> None:
+    """The errno text repeats the filename, which the label bound does not cover.
+
+    The ``/nope/`` case above stops at the missing parent and never reaches the
+    filesystem. Under an *existing* parent the name is handed to lstat(),
+    ENAMETOOLONG comes back, and ``str(exc)`` carries the whole
+    200,000-character filename into the same error response and log line the
+    label bound was there to protect.
+    """
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+    path = str(tmp_path / ("n" * 200_000))
+
+    with pytest.raises(UrlValidationError) as excinfo:
+        validate_local_path(path, policy)
+
+    assert len(str(excinfo.value)) < 500
+    assert "n" * 200 not in str(excinfo.value)
+
+
+def test_describe_media_source_bounds_data_uri_metadata() -> None:
+    """Eliding the payload is not enough: the media-type field is client-supplied.
+
+    Everything before the comma is the metadata, so a reference of
+    ``"data:" + "A" * 200_000 + ",AAAA"`` rendered a 200,036-character label with
+    the payload already elided. Omitting the comma takes the same branch.
+    """
+    for source in ("data:" + "A" * 200_000 + ",AAAA", "data:" + "A" * 200_000):
+        label = describe_media_source(source)
+
+        assert len(label) < 500
+        assert "A" * 200 not in label
+        assert f"({len(source)} chars" in label  # true size stays visible
+
+
+@pytest.mark.parametrize("scheme", ["data", "DATA", " \tDaTa"])
+def test_describe_media_source_elides_data_uri_payload(scheme) -> None:
+    label = describe_media_source(scheme + ":image/png;base64," + "A" * 50_000)
+
+    assert label.startswith("data:image/png (")
+    assert "payload elided" in label
+
+
+@pytest.mark.parametrize("scheme", ["data", "DATA", " \tDaTa"])
+def test_malformed_inline_source_label_elides_payload(scheme) -> None:
+    source = scheme + "://[;base64,private-inline-payload"
+
+    label = describe_media_source(source)
+
+    assert "private-inline-payload" not in label
+    assert len(label) < 200
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (
+            "https://user:private-password@example.com/ref.png?sig=private-token#private-fragment",
+            "https://example.com/ref.png",
+        ),
+        ("http://example.com/ref.png?sig=private-token", "http://example.com/ref.png"),
+        (
+            "https://user:private-password@[::1]:1234/ref.png?sig=private-token",
+            "https://[::1]:1234/ref.png",
+        ),
+    ],
+)
+def test_http_source_label_redacts_credentials(source, expected) -> None:
+    assert describe_media_source(source) == expected
+
+
+def test_validate_local_path_keeps_an_ordinary_path_intact(tmp_path) -> None:
+    """Control: bounding must not change the message for a normal path."""
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+
+    with pytest.raises(UrlValidationError, match=r"Path '/etc/passwd' is outside"):
+        validate_local_path("/etc/passwd", policy)
+
+
+async def test_validate_media_reference_rejects_empty(tmp_path) -> None:
+    """Parity with validate_media_url, which guards the empty string."""
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+
+    with pytest.raises(UrlValidationError, match="empty"):
+        await validate_media_reference("", policy)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https:///" + "A" * 200_000,  # no host component
+        "A" * 200_000 + "://x",  # scheme is client-supplied too
+    ],
+    ids=["missing-host", "oversized-scheme"],
+)
+async def test_validate_url_bounds_the_url_in_its_message(url) -> None:
+    """These messages became client-visible once the diffusion handlers
+    started mapping UrlValidationError to a 400 that carries the reason."""
+    with pytest.raises(UrlValidationError) as excinfo:
+        await validate_url(url, STRICT_HTTPS)
+
+    assert len(str(excinfo.value)) < 500
+
+
+async def test_redirect_chain_in_the_limit_message_is_bounded() -> None:
+    """The chain is entirely attacker-chosen URLs."""
+    from dynamo.common.http.base import HttpClient
+
+    long_hop = "https://example.com/" + "A" * 200_000
+
+    class _Client(HttpClient):
+        async def _fetch_simple(
+            self, url, timeout, *, max_bytes=None, policy=None, read_timeout=None
+        ):
+            raise AssertionError("unused")
+
+        async def _fetch_body_or_redirect(
+            self, url, timeout, *, max_bytes=None, policy=None, read_timeout=None
+        ):
+            return None, long_hop
+
+        async def close(self):
+            return None
+
+    policy = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+    with pytest.raises(UrlValidationError, match="Too many redirects") as excinfo:
+        await _Client().fetch_bytes(long_hop, 1.0, policy=policy)
+
+    assert len(str(excinfo.value)) < 1000
+
+
+async def test_a_data_uri_does_not_pay_for_a_label_it_cannot_use(monkeypatch) -> None:
+    """describe_media_source copies the source, and a data: URI is the payload.
+
+    The data branch returns before any message is built, so building the label
+    first made validate_url O(payload): 1.35 ms for a 32 MiB URI against
+    0.03 ms after.
+    """
+    calls = []
+    monkeypatch.setattr(
+        url_validator,
+        "describe_media_source",
+        lambda src, *a, **kw: calls.append(src) or src,
+    )
+
+    url = "data:image/png;base64,AAAA"
+    assert await url_validator.validate_url(url, STRICT_HTTPS) == url
+    assert calls == []
+
+
+def test_missing_allowed_dir_does_not_name_it(tmp_path) -> None:
+    """Same disclosure as the 'outside the allowed directory' message below it:
+    this one reaches the client too, on an ordinary misconfiguration."""
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path / "gone"))
+    # The input itself must resolve, or "File not found" fires first.
+    media = tmp_path / "x.png"
+    media.write_bytes(b"x")
+
+    with pytest.raises(UrlValidationError, match="does not exist") as excinfo:
+        validate_local_path(str(media), policy)
+
+    assert "gone" not in str(excinfo.value)
+
+
+def test_describe_error_detail_keeps_a_short_detail_intact() -> None:
+    assert describe_error_detail("[Errno 8] not known") == "[Errno 8] not known"
+
+
+def test_describe_error_detail_bounds_from_both_ends() -> None:
+    detail = "head-of-the-message " + "x" * 40_000 + " tail-of-the-message"
+    label = describe_error_detail(detail)
+
+    assert len(label) < 300
+    assert label.startswith("head-of-the-message")
+    assert label.endswith("tail-of-the-message")
+    assert str(len(detail)) in label  # true size stays visible
+
+
+def test_describe_error_detail_redacts_a_presigned_url_in_the_text() -> None:
+    signature = "0123456789abcdef" * 16
+    url = (
+        "https://bucket.s3.amazonaws.com/clip.wav?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+        f"&X-Amz-Expires=900&X-Amz-Signature={signature}"
+    )
+    for detail in (url, f"Invalid URL: '{url}'", f"Bad request to {url} (closed)"):
+        label = describe_error_detail(detail)
+
+        assert signature not in label
+        assert "X-Amz" not in label
+        assert "bucket.s3.amazonaws.com/clip.wav" in label
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://[2606:4700::1111]/img.png",
+        "https://bucket.s3.amazonaws.com/a(1)/img.png",
+        "https://bucket.example/o'reilly/img.png",
+    ],
+    ids=["ipv6_host", "parenthesis_in_path", "apostrophe_in_path"],
+)
+def test_presigned_url_with_brackets_stays_out_of_http_errors(url) -> None:
+    """A bracketed IPv6 host, a parenthesis or an apostrophe in the path must
+    not end the match early and leave the query unredacted."""
+    signed = f"{url}?X-Amz-Expires=900&X-Amz-Signature={'0123456789abcdef' * 16}"
+    error = HttpStatusError(400, f"Connection error loading image: '{signed}'", signed)
+
+    for text in (
+        describe_error_detail(f"Invalid URL: {signed}"),
+        str(error),
+        error.message,
+    ):
+        assert "0123456789abcdef" not in text
+        assert "X-Amz" not in text

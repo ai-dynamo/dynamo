@@ -45,9 +45,9 @@ The prefill and decode projections include load from the incoming request plus a
 
 For prefill load, the router estimates each candidate worker's uncached prompt work by subtracting its cached prefix tokens from the request's input tokens.
 
-By default, that effective prefill load remains charged at full value until the first output token marks prefill complete. With `--router-prefill-load-model aic`, the router also asks [AIConfigurator (AIC)](../../../additional-resources/aiconfigurator-reference.md) for an expected prefill duration using the effective ISL and cached prefix length. The active load tracker uses the oldest active prefill as a time anchor and applies elapsed time to the worker's aggregate modeled prefill backlog. When the oldest request completes, the next active prefill becomes the anchor. If a modeled non-anchor request completes first, the tracker adjusts the anchor to keep the reported load continuous.
+By default, that effective prefill load remains charged at full value until the first output token marks prefill complete. With `--router-prefill-load-model ais`, the router also asks [AISimulate (AIS)](../ai-simulate-experimental/overview.md) for an expected prefill duration using the effective ISL and cached prefix length. The active load tracker uses the oldest active prefill as a time anchor and applies elapsed time to the worker's aggregate modeled prefill backlog. When the oldest request completes, the next active prefill becomes the anchor. If a modeled non-anchor request completes first, the tracker adjusts the anchor to keep the reported load continuous.
 
-![Timeline showing how AIC decays active prefill load across an aggregate modeled backlog, compared with static accounting until the first output token.](../../../../../assets/img/router-active-prefill-timeline.jpg)
+![Timeline showing how AIS decays active prefill load across an aggregate modeled backlog, compared with static accounting until the first output token.](../../../../../assets/img/router-active-prefill-timeline.jpg)
 
 This model changes router-side prompt load accounting only; it does not change backend batching or execution.
 
@@ -71,7 +71,7 @@ To replace only the scoring and picking stage with statically linked Rust code, 
 
 When requests wait in policy-class queues, weighted
 [Deficit Round Robin Queue Scheduling](deficit-round-robin.md) selects the
-physical class to dispatch before worker scoring runs.
+class to dispatch before worker scoring runs.
 
 ## Using the KV Cache Router
 
@@ -91,17 +91,16 @@ For detailed CLI arguments and advanced configuration options, see [Configuratio
 
 Dynamo supports several routing strategies when sending requests from one component to another component's endpoint.
 
-First, create a client tied to a component endpoint. Here we get a client tied to the `generate` endpoint of the `VllmWorker` component.
+First, create a client tied to a component endpoint. Here we get a client tied to the `generate` endpoint of the `worker` component.
 
 ```python
-client = await runtime.endpoint("dynamo.VllmWorker.generate").client()
+client = await runtime.endpoint("dynamo.worker.generate").client()
 ```
 
-You can then use the default routing methods exposed by the client class to send requests to the `VllmWorker` component.
+You can then use the default routing methods exposed by the client class to send requests to the `worker` component.
 
 - **Round-robin routing**: Default strategy, available through `client.generate()` on a standard endpoint client or explicitly through `client.round_robin()`
 - **Random routing**: Selects a random worker through `client.random()`
-- **Power-of-two routing**: Samples two workers and selects the less-loaded one through `--router-mode power-of-two`
 - **Direct routing**: Explicitly targets a specific worker via `client.direct(input, component_id)`
 - **Least-loaded routing**: Routes to the worker with fewest active connections via `--router-mode least-loaded`
 - **Device-aware weighted routing**: Routes using CPU/non-CPU ratio budgeting plus least-loaded selection within the selected device group via `--router-mode device-aware-weighted`

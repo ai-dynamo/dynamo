@@ -75,6 +75,9 @@ async fn active_sequences_trace_replays_without_warnings_or_leaks() -> anyhow::R
             operation_lanes: NUM_UNIQUE_INFERENCE_WORKERS,
             spin_us: 50,
             issue_lag_diagnostic_threshold_us: 250,
+            issuer_cpu: None,
+            backend_cpus: Vec::new(),
+            modeled_prefill_tokens_per_sec: None,
         },
     )
     .await?;
@@ -133,6 +136,9 @@ async fn active_sequences_replay_matches_sequential_direct_oracle() -> anyhow::R
             operation_lanes: 1,
             spin_us: 50,
             issue_lag_diagnostic_threshold_us: 250,
+            issuer_cpu: None,
+            backend_cpus: Vec::new(),
+            modeled_prefill_tokens_per_sec: None,
         },
     )
     .await?;

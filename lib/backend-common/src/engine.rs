@@ -28,12 +28,13 @@ pub use dynamo_llm::protocols::common::llm_backend::{
 };
 pub use dynamo_llm::protocols::common::preprocessor::{
     BootstrapInfo, KV_HINT_TRANSFER_CAPABILITY_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
-    MultimodalData, MultimodalDataMap, PrefillResult, PreprocessedRequest, RoutingHints,
+    MultimodalData, MultimodalDataMap, MultimodalItemRef, PrefillResult, PreprocessedRequest,
+    RoutingHints,
 };
 pub use dynamo_llm::protocols::common::{
     FinishReason, GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
 };
-pub use dynamo_protocols::types::{CompletionUsage, StopReason};
+pub use dynamo_protocols::types::{CompletionUsage, PromptTokensDetails, StopReason};
 pub use dynamo_runtime::engine::AsyncEngineContext;
 
 /// Per-request handle wrapping the runtime context. `Deref`s to
@@ -141,6 +142,8 @@ pub struct LlmRegistration {
     pub max_num_seqs: Option<u64>,
     /// Maximum tokens the engine will process in a single batched step.
     pub max_num_batched_tokens: Option<u64>,
+    /// Maximum number of LoRA adapters the engine can keep resident on GPU.
+    pub max_gpu_lora_count: Option<u32>,
     /// DP ranks this worker hosts (default 1); the router enumerates per-rank
     /// load from it.
     pub data_parallel_size: Option<u32>,
@@ -148,6 +151,10 @@ pub struct LlmRegistration {
     /// owns a sub-range; the router enumerates
     /// `[start, start + data_parallel_size)`.
     pub data_parallel_start_rank: Option<u32>,
+    /// Engine emits bigram-keyed KV events (Eagle speculative decoding).
+    /// Published as `ModelRuntimeConfig::enable_eagle` so the router hashes
+    /// prompts the same way.
+    pub enable_eagle: bool,
     /// Bootstrap host advertised to decode peers. Backends with an internal
     /// KV-transport handshake leave it `None`. When host+port are set, `Worker`
     /// publishes them for the frontend's `PrefillRouter` bootstrap path.
@@ -272,6 +279,19 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// can observe transfer completion (e.g. a connector or scheduler).
     async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
         Ok(None)
+    }
+
+    /// Resolves once the engine can no longer serve, with the error the
+    /// `Worker` returns. The `Worker` then shuts down as on SIGTERM, withdrawing
+    /// from discovery, draining and running `cleanup`, so the process exits
+    /// and its supervisor can restart it. Default: never resolves.
+    ///
+    /// The `Worker` may poll this before `start` completes, and drops the
+    /// future once it finishes or starts shutting down another way.
+    /// Implementations must allow polling during startup and must not use this
+    /// future to clean up.
+    async fn engine_lost(&self) -> DynamoError {
+        std::future::pending().await
     }
 
     /// Release all engine resources. Called exactly once.
@@ -499,6 +519,10 @@ pub enum KvEventSource {
         endpoint: String,
         topic: String,
         dp_rank: u32,
+        /// Model image-placeholder token used to normalize multimodal events.
+        image_token_id: Option<u32>,
+        /// Opt-in idle heartbeat deadline; absent preserves legacy publishers.
+        heartbeat_timeout: Option<std::time::Duration>,
     },
     Push {
         on_ready: OnPublisherReady,

@@ -20,15 +20,19 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 
+from tensorrt_llm.llmapi import KvCacheConfig
+
 from dynamo.trtllm.args import Config, parse_args
 from dynamo.trtllm.constants import DisaggregationMode, Modality
+from dynamo.trtllm.publisher import KvEventPublicationMode
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 from dynamo.trtllm.workers.llm_worker import (
+    _cache_transceiver_runtime,
+    _configure_kv_cache_manager,
     _populate_kv_cache_capacity,
     _resolve_streaming_kv_events_config,
     _strip_postprocess_workers,
-    _validate_streaming_kv_events_backend,
     init_llm_worker,
 )
 
@@ -499,33 +503,53 @@ def test_resolve_streaming_kv_events_config_uses_nested_kv_cache_config():
     }
 
 
-def test_streaming_kv_events_require_python_v2_cache_manager(monkeypatch):
-    monkeypatch.delenv("TLLM_KV_CACHE_MANAGER_V2_BACKEND", raising=False)
+@pytest.mark.parametrize(
+    ("cli_args", "fpm_port_env", "expected"),
+    [
+        ([], None, False),
+        (["--fpm-trace"], None, True),
+        ([], "20380", True),
+        (["--publish-kv-events"], None, False),
+        (["--publish-metrics"], None, True),
+        (["--publish-kv-events", "--publish-metrics"], None, True),
+    ],
+)
+def test_config_publish_forward_pass_metrics_opt_in(
+    monkeypatch, cli_args, fpm_port_env, expected
+):
+    """The Planner's forward-pass metrics follow the opt-in shared with vLLM
+    and SGLang, plus --publish-metrics, which already pays for the iteration
+    statistics both read. --publish-kv-events alone never enables them."""
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    # Config.validate writes DYN_FPM_TRACE back; setenv restores it on teardown.
+    monkeypatch.setenv("DYN_FPM_TRACE", "0")
+    if fpm_port_env is not None:
+        monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", fpm_port_env)
 
-    with pytest.raises(ValueError, match="TLLM_KV_CACHE_MANAGER_V2_BACKEND=python"):
-        _validate_streaming_kv_events_backend()
+    config = parse_args(["--model", "fake-model", *cli_args])
 
-
-def test_streaming_kv_events_accept_python_v2_cache_manager(monkeypatch):
-    monkeypatch.setenv("TLLM_KV_CACHE_MANAGER_V2_BACKEND", "python")
-
-    _validate_streaming_kv_events_backend()
+    assert config.publish_forward_pass_metrics is expected
 
 
 @pytest.mark.parametrize(
-    ("publish_flags", "expected_iter_perf_stats"),
+    ("publish_flags", "fpm_port_env", "expected_iter_perf_stats"),
     [
-        (["--publish-kv-events"], False),
-        (["--publish-metrics"], True),
-        (["--publish-kv-events", "--publish-metrics"], True),
-        (["--publish-events-and-metrics"], True),
+        (["--publish-kv-events"], None, False),
+        (["--publish-metrics"], None, True),
+        (["--fpm-trace"], None, True),
+        ([], "20380", True),
+        ([], None, False),
+        (["--publish-kv-events", "--publish-metrics"], None, True),
+        (["--publish-events-and-metrics"], None, True),
     ],
 )
 @pytest.mark.asyncio
 async def test_init_llm_worker_engine_args_without_overrides(
-    monkeypatch, publish_flags, expected_iter_perf_stats
+    monkeypatch, publish_flags, fpm_port_env, expected_iter_perf_stats
 ):
-    """KV events and metrics control their respective engine paths independently."""
+    """Iteration stats follow --publish-metrics and the forward-pass metrics
+    opt-in, never --publish-kv-events alone; the engine-level
+    return_perf_metrics default stays off regardless."""
     monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_EXTRA_ENGINE_ARGS", raising=False)
@@ -533,6 +557,10 @@ async def test_init_llm_worker_engine_args_without_overrides(
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", raising=False)
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    monkeypatch.setenv("DYN_FPM_TRACE", "0")
+    if fpm_port_env is not None:
+        monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", fpm_port_env)
 
     if publish_flags == ["--publish-events-and-metrics"]:
         with pytest.warns(
@@ -663,7 +691,205 @@ async def test_publish_events_does_not_materialize_unset_kv_cache_defaults(monke
         kv_cache_config["free_gpu_memory_fraction"] == config.free_gpu_memory_fraction
     )
     assert kv_cache_config["event_buffer_max_size"] > 0
+    # Text workers keep TRT-LLM's KV cache manager default.
+    assert "use_kv_cache_manager_v2" not in kv_cache_config
     assert "enable_swa_scratch_reuse" not in kv_cache_config
+
+
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_kv_cache_config_override_merges_into_yaml(monkeypatch, tmp_path):
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    yaml_file = tmp_path / "engine_config.yaml"
+    yaml_file.write_text(
+        "kv_cache_config:\n  free_gpu_memory_fraction: 0.5\n  event_buffer_max_size: 64\n"
+    )
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--publish-kv-events",
+            "--extra-engine-args",
+            str(yaml_file),
+            "--override-engine-args",
+            '{"kv_cache_config": {"use_kv_cache_manager_v2": true}}',
+        ]
+    )
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    kv_cache_config = exc_info.value.engine_args["kv_cache_config"]
+    assert kv_cache_config["use_kv_cache_manager_v2"] is True
+    assert kv_cache_config["free_gpu_memory_fraction"] == 0.5
+    assert kv_cache_config["event_buffer_max_size"] == 64
+
+
+def _kv_engine_args(kv_cache_config=None, cache_transceiver_config=None, sleep=False):
+    engine_args = {
+        "kv_cache_config": {} if kv_cache_config is None else kv_cache_config
+    }
+    if cache_transceiver_config is not None:
+        engine_args["cache_transceiver_config"] = cache_transceiver_config
+    if sleep:
+        engine_args["sleep_config"] = object()
+    return engine_args
+
+
+def _modality_config(modality):
+    return mock.MagicMock(modality=modality)
+
+
+_POLLING = KvEventPublicationMode.POLLING
+_NO_EVENTS = KvEventPublicationMode.DISABLED
+
+
+@pytest.mark.parametrize(
+    "cache_transceiver_config, expected",
+    [
+        (None, None),
+        ({}, None),
+        ({"backend": None}, None),
+        ({"backend": "DEFAULT"}, "PYTHON"),
+        ({"backend": "NIXL", "transceiver_runtime": "PYTHON"}, "PYTHON"),
+        ({"backend": "UCX", "transceiver_runtime": "CPP"}, "CPP"),
+        ({"backend": "NIXL", "transceiver_runtime": None}, "CPP"),
+        ({"backend": "NIXL", "transceiver_runtime": "auto"}, "auto"),
+    ],
+)
+def test_cache_transceiver_runtime(cache_transceiver_config, expected):
+    engine_args = _kv_engine_args(cache_transceiver_config=cache_transceiver_config)
+    assert _cache_transceiver_runtime(engine_args) == expected
+
+
+@pytest.mark.parametrize("modality", [Modality.TEXT, Modality.MULTIMODAL])
+def test_configure_kv_cache_manager_leaves_python_transceiver_pairs_alone(modality):
+    engine_args = _kv_engine_args(cache_transceiver_config={"backend": "NIXL"})
+    _configure_kv_cache_manager(engine_args, _modality_config(modality), _NO_EVENTS)
+    assert engine_args["kv_cache_config"] == {}
+    assert engine_args["cache_transceiver_config"] == {"backend": "NIXL"}
+
+
+def test_configure_kv_cache_manager_text_events_keep_default():
+    engine_args = _kv_engine_args(cache_transceiver_config={"backend": "NIXL"})
+    _configure_kv_cache_manager(engine_args, _modality_config(Modality.TEXT), _POLLING)
+    assert engine_args["kv_cache_config"] == {}
+
+
+@pytest.mark.parametrize("runtime", ["CPP", None])
+def test_configure_kv_cache_manager_follows_cpp_runtime(runtime):
+    transceiver = {"backend": "UCX", "transceiver_runtime": runtime}
+    engine_args = _kv_engine_args(cache_transceiver_config=transceiver)
+    _configure_kv_cache_manager(engine_args, _modality_config(Modality.TEXT), _POLLING)
+    assert engine_args["kv_cache_config"] == {"use_kv_cache_manager_v2": False}
+    assert engine_args["cache_transceiver_config"] == transceiver
+
+
+def test_configure_kv_cache_manager_reads_unset_from_typed_config():
+    kv_cache_config = KvCacheConfig(free_gpu_memory_fraction=0.5)
+    engine_args = _kv_engine_args(
+        kv_cache_config=kv_cache_config,
+        cache_transceiver_config={"backend": "UCX", "transceiver_runtime": "CPP"},
+    )
+    _configure_kv_cache_manager(engine_args, _modality_config(Modality.TEXT), _POLLING)
+    assert kv_cache_config.use_kv_cache_manager_v2 is False
+
+
+def test_configure_kv_cache_manager_keeps_explicit_v2_with_cpp():
+    # TRT-LLM rejects this pair with its own error; Dynamo does not rewrite it.
+    engine_args = _kv_engine_args(
+        kv_cache_config={"use_kv_cache_manager_v2": True},
+        cache_transceiver_config={"backend": "UCX", "transceiver_runtime": "CPP"},
+    )
+    _configure_kv_cache_manager(engine_args, _modality_config(Modality.TEXT), _POLLING)
+    assert engine_args["kv_cache_config"] == {"use_kv_cache_manager_v2": True}
+
+
+def test_configure_kv_cache_manager_multimodal_events_use_v1():
+    engine_args = _kv_engine_args()
+    _configure_kv_cache_manager(
+        engine_args, _modality_config(Modality.MULTIMODAL), _POLLING
+    )
+    assert engine_args["kv_cache_config"] == {"use_kv_cache_manager_v2": False}
+
+
+@pytest.mark.parametrize("explicit_v2", [True, "auto"])
+def test_configure_kv_cache_manager_multimodal_events_reject_v2(explicit_v2):
+    engine_args = _kv_engine_args(
+        kv_cache_config={"use_kv_cache_manager_v2": explicit_v2}
+    )
+    with pytest.raises(ValueError, match="multimodal workers"):
+        _configure_kv_cache_manager(
+            engine_args, _modality_config(Modality.MULTIMODAL), _POLLING
+        )
+
+
+@pytest.mark.parametrize(
+    "modality, mode, sleep",
+    [
+        (Modality.MULTIMODAL, _POLLING, False),
+        (Modality.TEXT, _NO_EVENTS, True),
+    ],
+    ids=["multimodal-events", "sleep"],
+)
+@pytest.mark.parametrize(
+    "transceiver",
+    [
+        {"backend": "DEFAULT"},
+        {"backend": "NIXL", "transceiver_runtime": "PYTHON"},
+        {"backend": "NIXL", "transceiver_runtime": "auto"},
+    ],
+    ids=["default-runtime", "python", "auto"],
+)
+def test_configure_kv_cache_manager_v1_requires_cpp_transceiver(
+    modality, mode, sleep, transceiver
+):
+    engine_args = _kv_engine_args(cache_transceiver_config=transceiver, sleep=sleep)
+    with pytest.raises(ValueError, match="both the prefill and the decode worker"):
+        _configure_kv_cache_manager(engine_args, _modality_config(modality), mode)
+    assert engine_args["cache_transceiver_config"] == transceiver
+
+
+@pytest.mark.parametrize(
+    "modality, mode, sleep",
+    [
+        (Modality.MULTIMODAL, _POLLING, False),
+        (Modality.TEXT, _NO_EVENTS, True),
+    ],
+    ids=["multimodal-events", "sleep"],
+)
+@pytest.mark.parametrize("runtime", ["CPP", None])
+def test_configure_kv_cache_manager_v1_accepts_cpp_transceiver(
+    modality, mode, sleep, runtime
+):
+    transceiver = {"backend": "UCX", "transceiver_runtime": runtime}
+    engine_args = _kv_engine_args(cache_transceiver_config=transceiver, sleep=sleep)
+    _configure_kv_cache_manager(engine_args, _modality_config(modality), mode)
+    assert engine_args["kv_cache_config"] == {"use_kv_cache_manager_v2": False}
+    assert engine_args["cache_transceiver_config"] == transceiver
+
+
+def test_configure_kv_cache_manager_sleep_without_transceiver():
+    # TRT-LLM selects KV cache manager v1 itself when sleep_config is set.
+    engine_args = _kv_engine_args(sleep=True)
+    _configure_kv_cache_manager(
+        engine_args, _modality_config(Modality.TEXT), _NO_EVENTS
+    )
+    assert engine_args["kv_cache_config"] == {}
 
 
 class MultimodalProcessorInstantiated(Exception):

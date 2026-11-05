@@ -13,7 +13,9 @@ Use Dynamo when rollout serving has become a distributed-systems problem: many w
 
 In production, [Cognition used Dynamo while training SWE-1.7](https://cognition.com/blog/swe-1-7) to manage inference-engine lifecycles and route inference across a multi-cluster RL system. When a replica failed, Dynamo rerouted inference to another worker and rescheduled the replica so the rollout pipeline could remain available while the latest policy state was restored.
 
-Dynamo also connects to a growing RL framework ecosystem. [verl](https://github.com/verl-project/verl-recipe/tree/main/dynamo) publishes a Dynamo rollout recipe, [NeMo RL](https://github.com/NVIDIA-NeMo/RL/tree/main/nemo_rl/models/generation/dynamo) includes a managed Dynamo generation backend, and [Prime-RL](https://www.primeintellect.ai/blog/rl-at-1t-scale) supports the Dynamo router as a drop-in routing option. Integration work with [SLIME](integration-reference.md#framework-compatibility) extends the same serving capabilities to SGLang-based rollout stacks. Together, these paths demonstrate that Dynamo can support different training frameworks and deployment models while leaving RL semantics with the trainer.
+Dynamo connects to these RL frameworks. [verl](https://github.com/verl-project/verl-recipe/tree/main/dynamo) publishes a Dynamo rollout recipe. [NeMo RL](https://github.com/NVIDIA-NeMo/RL/tree/main/nemo_rl/models/generation/dynamo) includes a managed Dynamo generation backend. [Prime-RL](https://www.primeintellect.ai/blog/rl-at-1t-scale) supports the Dynamo router as a drop-in routing option. The experimental [Slime integration](slime.md) runs stock SGLang engines with Dynamo sidecars.
+
+These integrations support different training frameworks and deployment models. The trainer retains ownership of RL semantics.
 
 ## Keep Rollouts Running Through Failures
 
@@ -46,7 +48,7 @@ Start with a specific bottleneck and a baseline metric. Measure cache reuse, wor
 | Custom or external trainer | Experimental contract | [External Trainer Integration](implementation-guide.md) for generation, discovery, administration, and policy updates. |
 | verl | Experimental | [verl Integration](verl.md) for the public colocated Dynamo/vLLM recipe. |
 | NeMo RL | Experimental | [NeMo RL Integration](nemo-rl.md) for the managed Slurm/Ray Dynamo backend. |
-| SLIME | Integration in progress | Review the current boundary in [Framework Compatibility](integration-reference.md#framework-compatibility). |
+| Slime | Experimental fixed worker set | Use the [Slime Integration](slime.md) with the streaming external-rollout support from Slime. |
 | Prime-RL | Routing available; integration in progress | See [Prime-RL's routing overview](https://www.primeintellect.ai/blog/rl-at-1t-scale) and the current boundary in [Framework Compatibility](integration-reference.md#framework-compatibility). |
 
 Experimental guides have runnable upstream artifacts but do not make a general compatibility promise. Integrations in progress remain in the compatibility table until a maintained path lands.

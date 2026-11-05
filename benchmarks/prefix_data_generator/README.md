@@ -32,7 +32,7 @@ from prefix_data_generator.hasher import texts_to_hashes
 
 **Timestamp:** The arrival time (in milliseconds) of the request since the first request, which can be the same for multiple requests arriving simultaneously.
 
-**Block Size and Hash IDs:** In this example, the `block_size` (the page size of the KV cache) is assumed to be 512. The length of the `hash_ids` array equals `input_length // block_size`.
+**Block Size and Hash IDs:** In this example, the `block_size` (the page size of the KV cache) is assumed to be 512. The length of the `hash_ids` array equals `ceil(input_length / block_size)` (including a final partial block).
 
 ## Prefix Analyzer
 
@@ -65,11 +65,15 @@ datagen synthesize --input-file <path_to_trace.jsonl> --num-requests <N> [other 
 **Options:**
 - `--input-file`: Path to the input trace file (default: `mooncake_trace.jsonl`)
 - `--num-requests`: Number of requests to synthesize (default: 100000)
-- `--speedup-ratio`: Factor to speed up request intervals. It effectively divides the synthetic timestamps by this value (default: 1)
-- `--prefix-len-multiplier`: Multiplier for prefix lengths (default: 1.0)
-- `--prefix-root-multiplier`: Number of times to replicate the core radix tree (default: 1)
+- `--speedup-ratio`: Divide sampled arrival intervals by this value (default: 1). Timestamps retain fractional milliseconds.
+- `--prefix-len-multiplier`: Scale each compressed shared-prefix branch by this factor, then round to the nearest block count with a minimum of one (default: 1.0).
+- `--prefix-root-multiplier`: Number of independent prefix-tree namespaces (default: 1). Each request chooses one uniformly; this does not increase the requested row count.
 - `--prompt-len-multiplier`: Multiplier for leaf path lengths (default: 1.0, use <1 for shorter prompts)
-- `--max-isl`: Maximum input sequence length to include in output (default: None, no filtering)
+- `--min-isl`, `--max-isl`: Accept only input lengths within these bounds (default: no filtering).
+- `--max-rejections`: Fail after this many consecutive ISL rejections (default: 10000). Relax the bounds or raise the limit for rare accepted lengths.
+- `--osl-multiplier`: Scale output length and truncate to integer tokens (default: 1.0).
+- `--min-osl`, `--max-osl`: Clip output lengths after scaling (default: no clipping).
+- `--seed`: Seed all sampling, including tree traversal and copy selection (default: 0).
 - `--block-size`: Block size for prefilling and decoding (default: 512)
 - `--output-file`: Path to the output file (default: auto-generated from input file and options)
 
@@ -98,16 +102,22 @@ If we set the `prefix-len-multiplier` to 2, then the core prefix branches will b
 
 Note that the "prompt branches" are not stretched by `prefix-len-multiplier`. They can be separately modified by applying `prompt-len-multiplier`.
 
-Now, if we set `prefix-root-multiplier` to 2, then each row will have a 50 percent chance of being incremented by a large integer, so that they will be effectively separated into a new radix tree, which matches the statistics of the original one, but having completely different roots.
+Now, if we set `prefix-root-multiplier` to 2, each row has a 50 percent chance of using either independent radix tree. Both trees have the same structure and distinct hash IDs. The implementation maps each ID to `id * num_copies + copy_index`, keeping namespaces stable across repeated calls to `synthesize_requests`. With two copies, the first tree uses even IDs and the second uses odd IDs.
 
-For example, if rows 2 and 4 are offseted, then we would get:
+For example, if rows 2 and 4 use the second tree, then we would get:
 
 ```
-[0, 1, 2, 3, 4, 5, (6)]
-[10, 11, 12, 13]
-[0, 1, 2, 3, 4, 5]
-[10, 11, (14), (15)]
+[0, 2, 4, 6, 8, 10, (12)]
+[1, 3, 5, 7]
+[0, 2, 4, 6, 8, 10]
+[1, 3, (15), (17)]
 ```
+
+Synthetic hash IDs are normalized even when all multipliers are one. Do not mix
+these IDs with the original trace. Terminal partial blocks retain their sampled
+token remainder, including requests that end within the shared prefix tree.
+`context_len` describes potentially reusable content; actual cache hits depend on
+which requests have already arrived and the available cache capacity.
 
 ### Implementation details
 
@@ -123,13 +133,25 @@ The generation algorithm, simplified, is as follows
 
 To test for "correctness", or faithfulness to the original trace statistics, one can run
 ```
-python -m benchmarks.data_utils.synthesizer \
+datagen synthesize \
 --input-file mooncake_trace.jsonl \
 --num-requests 500000 \
 ```
 and compare the synthetic ISL statistics (mean, median, std) to the original ISL statistics, which one can obtain by running
 ```
-python -m benchmarks.data_utils.prefix_analyzer \
+datagen analyze \
 --input-file mooncake_trace.jsonl \
 ```
 I find this to be the most "robust" end-to-end test. It is important to sample a large number of requests (e.g., hundreds of thousands) to ensure the statistics are meaningful, due to the law of large numbers. In particular, the mean statistics (such as mean ISL) should be well preserved in the synthetic data. However, the standard deviation statistics—especially for ISL—are not expected to match exactly, since the synthesizer does not capture the correlation between context length and prompt length present in the original data.
+
+These regression tests remain excluded from automatic collection. Run them explicitly
+from the repository root, using its Python environment:
+
+```bash
+PYTHONPATH=benchmarks .venv/bin/python -m pytest -c pyproject.toml \
+  benchmarks/prefix_data_generator/tests/test_sampler.py \
+  benchmarks/prefix_data_generator/tests/test_synthesizer.py -q
+```
+
+The suite requires the benchmark Python dependencies and pytest. It does not download
+models or tokenizers; the external tokenizer round-trip suite remains opt-in.

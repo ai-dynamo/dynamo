@@ -20,17 +20,28 @@ This page describes multimodal inference with the Dynamo vLLM backend.
 | Modality | Aggregated | P/D | Separate encode worker |
 | --- | --- | --- | --- |
 | **Image** | Yes | Yes | Yes |
-| **Video** | Yes, H.264/H.265 | Yes, H.264/H.265 | Processed by the language-model worker |
+| **Video** | Yes; codec support depends on the decode path below | Yes, with backend decoding | Processed by the language-model worker |
 | **Audio** | Yes | Yes, with decode reload | Not routed to the separate encoder |
 
 > [!IMPORTANT]
-> **Video input is limited to H.264 and H.265.** The runtime images ship no software
-> video decoder, so these codecs are decoded on the GPU by NVDEC and no other codec
-> (VP8, VP9, AV1) has a decoder available. NVDEC decode requires a GPU with a video
-> decode engine and a container granted the `video` driver capability — see
-> [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
-> `http`, `https`, `file://` and `data:` sources are all hardware-decoded; `file://`
-> additionally requires `DYN_MM_LOCAL_PATH` to permit local reads.
+> Video codec support depends on where decoding runs:
+>
+> - **Backend decoding:** shipped CUDA images use NVDEC for H.264 and H.265.
+>   This requires a GPU with a video decode engine and the container's `video`
+>   driver capability. See [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
+> - **Rust frontend decoding:** aggregated workers with `--frontend-decoding`
+>   can receive VP8/VP9 frames decoded on the CPU by the in-tree FFmpeg.
+>   The shipped FFmpeg build does not decode H.264, H.265, or AV1. Installing
+>   Python decoder packages does not extend this path; additional codecs require
+>   a different FFmpeg build.
+>
+> **Backend software decoding** can support additional codecs without rebuilding
+> Dynamo. Explicitly install the backend's Python decoder packages using
+> [Additional Media Decoders](../../../../../use-cases/multimodal-serving/additional-media-decoders.md).
+> The installer extends backend decoding only, not Rust frontend decoding.
+> These paths depend on the deployed image and configuration; an older pinned
+> image may not provide the frontend decoder. Local `file://` reads additionally
+> require `DYN_MM_LOCAL_PATH`.
 
 ### Supported URL Formats
 
@@ -40,10 +51,22 @@ This page describes multimodal inference with the Dynamo vLLM backend.
 | **Data URL**   | `data:image/jpeg;base64,/9j/4AAQ...` | Base64-encoded inline data |
 
 > [!NOTE]
+> Inline `data:` media is forwarded once on the request plane in `multi_modal_data`.
+> The frontend strips the inline payload from `extra_args.messages` so the worker
+> frame is not doubled. A serialized frame that still exceeds
+> `DYN_TCP_MAX_MESSAGE_SIZE` (32 MiB by default) returns HTTP 400. See
+> [Frontend Configuration](../../../../../reference/components/frontend-configuration.mdx).
+
+> [!NOTE]
 > Media URLs are validated against a default-deny policy. `https://` and `data:` sources
 > pass; plain `http://` and hostnames that resolve to private or loopback addresses are
-> refused. To fetch media over the cluster's internal network, set
-> `DYN_MM_ALLOW_INTERNAL=1` on the worker that loads it.
+> refused. Two settings change this:
+>
+> - `DYN_MM_ALLOW_INTERNAL=1`, on the worker that loads the media, allows `http://` and
+>   internal hosts.
+> - `DYN_MM_ALLOW_REMOTE_URLS=0`, on the frontend and the workers, refuses every remote
+>   media URL and takes precedence over `DYN_MM_ALLOW_INTERNAL`. See
+>   [Runtime Configuration](../../../../../reference/components/runtime-configuration.mdx#multimodal-and-media-output).
 
 ## Deployment Patterns
 
@@ -63,16 +86,22 @@ The aggregated vLLM worker can load an author-provided vision tower in process, 
 
 ## Multimodal KV Routing
 
-vLLM supports two multimodal KV-routing paths. Both give the router and vLLM the same image identity so requests can be placed on workers that already cache the image's KV blocks.
+vLLM supports two multimodal KV-routing paths. Both give the router and vLLM the same media identity so requests can be placed on workers that already cache the image or video's KV blocks.
+
+Video inference, backend prefix-cache reuse, and media-aware worker selection are
+separate capabilities. A successful video response or a backend cache hit does not
+prove that video identity influenced routing. Exact video affinity also requires
+KV-aware routing, matching worker KV events, and an eligible request on one of
+the paths below.
 
 ### Choose a Routing Path
 
 | Consideration | Default Rust Frontend | Python Chat Processor |
 |---------------|-----------------------|-----------------------|
-| Frontend work | Hashes media and calculates the routing token layout | Runs vLLM's full Hugging Face multimodal processor |
+| Frontend work | Hashes media and calculates the routing token layout; exact video routing also samples and decodes the video | Runs vLLM's full Hugging Face multimodal processor |
 | Worker work | Processes the original multimodal input | Consumes processed `mm_kwargs` when transfer succeeds |
 | Model coverage | Models registered in Dynamo's `llm-multimodal` registry | Models supported by vLLM's multimodal processor |
-| Data sent to worker | Original media reference plus `mm_hashes` | Processed inputs over shared memory or NIXL, with media fallback when available |
+| Data sent to worker | Original image reference or frontend-decoded media, plus modality-grouped hashes | Processed inputs over shared memory or NIXL, with media fallback when available |
 | Best fit | Lowest frontend overhead for a registered model | Broader model coverage or centralized preprocessing |
 
 Start with the default path when the model is in Dynamo's Rust registry. It avoids running the full Hugging Face processor in the frontend and does not require a processed-input transfer channel.
@@ -83,13 +112,15 @@ Use the Python chat processor when the Rust registry does not recognize the mode
 
 The default path keeps multimodal processing on the worker:
 
-1. The frontend computes an `mm_hash` for each image.
-2. A model-specific processor specification resolves the image placeholder and calculates its expanded token count.
+1. The frontend computes an `mm_hash` for each supported media object.
+2. A model-specific processor specification resolves the media placeholder and calculates its expanded token layout.
 3. The frontend expands the placeholder in a routing-only token view and builds per-block multimodal metadata.
 4. The KV router credits that overlap in its combined prefill-and-decode cost and selects the lowest-cost eligible worker.
-5. The frontend forwards `mm_hashes`, which the worker passes to vLLM as `multi_modal_uuids`.
+5. The frontend forwards image hashes through `mm_hashes` and grouped image/video hashes through `mm_hashes_by_modality`. The worker passes them to vLLM as `multi_modal_uuids`.
 
 By default, the frontend hashes the exact full URI: the complete `data:` URI string or the HTTP URL including its query string. Set `--frontend-decoding` on the worker to register frontend media decoding and use decoded image content as the hash input. Content-addressed hashing lets different URLs for identical image bytes share a routing key.
+
+Exact video routing on this path requires `--frontend-decoding`. The frontend hashes sampled RGB frames and their model-visible metadata, then uses a model adapter to reproduce the worker's prompt expansion. Supported adapters cover Qwen3-VL, Qwen3.5, and Nemotron 3 Nano Omni. See [Multimodal KV Routing](../../../../../use-cases/multimodal-serving/multimodal-kv-routing.md#video-identity-and-token-layout) for setup, verification, and fallback behavior.
 
 Launch the default path:
 
@@ -106,18 +137,18 @@ Key settings:
 | `NUM_WORKERS` | `2` | Number of backend workers |
 | `BLOCK_SIZE` | `16` | Shared frontend and worker KV block size |
 | `GPU_MEMORY_UTILIZATION` | `0.20` | Per-worker GPU memory fraction |
-| `VLLM_EXTRA_ARGS` | unset | Additional worker flags; set `--frontend-decoding` for content-addressed image hashes |
+| `VLLM_EXTRA_ARGS` | unset | Additional worker flags; set `--frontend-decoding` for content-addressed image hashes and exact video routing |
 
 ### Python Chat Processor
 
-Use the Python path when the model is supported by vLLM but not by the Rust model registry, or when the frontend should preprocess images:
+Use the Python path when the model is supported by vLLM but not by the Rust model registry, or when the frontend should preprocess media:
 
 ```bash
 cd $DYNAMO_HOME
 bash examples/backends/vllm/launch/agg_multimodal_router_chat_processor.sh
 ```
 
-This launcher sets `--dyn-chat-processor vllm`. The frontend runs vLLM's Hugging Face processor, extracts hashes and expanded multimodal inputs, builds routing metadata, and transfers processed `mm_kwargs` to the selected worker. This path supports any VLM handled by vLLM's multimodal processor.
+This launcher sets `--dyn-chat-processor vllm`. The frontend runs vLLM's Hugging Face processor, extracts hashes and expanded multimodal inputs for images and videos, builds routing metadata, and transfers processed `mm_kwargs` to the selected worker. This path supports models handled by vLLM's multimodal processor.
 
 `DYNAMO_MM_TRANSFER` selects the transfer mechanism:
 
@@ -209,11 +240,10 @@ curl http://localhost:8000/v1/chat/completions \
 ### Reuse vLLM multimodal processor cache entries
 
 vLLM can cache processed multimodal inputs under a client-provided opaque UUID.
-Dynamo currently exposes this behavior for images only. The extension is
-specific to vLLM; it is not part of the OpenAI Chat Completions API and is not
-supported by Dynamo's other backends. Dynamo rejects UUIDs on audio or video,
-and its SGLang and TensorRT-LLM backends reject image UUIDs rather than silently
-ignoring unsupported cache semantics.
+Dynamo forwards UUIDs with URL-backed image, video, and audio inputs.
+The extension is specific to vLLM; it is not part of the OpenAI Chat Completions
+API and is not supported by Dynamo's other backends. Dynamo's SGLang and
+TensorRT-LLM backends reject cache UUIDs rather than silently ignoring them.
 
 To enable the cache, pass a nonzero `--mm-processor-cache-gb` value to the vLLM
 worker.
@@ -234,6 +264,13 @@ cache. Keep both caches enabled; the embedding cache alone cannot reconstruct a
 UUID-only input. Both caches are local to one vLLM engine, so the fill and reuse
 requests must reach the same aggregated worker.
 
+With the Python vLLM chat processor, requests that include client UUIDs defer
+multimodal processing to the worker so the same local vLLM cache handles both
+population and reuse. With the default Rust frontend, URL-backed media can still
+be decoded by the frontend when frontend decoding is enabled; Dynamo forwards
+the aligned UUIDs with the decoded media. UUID-only image slots reach the vLLM
+worker for cache resolution.
+
 Populate an entry by adding `uuid` beside the media field:
 
 ```json
@@ -243,6 +280,19 @@ Populate an entry by adding `uuid` beside the media field:
     "url": "https://example.com/image.png"
   },
   "uuid": "catalog-image-42"
+}
+```
+
+The same shape works for video and audio. For example, a video URL with a UUID
+provides a stable identity for the corresponding vLLM cache entry:
+
+```json
+{
+  "type": "video_url",
+  "video_url": {
+    "url": "https://example.com/video.mp4"
+  },
+  "uuid": "catalog-video-42"
 }
 ```
 
@@ -257,6 +307,9 @@ sending the same top-level UUID:
 }
 ```
 
+UUID-only cache reuse is currently limited to images in Dynamo. Audio and video
+parts must include a URL even when they also provide a UUID.
+
 UUIDs are opaque nonempty strings and must use the top-level field shown above.
 A UUID-only request fails on a cache miss because it contains no media payload
 to process. Dynamo also rejects a media content part that has neither a URL nor
@@ -270,12 +323,18 @@ router and worker.
 ### P/D Serving
 
 Use the P/D launcher to separate prefill and decode without deploying a
-dedicated multimodal encoder:
+dedicated multimodal encoder.
+
+In `--single-gpu` mode, each worker defaults to the first entry of `CUDA_VISIBLE_DEVICES`. Set it to the assigned GPU, for example `CUDA_VISIBLE_DEVICES=1`. Explicit `DYN_PREFILL_WORKER_GPU` and `DYN_DECODE_WORKER_GPU` values take precedence for their respective workers. If any worker needs the inherited default, an unset or empty first entry is an error.
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
 
+# Multi-GPU deployment
 bash launch/disagg_multimodal_p_d.sh --model Qwen/Qwen3-VL-2B-Instruct
+
+# Single-GPU (functional testing with small models; select GPU 0 explicitly)
+CUDA_VISIBLE_DEVICES=0 bash launch/disagg_multimodal_p_d.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu
 ```
 
 For Qwen-VL images, prefill sends grid and embedding-shape metadata so decode
@@ -292,6 +351,8 @@ model families use the expanded prompt token IDs produced during prefill.
 
 Use `disagg_multimodal_e_pd.sh` when you want a separate encode worker and a combined prefill/decode worker. This path is primarily useful for image-centric workloads and embedding-cache experiments.
 
+In `--single-gpu` mode, each worker defaults to the first entry of `CUDA_VISIBLE_DEVICES`. Set it to the assigned GPU, for example `CUDA_VISIBLE_DEVICES=1`. Explicit `DYN_ENCODE_WORKER_GPU` and `DYN_PD_WORKER_GPU` values take precedence for their respective workers. If any worker needs the inherited default, an unset or empty first entry is an error.
+
 > [!WARNING]
 > When a separate encode worker is deployed with the current vLLM path, only `image_url` inputs are routed to it. `video_url` inputs are still processed on the combined PD worker.
 
@@ -301,14 +362,16 @@ cd $DYNAMO_HOME/examples/backends/vllm
 # Multi-GPU deployment
 bash launch/disagg_multimodal_e_pd.sh --model Qwen/Qwen3-VL-2B-Instruct
 
-# Single-GPU (functional testing with small models)
-bash launch/disagg_multimodal_e_pd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu
+# Single-GPU (functional testing with small models; select GPU 0 explicitly)
+CUDA_VISIBLE_DEVICES=0 bash launch/disagg_multimodal_e_pd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu
 
 ```
 
 ### E/P/D Serving (Full Disaggregation)
 
 Use `disagg_multimodal_epd.sh` when you want separate encode, prefill, and decode workers for multimodal workloads.
+
+In `--single-gpu` mode, each worker defaults to the first entry of `CUDA_VISIBLE_DEVICES`. Set it to the assigned GPU, for example `CUDA_VISIBLE_DEVICES=1`. Explicit `DYN_ENCODE_WORKER_GPU`, `DYN_PREFILL_WORKER_GPU`, and `DYN_DECODE_WORKER_GPU` values take precedence for their respective workers. If any worker needs the inherited default, an unset or empty first entry is an error.
 
 > [!WARNING]
 > In the current vLLM implementation, the separate encode worker is only used for `image_url` inputs. `video_url` inputs are still processed on the prefill worker, not on the encode worker.
@@ -319,8 +382,8 @@ cd $DYNAMO_HOME/examples/backends/vllm
 # Multi-GPU deployment
 bash launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-VL-2B-Instruct
 
-# Single-GPU (functional testing with small models)
-bash launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu
+# Single-GPU (functional testing with small models; select GPU 0 explicitly)
+CUDA_VISIBLE_DEVICES=0 bash launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu
 ```
 
 ## Audio Serving

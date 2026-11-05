@@ -1,0 +1,362 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: dgd-lpx-v2-vllm
+  namespace: inference-engine
+spec:
+  components:
+    - name: frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - args:
+                - --model-name
+                - meta-llama/Llama-3.2-1B-Instruct
+                - --router-mode
+                - kv
+                - --router-reset-states
+                - --no-decode-fallback
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              env:
+                - name: HF_HOME
+                  value: /nfs/huggingface
+                - name: HF_HUB_CACHE
+                  value: /nfs/huggingface/hub
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+              name: main
+              volumeMounts:
+                - mountPath: /nfs
+                  name: model-storage
+    - name: lpu
+      type: lpx
+      replicas: 2
+      lpx:
+        buildId: llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
+      roles:
+      - name: conductor
+        replicas: 1
+        podTemplate:
+          spec:
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                  - matchExpressions:
+                    - key: kubernetes.io/hostname
+                      operator: In
+                      values:
+                      - gpu-node-0
+            containers:
+            - args:
+              - --dynamo-model-name
+              - meta-llama/Llama-3.2-1B-Instruct
+              - --model-card
+              - /etc/cyborg/model-card.json
+              - --use-disagg-prefill
+              - --nixl-kv-layout
+              - HND
+              - --num-layers
+              - '16'
+              env:
+              - name: GLUE_RDMA_PATH_MTU
+                value: '1024'
+              - name: RDMA_PORT
+                value: '19877'
+              - name: SERVER_HOSTS_FILE
+                value: /tmp/lpu_servers
+              - name: CYBORG_FPGA_GPI_REPLICA_INDEX
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['grove.io/podclique-pod-index']
+              image: example.invalid/gpu-runtime:test
+              name: main
+              resources:
+                limits:
+                  nvidia.com/gpu: '1'
+              command:
+              - /usr/local/bin/cyborg-entrypoint
+              - --expand-hosts
+              - --
+              - /usr/local/bin/cyborg
+              startupProbe:
+                failureThreshold: 720
+                httpGet:
+                  path: /live
+                  port: system
+                periodSeconds: 10
+                timeoutSeconds: 5
+              readinessProbe:
+                failureThreshold: 3
+                httpGet:
+                  path: /health
+                  port: system
+                periodSeconds: 10
+                timeoutSeconds: 4
+              livenessProbe:
+                failureThreshold: 1
+                httpGet:
+                  path: /live
+                  port: system
+                periodSeconds: 5
+                timeoutSeconds: 4
+              volumeMounts:
+              - name: config
+                mountPath: /configs
+              - mountPath: /etc/cyborg/model-card.json
+                name: cyborg-model-card
+                readOnly: true
+                subPath: model-card.json
+              - name: infiniband
+                mountPath: /dev/infiniband
+              - mountPath: /nfs
+                name: model-storage
+            tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+            volumes:
+            - configMap:
+                name: dgd-lpx-v2-vllm-cyborg-model-card
+              name: cyborg-model-card
+            - name: infiniband
+              hostPath:
+                path: /dev/infiniband
+                type: Directory
+            - name: model-storage
+              persistentVolumeClaim:
+                claimName: model-storage
+            securityContext:
+              fsGroup: 1000
+              fsGroupChangePolicy: OnRootMismatch
+      - name: agent
+        podTemplate:
+          spec:
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                  - matchExpressions:
+                    - key: kubernetes.io/hostname
+                      operator: In
+                      values:
+                      - lpu-node-01
+                      - lpu-node-02
+                      - lpu-node-03
+                      - lpu-node-04
+                      - lpu-node-05
+                      - lpu-node-06
+                      - lpu-node-07
+                      - lpu-node-08
+                      - lpu-node-09
+                      - lpu-node-10
+                      - lpu-node-11
+                      - lpu-node-12
+                      - lpu-node-13
+                      - lpu-node-14
+                      - lpu-node-15
+                      - lpu-node-16
+                      - lpu-node-17
+                      - lpu-node-18
+                      - lpu-node-19
+                      - lpu-node-20
+                      - lpu-node-21
+                      - lpu-node-22
+                      - lpu-node-23
+                      - lpu-node-24
+            containers:
+            - args:
+              - -c
+              - "readarray -t partition_node_counts < /configs/nodes_per_partition\nreadarray -t partition_node_offsets < /configs/partition_node_offsets\n\
+                part=\"\"\nfor i in \"${!partition_node_counts[@]}\"; do\n  if (( GROVE_PCLQ_POD_INDEX >= partition_node_offsets[i]\
+                \ &&\n        GROVE_PCLQ_POD_INDEX < partition_node_offsets[i] + partition_node_counts[i] )); then\n    part=\"\
+                ${i}\"\n    break\n  fi\ndone\n: \"${part:?no partition row for Grove pod index ${GROVE_PCLQ_POD_INDEX}}\"\nexec\
+                \ agent-hybrid-v2 \\\n  --assemble-dir \"${GAS_DIR}\" \\\n  --part \"${part}\" \\\n  --port \"${RDMA_PORT}\" \\\
+                \n  --nic \"${NIC_NAME}\" \\\n  --metadata-file \"$(mktemp)\" \\\n  --readiness-port \"${READINESS_PORT}\""
+              image: example.invalid/lpu-runtime:test
+              name: main
+              startupProbe:
+                failureThreshold: 60
+                httpGet:
+                  path: /readyz
+                  port: 19878
+                  scheme: HTTP
+                periodSeconds: 5
+                successThreshold: 1
+                timeoutSeconds: 1
+              readinessProbe:
+                failureThreshold: 6
+                httpGet:
+                  path: /readyz
+                  port: 19878
+                  scheme: HTTP
+                periodSeconds: 5
+                successThreshold: 1
+                timeoutSeconds: 1
+              env:
+              - name: GAS_DIR
+                value: $(LPX_MODEL_PATH)
+              - name: GLUE_RDMA_PATH_MTU
+                value: '1024'
+              - name: NIC_NAME
+                value: mlx5_0
+              - name: UCX_TLS
+                value: tcp
+              - name: RDMA_PORT
+                value: '19877'
+              - name: READINESS_PORT
+                value: '19878'
+              - name: LPU_MODEL_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['scheduling.lpu.nvidia.com/model']
+              volumeMounts:
+              - mountPath: /nfs
+                name: model-storage
+              - name: config
+                mountPath: /configs
+              - name: hugepages
+                mountPath: /dev/hugepages
+              - name: host-sys
+                mountPath: /sys
+              - name: host-dev
+                mountPath: /dev
+              - name: ssh-secret
+                mountPath: /ssh-pk
+                readOnly: true
+              securityContext:
+                privileged: true
+              resources:
+                limits:
+                  hugepages-2Mi: 4Gi
+                requests:
+                  cpu: '62'
+                  hugepages-2Mi: 4Gi
+            volumes:
+            - name: model-storage
+              persistentVolumeClaim:
+                claimName: model-storage
+            - name: host-dev
+              hostPath:
+                path: /dev
+                type: Directory
+            - name: host-sys
+              hostPath:
+                path: /sys
+                type: Directory
+            - name: hugepages
+              emptyDir:
+                medium: HugePages
+            - name: ssh-secret
+              secret:
+                secretName: ssh-secret
+                defaultMode: 420
+            dnsPolicy: ClusterFirstWithHostNet
+            hostIPC: true
+            hostNetwork: true
+            securityContext:
+              fsGroup: 1000
+              fsGroupChangePolicy: OnRootMismatch
+            tolerations:
+            - key: lpu.nvidia.com/node
+              operator: Exists
+    - name: prefill
+      type: prefill
+      replicas: 1
+      sharedMemorySize: 16Gi
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: kubernetes.io/hostname
+                        operator: In
+                        values:
+                          - gpu-node-0
+          containers:
+            - args:
+                - --model
+                - meta-llama/Llama-3.2-1B-Instruct
+                - --served-model-name
+                - meta-llama/Llama-3.2-1B-Instruct
+                - --tensor-parallel-size
+                - "1"
+                - --disaggregation-mode
+                - prefill
+                - --kv-transfer-config
+                - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                - --attention-backend
+                - FLASH_ATTN
+                - --max-num-seqs
+                - "1"
+                - --gpu-memory-utilization
+                - "0.8"
+                - --max-model-len
+                - "8192"
+                - --enforce-eager
+                - --block-size
+                - "32"
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              env:
+                - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+                  value: "5600"
+                - name: VLLM_KV_CACHE_LAYOUT
+                  value: HND
+                - name: UCX_NET_DEVICES
+                  value: all
+                - name: HF_HOME
+                  value: /nfs/huggingface
+                - name: HF_HUB_CACHE
+                  value: /nfs/huggingface/hub
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      key: token
+                      name: hf-token-secret
+                      optional: true
+                - name: VLLM_USE_FLASHINFER_SAMPLER
+                  value: "0"
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+              name: main
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+              securityContext:
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_RESOURCE
+                privileged: true
+                runAsUser: 0
+              volumeMounts:
+                - mountPath: /dev/infiniband
+                  name: infiniband
+                - mountPath: /nfs
+                  name: model-storage
+              workingDir: /workspace/examples/backends/vllm
+          hostIPC: true
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+          volumes:
+            - hostPath:
+                path: /dev/infiniband
+                type: Directory
+              name: infiniband

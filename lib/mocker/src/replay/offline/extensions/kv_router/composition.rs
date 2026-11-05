@@ -8,16 +8,18 @@ use aisimulate_core::replay::{
     ReplayComposition, ReplayDeterminism, ReplayScalingPolicy, ReplaySpec, WorkerTopology,
 };
 use anyhow::{Context, Result, bail};
+use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
 use std::collections::HashSet;
 
 use super::{KvReplayMetadata, KvRouterPlacement};
-use crate::common::protocols::MockEngineArgs;
-use crate::replay::ReplayPrefillLoadEstimator;
+use crate::common::protocols::MockerConfig;
 use crate::replay::offline::extensions::kv_events::RouterEventObservation;
+use crate::replay::{ConversationAffinityConfig, ReplayPrefillLoadEstimator, ReplayRouterControls};
 
 /// Round-robin placement with an optional Dynamo Planner scaling policy.
 pub(in crate::replay) struct RoundRobinReplayComposition {
+    affinity_enabled: bool,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     scaling_enabled: bool,
 }
@@ -25,6 +27,9 @@ pub(in crate::replay) struct RoundRobinReplayComposition {
 impl RoundRobinReplayComposition {
     pub(in crate::replay) fn new(scaling_policy: Option<Box<dyn ReplayScalingPolicy>>) -> Self {
         Self {
+            affinity_enabled: crate::replay::replay_scope()
+                .conversation_affinity
+                .is_some(),
             scaling_enabled: scaling_policy.is_some(),
             scaling_policy,
         }
@@ -38,7 +43,19 @@ impl ReplayComposition for RoundRobinReplayComposition {
     type DisaggregatedPlacement = PoolRoundRobinPlacement<()>;
 
     fn validate_spec(&self, spec: &ReplaySpec) -> aisimulate_core::replay::ReplayResult<()> {
-        validate_adapter_descriptors(spec, "round_robin", self.scaling_enabled)
+        if spec.adapters.placement.provider != "round_robin" {
+            return Err(aisimulate_core::replay::ReplayError::InvalidSpec(format!(
+                "round-robin composition received placement provider {:?}",
+                spec.adapters.placement.provider
+            )));
+        }
+        validate_adapter_descriptors(spec, "round_robin", self.scaling_enabled)?;
+        if self.affinity_enabled {
+            return Err(aisimulate_core::replay::ReplayError::InvalidSpec(
+                "conversation affinity requires the Dynamo KV router".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn create_aggregated_placement(
@@ -69,12 +86,12 @@ impl ReplayComposition for RoundRobinReplayComposition {
 
 enum KvTopologyConfig {
     Aggregated {
-        args: Box<MockEngineArgs>,
+        args: Box<MockerConfig>,
         num_workers: usize,
     },
     Disaggregated {
-        prefill_args: Box<MockEngineArgs>,
-        decode_args: Box<MockEngineArgs>,
+        prefill_args: Box<MockerConfig>,
+        decode_args: Box<MockerConfig>,
         num_prefill_workers: usize,
         num_decode_workers: usize,
     },
@@ -83,11 +100,20 @@ enum KvTopologyConfig {
 /// KV-aware placement plus an optional Dynamo Planner scaling policy.
 pub struct KvReplayComposition {
     topology: KvTopologyConfig,
+    conversation_affinity: Option<ConversationAffinityConfig>,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     scaling_enabled: bool,
+    /// Set by the Replayer from its capture options. Only an explicit
+    /// [`ReplayDeterminism::CanonicalV1`] seeds the selectors; seeded selection breaks ties in
+    /// stable worker order.
     determinism: ReplayDeterminism,
+    /// Captured from [`crate::replay::ReplayScope`] at construction.
+    kv_event_lag_ms: f64,
+    /// Captured from [`crate::replay::ReplayScope`] at construction. Each placement registers its
+    /// selector control here under its worker type.
+    router_controls: Option<ReplayRouterControls>,
     // `router_config`/`prefill_load_estimator` are consumed via `.take()`
     // the first time a placement is created, so `None` is ambiguous between
     // "the caller never provided one" and "already taken by a prior
@@ -106,23 +132,27 @@ impl KvReplayComposition {
     /// worker selector) unless [`Self::set_determinism`] is called
     /// afterward; a reproducible replay must opt in explicitly.
     pub fn aggregated(
-        args: MockEngineArgs,
+        args: MockerConfig,
         num_workers: usize,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     ) -> Self {
         let scaling_enabled = scaling_policy.is_some();
+        let scope = crate::replay::replay_scope();
         Self {
             topology: KvTopologyConfig::Aggregated {
                 args: Box::new(args),
                 num_workers,
             },
+            conversation_affinity: scope.conversation_affinity,
             router_config,
             prefill_load_estimator,
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
+            kv_event_lag_ms: scope.kv_event_lag_ms,
+            router_controls: scope.router_controls,
             placement_created: false,
         }
     }
@@ -134,8 +164,8 @@ impl KvReplayComposition {
     /// worker selector) unless [`Self::set_determinism`] is called
     /// afterward; a reproducible replay must opt in explicitly.
     pub fn disaggregated(
-        prefill_args: MockEngineArgs,
-        decode_args: MockEngineArgs,
+        prefill_args: MockerConfig,
+        decode_args: MockerConfig,
         num_prefill_workers: usize,
         num_decode_workers: usize,
         router_config: Option<KvRouterConfig>,
@@ -143,6 +173,7 @@ impl KvReplayComposition {
         scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     ) -> Self {
         let scaling_enabled = scaling_policy.is_some();
+        let scope = crate::replay::replay_scope();
         Self {
             topology: KvTopologyConfig::Disaggregated {
                 prefill_args: Box::new(prefill_args),
@@ -150,12 +181,23 @@ impl KvReplayComposition {
                 num_prefill_workers,
                 num_decode_workers,
             },
+            conversation_affinity: scope.conversation_affinity,
             router_config,
             prefill_load_estimator,
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
             placement_created: false,
+            kv_event_lag_ms: scope.kv_event_lag_ms,
+            router_controls: scope.router_controls,
+        }
+    }
+}
+
+impl KvReplayComposition {
+    fn register_router_control(&self, worker_type: WorkerType, placement: &KvRouterPlacement) {
+        if let Some(controls) = &self.router_controls {
+            controls.register(worker_type, placement.selector_control());
         }
     }
 }
@@ -167,7 +209,19 @@ impl ReplayComposition for KvReplayComposition {
     type DisaggregatedPlacement = KvRouterPlacement;
 
     fn validate_spec(&self, spec: &ReplaySpec) -> aisimulate_core::replay::ReplayResult<()> {
-        validate_adapter_descriptors(spec, "dynamo_kv_router", self.scaling_enabled)
+        if spec.adapters.placement.provider != "dynamo_kv_router" {
+            return Err(aisimulate_core::replay::ReplayError::InvalidSpec(format!(
+                "Dynamo KV composition received placement provider {:?}",
+                spec.adapters.placement.provider
+            )));
+        }
+        validate_adapter_descriptors(spec, "dynamo_kv_router", self.scaling_enabled)?;
+        if self.conversation_affinity.is_some() && self.scaling_enabled {
+            return Err(aisimulate_core::replay::ReplayError::InvalidSpec(
+                "conversation affinity requires static worker pools".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn create_aggregated_placement(
@@ -193,14 +247,18 @@ impl ReplayComposition for KvReplayComposition {
         // this composition refuse a second call rather than silently rebuild on
         // defaults.
         self.placement_created = true;
-        KvRouterPlacement::new(
+        let placement = KvRouterPlacement::new_with_selector_seed(
             args,
             router_config,
             prefill_load_estimator,
-            topology.len(),
+            &topology,
             self.determinism.selector_seed(),
         )
-        .context("constructing aggregated KV Router placement")
+        .context("constructing aggregated KV Router placement")?
+        .with_kv_event_lag_ms(self.kv_event_lag_ms)?
+        .with_conversation_affinity(self.conversation_affinity)?;
+        self.register_router_control(WorkerType::Aggregated, &placement);
+        Ok(placement)
     }
 
     fn create_disaggregated_placements(
@@ -247,22 +305,31 @@ impl ReplayComposition for KvReplayComposition {
         // decode-side construction failure must still make this composition
         // refuse a second call rather than silently rebuild on defaults.
         self.placement_created = true;
-        let prefill = KvRouterPlacement::new(
+        let prefill = KvRouterPlacement::new_with_selector_seed(
             prefill_args,
-            Some(derive_prefill_router_config(router_config.clone())),
+            Some(derive_prefill_router_config(
+                prefill_args,
+                router_config.clone(),
+            )),
             prefill_load_estimator,
-            prefill_topology.len(),
+            &prefill_topology,
             self.determinism.selector_seed(),
         )
-        .context("constructing prefill KV Router placement")?;
-        let decode = KvRouterPlacement::new(
+        .context("constructing prefill KV Router placement")?
+        .with_kv_event_lag_ms(self.kv_event_lag_ms)?
+        .with_conversation_affinity(self.conversation_affinity)?;
+        let decode = KvRouterPlacement::new_with_selector_seed(
             decode_args,
-            Some(derive_decode_router_config(router_config)),
+            Some(derive_decode_router_config(decode_args, router_config)),
             None,
-            decode_topology.len(),
+            &decode_topology,
             self.determinism.selector_seed(),
         )
-        .context("constructing decode KV Router placement")?;
+        .context("constructing decode KV Router placement")?
+        .with_kv_event_lag_ms(self.kv_event_lag_ms)?
+        .with_conversation_affinity(self.conversation_affinity)?;
+        self.register_router_control(WorkerType::Prefill, &prefill);
+        self.register_router_control(WorkerType::Decode, &decode);
         Ok((prefill, decode))
     }
 
@@ -274,12 +341,6 @@ impl ReplayComposition for KvReplayComposition {
         &mut self,
         determinism: ReplayDeterminism,
     ) -> aisimulate_core::replay::ReplayResult<()> {
-        #[cfg(not(feature = "replay-bench"))]
-        if determinism == ReplayDeterminism::CanonicalV1 {
-            return Err(aisimulate_core::replay::ReplayError::InvalidSpec(
-                "canonical KV Router replay requires the replay-bench feature".to_string(),
-            ));
-        }
         self.determinism = determinism;
         Ok(())
     }
@@ -323,7 +384,7 @@ fn validate_adapter_descriptors(
 
 fn validate_runtime_topology(
     stage: &str,
-    args: &MockEngineArgs,
+    args: &MockerConfig,
     expected_workers: usize,
     dp_size: u32,
     topology: &[WorkerTopology],
@@ -366,23 +427,31 @@ fn validate_runtime_topology(
     Ok(())
 }
 
-/// Applies only the prefill/decode-specific deltas. `router_queue_policy`
-/// (the one field `replay_router_config` sets from `args`) is deliberately
-/// left untouched here: every caller feeds this output straight into
-/// `KvRouterPlacement::new` -> `OfflineReplayRouter::new_with_selector_seed`,
-/// which already calls `replay_router_config` unconditionally with the same
-/// per-role `args`. Applying it here too would be a second, redundant
-/// application of the same base config -- harmless today only because that
-/// rule happens to be an idempotent overwrite; duplicating the call site
-/// would silently diverge the moment a non-idempotent rule is added there.
-fn derive_prefill_router_config(router_config: Option<KvRouterConfig>) -> KvRouterConfig {
+fn base_router_config(
+    args: &MockerConfig,
+    router_config: Option<KvRouterConfig>,
+) -> KvRouterConfig {
     let mut config = router_config.unwrap_or_default();
+    if let Some(policy) = args.runtime.router_queue_policy {
+        config.router_queue_policy = policy;
+    }
+    config
+}
+
+pub(in crate::replay) fn derive_prefill_router_config(
+    args: &MockerConfig,
+    router_config: Option<KvRouterConfig>,
+) -> KvRouterConfig {
+    let mut config = base_router_config(args, router_config);
     config.router_track_active_blocks = false;
     config
 }
 
-fn derive_decode_router_config(router_config: Option<KvRouterConfig>) -> KvRouterConfig {
-    let mut config = router_config.unwrap_or_default();
+pub(in crate::replay) fn derive_decode_router_config(
+    args: &MockerConfig,
+    router_config: Option<KvRouterConfig>,
+) -> KvRouterConfig {
+    let mut config = base_router_config(args, router_config);
     config.overlap_score_credit = 0.0;
     config.router_assume_kv_reuse = false;
     config.router_track_prefill_tokens = false;
@@ -413,6 +482,7 @@ mod tests {
             max_in_flight: None,
             record_per_request: false,
             sla: Default::default(),
+            encoder: None,
             requests: Vec::new(),
         }
     }
@@ -431,11 +501,27 @@ mod tests {
                 .to_string()
                 .contains("requires scaling provider \"none\"")
         );
+        let composition = crate::replay::with_replay_scope(
+            crate::replay::ReplayScope {
+                conversation_affinity: Some(Default::default()),
+                ..Default::default()
+            },
+            || RoundRobinReplayComposition::new(None),
+        )
+        .unwrap();
+        // Validation must retain the setting after its construction scope ends.
+        assert!(
+            composition
+                .validate_spec(&spec(ProviderSpec::no_scaling()))
+                .unwrap_err()
+                .to_string()
+                .contains("requires the Dynamo KV router")
+        );
     }
 
     #[test]
     fn runtime_topology_must_match_dynamo_dp_and_worker_shape() {
-        let args = MockEngineArgs::builder().dp_size(2).build().unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({"dp_size":2})).unwrap();
         let error = validate_runtime_topology(
             "aggregated",
             &args,
@@ -444,6 +530,7 @@ mod tests {
             &[WorkerTopology {
                 worker_id: 0,
                 scheduler_ids: vec![0],
+                router_hint: false,
             }],
         )
         .unwrap_err();
@@ -452,14 +539,16 @@ mod tests {
 
     #[test]
     fn native_vllm_kv_router_does_not_observe_blocks_before_pass_completion() {
-        let args = MockEngineArgs::builder()
-            .block_size(64)
-            .num_gpu_blocks(64)
-            .max_num_seqs(Some(4))
-            .max_num_batched_tokens(Some(256))
-            .speedup_ratio(0.001)
-            .build()
-            .unwrap();
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "num_gpu_blocks": 64,
+                "max_num_seqs": 4,
+                "max_num_batched_tokens": 256,
+                "speedup_ratio": 0.001
+            }
+        }))
+        .unwrap();
         let router_config = KvRouterConfig {
             // If the first pass were published at pass start, this deliberately
             // strong credit would route the matching mid-pass request back to
@@ -489,6 +578,7 @@ mod tests {
             None,
             Default::default(),
             None,
+            None,
         )
         .unwrap();
 
@@ -511,11 +601,285 @@ mod tests {
         assert_eq!(mid_pass_route.reported_overlap_tokens, Some(0));
     }
 
-    #[cfg(feature = "replay-bench")]
+    fn lag_scope(kv_event_lag_ms: f64) -> crate::replay::ReplayScope {
+        crate::replay::ReplayScope {
+            kv_event_lag_ms,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn kv_event_lag_hides_a_finished_requests_blocks_until_due() {
+        let args = MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": 64,
+                "num_gpu_blocks": 64,
+                "max_num_seqs": 4,
+                "max_num_batched_tokens": 256,
+            },
+        }))
+        .unwrap();
+        let router_config = KvRouterConfig {
+            overlap_score_credit: 100.0,
+            overlap_score_credit_decay: 0.0,
+            router_temperature: 0.0,
+            ..KvRouterConfig::default()
+        };
+        let shared_prompt = vec![7; 128];
+        let request = |uuid, arrival_timestamp_ms| DirectRequest {
+            tokens: shared_prompt.clone(),
+            max_output_tokens: 2,
+            uuid: Some(uuid::Uuid::from_u128(uuid)),
+            arrival_timestamp_ms: Some(arrival_timestamp_ms),
+            ..DirectRequest::default()
+        };
+        // Request 2 arrives 10 s after request 1, long after it finished. Request 1's cached
+        // blocks attract it unless the KV event lag exceeds that gap.
+        let routes = |lag_ms: f64| {
+            let report = crate::replay::with_replay_scope(lag_scope(lag_ms), || {
+                crate::replay::offline::entrypoints::simulate_trace_with_scaling_policy(
+                    args.clone(),
+                    Some(router_config.clone()),
+                    None,
+                    vec![request(1, 0.0), request(2, 10_000.0)],
+                    2,
+                    1.0,
+                    ReplayRouterMode::KvRouter,
+                    true,
+                    None,
+                    Default::default(),
+                    None,
+                    None,
+                )
+            })
+            .unwrap()
+            .unwrap();
+            [1, 2].map(|uuid| {
+                let record = report
+                    .per_request
+                    .iter()
+                    .find(|record| record.uuid == uuid::Uuid::from_u128(uuid).to_string())
+                    .unwrap();
+                let route = record.routing_history.first().unwrap();
+                (route.logical_worker_id, route.reported_overlap_tokens)
+            })
+        };
+
+        for lag_ms in [0.0, 5_000.0] {
+            let [first, second] = routes(lag_ms);
+            assert_eq!(second.0, first.0, "lag {lag_ms} ms");
+            assert!(second.1.is_some_and(|tokens| tokens > 0), "lag {lag_ms} ms");
+        }
+
+        let [_, stale_second] = routes(60_000.0);
+        assert_eq!(stale_second.1, Some(0));
+    }
+
+    #[test]
+    fn kv_event_lag_reaches_both_disaggregated_routers() {
+        let topology = || {
+            vec![WorkerTopology {
+                worker_id: 0,
+                scheduler_ids: vec![0],
+                router_hint: false,
+            }]
+        };
+        let mut composition = crate::replay::with_replay_scope(lag_scope(25.0), || {
+            KvReplayComposition::disaggregated(
+                MockerConfig::default(),
+                MockerConfig::default(),
+                1,
+                1,
+                None,
+                None,
+                None,
+            )
+        })
+        .unwrap();
+        let (prefill, decode) = composition
+            .create_disaggregated_placements(1, topology(), 1, topology())
+            .unwrap();
+        assert_eq!(prefill.router.kv_event_lag_ms, 25.0);
+        assert_eq!(decode.router.kv_event_lag_ms, 25.0);
+    }
+
+    #[test]
+    fn only_prefill_placements_carry_kv_fetch_hints() {
+        use super::super::tests::{
+            fetch_hint, kv_fetch_target, occupy_worker_1, place_now, target_prefix_in_g2, topology,
+        };
+
+        let args =
+            MockerConfig::from_value(serde_json::json!({"engine": {"block_size": 64}})).unwrap();
+        let mut composition =
+            KvReplayComposition::disaggregated(args.clone(), args, 2, 2, None, None, None);
+        let (mut prefill, mut decode) = composition
+            .create_disaggregated_placements(1, topology(2, 1, true), 1, topology(2, 1, true))
+            .unwrap();
+
+        occupy_worker_1(&mut prefill, 0);
+        prefill
+            .router
+            .on_kv_events(vec![target_prefix_in_g2(1, 0)])
+            .unwrap();
+        let placed = place_now(&mut prefill, &kv_fetch_target(1), 0.0);
+        assert_eq!((placed.scheduler_id, placed.kv_hints), (0, fetch_hint(1)));
+
+        // Decode workers accept hints too, but the P/D decode router forces
+        // overlap credit 0, so its policy reads no KV index and, as in production,
+        // retains no transfer chain. Decode balances the two targets over both
+        // workers, so one of them lands away from worker 1's G2 prefix unhinted.
+        assert!(!decode.router.indexer.retain_kv_transfer_chain);
+        assert!(decode.router.kv_transfer_gate_warned);
+        decode
+            .router
+            .on_kv_events(vec![target_prefix_in_g2(1, 0)])
+            .unwrap();
+        let placed = [1, 2].map(|uuid| place_now(&mut decode, &kv_fetch_target(uuid), 0.0));
+        assert!(placed.iter().any(|placement| placement.scheduler_id == 0));
+        assert!(placed.iter().all(|placement| placement.kv_hints.is_none()));
+    }
+
+    #[test]
+    fn aggregated_placements_carry_kv_fetch_hints() {
+        use super::super::tests::{
+            fetch_hint, kv_fetch_target, occupy_worker_1, place_now, target_prefix_in_g2, topology,
+        };
+
+        let args =
+            MockerConfig::from_value(serde_json::json!({"engine": {"block_size": 64}})).unwrap();
+        let mut composition = KvReplayComposition::aggregated(args, 2, None, None, None);
+        let mut placement = composition
+            .create_aggregated_placement(1, topology(2, 1, true))
+            .unwrap();
+
+        occupy_worker_1(&mut placement, 0);
+        placement
+            .router
+            .on_kv_events(vec![target_prefix_in_g2(1, 0)])
+            .unwrap();
+        let placed = place_now(&mut placement, &kv_fetch_target(1), 0.0);
+        assert_eq!((placed.scheduler_id, placed.kv_hints), (0, fetch_hint(1)));
+    }
+
+    fn retune_router_config() -> KvRouterConfig {
+        KvRouterConfig {
+            overlap_score_credit: 1.5,
+            overlap_score_credit_decay: 0.3,
+            prefill_load_scale: 2.0,
+            decode_active_request_weight: 0.4,
+            host_cache_hit_weight: 0.5,
+            disk_cache_hit_weight: 0.2,
+            shared_cache_multiplier: Some(0.3),
+            router_temperature: 0.7,
+            ..KvRouterConfig::default()
+        }
+    }
+
+    fn single_worker_topology() -> Vec<WorkerTopology> {
+        vec![WorkerTopology {
+            worker_id: 0,
+            scheduler_ids: vec![0],
+            router_hint: false,
+        }]
+    }
+
+    fn registry_scope(registry: &ReplayRouterControls) -> crate::replay::ReplayScope {
+        crate::replay::ReplayScope {
+            router_controls: Some(registry.clone()),
+            ..Default::default()
+        }
+    }
+
+    fn registered_parameters(
+        registry: &ReplayRouterControls,
+    ) -> Vec<(WorkerType, serde_json::Map<String, serde_json::Value>)> {
+        registry
+            .runtime_configs()
+            .unwrap()
+            .into_iter()
+            .map(|(worker_type, config)| {
+                assert_eq!(config.revision(), 0);
+                (worker_type, config.parameters().clone())
+            })
+            .collect()
+    }
+
+    /// The registered replay selectors start from the same resolved parameters a live router
+    /// reports for each role, so a desired map computed with `startup_policy_parameters` is a
+    /// no-op at the first tick.
+    #[test]
+    fn registered_router_controls_match_startup_policy_parameters() {
+        use dynamo_router_policies::startup_policy_parameters;
+
+        let config = retune_router_config();
+        let registry = ReplayRouterControls::new();
+        let mut composition = crate::replay::with_replay_scope(registry_scope(&registry), || {
+            KvReplayComposition::aggregated(
+                MockerConfig::default(),
+                1,
+                Some(config.clone()),
+                None,
+                None,
+            )
+        })
+        .unwrap();
+        assert!(
+            registry.runtime_configs().unwrap().is_empty(),
+            "registration happens at placement"
+        );
+        composition
+            .create_aggregated_placement(1, single_worker_topology())
+            .unwrap();
+        assert_eq!(
+            registered_parameters(&registry),
+            [(
+                WorkerType::Aggregated,
+                startup_policy_parameters(&config, WorkerType::Aggregated)
+            )]
+        );
+
+        let registry = ReplayRouterControls::new();
+        let mut composition = crate::replay::with_replay_scope(registry_scope(&registry), || {
+            KvReplayComposition::disaggregated(
+                MockerConfig::default(),
+                MockerConfig::default(),
+                1,
+                1,
+                Some(config.clone()),
+                None,
+                None,
+            )
+        })
+        .unwrap();
+        composition
+            .create_disaggregated_placements(
+                1,
+                single_worker_topology(),
+                1,
+                single_worker_topology(),
+            )
+            .unwrap();
+        // Decode registers as a plain decode router (zero cache credits), as live decode does.
+        assert_eq!(
+            registered_parameters(&registry),
+            [
+                (
+                    WorkerType::Prefill,
+                    startup_policy_parameters(&config, WorkerType::Prefill)
+                ),
+                (
+                    WorkerType::Decode,
+                    startup_policy_parameters(&config, WorkerType::Decode)
+                ),
+            ]
+        );
+    }
+
     #[test]
     fn kv_composition_uses_only_explicit_canonical_determinism() {
         let mut composition =
-            KvReplayComposition::aggregated(MockEngineArgs::default(), 1, None, None, None);
+            KvReplayComposition::aggregated(MockerConfig::default(), 1, None, None, None);
         assert_eq!(composition.determinism.selector_seed(), None);
 
         composition
@@ -532,6 +896,7 @@ mod tests {
         vec![WorkerTopology {
             worker_id: 0,
             scheduler_ids: vec![0],
+            router_hint: false,
         }]
     }
 
@@ -541,7 +906,7 @@ mod tests {
     #[test]
     fn create_aggregated_placement_refuses_a_second_call() {
         let mut composition =
-            KvReplayComposition::aggregated(MockEngineArgs::default(), 1, None, None, None);
+            KvReplayComposition::aggregated(MockerConfig::default(), 1, None, None, None);
         composition
             .create_aggregated_placement(1, single_worker_topology())
             .unwrap();
@@ -573,7 +938,7 @@ mod tests {
     #[test]
     fn a_failed_first_placement_call_still_consumes_the_composition() {
         let mut aggregated = KvReplayComposition::aggregated(
-            MockEngineArgs::default(),
+            MockerConfig::default(),
             1,
             Some(unbuildable_router_config()),
             None,
@@ -595,8 +960,8 @@ mod tests {
         );
 
         let mut disaggregated = KvReplayComposition::disaggregated(
-            MockEngineArgs::default(),
-            MockEngineArgs::default(),
+            MockerConfig::default(),
+            MockerConfig::default(),
             1,
             1,
             Some(unbuildable_router_config()),
@@ -632,8 +997,8 @@ mod tests {
     #[test]
     fn create_disaggregated_placements_refuses_a_second_call() {
         let mut composition = KvReplayComposition::disaggregated(
-            MockEngineArgs::default(),
-            MockEngineArgs::default(),
+            MockerConfig::default(),
+            MockerConfig::default(),
             1,
             1,
             None,
