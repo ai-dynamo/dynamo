@@ -185,7 +185,11 @@ impl CandidatePreparerExt for CandidatePreparer {
         let source = SelectionRowSource::new(request, workers, eligibility, block_size);
         let rows = self.prepare_with(workers.len(), |inputs, rows| {
             eligibility.for_each_eligible_worker_rank(workers, |worker, config| {
-                rows.push(source.row_for(worker, config, inputs));
+                let mut row = source.row_for(worker, config, inputs);
+                // Prepared rows carry the worker's rank count, so the scheduler actor can tell
+                // a fully full worker at selection without a config lookup.
+                row.dp_size = u16::try_from(config.data_parallel_size()).unwrap_or(u16::MAX);
+                rows.push(row);
             });
         })?;
         Some(PreparedCandidates {
@@ -562,6 +566,7 @@ fn worker_input_row(
         load,
         transfer: None,
         preferred_taint_multiplier,
+        dp_size: 0,
     }
 }
 
@@ -760,6 +765,19 @@ fn select_with_policy<C: WorkerConfigLike>(
             source.restore_kv_transfer_sources(kv_transfer_sources);
             rows
         })
+    });
+    // The rows were built before the actor's projection: a worker whose every rank is now
+    // past the reject thresholds leaves, the rest keep their order, and the policy recounts
+    // the best eligible cached prefix from the rows it adopts.
+    let prepared = prepared.map(|mut rows| {
+        if source.eligibility.skips_full_workers() {
+            rows.retain(|row| {
+                !source
+                    .eligibility
+                    .is_worker_full(row.worker.worker_id, u32::from(row.dp_size))
+            });
+        }
+        rows
     });
     let picked: Picked = match policy.select_rows(&context, &source, prepared, trace) {
         Ok(RowPick {

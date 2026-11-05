@@ -27,6 +27,10 @@ pub struct CandidateData {
     pub transfer: Option<WorkerTransferInput>,
     /// The request's preference for this rank's taints, when asked for and not pinned.
     pub preferred_taint_multiplier: Option<f64>,
+    /// The worker's data-parallel size, set only on prepared rows so the scheduler actor can
+    /// tell a fully full worker without a config lookup. Host-only. A `u16` fits the three
+    /// bytes left in the 128-byte row; no worker has more ranks than that.
+    pub dp_size: u16,
 }
 
 /// Static worker info by view row. Hosts look it up only when a component asks, so rows
@@ -436,6 +440,7 @@ impl CandidateData {
             preferred_taint_multiplier: self
                 .preferred_taint_multiplier
                 .or(additional.preferred_taint_multiplier),
+            dp_size: self.dp_size,
         }
     }
 }

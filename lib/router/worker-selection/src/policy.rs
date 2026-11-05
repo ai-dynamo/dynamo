@@ -370,8 +370,10 @@ impl WorkerSelectionPolicy {
         let cache_snapshot = context.cache_snapshot();
         let has_eligible_worker = match prepared {
             Some(prepared) => {
+                // Whether any row is left once the kernel dropped full workers' rows.
+                let has_eligible_worker = !prepared.rows.is_empty();
                 state.adopt_prepared(context, &cache_snapshot, source, prepared)?;
-                true
+                has_eligible_worker
             }
             None => state.collect_rows(context, &cache_snapshot, source)?,
         };
@@ -864,6 +866,13 @@ impl PreparedRows {
     pub fn rows(&self) -> &[CandidateData] {
         &self.rows
     }
+
+    /// Drop the rows `keep` refuses, keeping the rest in order: the kernel removes the rows of
+    /// workers whose every rank is past the reject thresholds at selection, after the rows
+    /// were built. A policy recounts the best eligible cached prefix from the rows it adopts.
+    pub fn retain(&mut self, keep: impl FnMut(&CandidateData) -> bool) {
+        self.rows.retain(keep);
+    }
 }
 
 /// Copy the retained candidate costs out of the policy's scratch rows in one pass.
@@ -1055,6 +1064,7 @@ mod row_source_tests {
                 },
                 transfer: None,
                 preferred_taint_multiplier: None,
+                dp_size: 0,
             }
         }
     }

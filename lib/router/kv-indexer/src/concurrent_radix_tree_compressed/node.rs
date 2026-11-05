@@ -503,6 +503,35 @@ impl Node {
         })
     }
 
+    /// Appends `blocks` for `worker` if this leaf's edge ends with `parent_hash` and
+    /// `worker` covers that tail, as [`Self::try_extend_leaf_with_version`] does, but
+    /// checks and commits under one exclusive gate, so it needs no shape version from an
+    /// earlier read. Anchors and nodes that ever had children never extend. Returns
+    /// whether it appended.
+    pub(super) fn try_append_at_tail(
+        &self,
+        worker: WorkerWithDpRank,
+        parent_hash: ExternalSequenceBlockHash,
+        blocks: &[KvCacheStoredBlockData],
+    ) -> bool {
+        debug_assert!(!blocks.is_empty());
+        if self.anchor || self.internal.load(Ordering::Acquire) {
+            return false;
+        }
+        let _gate = self.shape_gate.write();
+        // Child inserts and splits set `internal` under this gate.
+        if self.internal.load(Ordering::Acquire) {
+            return false;
+        }
+        let mut state = self.state.write();
+        if !state.tail_hash_is(parent_hash) || !state.covers_pos(worker, state.edge.len() - 1) {
+            return false;
+        }
+        state.append_blocks_to_leaf(worker, blocks);
+        self.shape_version.fetch_add(1, Ordering::Release);
+        true
+    }
+
     pub(super) fn child_lookup_plan(
         &self,
         last_ext_hash: Option<ExternalSequenceBlockHash>,

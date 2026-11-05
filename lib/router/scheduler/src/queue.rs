@@ -102,8 +102,9 @@ struct QueuedRequest {
 ///
 /// The actor selects from them only when it would build the same rows: the worker
 /// configuration, availability, and overload it reads at selection match the ones
-/// the rows were built from, and no rank is past the host's reject thresholds. Load
-/// inputs depend on the actor's earlier bookings, so it fills them at selection.
+/// the rows were built from. Load inputs and the ranks past the host's reject
+/// thresholds depend on the actor's earlier bookings, so it fills the loads and drops
+/// the rows of workers whose every rank is full at selection.
 struct PreparedAdmission {
     candidates: PreparedCandidates,
     /// Configuration generation, loaded before the configuration was read.
@@ -2400,19 +2401,25 @@ impl<
                 .overloaded_worker_provider
                 .as_ref()
                 .and_then(|provider| provider());
+            let exclusive_affinity = self.selector.uses_exclusive_affinity_target();
             let eligibility = selection_eligibility(
                 request,
                 &workers,
                 overloaded_worker_ids.as_deref(),
                 available_worker_ids.as_deref(),
                 Some(&self.full_ranks),
-                self.selector.uses_exclusive_affinity_target(),
+                exclusive_affinity,
             );
+            // Selection drops full workers' rows from prepared rows. Preparation did not know
+            // which ranks are full, so an exclusive affinity target it found eligible may be
+            // full, and fetch sources span every row: those requests rebuild.
+            let prepared_rows_usable = self.full_ranks.is_empty()
+                || (!(exclusive_affinity && request.affinity_target.is_some())
+                    && request.kv_transfer_candidates.is_none());
             // Checked under the borrow selection uses: a change since the actor
-            // last advanced the generation is not counted in it yet. Prepared rows
-            // never skip full ranks, so any full rank means rebuilding them.
+            // last advanced the generation is not counted in it yet.
             let prepared = prepared
-                .filter(|_| !workers.has_changed() && self.full_ranks.is_empty())
+                .filter(|_| !workers.has_changed() && prepared_rows_usable)
                 .and_then(|prepared| {
                     prepared.into_current(
                         self.workers_generation.load(AtomicOrdering::Relaxed),
@@ -3684,6 +3691,10 @@ mod tests {
             WorkerSelector::<SimpleWorkerConfig>::required_worker_inputs(&self.inner)
         }
 
+        fn uses_exclusive_affinity_target(&self) -> bool {
+            WorkerSelector::<SimpleWorkerConfig>::uses_exclusive_affinity_target(&self.inner)
+        }
+
         fn select_worker(
             &self,
             input: WorkerSelectionInput<'_, SimpleWorkerConfig>,
@@ -3731,14 +3742,18 @@ mod tests {
         }
     }
 
-    fn counting_policy(prepared_selections: &Arc<AtomicUsize>) -> CountingPreparedPolicy {
+    fn counting_policy(
+        prepared_selections: &Arc<AtomicUsize>,
+        exclusive_affinity: bool,
+    ) -> CountingPreparedPolicy {
         CountingPreparedPolicy {
             inner: dynamo_worker_selection::WorkerSelectionPolicy::new(
                 dynamo_worker_selection::SelectionConfig::default(),
                 "test",
                 vec![],
                 Box::new(LeastLoaded),
-            ),
+            )
+            .with_exclusive_affinity(exclusive_affinity),
             prepared_selections: Arc::clone(prepared_selections),
         }
     }
@@ -3763,10 +3778,15 @@ mod tests {
     }
 
     fn make_prepared_queue() -> PreparedQueue {
+        make_prepared_queue_with(1, false)
+    }
+
+    /// Two workers of `dp_size` ranks, each rank with a 64-token prefill budget.
+    fn make_prepared_queue_with(dp_size: u32, exclusive_affinity: bool) -> PreparedQueue {
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
             NoopSequencePublisher,
             16,
-            (0..2).map(|id| (id, (0, 1))).collect(),
+            (0..2).map(|id| (id, (0, dp_size))).collect(),
             false,
             0,
             "test",
@@ -3775,6 +3795,7 @@ mod tests {
             .map(|id| {
                 let config = SimpleWorkerConfig {
                     max_num_batched_tokens: Some(64),
+                    data_parallel_size: dp_size,
                     ..Default::default()
                 };
                 (id, config)
@@ -3803,7 +3824,7 @@ mod tests {
             cfg_rx,
             PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
             16,
-            counting_policy(&prepared_selections),
+            counting_policy(&prepared_selections, exclusive_affinity),
             None,
             None,
             Some(overloaded_provider),
@@ -4341,7 +4362,7 @@ mod tests {
 
     #[tokio::test]
     async fn prepared_rows_are_rebuilt_when_selection_inputs_change() {
-        for change in ["configuration", "availability", "overload", "full rank"] {
+        for change in ["configuration", "availability", "overload"] {
             let prepared_queue = make_prepared_queue();
             let (request, rx) = make_request("request", 64);
             let prepared = prepared_queue.queue.prepare_candidates(&request);
@@ -4353,19 +4374,8 @@ mod tests {
                 "availability" => {
                     *prepared_queue.available.lock().unwrap() = Some(Arc::new(HashSet::from([1])))
                 }
-                "overload" => {
-                    *prepared_queue.overloaded.lock().unwrap() = Some(Arc::new(HashSet::from([0])))
-                }
                 _ => {
-                    // Past half its 64-token prefill budget, worker 0's only rank is full.
-                    *prepared_queue.reject.lock().unwrap() = BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.5),
-                        ..Default::default()
-                    };
-                    let (mut held, held_rx) = make_request("held", 48);
-                    held.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
-                    prepared_queue.queue.enqueue(held).await;
-                    held_rx.await.unwrap().unwrap();
+                    *prepared_queue.overloaded.lock().unwrap() = Some(Arc::new(HashSet::from([0])))
                 }
             }
 
@@ -4376,13 +4386,107 @@ mod tests {
         }
     }
 
+    /// Reject thresholds under which a rank past 32 tokens, half its prefill budget, is full.
+    fn half_budget_reject() -> BusyThresholds {
+        BusyThresholds {
+            prefill_busy_threshold_frac: Some(0.5),
+            ..Default::default()
+        }
+    }
+
+    /// Book `tokens` of prefill on `worker`, as a pinned request.
+    async fn hold_prefill(
+        queue: &SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, CountingPreparedPolicy>,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+        tokens: usize,
+    ) {
+        let (mut held, held_rx) = make_request(request_id, tokens);
+        held.pinned_worker = Some(worker);
+        queue.enqueue(held).await;
+        held_rx.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepared_rows_drop_only_workers_whose_every_rank_is_full() {
+        let prepared_queue = make_prepared_queue_with(2, false);
+        let queue = &prepared_queue.queue;
+        *prepared_queue.reject.lock().unwrap() = half_budget_reject();
+        let select = |request_id: &'static str| async move {
+            let (request, rx) = make_request(request_id, 16);
+            let prepared = queue.prepare_candidates(&request);
+            enqueue_prepared(queue, request, prepared).await;
+            rx.await.unwrap()
+        };
+
+        // One full rank leaves worker 0 eligible: its other rank is the least loaded.
+        hold_prefill(queue, "held-0-0", WorkerWithDpRank::new(0, 0), 48).await;
+        let selected = select("one-rank-full").await.unwrap().best_worker;
+        assert_eq!(selected, WorkerWithDpRank::new(0, 1));
+
+        // Both ranks full: worker 0's rows are dropped.
+        hold_prefill(queue, "held-0-1", WorkerWithDpRank::new(0, 1), 48).await;
+        let selected = select("worker-full").await.unwrap().best_worker;
+        assert_eq!(selected, WorkerWithDpRank::new(1, 0));
+
+        hold_prefill(queue, "held-1-0", WorkerWithDpRank::new(1, 0), 48).await;
+        hold_prefill(queue, "held-1-1", WorkerWithDpRank::new(1, 1), 48).await;
+        assert!(matches!(
+            select("all-full").await,
+            Err(KvSchedulerError::AllEligibleWorkersOverloaded)
+        ));
+        assert_eq!(prepared_queue.prepared_selections(), 3);
+    }
+
+    #[tokio::test]
+    async fn prepared_rows_are_rebuilt_for_an_exclusive_affinity_target_once_a_rank_is_full() {
+        let prepared_queue = make_prepared_queue_with(1, true);
+        let queue = &prepared_queue.queue;
+        *prepared_queue.reject.lock().unwrap() = half_budget_reject();
+        hold_prefill(queue, "held", WorkerWithDpRank::new(0, 0), 48).await;
+
+        // Preparation held only the full target's rows; selection, which sees the target
+        // full, routes like any request.
+        let (mut request, rx) = make_request("request", 16);
+        request.affinity_target = Some(dynamo_session_affinity::WorkerAffinityTarget::new(0, None));
+        let prepared = queue.prepare_candidates(&request);
+        assert!(prepared.is_some());
+        enqueue_prepared(queue, request, prepared).await;
+        assert_eq!(
+            rx.await.unwrap().unwrap().best_worker,
+            WorkerWithDpRank::new(1, 0)
+        );
+        assert_eq!(prepared_queue.prepared_selections(), 0);
+    }
+
+    #[tokio::test]
+    async fn prepared_rows_recount_the_best_cached_prefix_without_full_workers() {
+        let prepared_queue = make_prepared_queue();
+        let queue = &prepared_queue.queue;
+        *prepared_queue.reject.lock().unwrap() = half_budget_reject();
+        hold_prefill(queue, "held", WorkerWithDpRank::new(0, 0), 48).await;
+
+        // Worker 0 caches the longest prefix but is full, so only worker 1's prefix counts.
+        let (mut request, rx) = make_request("request", 64);
+        request.overlap.tier_overlap_blocks.device = FxHashMap::from_iter([
+            (WorkerWithDpRank::new(0, 0), 3),
+            (WorkerWithDpRank::new(1, 0), 1),
+        ]);
+        let prepared = queue.prepare_candidates(&request);
+        enqueue_prepared(queue, request, prepared).await;
+        let response = rx.await.unwrap().unwrap();
+        assert_eq!(response.best_worker, WorkerWithDpRank::new(1, 0));
+        assert_eq!(response.max_raw_cached_tokens, Some(16));
+        assert_eq!(prepared_queue.prepared_selections(), 1);
+    }
+
     #[tokio::test]
     async fn prepared_rows_recheck_config_under_selection_borrow() {
         let prepared_queue = make_prepared_queue();
         let mut actor = actor_with_selector_for_test(
             &prepared_queue.queue,
             &prepared_queue.slots,
-            counting_policy(&prepared_queue.prepared_selections),
+            counting_policy(&prepared_queue.prepared_selections, false),
         );
         let (request, mut rx) = make_request("request", 64);
         let prepared = prepared_queue.queue.prepare_candidates(&request);
@@ -7475,7 +7579,7 @@ mod tests {
             cfg_rx,
             PolicyProfile::synthetic(Some(0.0), RouterQueuePolicy::Fcfs),
             16,
-            counting_policy(&prepared_selections),
+            counting_policy(&prepared_selections, false),
             None,
             Some(Arc::clone(&refresher)),
             None,
