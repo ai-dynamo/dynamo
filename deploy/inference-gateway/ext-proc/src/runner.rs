@@ -21,6 +21,55 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{EppMode, EppStandaloneConfig, ExtProcServer, Router, metrics};
 
+/// Populate a Runtime EPP catalog with Dynamo's shipped named providers.
+///
+/// Starts from the caller's registry (or an empty one) and registers the shipped
+/// types with [`dynamo_router_policies::register`]. The process installer then
+/// applies the required builtin default factory and routing-mode providers.
+///
+/// Callers must not pre-register Dynamo's shipped type names; a duplicate is a
+/// startup error rather than a silent override. Custom worker-selection and
+/// request-classifier providers already in `policy_registry` are preserved.
+fn prepare_runtime_plugin_registry(
+    policy_registry: Option<RouterPluginRegistry>,
+) -> Result<RouterPluginRegistry> {
+    let mut registry = policy_registry.unwrap_or_default();
+    dynamo_router_policies::register(&mut registry).map_err(|error| {
+        anyhow::anyhow!(
+            "Dynamo shipped router plugin registration failed \
+             (supplied registries must not pre-register shipped type names): {error}"
+        )
+    })?;
+    Ok(registry)
+}
+
+/// Install the Runtime catalog once before discovery or router construction.
+fn install_runtime_plugin_registry(registry: RouterPluginRegistry) -> Result<()> {
+    if !dynamo_llm::kv_router::plugins::install_router_plugin_registry(registry) {
+        anyhow::bail!("router plugin registry already installed");
+    }
+    Ok(())
+}
+
+/// Mode-dependent registry bootstrap for [`run`].
+///
+/// Standalone returns the supplied (or empty) registry unchanged and does not
+/// install. Runtime prepares shipped providers, installs once (fatal if already
+/// installed), and returns an unused empty registry for [`run_inner`].
+fn bootstrap_plugin_registry(
+    mode: EppMode,
+    policy_registry: Option<RouterPluginRegistry>,
+) -> Result<RouterPluginRegistry> {
+    match mode {
+        EppMode::Standalone => Ok(policy_registry.unwrap_or_default()),
+        EppMode::DynamoRuntime => {
+            let registry = prepare_runtime_plugin_registry(policy_registry)?;
+            install_runtime_plugin_registry(registry)?;
+            Ok(RouterPluginRegistry::default())
+        }
+    }
+}
+
 const GRPC_PORT: u16 = 9002;
 const HEALTH_PORT: u16 = 9003;
 const HEALTH_SERVICE_NAME: &str = "inference-extension";
@@ -128,17 +177,15 @@ fn create_tls_acceptor() -> Result<TlsAcceptor> {
 }
 
 /// Run EPP until it exits.
+///
+/// Runtime mode installs Dynamo's shipped named providers plus any supplied
+/// catalog into the process registry ModelManager uses. Standalone keeps the
+/// supplied registry on the selector path without process installation.
 pub async fn run(policy_registry: Option<RouterPluginRegistry>) -> Result<()> {
     init_tracing();
     let mode = EppMode::from_env()?;
-    if !matches!(mode, EppMode::Standalone)
-        && policy_registry
-            .as_ref()
-            .is_some_and(|registry| !registry.is_empty())
-    {
-        anyhow::bail!("linked worker-selection policies require DYN_EPP_MODE=standalone")
-    }
-    run_inner(mode, policy_registry.unwrap_or_default()).await
+    let registry = bootstrap_plugin_registry(mode, policy_registry)?;
+    run_inner(mode, registry).await
 }
 
 fn init_tracing() {
@@ -503,16 +550,72 @@ async fn serve<P: crate::EndpointPicker>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
-    use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
-    use dynamo_kv_router::services::selection::WorkerSelectionPolicyProviderError;
-    use tokio::sync::Mutex;
+    use dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError;
+    use dynamo_kv_router::plugins::worker_selection::{
+        WorkerSelectionPolicy, WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
+        WorkerSelectionPolicyProviderError,
+    };
+    use dynamo_kv_router::{
+        DEFAULT_ROUTING_GROUP, KvRouterConfig, RoutingPartitionId, RoutingPartitionRef, WorkerType,
+    };
+    use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_PREFILL};
+    use dynamo_llm::kv_router::plugins::router_plugin_registry;
+    use dynamo_runtime::distributed::DistributedConfig;
+    use dynamo_runtime::{DistributedRuntime, Runtime};
+    use uuid::Uuid;
 
     use super::*;
-    use crate::epp_standalone_config::{DYN_EPP_MODE, DYNAMO_RUNTIME_MODE};
 
-    static EPP_MODE_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+    const RUNTIME_BOOTSTRAP_CHILD: &str = "DYN_EPP_RUNTIME_BOOTSTRAP_CHILD";
+
+    fn policy_config(yaml: &str) -> (tempfile::NamedTempFile, KvRouterConfig) {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), yaml).unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(file.path().display().to_string()),
+            ..Default::default()
+        };
+        (file, config)
+    }
+
+    fn assert_exact_one_passing_child(output: &std::process::Output) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "child failed:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;")),
+            "child must execute exactly one passing test:\n{stdout}\n{stderr}"
+        );
+    }
+
+    struct AlwaysFirstPicker;
+
+    impl dynamo_kv_router::plugins::worker_selection::WorkerPicker for AlwaysFirstPicker {
+        fn pick(
+            &self,
+            _context: &dynamo_kv_router::plugins::worker_selection::WorkerSelectionContext<'_>,
+            input: dynamo_kv_router::plugins::worker_selection::WorkerInputView<'_>,
+        ) -> Result<usize, dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyError>
+        {
+            if input.candidates().is_empty() {
+                Err(
+                    dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyError::failed(
+                        "no eligible worker",
+                    ),
+                )
+            } else {
+                Ok(0)
+            }
+        }
+    }
 
     #[test]
     fn namespace_environment_preserves_exact_and_prefix_intent() {
@@ -557,35 +660,369 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn linked_policy_registry_requires_standalone_mode() {
+    /// Stock Runtime preparation resolves the named default with real parameters and keeps
+    /// the builtin default plus routing modes when no instance is selected.
+    #[test]
+    fn stock_runtime_registry_resolves_named_default_and_required_modes() {
+        let registry =
+            dynamo_router_policies::with_defaults(prepare_runtime_plugin_registry(None).unwrap());
+        let partition = RoutingPartitionRef::new("model", "default");
+
+        let (_file, named) = policy_config(
+            r#"
+worker_selection:
+  aggregated: tuned
+  prefill: tuned
+  decode: tuned
+  instances:
+    - name: tuned
+      type: dynamo-default-cost-fn
+      parameters:
+        router_temperature: 0.25
+"#,
+        );
+        let named_factory = registry.resolve(&named).unwrap().unwrap();
+        for role in [
+            WorkerType::Aggregated,
+            WorkerType::Prefill,
+            WorkerType::Decode,
+        ] {
+            let policy = named_factory(&named, role, partition);
+            let snapshot = policy.runtime_config().unwrap();
+            assert_eq!(
+                snapshot.parameters().get("router_temperature"),
+                Some(&serde_json::json!(0.25)),
+                "{role:?}"
+            );
+        }
+
+        let default_factory = registry
+            .resolve(&KvRouterConfig::default())
+            .unwrap()
+            .unwrap();
+        for role in [
+            WorkerType::Aggregated,
+            WorkerType::Prefill,
+            WorkerType::Decode,
+        ] {
+            let policy = default_factory(&KvRouterConfig::default(), role, partition);
+            let snapshot = policy.runtime_config().unwrap();
+            assert_ne!(
+                snapshot.parameters().get("router_temperature"),
+                Some(&serde_json::json!(0.25)),
+                "no selected instance must retain the named-default parameters ({role:?})"
+            );
+        }
+
+        for mode in [
+            dynamo_router_policies::router_modes::RANDOM,
+            dynamo_router_policies::router_modes::ROUND_ROBIN,
+            dynamo_router_policies::router_modes::LEAST_LOADED,
+        ] {
+            let (_file, mode_config) = policy_config(&format!(
+                r#"
+worker_selection:
+  aggregated: mode
+  instances:
+    - name: mode
+      type: {mode}
+"#
+            ));
+            assert!(
+                registry.resolve(&mode_config).unwrap().is_some(),
+                "{mode} must remain available"
+            );
+        }
+
+        let (_file, unknown) = policy_config(
+            r#"
+worker_selection:
+  aggregated: missing
+  instances:
+    - name: missing
+      type: not-a-registered-policy
+"#,
+        );
+        assert!(matches!(
+            registry.resolve(&unknown),
+            Err(WorkerSelectionPolicyRegistryError::UnknownType { name, .. })
+                if name == "not-a-registered-policy"
+        ));
+
+        let (_file, invalid) = policy_config(
+            r#"
+worker_selection:
+  aggregated: tuned
+  instances:
+    - name: tuned
+      type: dynamo-default-cost-fn
+      parameters:
+        router_temperature: -1.0
+"#,
+        );
+        assert!(
+            matches!(
+                registry.resolve(&invalid),
+                Err(WorkerSelectionPolicyRegistryError::Provider { .. })
+            ),
+            "invalid named-default parameters must fail resolution"
+        );
+    }
+
+    #[test]
+    fn duplicate_shipped_provider_name_fails_preparation() {
         let mut registry = RouterPluginRegistry::default();
         registry
             .register_worker_selection(
-                "test",
+                "dynamo-default-cost-fn",
                 Arc::new(
-                    |_| -> std::result::Result<
+                    |_: &WorkerSelectionPolicyParameters| -> std::result::Result<
                         WorkerSelectionPolicyFactory,
                         WorkerSelectionPolicyProviderError,
                     > {
-                        Err(WorkerSelectionPolicyProviderError::new("not invoked"))
+                        Err(WorkerSelectionPolicyProviderError::new("should not run"))
                     },
                 ),
             )
             .unwrap();
+        let error = prepare_runtime_plugin_registry(Some(registry))
+            .err()
+            .expect("duplicate shipped name must fail preparation");
+        assert!(
+            error.to_string().contains("dynamo-default-cost-fn"),
+            "duplicate error should name the shipped type: {error}"
+        );
+    }
 
-        let _lock = EPP_MODE_ENV_LOCK.lock().await;
-        let previous = std::env::var_os(DYN_EPP_MODE);
-        unsafe { std::env::set_var(DYN_EPP_MODE, DYNAMO_RUNTIME_MODE) };
-        let result = run(Some(registry)).await;
-        match previous {
-            Some(value) => unsafe { std::env::set_var(DYN_EPP_MODE, value) },
-            None => unsafe { std::env::remove_var(DYN_EPP_MODE) },
+    #[test]
+    fn preparation_preserves_custom_provider_alongside_shipped_types() {
+        let mut registry = RouterPluginRegistry::default();
+        registry
+            .register_worker_selection(
+                "custom-sentinel",
+                Arc::new(|_: &WorkerSelectionPolicyParameters| {
+                    Ok(Arc::new(
+                        |config: &KvRouterConfig, worker_type, _partition| {
+                            WorkerSelectionPolicy::new(
+                                config.clone(),
+                                worker_type.as_str(),
+                                Vec::new(),
+                                Box::new(AlwaysFirstPicker),
+                            )
+                        },
+                    ) as WorkerSelectionPolicyFactory)
+                }),
+            )
+            .unwrap();
+        let registry = dynamo_router_policies::with_defaults(
+            prepare_runtime_plugin_registry(Some(registry)).unwrap(),
+        );
+        let (_file, config) = policy_config(
+            r#"
+worker_selection:
+  aggregated: custom-sentinel
+  instances:
+    - name: custom-sentinel
+      type: custom-sentinel
+"#,
+        );
+        assert!(registry.resolve(&config).unwrap().is_some());
+        let (_file, shipped) = policy_config(
+            r#"
+worker_selection:
+  aggregated: tuned
+  instances:
+    - name: tuned
+      type: dynamo-default-cost-fn
+"#,
+        );
+        assert!(registry.resolve(&shipped).unwrap().is_some());
+    }
+
+    #[test]
+    fn standalone_bootstrap_passes_through_without_process_install() {
+        let mut registry = RouterPluginRegistry::default();
+        registry
+            .register_worker_selection(
+                "standalone-sentinel",
+                Arc::new(|_: &WorkerSelectionPolicyParameters| {
+                    Ok(Arc::new(
+                        |config: &KvRouterConfig, worker_type, _partition| {
+                            WorkerSelectionPolicy::new(
+                                config.clone(),
+                                worker_type.as_str(),
+                                Vec::new(),
+                                Box::new(AlwaysFirstPicker),
+                            )
+                        },
+                    ) as WorkerSelectionPolicyFactory)
+                }),
+            )
+            .unwrap();
+        let (_file, config) = policy_config(
+            r#"
+worker_selection:
+  aggregated: standalone-sentinel
+  instances:
+    - name: standalone-sentinel
+      type: standalone-sentinel
+"#,
+        );
+        let returned =
+            bootstrap_plugin_registry(EppMode::Standalone, Some(registry)).unwrap();
+        assert!(
+            dynamo_router_policies::with_defaults(returned)
+                .resolve(&config)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            matches!(
+                router_plugin_registry().resolve_for_worker_type(&config, WorkerType::Aggregated),
+                Err(WorkerSelectionPolicyRegistryError::UnknownType { name, .. })
+                    if name == "standalone-sentinel"
+            ),
+            "Standalone bootstrap must not install into the process registry"
+        );
+    }
+
+    /// Fresh-process Runtime bootstrap: process install + ModelManager typed role.
+    #[tokio::test]
+    async fn runtime_bootstrap_installs_sentinel_for_managed_kv_router() {
+        const TEST: &str = concat!(
+            module_path!(),
+            "::runtime_bootstrap_installs_sentinel_for_managed_kv_router"
+        );
+        let test_name = TEST.split_once("::").unwrap().1;
+        if std::env::var(RUNTIME_BOOTSTRAP_CHILD).as_deref() != Ok(test_name) {
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", test_name, "--nocapture"])
+                .env(RUNTIME_BOOTSTRAP_CHILD, test_name)
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(60), child.output())
+                .await
+                .expect("runtime bootstrap child must finish within its deadline")
+                .expect("spawn runtime bootstrap child");
+            assert_exact_one_passing_child(&output);
+            return;
         }
 
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "linked worker-selection policies require DYN_EPP_MODE=standalone"
+        const MODEL: &str = "epp-runtime-catalog";
+        let sentinel_yaml = r#"
+worker_selection:
+  prefill: recording-sentinel
+  instances:
+    - name: recording-sentinel
+      type: recording-sentinel
+"#;
+        let (_file, config) = policy_config(sentinel_yaml);
+        assert!(
+            matches!(
+                router_plugin_registry()
+                    .resolve_for_worker_type(&config, WorkerType::Prefill),
+                Err(WorkerSelectionPolicyRegistryError::UnknownType { name, .. })
+                    if name == "recording-sentinel"
+            ),
+            "uninstalled process registry must reject the sentinel as UnknownType"
         );
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = RouterPluginRegistry::default();
+        registry
+            .register_worker_selection(
+                "recording-sentinel",
+                Arc::new({
+                    let seen = Arc::clone(&seen);
+                    move |_parameters: &WorkerSelectionPolicyParameters| {
+                        let seen = Arc::clone(&seen);
+                        let factory: WorkerSelectionPolicyFactory =
+                            Arc::new(move |config, worker_type, partition| {
+                                seen.lock()
+                                    .unwrap()
+                                    .push((worker_type, partition.into_owned()));
+                                WorkerSelectionPolicy::new(
+                                    config.clone(),
+                                    worker_type.as_str(),
+                                    Vec::new(),
+                                    Box::new(AlwaysFirstPicker),
+                                )
+                            });
+                        Ok(factory)
+                    }
+                }),
+            )
+            .expect("register sentinel");
+
+        let for_inner =
+            bootstrap_plugin_registry(EppMode::DynamoRuntime, Some(registry)).unwrap();
+        assert!(for_inner.is_empty());
+
+        let runtime_config = KvRouterConfig {
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            skip_initial_worker_wait: true,
+            router_policy_config: config.router_policy_config.clone(),
+            ..Default::default()
+        };
+        assert!(
+            router_plugin_registry()
+                .resolve_for_worker_type(&runtime_config, WorkerType::Prefill)
+                .unwrap()
+                .is_some()
+        );
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = tokio::time::timeout(
+            Duration::from_secs(10),
+            DistributedRuntime::new(runtime, DistributedConfig::process_local()),
+        )
+        .await
+        .expect("process-local runtime construction timed out")
+        .unwrap();
+        let endpoint = drt
+            .namespace(format!("epp-runtime-catalog-{}", Uuid::new_v4()))
+            .unwrap()
+            .component("backend")
+            .unwrap()
+            .endpoint("generate");
+        let model_manager = Arc::new(ModelManager::new());
+        let managed = tokio::time::timeout(
+            Duration::from_secs(20),
+            model_manager.managed_kv_router_for_with_worker_role(
+                &endpoint,
+                16,
+                Some(runtime_config),
+                None,
+                Some(WorkerType::Prefill),
+                WORKER_TYPE_PREFILL,
+                Some(MODEL.to_string()),
+                false,
+            ),
+        )
+        .await
+        .expect("managed KvRouter construction timed out")
+        .expect("managed KvRouter construction");
+
+        let expected = RoutingPartitionId::new(MODEL, DEFAULT_ROUTING_GROUP);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![(WorkerType::Prefill, expected)],
+            "Runtime bootstrap install must reach ModelManager with the real role and partition"
+        );
+
+        let repeat = bootstrap_plugin_registry(EppMode::DynamoRuntime, None)
+            .err()
+            .expect("second Runtime bootstrap must fail");
+        assert!(
+            repeat
+                .to_string()
+                .contains("router plugin registry already installed"),
+            "{repeat}"
+        );
+
+        drop(managed);
+        drop(model_manager);
+        drt.shutdown();
     }
 }
