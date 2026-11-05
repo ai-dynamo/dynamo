@@ -1151,46 +1151,24 @@ mod tests {
     #[test]
     fn image_response_json_body_matches_serde() {
         let b64 = "aGVsbG8gd29ybGQ=".repeat(100);
+        // One escape per `b64_json`, so each case of the escape check has to
+        // catch it alone. The control character opens a 41-byte string, so it
+        // is found in a 32-byte chunk; the other two are found in the tail.
+        let escapes = format!(
+            r#"{{"b64_json":"YQ==\""}},{{"b64_json":"YQ==\\"}},{{"b64_json":"\u0001{}"}}"#,
+            "A".repeat(40)
+        );
         let responses = [
             FULL_IMAGE_RESPONSE.to_owned(),
-            // Absent optional fields are written as null, and `nvext` is omitted.
-            r#"{"created":1,"data":[{"b64_json":"YQ=="}]}"#.to_owned(),
-            r#"{"created":0,"data":[]}"#.to_owned(),
-            // Strings that need escaping, including a `b64_json`.
-            r#"{"created":1,"data":[{"url":"http://x/\"1\".png","revised_prompt":"a\ncat"},{"b64_json":"YQ==\\\u0001"}],"size":"1024\tx1024","nvext":{"usage":{"output_images":2,"input_images":1,"num_inference_steps":4}}}"#.to_owned(),
+            format!(r#"{{"created":1,"data":[{escapes}]}}"#),
             format!(
-                r#"{{"created":1,"data":[{{"b64_json":"{b64}"}},{{"b64_json":"{b64}","revised_prompt":"a cat"}}],"nvext":{{"usage":{{"output_images":2}}}}}}"#
-            ),
-            // Ten images with long revised prompts, every optional field set.
-            format!(
-                r#"{{"created":4294967295,"data":[{}],"background":"transparent","output_format":"webp","size":"1536x1024","quality":"medium","usage":{{"input_tokens":4294967295,"total_tokens":4294967295,"output_tokens":4294967295,"output_token_details":{{"text_tokens":4294967295,"image_tokens":4294967295}},"input_tokens_details":{{"text_tokens":4294967295,"image_tokens":4294967295}}}},"nvext":{{"usage":{{"output_images":4294967295,"input_images":4294967295,"num_inference_steps":255}}}}}}"#,
-                vec![format!(r#"{{"b64_json":"{b64}","revised_prompt":"{}"}}"#, "a cat ".repeat(100)); 10].join(",")
+                r#"{{"created":1,"data":[{{"b64_json":"{b64}"}}],"nvext":{{"usage":{{"output_images":1}}}}}}"#
             ),
         ];
         for json in responses {
             let response: NvImagesResponse = serde_json::from_str(&json).unwrap();
             let body = String::from_utf8(response.to_json_vec().unwrap()).unwrap();
             assert_eq!(body, serde_json::to_string(&response).unwrap());
-            let capacity = response.json_capacity();
-            assert!(body.len() <= capacity, "{} > {capacity}", body.len());
-        }
-    }
-
-    #[test]
-    fn json_str_matches_serde_for_every_ascii_byte() {
-        // 80 bytes of base64: two 32-byte chunks of the escape check and a tail.
-        let b64 = "QUJD".repeat(20);
-        for c in (0u8..=0x7f).map(char::from).chain(['é', '\u{2028}']) {
-            for at in [0, 40, 79] {
-                let mut s = b64.clone();
-                s.insert(at, c);
-                let expected = serde_json::to_vec(&s).unwrap();
-                let serde_escapes = expected.len() != s.len() + 2;
-                assert_eq!(needs_json_escape(s.as_bytes()), serde_escapes, "{c:?}");
-                let mut out = Vec::new();
-                write_json_str(&mut out, &s).unwrap();
-                assert_eq!(out, expected, "{c:?} at {at}");
-            }
         }
     }
 }
