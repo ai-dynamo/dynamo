@@ -88,12 +88,13 @@ class TestPrefillHandlerGenerate:
         assert ep_params is expected_params
 
     @pytest.mark.asyncio
-    async def test_embedding_paths_log_keeps_signed_url_out(self, caplog):
+    @pytest.mark.parametrize("scheme", ["https", "s3"])
+    async def test_embedding_paths_log_keeps_signed_url_out(self, caplog, scheme):
         """The query of a presigned URL is a bearer credential; the NIXL
         embedding path must log only scheme, host and path."""
         signature = "c2f1e9d8b7a6deadbeef0123456789abcdef"
         signed_url = (
-            "https://bucket.s3.amazonaws.com/emb.safetensors"
+            f"{scheme}://user:private-password@bucket.s3.amazonaws.com/emb.safetensors"
             "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
             f"&X-Amz-Signature={signature}"
         )
@@ -123,3 +124,4 @@ class TestPrefillHandlerGenerate:
         assert "bucket.s3.amazonaws.com/emb.safetensors" in caplog.text
         assert signature not in caplog.text
         assert "X-Amz-" not in caplog.text
+        assert "private-password" not in caplog.text

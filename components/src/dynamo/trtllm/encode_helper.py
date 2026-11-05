@@ -251,7 +251,7 @@ class EncodeHelper:
         """
         logging.info(
             "EncodeHelper: loading embeddings from %s",
-            describe_media_source(embedding_paths[0]),
+            describe_media_source(embedding_paths[0], redact_non_http_urls=True),
         )
         try:
             loaded_data = await multimodal_processor.load_tensor_from_path_or_url(

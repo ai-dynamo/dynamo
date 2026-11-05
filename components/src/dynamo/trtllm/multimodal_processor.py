@@ -542,7 +542,9 @@ class MultimodalRequestProcessor:
                                 "Loaded %d embedding file(s) from: %s",
                                 len(loaded_embeddings),
                                 ", ".join(
-                                    describe_media_source(path)
+                                    describe_media_source(
+                                        path, redact_non_http_urls=True
+                                    )
                                     for path in embedding_paths
                                 ),
                             )

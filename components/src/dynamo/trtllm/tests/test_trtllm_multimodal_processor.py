@@ -35,6 +35,7 @@ from dynamo.common.http.aiohttp_client import AiohttpClient
 from dynamo.common.http.base import HttpClient
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.trtllm import multimodal_processor as mmp
+from dynamo.trtllm.encode_helper import EncodeHelper
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 
 pytestmark = [
@@ -1252,6 +1253,7 @@ def _assert_no_signed_query(text: str) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(10)
 async def test_loaded_embedding_log_keeps_signed_url_out(
     embedding_server, shared_client, caplog
 ) -> None:
@@ -1276,21 +1278,26 @@ async def test_loaded_embedding_log_keeps_signed_url_out(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize("scheme", ["http", "s3"])
 async def test_encode_worker_download_failure_keeps_signed_url_out(
-    embedding_server, shared_client, caplog
+    embedding_server, shared_client, caplog, scheme
 ) -> None:
     """S3 answers an expired or wrong signature with 403. The worker logs the
     source before the fetch, so the log line exists even when it fails."""
-    from dynamo.trtllm.encode_helper import EncodeHelper
-
     embedding_server.status = 403
     embedding_server.body = b"<Error><Code>AccessDenied</Code></Error>"
     processor = _embedding_processor()
     processor._url_policy = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
-    signed_url = f"{embedding_server.url}/emb.safetensors{_SIGNED_QUERY}"
+    signed_url = (
+        f"{embedding_server.url}/emb.safetensors{_SIGNED_QUERY}"
+        if scheme == "http"
+        else f"s3://user:private-password@bucket/emb.safetensors{_SIGNED_QUERY}"
+    )
+    expected_error = HttpStatusError if scheme == "http" else RuntimeError
 
     with caplog.at_level(logging.DEBUG):
-        with pytest.raises(HttpStatusError) as excinfo:
+        with pytest.raises(expected_error) as excinfo:
             async for _ in EncodeHelper.process_encode_request(
                 request=_embedding_request(signed_url),
                 multimodal_processor=processor,
@@ -1298,14 +1305,23 @@ async def test_encode_worker_download_failure_keeps_signed_url_out(
             ):
                 pass
 
-    # The signed URL went out on the wire, so the client had the credential.
-    assert len(embedding_server.hits) == 1
-    assert _SIGNATURE in embedding_server.hits[0]
-    assert excinfo.value.status == 403
+    if scheme == "http":
+        # The signed URL went out on the wire, so the client had the credential.
+        assert len(embedding_server.hits) == 1
+        assert _SIGNATURE in embedding_server.hits[0]
+        assert excinfo.value.status == 403
+    else:
+        assert embedding_server.hits == []
+        assert str(excinfo.value) == "Unsupported URL scheme: s3"
     assert "EncodeHelper: loading embeddings from" in caplog.text
     _assert_no_signed_query(caplog.text)
+    assert "private-password" not in caplog.text
     _assert_no_signed_query(str(excinfo.value))
     # Some handlers log with exc_info=True, which prints the whole chain.
     _assert_no_signed_query("".join(traceback.format_exception(excinfo.value)))
-    host_and_path = f"{embedding_server.url.removeprefix('http://')}/emb.safetensors"
+    host_and_path = (
+        f"{embedding_server.url.removeprefix('http://')}/emb.safetensors"
+        if scheme == "http"
+        else "bucket/emb.safetensors"
+    )
     assert host_and_path in caplog.text

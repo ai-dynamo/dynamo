@@ -178,7 +178,8 @@ class PrefillHandler(HandlerBase):
                     logging.info(
                         "PrefillHandler: embedding_paths=%s",
                         ", ".join(
-                            describe_media_source(path) for path in embedding_paths
+                            describe_media_source(path, redact_non_http_urls=True)
+                            for path in embedding_paths
                         ),
                     )
                     embeddings_tensor = await self.remote_encode_with_nixl(
