@@ -175,6 +175,7 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 			podLabels,
 			checkpointInfo,
 			containerGPUs,
+			dgd.Spec.Env,
 		)
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "failed to generate %s pod template", role)
@@ -200,6 +201,7 @@ func (r *dcdWorkloadRenderer) generateComponentRolePodTemplateSpec(
 	labels map[string]string,
 	checkpointInfo *checkpoint.CheckpointInfo,
 	containerGPUs dynamo.ContainerGPUCount,
+	generalEnvironment []corev1.EnvVar,
 ) (*corev1.PodTemplateSpec, error) {
 	podTemplate, err := r.generateComponentPodTemplateSpec(
 		ctx,
@@ -216,6 +218,7 @@ func (r *dcdWorkloadRenderer) generateComponentRolePodTemplateSpec(
 		role,
 		checkpointInfo,
 		containerGPUs,
+		generalEnvironment,
 	)
 	if err != nil {
 		return nil, err
@@ -366,6 +369,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		role,
 		checkpointInfo,
 		containerGPUs,
+		dcd.Spec.Env,
 	)
 }
 
@@ -384,6 +388,7 @@ func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(
 	role dynamo.Role,
 	checkpointInfo *checkpoint.CheckpointInfo,
 	containerGPUs dynamo.ContainerGPUCount,
+	generalEnvironment []corev1.EnvVar,
 ) (*corev1.PodTemplateSpec, error) {
 	component = component.DeepCopy()
 	if componentType != "" {
@@ -419,6 +424,7 @@ func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(
 		componentName,
 		nil,
 		containerGPUs,
+		generalEnvironment...,
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate base pod spec")

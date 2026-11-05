@@ -37,7 +37,7 @@ spec:
 
 ## Spec reference
 
-The DCD spec is `backendFramework` plus the [shared component spec](#shared-component-spec) inlined at the same level.
+The DCD spec contains `backendFramework`, general environment defaults in `env`, and the [shared component spec](#shared-component-spec) inlined at the same level.
 
 <ParamField path="backendFramework" type="string">
   Inference backend framework for this component. Drives backend-specific defaults the operator injects into the `spec.podTemplate.spec.containers[name=main]` container.
@@ -45,6 +45,47 @@ The DCD spec is `backendFramework` plus the [shared component spec](#shared-comp
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 
 </ParamField>
+
+<ParamField path="env" type="[]core/v1.EnvVar">
+  General environment defaults for the regular `main` container and any declared `runtime`
+  init container. Optional, with no default. Container-specific `env` replaces same-named
+  entries, including the complete `valueFrom` definition. Graph-generated DCDs preserve the
+  DGD's `spec.env` here rather than flattening it into PodTemplates.
+
+  For operator origins 1.7.0 and later, list order is preserved within each source and references
+  between sources are topologically ordered; cycles fail rendering. Operator-owned bindings retain
+  their generated values. Older or missing origins retain legacy sorted composition.
+  The field maps natively between `v1alpha1` and `v1beta1`, separately from alpha `envs`.
+  See [Environment Variable Order](../../kubernetes/model-deployment/deploy-with-dgd.md#environment-variable-order).
+
+  <a href="https://pkg.go.dev/k8s.io/api/core/v1#EnvVar" target="_blank">core/v1.EnvVar</a>
+</ParamField>
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoComponentDeployment
+metadata:
+  name: worker
+spec:
+  backendFramework: vllm
+  env:
+    - name: BASE
+      value: /models
+    - name: MODEL
+      value: "$(BASE)/qwen"
+  type: worker
+  podTemplate:
+    spec:
+      containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
+          env:
+            - name: BASE
+              value: /fast/models
+```
+
+For a semantic-origin DCD, the effective `BASE` precedes `MODEL`, which expands to
+`/fast/models/qwen`. `env` is a DCD root field, not an additional field on DGD components.
 
 ### Shared component spec
 

@@ -327,6 +327,7 @@ func TestPrepareCheckpointGMSPodTemplateRejectsMissingClient(t *testing.T) {
 		commonconsts.MainContainerName,
 		"checkpoint-id",
 		gmsSpec,
+		nil,
 	)
 
 	t.Log("Verify the typo fails before partially mutating the Pod template")

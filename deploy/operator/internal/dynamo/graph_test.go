@@ -1743,7 +1743,7 @@ func TestAddStandardEnvVars_NATS(t *testing.T) {
 	}
 }
 
-func TestAddMultinodeTopologyEnvVars(t *testing.T) {
+func TestAddLegacyMultinodeTopologyEnvVars(t *testing.T) {
 	enabledAnnotations := map[string]string{
 		commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
 	}
@@ -1818,7 +1818,7 @@ func TestAddMultinodeTopologyEnvVars(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("inject topology aliases into the rendered main container")
 			container := &corev1.Container{Env: tt.initialEnv}
-			addMultinodeTopologyEnvVars(container, tt.numberOfNodes, "Engine", tt.deployer, tt.annotations)
+			addLegacyMultinodeTopologyEnvVars(container, tt.numberOfNodes, "Engine", tt.deployer, tt.annotations)
 
 			t.Log("verify aliases are present only for eligible multinode deployments")
 			leader := findEnvVar(container.Env, commonconsts.DynamoLeaderAddressEnvVar)
@@ -1926,19 +1926,20 @@ func TestGenerateBasePodSpecEnvironmentOrderByOrigin(t *testing.T) {
 		return podSpec.Containers[0].Env
 	}
 
-	t.Run("origin 1.7 keeps injected env before user env in declared order", func(t *testing.T) {
+	t.Run("origin 1.7 preserves user order and replaces overridden defaults", func(t *testing.T) {
 		env := render(t, "1.7.0", 1)
 		require.GreaterOrEqual(t, len(env), len(userEnv)+1)
 		require.Equal(t, userEnv, env[len(env)-len(userEnv):])
-		require.Equal(t, corev1.EnvVar{Name: "NATS_SERVER", Value: "nats://system:4222"}, env[0])
+		require.Len(t, envVarsToMap(env), len(env))
+		require.Equal(t, "nats://user:4222", envVarsToMap(env)["NATS_SERVER"])
 	})
 
-	t.Run("origin 1.7 keeps multinode topology aliases ahead of the user suffix", func(t *testing.T) {
+	t.Run("origin 1.7 keeps user order without requiring a fixed system prefix", func(t *testing.T) {
 		t.Log("Render topology aliases without sorting the authored environment")
 		env := render(t, "1.7.0", 2)
-		require.Equal(t, userEnv, env[len(env)-len(userEnv):])
-		require.Equal(t, commonconsts.DynamoLeaderAddressEnvVar, env[0].Name)
-		require.Equal(t, commonconsts.DynamoRankEnvVar, env[1].Name)
+		require.Equal(t, userEnv, env[len(env)-len(userEnv)-2:len(env)-2])
+		require.Equal(t, commonconsts.DynamoLeaderAddressEnvVar, env[len(env)-2].Name)
+		require.Equal(t, commonconsts.DynamoRankEnvVar, env[len(env)-1].Name)
 	})
 
 	t.Run("origin 1.6 retains legacy sorted and de-duplicated output", func(t *testing.T) {
@@ -1997,10 +1998,15 @@ func TestGenerateBasePodSpecBackendEnvironmentOrderByOrigin(t *testing.T) {
 		return podSpec.Containers[0].Env
 	}
 
-	t.Run("origin 1.7 moves backend env before the ordered user suffix", func(t *testing.T) {
+	t.Run("origin 1.7 overrides a backend default without repairing a local forward reference", func(t *testing.T) {
 		environment := render(t, "1.7.0")
-		wantSuffix := append([]corev1.EnvVar{backendEnvironment}, userEnvironment...)
-		require.Equal(t, wantSuffix, environment[len(environment)-len(wantSuffix):])
+		var relevant []corev1.EnvVar
+		for _, variable := range environment {
+			if variable.Name == "A_DERIVED" || variable.Name == backendEnvironmentName {
+				relevant = append(relevant, variable)
+			}
+		}
+		require.Equal(t, userEnvironment, relevant)
 	})
 
 	t.Run("origin 1.6 retains the legacy backend env suffix", func(t *testing.T) {
