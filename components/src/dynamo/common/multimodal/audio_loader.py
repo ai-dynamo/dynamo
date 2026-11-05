@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import errno
 import logging
 from typing import Any, Awaitable, Dict, Final, List
 from urllib.parse import urlparse
@@ -204,6 +205,12 @@ class AudioLoader:
             )
             raise audio_decoder_missing("vllm", cause=str(exc)) from exc
         except Exception as exc:
+            # Host resource exhaustion is a server fault, not invalid audio.
+            if isinstance(exc, MemoryError) or (
+                isinstance(exc, OSError)
+                and exc.errno in (errno.EMFILE, errno.ENFILE, errno.ENOMEM)
+            ):
+                raise
             # Bound the URL like the branches above: a signed URL (GCS, S3,
             # Azure SAS) is a bearer credential, and its signature must reach
             # neither the log nor the client's error body.

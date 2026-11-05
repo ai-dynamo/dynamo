@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import errno
 import logging
 from unittest.mock import AsyncMock
 
@@ -215,6 +216,7 @@ async def test_load_audio_batch_preserves_invalid_audio_value_error(bad_result):
     good = (np.zeros(8000, dtype=np.float32), 16000.0)
 
     async def _fetch(url):
+        """Return valid audio or simulate a decoder failure."""
         if url.endswith("good.wav"):
             return good
         if isinstance(bad_result, Exception):
@@ -235,6 +237,7 @@ async def test_load_audio_batch_preserves_invalid_audio_value_error(bad_result):
 
 @pytest.mark.asyncio
 async def test_load_audio_batch_value_error_outranks_generic_failure():
+    """Invalid audio stays a client error even when another item fails."""
     loader = AudioLoader()
     value_error = ValueError("Decoded waveform is empty.")
     loader.load_audio = AsyncMock(  # type: ignore[method-assign]
@@ -280,6 +283,31 @@ async def test_load_audio_batch_server_failure_is_not_client_error(
         await loader.load_audio_batch([{"Url": "https://example.com/bad.wav"}])
 
     assert type(exc_info.value) is Exception
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        MemoryError("Out of memory"),
+        OSError(errno.ENOMEM, "Cannot allocate memory"),
+        OSError(errno.EMFILE, "Too many open files"),
+        OSError(errno.ENFILE, "Too many open files in system"),
+    ],
+    ids=["memory_error", "enomem", "emfile", "enfile"],
+)
+async def test_load_audio_batch_resource_failure_is_not_client_error(failure):
+    """Host resource exhaustion must remain a server error in a batch."""
+    loader = AudioLoader()
+    loader._load_audio_with_vllm = AsyncMock(  # type: ignore[method-assign]
+        side_effect=failure
+    )
+
+    with pytest.raises(Exception, match="Failed to load audio") as exc_info:
+        await loader.load_audio_batch([{"Url": "https://example.com/bad.wav"}])
+
+    assert type(exc_info.value) is Exception
+    assert str(failure) in str(exc_info.value)
 
 
 @pytest.mark.asyncio
