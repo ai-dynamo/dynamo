@@ -224,8 +224,11 @@ cargo run -p dynamo-global-frontend -- --port 8000 \
   --relay-view-port 50051
 ```
 
-Set each Relay's `--global-discovery-url`, `--bind`, and
-`--routing-pool <cluster>/<Kubernetes namespace>/<DGD name>`. Scope its discovery
+Set each Relay's `--global-discovery-url`, `--bind`,
+`--routing-pool <cluster>/<Kubernetes namespace>/<DGD name>`,
+`--routing-pool-region`, and, with registrations-mode discovery,
+`--routing-pool-frontends`. The Relay registers its pool with `POST /pools` and
+renews it on the lease heartbeat. Scope its discovery
 sources to that DGD. Each `GET /routers` endpoint must address a replica's gRPC
 receiving port. Relays send a fresh catalog/readiness/load snapshot on every
 connection, then updates. Separate Relay views keep active-active reports from
