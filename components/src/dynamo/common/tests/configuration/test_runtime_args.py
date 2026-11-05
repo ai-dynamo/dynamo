@@ -473,6 +473,8 @@ def test_invalid_allow_remote_urls_fails_at_startup(monkeypatch):
 
 def test_muse_parser_alias_warns_per_flag(monkeypatch, caplog):
     _clear_structural_tag_env(monkeypatch)
+    # validate() exports DYN_RESPONSE_PLANE; track it so monkeypatch restores it.
+    monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
     with caplog.at_level(logging.WARNING, logger=runtime_args.__name__):
         config, _ = _parse_runtime_args(
             ["--dyn-tool-call-parser", "muse", "--dyn-reasoning-parser", "muse"]
@@ -488,6 +490,7 @@ def test_muse_parser_alias_warns_per_flag(monkeypatch, caplog):
 
 def test_canonical_muse_parsers_do_not_warn(monkeypatch, caplog):
     _clear_structural_tag_env(monkeypatch)
+    monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
     with caplog.at_level(logging.WARNING, logger=runtime_args.__name__):
         _parse_runtime_args(
             [
