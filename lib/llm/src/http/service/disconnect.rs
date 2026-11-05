@@ -40,8 +40,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::http::service::error::{
-    ClientErrorAction, SanitizedError, anthropic_context_length_public_message,
-    http_action_for_error,
+    ClientErrorAction, Protocol, SanitizedError, http_action_for_error, public_message_for,
 };
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
 use dynamo_runtime::error::{DynamoError, ErrorClass};
@@ -401,11 +400,8 @@ fn openai_semantic_stream_error(error: &DynamoError) -> (ErrorType, String) {
             "Request cancelled",
         ),
     };
-    let message = error
-        .public_message()
-        .map(str::to_owned)
-        .or_else(|| anthropic_context_length_public_message(error))
-        .unwrap_or_else(|| message.to_string());
+    let message =
+        public_message_for(error, Protocol::OpenAi).unwrap_or_else(|| message.to_string());
     let error_type = if status == crate::http::service::error::overload_status_code() {
         "service_unavailable"
     } else {
@@ -1359,9 +1355,9 @@ mod tests {
         assert_eq!(body["error"]["type"], "invalid_request_error");
         assert_eq!(
             body["error"]["message"],
-            "this model's maximum context length is 8192 tokens. However, the request would use \
-             4000 prompt tokens plus 5000 requested output tokens (9000 tokens total). Please \
-             reduce the length of the messages or the requested output."
+            "This model's maximum context length is 8192 tokens. However, your request would \
+             use 4000 prompt tokens plus 5000 requested output tokens (9000 tokens total). \
+             Please reduce the length of the messages or the requested output."
         );
         let message = body["error"]["message"].as_str().unwrap();
         assert!(message.contains("maximum context length is 8192 tokens"));
@@ -1389,10 +1385,13 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&body).unwrap();
 
         let message = body["error"]["message"].as_str().unwrap();
-        assert!(message.contains("prompt is too long"));
-        assert!(message.contains("maximum context length is 8192 tokens"));
-        assert!(message.contains("leaves no room for output"));
-        assert!(message.contains("8192 tokens, which leaves no room for output"));
+        assert_eq!(
+            message,
+            "This model's maximum context length is 8192 tokens. However, your messages \
+             resulted in 8192 tokens, which leaves no room for output. Please reduce the length \
+             of the messages."
+        );
+        assert!(!message.contains("prompt is too long"));
     }
 
     #[test]

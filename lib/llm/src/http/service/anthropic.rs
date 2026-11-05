@@ -65,9 +65,8 @@ use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{
-    ClientErrorAction, SanitizedError, anthropic_context_length_message,
-    anthropic_context_length_public_message, find_canonical_error_in_chain, http_action_for_error,
-    invalid_argument,
+    ClientErrorAction, Protocol, SanitizedError, anthropic_context_length_message,
+    find_canonical_error_in_chain, http_action_for_error, invalid_argument, public_message_for,
 };
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id, warn_nvext_disabled};
@@ -1465,10 +1464,7 @@ fn anthropic_stream_error_body(error: &dynamo_runtime::error::DynamoError) -> An
     };
     AnthropicErrorBody {
         error_type: anthropic_error_type_for_class(error.class()).to_string(),
-        message: error
-            .public_message()
-            .map(str::to_owned)
-            .or_else(|| anthropic_context_length_public_message(error))
+        message: public_message_for(error, Protocol::Anthropic)
             .unwrap_or_else(|| message.to_string()),
     }
 }
@@ -1500,10 +1496,7 @@ fn anthropic_semantic_error(error: &dynamo_runtime::error::DynamoError) -> Optio
     } else {
         tracing::debug!(class = %error.class(), reason = %error.reason(), diagnostic = ?error.diagnostic().map(dynamo_runtime::error::Diagnostic::as_str), "Semantic request failure");
     }
-    let rendered_message = error
-        .public_message()
-        .map(str::to_owned)
-        .or_else(|| anthropic_context_length_public_message(error))
+    let rendered_message = public_message_for(error, Protocol::Anthropic)
         .unwrap_or_else(|| public_message.to_string());
     Some(anthropic_error_unrecorded(
         status,
