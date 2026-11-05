@@ -1251,11 +1251,8 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             history_phases.clear();
         }
 
-        // Responses returns scores only when `include` asks for them. The chat
-        // request then needs `logprobs: true` and an explicit count, since the
-        // chat default is 1. Without the include, `top_logprobs` selects
-        // nothing, and chat rejects it without `logprobs: true`, so it stays
-        // out of the backend request and is only echoed on the response.
+        // Scores need the include selector plus an explicit count (chat defaults to 1).
+        // A bare `top_logprobs` is only echoed: chat rejects it without `logprobs: true`.
         let logprobs_requested = include_requests_logprobs(resp.inner.include.as_deref());
         let top_logprobs =
             logprobs_requested.then(|| convert_top_logprobs(resp.inner.top_logprobs).unwrap_or(0));
