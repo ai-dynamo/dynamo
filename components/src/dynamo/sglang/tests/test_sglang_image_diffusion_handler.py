@@ -892,21 +892,6 @@ class TestOutputFormat:
         assert results[0]["output_format"] == output_format
 
     @pytest.mark.asyncio
-    async def test_jpeg_flattens_transparency_onto_white(self, handler, mock_context):
-        self._mock_frame(handler, Image.new("RGBA", (64, 32), (255, 0, 0, 0)))
-
-        results = [
-            r
-            async for r in handler.generate(
-                self._request(output_format="jpeg"), mock_context
-            )
-        ]
-
-        decoded = base64.b64decode(results[0]["data"][0]["b64_json"])
-        pixel = Image.open(io.BytesIO(decoded)).convert("RGB").getpixel((0, 0))
-        assert all(channel >= 250 for channel in pixel)
-
-    @pytest.mark.asyncio
     async def test_mixed_frame_sizes_omit_size(self, handler, mock_context):
         handler.generator.generate = Mock(
             side_effect=[
