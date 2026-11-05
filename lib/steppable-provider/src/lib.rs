@@ -439,6 +439,8 @@ unsafe fn replay_context(
             .then_some(context.turn_index as usize),
         metadata,
         prompt_token_source,
+        // The steppable ABI carries no agentic runtime identity.
+        agentic: None,
     }))
 }
 
@@ -482,6 +484,9 @@ unsafe fn direct_request(request: DirectRequestV1) -> Result<DirectRequest, Stat
         strict_priority: request.strict_priority,
         policy_class,
         replay_context: unsafe { replay_context(request) }?,
+        // The steppable ABI carries neither peer-fetch hints nor images.
+        kv_hints: None,
+        images: Vec::new(),
     })
 }
 
@@ -1633,8 +1638,8 @@ mod tests {
 
         assert_eq!(args.dp_size, 2);
         assert_eq!(args.num_gpu_blocks, 29);
-        assert_eq!(args.max_num_batched_tokens, Some(37));
-        assert_eq!(args.max_num_seqs, Some(7));
+        assert_eq!(args.max_num_batched_tokens, 37);
+        assert_eq!(args.max_num_seqs, 7);
     }
 
     #[test]
