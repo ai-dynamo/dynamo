@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import argparse
+import importlib.metadata
 import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -75,3 +78,78 @@ def test_http_sglang_processor_keeps_parser_options(
 
     assert config.chat_processor == "sglang"
     assert sglang_flags.tool_call_parser == "qwen"
+
+
+@pytest.mark.parametrize("layout", ["common", "launchers", "openai"])
+@pytest.mark.parametrize("version", ["0.1.dev24216", "0.32.0"])
+def test_http_vllm_processor_detects_cli_layout_without_version_checks(
+    monkeypatch: pytest.MonkeyPatch, layout: str, version: str
+) -> None:
+    # Model the modern development wheel and the older supported layout,
+    # including version strings that disagree with the installed modules.
+    modules = {}
+    for name in (
+        "vllm",
+        "vllm.utils",
+        "vllm.platforms",
+        "vllm.engine",
+        "vllm.engine.arg_utils",
+        "vllm.entrypoints",
+        "vllm.entrypoints.common",
+        "vllm.entrypoints.launchers",
+        "vllm.entrypoints.openai",
+        f"vllm.entrypoints.{layout}.cli_args",
+    ):
+        module = ModuleType(name)
+        module.__path__ = []
+        modules[name] = module
+        monkeypatch.setitem(sys.modules, name, module)
+        parent, _, child = name.rpartition(".")
+        if parent:
+            monkeypatch.setattr(modules[parent], child, module, raising=False)
+
+    class FrontendArgs:
+        @staticmethod
+        def add_cli_args(parser):
+            parser.add_argument("--tool-call-parser")
+            return parser
+
+    class AsyncEngineArgs:
+        @staticmethod
+        def add_cli_args(parser):
+            parser.add_argument("--max-model-len", type=int)
+            return parser
+
+    modules["vllm.utils"].FlexibleArgumentParser = argparse.ArgumentParser
+    modules["vllm.platforms"].current_platform = SimpleNamespace(device_type="cpu")
+    modules["vllm.engine.arg_utils"].AsyncEngineArgs = AsyncEngineArgs
+    modules[f"vllm.entrypoints.{layout}.cli_args"].FrontendArgs = FrontendArgs
+    for other_layout in {"common", "launchers", "openai"} - {layout}:
+        monkeypatch.setitem(
+            sys.modules, f"vllm.entrypoints.{other_layout}.cli_args", None
+        )
+    installed_version = importlib.metadata.version
+    monkeypatch.setattr(
+        importlib.metadata,
+        "version",
+        lambda name: version if name == "vllm" else installed_version(name),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "dynamo.frontend",
+            "--dyn-chat-processor",
+            "vllm",
+            "--max-model-len",
+            "2048",
+            "--tool-call-parser",
+            "kimi_k3",
+        ],
+    )
+
+    config, vllm_flags, _ = parse_args()
+
+    assert config.chat_processor == "vllm"
+    assert vllm_flags.max_model_len == 2048
+    assert vllm_flags.tool_call_parser == "kimi_k3"

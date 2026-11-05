@@ -1098,7 +1098,9 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
 
 @pytest.mark.asyncio
 async def test_external_mm_hashes_rebuild_padding_after_hash_override():
-    item = SimpleNamespace(pad_value=91, offsets=[(1, 2)])
+    from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+
+    item = MultimodalDataItem(modality=Modality.IMAGE, pad_value=91, offsets=[(1, 2)])
     mm_inputs = SimpleNamespace(mm_items=[item], padded_input_ids=[1, 7, 7, 4])
     tokenized = SimpleNamespace(input_ids=[1, 2, 3, 4], mm_inputs=mm_inputs)
 
