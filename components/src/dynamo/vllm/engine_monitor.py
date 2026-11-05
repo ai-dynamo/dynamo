@@ -116,6 +116,9 @@ class VllmEngineMonitor:
                     await asyncio.sleep(self.health_config.interval)
 
             except (EngineDeadError, asyncio.TimeoutError) as e:
+                # Planned retirement stops the EngineCore but retains the API for correlated observation.
+                if self.engine_client.should_keep_api_server_alive:
+                    continue
                 if self.shutdown_event and self.shutdown_event.is_set():
                     logger.warning(
                         "%s: %s while worker shutdown is in progress; "
@@ -135,6 +138,8 @@ class VllmEngineMonitor:
                 break
 
     async def _run_health_check(self):
+        if self.engine_client.should_keep_api_server_alive:
+            return
         health_check = self.engine_client.check_health()
         if self.health_config.check_timeout > 0:
             return await asyncio.wait_for(
@@ -173,7 +178,8 @@ class VllmEngineMonitor:
                 else:
                     await asyncio.sleep(interval)
 
-                await self.engine_client.do_log_stats()
+                if not self.engine_client.should_keep_api_server_alive:
+                    await self.engine_client.do_log_stats()
             except asyncio.CancelledError:
                 break
             except Exception:

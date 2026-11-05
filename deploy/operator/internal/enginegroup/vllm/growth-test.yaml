@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Pinned B200 functional growth test; see README.md for prerequisites and limits.
+# Manual MoE test, not shared L4/pre-merge CI; Elastic EP requires real expert redistribution.
+# Render IMAGE with a build containing the native prerequisites in README.md.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-enginegroup-followup
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    runtimeVersionOverride: "1.7.0"
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${IMAGE}
+  - name: Worker
+    type: worker
+    runtimeVersionOverride: "1.7.0"
+    replicas: 1
+    engineGroup:
+      initialSize: 2
+      policy: {minSize: 2, maxSize: 4}
+    podTemplate:
+      metadata:
+        labels:
+          dynamo.nvidia.com/poc-member: followup-e2e
+      spec:
+        restartPolicy: Never
+        readinessGates:
+        - conditionType: dynamo.nvidia.com/retained
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+        containers:
+        - name: main
+          image: ${IMAGE}
+          command: [python3, -m, dynamo.vllm]
+          env:
+          - {name: VLLM_ENABLE_V1_MULTIPROCESSING, value: "1"}
+          - {name: VLLM_USE_RUST_FRONTEND, value: "0"}
+          - {name: VLLM_ELASTIC_EP_DRAIN_REQUESTS, value: "1"}
+          - {name: DYNAMO_ENGINE_GROUP, value: "1"}
+          - name: DYNAMO_POD_UID
+            valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+          args:
+          - --model=/models/Qwen3-30B-A3B
+          - --served-model-name=Qwen/Qwen3-30B-A3B
+          - --tensor-parallel-size=1
+          - --elastic-ep-auto-bootstrap
+          - --elastic-ep-initial-dp-size=2
+          - --data-parallel-rank=$(DYNAMO_RANK)
+          - --data-parallel-address=$(DYNAMO_LEADER_ADDRESS)
+          - --data-parallel-external-lb
+          - --data-parallel-size-local=1
+          - --distributed-executor-backend=mp
+          - --enable-expert-parallel
+          - --enable-eplb
+          - --enable-elastic-ep
+          - --elastic-ep-max-dp-size=4
+          - --gpu-memory-utilization=0.8
+          - --max-model-len=2048
+          - --enforce-eager
+          - --scheduler-cls=vllm.v1.core.sched.async_scheduler.AsyncScheduler
+          resources:
+            requests: {cpu: "4", memory: 32Gi}
+            limits: {cpu: "16", memory: 96Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+          - {name: model, mountPath: /models, readOnly: true}
+        volumes:
+        - name: model
+          persistentVolumeClaim: {claimName: moe-model}
