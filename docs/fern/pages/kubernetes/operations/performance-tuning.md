@@ -119,7 +119,7 @@ than a leak.
 The frontend's Rust allocations use a built-in jemalloc with a background thread that returns
 freed pages after about 10 seconds, so resident memory should fall back toward the live heap once
 the load stops. To change the decay or arena settings, set `_RJEM_MALLOC_CONF` on the frontend
-container; see
+container. To compare against the system allocator, set `DYN_DISABLE_JEMALLOC=1`. See
 [Host memory allocator](../../reference/components/frontend-configuration.mdx#host-memory-allocator)
 for the defaults.
 
