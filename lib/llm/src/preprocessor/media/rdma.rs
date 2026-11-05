@@ -14,6 +14,7 @@ use ndarray::{ArrayBase, Dimension, OwnedRepr};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use super::decoders::DecodedMediaMetadata;
 
@@ -62,6 +63,52 @@ pub struct RdmaMediaDataDescriptor {
     pub(crate) source_storage: Option<Arc<nixl::NixlRegistered<SystemStorage>>>,
 }
 
+/// How long decoded media stays registered after the frontend gives up on an
+/// attempt that may still read it. A vLLM `nixl_ref` reader starts no read
+/// later than 30 s after its own request ends; the other 5 s is margin.
+const READ_GRACE: Duration = Duration::from_secs(35);
+
+/// Registrations of a request's decoded media that a remote reader may still
+/// read.
+///
+/// A worker reads the decoded media before its first token. So the frontend
+/// keeps the media registered for [`READ_GRACE`] after an attempt that ends
+/// before it delivered a token, and after a failed encoder hop. The grace
+/// starts when the frontend gives up on the attempt or hop. It covers a late
+/// read only when the worker's vLLM request ends within 5 s of that time, so
+/// it does not cover a worker that the frontend lost contact with and that
+/// submits the request to vLLM later.
+pub(crate) struct DecodedMediaHold {
+    _registrations: Vec<Arc<nixl::NixlRegistered<SystemStorage>>>,
+}
+
+impl DecodedMediaHold {
+    /// The registrations of the decoded media in `data`, if there are any.
+    pub(crate) fn of<'a>(
+        data: impl IntoIterator<Item = &'a RdmaMediaDataDescriptor>,
+    ) -> Option<Self> {
+        let held: Vec<_> = data
+            .into_iter()
+            .filter_map(|descriptor| descriptor.source_storage.clone())
+            .collect();
+        (!held.is_empty()).then_some(Self {
+            _registrations: held,
+        })
+    }
+
+    /// Keep the registrations for [`READ_GRACE`] from now.
+    pub(crate) fn release_after_grace(self) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!("no async runtime to keep decoded media registered; releasing it now");
+            return;
+        };
+        runtime.spawn(async move {
+            tokio::time::sleep(READ_GRACE).await;
+            drop(self);
+        });
+    }
+}
+
 impl RdmaMediaDataDescriptor {
     #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
     fn local_payload(&self) -> Option<&[u8]> {
@@ -76,6 +123,45 @@ impl RdmaMediaDataDescriptor {
     /// Canonical cache/routing key serialized on the descriptor.
     pub(crate) fn content_hash_key(&self) -> Option<&str> {
         self.content_hash.as_deref()
+    }
+
+    /// Describe a decoded still image for a NIXL reader in another process.
+    ///
+    /// Keeps the decoder's channel count: 1 (L), 2 (LA), 3 (RGB), or 4
+    /// (RGBA), 8 bits each. Fails for memory other than host memory and for
+    /// shapes other than one image, `[H, W, C]` or `[1, H, W, C]`.
+    pub fn remote_image(&self) -> Result<RemoteImage> {
+        let descriptor = &self.nixl_descriptor;
+        anyhow::ensure!(
+            descriptor.mem_type == nixl::MemType::Dram,
+            "decoded media is in {:?} memory; only host memory can be read remotely",
+            descriptor.mem_type
+        );
+        let (height, width, channels) = match self.tensor_info.shape.as_slice() {
+            [height, width, channels] | [1, height, width, channels]
+                if (1..=4).contains(channels) =>
+            {
+                (*height, *width, *channels)
+            }
+            shape => anyhow::bail!("decoded media shape {shape:?} is not one 8-bit image"),
+        };
+        anyhow::ensure!(
+            height
+                .checked_mul(width)
+                .and_then(|pixels| pixels.checked_mul(channels))
+                == Some(descriptor.size),
+            "decoded image of {height}x{width}x{channels} does not fill its {}-byte region",
+            descriptor.size
+        );
+        Ok(RemoteImage {
+            agent_metadata: decode_nixl_metadata(&self.nixl_metadata)?,
+            addr: descriptor.addr,
+            height: u32::try_from(height)
+                .map_err(|_| anyhow::anyhow!("decoded image height exceeds u32"))?,
+            width: u32::try_from(width)
+                .map_err(|_| anyhow::anyhow!("decoded image width exceeds u32"))?,
+            channels: channels as u32,
+        })
     }
 
     /// Numeric form used by MM-aware KV routing.
@@ -258,14 +344,14 @@ impl DecodedMediaData {
         self.content_hash = content_hash_for_storage(&self.tensor_info, &self.data, hash_video);
     }
 
-    pub fn into_rdma_descriptor(self, nixl_agent: &NixlAgent) -> Result<RdmaMediaDataDescriptor> {
+    pub fn into_rdma_descriptor(self, nixl_agent: &MediaAgent) -> Result<RdmaMediaDataDescriptor> {
         let source_storage = self.data;
         let content_hash = self.content_hash.map(|hash| format!("{hash:016x}"));
         let registered = nixl::register_with_nixl(source_storage, nixl_agent, None)
             .map_err(|_| anyhow::anyhow!("Failed to register storage with NIXL"))?;
 
         let nixl_descriptor = registered.descriptor();
-        let nixl_metadata = get_nixl_metadata(nixl_agent, registered.storage())?;
+        let nixl_metadata = get_nixl_metadata(nixl_agent, &nixl_descriptor)?;
 
         Ok(RdmaMediaDataDescriptor {
             nixl_metadata,
@@ -305,16 +391,113 @@ impl<D: Dimension> TryFrom<ArrayBase<OwnedRepr<u8>, D>> for DecodedMediaData {
     }
 }
 
-// Get NIXL metadata for a descriptor
+/// The NIXL agent of a media loader, with the part of its agent metadata
+/// before the memory sections: the agent name and the connection info. That
+/// part stays the same for the life of the agent, so the agent reads it once.
+pub struct MediaAgent {
+    agent: NixlAgent,
+    connections: Vec<u8>,
+}
+
+impl MediaAgent {
+    pub fn new(agent: NixlAgent) -> Result<Self> {
+        // With an empty list, `getLocalPartialMD` gives only the connection info.
+        let connections = agent
+            .raw_agent()
+            .get_local_partial_md(&nixl::RegDescList::new(nixl::MemType::Dram)?, None)?;
+        let connections = connections[..memory_section_offset(&connections)?].to_vec();
+        Ok(Self { agent, connections })
+    }
+}
+
+impl std::ops::Deref for MediaAgent {
+    type Target = NixlAgent;
+
+    fn deref(&self) -> &NixlAgent {
+        &self.agent
+    }
+}
+
+/// Agent metadata with the connection info and the section of `region`.
+///
+/// nixl-sys 1.3.2 cannot ask `getLocalPartialMD` for both: with a region it
+/// leaves out the connection info, and with no region it gives only the
+/// connection info. Both blobs use the `nixlSerDes` layout (agent name,
+/// connections, memory sections), so the connections of the first join the
+/// sections of the second.
+fn region_metadata(agent: &MediaAgent, region: &NixlDescriptor) -> Result<Vec<u8>> {
+    let mut descs = nixl::RegDescList::new(region.mem_type)?;
+    descs.add_storage_desc(region)?;
+    let section = agent.raw_agent().get_local_partial_md(&descs, None)?;
+    Ok([
+        agent.connections.as_slice(),
+        &section[memory_section_offset(&section)?..],
+    ]
+    .concat())
+}
+
+/// Byte offset of the `MemSection` field: after the agent name and the
+/// connection entries.
+fn memory_section_offset(metadata: &[u8]) -> Result<usize> {
+    let malformed = || anyhow::anyhow!("NIXL agent metadata has an unexpected layout");
+    let mut rest = metadata
+        .strip_prefix(b"nixlSerDes|")
+        .ok_or_else(malformed)?;
+    let mut field = |tag: &str| -> Result<&[u8]> {
+        let after_tag = rest.strip_prefix(tag.as_bytes()).ok_or_else(malformed)?;
+        let (len, after_len) = after_tag
+            .split_first_chunk::<{ std::mem::size_of::<usize>() }>()
+            .ok_or_else(malformed)?;
+        let (value, after_value) = after_len
+            .split_at_checked(usize::from_ne_bytes(*len))
+            .ok_or_else(malformed)?;
+        rest = after_value.strip_prefix(b"|").ok_or_else(malformed)?;
+        Ok(value)
+    };
+    field("Agent")?;
+    let connections = usize::from_ne_bytes(field("Conns")?.try_into().map_err(|_| malformed())?);
+    for _ in 0..connections {
+        field("t")?;
+        field("c")?;
+    }
+    Ok(metadata.len() - rest.len())
+}
+
+/// A decoded 8-bit image in host memory that another process can read over
+/// NIXL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteImage {
+    /// Raw NIXL agent metadata of the process that owns the memory.
+    pub agent_metadata: Vec<u8>,
+    /// Address of the first pixel in that process.
+    pub addr: u64,
+    pub height: u32,
+    pub width: u32,
+    /// 1 (L), 2 (LA), 3 (RGB), or 4 (RGBA).
+    pub channels: u32,
+}
+
+/// Inverse of the encoding in [`get_nixl_metadata`].
+fn decode_nixl_metadata(encoded: &str) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+
+    let compressed = general_purpose::STANDARD.decode(
+        encoded
+            .strip_prefix("b64:")
+            .ok_or_else(|| anyhow::anyhow!("NIXL metadata must start with `b64:`"))?,
+    )?;
+    let mut raw = Vec::new();
+    flate2::read::ZlibDecoder::new(compressed.as_slice()).read_to_end(&mut raw)?;
+    Ok(raw)
+}
+
+// Get NIXL metadata for one registered region: the agent's connection info and
+// that region only. `get_local_md` would list every live registration of the
+// agent, so its size would grow with the loader cache and with concurrent requests.
 // Returns zlib-compressed, base64-encoded metadata in format: "b64:<compressed_base64>"
 // This format matches what Python nixl_connect expects for RdmaMetadata.nixl_metadata
-// TODO: pre-allocate a fixed NIXL-registered RAM pool so metadata can be cached on the target?
-pub fn get_nixl_metadata(agent: &NixlAgent, _storage: &SystemStorage) -> Result<String> {
-    // WAR: Until https://github.com/ai-dynamo/nixl/pull/970 is merged, can't use get_local_partial_md
-    let nixl_md = agent.raw_agent().get_local_md()?;
-    // let mut reg_desc_list = RegDescList::new(MemType::Dram)?;
-    // reg_desc_list.add_storage_desc(storage)?;
-    // let nixl_partial_md = agent.raw_agent().get_local_partial_md(&reg_desc_list, None)?;
+pub fn get_nixl_metadata(agent: &MediaAgent, region: &NixlDescriptor) -> Result<String> {
+    let nixl_md = region_metadata(agent, region)?;
 
     // Compress with zlib (level 6, matching Python's default)
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(6));
@@ -490,5 +673,163 @@ mod video_tests {
         rgba.shape[3] = 4;
         assert!(video_dimensions_from_parts(&rgba, &bytes).is_err());
         assert!(video_dimensions_from_parts(&info, &bytes[..11]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod remote_image_tests {
+    use super::*;
+
+    fn encode(raw: &[u8]) -> String {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(6));
+        encoder.write_all(raw).unwrap();
+        format!(
+            "b64:{}",
+            general_purpose::STANDARD.encode(encoder.finish().unwrap())
+        )
+    }
+
+    fn descriptor(
+        shape: serde_json::Value,
+        size: usize,
+        mem_type: &str,
+    ) -> RdmaMediaDataDescriptor {
+        serde_json::from_value(serde_json::json!({
+            "nixl_metadata": encode(b"agent metadata"),
+            "nixl_descriptor": {"addr": 4096, "size": size, "mem_type": mem_type, "device_id": 0},
+            "shape": shape,
+            "dtype": "UINT8",
+            "metadata": null,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn still_images_in_host_memory_describe_a_remote_read() {
+        for channels in 1..=4 {
+            for shape in [
+                serde_json::json!([2, 3, channels]),
+                serde_json::json!([1, 2, 3, channels]),
+            ] {
+                let image = descriptor(shape, 6 * channels, "Dram")
+                    .remote_image()
+                    .unwrap();
+                assert_eq!(
+                    image,
+                    RemoteImage {
+                        agent_metadata: b"agent metadata".to_vec(),
+                        addr: 4096,
+                        height: 2,
+                        width: 3,
+                        channels: channels as u32,
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn other_memory_shapes_and_sizes_are_rejected() {
+        for (shape, size, mem_type, message) in [
+            (serde_json::json!([2, 3, 3]), 18, "Vram", "only host memory"),
+            (
+                serde_json::json!([4, 2, 3, 3]),
+                72,
+                "Dram",
+                "is not one 8-bit image",
+            ),
+            (
+                serde_json::json!([2, 3, 5]),
+                30,
+                "Dram",
+                "is not one 8-bit image",
+            ),
+            (
+                serde_json::json!([2, 3, 3]),
+                20,
+                "Dram",
+                "does not fill its 20-byte region",
+            ),
+        ] {
+            let error = descriptor(shape, size, mem_type)
+                .remote_image()
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(message), "{error}");
+        }
+    }
+
+    #[test]
+    fn metadata_must_use_the_frontend_encoding() {
+        assert_eq!(decode_nixl_metadata(&encode(b"md")).unwrap(), b"md");
+        assert!(decode_nixl_metadata("md").is_err());
+        assert!(decode_nixl_metadata("b64:not base64!").is_err());
+        assert!(
+            decode_nixl_metadata(&format!("b64:{}", general_purpose::STANDARD.encode(b"md")))
+                .is_err()
+        );
+    }
+}
+
+#[cfg(all(test, feature = "testing-nixl"))]
+mod region_metadata_tests {
+    use super::*;
+
+    fn register(agent: &NixlAgent) -> nixl::NixlRegistered<SystemStorage> {
+        match nixl::register_with_nixl(SystemStorage::new(4096).unwrap(), agent, None) {
+            Ok(registered) => registered,
+            Err(_) => panic!("failed to register test storage with NIXL"),
+        }
+    }
+
+    /// The metadata of one image must not list the other live images: the
+    /// loader cache and concurrent requests keep many of them registered.
+    #[test]
+    fn region_metadata_does_not_grow_with_other_registrations() {
+        let agent = MediaAgent::new(get_nixl_agent().expect("NIXL agent")).unwrap();
+        let image = register(&agent);
+        let alone = get_nixl_metadata(&agent, &image.descriptor()).unwrap();
+        let others: Vec<_> = (0..32).map(|_| register(&agent)).collect();
+        let crowded = get_nixl_metadata(&agent, &image.descriptor()).unwrap();
+        assert_eq!(alone, crowded);
+
+        let region = decode_nixl_metadata(&crowded).unwrap();
+        let full = agent.raw_agent().get_local_md().unwrap();
+        assert!(
+            full.len() >= region.len() + 32 * 24,
+            "full {} bytes, region {} bytes",
+            full.len(),
+            region.len()
+        );
+        // Another agent connects and loads the region from it alone.
+        let reader = get_nixl_agent().expect("NIXL agent");
+        let name = reader.raw_agent().load_remote_md(&region).unwrap();
+        assert_eq!(name, agent.raw_agent().name());
+        drop(others);
+    }
+
+    /// A hold keeps the registration for the read grace period after the
+    /// request drops its own reference, and then releases it.
+    #[tokio::test(start_paused = true)]
+    async fn hold_releases_after_the_read_grace() {
+        let agent = MediaAgent::new(get_nixl_agent().expect("NIXL agent")).unwrap();
+        let decoded = DecodedMediaData::try_from(ndarray::Array3::<u8>::zeros((2, 2, 3))).unwrap();
+        let descriptor = decoded.into_rdma_descriptor(&agent).unwrap();
+        let registration = std::sync::Arc::downgrade(descriptor.source_storage.as_ref().unwrap());
+
+        DecodedMediaHold::of([&descriptor])
+            .unwrap()
+            .release_after_grace();
+        drop(descriptor);
+        tokio::time::sleep(READ_GRACE - Duration::from_secs(1)).await;
+        assert!(
+            registration.upgrade().is_some(),
+            "released before the grace ended"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            registration.upgrade().is_none(),
+            "still held after the grace"
+        );
     }
 }

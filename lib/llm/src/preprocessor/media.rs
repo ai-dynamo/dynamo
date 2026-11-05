@@ -14,7 +14,11 @@ pub use common::EncodedMediaData;
 pub use decoders::{Decoder, ImageDecoder, MediaDecoder};
 pub use loader::{MediaFetcher, MediaLoader, max_data_url_bytes};
 
-pub use rdma::{DecodedMediaData, RdmaMediaDataDescriptor, get_nixl_agent, get_nixl_metadata};
+pub(crate) use rdma::DecodedMediaHold;
+pub use rdma::{
+    DecodedMediaData, MediaAgent, RdmaMediaDataDescriptor, RemoteImage, get_nixl_agent,
+    get_nixl_metadata,
+};
 
 #[doc(hidden)]
 pub fn libjpeg_turbo_available() -> bool {

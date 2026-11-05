@@ -18,7 +18,7 @@ vision encoding.
 
 | Input modality | vLLM | SGLang | TensorRT-LLM |
 | --- | --- | --- | --- |
-| Image | Agg | Agg | Agg |
+| Image | Agg; sidecar: Agg, E+PD | Agg | Agg |
 | Video | Agg (VP8/VP9) | Agg (VP8/VP9) | Not supported |
 | Audio | Not supported | Not supported | Not supported |
 
@@ -71,6 +71,32 @@ registers the model.
 | [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/reference-guide.md) | `--enable-multimodal --frontend-decoding` |
 | [SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/reference-guide.md) | `--frontend-decoding` |
 | [TensorRT-LLM](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/reference-guide.md) | `--enable-multimodal --frontend-decoding` |
+
+### vLLM Sidecar
+
+The [vLLM sidecar](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/vllm)
+takes the same `--frontend-decoding` flag (or `DYN_VLLM_FRONTEND_DECODING=1`).
+It sends each decoded image to `vllm-rs` as a NIXL reference
+(`MediaItem.nixl_ref`), and `vllm-rs` reads the pixels over NIXL. The decoder
+that the sidecar publishes applies the EXIF orientation of each image, as
+`vllm-rs` does. The sidecar starts only when `vllm-rs` reports
+`supports_nixl_ref`:
+
+- Build `vllm-rs` with its `nixl-media` cargo feature, and install NIXL and UCX
+  on the node.
+- Start `vllm-rs` with `--enable-grpc-nixl-media`. Only trusted peers may reach
+  its gRPC port when this option is on.
+
+Set the flag on the aggregated workers, and in E+PD on both the PD worker
+(`--route-to-encoder`) and the Encode worker. Prefill and decode workers do not
+support it. Set it on every worker of a model: the model card checksum does not
+cover the decoder.
+
+> [!NOTE]
+> For JPEG pixels to match what `vllm-rs` decodes, the frontend needs
+> libjpeg-turbo (see [JPEG Decoder](#jpeg-decoder)). Without it, the frontend
+> logs a one-time warning and falls back to another decoder, and JPEG pixels can
+> differ by a few levels.
 
 ### JPEG Decoder
 

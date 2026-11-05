@@ -20,6 +20,9 @@ pub use nixl_sys::{
 };
 pub use serde::{Deserialize, Serialize};
 
+/// Descriptor list for `Agent::get_local_partial_md`.
+pub use nixl_sys::RegDescList;
+
 /// Trait for storage types that can be registered with NIXL.
 pub trait NixlCompatible {
     /// Get parameters needed for NIXL registration.

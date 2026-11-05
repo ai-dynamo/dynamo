@@ -30,6 +30,7 @@ use tonic::{Request, Response, Status};
 use tonic_health::ServingStatus as HealthServingStatus;
 
 use crate::client::{CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
+use crate::convert::build_generate_request;
 use crate::engine::VllmSidecarEngine;
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
@@ -2918,4 +2919,402 @@ async fn unsupported_features_fail_before_rpc_submission() {
         assert!(result.is_err());
     }
     assert!(server.service.requests.lock().await.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Frontend-decoded images (`MediaItem.nixl_ref`)
+// ---------------------------------------------------------------------------
+
+/// `"b64:" + base64(zlib(b"frontend agent metadata"))`, the frontend's encoding.
+const ENCODED_AGENT_METADATA: &str = "b64:eJxLK8rPK0nNS1FITE/NK1HITS1JTEksSQQAbE8I8Q==";
+
+/// What the frontend publishes for one decoded RGB image in host memory.
+fn decoded_image(addr: u64, shape: serde_json::Value, mem_type: &str) -> MultimodalData {
+    let size = shape
+        .as_array()
+        .expect("shape")
+        .iter()
+        .map(|dim| dim.as_u64().expect("dimension"))
+        .product::<u64>();
+    serde_json::from_value(json!({
+        "Decoded": {
+            "nixl_metadata": ENCODED_AGENT_METADATA,
+            "nixl_descriptor": {"addr": addr, "size": size, "mem_type": mem_type, "device_id": 0},
+            "shape": shape,
+            "dtype": "UINT8",
+            "metadata": null,
+            "content_hash": "0123456789abcdef"
+        }
+    }))
+    .expect("decoded media descriptor")
+}
+
+fn decoded_image_request(items: Vec<MultimodalData>) -> PreprocessedRequest {
+    let mut request = epd_image_request();
+    request.multi_modal_uuids = None;
+    request.multi_modal_data = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        items,
+    )]));
+    request
+}
+
+fn nixl_ref_model_info(supports_nixl_ref: bool) -> pb::ModelInfo {
+    let mut model = model_info();
+    model.supports_multimodal = true;
+    model.supports_nixl_ref = supports_nixl_ref;
+    model
+}
+
+#[tokio::test]
+async fn image_decoder_is_published_only_on_request_and_with_engine_support() {
+    for (multimodal, supports_nixl_ref, extra, outcome) in [
+        (true, true, vec!["--frontend-decoding"], Ok(true)),
+        // Opt-in: engine support alone does not change what the frontend sends.
+        (true, true, Vec::<&str>::new(), Ok(false)),
+        (true, false, Vec::new(), Ok(false)),
+        // A model that takes no images gets no decoder, and the flag does not
+        // fail startup. vLLM reports no `nixl_ref` support for it.
+        (false, false, vec!["--frontend-decoding"], Ok(false)),
+        // A flag that the engine cannot support fails startup.
+        (
+            true,
+            false,
+            vec!["--frontend-decoding"],
+            Err("does not report supports_nixl_ref"),
+        ),
+        // E+PD: the PD worker publishes the decoder, and the Encode worker
+        // only checks that vLLM reads `nixl_ref`.
+        (
+            true,
+            true,
+            vec!["--frontend-decoding", "--route-to-encoder"],
+            Ok(true),
+        ),
+        (
+            true,
+            true,
+            vec!["--frontend-decoding", "--disaggregation-mode", "encode"],
+            Ok(false),
+        ),
+        (
+            true,
+            false,
+            vec!["--frontend-decoding", "--disaggregation-mode", "encode"],
+            Err("does not report supports_nixl_ref"),
+        ),
+        (
+            true,
+            true,
+            vec!["--frontend-decoding", "--disaggregation-mode", "prefill"],
+            Err("prefill and decode workers"),
+        ),
+        (
+            true,
+            true,
+            vec!["--frontend-decoding", "--disaggregation-mode", "decode"],
+            Err("prefill and decode workers"),
+        ),
+    ] {
+        let service = FakeVllm::default();
+        let mut model = nixl_ref_model_info(supports_nixl_ref);
+        model.supports_multimodal = multimodal;
+        *service.model_info_override.lock().await = Some(model);
+        let server = FakeServer::start(service).await;
+        let mut argv = vec![
+            "dynamo-vllm-sidecar".to_string(),
+            "--grpc-endpoint".to_string(),
+            server.endpoint.clone(),
+        ];
+        argv.extend(extra.iter().map(|arg| arg.to_string()));
+        let result = tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
+            .await
+            .expect("bootstrap task");
+        match (result, outcome) {
+            (Ok((_, config)), Ok(publishes)) => {
+                assert_eq!(
+                    config.media_decoder.is_some(),
+                    publishes,
+                    "multimodal={multimodal} supports_nixl_ref={supports_nixl_ref} {extra:?}"
+                );
+                if let Some(decoder) = config.media_decoder {
+                    assert!(decoder.image.is_some());
+                    assert!(decoder.apply_exif_orientation);
+                }
+            }
+            (Err(error), Err(message)) => {
+                assert!(error.to_string().contains(message), "{error}");
+            }
+            (result, outcome) => panic!(
+                "multimodal={multimodal} supports_nixl_ref={supports_nixl_ref} {extra:?}: got {:?}, expected {outcome:?}",
+                result.map(|(_, config)| config.media_decoder.is_some())
+            ),
+        }
+    }
+}
+
+#[test]
+fn decoded_images_are_forwarded_as_nixl_refs_in_request_order() {
+    let mut request = decoded_image_request(vec![
+        MultimodalData::RawUrl("https://example.com/a.png".to_string()),
+        decoded_image(0x7f00_0000_1000, json!([32, 64, 3]), "Dram"),
+        decoded_image(0x7f00_0000_9000, json!([1, 16, 8, 1]), "Dram"),
+        decoded_image(0x7f00_0001_0000, json!([4, 4, 4]), "Dram"),
+    ]);
+    request.multi_modal_uuids = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        vec![
+            Some("url".to_string()),
+            Some("first".to_string()),
+            None,
+            None,
+        ],
+    )]));
+
+    let wire = build_generate_request(
+        request,
+        "decoded".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("decoded images map to nixl_ref");
+
+    let nixl_ref = |addr, height, width, channels| {
+        Some(pb::media_item::Source::NixlRef(pb::NixlRef {
+            agent_metadata: b"frontend agent metadata".to_vec(),
+            addr,
+            height,
+            width,
+            channels,
+        }))
+    };
+    let sources: Vec<_> = wire
+        .media
+        .iter()
+        .map(|item| (item.modality(), item.uuid.as_str(), item.source.clone()))
+        .collect();
+    assert_eq!(
+        sources,
+        [
+            (
+                pb::Modality::Image,
+                "url",
+                Some(pb::media_item::Source::Url(
+                    "https://example.com/a.png".to_string()
+                ))
+            ),
+            (
+                pb::Modality::Image,
+                "first",
+                nixl_ref(0x7f00_0000_1000, 32, 64, 3)
+            ),
+            (
+                pb::Modality::Image,
+                "",
+                nixl_ref(0x7f00_0000_9000, 16, 8, 1)
+            ),
+            (pb::Modality::Image, "", nixl_ref(0x7f00_0001_0000, 4, 4, 4)),
+        ]
+    );
+}
+
+#[test]
+fn decoded_video_audio_and_device_memory_are_rejected() {
+    let mut cases = Vec::new();
+    for key in ["video_url", "audio_url"] {
+        let mut request = epd_image_request();
+        request.multi_modal_uuids = None;
+        request.multi_modal_data = Some(std::collections::HashMap::from([(
+            key.to_string(),
+            vec![decoded_image(4096, json!([2, 2, 2, 3]), "Dram")],
+        )]));
+        cases.push((request, format!("only for images, not `{key}`")));
+    }
+    cases.push((
+        decoded_image_request(vec![decoded_image(4096, json!([2, 2, 3]), "Vram")]),
+        "only host memory can be read remotely".to_string(),
+    ));
+    cases.push((
+        decoded_image_request(vec![decoded_image(4096, json!([4, 2, 2, 3]), "Dram")]),
+        "is not one 8-bit image".to_string(),
+    ));
+    for (request, message) in cases {
+        let error = build_generate_request(
+            request,
+            "decoded".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect_err("must be rejected");
+        assert!(error.to_string().contains(&message), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn decoded_images_reach_vllm_only_from_aggregated_and_encode_workers_it_supports() {
+    for (supports_nixl_ref, mode, accepted) in [
+        (true, DisaggregationMode::Aggregated, true),
+        (false, DisaggregationMode::Aggregated, false),
+        (true, DisaggregationMode::Encode, true),
+        (false, DisaggregationMode::Encode, false),
+        (true, DisaggregationMode::Prefill, false),
+        (true, DisaggregationMode::Decode, false),
+    ] {
+        let service = FakeVllm::default();
+        // An Encode worker expects an encoder-cache terminal, not tokens.
+        service
+            .encoder_response
+            .store(mode.is_encode(), Ordering::SeqCst);
+        *service.model_info_override.lock().await = Some(nixl_ref_model_info(supports_nixl_ref));
+        let server = FakeServer::start(service).await;
+        let engine = engine(
+            &server.endpoint,
+            mode,
+            1,
+            nixl_ref_model_info(supports_nixl_ref),
+        );
+        engine.start(0).await.expect("start");
+
+        let request = decoded_image_request(vec![decoded_image(
+            0x7f00_0000_1000,
+            json!([32, 64, 3]),
+            "Dram",
+        )]);
+        let result = collect_result(&engine, request).await;
+        let requests = server.service.requests.lock().await;
+        if accepted {
+            assert!(result.is_ok(), "{result:?}");
+            let media = &requests.last().expect("recorded request").media;
+            assert!(matches!(
+                media[0].source,
+                Some(pb::media_item::Source::NixlRef(_))
+            ));
+        } else {
+            let error = result.expect_err("decoded media must be rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains("cannot dereference pre-decoded RDMA media"),
+                "{error}"
+            );
+            assert!(requests.is_empty(), "no request may reach vLLM");
+        }
+    }
+}
+
+/// vLLM reads `nixl_ref` pixels before it answers the submit, and the
+/// frontend frees them when the request ends. A cancelled request with
+/// `nixl_ref` media must therefore reach vLLM and get its answer before the
+/// sidecar reports the cancellation, but need not wait for a token.
+#[tokio::test]
+async fn nixl_ref_cancellation_waits_for_submission_only() {
+    let service = FakeVllm::default();
+    service.hang_before_headers.store(true, Ordering::SeqCst);
+    service
+        .hold_before_first_token
+        .store(true, Ordering::SeqCst);
+    *service.model_info_override.lock().await = Some(nixl_ref_model_info(true));
+    let server = FakeServer::start(service).await;
+    let engine = engine(
+        &server.endpoint,
+        DisaggregationMode::Aggregated,
+        1,
+        nixl_ref_model_info(true),
+    );
+    engine.start(0).await.expect("start");
+
+    let context = dynamo_backend_common::testing::mock_context();
+    let request = decoded_image_request(vec![decoded_image(
+        0x7f00_0000_1000,
+        json!([32, 64, 3]),
+        "Dram",
+    )]);
+    let generate = engine.generate(request, GenerateContext::new(context.clone(), None));
+    tokio::pin!(generate);
+    tokio::select! {
+        _ = &mut generate => panic!("generate returned before response headers were gated"),
+        _ = async {
+            while !server.service.headers_pending.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        } => {}
+    }
+    context.stop_generating();
+    tokio::select! {
+        _ = &mut generate => panic!("cancellation returned before vLLM answered"),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+    }
+
+    server.service.release_headers.notify_one();
+    let mut stream = tokio::time::timeout(std::time::Duration::from_secs(2), &mut generate)
+        .await
+        .expect("response headers")
+        .expect("stream");
+    // The fake server holds the first token, so only the answer released
+    // the cancellation.
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("cancellation waited for the first token")
+        .expect("cancelled terminal")
+        .expect("cancelled output");
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+    assert_eq!(server.service.requests.lock().await.len(), 1);
+}
+
+/// `DYN_VLLM_FRONTEND_DECODING` takes the usual boolean spellings, such as
+/// `1` and `yes`. The test reads the argument definition instead of setting
+/// the variable, which other tests in this process would see.
+#[test]
+fn frontend_decoding_env_accepts_boolish_values() {
+    use clap::CommandFactory as _;
+
+    let mut command = crate::args::Args::command();
+    command.build();
+    let arg = command
+        .get_arguments()
+        .find(|arg| arg.get_id() == "frontend_decoding")
+        .expect("--frontend-decoding");
+    assert_eq!(
+        arg.get_env().and_then(|name| name.to_str()),
+        Some("DYN_VLLM_FRONTEND_DECODING")
+    );
+    let parser = clap::builder::BoolishValueParser::new();
+    // The flag's parser yields a bool, as the boolish parser below does.
+    assert_eq!(
+        arg.get_value_parser().type_id(),
+        clap::builder::ValueParser::new(parser).type_id()
+    );
+    for (value, expected) in [
+        ("1", Some(true)),
+        ("yes", Some(true)),
+        ("on", Some(true)),
+        ("true", Some(true)),
+        ("0", Some(false)),
+        ("no", Some(false)),
+        ("off", Some(false)),
+        ("false", Some(false)),
+        ("maybe", None),
+    ] {
+        let parsed = clap::builder::TypedValueParser::parse_ref(
+            &parser,
+            &command,
+            Some(arg),
+            std::ffi::OsStr::new(value),
+        )
+        .ok();
+        assert_eq!(parsed, expected, "{value}");
+    }
+}
+
+#[test]
+fn startup_rejects_a_changed_nixl_ref_capability() {
+    let bootstrap =
+        DiscoveredModel::from_proto(nixl_ref_model_info(true), server_info()).expect("discovery");
+    let observed =
+        DiscoveredModel::from_proto(nixl_ref_model_info(false), server_info()).expect("discovery");
+    let error = bootstrap
+        .ensure_startup_compatible(&observed)
+        .expect_err("capability change must fail startup");
+    assert!(
+        error.to_string().contains("nixl_ref support changed"),
+        "{error}"
+    );
 }

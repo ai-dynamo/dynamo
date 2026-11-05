@@ -65,6 +65,17 @@ pub struct MediaDecoder {
 }
 
 impl MediaDecoder {
+    /// Decode images with the default limits. The frontend leaves video and
+    /// audio parts as URLs for the backend.
+    pub fn images_only() -> Self {
+        Self {
+            image: Some(ImageDecoder::default()),
+            #[cfg(feature = "media-ffmpeg")]
+            video: None,
+            apply_exif_orientation: false,
+        }
+    }
+
     pub(crate) fn warn_if_unavailable_backends(&self) {
         if let Some(image) = &self.image {
             image.warn_if_libjpeg_unavailable();
@@ -91,12 +102,12 @@ mod tests {
         let old_card: MediaDecoder =
             serde_json::from_value(serde_json::json!({"image": {}})).unwrap();
         assert!(!old_card.apply_exif_orientation);
-        let default = serde_json::to_value(&old_card).unwrap();
+        let default = serde_json::to_value(MediaDecoder::images_only()).unwrap();
         assert!(default.get("apply_exif_orientation").is_none());
 
         let card = serde_json::to_value(MediaDecoder {
             apply_exif_orientation: true,
-            ..old_card
+            ..MediaDecoder::images_only()
         })
         .unwrap();
         assert_eq!(card["apply_exif_orientation"], true);

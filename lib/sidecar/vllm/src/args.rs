@@ -26,6 +26,20 @@ pub(crate) struct Args {
     )]
     pub vllm_http_endpoint: Option<HttpEndpoint>,
 
+    /// Let the Dynamo frontend decode images and send them to vLLM as NIXL references.
+    ///
+    /// Takes effect on aggregated workers (also with `--route-to-encoder`) and Encode workers, and
+    /// only when the vLLM gRPC server reports `supports_nixl_ref` (vllm-rs started with
+    /// `--enable-grpc-nixl-media`, from a build with its `nixl-media` feature). Set it on every
+    /// worker of a model, including its Encode workers.
+    #[arg(
+        long,
+        default_value_t = false,
+        env = "DYN_VLLM_FRONTEND_DECODING",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub frontend_decoding: bool,
+
     /// Optional total RL process world size for vLLM versions that omit it from gRPC metadata.
     ///
     /// The value includes tensor, pipeline, prefill-context, and data parallelism.

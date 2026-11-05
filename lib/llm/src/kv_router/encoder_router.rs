@@ -423,6 +423,11 @@ impl
                     namespace = %self.namespace,
                     "Encoder hop failed; falling back to downstream inline encoding"
                 );
+                // The Encode worker may still read the decoded media after the
+                // downstream worker answers and the request frees it.
+                if let Some(hold) = request.decoded_media_hold() {
+                    hold.release_after_grace();
+                }
             }
         }
         next.generate(context.map(|_| request)).await

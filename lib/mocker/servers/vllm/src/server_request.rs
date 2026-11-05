@@ -430,6 +430,13 @@ fn validate_media(media: &[pb::MediaItem]) -> BoxedStatusResult<()> {
             }
         }
         let has_payload = match item.source.as_ref() {
+            // The mock reports `supports_nixl_ref = false`, as vLLM without `nixl-media` does.
+            Some(Source::NixlRef(_)) => {
+                return Err(Status::invalid_argument(
+                    "the mock server does not read nixl_ref media",
+                )
+                .into());
+            }
             Some(Source::Url(value) | Source::DataUri(value)) => !value.trim().is_empty(),
             Some(Source::RawBytes(value)) => !value.is_empty(),
             Some(Source::Features(value)) => {

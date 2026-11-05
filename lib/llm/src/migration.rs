@@ -392,6 +392,20 @@ where
     /// Delivered tokens replayed in the active attempt's prompt. The worker counts them in its
     /// `prompt_tokens` although the client received them as completion.
     replayed_tokens: u32,
+    /// Whether the active attempt delivered a response with output tokens. A
+    /// worker reads the decoded media before its first token, so only an
+    /// attempt without one can leave a read in flight.
+    attempt_delivered_tokens: bool,
+}
+
+impl<Resp> Drop for RetryManager<Resp>
+where
+    Resp: Data + HasTokenIds,
+{
+    fn drop(&mut self) {
+        // The request ended: it finished, failed, or the client went away.
+        self.hold_media_for_late_reads();
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -485,6 +499,7 @@ where
             pending_migration: None,
             prompt_len,
             replayed_tokens: 0,
+            attempt_delivered_tokens: false,
         };
         slf.new_stream(None).await?;
         slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
@@ -509,6 +524,7 @@ where
                             tracing::warn!(error = %err, "Migration eligibility had no semantic error");
                             continue;
                         };
+                        self.hold_media_for_late_reads();
                         if !self.attempts.has_remaining() {
                             let route_trace = self.active_route_trace.clone();
                             self.record_migration_exhausted(MigrationCause {
@@ -556,6 +572,17 @@ where
                 return Some(response);
             }
             return None;
+        }
+    }
+
+    /// Call when the active attempt ends. If it delivered no token, its worker
+    /// can still read the request's decoded media, so keep the media
+    /// registered for the read grace.
+    fn hold_media_for_late_reads(&self) {
+        if !self.attempt_delivered_tokens
+            && let Some(hold) = self.request.decoded_media_hold()
+        {
+            hold.release_after_grace();
         }
     }
 
@@ -670,6 +697,7 @@ where
             {
                 release.release().await;
             }
+            self.attempt_delivered_tokens = false;
             let response_stream = self.next_generate.generate(request).await;
             match response_stream {
                 Ok(next_stream) => {
@@ -692,6 +720,8 @@ where
                     return Ok(());
                 }
                 Err(err) if is_migratable_for_request(&self.request, err.as_ref()) => {
+                    // The worker can have the request although the dispatch failed.
+                    self.hold_media_for_late_reads();
                     let Some(migration_error) = migratable_error_in_chain(err.as_ref()) else {
                         tracing::warn!(error = %err, "Migration eligibility had no semantic error");
                         return Err(err);
@@ -802,6 +832,7 @@ where
             None => return,
         };
         let token_ids = llm_engine_output.token_ids();
+        self.attempt_delivered_tokens |= !token_ids.is_empty();
         // Pure telemetry for the migration lifecycle events, so it has to count
         // the final allowed attempt as well. `new_stream` consumes
         // the attempt budget *before* dispatching, so that attempt runs with the
@@ -1331,6 +1362,11 @@ mod tests {
         },
         /// Always fails with NoResponders error (same as FailThenSuccess first call)
         AlwaysFail,
+        /// Ends with a cancelled output that has no token, as a sidecar does
+        /// when it shuts down before vLLM answers
+        CancelledWithoutTokens,
+        /// Fails before any token with an error that migration does not retry
+        NonMigratableError,
     }
 
     // Unified mock server streaming engine that can simulate different scenarios
@@ -1685,6 +1721,30 @@ mod tests {
                             .error_type(ErrorType::CannotConnect)
                             .message("no responders")
                             .build()
+                    ))
+                }
+                MockBehavior::CancelledWithoutTokens => {
+                    let mut output = create_mock_output(0);
+                    if let Some(data) = output.data.as_mut() {
+                        data.token_ids.clear();
+                        data.finish_reason =
+                            Some(crate::protocols::common::FinishReason::Cancelled);
+                    }
+                    Ok(dynamo_runtime::pipeline::ResponseStream::new(
+                        Box::pin(stream::iter([output])),
+                        Arc::new(Controller::new(self.context_id.clone())),
+                    ))
+                }
+                MockBehavior::NonMigratableError => {
+                    let error = Annotated::from_err(
+                        DynamoError::builder()
+                            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                            .message("worker rejected the request")
+                            .build(),
+                    );
+                    Ok(dynamo_runtime::pipeline::ResponseStream::new(
+                        Box::pin(stream::iter([error])),
+                        Arc::new(Controller::new(self.context_id.clone())),
                     ))
                 }
             }
@@ -4052,5 +4112,97 @@ mod tests {
                 (3, Some("!"), 3.0)
             ]
         );
+    }
+
+    #[cfg(feature = "testing-nixl")]
+    mod decoded_media_hold {
+        use super::*;
+        use crate::preprocessor::media::{DecodedMediaData, MediaAgent, get_nixl_agent};
+        use dynamo_memory::{SystemStorage, nixl::NixlRegistered};
+        use std::sync::Weak;
+        use std::time::Duration;
+
+        const RESPONSES: usize = 3;
+
+        /// A request with one decoded image, and a weak reference to the
+        /// image's NIXL registration.
+        fn request_with_decoded_image(
+            agent: &MediaAgent,
+        ) -> (PreprocessedRequest, Weak<NixlRegistered<SystemStorage>>) {
+            let descriptor = DecodedMediaData::try_from(ndarray::Array3::<u8>::zeros((2, 2, 3)))
+                .unwrap()
+                .into_rdma_descriptor(agent)
+                .unwrap();
+            let registration = Arc::downgrade(descriptor.source_storage.as_ref().unwrap());
+            let mut request = create_mock_request(RESPONSES as u32);
+            request.multi_modal_data = Some(std::collections::HashMap::from([(
+                "image_url".to_string(),
+                vec![MultimodalData::Decoded(descriptor)],
+            )]));
+            (request, registration)
+        }
+
+        /// An attempt that ends before it delivered a token keeps the decoded
+        /// media registered for the read grace. After a token the worker has
+        /// read the media, so the request frees it when it ends.
+        #[tokio::test(start_paused = true)]
+        async fn an_attempt_without_a_token_holds_the_decoded_media() {
+            dynamo_runtime::logging::init();
+            let agent = MediaAgent::new(get_nixl_agent().expect("NIXL agent")).unwrap();
+            // The client reads all responses (None) or drops the stream after
+            // some of them.
+            for (behavior, drop_after, held) in [
+                // The worker can have the request although the dispatch failed.
+                (MockBehavior::FailThenSuccess, None, true),
+                (MockBehavior::MidStreamFail { fail_after: 0 }, None, true),
+                (MockBehavior::MidStreamFail { fail_after: 1 }, None, false),
+                // The first attempt's token must not cover the replacement,
+                // which fails before its first token.
+                (
+                    MockBehavior::MidStreamFailAlways { fail_after: 1 },
+                    None,
+                    true,
+                ),
+                // Only `Drop` holds after an error that migration does not retry.
+                (MockBehavior::NonMigratableError, None, true),
+                (MockBehavior::Success, Some(0), true),
+                (MockBehavior::Success, Some(1), false),
+                (MockBehavior::CancelledWithoutTokens, None, true),
+                (MockBehavior::Success, None, false),
+            ] {
+                let case = format!("{behavior:?}, drop after {drop_after:?}");
+                let context_id = uuid::Uuid::new_v4().to_string();
+                let (request, registration) = request_with_decoded_image(&agent);
+                let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+                    Arc::new(MockEngine::new(
+                        behavior,
+                        RESPONSES,
+                        100,
+                        context_id.clone(),
+                    ));
+                let mut manager = RetryManager::build(
+                    Arc::new(Controller::new(context_id)),
+                    BTreeMap::new(),
+                    request,
+                    engine,
+                    3,
+                    None,
+                    Arc::new(TEST_MODEL.to_string()),
+                    Arc::new(Metrics::new()),
+                    None,
+                )
+                .await
+                .unwrap();
+                let mut responses = 0;
+                while Some(responses) != drop_after && manager.next().await.is_some() {
+                    responses += 1;
+                }
+                drop(manager);
+                assert_eq!(registration.upgrade().is_some(), held, "{case}");
+                // Well past the read grace.
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                assert!(registration.upgrade().is_none(), "{case}: still held");
+            }
+        }
     }
 }

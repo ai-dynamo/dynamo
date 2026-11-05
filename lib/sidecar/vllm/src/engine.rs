@@ -12,6 +12,7 @@ use dynamo_backend_common::{
     LLMEngineOutput, LLMEngineOutputExt, RlAdminBaseUrl, RuntimeConfig, WorkerConfig,
 };
 use dynamo_llm::lora::{LoRADownloader, lora_serving_enabled};
+use dynamo_llm::preprocessor::media::MediaDecoder;
 use dynamo_runtime::component::Endpoint;
 use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
@@ -26,7 +27,7 @@ use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{
     ResponseState, build_generate_request, consume_reasoning_parser_args, data_parallel_rank,
-    request_has_multimodal_input, require_proto_0_6_controls,
+    request_has_decoded_media, request_has_multimodal_input, require_proto_0_6_controls,
 };
 use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, resolve_source_path};
 use crate::model::DiscoveredModel;
@@ -56,6 +57,71 @@ pub struct VllmSidecarEngine {
 fn cancelled(state: &ResponseState) -> LLMEngineOutput {
     LLMEngineOutput::cancelled()
         .with_usage(state.completion_usage(state.reported_completion_tokens(), None))
+}
+
+/// The image decoder to publish on the model card. It makes the frontend
+/// decode images and send NIXL descriptors instead of URLs.
+///
+/// An aggregated worker publishes it, also one with `--route-to-encoder`. An
+/// Encode worker publishes none, because the frontend takes the decoder from
+/// the card of the model that it serves; there the flag only checks at startup
+/// that vLLM reads `nixl_ref`. Prefill and decode workers cannot use it. A
+/// worker of a text-only model publishes none. vLLM reports no `nixl_ref`
+/// support for a multimodal model without image input, and the sidecar cannot
+/// tell that model from a server without `nixl_ref`, so the flag fails startup
+/// there.
+///
+/// `--frontend-decoding` that the engine or the mode cannot support fails
+/// startup: the model card checksum does not cover the decoder, so a worker
+/// that joined without it would receive frontend-decoded images and reject
+/// them.
+fn frontend_image_decoder(
+    requested: bool,
+    model: &DiscoveredModel,
+    mode: DisaggregationMode,
+) -> Result<Option<MediaDecoder>, DynamoError> {
+    if !requested {
+        return Ok(None);
+    }
+    // vLLM reports no `nixl_ref` support for such a model, so check it first.
+    if !model.supports_multimodal {
+        tracing::info!(
+            model = %model.served_name,
+            "--frontend-decoding has no effect: the model takes no image input"
+        );
+        return Ok(None);
+    }
+    let unavailable = if !model.supports_nixl_ref {
+        Some(
+            "the vLLM gRPC server does not report supports_nixl_ref (it reports it only for a \
+             model that takes images, when vllm-rs runs with --enable-grpc-nixl-media from a \
+             build with its nixl-media feature, and NIXL and UCX are installed on this node)",
+        )
+    } else if !reads_decoded_media(mode) {
+        Some("prefill and decode workers do not support it")
+    } else {
+        None
+    };
+    if let Some(reason) = unavailable {
+        return Err(client::invalid_argument(format!(
+            "--frontend-decoding cannot take effect: {reason}"
+        )));
+    }
+    eprintln!("Frontend decoding is on: the frontend decodes images and vLLM reads them over NIXL");
+    if mode.is_encode() {
+        return Ok(None);
+    }
+    Ok(Some(MediaDecoder {
+        // vllm-rs applies EXIF orientation to the images that it decodes itself.
+        apply_exif_orientation: true,
+        ..MediaDecoder::images_only()
+    }))
+}
+
+/// Aggregated and Encode workers forward frontend-decoded images to vLLM.
+/// In E+PD, both the Encode worker and the PD worker read the same image.
+fn reads_decoded_media(mode: DisaggregationMode) -> bool {
+    matches!(mode, DisaggregationMode::Aggregated) || mode.is_encode()
 }
 
 impl VllmSidecarEngine {
@@ -243,6 +309,7 @@ impl VllmSidecarEngine {
         let rl_metadata = enable_rl
             .then(|| model.rl_worker_metadata(vllm_http_url, vllm_rl_world_size))
             .transpose()?;
+        let media_decoder = frontend_image_decoder(args.frontend_decoding, &model, mode)?;
         let mut engine = Self::new(endpoint, model.clone(), mode, transport);
         engine.engine_gates_reasoning =
             model.reports_proto_0_6() && model.reasoning_parser().is_some();
@@ -275,6 +342,7 @@ impl VllmSidecarEngine {
             route_to_encoder: args.sidecar.common.route_to_encoder,
             enable_rl,
             rl_metadata,
+            media_decoder,
             ..Default::default()
         };
         Ok((engine, config))
@@ -861,6 +929,13 @@ impl LLMEngine for VllmSidecarEngine {
                 self.model.served_name
             )));
         }
+        if request_has_decoded_media(&request)
+            && (!self.model.supports_nixl_ref || !reads_decoded_media(self.mode))
+        {
+            return Err(client::invalid_argument(
+                "vLLM sidecar cannot dereference pre-decoded RDMA media: it needs an aggregated or encode worker and a vLLM server that reports supports_nixl_ref; configure URL passthrough",
+            ));
+        }
         let client = self
             .client
             .get()
@@ -902,17 +977,38 @@ impl LLMEngine for VllmSidecarEngine {
             // Routers may address the base model by name through the adapter field.
             proto_request.lora_name.clear();
         }
+        // vLLM reads `nixl_ref` pixels from frontend memory before it answers
+        // the submit, and the frontend frees that memory when the request
+        // ends. So a cancelled request waits for the answer; vLLM bounds that
+        // wait with its read deadline. A sidecar that shuts down or crashes
+        // does not wait.
+        let reads_frontend_memory = proto_request
+            .media
+            .iter()
+            .any(|item| matches!(item.source, Some(pb::media_item::Source::NixlRef(_))));
+        let submit_ctx = ctx.inner_arc();
         let submit = async {
+            // No read starts before vLLM gets the request, so a request that
+            // is cancelled before that need not reach vLLM.
             let _admission = if proto_request.lora_name.is_empty() {
                 None
             } else {
-                Some(self.admit_lora_request(&proto_request.lora_name).await?)
+                tokio::select! {
+                    biased;
+                    _ = submit_ctx.stopped(), if reads_frontend_memory => return Ok(None),
+                    admission = self.admit_lora_request(&proto_request.lora_name) => Some(admission?),
+                }
             };
+            if reads_frontend_memory && submit_ctx.is_stopped() {
+                return Ok(None);
+            }
             client
                 .generate_stream(proto_request, data_parallel_rank)
                 .await
+                .map(Some)
         };
-        let defer_request_cancellation = self.mode.is_decode();
+        let defer_cancellation_until_submitted = self.mode.is_decode() || reads_frontend_memory;
+        let defer_cancellation_until_first_token = self.mode.is_decode();
         let stopped_ctx = ctx.inner_arc();
         let shutdown = self.cancel.child_token();
         let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
@@ -920,9 +1016,10 @@ impl LLMEngine for VllmSidecarEngine {
         let stream = tokio::select! {
             biased;
             _ = shutdown_cancellation.as_mut() => None,
-            // Decode must reach vLLM so NIXL can release transferred KV.
-            _ = request_cancellation.as_mut(), if !defer_request_cancellation => None,
-            result = submit => Some(result?),
+            // Decode must reach vLLM so NIXL can release transferred KV, and
+            // `nixl_ref` media must be read before the frontend frees it.
+            _ = request_cancellation.as_mut(), if !defer_cancellation_until_submitted => None,
+            result = submit => result?,
         };
         let Some(mut stream) = stream else {
             let output = cancelled(&state);
@@ -944,7 +1041,7 @@ impl LLMEngine for VllmSidecarEngine {
                         biased;
                         _ = shutdown_cancellation.as_mut() => None,
                         _ = request_cancellation.as_mut() => {
-                            if defer_request_cancellation && !first_token_observed {
+                            if defer_cancellation_until_first_token && !first_token_observed {
                                 request_cancelled = true;
                                 continue;
                             }

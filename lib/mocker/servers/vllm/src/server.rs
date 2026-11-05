@@ -113,6 +113,7 @@ impl VllmMockerService {
             supports_multimodal: config.supports_multimodal,
             reasoning_parser: String::new(),
             tool_call_parser: String::new(),
+            supports_nixl_ref: false,
         };
         let server_info = pb::ServerInfo {
             max_loras: 0,
