@@ -92,6 +92,7 @@ func TestGroveComponentSelectionDoesNotMutateDGD(t *testing.T) {
 						Containers: []corev1.Container{{Name: "main", Image: "frontend"}},
 					}},
 				})
+				source.Spec.Restart = &v1beta1.Restart{ID: "restart-1"}
 			}
 			before := source.DeepCopy()
 			req := groveReconcileRequest{DGD: source, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}
@@ -112,6 +113,13 @@ func TestGroveComponentSelectionDoesNotMutateDGD(t *testing.T) {
 			}
 			pcs := &grovev1alpha1.PodCliqueSet{
 				Name: pcsName, Namespace: source.Namespace, Generation: 1,
+				Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
+						Name:        "ordinary-frontend",
+						Labels:      map[string]string{consts.KubeLabelDynamoComponent: "ordinary-frontend"},
+						Annotations: map[string]string{consts.RestartAnnotation: "restart-1"},
+					}},
+				}},
 				Status: grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: new(int64(1)), Conditions: []metav1.Condition{{
 					Type: groveconstants.ConditionTopologyLevelsUnavailable, Status: metav1.ConditionTrue,
 					Reason: groveconstants.ConditionReasonClusterTopologyNotFound, Message: "missing ordinary topology",
@@ -672,6 +680,20 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 			groveReq := groveReconcileRequest{DGD: source, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}
 			pcs := &grovev1alpha1.PodCliqueSet{
 				Name: dynamo.PCSNameForDGD(groveReq.DGD, groveReq.IsDelegated), Namespace: source.Namespace, Generation: 2,
+				Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+						{
+							Name:        "frontend",
+							Labels:      map[string]string{consts.KubeLabelDynamoComponent: "frontend"},
+							Annotations: map[string]string{consts.RestartAnnotation: "pair-restart"},
+						},
+						{
+							Name:        "prefill",
+							Labels:      map[string]string{consts.KubeLabelDynamoComponent: "prefill"},
+							Annotations: map[string]string{consts.RestartAnnotation: "pair-restart"},
+						},
+					},
+				}},
 				Status: grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: new(int64(1))},
 			}
 			require.NoError(t, kube.Create(t.Context(), pcs))
