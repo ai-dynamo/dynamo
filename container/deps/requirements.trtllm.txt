@@ -46,7 +46,7 @@ pillow>=13.0.0,<14
 # specifier in step with requirements.{vllm,sglang}.txt;
 # tests/dependencies/test_pynvvideocodec_spec.py enforces that.
 pip==26.2.2
-PyNvVideoCodec==2.2.3
+PyNvVideoCodec==2.2.4
 # Dynamo installs with --no-deps, so the shared image-cache client must be
 # installed explicitly even though the cache is disabled by default.
 redis>=6.2.0,<9.0.0

@@ -57,7 +57,7 @@ pip==26.2.2
 # it so the --no-deps install moves it to the current patch line. pyasn1 has no
 # dependencies.
 pyasn1>=0.6.5,<0.7
-PyNvVideoCodec==2.2.3
+PyNvVideoCodec==2.2.4
 # Dynamo installs with --no-deps, so declare the shared image-cache client
 # explicitly instead of relying on LMCache's unbounded transitive dependency.
 redis>=6.2.0,<9.0.0
