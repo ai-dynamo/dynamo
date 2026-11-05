@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from autoscaling_arena.workloads import Workload
 
 
 def _canonical_engine_args(config):
@@ -903,6 +904,7 @@ def _trace_alias(trace: Path, kind: str) -> Path:
     return alias
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "kind", ["identical", "resolved alias", "symlink", "hard link"]
 )
@@ -933,6 +935,7 @@ def test_report_destination_cannot_clobber_trace_input(
     assert trace.read_text() == "{}\n"
 
 
+@pytest.mark.unit
 def test_report_destination_checks_every_trace_shard(
     sims_module: types.ModuleType,
     monkeypatch: pytest.MonkeyPatch,
@@ -958,6 +961,7 @@ def test_report_destination_checks_every_trace_shard(
     assert shards[1].read_text() == "trace-001.jsonl\n"
 
 
+@pytest.mark.unit
 def test_report_destination_accepts_separate_existing_file(
     sims_module: types.ModuleType, tmp_path: Path
 ) -> None:
@@ -969,6 +973,7 @@ def test_report_destination_accepts_separate_existing_file(
     sims_module._validate_report_destination(report, trace_paths=[str(trace)])
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize("kind", ["identical", "symlink", "hard link"])
 def test_run_match_rejects_report_json_aliasing_trace(
     sims_module: types.ModuleType,
@@ -977,8 +982,6 @@ def test_run_match_rejects_report_json_aliasing_trace(
     tmp_path: Path,
     kind: str,
 ) -> None:
-    from autoscaling_arena.workloads import Workload
-
     trace = tmp_path / "trace.jsonl"
     record = {"timestamp": 0, "input_length": 4, "output_length": 1, "hash_ids": [1]}
     trace.write_text(json.dumps(record) + "\n")
