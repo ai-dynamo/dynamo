@@ -1481,8 +1481,9 @@ class FpmEventSubscriber:
         """
         Start background tracking of the latest FPM per (worker_id, dp_rank).
 
-        ``max_age_seconds`` fixes the freshness and cleanup window for this
-        subscription. It must be finite and positive.
+        ``max_age_seconds`` sets the freshness and cleanup window for this
+        subscription; ``set_max_age`` changes it later. It must be finite and
+        positive.
 
         Spawns two background tasks:
 
@@ -1494,6 +1495,15 @@ class FpmEventSubscriber:
            worker_id matches the removed instance_id are purged.
 
         After calling this, ``recv()`` will raise RuntimeError.
+        """
+        ...
+
+    def set_max_age(self, max_age_seconds: float) -> None:
+        """
+        Change the freshness and cleanup window after ``start_tracking``,
+        which sets it from its own ``max_age_seconds`` and so replaces a value
+        set earlier. Tracked samples are kept; snapshot reads and the next
+        cleanup use the new age. It must be finite and positive.
         """
         ...
 
@@ -1516,7 +1526,7 @@ class FpmEventSubscriber:
         """Return fresh samples, unjoined IDs, stale count, and missing rank count.
 
         Age is measured from local receive time, including idle heartbeats.
-        The age limit is set once by ``start_tracking()``.
+        The age limit is set by ``start_tracking()`` and changed by ``set_max_age()``.
         Missing ranks include discovered workers that have not published a sample.
         """
         ...

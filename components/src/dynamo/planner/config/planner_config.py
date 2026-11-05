@@ -2466,12 +2466,12 @@ class PlannerConfig(BaseModel):
         planner_domain = expand_planner_domain(self)
         router_domain = expand_router_domain(retune)
 
-        if self.enable_throughput_scaling and retune.history_seconds is not None:
+        if retune.history_seconds is not None:
             required = required_history_seconds(self, planner_domain)
             if retune.history_seconds < required:
                 raise ValueError(
                     f"retune.history_seconds must be >= {required:g}s "
-                    "(throughput_adjustment_interval_seconds x "
+                    "(the largest throughput_adjustment_interval_seconds x "
                     "max(prophet_window_size, kalman_min_points) over the "
                     "current predictor and the load_predictor candidates) to "
                     "warm throughput predictors"
@@ -2481,14 +2481,16 @@ class PlannerConfig(BaseModel):
             raise ValueError(
                 "retune requires a non-empty router or planner search domain"
             )
-        size = grid_size(router_domain, planner_domain.grid)
+        size = grid_size(router_domain) * len(planner_domain.points)
         if size > retune.max_candidates:
+            description = describe_grid(
+                router_domain, planner_domain.grid, len(planner_domain.points)
+            )
             raise ValueError(
                 f"retune grid has {size} candidates, exceeding "
                 f"retune.max_candidates={retune.max_candidates} "
-                f"({describe_grid(router_domain, planner_domain.grid)}); an "
-                "omitted AISimulate knob searches its default domain, so pin "
-                "knobs with a scalar to shrink the grid"
+                f"({description}); an omitted AISimulate knob searches its "
+                "default domain, so pin knobs with a scalar to shrink the grid"
             )
         if retune.executor == "dgdr":
             self._validate_live_retune_budget(retune, router_domain)
@@ -2663,36 +2665,33 @@ class PlannerConfig(BaseModel):
         self,
         grid: Mapping[str, Sequence[Any]],
         public_names: Mapping[str, str],
+        *,
+        load_scaling: Optional[bool] = None,
+        throughput_scaling: Optional[bool] = None,
     ) -> dict[str, list[Any]]:
         """Reject planner grid fields that are inert in this configuration.
 
         ``grid`` is keyed by ``PlannerConfig`` field; ``public_names`` gives
-        the ``retune.planner`` name to report. Each value must pass the
-        field's strict validation, as a runtime reconfiguration would.
-        Returns the grid with validated values (``80`` becomes ``80.0`` for a
-        float field), so candidates compare equal to the live config by key.
+        the ``retune.planner`` name to report. ``load_scaling`` and
+        ``throughput_scaling`` say whether some grid point scales that way
+        (default: this config does). Each value must pass the field's strict
+        validation, as a runtime reconfiguration would. Returns the grid with
+        validated values (``80`` becomes ``80.0`` for a float field), so
+        candidates compare equal to the live config by key.
         """
 
-        active_endpoints = (
-            {"min_endpoint"}
-            if self.mode == "agg"
-            else {"prefill_min_endpoint", "decode_min_endpoint"}
-        )
+        if load_scaling is None:
+            load_scaling = self.enable_load_scaling
+        if throughput_scaling is None:
+            throughput_scaling = self.enable_throughput_scaling
         validated: dict[str, list[Any]] = {}
         for key, values in grid.items():
             name = f"retune.planner.{public_names.get(key, key)}"
-            if key in ("min_endpoint", "prefill_min_endpoint", "decode_min_endpoint"):
-                relevant = key in active_endpoints
-                requirement = (
-                    "mode='agg' (use prefill_min_workers/decode_min_workers in disagg)"
-                    if key == "min_endpoint"
-                    else "mode='disagg' (use min_workers in agg)"
-                )
-            elif key == "max_throughput_scaling_replicas":
-                relevant = self.enable_throughput_scaling
+            if key == "max_throughput_scaling_replicas":
+                relevant = throughput_scaling
                 requirement = "enable_throughput_scaling"
             elif key == "load_scaling_down_sensitivity":
-                relevant = self.enable_load_scaling
+                relevant = load_scaling
                 requirement = "enable_load_scaling"
             elif key in (
                 "prefill_scale_up_queue_tokens",
@@ -2704,7 +2703,8 @@ class PlannerConfig(BaseModel):
                 relevant = self.optimization_target == "load"
                 requirement = "optimization_target='load'"
             else:
-                # min_gpu_budget / max_gpu_budget apply to any scaling mode.
+                # The scaling-policy fields: expand_planner_domain keeps only
+                # the policies that apply.
                 relevant = True
                 requirement = ""
             if not relevant:
@@ -2750,6 +2750,11 @@ class PlannerConfig(BaseModel):
             ) from e
 
         return cls.model_validate(data)
+
+    @property
+    def fpm_max_age_seconds(self) -> float:
+        """Freshness window of live FPM samples: three load intervals."""
+        return 3.0 * self.load_adjustment_interval_seconds
 
     @classmethod
     def _load_from_file(cls, path: Path) -> "PlannerConfig":
