@@ -136,6 +136,12 @@ not `internal`, the parent hash is still the edge tail, and the worker covers
 that tail. If the node has ever had children, decode falls back to child
 insertion or splitting instead of extending the compressed edge.
 
+A store tries this first, before parent planning: when the worker's lookup entry
+for the parent names a node, that node's conditions are checked and the blocks
+appended under one exclusive shape gate, so no shape version from an earlier
+read is needed. Anchors never extend. Any store this declines goes through the
+planned path, which may still extend through `try_extend_leaf_with_version`.
+
 ### Suffix Reuse And Splitting
 
 When a store names a parent hash inside an existing compressed edge, the node can
