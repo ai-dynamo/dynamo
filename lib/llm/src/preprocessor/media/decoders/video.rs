@@ -116,13 +116,11 @@ fn get_source_timing_from_video_packets(
         });
     };
 
-    let start_time_secs = Time::new(Some(first_pts), stream_time_base).as_secs() as f64;
+    let start_time_secs = Time::new(Some(first_pts), stream_time_base).as_secs_f64();
     let pts_duration =
-        Time::new(Some(max_pts.saturating_sub(first_pts)), stream_time_base).as_secs() as f64;
+        Time::new(Some(max_pts.saturating_sub(first_pts)), stream_time_base).as_secs_f64();
     let packet_duration = max_packet_end
-        .map(|end| {
-            Time::new(Some(end.saturating_sub(first_pts)), stream_time_base).as_secs() as f64
-        })
+        .map(|end| Time::new(Some(end.saturating_sub(first_pts)), stream_time_base).as_secs_f64())
         .filter(|duration| *duration > 0.0);
 
     Ok(SourceVideoTiming {
@@ -230,13 +228,13 @@ fn get_target_times(
     let last_frame_time = (duration_secs - frame_duration - FRAME_TIME_BUFFER_SECS).max(0.0);
 
     if requested_frames == 1 {
-        return Ok(vec![Time::from_secs(last_frame_time as f32 / 2.0)]);
+        return Ok(vec![Time::from_secs_f64(last_frame_time / 2.0)]);
     }
 
     Ok((0..requested_frames)
         .map(|i| {
             let time_secs = (i as f64 * last_frame_time) / (requested_frames as f64 - 1.0);
-            Time::from_secs(time_secs.max(0.0) as f32)
+            Time::from_secs_f64(time_secs.max(0.0))
         })
         .collect())
 }
@@ -249,7 +247,7 @@ fn get_frame_timestamp(frame: &ffmpeg_next::frame::Video, time_base: Rational) -
     let pts = frame.pts();
 
     match best_effort_pts.or(pts) {
-        Some(ts) => Ok(Time::new(Some(ts), time_base).as_secs() as f64),
+        Some(ts) => Ok(Time::new(Some(ts), time_base).as_secs_f64()),
         None => anyhow::bail!("No timestamp found (both best_effort_pts and pts are None)"),
     }
 }
@@ -415,11 +413,11 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
         let start_time_secs = if stream_start_time == ffmpeg_next::ffi::AV_NOPTS_VALUE {
             0.0
         } else {
-            Time::new(Some(stream_start_time), stream_time_base).as_secs() as f64
+            Time::new(Some(stream_start_time), stream_time_base).as_secs_f64()
         };
         SourceVideoTiming {
             start_time_secs,
-            duration_secs: Time::new(Some(stream_duration), stream_time_base).as_secs() as f64,
+            duration_secs: Time::new(Some(stream_duration), stream_time_base).as_secs_f64(),
         }
     } else {
         get_source_timing_from_video_packets(
@@ -489,7 +487,7 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
                             Some(timestamp) => timestamp - source_timing.start_time_secs,
                             None => continue,
                         };
-                    if timestamp < target_times[*target_index].as_secs() as f64 {
+                    if timestamp < target_times[*target_index].as_secs_f64() {
                         continue;
                     }
 
@@ -679,7 +677,7 @@ mod tests {
         let mut decoder = video_rs::decode::Decoder::new(location)?;
         let target_times = get_target_times(
             requested_frames,
-            decoder.duration()?.as_secs() as f64,
+            decoder.duration()?.as_secs_f64(),
             decoder.frame_rate() as f64,
         )?;
         let (width, height) = decoder.size();
@@ -692,7 +690,7 @@ mod tests {
         for result in decoder.decode_raw_iter() {
             let frame = result?;
             let timestamp = get_frame_timestamp(&frame, time_base)?;
-            if timestamp < target_times[target_index].as_secs() as f64 {
+            if timestamp < target_times[target_index].as_secs_f64() {
                 continue;
             }
             let output = &mut frames[target_index * frame_size..(target_index + 1) * frame_size];
