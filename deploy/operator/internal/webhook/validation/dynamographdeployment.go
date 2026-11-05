@@ -264,9 +264,8 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 	annotationsPath := fldPath.Child("annotations")
 	allErrs = append(allErrs, v.sharedValidation.validateObjectMeta(objectMeta, nil, fldPath)...)
 
-	// The nvidia.com/dynamo-graph-deployment-name label carries the DGD name unchanged
-	// because controllers read it back to find the DGD, so the name must fit in a label
-	// value. Names are immutable; ratchet an existing object so it can still be updated.
+	// Controllers read the DGD name back from a label, so it must fit a label value.
+	// Names are immutable, so ratchet existing objects to keep them updatable.
 	if len(objectMeta.Name) > k8svalidation.LabelValueMaxLength &&
 		(oldObjectMeta == nil || oldObjectMeta.Name != objectMeta.Name) {
 		allErrs = append(allErrs, field.TooLong(fldPath.Child("name"), objectMeta.Name, k8svalidation.LabelValueMaxLength))
