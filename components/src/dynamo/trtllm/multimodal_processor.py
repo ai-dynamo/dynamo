@@ -536,9 +536,8 @@ class MultimodalRequestProcessor:
                             else:
                                 loaded_embeddings.append(item)
                         if loaded_embeddings:
-                            # A signed URL (S3, GCS, Azure SAS) carries a bearer
-                            # credential in its query; log only scheme, host,
-                            # and path.
+                            # A signed URL's query is a bearer credential; log
+                            # only scheme, host and path.
                             logging.info(
                                 "Loaded %d embedding file(s) from: %s",
                                 len(loaded_embeddings),
