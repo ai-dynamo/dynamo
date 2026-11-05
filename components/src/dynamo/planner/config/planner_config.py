@@ -1854,6 +1854,14 @@ class PlannerConfig(BaseModel):
 
     # Global planner environment
     global_planner_namespace: Optional[str] = None
+    global_planner_managed_allocation: bool = Field(
+        default=False,
+        description=(
+            "Set when the Global Planner runs managed_allocation. Stable "
+            "same-count recommendations are then published as demand, so a "
+            "hold can cancel older retained demand."
+        ),
+    )
 
     # Scaling mode flags
     enable_throughput_scaling: bool = SLAPlannerDefaults.enable_throughput_scaling
@@ -2248,6 +2256,13 @@ class PlannerConfig(BaseModel):
             raise ValueError(
                 "global_planner_namespace is required when environment='global-planner'. "
                 "Please specify the namespace where GlobalPlanner is running."
+            )
+        if (
+            self.global_planner_managed_allocation
+            and self.environment != "global-planner"
+        ):
+            raise ValueError(
+                "global_planner_managed_allocation requires environment='global-planner'"
             )
 
         # Retune-only mode needs both flags explicitly false, so a config that
