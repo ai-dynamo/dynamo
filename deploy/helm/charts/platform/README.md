@@ -222,6 +222,31 @@ own value; rename that variable before upgrading.
 **Existing deployments:** Reconciliation rolls each LPX workload once without an
 authored manifest change.
 
+##### Hybrid LPX conductors require the runtime sidecar
+
+**Change:** Reconciliation rejects a hybrid LPX build whose conductor template declares no
+`spec.initContainers[name=runtime]`, and the DGD reports `status.state: failed`. Previously the
+operator ran the conductor's `main` container as a Dynamo worker. Operator v1.6.x rejects a
+`runtime` init container in LPX role templates, so affected DGDs can migrate only after the
+upgrade.
+
+**Affected:** DGDs with a hybrid LPX component whose conductor role has no runtime sidecar.
+
+**Action:** After upgrading to v1.7.0, add the `runtime` init container to the conductor template,
+as described in
+[Dynamo Sidecar Mode](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-component-deployment.mdx#dynamo-sidecar-mode),
+with an engine image that serves through it. Run the sidecar with the `lpx` subcommand,
+`--grpc-endpoint` set to the engine's endpoint, and `--model-path` set to the model's tokenizer
+directory, such as `$(LPX_MODEL_PATH)/tokenizer`. Mount the volume the sidecar uses to reach the
+engine in both containers. The sidecar takes over the `system` port and the Dynamo environment, so
+probe the engine on its own port and remove references such as `$(DYN_NAMESPACE)` or `$(POD_IP)`
+from `main`. The edit changes the DGD's serving revision, so its other workers also roll once.
+
+**Existing deployments:** Until the conductor declares the sidecar, the operator still deletes
+released Agent Pods, which Grove recreates, but makes no other change to the LPX workload. It does
+not update its templates or replica count, and it does not retire or republish pipeline requests,
+so a faulted pipeline does not recover.
+
 #### New behavior
 
 ##### LWS no longer requires Volcano
