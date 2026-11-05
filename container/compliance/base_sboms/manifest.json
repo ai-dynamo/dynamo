@@ -62,30 +62,6 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:0230b7f243483cb15969fa3cc724a9459599604427052fc2a0d4291c7c0647dd",
-      "baseline_image": "nvidia/cuda",
-      "baseline_sbom": "cuda@0230b7f2-amd64.cdx.json",
-      "baseline_tag": "13.0.3-cudnn-devel-ubuntu24.04",
-      "capture_note": "lmsysorg/sglang is built on this nvidia/cuda cudnn-devel base; the vendor image layout is not layer-prefix preserving, so layer-prefix validation was skipped. Registry digest and CUDA 13.0.3 metadata were verified locally; full from-image delta policy validation runs in CI.",
-      "from_digest": "sha256:c3d99f078c329a5b2d0c0c02c4237cf8b0dcd1dc6f875a943ae163c1720854cb",
-      "from_image": "lmsysorg/sglang",
-      "from_tag": "v0.5.22-cu130-runtime",
-      "layer_prefix_check_skipped": true,
-      "platform": "linux/amd64"
-    },
-    {
-      "baseline_digest": "sha256:0230b7f243483cb15969fa3cc724a9459599604427052fc2a0d4291c7c0647dd",
-      "baseline_image": "nvidia/cuda",
-      "baseline_sbom": "cuda@0230b7f2-arm64.cdx.json",
-      "baseline_tag": "13.0.3-cudnn-devel-ubuntu24.04",
-      "capture_note": "lmsysorg/sglang is built on this nvidia/cuda cudnn-devel base; the vendor image layout is not layer-prefix preserving, so layer-prefix validation was skipped. Registry digest and CUDA 13.0.3 metadata were verified locally; full from-image delta policy validation runs in CI.",
-      "from_digest": "sha256:c3d99f078c329a5b2d0c0c02c4237cf8b0dcd1dc6f875a943ae163c1720854cb",
-      "from_image": "lmsysorg/sglang",
-      "from_tag": "v0.5.22-cu130-runtime",
-      "layer_prefix_check_skipped": true,
-      "platform": "linux/arm64"
-    },
-    {
       "baseline_digest": "sha256:cab8318458b3dd92cc74c53709a30001d90d38928e5bfeb9fb84280ce00369f5",
       "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
       "baseline_sbom": "release@cab83184-amd64.cdx.json",
@@ -126,25 +102,49 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:3eb2d952d9cff2d7a4e42a1cedc19cfa610a7f72c3b8428811731dcea5a175fd",
+      "baseline_digest": "sha256:7c7413a56200486f71f181cad9310f6fd31b6bb21816ade15fc9c1e1e927a5c1",
       "baseline_image": "nvidia/cuda",
-      "baseline_sbom": "cuda@3eb2d952-amd64.cdx.json",
-      "baseline_tag": "13.4.1-base-ubuntu24.04",
-      "capture_note": "Exact seven-layer CUDA base prefix verified against the private ECR image. This SBOM captures only the CUDA base; runtime delta policy validation remains in image CI.",
-      "from_digest": "sha256:bc216f68c2cef5adafb1c43a2c2a51b0a3cbf56954ec8361d28c5d713dee57e1",
-      "from_image": "210086341041.dkr.ecr.us-west-2.amazonaws.com/ai-dynamo/kimi_k31",
-      "from_tag": "vllm-upstream-private-20261028-34c09519a7-fi-6833-7064",
+      "baseline_sbom": "kimi-k31-vllm-amd64.cdx.json",
+      "baseline_tag": "13.0.3-base-ubuntu24.04",
+      "capture_note": "All seven uncompressed CUDA-base layer DiffIDs match exactly. The vendor recompressed the Ubuntu layer, so compressed layer-prefix validation is skipped; tag/index digests remain checked. The immutable NVIDIA baseline SBOM is reused. Final-image license and codec policy validation runs in CI.",
+      "from_digest": "sha256:904520f3fefc32414abcedf6ba8dadc9c5978db1bcdaf40f58d6b9036ef30a99",
+      "from_image": "vllm/vllm-openai",
+      "from_tag": "kimi-k31",
+      "layer_prefix_check_skipped": true,
       "platform": "linux/amd64"
     },
     {
       "baseline_digest": "sha256:3eb2d952d9cff2d7a4e42a1cedc19cfa610a7f72c3b8428811731dcea5a175fd",
       "baseline_image": "nvidia/cuda",
-      "baseline_sbom": "cuda@3eb2d952-arm64.cdx.json",
+      "baseline_sbom": "kimi-k31-vllm-arm64.cdx.json",
       "baseline_tag": "13.4.1-base-ubuntu24.04",
-      "capture_note": "Exact seven-layer CUDA base prefix verified against the private ECR image. This SBOM captures only the CUDA base; runtime delta policy validation remains in image CI.",
-      "from_digest": "sha256:bc216f68c2cef5adafb1c43a2c2a51b0a3cbf56954ec8361d28c5d713dee57e1",
-      "from_image": "210086341041.dkr.ecr.us-west-2.amazonaws.com/ai-dynamo/kimi_k31",
-      "from_tag": "vllm-upstream-private-20261028-34c09519a7-fi-6833-7064",
+      "capture_note": "All seven uncompressed CUDA-base layer DiffIDs match exactly. The vendor recompressed the Ubuntu layer, so compressed layer-prefix validation is skipped; tag/index digests remain checked. The immutable NVIDIA baseline SBOM is reused. Final-image license and codec policy validation runs in CI.",
+      "from_digest": "sha256:5c22aa1cd946b511dfd1bd871ee531c5ee893379fa1d3bfbbab6b8a8de250a89",
+      "from_image": "vllm/vllm-openai",
+      "from_tag": "kimi-k31-cu134",
+      "layer_prefix_check_skipped": true,
+      "platform": "linux/arm64"
+    },
+    {
+      "baseline_digest": "sha256:0230b7f243483cb15969fa3cc724a9459599604427052fc2a0d4291c7c0647dd",
+      "baseline_image": "nvidia/cuda",
+      "baseline_sbom": "kimi-k31-sglang-amd64.cdx.json",
+      "baseline_tag": "13.0.3-cudnn-devel-ubuntu24.04",
+      "capture_note": "Exact NVIDIA CUDA layer prefix verified against the public Kimi image. Reuses the recorded immutable NVIDIA baseline SBOM through a per-architecture alias. All SGLang additions remain above the compliance floor; final-image license and codec policy validation runs in CI.",
+      "from_digest": "sha256:67fc77d1cbe67de27ca54d874c82757a4844743fea899ea7d0df547e30c2c391",
+      "from_image": "lmsysorg/sglang",
+      "from_tag": "dev-kimi-k31-pro",
+      "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:3eb2d952d9cff2d7a4e42a1cedc19cfa610a7f72c3b8428811731dcea5a175fd",
+      "baseline_image": "nvidia/cuda",
+      "baseline_sbom": "kimi-k31-sglang-arm64.cdx.json",
+      "baseline_tag": "13.4.1-base-ubuntu24.04",
+      "capture_note": "Exact NVIDIA CUDA layer prefix verified against the public Kimi image. Reuses the recorded immutable NVIDIA baseline SBOM through a per-architecture alias. All SGLang additions remain above the compliance floor; final-image license and codec policy validation runs in CI.",
+      "from_digest": "sha256:a42079a8d1299b94824eab821de5f261c016797434cf69dc1fb3b15bdfddfc0e",
+      "from_image": "lmsysorg/sglang",
+      "from_tag": "dev-kimi-k31-pro-cu134",
       "platform": "linux/arm64"
     }
   ],
@@ -160,6 +160,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-10-29T18:03:54+00:00",
+  "generated_at": "2026-11-05T02:48:06+00:00",
   "schema_version": 2
 }

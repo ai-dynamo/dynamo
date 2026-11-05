@@ -9,6 +9,10 @@
 
 {% if device == "xpu" %}
 FROM framework AS runtime
+{% elif platform == "multi" %}
+FROM --platform=linux/amd64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG_AMD64} AS sglang_runtime_amd64
+FROM --platform=linux/arm64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG_ARM64} AS sglang_runtime_arm64
+FROM sglang_runtime_${TARGETARCH} AS pre_runtime
 {% else %}
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}

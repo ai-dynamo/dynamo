@@ -30,7 +30,12 @@ ARG BASE_IMAGE={{ context[framework][device_key].base_image }}
 ARG BASE_IMAGE_TAG={{ context[framework][device_key].base_image_tag }}
 {% if framework in ["sglang", "trtllm", "vllm", "triton"] -%}
 ARG RUNTIME_IMAGE={{ context[framework][device_key].runtime_image }}
-ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tag }}
+ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].get("runtime_image_tag_" + platform, context[framework][device_key].runtime_image_tag) }}
+{% if framework in ["sglang", "vllm"] and platform == "multi" -%}
+# Override these per-arch tags when supplying replacement multi-arch bases.
+ARG RUNTIME_IMAGE_TAG_AMD64=${RUNTIME_IMAGE_TAG}
+ARG RUNTIME_IMAGE_TAG_ARM64={{ context[framework][device_key].get("runtime_image_tag_arm64", "${RUNTIME_IMAGE_TAG}") }}
+{%- endif %}
 {%- endif %}
 
 # wheel builder image selection
