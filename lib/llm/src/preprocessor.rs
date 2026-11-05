@@ -13167,10 +13167,14 @@ responses_tools: None,
     fn gpt_oss_return_stop_respects_parser_version_and_tool_choice() {
         const CHILD: &str = "DYNAMO_GPT_OSS_RETURN_STOP_CHILD";
         let Ok(version) = std::env::var(CHILD) else {
+            let (_, test_name) = concat!(
+                module_path!(),
+                "::gpt_oss_return_stop_respects_parser_version_and_tool_choice"
+            )
+            .split_once("::")
+            .unwrap();
             for version in ["auto", "1", "2"] {
-                let mut command = crate::test_utils::isolated_command(
-                    "preprocessor::extra_args_media_copy_tests::gpt_oss_return_stop_respects_parser_version_and_tool_choice",
-                );
+                let mut command = crate::test_utils::isolated_command(test_name);
                 command
                     .env(CHILD, version)
                     .env(env_llm::DYN_PARSER_VERSION, version);
@@ -13218,6 +13222,7 @@ responses_tools: None,
         use crate::backend::Decoder;
         use crate::protocols::common::StopConditions;
         use crate::protocols::openai::chat_completions::NvCreateChatCompletionResponse;
+        use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 
         let mut preprocessor = hidden_stop_preprocessor();
         preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
