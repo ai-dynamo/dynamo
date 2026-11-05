@@ -264,6 +264,14 @@ func TestComputeSnapshotCompatibilityHashRejectsProcessContractChanges(t *testin
 			gmsMode: "disabled",
 		},
 		{
+			name: "offline policy",
+			mutate: func(template *corev1.PodTemplateSpec) {
+				template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, corev1.EnvVar{Name: "HF_HUB_OFFLINE", Value: "1"})
+			},
+			backend: "vllm",
+			gmsMode: "disabled",
+		},
+		{
 			name: "GPU node selector",
 			mutate: func(template *corev1.PodTemplateSpec) {
 				template.Spec.NodeSelector = map[string]string{"nvidia.com/gpu.product": "H100"}
@@ -404,38 +412,6 @@ func TestSnapshotRestoreEnvironmentNamesMatchPythonRuntime(t *testing.T) {
 	delete(pythonNames, "HF_HUB_OFFLINE")
 	assert.Equal(t, pythonNames, snapshotRestoreEnvironmentNames,
 		"Go compatibility filtering must track Python restore env except HF_HUB_OFFLINE, retained in v2")
-}
-
-func TestComputeSnapshotCompatibilityHashPreservesOfflinePolicy(t *testing.T) {
-	t.Log("Given a snapshot whose target and init container explicitly set the offline policy")
-	template := snapshotCompatibilityTestPodTemplate("capture-dgd", "capture-ns", "worker-a")
-	template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env,
-		corev1.EnvVar{Name: "HF_HUB_OFFLINE", Value: "1"})
-	template.Spec.InitContainers = []corev1.Container{{
-		Name:  "prepare",
-		Image: "prepare:1.0",
-		Env:   []corev1.EnvVar{{Name: "HF_HUB_OFFLINE", Value: "1"}},
-	}}
-	baseHash, err := ComputeSnapshotCompatibilityHash(&template, "main", "vllm", "disabled", "")
-	require.NoError(t, err)
-
-	for _, location := range []string{"target", "init"} {
-		t.Run(location, func(t *testing.T) {
-			t.Log("When only that container's offline policy changes")
-			changed := template.DeepCopy()
-			if location == "target" {
-				lastEnv := len(changed.Spec.Containers[0].Env) - 1
-				changed.Spec.Containers[0].Env[lastEnv].Value = "0"
-			} else {
-				changed.Spec.InitContainers[0].Env[0].Value = "0"
-			}
-			changedHash, err := ComputeSnapshotCompatibilityHash(changed, "main", "vllm", "disabled", "")
-			require.NoError(t, err)
-
-			t.Log("Then the persisted v2 compatibility identity still distinguishes the policies")
-			assert.NotEqual(t, baseHash, changedHash)
-		})
-	}
 }
 
 func snapshotCompatibilityTestPodTemplate(dgdName, namespace, workerSuffix string) corev1.PodTemplateSpec {

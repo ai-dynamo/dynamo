@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import json
 import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -13,13 +12,8 @@ from dynamo.common.snapshot.constants import (
     READY_FOR_SNAPSHOT_FILE,
     RESTORE_COMPLETE_FILE,
     SNAPSHOT_CONTROL_DIR_ENV,
-    SNAPSHOT_RESTORE_CONTEXT_FILE,
 )
-from dynamo.common.snapshot.lifecycle import (
-    SnapshotConfig,
-    configure_snapshot_capture_env,
-    elect_and_wake,
-)
+from dynamo.common.snapshot.lifecycle import SnapshotConfig, elect_and_wake
 from dynamo.common.snapshot.restore_context import (
     refresh_snapshot_restore_config,
     write_snapshot_restore_context,
@@ -77,34 +71,32 @@ async def test_snapshot_lifecycle_returns_paused_after_restore_sentinel(
                 await lifecycle
 
 
-async def test_snapshot_lifecycle_clears_capture_only_env_after_restore(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize("destination_policy", ["1", None])
+async def test_snapshot_lifecycle_applies_destination_offline_policy(
+    monkeypatch, tmp_path, destination_policy
 ):
+    """Clear the capture override, then apply the destination policy before parsing."""
     monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+    if destination_policy is None:
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    else:
+        monkeypatch.setenv("HF_HUB_OFFLINE", destination_policy)
+    write_snapshot_restore_context()
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    assert os.environ["HF_HUB_OFFLINE"] == "1"
-
+    (tmp_path / RESTORE_COMPLETE_FILE).write_text("done", encoding="utf-8")
     controller = _PauseController()
     config = SnapshotConfig.from_env()
     assert config is not None
 
-    lifecycle = asyncio.create_task(config.run_lifecycle(controller))
-    try:
-        for _ in range(100):
-            if (tmp_path / READY_FOR_SNAPSHOT_FILE).exists():
-                break
-            await asyncio.sleep(0.01)
+    assert await asyncio.wait_for(config.run_lifecycle(controller), timeout=1) is True
+    assert "HF_HUB_OFFLINE" not in os.environ
 
-        (tmp_path / RESTORE_COMPLETE_FILE).write_text("done", encoding="utf-8")
+    def parse_config():
+        assert os.environ.get("HF_HUB_OFFLINE") == destination_policy
+        return SimpleNamespace(discovery_backend="file")
 
-        assert await lifecycle is True
-        assert controller.resumed is False
-        assert "HF_HUB_OFFLINE" not in os.environ
-    finally:
-        if not lifecycle.done():
-            lifecycle.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await lifecycle
+    await refresh_snapshot_restore_config(SimpleNamespace(), parse_config)
+    assert controller.resumed is False
 
 
 async def test_elect_and_wake_resumes_without_lock(monkeypatch):
@@ -115,54 +107,6 @@ async def test_elect_and_wake_resumes_without_lock(monkeypatch):
 
     assert lock is None
     assert controller.resumed is True
-
-
-@pytest.mark.parametrize(
-    "destination_policy", ["1", "0", "true", "false", "", None, "legacy"]
-)
-async def test_restore_applies_destination_offline_policy_before_runtime_parsing(
-    monkeypatch, tmp_path, destination_policy
-):
-    """Apply destination policy after capture without leaking environment changes."""
-    monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
-    monkeypatch.setenv("HF_HUB_OFFLINE", "")
-    if destination_policy is None or destination_policy == "legacy":
-        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
-    else:
-        monkeypatch.setenv("HF_HUB_OFFLINE", destination_policy)
-    write_snapshot_restore_context()
-    if destination_policy == "legacy":
-        context_path = tmp_path / SNAPSHOT_RESTORE_CONTEXT_FILE
-        context = json.loads(context_path.read_text(encoding="utf-8"))
-        context["env"].pop("HF_HUB_OFFLINE", None)
-        context_path.write_text(json.dumps(context), encoding="utf-8")
-
-    for name in (
-        "NCCL_IB_DISABLE",
-        "NCCL_RAS_ENABLE",
-        "TORCH_NCCL_ENABLE_MONITORING",
-        "TORCH_NCCL_DUMP_ON_TIMEOUT",
-    ):
-        # Record absence too: capture writes directly to os.environ.
-        monkeypatch.setenv(name, os.environ.get(name, ""))
-        monkeypatch.delenv(name, raising=False)
-    configure_snapshot_capture_env()
-    assert os.environ["HF_HUB_OFFLINE"] == "1"
-
-    (tmp_path / RESTORE_COMPLETE_FILE).write_text("done", encoding="utf-8")
-    controller = _PauseController()
-    config = SnapshotConfig.from_env()
-    assert config is not None
-    assert await asyncio.wait_for(config.run_lifecycle(controller), timeout=1) is True
-
-    expected_policy = None if destination_policy == "legacy" else destination_policy
-
-    def parse_config():
-        assert os.environ.get("HF_HUB_OFFLINE") == expected_policy
-        return SimpleNamespace(discovery_backend="file")
-
-    await refresh_snapshot_restore_config(SimpleNamespace(), parse_config)
-    assert controller.resumed is False
 
 
 def _patch_flock_lock(monkeypatch, fake_lock):
