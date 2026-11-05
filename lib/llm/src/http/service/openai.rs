@@ -5481,6 +5481,8 @@ async fn images_with_request(
     inflight.mark_ok();
     // The body and header `Json(response)` would send, but each b64_json
     // image is copied instead of checked for escapes byte by byte.
+    // TODO: back to `Json(response)` once serde_json escapes faster; see
+    // `NvImagesResponse::to_json_vec`.
     let body = response.to_json_vec().map_err(|e| {
         ErrorMessage::internal_server_error_with_details("Failed to serialize images response", e)
     })?;

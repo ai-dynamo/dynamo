@@ -372,6 +372,10 @@ impl NvImagesResponse {
     /// which costs about 1 ms of CPU for a 2.9 MB `b64_json` image. Base64
     /// needs no escaping, so each `b64_json` goes through `write_json_str`
     /// and every other value through serde_json.
+    ///
+    /// Temporary: serde_json 1.0.154 still checks one byte at a time. Once a
+    /// release scans faster (serde-rs/json#1360, #1363 or #1366), remove this
+    /// method and its helpers, and serve the response with `Json` again.
     pub fn to_json_vec(&self) -> serde_json::Result<Vec<u8>> {
         // Every field is named, so a field added to the struct fails to
         // compile here until it is written below, in declaration order.
