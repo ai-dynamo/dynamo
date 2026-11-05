@@ -1696,7 +1696,8 @@ SetupMetricsCollectionFn = Callable[..., None]
 
 @dataclass
 class _WorkerLifecycle:
-    """Owns the engine and handler of a prefill, decode, or aggregated worker.
+    """Owns the engine and handler of a prefill, decode, aggregated, or
+    transcription worker.
 
     On exit it shuts the vLLM EngineCore down explicitly. EngineCore is a
     non-daemon child, so leaving it to interpreter exit can block the main
@@ -1705,7 +1706,7 @@ class _WorkerLifecycle:
 
     engine_client: Optional[AsyncLLM] = None
     vllm_config: Optional[VllmConfig] = None
-    handler: Optional[BaseWorkerHandler] = None
+    handler: Optional[BaseWorkerHandler | TranscriptionWorkerHandler] = None
     shutdown_event: asyncio.Event | None = None
 
     def __enter__(self) -> "_WorkerLifecycle":
@@ -2080,50 +2081,62 @@ class WorkerFactory:
                 stat_logger_factory,
                 fpm_worker_id=fpm_worker_id,
             )
-        _, dp_size = get_dp_range_for_worker(vllm_config)
-        stat_logger_factory.set_num_gpu_blocks_all(
-            per_rank_kv_blocks(vllm_config.cache_config.num_gpu_blocks, dp_size) or 0
-        )
-        stat_logger_factory.init_publish()
-        handler = TranscriptionWorkerHandler(
-            runtime=runtime,
-            engine=engine_client,
-            config=config,
-            shutdown_event=shutdown_event,
-        )
-        self.setup_metrics_collection(config, generate_endpoint, logger)
-        model_name = config.served_model_name or config.model
-        health_payload = VllmTranscriptionHealthCheckPayload(model_name).to_dict()
-        metric_labels = [
-            (prometheus_names.labels.MODEL, model_name),
-            (prometheus_names.labels.MODEL_NAME, model_name),
-        ]
-
-        register_model_taint_route(runtime, generate_endpoint)
-        logger.info("Starting to serve the transcription worker endpoint...")
+        # Owned only after the snapshot sync, which shuts the engine down itself
+        # on failure; from here on any exit shuts it down through the lifecycle,
+        # then removes the metrics directory.
         try:
-            await asyncio.gather(
-                generate_endpoint.serve_endpoint(
-                    handler.generate,
-                    metrics_labels=metric_labels,
-                    health_check_payload=health_payload,
-                ),
-                self.register_vllm_model(
-                    ModelInput.Text,
-                    ModelType.Transcriptions,
-                    generate_endpoint,
-                    config,
-                    engine_client,
-                    vllm_config,
-                    worker_type=WorkerType.Aggregated,
-                    needs=[],
-                ),
-            )
-        except Exception:
-            logger.exception("Failed to serve transcription worker endpoint")
-            raise
+            with _WorkerLifecycle(
+                engine_client=engine_client,
+                vllm_config=vllm_config,
+                shutdown_event=shutdown_event,
+            ) as lifecycle:
+                _, dp_size = get_dp_range_for_worker(vllm_config)
+                stat_logger_factory.set_num_gpu_blocks_all(
+                    per_rank_kv_blocks(vllm_config.cache_config.num_gpu_blocks, dp_size)
+                    or 0
+                )
+                stat_logger_factory.init_publish()
+                handler = TranscriptionWorkerHandler(
+                    runtime=runtime,
+                    engine=engine_client,
+                    config=config,
+                    shutdown_event=shutdown_event,
+                )
+                lifecycle.handler = handler
+                self.setup_metrics_collection(config, generate_endpoint, logger)
+                model_name = config.served_model_name or config.model
+                health_payload = VllmTranscriptionHealthCheckPayload(
+                    model_name
+                ).to_dict()
+                metric_labels = [
+                    (prometheus_names.labels.MODEL, model_name),
+                    (prometheus_names.labels.MODEL_NAME, model_name),
+                ]
+
+                register_model_taint_route(runtime, generate_endpoint)
+                logger.info("Starting to serve the transcription worker endpoint...")
+                try:
+                    await asyncio.gather(
+                        generate_endpoint.serve_endpoint(
+                            handler.generate,
+                            metrics_labels=metric_labels,
+                            health_check_payload=health_payload,
+                        ),
+                        self.register_vllm_model(
+                            ModelInput.Text,
+                            ModelType.Transcriptions,
+                            generate_endpoint,
+                            config,
+                            engine_client,
+                            vllm_config,
+                            worker_type=WorkerType.Aggregated,
+                            needs=[],
+                        ),
+                    )
+                except Exception:
+                    logger.exception("Failed to serve transcription worker endpoint")
+                    raise
         finally:
-            handler.cleanup()
             if prometheus_temp_dir is not None:
                 prometheus_temp_dir.cleanup()
 
