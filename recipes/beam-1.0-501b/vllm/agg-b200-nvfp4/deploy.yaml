@@ -1,0 +1,158 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Configure cluster placement before applying.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: beam-vllm-b200-agg
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-beam-1.0-501b-dev.1
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+              args:
+                - -m
+                - dynamo.frontend
+                - --http-port
+                - '8000'
+                - --kv-cache-block-size
+                - '64'
+                - --no-router-kv-events
+              env:
+                - name: DYN_ROUTER_MODE
+                  value: kv
+                - name: HF_HUB_OFFLINE
+                  value: '1'
+                - name: TRANSFORMERS_OFFLINE
+                  value: '1'
+                - name: NVIDIA_VISIBLE_DEVICES
+                  value: void
+                - name: LD_LIBRARY_PATH
+                  value: /usr/local/cuda/lib64/stubs:/usr/local/cuda/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+              resources:
+                requests:
+                  cpu: '4'
+                  memory: 8Gi
+                limits:
+                  cpu: '8'
+                  memory: 16Gi
+    - name: Worker
+      type: worker
+      replicas: 2
+      sharedMemorySize: 192Gi
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-beam-1.0-501b-dev.1
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+              args:
+                - -m
+                - dynamo.vllm
+                - --model
+                - $(MODEL_NAME)
+                - --served-model-name
+                - $(SERVED_MODEL_NAME)
+                - --tensor-parallel-size
+                - '4'
+                - --dtype
+                - bfloat16
+                - --max-model-len
+                - '1048576'
+                - --attention-config
+                - '{"backend":"FLASHINFER"}'
+                - --moe-backend
+                - flashinfer_trtllm
+                - --kv-cache-dtype
+                - fp8_e4m3
+                - --block-size
+                - '64'
+                - --max-num-seqs
+                - '128'
+                - --enable-chunked-prefill
+                - --max-num-batched-tokens
+                - '2048'
+                - --gpu-memory-utilization
+                - '0.9'
+                - --enable-prefix-caching
+                - --kv-offloading-backend
+                - native
+                - --kv-offloading-size
+                - '149'
+                - --speculative-config
+                - '{"method":"dflash","model":"$(DRAFT_MODEL_NAME)","num_speculative_tokens":7,"draft_tensor_parallel_size":4,"kv_cache_dtype":"fp8_e4m3","attention_backend":"FLASH_ATTN","max_model_len":1048576}'
+                - --seed
+                - '42'
+                - --safetensors-load-strategy
+                - lazy
+                - --per-request-spec-decode-metrics
+                - summary
+                - --dyn-tool-call-parser
+                - beam
+                - --dyn-reasoning-parser
+                - beam
+              env:
+                - name: MODEL_NAME
+                  value: reflection/Beam-1.0-501B-A23B-NVFP4
+                - name: DRAFT_MODEL_NAME
+                  value: reflection/Beam-1.0-501B-A23B-DFlash2
+                - name: SERVED_MODEL_NAME
+                  value: Beam-1.0-501B-A23B
+                - name: VLLM_ENGINE_READY_TIMEOUT_S
+                  value: '3600'
+                - name: HF_HOME
+                  value: /shared-model-cache
+                - name: HF_HUB_OFFLINE
+                  value: '1'
+                - name: TRANSFORMERS_OFFLINE
+                  value: '1'
+                - name: NCCL_NVLS_ENABLE
+                  value: '0'
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_PTRACE
+                    - SYS_RESOURCE
+              resources:
+                requests:
+                  cpu: '32'
+                  memory: 450Gi
+                  nvidia.com/gpu: '4'
+                limits:
+                  cpu: '32'
+                  memory: 450Gi
+                  nvidia.com/gpu: '4'
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache

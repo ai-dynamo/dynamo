@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from tests.utils.vllm_omni import vllm_omni_skip_reason
 
 if _omni_skip_reason := vllm_omni_skip_reason():
@@ -18,7 +19,6 @@ try:
 except (ImportError, OSError, NotImplementedError):
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
-from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from tests.serve.common import (
     WORKSPACE_DIR,
     params_with_model_mark,
@@ -49,6 +49,47 @@ class VLLMOmniConfig(EngineConfig):
 
 
 vllm_omni_configs = {
+    "omni_cosmos3_edge_i2v": VLLMOmniConfig(
+        name="omni_cosmos3_edge_i2v",
+        directory=vllm_dir,
+        script_name="agg_omni_cosmos3_i2v.sh",
+        script_args=["--model", "nvidia/Cosmos3-Edge", "--no-guardrails"],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.installs_extra_dependencies,
+            pytest.mark.timeout(1200),
+            pytest.mark.profiled_vram_gib(12.0),  # GH200 peak 10.2 GiB, plus headroom.
+            # Diffusion allocates no KV cache; declare zero for the GPU scheduler.
+            pytest.mark.requested_vllm_kv_cache_bytes(0),
+        ],
+        model="nvidia/Cosmos3-Edge",
+        # Omni 0.31's Cosmos pipeline imports media_utils, which requires PyAV.
+        # Install it only for this worker; the runtime image intentionally omits it.
+        env={"DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["av"]},
+        health_check_workers=True,
+        health_check_worker_count=1,
+        request_payloads=[
+            I2VPayload(
+                body={
+                    "prompt": "A red cube on a table rotates slowly.",
+                    "size": "256x256",
+                    "response_format": "b64_json",
+                    "nvext": {
+                        "num_inference_steps": 5,
+                        "num_frames": 17,
+                        "fps": 24,
+                        "guidance_scale": 6.0,
+                        "seed": 42,
+                    },
+                },
+                expected_video_shape=(17, 256, 256),
+                expected_video_fps=24,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
     "omni_disagg_t2i": VLLMOmniConfig(
         name="omni_disagg_t2i",
         directory=vllm_dir,

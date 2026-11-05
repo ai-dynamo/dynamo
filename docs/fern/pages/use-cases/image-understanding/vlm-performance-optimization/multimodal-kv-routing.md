@@ -63,9 +63,9 @@ URI string, while frontend decoding hashes the decoded bytes.
 
   </Tab>
   <Tab title="SGLang" language="sglang">
-    The frontend hashes each image and converts that hash into the same `pad_value` token that SGLang RadixAttention uses for its prefix-cache key. The matching token view lets the router measure image overlap before selecting a worker.
+    On compatible SGLang builds, the frontend hashes each image and converts that hash into the same `pad_value` token that SGLang RadixAttention uses for its prefix-cache key. The matching token view lets the router measure image overlap before selecting a worker.
 
-    Dynamo's SGLang image includes the required hash-forwarding support. For video, see [Exact Video KV Routing](../../video-understanding/exact-video-kv-routing.md).
+    Dynamo's SGLang 0.5.23 image includes hash-forwarding support but is a [wide-token build](../../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#wide-token-sglang-builds), so it uses text-prefix routing for images and videos, including with `--frontend-decoding`. For video, see [Exact Video KV Routing](../../video-understanding/exact-video-kv-routing.md).
   </Tab>
   <Tab title="TensorRT-LLM" language="trtllm">
     The frontend hashes each image, represents that identity in its routing token view, and forwards the hash as `multi_modal_uuids`. TensorRT-LLM workers publish matching KV events so the router can identify cached image blocks.
@@ -154,7 +154,7 @@ request; the second request should report more overlap than the first.
 |---------|--------------|--------|-------|
 | [vLLM](../../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Exact image routing supports Qwen2-VL, Qwen2.5-VL, Qwen3-VL, LLaVA 1.5, LLaVA-NeXT, Llama 4, Kimi K2.5/K2.6, Qwen3.5, Qwen3.6, and Nemotron 3 Nano Omni. Exact video routing requires frontend decoding and supports Qwen3-VL, Qwen3.5, and Nemotron 3 Nano Omni. Other media layouts use text-prefix routing. |
 | [vLLM](../../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#multimodal-kv-routing) | Python chat processor | <Badge intent="success" minimal>Yes</Badge> | Uses vLLM's multimodal processor to derive image and video feature hashes and positions for models supported by vLLM. |
-| [SGLang](../../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Exact image routing uses SGLang's hash-forwarding support. Exact video routing supports aggregated Qwen3-VL and Qwen3.5 workers on CUDA with frontend decoding; other video requests use text-prefix routing. |
+| [SGLang](../../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="note" minimal>Text prefix</Badge> | Dynamo's SGLang 0.5.23 image is a [wide-token build](../../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#wide-token-sglang-builds), so image and video requests use text-prefix routing. Builds before [sgl-project/sglang#43043](https://github.com/sgl-project/sglang/pull/43043) support exact image routing through hash forwarding, and exact video routing on aggregated Qwen3-VL and Qwen3.5 CUDA workers with frontend decoding. |
 | [TensorRT-LLM](../../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Images</Badge> | Exact image routing supports Qwen2-VL, Qwen2.5-VL, Qwen3-VL, and Kimi K2.5/K2.6. Video requests and other models use text-prefix routing. |
 
 Nemotron 3 Nano Omni exact image and video routing currently requires the vLLM backend. Other backends fall back to text-prefix routing for this model.

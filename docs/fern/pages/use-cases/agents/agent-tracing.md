@@ -99,9 +99,9 @@ The endpoint is a ZMQ PULL bind address. Configure it on only one process. The h
 <details>
 <summary>Tool-event wire format and example</summary>
 
-The wire format is `[topic, seq_be_u64, msgpack(tool_event)]`. `tool_event` has top-level `schema`, `event_type`, `event_time_unix_ms`, `session_id`, an optional `parent_session_id`, and `tool`. Dynamo adds the `harness` event source and builds the record's agent context from the session fields. Use a monotonic sequence and a background PUSH publisher with a bounded queue. Include `started_at_unix_ms`, `ended_at_unix_ms`, and `duration_ms` on terminal `tool_end` and `tool_error` events so timing survives a dropped `tool_start`.
+The wire format is `[topic, seq_be_u64, msgpack(RequestTraceToolEventIngress)]`. The event has top-level `schema`, `event_type`, `event_time_unix_ms`, `session_id`, an optional `parent_session_id`, and `tool`. Dynamo adds the `harness` event source and builds the record's agent context from the session fields. Use a monotonic sequence and a background PUSH publisher with a bounded queue. Include `started_at_unix_ms`, `ended_at_unix_ms`, and `duration_ms` on terminal `tool_end` and `tool_error` events so timing survives a dropped `tool_start`.
 
-Use the same `session_id` as the surrounding LLM requests. Make each `tool_call_id` unique within its session.
+Use the same `session_id` as the surrounding LLM requests. Set `tool_call_id` to the exact ID the client received in the model response. On `/v1/messages` that is the `toolu_...` ID, not the backend's ID.
 
 ```json title="Explicit tool_end event"
 {
@@ -185,7 +185,7 @@ Requests with recognized session identity can include opaque strings in `agent_c
 For chat streams, Dynamo records finish metadata after parser and jail rewrites. Completion streams record the final OpenAI-compatible completion finish reason.
 
 <Warning>
-Request tracing currently covers eligible Rust OpenAI chat-completions and completions requests. It skips unsupported replay shapes, including `n > 1`, `best_of > 1`, `prompt_embeds`, multimodal inputs, and requests without a tracker or usable KV cache block size. Sinks use best-effort delivery and can drop records when they lag, so check warnings and validate row counts before treating a capture as complete.
+Request tracing covers eligible chat completions, completions, Responses, and Messages requests that pass through the Rust preprocessor. It skips unsupported replay shapes, including `n > 1`, `best_of > 1`, `prompt_embeds`, multimodal inputs, and requests without a tracker or usable KV cache block size. Sinks use best-effort delivery and can drop records when they lag, so check warnings and validate row counts before treating a capture as complete.
 </Warning>
 
 ## Next

@@ -950,6 +950,7 @@ mod tests {
         token_logprobs: Vec<ChatCompletionTokenLogprob>,
     ) -> NvCreateChatCompletionStreamResponse {
         NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 choices: vec![ChatChoiceStream {
@@ -981,6 +982,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }
     }
 
@@ -1011,6 +1013,7 @@ mod tests {
             .collect();
 
         NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 choices,
@@ -1025,6 +1028,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }
     }
 
@@ -1344,6 +1348,7 @@ mod tests {
     fn test_logprob_extractor_with_missing_data() {
         // Test with choice that has no logprobs
         let response = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 choices: vec![ChatChoiceStream {
@@ -1372,6 +1377,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
 
         let logprobs = response.extract_logprobs_by_choice();
@@ -1578,6 +1584,7 @@ mod tests {
         // In practice, this would have real logprobs data
 
         NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 choices: vec![],
@@ -1592,6 +1599,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }
     }
 

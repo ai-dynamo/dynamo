@@ -30,7 +30,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -53,6 +52,8 @@ func newComponentWorkloadsReconciler(
 	}
 }
 
+// Reconcile syncs one DCD per component of dgd and returns their readiness. The
+// graph fails while any DCD reports a crash-looping container.
 func (r *componentWorkloadsReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -60,6 +61,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) (ReconcileResult, error) {
 	resources := []Resource{}
+	syncedDCDs := []*nvidiacomv1beta1.DynamoComponentDeployment{}
 	logger := log.FromContext(ctx)
 
 	rollingUpdateCtx, err := r.rollout.buildRollingUpdateContext(ctx, dgd)
@@ -111,6 +113,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 			return ReconcileResult{}, fmt.Errorf("failed to sync the DynamoComponentDeployment: %w", err)
 		}
 		resources = append(resources, syncedDCD)
+		syncedDCDs = append(syncedDCDs, syncedDCD)
 	}
 
 	if rollingUpdateCtx.InProgress() {
@@ -120,7 +123,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 		}
 	}
 
-	result := checkResourcesReadiness(resources)
+	result := applyComponentCrashLoops(checkResourcesReadiness(resources), syncedDCDs)
 	if rollingUpdateCtx.InProgress() {
 		oldWorkerStatuses, err := r.rollout.aggregateOldWorkerComponentStatuses(ctx, dgd, rollingUpdateCtx)
 		if err != nil {
@@ -221,26 +224,16 @@ func applyCheckpointStartupPolicy(
 		component.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicy(startupPolicy)
 	}
 
-	// Artifact identity is independent of startup policy. Preserve the automatic
-	// SnapshotJob handoff even while WaitForCheckpoint keeps replicas gated.
-	if checkpointInfo.AutomaticSnapshotJob != nil {
-		if err := applyRestoreCandidateMetadataToComponent(component, checkpointInfo); err != nil {
-			return err
-		}
+	// Artifact identity is independent of startup policy: stamp the compatibility
+	// hash and any Ready candidate pin even while WaitForCheckpoint gates replicas.
+	if err := applyRestoreCandidateMetadataToComponent(component, checkpointInfo); err != nil {
+		return err
 	}
 
 	if checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint && !checkpointInfo.Ready {
-		component.Replicas = ptr.To(int32(0))
-		return nil
+		component.Replicas = new(int32(0))
 	}
-	if checkpointInfo.StartupPolicy != "" &&
-		checkpointInfo.StartupPolicy != nvidiacomv1alpha1.CheckpointStartupPolicyImmediate {
-		return nil
-	}
-	if checkpointInfo.AutomaticSnapshotJob != nil {
-		return nil
-	}
-	return applyRestoreCandidateMetadataToComponent(component, checkpointInfo)
+	return nil
 }
 
 func applyRestoreCandidateMetadataToComponent(

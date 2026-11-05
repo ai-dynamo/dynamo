@@ -31,6 +31,9 @@ impl ConcurrentRadixTreeCompressed {
         id: u64,
         counters: Option<&PreBoundEventCounters>,
     ) -> Result<(), KvCacheEventError> {
+        if self.try_append_at_parent_tail(lookup, worker, &op) {
+            return Ok(());
+        }
         lookup.add_worker(worker);
 
         let parent_resolution = self.resolve_store_parent(lookup, worker, &op, id)?;
@@ -38,6 +41,42 @@ impl ConcurrentRadixTreeCompressed {
         self.record_store_outcome(&outcome, counters);
 
         Ok(())
+    }
+
+    /// The decode case: when the worker's entry for the parent names a leaf whose edge
+    /// ends with the parent and the worker covers that tail, appends the blocks there
+    /// under one lock, skipping parent planning and its shape-version round trips.
+    /// Returns `false` without changing anything for every other store, which then takes
+    /// the general path.
+    fn try_append_at_parent_tail(
+        &self,
+        lookup: &mut LaneLookup,
+        worker: WorkerWithDpRank,
+        op: &KvCacheStoreData,
+    ) -> bool {
+        let Some(parent_hash) = op.parent_hash else {
+            return false;
+        };
+        if op.blocks.is_empty() {
+            return false;
+        }
+        let Some((node_id, node)) = lookup.held(worker, parent_hash) else {
+            return false;
+        };
+        if !node.try_append_at_tail(worker, parent_hash, &op.blocks) {
+            return false;
+        }
+        lookup.upsert_all_held(
+            worker,
+            op.blocks.iter().map(|block| block.block_hash),
+            node_id,
+        );
+        self.insert_lifecycle_hashes(worker, &op.blocks);
+        #[cfg(test)]
+        self.bench_metrics
+            .tail_appends
+            .fetch_add(1, Ordering::Relaxed);
+        true
     }
 
     fn resolve_store_parent(
@@ -372,7 +411,11 @@ impl ConcurrentRadixTreeCompressed {
             }
         }
 
-        let new_node = Arc::new(Node::from_blocks_for_worker(remaining, worker));
+        let new_node = Arc::new(Node::from_blocks_for_worker(
+            remaining,
+            worker,
+            cursor.last_ext_hash,
+        ));
         if let Some(parent_hash) = cursor.last_ext_hash
             && !cursor.parent_is_anchor
         {
@@ -459,7 +502,11 @@ impl ConcurrentRadixTreeCompressed {
                 let tail = &remaining[scan.match_len..];
                 debug_assert!(!tail.is_empty());
 
-                let tail_candidate = Arc::new(Node::from_blocks_for_worker(tail, worker));
+                let tail_candidate = Arc::new(Node::from_blocks_for_worker(
+                    tail,
+                    worker,
+                    Some(remaining[scan.match_len - 1].block_hash),
+                ));
                 let SplitStoreOutcome::Done { split, tail_node } = child.split_for_store_tail(
                     worker,
                     scan.match_len,

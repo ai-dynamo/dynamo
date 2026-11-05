@@ -7,7 +7,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
 from dynamo.common.multimodal import TransferRequest
-from dynamo.common.protocols.image_protocol import ImageNvExt
 from dynamo.common.utils.token_ids import token_ids_to_list
 
 TokenIdType = int
@@ -167,92 +166,3 @@ class DisaggSglangMultimodalRequest(BaseModel):
     request: SglangMultimodalRequest
     sampling_params: dict
     data_parallel_rank: Optional[int] = None
-
-
-# ============================================================================
-# Image diffusion Protocol Types
-# ============================================================================
-
-
-class CreateImageRequest(BaseModel):
-    """OpenAI /v1/images/generations and /v1/images/edits compatible request.
-
-    Generation params (seed, guidance_scale, num_inference_steps, negative_prompt)
-    are specified under ``nvext``.  SGLang-specific defaults (guidance_scale=7.5,
-    num_inference_steps=50) are applied in the handler, not the model.
-    """
-
-    prompt: str
-    model: str  # e.g. "stabilityai/stable-diffusion-3.5-medium"
-    n: int = 1  # Number of images
-    size: Optional[str] = "1024x1024"  # "WxH" format
-    quality: Optional[str] = "standard"  # standard, hd
-    response_format: Optional[str] = "url"  # url or b64_json
-    user: Optional[str] = None
-    input_reference: Optional[str] = None  # For I2I/TI2I - image path/url
-
-    nvext: Optional[ImageNvExt] = None
-
-
-class ImageData(BaseModel):
-    url: Optional[str] = None  # S3 URL
-    b64_json: Optional[str] = None  # Base64 encoded
-    revised_prompt: Optional[str] = None
-
-
-class ImagesResponse(BaseModel):
-    """OpenAI-compatible response"""
-
-    created: int  # Unix timestamp
-    data: list[ImageData]
-
-
-# ============================================================================
-# Video Generation Protocol Types
-# ============================================================================
-
-
-class VideoNvExt(BaseModel):
-    """NVIDIA extensions for video generation requests."""
-
-    annotations: Optional[list[str]] = None
-    fps: Optional[int] = 24
-    num_frames: Optional[int] = None  # Override: if set, ignores fps * seconds
-    negative_prompt: Optional[str] = None
-    num_inference_steps: Optional[int] = 50
-    guidance_scale: float = 5.0
-    seed: Optional[int] = None
-
-
-class CreateVideoRequest(BaseModel):
-    """Request for /v1/videos endpoint"""
-
-    prompt: str
-    model: str
-    input_reference: Optional[str] = None  # For I2V (image-to-video) - image path/url
-    seconds: Optional[int] = 4
-    size: Optional[str] = "832x480"  # WxH format (Wan default: 832x480)
-    user: Optional[str] = None
-    response_format: Optional[str] = "url"  # url or b64_json
-    output_format: Optional[str] = None  # only mp4 is supported
-    nvext: Optional[VideoNvExt] = None
-
-
-class VideoData(BaseModel):
-    output_format: str
-    url: Optional[str] = None
-    b64_json: Optional[str] = None
-
-
-class VideoGenerationResponse(BaseModel):
-    """Response for video generation"""
-
-    id: str
-    object: str = "video"
-    model: str
-    status: str = "completed"
-    progress: int = 100
-    created: int
-    data: list[VideoData] = []
-    error: Optional[str] = None
-    inference_time_s: Optional[float] = None

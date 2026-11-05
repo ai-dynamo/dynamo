@@ -27,13 +27,19 @@ The `--help` output is organized into the following groups:
 
 ### Tool and Reasoning Parsers
 
-Use `--dyn-tool-call-parser` and `--dyn-reasoning-parser` to match the model's output format when the model emits tool calls and/or reasoning content. The current supported values are documented in [Tool Call Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#supported-reasoning-parsers).
+Use `--dyn-tool-call-parser` and `--dyn-reasoning-parser` to match the model's output format when the model emits tool calls and/or reasoning content. The current supported values are documented in [Tool Call Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#supported-reasoning-parsers).
 
 To set the thinking mode used when a request omits an explicit control, pass
 `--dyn-default-thinking-mode enabled|disabled` or set
 `DYN_DEFAULT_THINKING_MODE`. Request-level thinking controls, including
 adaptive thinking, take precedence. See
-[Deployment-Level Thinking Default](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#deployment-level-thinking-default).
+[Deployment-Level Thinking Default](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#deployment-level-thinking-default).
+
+Set chat template defaults with `--default-chat-template-kwargs` on the
+frontend, not on the worker. The frontend renders the chat template for workers
+and sidecars, so the worker refuses the vLLM flag at startup. A `vllm-rs serve`
+engine behind the vLLM sidecar applies its own flag only to its own HTTP server,
+and the sidecar cannot detect it.
 
 For reasoning models with structured output (`response_format`, JSON schema,
 or required/named tool choice), configure both reasoning parsers on the worker:
@@ -108,15 +114,24 @@ For more details, see [Graceful Shutdown](../../../../../kubernetes/fault-tolera
 
 ## Health Checks
 
-Each worker type has a specialized health check payload that validates the full inference pipeline:
+Each worker type registers a health check with the Dynamo runtime. Set
+`DYN_HEALTH_CHECK_ENABLED=true` to enable active checks.
 
 | Worker Type | Health Check Strategy |
 |------------|----------------------|
 | Decode / Aggregated | Short generation request (`max_tokens=1`) using the model's BOS token |
 | Prefill | Same payload structure as decode, adapted for prefill request format |
-| vLLM-Omni | Short generation request via AsyncOmni with the model's BOS token |
+| [vLLM-Omni](../../../../../reference/backends/vllm-omni-configuration.mdx) (aggregated) | Native engine health check; see [vLLM-Omni Health Checks](../../../../../reference/observability/health-checks.mdx#vllm-omni-health-checks) for defaults and custom inference checks |
+| vLLM-Omni ([stage worker](vllm-omni-disaggregated-serving.md)) | Short generation request using the model's BOS token |
 
-Health checks are registered with the Dynamo runtime and called by the frontend or Kubernetes liveness probes. The payload can be overridden via `DYN_HEALTH_CHECK_PAYLOAD` environment variable. See [Observability Architecture](../../../concepts/observability-architecture.md#active-worker-health-checks) for the active health-check design.
+An aggregated Omni worker serves the complete model pipeline through one Dynamo endpoint. A stage
+worker runs a single stage in a disaggregated pipeline.
+
+The runtime's HTTP health endpoints expose the resulting status to Kubernetes probes. Override the
+payload with `DYN_HEALTH_CHECK_PAYLOAD`. See the
+[Health Check Reference](../../../../../reference/observability/health-checks.mdx#active-canary-configuration)
+for configuration and [Observability Architecture](../../../concepts/observability-architecture.md#active-worker-health-checks)
+for the active health-check design.
 
 ## Request Cancellation
 

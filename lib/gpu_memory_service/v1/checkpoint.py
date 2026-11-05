@@ -153,7 +153,10 @@ class GMSCheckpointLifecycle:
             or sessions.waiting_writers
             or sessions.writer_reserved
         ):
-            raise RuntimeError(f"{name} has active or waiting sessions")
+            raise RuntimeError(
+                f"{name} has active or waiting sessions: an engine or an MX "
+                "source still holds a lease"
+            )
 
     def _require_managers(self) -> Mapping[str, _CheckpointDomainManager]:
         if self._managers is None:

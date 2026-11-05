@@ -22,7 +22,6 @@ import (
 	"fmt"
 
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -65,11 +64,9 @@ func ScaleResource(ctx context.Context, kubeClient client.Client, gvr schema.Gro
 	}
 
 	scaleObj := &autoscalingv1.Scale{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            name,
-			Namespace:       namespace,
-			ResourceVersion: currentScale.ObjectMeta.ResourceVersion,
-		},
+		Name:            name,
+		Namespace:       namespace,
+		ResourceVersion: currentScale.ObjectMeta.ResourceVersion,
 		Spec: autoscalingv1.ScaleSpec{
 			Replicas: replicas,
 		},

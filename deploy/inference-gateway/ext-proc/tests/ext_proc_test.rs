@@ -81,6 +81,7 @@ async fn test_pick_result_translates_to_ext_proc_mutations() {
         token_ids: Some(vec![1, 2, 3, 4, 5]),
         cache_namespace: None,
         cache_salt_forwarding: Default::default(),
+        strip_nvext: false,
         reservation_id: None,
     };
 

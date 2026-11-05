@@ -15,6 +15,12 @@ across requests, such as several questions about one video. Exact video routing
 decodes and samples the video in the frontend before worker selection, so use it
 when the expected KV reuse offsets that frontend work.
 
+Video inference and backend prefix-cache reuse do not require video-aware router
+affinity. A video response or a backend cache hit alone does not show that the
+router used video identity to select a worker. Exact affinity requires KV-aware
+routing, matching worker KV events, and eligible model, decoder, and request
+layouts as described below.
+
 ![A request with a repeated video reaches the frontend. The frontend decodes and samples the video, hashes the decoded content, reproduces the worker's token layout, builds a routing-only prompt, and scores workers. Worker A, which holds the clip's KV blocks, is selected.](../../../assets/img/exact-video-kv-routing.svg)
 
 ## Video Identity and Token Layout
@@ -87,13 +93,15 @@ Send the request twice to populate and then reuse the worker's KV cache. Exact r
 
 The vLLM and SGLang multimodal router launchers enable routing debug logs by default. For a custom launch, set `DYN_LOG=info,mm_routing=debug,dynamo_kv_router::scheduling=debug,dynamo_llm::kv_router=debug`, then check for:
 
-- `exact video-aware KV routing enabled` during worker registration.
+- `video routing processor available` during worker registration. This reports
+  model-adapter availability, not active video routing. Exact routing also
+  requires KV router mode, frontend video decoding, and an eligible request.
 - `video routing metadata resolved` after the frontend decodes an eligible request.
 - `[ROUTING]` records with `worker_id`, `overlap_blocks`, and `total_blocks` for each request.
 
-With idle workers, a warm repeat should select the same worker and report more overlap than the first request. A different video should not receive the first video's full overlap. The router can still choose a less-cached worker when its combined cache-and-load cost is lower.
+Keep the text prompt fixed when comparing videos. On a backend and version that support exact video routing, a warm repeat on idle workers should select the same worker and report more overlap than the first request. A different video should not receive the first video's full overlap. The router can still choose a less-cached worker when its combined cache-and-load cost is lower. Startup availability alone, or overlap attributable only to the shared text prefix, does not verify media-aware routing.
 
-If startup or request validation cannot prove that the frontend and worker produce the same token layout, Dynamo logs the reason and uses text-prefix routing. The request continues to run, but video identity does not contribute to worker selection.
+Without frontend video decoding, video requests use text-prefix routing even if a model adapter is available. If startup or request validation cannot prove that the frontend and worker produce the same token layout, Dynamo logs the reason and uses text-prefix routing. This routing fallback does not add a decoder: inference still requires a decode path that supports the input codec and deployment topology.
 
 ## Exact Video Routing Limits
 
@@ -101,6 +109,6 @@ The default Rust frontend supports exact video routing for:
 
 - vLLM Qwen3-VL and Qwen3.5 dense and mixture-of-experts models. Video pruning is not supported on this path.
 - vLLM Nemotron 3 Nano Omni. The adapter reproduces temporal grouping, frame separators, dynamic resolution, and optional EVS pruning.
-- Aggregated SGLang Qwen3-VL and Qwen3.5 dense and mixture-of-experts models on CUDA with `--frontend-decoding`.
+- Aggregated SGLang Qwen3-VL and Qwen3.5 dense and mixture-of-experts models on CUDA with `--frontend-decoding` and a [compatible event format](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#wide-token-sglang-builds).
 
 Exact video routing falls back to text-prefix routing for unsupported models, opaque client-provided UUIDs, non-empty `mm_processor_kwargs`, audio in the same request, or adjacent video objects. SGLang also falls back when workers publish missing, incompatible, or different processor contracts. Nemotron uses the same `<image>` placeholder for image and video features, so its exact path currently supports one video-only media object per request; mixed image-and-video or multiple-video Nemotron requests fall back.

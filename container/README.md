@@ -37,7 +37,6 @@ Below is a summary of the general file structure for the framework Dockerfile st
 |  /usr/local/ucx/ | Built from source (→ runtime)
 |  /opt/nvidia/nvda_nixl/ | Built from source (→ runtime)
 |  /opt/nvidia/nvda_nixl/lib64/ | Built from source (→ runtime)
-|  /opt/dynamo/target/ | Cargo build output (→ runtime)
 |  /opt/dynamo/dist/*.whl | Built wheels (→ runtime)
 |  /opt/dynamo/dist/nixl/ | Built nixl wheels (→ runtime)
 | **STAGE: runtime** | **FROM ${RUNTIME_IMAGE} (multi-arch upstream runtime image)** |

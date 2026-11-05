@@ -48,16 +48,10 @@ Priority can act in three places. They are configured separately and are additiv
 The router holds a request in a queue while every eligible worker is busy, then releases requests in priority order. Queueing is off until you enable it in a router policy file. Save this as `policy.yaml`:
 
 ```yaml
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
-  - name: standard_all
-    policy_family: standard
-    cache_bucket: all
-    queue_policy: fcfs
+  - name: standard
     quantum: 1
+    queue_policy: fcfs
     prefill_busy_threshold_frac: 1.0
 ```
 
@@ -69,7 +63,7 @@ python -m dynamo.frontend \
   --router-policy-config policy.yaml
 ```
 
-A request waits while every eligible worker's active prefill tokens exceed `prefill_busy_threshold_frac` times its `max_num_batched_tokens`. Lower the fraction to queue sooner. See [Policy-Class Queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) for the full schema, including `wspt` ordering and per-worker queue limits.
+A request waits while every eligible worker's active prefill tokens exceed `prefill_busy_threshold_frac` times its `max_num_batched_tokens`. Lower the fraction to queue sooner. Keep `queue_policy` set to `fcfs` or `wspt`: the default, `edf`, ignores `priority` and `strict_priority` when it orders the queue. See [Policy-Class Queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) for the full schema, including `wspt` ordering and per-worker queue limits.
 
 <Note>
 The older `--router-queue-threshold` and `--router-queue-policy` flags are deprecated and are planned for removal in v1.7. Use the policy file instead.
@@ -129,15 +123,15 @@ Expected result: higher priority values get better TTFT under contention. If low
 
 ### Router queue ordering
 
-Queued requests are ordered by this key:
+A policy class defaults to the `edf` queue policy, which dispatches the earliest due time first, then keeps arrival order, and ignores `priority` and `strict_priority`. To let these hints reorder the router queue, set the class's `queue_policy` to `fcfs` or `wspt`. Without a policy file, the synthetic class uses `--router-queue-policy`, `fcfs` by default. These policies order queued requests by this key:
 
 ```text
 (strict_priority, due_at, configured_policy_key)
 ```
 
-The strict tier is compared first. Within a tier, every request with an internal `due_at` goes ahead of every request without one, and then the configured policy applies. Sustained deadline-bearing traffic can therefore starve non-deadline requests in the same class.
+The strict tier is compared first. Within a tier, every request with a request classifier's `due_at` goes ahead of every request without one, and then the configured policy applies. Sustained deadline-bearing traffic can therefore starve non-deadline requests in the same class.
 
-The default policy is `fcfs`, which treats `priority` as a positive arrival-time bump: higher values move the request earlier. Negative values are clamped to zero for router queueing, so a request cannot be pushed behind normal first-come ordering. The `wspt` policy orders by `(1 + priority_jump) / scheduling_cost_tokens` and optimizes average TTFT.
+The `fcfs` policy treats `priority` as a positive arrival-time bump: higher values move the request earlier. Negative values are clamped to zero for router queueing, so a request cannot be pushed behind normal first-come ordering. The `wspt` policy orders by `(1 + priority_jump) / scheduling_cost_tokens` and optimizes average TTFT.
 
 ### What priority does not do
 
