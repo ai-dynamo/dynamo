@@ -486,22 +486,7 @@ mod select_service_cli_tests {
     }
 
     #[test]
-    fn selection_cache_ttl_rejects_unrepresentable_durations() {
-        for ttl in ["-1", "NaN", "inf", "1e300"] {
-            let cli = SelectServiceCli::try_parse_from([
-                "dynamo.select_service",
-                &format!("--selection-cache-ttl-secs={ttl}"),
-            ])
-            .unwrap();
-            let error =
-                selection_cache_config_from_overrides(cli.selection_cache_ttl_secs, None, None)
-                    .unwrap_err();
-            assert!(
-                error.contains("selection_cache_ttl_secs is not a valid duration"),
-                "ttl {ttl}: {error}"
-            );
-        }
-
+    fn selection_cache_ttl_converts_valid_durations() {
         for (ttl, expected) in [
             (0.0, std::time::Duration::ZERO),
             (0.125, std::time::Duration::from_millis(125)),

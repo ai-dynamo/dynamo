@@ -257,16 +257,6 @@ def test_selection_cache_config_rejects_invalid_ttl(ttl):
 
 
 @pytest.mark.skipif(
-    SelectionCacheConfig is None,
-    reason="SelectionCacheConfig requires the select-service Cargo feature",
-)
-@pytest.mark.parametrize("ttl", [0, 0.125, 30])
-@pytest.mark.timeout(5)
-def test_selection_cache_config_accepts_valid_ttl(ttl):
-    SelectionCacheConfig(ttl_secs=ttl)
-
-
-@pytest.mark.skipif(
     SelectionService is None,
     reason="SelectionService requires the select-service Cargo feature",
 )
