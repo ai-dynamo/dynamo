@@ -536,8 +536,16 @@ class MultimodalRequestProcessor:
                             else:
                                 loaded_embeddings.append(item)
                         if loaded_embeddings:
+                            # A signed URL (S3, GCS, Azure SAS) carries a bearer
+                            # credential in its query; log only scheme, host,
+                            # and path.
                             logging.info(
-                                f"Loaded {len(loaded_embeddings)} embedding file(s) from paths: {embedding_paths}"
+                                "Loaded %d embedding file(s) from: %s",
+                                len(loaded_embeddings),
+                                ", ".join(
+                                    describe_media_source(path)
+                                    for path in embedding_paths
+                                ),
                             )
                     except (
                         UrlValidationError,

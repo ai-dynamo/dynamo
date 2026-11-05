@@ -16,6 +16,7 @@ from dynamo.common.multimodal.image_loader import (
     ImageLoader,
     image_cache_scope_from_request,
 )
+from dynamo.common.multimodal.media_source import describe_media_source
 from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.trtllm.multimodal_processor import resolve_mm_processor_kwargs
 from dynamo.trtllm.utils.disagg_utils import DisaggregatedParamsCodec
@@ -248,7 +249,10 @@ class EncodeHelper:
         Yields:
             Response with NIXL metadata, shape, dtype, and auxiliary data
         """
-        logging.info(f"EncodeHelper: loading embeddings from {embedding_paths[0]}")
+        logging.info(
+            "EncodeHelper: loading embeddings from %s",
+            describe_media_source(embedding_paths[0]),
+        )
         try:
             loaded_data = await multimodal_processor.load_tensor_from_path_or_url(
                 embedding_paths[0]
