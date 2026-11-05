@@ -43,6 +43,139 @@ pub(crate) struct NativeRequest {
     keep_prefill_output: bool,
 }
 
+/// Sub-configs that may hold the language model's `vocab_size`; SGLang picks
+/// one of them as `hf_text_config`.
+const TEXT_SUB_CONFIGS: [&str; 4] = [
+    "text_config",
+    "llm_config",
+    "language_config",
+    "thinker_config",
+];
+
+/// Model bounds for native `input_ids`. SGLang does not check input IDs
+/// against the embedding table, so the sidecar does before dispatch.
+///
+/// The default has no `vocab_size` and accepts every ID.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct InputTokenLimits {
+    vocab_size: Option<u32>,
+    image_token_id: Option<u32>,
+    video_token_id: Option<u32>,
+    audio_token_id: Option<u32>,
+}
+
+impl InputTokenLimits {
+    /// Read the bounds from a model's `config.json`.
+    ///
+    /// SGLang uses `hf_text_config.vocab_size`, but the sidecar cannot see
+    /// which sub-config SGLang picked. Taking the largest size found never
+    /// rejects an ID SGLang can embed, and still rejects IDs past every table.
+    pub(crate) fn from_model_config(config: &Value) -> Self {
+        let mut configs = vec![config];
+        for key in TEXT_SUB_CONFIGS {
+            if let Some(sub) = config.get(key).filter(|sub| sub.is_object()) {
+                configs.push(sub);
+            }
+        }
+        if let Some(sub) = config
+            .get("thinker_config")
+            .and_then(|thinker| thinker.get("text_config"))
+            .filter(|sub| sub.is_object())
+        {
+            configs.push(sub);
+        }
+        let vocab_size = configs
+            .iter()
+            .flat_map(|config| {
+                ["vocab_size", "vision_vocab_size"]
+                    .into_iter()
+                    .filter_map(|key| config_u32(config, key))
+            })
+            .filter(|size| *size > 0)
+            .max();
+        let first = |keys: &[&str]| keys.iter().find_map(|key| config_u32(config, key));
+        Self {
+            vocab_size,
+            image_token_id: first(&["image_token_id", "image_token_index"]),
+            video_token_id: first(&["video_token_id", "video_token_index"]),
+            audio_token_id: first(&["audio_token_id", "audio_token_index"]),
+        }
+    }
+
+    pub(crate) fn vocab_size(&self) -> Option<u32> {
+        self.vocab_size
+    }
+
+    /// Reject an ID at or above `vocab_size` unless it is the placeholder of
+    /// a modality the request carries.
+    fn check(
+        &self,
+        request: &PreprocessedRequest,
+        payload: &Map<String, Value>,
+    ) -> Result<(), DynamoError> {
+        let Some(vocab_size) = self.vocab_size else {
+            return Ok(());
+        };
+        // Built only when an ID is out of range, so text requests skip it.
+        let mut allowed: Option<[Option<u32>; 3]> = None;
+        for (index, &id) in request.token_ids.iter().enumerate() {
+            if id < vocab_size {
+                continue;
+            }
+            let allowed =
+                allowed.get_or_insert_with(|| self.allowed_placeholders(request, payload));
+            if !allowed.contains(&Some(id)) {
+                return Err(client::invalid_arg(format!(
+                    "Token id {id} is out of vocabulary at input_ids[{index}]"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn allowed_placeholders(
+        &self,
+        request: &PreprocessedRequest,
+        payload: &Map<String, Value>,
+    ) -> [Option<u32>; 3] {
+        // Native media travels in the opaque payload (`image_data`, ...);
+        // the frontend's multimodal map uses `image_url`, ...
+        let has = |modality: &str| {
+            payload
+                .get(&format!("{modality}_data"))
+                .is_some_and(json_is_present)
+                || request.multi_modal_data.as_ref().is_some_and(|data| {
+                    data.get(&format!("{modality}_url"))
+                        .is_some_and(|items| !items.is_empty())
+                })
+        };
+        let (image, video, audio) = (has("image"), has("video"), has("audio"));
+        [
+            // LLaVA-style video uses the image placeholder.
+            self.image_token_id.filter(|_| image || video),
+            self.video_token_id.filter(|_| video),
+            self.audio_token_id.filter(|_| audio),
+        ]
+    }
+}
+
+fn config_u32(config: &Value, key: &str) -> Option<u32> {
+    config
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn json_is_present(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(fields) => !fields.is_empty(),
+        Value::String(text) => !text.is_empty(),
+        Value::Bool(_) | Value::Number(_) => true,
+    }
+}
+
 /// Rebuild the installed SGLang version's request from the opaque frontend
 /// envelope, replacing only fields owned by Dynamo routing.
 pub(crate) fn request(
@@ -51,6 +184,7 @@ pub(crate) fn request(
     mode: DisaggregationMode,
     bootstrap_host: Option<&str>,
     bootstrap_port: Option<u16>,
+    limits: &InputTokenLimits,
 ) -> Result<Option<NativeRequest>, DynamoError> {
     let Some(payload) = request
         .extra_args
@@ -69,6 +203,7 @@ pub(crate) fn request(
             "native SGLang Generate requires token input",
         ));
     }
+    limits.check(request, &body)?;
 
     let rid = format!("{request_id}-{:08x}", rand::random::<u32>());
     body.insert("input_ids".into(), serde_json::json!(request.token_ids));
@@ -639,7 +774,8 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::{
-        NativeHttp, NativeRequest, authentication_error, build_http_client, request, response_error,
+        InputTokenLimits, NativeHttp, NativeRequest, authentication_error, build_http_client,
+        request, response_error,
     };
     use crate::client::Discovery;
 
@@ -719,6 +855,7 @@ mod tests {
             DisaggregationMode::Prefill,
             Some("prefill"),
             Some(5000),
+            &InputTokenLimits::default(),
         )
         .unwrap()
         .unwrap();
@@ -756,6 +893,7 @@ mod tests {
             DisaggregationMode::Aggregated,
             None,
             None,
+            &InputTokenLimits::default(),
         )
         .unwrap()
         .unwrap();
@@ -784,6 +922,7 @@ mod tests {
             DisaggregationMode::Aggregated,
             None,
             None,
+            &InputTokenLimits::default(),
         )
         .unwrap()
         .unwrap();
@@ -801,7 +940,8 @@ mod tests {
                 "rid",
                 DisaggregationMode::Aggregated,
                 None,
-                None
+                None,
+                &InputTokenLimits::default()
             )
             .unwrap()
             .is_none()
@@ -814,6 +954,7 @@ mod tests {
                 DisaggregationMode::Aggregated,
                 None,
                 None,
+                &InputTokenLimits::default(),
             )
             .err()
             .unwrap();
@@ -830,6 +971,7 @@ mod tests {
             DisaggregationMode::Aggregated,
             None,
             None,
+            &InputTokenLimits::default(),
         )
         .err()
         .unwrap();
@@ -850,6 +992,7 @@ mod tests {
                 DisaggregationMode::Prefill,
                 Some("prefill"),
                 Some(5000),
+                &InputTokenLimits::default(),
             )
             .unwrap()
             .unwrap();
@@ -873,6 +1016,7 @@ mod tests {
             DisaggregationMode::Prefill,
             Some("prefill"),
             Some(5000),
+            &InputTokenLimits::default(),
         )
         .err()
         .unwrap();
@@ -903,6 +1047,7 @@ mod tests {
             DisaggregationMode::Aggregated,
             None,
             None,
+            &InputTokenLimits::default(),
         )
         .unwrap()
         .unwrap();
@@ -942,6 +1087,7 @@ mod tests {
             DisaggregationMode::Aggregated,
             None,
             None,
+            &InputTokenLimits::default(),
         )
         .unwrap()
         .unwrap();
@@ -1223,7 +1369,14 @@ mod tests {
         canonical.extra_args = Some(json!({"sglang_tito": {}}));
         canonical.annotations = vec![super::PREFILL_OUTPUT_ANNOTATION.to_string()];
         let mode = DisaggregationMode::Prefill;
-        let native = request(&canonical, "rid", mode, Some("prefill"), Some(5000));
+        let native = request(
+            &canonical,
+            "rid",
+            mode,
+            Some("prefill"),
+            Some(5000),
+            &InputTokenLimits::default(),
+        );
         let native = native.unwrap().unwrap();
         let response =
             json!({"output_ids": [101], "meta_info": {"finish_reason": {"type": "length"}}});
@@ -1461,6 +1614,7 @@ mod tests {
                 DisaggregationMode::Aggregated,
                 None,
                 None,
+                &InputTokenLimits::default(),
             )
             .unwrap()
             .unwrap()
@@ -1506,6 +1660,160 @@ mod tests {
         assert_eq!(
             response_error(StatusCode::BAD_REQUEST, "bad request".to_string()).error_type(),
             ErrorType::Backend(BackendError::InvalidArgument)
+        );
+    }
+
+    const QWEN3_VOCAB_SIZE: u32 = 151_936;
+
+    fn vocab_limits() -> InputTokenLimits {
+        InputTokenLimits {
+            vocab_size: Some(QWEN3_VOCAB_SIZE),
+            image_token_id: Some(QWEN3_VOCAB_SIZE),
+            video_token_id: None,
+            audio_token_id: Some(QWEN3_VOCAB_SIZE + 1),
+        }
+    }
+
+    fn native_with_ids(
+        token_ids: Vec<u32>,
+        payload: serde_json::Value,
+        limits: &InputTokenLimits,
+    ) -> Result<Option<NativeRequest>, dynamo_backend_common::DynamoError> {
+        let mut canonical = canonical_request();
+        canonical.token_ids = token_ids.into();
+        canonical.extra_args = Some(json!({ "sglang_tito": payload }));
+        request(
+            &canonical,
+            "request-id",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+            limits,
+        )
+    }
+
+    #[test]
+    fn out_of_vocabulary_input_id_is_rejected_before_dispatch() {
+        for id in [QWEN3_VOCAB_SIZE, u32::MAX] {
+            let error = match native_with_ids(vec![1, id], json!({}), &vocab_limits()) {
+                Err(error) => error,
+                Ok(_) => panic!("input id {id} must be rejected"),
+            };
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::InvalidArgument)
+            );
+            assert!(
+                error.to_string().contains(&format!(
+                    "Token id {id} is out of vocabulary at input_ids[1]"
+                )),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn in_vocabulary_input_ids_pass_unchanged() {
+        let native = native_with_ids(vec![1, QWEN3_VOCAB_SIZE - 1], json!({}), &vocab_limits())
+            .unwrap()
+            .unwrap();
+        assert_eq!(native.body["input_ids"], json!([1, QWEN3_VOCAB_SIZE - 1]));
+    }
+
+    #[test]
+    fn media_placeholder_id_passes_only_with_its_media() {
+        let ids = vec![1, QWEN3_VOCAB_SIZE, 2];
+        let native = native_with_ids(ids.clone(), json!({"image_data": ["x"]}), &vocab_limits())
+            .unwrap()
+            .unwrap();
+        assert_eq!(native.body["input_ids"], json!(ids));
+
+        let mut canonical = canonical_request();
+        canonical.token_ids = ids.clone().into();
+        canonical.extra_args = Some(json!({ "sglang_tito": {} }));
+        canonical.multi_modal_data = Some(
+            [(
+                "image_url".to_string(),
+                vec![dynamo_backend_common::MultimodalData::Url(
+                    "https://example.com/a.png".parse().unwrap(),
+                )],
+            )]
+            .into(),
+        );
+        assert!(
+            request(
+                &canonical,
+                "request-id",
+                DisaggregationMode::Aggregated,
+                None,
+                None,
+                &vocab_limits(),
+            )
+            .unwrap()
+            .is_some()
+        );
+
+        for payload in [
+            json!({}),
+            json!({"image_data": []}),
+            json!({"audio_data": ["x"]}),
+        ] {
+            let error = match native_with_ids(ids.clone(), payload.clone(), &vocab_limits()) {
+                Err(error) => error,
+                Ok(_) => panic!("placeholder without image media must be rejected: {payload}"),
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("out of vocabulary at input_ids[1]"),
+                "{error}"
+            );
+        }
+        // The audio placeholder is allowed with audio.
+        native_with_ids(
+            vec![QWEN3_VOCAB_SIZE + 1],
+            json!({"audio_data": ["x"]}),
+            &vocab_limits(),
+        )
+        .unwrap()
+        .unwrap();
+    }
+
+    #[test]
+    fn unknown_vocab_size_accepts_every_input_id() {
+        native_with_ids(vec![1, u32::MAX], json!({}), &InputTokenLimits::default())
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn input_token_limits_read_model_config() {
+        // Llama 3.2 Vision keeps the size in `text_config`.
+        let limits = InputTokenLimits::from_model_config(&json!({
+            "image_token_index": 128256,
+            "text_config": {"vocab_size": 128256},
+            "vision_config": {"vocab_size": 1}
+        }));
+        assert_eq!(
+            limits,
+            InputTokenLimits {
+                vocab_size: Some(128256),
+                image_token_id: Some(128256),
+                video_token_id: None,
+                audio_token_id: None,
+            }
+        );
+        assert_eq!(
+            InputTokenLimits::from_model_config(&json!({
+                "vocab_size": 151936,
+                "thinker_config": {"text_config": {"vocab_size": 152064}}
+            }))
+            .vocab_size(),
+            Some(152064)
+        );
+        assert_eq!(
+            InputTokenLimits::from_model_config(&json!({"model_type": "x"})),
+            InputTokenLimits::default()
         );
     }
 }
