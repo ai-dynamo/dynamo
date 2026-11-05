@@ -16,6 +16,7 @@
 
 import inspect
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -42,6 +43,12 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
 ]
+
+
+def _select_service_env():
+    """Parent environment without DYN_* settings, which the select-service CLI
+    reads before it validates its flags."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("DYN_")}
 
 
 @pytest.mark.timeout(5)  # Expected: ~1s, timeout set to 5x for safety
@@ -239,6 +246,7 @@ def test_selection_service_cli_rejects_invalid_affinity_ttl(ttl):
         capture_output=True,
         text=True,
         timeout=15,
+        env=_select_service_env(),
     )
     assert result.returncode != 0
     assert "session_affinity_ttl_secs must be between" in result.stderr
@@ -273,6 +281,7 @@ def test_selection_service_cli_rejects_invalid_selection_cache_ttl(ttl):
         capture_output=True,
         text=True,
         timeout=15,
+        env=_select_service_env(),
     )
     assert result.returncode != 0
     assert "selection_cache_ttl_secs is not a valid duration" in result.stderr
