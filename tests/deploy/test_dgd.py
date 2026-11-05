@@ -377,39 +377,29 @@ async def test_deployment(
 @pytest.mark.e2e
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize(
-    "manifest,workers",
+    "backend,manifest,workers",
     [
-        pytest.param(
-            "examples/backends/vllm/deploy/gaie/agg.yaml", ("worker",), id="vllm-agg"
-        ),
-        pytest.param(
-            "examples/backends/vllm/deploy/gaie/disagg.yaml",
-            ("prefill", "decode"),
-            id="vllm-disagg",
-        ),
-        pytest.param(
-            "examples/backends/sglang/deploy/gaie/agg.yaml",
-            ("worker",),
-            id="sglang-agg",
-        ),
-        # No TensorRT-LLM GAIE example exists, so this case has its own manifest.
-        pytest.param("tests/deploy/gaie/trtllm-agg.yaml", ("worker",), id="trtllm-agg"),
+        pytest.param("vllm", "agg.yaml", ("worker",), id="vllm-agg"),
+        pytest.param("vllm", "disagg.yaml", ("prefill", "decode"), id="vllm-disagg"),
+        pytest.param("sglang", "agg.yaml", ("worker",), id="sglang-agg"),
+        pytest.param("trtllm", "agg.yaml", ("worker",), id="trtllm-agg"),
     ],
 )
 async def test_gaie_deployment(
+    backend: str,
     manifest: str,
     workers: tuple[str, ...],
     namespace: str,
     skip_service_restart: bool,
     request,
 ) -> None:
-    """Test a GAIE deployment through the Gateway, with mocker workers.
+    """Test a backend's GAIE example through the Gateway, with mocker workers.
 
-    Deploys a vLLM, SGLang or TensorRT-LLM GAIE manifest's EPP and workers
-    with frontend sidecars, each engine replaced by a mocker of that engine
-    from the frontend image, so the test needs no GPU and no ``--image``.
-    Applies an HTTPRoute to the generated InferencePool, sends a chat
-    completion through the Gateway, and checks which workers served it.
+    Deploys the example's EPP and workers with frontend sidecars, each engine
+    replaced by a mocker of that engine from the frontend image, so the test
+    needs no GPU and no ``--image``. Applies an HTTPRoute to the generated
+    InferencePool, sends a chat completion through the Gateway, and checks
+    which workers served it.
     """
     frontend_image = request.config.getoption("--frontend-image")
 
@@ -417,10 +407,11 @@ async def test_gaie_deployment(
     assert namespace, "--namespace is required for GAIE deploy test"
 
     workspace = _get_workspace_dir()
-    manifest_path = os.path.join(workspace, manifest)
+    examples_dir = os.path.join(workspace, "examples", "backends")
+    manifest_path = os.path.join(examples_dir, backend, "deploy", "gaie", manifest)
     # The route has nothing backend-specific, so every case uses the vLLM one.
     httproute_path = os.path.join(
-        workspace, "examples", "backends", "vllm", "deploy", "gaie", "http-route.yaml"
+        examples_dir, "vllm", "deploy", "gaie", "http-route.yaml"
     )
 
     assert os.path.exists(manifest_path), f"GAIE manifest not found: {manifest_path}"

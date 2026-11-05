@@ -190,7 +190,6 @@ jobs:
       - deploy-test-checkpoint-vllm
       - deploy-test-checkpoint-sglang
       - deploy-test-checkpoint-trtllm
-      # TEMPORARY (PR #17477): remove with the job.
       - deploy-test-gaie
       - deploy-cleanup
       - deploy-cleanup-checkpoint-vllm
@@ -1442,22 +1441,26 @@ jobs:
       DD_API_KEY: ${{ secrets.DD_API_KEY }}
 
   # ============================================================================
-  # TEMPORARY: GAIE DEPLOY TEST ON EVERY PUSH (PR #17477)
-  # A copy of post-merge-ci.yml's deploy-test-gaie, so this PR runs it. Remove
-  # this job, and its entries in deploy-cleanup and deploy-status-check, before
-  # merging. It runs only on this PR's CI branch, so a copy merged by mistake
-  # is skipped.
+  # GAIE DEPLOY TEST
+  # The backends' GAIE examples behind agentgateway and the EPP, with mocker
+  # workers: the EPP, the frontend sidecars, and the mockers all run from the
+  # frontend image, and the backend filters cover the examples.
   # ============================================================================
   deploy-test-gaie:
     name: GAIE Deploy Test
     runs-on: prod-deploy-tester-v1
     needs: [changed-files, deploy-operator, frontend-copy-to-acr]
     if: |
-      github.ref_name == 'pull-request/17477' &&
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       !cancelled() && !failure() &&
       needs.deploy-operator.result == 'success' &&
-      needs.frontend-copy-to-acr.result == 'success'
+      needs.frontend-copy-to-acr.result == 'success' &&
+      (needs.changed-files.outputs.frontend == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.trtllm == 'true')
     timeout-minutes: 30
     permissions:
       contents: read
@@ -2028,7 +2031,6 @@ jobs:
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always()
-    # TEMPORARY (PR #17477): remove deploy-test-gaie with the job.
     needs: [changed-files, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-dgdr, deploy-test-gaie]
     runs-on: prod-deploy-tester-v1
     steps:

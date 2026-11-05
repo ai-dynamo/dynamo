@@ -1,14 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Aggregated TensorRT-LLM behind the Gateway, for test_gaie_deployment in
-# tests/deploy/test_dgd.py, which runs a TensorRT-LLM mocker in place of the
-# engine. No TensorRT-LLM GAIE example exists; this follows the vLLM and
-# SGLang ones in examples/backends/*/deploy/gaie/agg.yaml.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: trtllm-gaie-agg
+  name: qwen
 spec:
   backendFramework: trtllm
   components:
@@ -19,7 +14,6 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag
           env:
           - name: DYN_KV_CACHE_BLOCK_SIZE
             value: "32"
@@ -28,38 +22,40 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag
   - name: worker
-    type: worker
+    type: decode
     replicas: 1
+    sharedMemorySize: 2Gi
     frontendSidecar: sidecar-frontend
     podTemplate:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
-          command:
-          - python3
-          - -m
-          - dynamo.trtllm
           args:
-          - --model-path
-          - Qwen/Qwen3-0.6B
-          - --served-model-name
-          - Qwen/Qwen3-0.6B
-          - --kv-block-size
-          - "32"
-          - --extra-engine-args
-          - /workspace/examples/backends/trtllm/engine_configs/qwen3/agg.yaml
+          - python3 -m dynamo.trtllm --model-path $MODEL_PATH --served-model-name $SERVED_MODEL_NAME
+            --extra-engine-args ./engine_configs/qwen3/agg.yaml --kv-block-size 32 --publish-kv-events
+          command:
+          - /bin/sh
+          - -c
+          env:
+          - name: SERVED_MODEL_NAME
+            value: Qwen/Qwen3-0.6B
+          - name: MODEL_PATH
+            value: Qwen/Qwen3-0.6B
+          - name: DYN_STORE_KV
+            value: mem
           envFrom:
           - secretRef:
               name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
           resources:
             limits:
               nvidia.com/gpu: "1"
             requests:
               nvidia.com/gpu: "1"
+          workingDir: /workspace/examples/backends/trtllm
         - name: sidecar-frontend
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag
           args:
           - -m
           - dynamo.frontend
@@ -68,3 +64,4 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag

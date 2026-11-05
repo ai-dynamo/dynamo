@@ -55,12 +55,10 @@ python -m pytest tests/deploy/test_deploy_efa_sglang.py \
 ```
 
 `test_gaie_deployment` in `test_dgd.py` is the Gateway API Inference Extension
-lane. Its `vllm-agg`, `vllm-disagg`, and `sglang-agg` cases deploy the GAIE
-examples in `examples/backends/vllm/deploy/gaie/` and
-`examples/backends/sglang/deploy/gaie/`; `trtllm-agg` deploys
-`gaie/trtllm-agg.yaml`, since no TensorRT-LLM GAIE example exists. Each case
-replaces every engine with a mocker of that engine from the frontend image,
-applies an HTTPRoute to the generated `InferencePool`, and sends a chat
+lane. Its `vllm-agg`, `vllm-disagg`, `sglang-agg`, and `trtllm-agg` cases
+deploy the GAIE examples in `examples/backends/<backend>/deploy/gaie/`. Each
+case replaces every engine with a mocker of that engine from the frontend
+image, applies an HTTPRoute to the generated `InferencePool`, and sends a chat
 completion through the Gateway. Because the mockers run from the frontend
 image, the test needs no GPU and no `--image`. The cluster needs the Dynamo
 operator, an `hf-token-secret` Secret in the test namespace, and the Gateway
