@@ -223,7 +223,6 @@ fn validate_endpoint(endpoint: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// How often a startup retry loop logs while it keeps failing.
 pub(crate) const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Connect and discover the engine before the worker registers, which fixes
@@ -797,9 +796,6 @@ mod tests {
         );
     }
 
-    /// Startup discovery retries UNAVAILABLE, which GetServerInfo answers
-    /// until every DP rank's listener is bound, up to the deadline; any other
-    /// error fails at once.
     #[tokio::test]
     async fn startup_discovery_retries_only_unavailable() {
         let interval = Duration::from_millis(1);

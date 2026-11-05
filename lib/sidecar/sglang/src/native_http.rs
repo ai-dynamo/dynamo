@@ -115,6 +115,7 @@ pub(crate) fn request(
         body.remove("bootstrap_host");
         body.remove("bootstrap_port");
         body.remove("bootstrap_room");
+        body.remove("disagg_prefill_dp_rank");
     }
 
     // SGLang's Rust listeners run a request on their own rank, and the rank
@@ -825,6 +826,11 @@ mod tests {
                 .get("disagg_prefill_dp_rank")
                 .is_none()
         );
+
+        let native = request(&canonical, "rid", DisaggregationMode::Aggregated, ranked)
+            .unwrap()
+            .unwrap();
+        assert!(native.body.get("disagg_prefill_dp_rank").is_none());
     }
 
     #[test]
