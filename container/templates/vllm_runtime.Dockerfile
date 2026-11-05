@@ -103,6 +103,7 @@ RUN apt-get update && \
         gpgsm \
         gpgv \
         keyboxd \
+        libbrotli1 \
         libgnutls30t64 \
         libssl3t64 \
         openssl && \
