@@ -1289,7 +1289,12 @@ class ManagedDeployment:
             warnings: List[str] = []
             for pod in pods.items:
                 pod_name = pod.metadata.name if pod.metadata else "?"
-                statuses = (pod.status.container_statuses if pod.status else None) or []
+                statuses = (
+                    (pod.status.init_container_statuses or [])
+                    + (pod.status.container_statuses or [])
+                    if pod.status
+                    else []
+                )
                 for cs in statuses:
                     after = cs.restart_count or 0
                     if after <= 0:
