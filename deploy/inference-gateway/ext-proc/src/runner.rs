@@ -584,10 +584,7 @@ mod tests {
     fn assert_exact_one_passing_child(output: &std::process::Output) {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            output.status.success(),
-            "child failed:\n{stdout}\n{stderr}"
-        );
+        assert!(output.status.success(), "child failed:\n{stdout}\n{stderr}");
         assert!(
             stdout
                 .lines()
@@ -801,16 +798,16 @@ worker_selection:
             .register_worker_selection(
                 "custom-sentinel",
                 Arc::new(|_: &WorkerSelectionPolicyParameters| {
-                    Ok(Arc::new(
-                        |config: &KvRouterConfig, worker_type, _partition| {
+                    let factory: WorkerSelectionPolicyFactory =
+                        Arc::new(|config, worker_type, _partition| {
                             WorkerSelectionPolicy::new(
                                 config.clone(),
                                 worker_type.as_str(),
                                 Vec::new(),
                                 Box::new(AlwaysFirstPicker),
                             )
-                        },
-                    ) as WorkerSelectionPolicyFactory)
+                        });
+                    Ok(factory)
                 }),
             )
             .unwrap();
@@ -846,16 +843,16 @@ worker_selection:
             .register_worker_selection(
                 "standalone-sentinel",
                 Arc::new(|_: &WorkerSelectionPolicyParameters| {
-                    Ok(Arc::new(
-                        |config: &KvRouterConfig, worker_type, _partition| {
+                    let factory: WorkerSelectionPolicyFactory =
+                        Arc::new(|config, worker_type, _partition| {
                             WorkerSelectionPolicy::new(
                                 config.clone(),
                                 worker_type.as_str(),
                                 Vec::new(),
                                 Box::new(AlwaysFirstPicker),
                             )
-                        },
-                    ) as WorkerSelectionPolicyFactory)
+                        });
+                    Ok(factory)
                 }),
             )
             .unwrap();
@@ -868,8 +865,7 @@ worker_selection:
       type: standalone-sentinel
 "#,
         );
-        let returned =
-            bootstrap_plugin_registry(EppMode::Standalone, Some(registry)).unwrap();
+        let returned = bootstrap_plugin_registry(EppMode::Standalone, Some(registry)).unwrap();
         assert!(
             dynamo_router_policies::with_defaults(returned)
                 .resolve(&config)
@@ -954,8 +950,7 @@ worker_selection:
             )
             .expect("register sentinel");
 
-        let for_inner =
-            bootstrap_plugin_registry(EppMode::DynamoRuntime, Some(registry)).unwrap();
+        let for_inner = bootstrap_plugin_registry(EppMode::DynamoRuntime, Some(registry)).unwrap();
         assert!(for_inner.is_empty());
 
         let runtime_config = KvRouterConfig {
