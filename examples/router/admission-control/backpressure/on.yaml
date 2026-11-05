@@ -22,5 +22,4 @@ policy_classes:
     queue_policy: fcfs
     controlled_delay: false
     quantum: 512
-    prefill_busy_threshold_frac: 0.1875
-    request_queue_limit_per_worker: 1024
+    prefill_busy_threshold_frac: 1.0

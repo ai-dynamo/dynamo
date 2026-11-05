@@ -189,6 +189,9 @@ core:
   - '.cargo/config.toml'
   - 'lib/**'
   - 'tests/**'
+  # The backpressure test reuses this example runner and its policies.
+  - 'examples/router/admission-control/backpressure/*.py'
+  - 'examples/router/admission-control/backpressure/*.yaml'
   - 'components/src/dynamo/pool_relay/**'
   - 'components/src/dynamo/kv_state_agent/**'
   - 'components/src/dynamo/router/**'

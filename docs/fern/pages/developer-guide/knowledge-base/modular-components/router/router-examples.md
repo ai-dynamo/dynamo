@@ -376,5 +376,5 @@ For deployments with multiple worker pools, the **Global Router** enables hierar
 - **[Router README](overview.md)**: Quick start guide for the KV Router
 - **[Configuration and Tuning](configuration-and-tuning.md)**: Router flags and production setup
 - **[Prioritize Premium Requests with Policy Classes](deficit-round-robin.md#prioritize-premium-requests-with-policy-classes)**: Give premium traffic a larger service share while regular traffic continues to progress
-- **[Router Backpressure with CPU Mockers](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/backpressure)**: Compare backend arrival rates with admission off and on while removing and slowing a worker, without a GPU
+- **[Router Backpressure with CPU Mockers](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/admission-control/backpressure)**: Compare backend arrival rates with admission off and on while removing and slowing a worker, without a GPU
 - **[Router Design](router-design.md)**: Architecture details and event transport modes
