@@ -33,7 +33,9 @@ server. See the [sidecar overview](../README.md) for installation.
 | Image, video, and audio input | No; the sidecar returns 400 |
 
 SGLang's Rust server runs one listener per DP rank. One sidecar per node serves
-all of the node's listeners as one worker.
+all of the node's listeners as one worker, with `--grpc-connections` connections
+to each. DP>1 needs SGLang main at or after
+[sgl-project/sglang#46637](https://github.com/sgl-project/sglang/pull/46637); v0.5.23 does not have it.
 
 See [support notes](../SUPPORT_NOTES.md#sglang) for feature restrictions and operational limits.
 

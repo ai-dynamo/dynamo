@@ -77,7 +77,7 @@ Multinode deployments require complete `leader` and `worker` role PodTemplates. 
 `backendFramework: sglang` as the examples do; the operator does not infer a backend from
 a native engine launch. The templates own the native engine commands and
 sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and
-[attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). Attention-DP (any DP>1) needs an SGLang build with [sgl-project/sglang#46637](https://github.com/sgl-project/sglang/pull/46637) (unmerged) on SGLang main at or after [sgl-project/sglang#46181](https://github.com/sgl-project/sglang/pull/46181).
+[attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). DP>1 needs SGLang main at or after [sgl-project/sglang#46637](https://github.com/sgl-project/sglang/pull/46637); v0.5.23 does not have it.
 Engine-failure KV recovery remains
 incomplete and is tracked in [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
 

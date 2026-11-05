@@ -3,7 +3,7 @@
 #
 # Replace <tag> with a supported SGLang image tag before deploying.
 # EXPERIMENTAL: multinode SGLang attention data parallelism (attention-DP) with explicit leader and worker templates.
-# Attention-DP (any DP>1) needs an SGLang build with sgl-project/sglang#46637 (unmerged) on SGLang main at or after sgl-project/sglang#46181.
+# Needs SGLang main at or after sgl-project/sglang#46637; v0.5.23 does not have it.
 # For a DGD created before operator 1.6.0, see docs/fern/pages/kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160.
 
 apiVersion: nvidia.com/v1beta1
