@@ -71,10 +71,21 @@ def restore_proxy(monkeypatch, tmp_path):
     ids=["missing-context", "stale-context", "invalid-context"],
 )
 @pytest.mark.parametrize("same_pod", [False, True])
+@pytest.mark.parametrize("retained_control_dir", [False, True])
 async def test_proxy_refresh_uses_destination_identity_before_parsing(
-    monkeypatch, restore_proxy, existing_context, same_pod
+    monkeypatch,
+    restore_proxy,
+    tmp_path,
+    existing_context,
+    same_pod,
+    retained_control_dir,
 ):
+    """Apply proxy identity directly even when capture retained another control path."""
     proxy, control_path = restore_proxy
+    if retained_control_dir:
+        control_path = tmp_path / "capture-control"
+        control_path.mkdir()
+        monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(control_path))
     destination = {
         name: f"destination-{name}" for name in KUBERNETES_REQUIRED_ENV_NAMES
     }
@@ -144,11 +155,32 @@ def test_proxy_rejects_spoofed_command(restore_proxy):
         apply_snapshot_restore_env()
 
 
+@pytest.mark.parametrize(
+    "command_kind",
+    ["sleep", "other-executable", "extra-argument", "relative-path", "unterminated"],
+)
 def test_legacy_standby_context_is_used_for_non_proxy_pid_one(
-    monkeypatch, restore_proxy
+    monkeypatch, restore_proxy, command_kind
 ):
-    proxy, _ = restore_proxy
-    (proxy / "cmdline").write_bytes(b"sleep\0infinity\0")
+    """Use the legacy context unless PID 1 has the exact proxy command shape."""
+    proxy, control_path = restore_proxy
+    proxy_binary = control_path / "snapshot-restore-proxy"
+    if command_kind == "sleep":
+        command = b"sleep\0infinity\0"
+    elif command_kind == "other-executable":
+        other_binary = control_path / "other-init"
+        other_binary.touch()
+        (proxy / "exe").unlink()
+        (proxy / "exe").symlink_to(other_binary)
+        command = os.fsencode(other_binary) + b"\0"
+    elif command_kind == "extra-argument":
+        command = os.fsencode(proxy_binary) + b"\0extra\0"
+    elif command_kind == "relative-path":
+        command = b"snapshot-restore-proxy\0"
+    else:
+        command = os.fsencode(proxy_binary)
+    (proxy / "cmdline").write_bytes(command)
+    (proxy / "environ").write_bytes(b"POD_UID=wrong-proxy-uid\0")
     monkeypatch.setenv("POD_UID", "destination-uid")
     write_snapshot_restore_context()
     monkeypatch.setenv("POD_UID", "capture-uid")

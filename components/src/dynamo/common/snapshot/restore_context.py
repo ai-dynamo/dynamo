@@ -117,14 +117,14 @@ def parse_snapshot_restore_runtime_config(argv: list[str] | None) -> object:
 def apply_snapshot_restore_env() -> dict[str, str | None]:
     """Apply destination env from the proxy or legacy context to ``os.environ``."""
 
-    control_dir = os.environ.get(SNAPSHOT_CONTROL_DIR_ENV, SNAPSHOT_CONTROL_DIR)
-    proxy_env = _read_restore_proxy_env(Path(control_dir))
+    proxy_env = _read_restore_proxy_env()
     if proxy_env is not None:
         # Include absent settings so capture-time values are cleared too.
         return _apply_restore_env(
             {name: proxy_env.get(name) for name in _SUPPORTED_RESTORE_ENV_NAMES},
             source=str(_PID_ONE / "environ"),
         )
+    control_dir = os.environ.get(SNAPSHOT_CONTROL_DIR_ENV, SNAPSHOT_CONTROL_DIR)
     context_path = Path(control_dir) / SNAPSHOT_RESTORE_CONTEXT_FILE
     if not context_path.is_file():
         raise RuntimeError(f"snapshot restore context file not found: {context_path}")
@@ -145,18 +145,23 @@ def apply_snapshot_restore_env() -> dict[str, str | None]:
     return _apply_restore_env(env_config, source=source)
 
 
-def _read_restore_proxy_env(control_path: Path) -> dict[str, str] | None:
+def _read_restore_proxy_env() -> dict[str, str] | None:
     """Read destination env only from a verified ``snapshot-restore-proxy``.
 
     The command and binary name follow snapshot/api/podcontract. Older agents
     run the standby entrypoint instead and supply a context file directly.
     """
-    proxy_binary = control_path / SNAPSHOT_RESTORE_PROXY_BINARY
     try:
         command = (_PID_ONE / "cmdline").read_bytes()
     except FileNotFoundError:
         return None
-    if command != os.fsencode(proxy_binary) + b"\0":
+    if not command.endswith(b"\0") or b"\0" in command[:-1]:
+        return None
+    proxy_binary = Path(os.fsdecode(command[:-1]))
+    if (
+        not proxy_binary.is_absolute()
+        or proxy_binary.name != SNAPSHOT_RESTORE_PROXY_BINARY
+    ):
         return None
     if not (_PID_ONE / "exe").samefile(proxy_binary):
         raise RuntimeError(
