@@ -1983,9 +1983,8 @@ class ManagedDeployment:
                     self._logger.warning(
                         "Discovery snapshot failed; continuing cleanup: %s", error
                     )
-                # A worker that crashes after Ready makes the frontend answer
-                # 503 "model not ready"; put its restart and previous log in
-                # the job log, since failure files may not be uploaded.
+                # Log restarts in the job log: a crash after Ready shows only as a
+                # 503 "model not ready", and failure files may not be uploaded.
                 try:
                     async with asyncio.timeout(RESTART_REPORT_TIMEOUT):
                         restarts = await self._dump_in_flight_restart_logs()
