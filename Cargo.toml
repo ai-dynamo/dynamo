@@ -70,7 +70,7 @@ dynamo-memory = { path = "lib/memory", version = "1.7.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.7.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.7.0" }
 dynamo-protocols = { version = "=8.5.0" }
-dynamo-parsers = { version = "=10.0.7" }
+dynamo-parsers = { version = "=10.2.2" }
 
 # Preserve the V2 parser version used by the port, using its published package.
 dynamo-parsers-v2 = { version = "=0.8.8" }
