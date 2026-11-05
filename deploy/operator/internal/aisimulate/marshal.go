@@ -25,10 +25,8 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// MarshalInput encodes a lowered input as the YAML file AISimulate loads with PyYAML's safe_load.
-// PyYAML follows YAML 1.1, whose float grammar needs a "." in the mantissa, so it reads Go's
-// shortest float text such as 1e-06 or 1e+21 as a string. MarshalInput writes those floats as
-// 1.0e-06 and 1.0e+21 and otherwise keeps the sigs.k8s.io/yaml encoding, including integer precision.
+// MarshalInput encodes input as YAML for AISimulate's PyYAML safe_load, writing floats such as
+// 1e-06 as 1.0e-06 because YAML 1.1 reads a float without a mantissa "." as a string.
 func MarshalInput(input map[string]any) ([]byte, error) {
 	// Encode with sigs.k8s.io/yaml so key order, json.Number values, and integers stay as before.
 	contents, err := yaml.Marshal(input)
@@ -45,7 +43,6 @@ func MarshalInput(input map[string]any) ([]byte, error) {
 		return contents, nil
 	}
 
-	// Re-encode the patched tree with a 2-space indent.
 	var out bytes.Buffer
 	encoder := yamlv3.NewEncoder(&out)
 	encoder.SetIndent(2)
