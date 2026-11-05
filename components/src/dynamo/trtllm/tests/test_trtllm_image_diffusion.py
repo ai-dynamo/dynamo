@@ -439,7 +439,7 @@ class TestVideoHandlerConcurrency:
             requests = [self._make_request() for _ in range(3)]
 
             with patch(
-                "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+                "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_image_bytes",
                 return_value=b"fake_image_bytes",
             ), patch(
                 "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
@@ -525,7 +525,7 @@ class TestImageHandlerResponseFormats:
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_image_bytes",
             return_value=b"fake_image_bytes",
         ), patch(
             "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
@@ -556,7 +556,7 @@ class TestImageHandlerResponseFormats:
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_image_bytes",
             return_value=b"fake_image_bytes",
         ):
             results = []
@@ -587,7 +587,7 @@ class TestImageHandlerResponseFormats:
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_image_bytes",
             return_value=b"fake_image_bytes",
         ), patch(
             "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
@@ -645,7 +645,7 @@ class TestImageHandlerResponseFormats:
             "https://cdn.example.com/media/images/test_1.png",
         ]
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_image_bytes",
             return_value=b"fake_image_bytes",
         ), patch(
             "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
@@ -682,7 +682,7 @@ class TestImageHandlerResponseFormats:
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_image_bytes",
             return_value=b"fake_image_bytes",
         ):
             results = []
@@ -709,7 +709,7 @@ class TestImageHandlerResponseFormats:
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_image_bytes",
             return_value=b"fake_image_bytes",
         ):
             async for _ in handler.generate(request, MagicMock()):
@@ -734,7 +734,7 @@ class TestImageHandlerResponseFormats:
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_image_bytes",
             return_value=b"fake_image_bytes",
         ), patch(
             "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
@@ -799,7 +799,7 @@ class TestImageHandlerResponseFormats:
             "https://cdn.example.com/media/images/test_1.png",
         ]
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_image_bytes",
             return_value=b"fake_image_bytes",
         ), patch(
             "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
@@ -812,6 +812,95 @@ class TestImageHandlerResponseFormats:
         assert len(results) == 1
         assert len(results[0]["data"]) == 2
         assert mock_upload.call_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "output_format, expected_format, signature",
+        [
+            (None, "png", b"\x89PNG\r\n\x1a\n"),
+            ("png", "png", b"\x89PNG\r\n\x1a\n"),
+            ("jpeg", "jpeg", b"\xff\xd8\xff"),
+            ("WebP", "webp", b"RIFF"),
+        ],
+    )
+    async def test_b64_bytes_and_metadata_match_output_format(
+        self, tmp_path, output_format, expected_format, signature
+    ):
+        """The real encoder writes the requested format, and the response
+        reports it with the batch's size."""
+        import base64
+
+        handler = self._make_handler(tmp_path)
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "response_format": "b64_json",
+        }
+        if output_format is not None:
+            request["output_format"] = output_format
+
+        results = [r async for r in handler.generate(request, MagicMock())]
+
+        response = results[0]
+        decoded = base64.b64decode(response["data"][0]["b64_json"])
+        assert decoded.startswith(signature)
+        if expected_format == "webp":
+            assert decoded[8:12] == b"WEBP"
+        assert response["output_format"] == expected_format
+        assert response["size"] == "64x64"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "output_format, extension", [("png", "png"), ("jpeg", "jpg"), ("webp", "webp")]
+    )
+    async def test_url_upload_extension_matches_output_format(
+        self, tmp_path, output_format, extension
+    ):
+        handler = self._make_handler(
+            tmp_path, engine_output_batch=2, default_num_images_per_prompt=2
+        )
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "response_format": "url",
+            "output_format": output_format,
+        }
+
+        with patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+            return_value=f"https://cdn.example.com/media/images/test.{extension}",
+        ) as mock_upload:
+            results = [r async for r in handler.generate(request, MagicMock())]
+
+        assert mock_upload.call_count == 2
+        for call in mock_upload.call_args_list:
+            assert call.args[1].endswith(f".{extension}")
+        assert results[0]["output_format"] == output_format
+        assert results[0]["size"] == "64x64"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "overrides, field",
+        [
+            ({"quality": "high"}, "quality"),
+            ({"background": "transparent"}, "background"),
+            ({"output_format": "gif"}, "output_format"),
+        ],
+    )
+    async def test_unsupported_options_rejected_before_generation(
+        self, tmp_path, overrides, field
+    ):
+        """quality and background cannot be applied by this pipeline, so they
+        are a client error (HTTP 400) and the engine is never called."""
+        handler = self._make_handler(tmp_path)
+        handler.engine.generate = MagicMock()
+        request = {"prompt": "a test image", "model": "test-model", **overrides}
+
+        with pytest.raises(InvalidArgument, match=field):
+            async for _ in handler.generate(request, MagicMock()):
+                pass
+
+        handler.engine.generate.assert_not_called()
 
 
 # =============================================================================

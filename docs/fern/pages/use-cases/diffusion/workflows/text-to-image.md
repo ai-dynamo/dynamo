@@ -46,6 +46,8 @@ Image generation is available on two endpoints: `/v1/chat/completions` returns b
 
 For `/v1/images/generations` and `/v1/images/edits`, Dynamo's vLLM-Omni image handler accepts `output_format` values `png` (default), `jpeg`, and `webp`. It reports the encoded format in `output_format`; use `jpeg` for JPEG output. It reports `size` when every output has the same valid dimensions and returns `null` when dimensions are mixed or unavailable. This handler accepts `response_format` values `url` and `b64_json`; if omitted, the response uses base64. JPEG output composites transparent pixels onto white. This handler does not apply `quality` or `background`; requests that set either field are rejected with HTTP 400 rather than echoing values that were not used.
 
+The SGLang and TensorRT-LLM image handlers on `/v1/images/generations` follow the same `output_format`, `size`, `quality`, and `background` rules, and also write URL uploads with a matching `.png`, `.jpg`, or `.webp` extension. Their `response_format` defaults to `url` instead of base64.
+
 <Tabs>
 <Tab title="/v1/images/generations">
 
