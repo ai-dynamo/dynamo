@@ -154,6 +154,7 @@ type admissionTestCase struct {
 	gates              features.Gate
 	seedGates          *features.Gates
 	seedWithoutWebhook bool
+	statusOnly         bool
 	terminating        bool
 	username           string
 
@@ -214,7 +215,19 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 		oldFixture, _ := admissionObject(t, test.oldObject, env.Namespace(), nil)
 		current = applyAdmissionFixtureChanges(old, oldFixture, current)
 		current.SetResourceVersion(old.GetResourceVersion())
-		result, err = resourceClient.Update(t.Context(), current, metav1.UpdateOptions{})
+		if test.statusOnly {
+			t.Log("Write the status subresource while leaving the immutable spec unchanged")
+			status, found, statusErr := unstructured.NestedMap(mustUnstructured(t, test.object), "status")
+			if statusErr != nil || !found {
+				t.Fatalf("read status update fixture: found=%v, err=%v", found, statusErr)
+			}
+			if statusErr := unstructured.SetNestedMap(current.Object, status, "status"); statusErr != nil {
+				t.Fatalf("set status update fixture: %v", statusErr)
+			}
+			result, err = resourceClient.UpdateStatus(t.Context(), current, metav1.UpdateOptions{})
+		} else {
+			result, err = resourceClient.Update(t.Context(), current, metav1.UpdateOptions{})
+		}
 	}
 
 	t.Log("Compare the API server admission result with the table expectations")
@@ -306,6 +319,8 @@ func admissionResource(t *testing.T, kind string) string {
 		return "dynamographdeploymentrequests"
 	case "DynamoGraphDeploymentRun":
 		return "dynamographdeploymentruns"
+	case "DynamoGraphDeploymentCandidate":
+		return "dynamographdeploymentcandidates"
 	default:
 		t.Fatalf("unsupported admission kind %q", kind)
 		return ""
@@ -334,6 +349,8 @@ func admissionGVK(t *testing.T, object runtime.Object) schema.GroupVersionKind {
 		return nvidiacomv1beta2.DynamoGraphDeploymentRequestGVK
 	case *nvidiacomv1beta2.DynamoGraphDeploymentRun:
 		return nvidiacomv1beta2.DynamoGraphDeploymentRunGVK
+	case *nvidiacomv1beta2.DynamoGraphDeploymentCandidate:
+		return nvidiacomv1beta2.DynamoGraphDeploymentCandidateGVK
 	default:
 		t.Fatalf("unsupported admission object type %T", object)
 		return schema.GroupVersionKind{}

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::error::Error;
 use std::time::Duration;
 
 use dynamo_global_common::{
@@ -175,6 +176,18 @@ async fn read_json<T: DeserializeOwned>(
     })
 }
 
+/// The error and each of its causes, joined with `: `.
+pub(crate) fn error_chain(error: &dyn Error) -> String {
+    let mut chain = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        chain.push_str(": ");
+        chain.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    chain
+}
+
 /// `base_url` with `segment` appended, keeping any path it already has.
 fn endpoint(base_url: &Url, segment: &str) -> Result<Url, DiscoveryClientError> {
     let mut url = base_url.clone();
@@ -188,6 +201,24 @@ fn endpoint(base_url: &Url, segment: &str) -> Result<Url, DiscoveryClientError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_chain_joins_every_cause() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("request failed")]
+        struct Outer(#[source] Middle);
+        #[derive(Debug, thiserror::Error)]
+        #[error("connect failed")]
+        struct Middle(#[source] std::io::Error);
+        let error = Outer(Middle(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        )));
+        assert_eq!(
+            error_chain(&error),
+            "request failed: connect failed: connection refused"
+        );
+    }
 
     #[test]
     fn endpoint_keeps_the_base_path() {
