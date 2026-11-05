@@ -623,11 +623,9 @@ impl Worker {
             // the DistributedRuntime init path — required so workers using
             // `dynamo.common.backend.Worker` directly (without constructing a
             // DistributedRuntime first) install the tracing + OTLP exporter
-            // layers. Without this, OTEL_EXPORT_ENABLED workers emit no
+            // layers. Without this, OTLP-exporting workers emit no
             // logs and no spans.
-            if dynamo_runtime::config::env_is_truthy(
-                dynamo_runtime::config::environment_names::logging::otlp::OTEL_EXPORT_ENABLED,
-            ) {
+            if dynamo_runtime::logging::otlp_export_enabled() {
                 rs::logging::init();
                 // Runtime canary: if a future refactor drops or breaks the
                 // init above, this loud stderr message fires once per worker
@@ -638,7 +636,7 @@ impl Worker {
                 // signal MUST bypass tracing.
                 if !tracing::dispatcher::has_been_set() {
                     eprintln!(
-                        "ERROR: OTEL_EXPORT_ENABLED=1 but no tracing subscriber \
+                        "ERROR: OTLP export is enabled but no tracing subscriber \
                          installed after `Worker::run` init. Worker telemetry \
                          (spans, logs) will be SILENT — check the conditional \
                          `rs::logging::init()` call in `Worker::run`."
