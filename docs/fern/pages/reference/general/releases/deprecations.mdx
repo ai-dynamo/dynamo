@@ -45,6 +45,35 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Set `DYN_ENABLE_FRONTEND_ADMIN_API=1` on frontends that need these routes and call port `8002` (`DYN_FRONTEND_ADMIN_PORT`). The listener binds to `127.0.0.1` (`DYN_FRONTEND_ADMIN_HOST`), so on Kubernetes use `kubectl port-forward pod/<frontend-pod> 8002:8002`. Remove `DYN_DISABLE_FRONTEND_ADMIN_API`; it is ignored.
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Worker-selection plugin callbacks take `&self` and require `Send + Sync`** ([#17712](https://github.com/ai-dynamo/dynamo/pull/17712)). `WorkerFilter::keep`, `WorkerScorer::score` and `WorkerPicker::pick` no longer take `&mut self`, and one plugin instance may be called from several threads at once.
+
+  > **Migrate:** Change each callback's receiver to `&self`. Move state that changes between calls behind atomics, a lock or a thread-local, and make sure the plugin type is `Sync`.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the `WorkerInputs::OCCUPANCY` worker-selection input group** in favor of `WorkerInputs::ACTIVE_REQUESTS`, which custom pickers read through `WorkerInputView::active_requests(row)`. The alias still compiles with a deprecation warning and is slated for removal in Dynamo v1.9.0.
+
+  > **Migrate:** Replace `WorkerInputs::OCCUPANCY` with `WorkerInputs::ACTIVE_REQUESTS` in custom worker-selection policies.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Your own Rust code that constructs a round-robin, random or least-loaded `PushRouter` must pass the router-mode plugins** ([#17713](https://github.com/ai-dynamo/dynamo/pull/17713)). Without them, the router fails to build.
+
+  > **Migrate:** CLI, Python and Kubernetes deployments need no change. If your Rust code creates a `PushRouter` in one of these modes, replace `PushRouter::from_client(client, RouterMode::RoundRobin)` with `PushRouter::from_client_with_options(client, RouterMode::RoundRobin, dynamo_llm::kv_router::plugins::push_router_options())`. If your code depends only on `dynamo-runtime`, add `dynamo-llm`, or implement `InstanceSelector`.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed the `power-of-two` Router mode.** `--router-mode power-of-two`, `DYN_ROUTER_MODE=power-of-two`, and a policy file that names the `power-of-two` worker-selection type now fail at startup, and the Rust `PushRouter::power_of_two_choices()` method is removed. A frontend that discovers a v1.5 or v1.6 worker advertising `power-of-two` reports an error naming the removal instead of routing to that worker set.
+
+  > **Migrate:** Choose another `--router-mode`, and restart workers that pass `--router-mode power-of-two` with another mode before upgrading the frontend. If a policy file names the `power-of-two` type, name another worker-selection type there.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed the compatibility import paths and names for Router plugins** in the `dynamo-kv-router` and `dynamo-llm` Rust crates.
+
+| Removed | Replacement |
+| :---- | :---- |
+| Crate-root `dynamo_kv_router::{WorkerFilter, WorkerScorer, WorkerPicker, WorkerCandidate, WorkerCandidates, WorkerInputs, WorkerInputView, WorkerLoadInput, WorkerCacheInput, WorkerCacheInputs, ScoredWorkerCandidate, WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyFactory}`, the same contract names under `selector`, and `services::selection::WorkerSelectionPolicyFactory` | `dynamo_kv_router::plugins::worker_selection::*` |
+| `scheduling::{RequestClassifier, ClassifyRequest, ClassifyFuture, ClassifyEvent, ClassifierError, AbortCause, RequestClassifierContext, RequestProgress, ...}` and the same names under `scheduling::request_classifier` | `dynamo_kv_router::plugins::request_classifier::*` |
+| `scheduling::{WorkerSelectionConfig, WorkerSelectionInstance}`, `scheduling::policy_config::{RequestClassifierConfig, WorkerSelectionConfig, WorkerSelectionInstance}` | `plugins::worker_selection::{WorkerSelectionConfig, WorkerSelectionInstance}`, `plugins::request_classifier::RequestClassifierConfig` |
+| `WorkerSelectionPolicyRegistry`; `RouterPluginRegistry::register` | `RouterPluginRegistry`; `RouterPluginRegistry::register_worker_selection` |
+| `dynamo_llm::kv_router::{install_worker_selection_policy_registry, worker_selection_policy_registry}` | `dynamo_llm::kv_router::plugins::{install_router_plugin_registry, router_plugin_registry}` |
+| `HttpFrontend::worker_selection_policy_factory` | `HttpFrontend::plugins(RouterPlugins::default().with_worker_selection(...))`, called before `request_classifier_factory`, because `plugins` replaces every plugin set earlier |
+
+  > **Migrate:** Update `use` paths and registry calls in custom policy crates and catalogs. The types and traits are unchanged, so no other code changes are needed.
+
 <a id="v160"></a>
 
 ## v1.6.0 - Oct 22, 2026
