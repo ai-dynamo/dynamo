@@ -57,6 +57,24 @@ func LivePowerCapSupport(dgd *v1beta1.DynamoGraphDeployment) (reason string, sup
 	return "", true
 }
 
+// DesiredWorkerPowerCaps returns each worker's explicit pod-template cap, bounded to supported graphs.
+// dgd must be non-nil.
+func DesiredWorkerPowerCaps(dgd *v1beta1.DynamoGraphDeployment) map[string]string {
+	if _, supported := LivePowerCapSupport(dgd); !supported {
+		return nil
+	}
+	caps := map[string]string{}
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if IsWorkerComponent(string(component.ComponentType)) && component.PodTemplate != nil {
+			if cap, ok := component.PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit]; ok {
+				caps[component.ComponentName] = cap
+			}
+		}
+	}
+	return caps
+}
+
 // WorkerSpecsEqual compares the non-scaling spec and resolved runtime versions used by worker hashing.
 // Callers align identity and the explicitly retained cap before comparison; neither input is mutated.
 func WorkerSpecsEqual(a, b *v1beta1.DynamoComponentDeployment) bool {

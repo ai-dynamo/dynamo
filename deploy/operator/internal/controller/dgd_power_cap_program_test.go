@@ -5,19 +5,18 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/power"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -73,7 +72,7 @@ func TestPowerCapGrovePendingUpdate(t *testing.T) {
 			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
 			pendingVersion := pcs.ResourceVersion
 
-			t.Log("A cap-only edit is pending: no template write, no hash commit and no Pod repair")
+			t.Log("A cap-only edit is pending: no template write and no hash commit")
 			dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
 			result, err := root.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
 			require.NoError(t, err)
@@ -81,97 +80,21 @@ func TestPowerCapGrovePendingUpdate(t *testing.T) {
 			require.Equal(t, pendingVersion, pcs.ResourceVersion)
 			require.Equal(t, "300", podCliqueSetCliqueForComponent(pcs, "worker").Annotations[consts.KubeAnnotationGPUPowerLimit])
 			require.Equal(t, hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
-			require.Equal(t, "300", pod.Annotations[consts.KubeAnnotationGPUPowerLimit])
-			condition := meta.FindStatusCondition(result.Status.Conditions, powerCapPropagationCondition)
-			require.Equal(t, metav1.ConditionFalse, condition.Status)
-			require.Equal(t, "WaitingForWorkerUpdate", condition.Reason)
-			require.LessOrEqual(t, result.RequeueAfter, powerCapRetry)
-			require.Positive(t, result.RequeueAfter)
+			require.Nil(t, meta.FindStatusCondition(result.Status.Conditions, power.ConditionType))
 
-			t.Log("After Grove acknowledges and finishes, the retained identity converges by Pod repair")
+			t.Log("After Grove acknowledges and finishes, the retained identity stays without a template write")
 			pcs.Status.ObservedGeneration = new(pcs.Generation)
 			pcs.Status.UpdateProgress = nil
 			require.NoError(t, c.Status().Update(t.Context(), pcs))
 			acknowledgedVersion := pcs.ResourceVersion
-			for _, wantReason := range []string{"PodAnnotationMismatch", "PodAnnotationsMatch"} {
-				result, err = root.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
-				require.NoError(t, err)
-				require.Equal(t, wantReason, meta.FindStatusCondition(result.Status.Conditions, powerCapPropagationCondition).Reason)
-			}
-			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
-			require.Equal(t, "350", pod.Annotations[consts.KubeAnnotationGPUPowerLimit])
+			_, err = root.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+			require.NoError(t, err)
 			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
 			require.Equal(t, acknowledgedVersion, pcs.ResourceVersion)
 			require.Equal(t, "300", podCliqueSetCliqueForComponent(pcs, "worker").Annotations[consts.KubeAnnotationGPUPowerLimit])
 			require.Equal(t, hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 		})
 	}
-}
-
-func TestPowerCapGrovePendingSurvivesPodCliqueSetSyncFailure(t *testing.T) {
-	t.Log("Let the production Grove program create the active PCS at 300 W")
-	dgd := powerCapTestDGD(t, "grove")
-	scheme := powerCapTestScheme(t)
-	require.NoError(t, rbacv1.AddToScheme(scheme))
-	failPCSWrites, podReads, podPatches := false, 0, 0
-	funcs := groveScaleInterceptor(interceptor.Funcs{
-		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-			if failPCSWrites && obj.GetObjectKind().GroupVersionKind().Kind == "PodCliqueSet" {
-				return errors.New("PCS write denied")
-			}
-			return c.Update(ctx, obj, opts...)
-		},
-		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-			if failPCSWrites && obj.GetObjectKind().GroupVersionKind().Kind == "PodCliqueSet" {
-				return errors.New("PCS write denied")
-			}
-			if _, ok := obj.(*corev1.Pod); ok {
-				podPatches++
-			}
-			return c.Patch(ctx, obj, patch, opts...)
-		},
-		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			if _, ok := list.(*corev1.PodList); ok && failPCSWrites {
-				podReads++
-			}
-			return c.List(ctx, list, opts...)
-		},
-	}, nil)
-	c := powerCapTestClient(scheme).WithRESTMapper(groveScaleRESTMapper()).WithInterceptorFuncs(funcs).WithObjects(dgd).WithStatusSubresource(dgd).Build()
-	config := &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}, Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendEtcd}}
-	root := &DynamoGraphDeploymentReconciler{Client: c, Config: config, RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}, DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}}
-	for range 2 {
-		// The first pass writes the PCS; the next observes it and commits the worker hash.
-		_, err := root.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
-		require.NoError(t, err)
-	}
-	sets := &grovev1alpha1.PodCliqueSetList{}
-	require.NoError(t, c.List(t.Context(), sets))
-	require.Len(t, sets.Items, 1)
-	pcs := &sets.Items[0]
-	require.Nil(t, pcs.Status.ObservedGeneration, "Grove has not acknowledged the stored PCS")
-	clique := &grovev1alpha1.PodClique{Name: "clique", Namespace: dgd.Namespace, UID: "clique-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))}}
-	require.NoError(t, c.Create(t.Context(), clique))
-	_, pod := powerCapTestOwners(dgd, "grove")
-	pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(clique, grovev1alpha1.SchemeGroupVersion.WithKind("PodClique"))}
-	require.NoError(t, c.Create(t.Context(), pod))
-
-	t.Log("A cap edit with a rollout-policy change needs a PCS write, and that write fails")
-	dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
-	dgd.Annotations[consts.KubeAnnotationGroveUpdateStrategy] = string(grovev1alpha1.OnDeleteStrategy)
-	failPCSWrites = true
-	result, err := root.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
-
-	t.Log("The workload error remains while propagation keeps waiting without Pod reads or patches")
-	require.ErrorContains(t, err, "failed to reconcile the Grove PodCliqueSet")
-	require.Zero(t, podReads)
-	require.Zero(t, podPatches)
-	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
-	require.Equal(t, "300", pod.Annotations[consts.KubeAnnotationGPUPowerLimit])
-	condition := meta.FindStatusCondition(result.Status.Conditions, powerCapPropagationCondition)
-	require.Equal(t, metav1.ConditionFalse, condition.Status)
-	require.Equal(t, "WaitingForWorkerUpdate", condition.Reason)
 }
 
 func TestPowerCapComponentRestartAppliesToRetainedWorkers(t *testing.T) {

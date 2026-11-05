@@ -274,19 +274,21 @@ The operator maintains observed state under `status`.
   - `PodAnnotationsMatch` (`True`): every owned nonterminal worker Pod matches,
     including an empty live Pod set.
   - `PodAnnotationMismatch` (`False`): annotations are being repaired.
-  - `WaitingForWorkerUpdate` (`False`): a cap-only edit waits for Grove to
-    acknowledge and finish a `PodCliqueSet` update; no Pods are patched.
+  - `WaitingForWorkerUpdate` (`False`): Grove has not acknowledged or finished an
+    update of the graph's `PodCliqueSet`; no Pods are patched until it does.
   - `PodObservationFailed` (`Unknown`): worker Pods or their owners could not be
     observed.
   - `PodPatchFailed` (`False`): a repair failed, including a conflicting
     concurrent Pod update.
 
-  When Pods disagree, the condition reports the most severe reason. The operator
-  retries conflicts and pending observations after about 2 seconds, and other
-  observation or repair failures after about 10 seconds. These outcomes never
-  change the DGD's `Ready` condition, state, or `observedGeneration`. The condition
-  is removed when the graph leaves this scope. It does not prove GPU hardware
-  enforcement.
+  When Pods disagree, the condition reports the most severe reason. A separate
+  power-cap controller writes this condition and no other status field. It reacts to
+  changes of the DGD, its worker Pods and its `PodCliqueSet`, retries conflicts and
+  pending owner observations after about 2 seconds, and retries other observation or
+  repair failures after about 10 seconds. These outcomes never change the DGD's
+  `Ready` condition, state, or `observedGeneration`, and DGD workload failures do not
+  stop propagation. The condition is removed when the graph leaves this scope. It
+  does not prove GPU hardware enforcement.
 
   <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#Condition" target="_blank">metav1.Condition</a>
 </ParamField>

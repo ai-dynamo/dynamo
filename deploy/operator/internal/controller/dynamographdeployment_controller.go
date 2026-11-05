@@ -63,8 +63,6 @@ const (
 	reasonWaitingForCheckpoint                Reason = "waiting_for_checkpoint"
 	reasonSelectedWorkloadProviderUnavailable Reason = "selected_workload_provider_unavailable"
 	reasonUnsupportedWorkloadProvider         Reason = "unsupported_workload_provider"
-
-	dgdComponentPodIndex = ".metadata.dgdComponent"
 )
 
 // DynamoGraphDeploymentReconciler reconciles a DynamoGraphDeployment object
@@ -96,8 +94,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;patch
-// +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=get;list;watch;create;update
@@ -267,16 +264,8 @@ func workloadRoutingAnnotationsChanged(update event.UpdateEvent) bool {
 }
 
 // SetupWithManager sets up the controller with the Manager.
+// The composition root registers the dynamo.ComponentPodIndex Pod index it queries.
 func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if err := mgr.GetFieldIndexer().IndexField(
-		context.Background(),
-		&corev1.Pod{},
-		dgdComponentPodIndex,
-		dgdComponentPodIndexValues,
-	); err != nil {
-		return fmt.Errorf("register DGD component Pod index: %w", err)
-	}
-
 	// Index native PodSnapshot references so dependency events can find affected DGDs.
 	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
 		if err := mgr.GetFieldIndexer().IndexField(
@@ -419,26 +408,6 @@ func isDGDManagedWorkerPod(obj client.Object) bool {
 		dynamo.IsWorkerComponent(labels[consts.KubeLabelDynamoComponentType])
 }
 
-func dgdComponentPodIndexValues(obj client.Object) []string {
-	pod, ok := obj.(*corev1.Pod)
-	if !ok || pod == nil {
-		return nil
-	}
-	labels := pod.GetLabels()
-	dgdName := labels[consts.KubeLabelDynamoGraphDeploymentName]
-	componentName := labels[consts.KubeLabelDynamoComponent]
-	if dgdName == "" || componentName == "" {
-		return nil
-	}
-	return []string{dgdComponentPodIndexValue(dgdName, componentName)}
-}
-
-func dgdComponentPodIndexValue(dgdName, componentName string) string {
-	// Both inputs are label values, which cannot contain '/', so this encoding
-	// is collision-free.
-	return dgdName + "/" + componentName
-}
-
 // dgdWorkerPodEventPredicate admits only events that can change whether a
 // worker rollout is blocked by an old pod. Creation and deletion change pod
 // membership; updates matter only when membership or terminality changes. A
@@ -462,9 +431,6 @@ func dgdWorkerPodEventPredicate() predicate.Predicate {
 			}
 			oldPod := e.ObjectOld.(*corev1.Pod)
 			newPod := e.ObjectNew.(*corev1.Pod)
-			if oldPod.Annotations[consts.KubeAnnotationGPUPowerLimit] != newPod.Annotations[consts.KubeAnnotationGPUPowerLimit] {
-				return true
-			}
 			if oldPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] != newPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] ||
 				oldPod.Labels[consts.KubeLabelDynamoComponent] != newPod.Labels[consts.KubeLabelDynamoComponent] ||
 				oldPod.Labels[consts.KubeLabelDynamoSelector] != newPod.Labels[consts.KubeLabelDynamoSelector] ||

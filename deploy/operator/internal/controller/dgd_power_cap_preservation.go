@@ -19,6 +19,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// powerCapRolloutBlocked reports a managed rollout state that disables cap-only preservation.
+func powerCapRolloutBlocked(status *v1beta1.RollingUpdateStatus) bool {
+	return rollingUpdateInProgress(status) || (status != nil && status.Phase == v1beta1.RollingUpdatePhaseFailed)
+}
+
 type componentPowerCapPreservation struct {
 	hash string
 	caps map[string]string
@@ -29,7 +34,7 @@ type componentPowerCapPreservation struct {
 // retained DCDs in place and are not worker identity.
 // dgd must be non-nil.
 func (r *componentWorkloadsReconciler) resolvePowerCapPreservation(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, checkpoints map[string]*checkpoint.CheckpointInfo) (*componentPowerCapPreservation, error) {
-	if len(desiredWorkerPowerCaps(dgd)) == 0 || powerCapRolloutBlocked(dgd.Status.RollingUpdate) {
+	if len(dynamo.DesiredWorkerPowerCaps(dgd)) == 0 || powerCapRolloutBlocked(dgd.Status.RollingUpdate) {
 		return nil, nil
 	}
 	current := currentWorkerHashes(dgd)

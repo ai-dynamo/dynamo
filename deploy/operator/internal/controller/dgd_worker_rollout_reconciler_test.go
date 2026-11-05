@@ -110,7 +110,7 @@ func createTestDGDReconcilerWithStatus(dgd *nvidiacomv1beta1.DynamoGraphDeployme
 	builder := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithRuntimeObjects(dgd).
-		WithIndex(&corev1.Pod{}, dgdComponentPodIndex, dgdComponentPodIndexValues).
+		WithIndex(&corev1.Pod{}, dynamo.ComponentPodIndex, dynamo.ComponentPodIndexValues).
 		WithStatusSubresource(&nvidiacomv1beta1.DynamoGraphDeployment{})
 	for _, opt := range opts {
 		opt(builder)
@@ -4168,7 +4168,7 @@ func TestDGDComponentPodIndexValues(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, dgdComponentPodIndexValues(tt.obj))
+			assert.Equal(t, tt.want, dynamo.ComponentPodIndexValues(tt.obj))
 		})
 	}
 }

@@ -59,7 +59,6 @@ type grovePodCliqueSetRender struct {
 	gpuShapes         map[string]dynamo.GPUShape
 	runtimeStatuses   map[string]dynamo.ComponentRuntimeStatus
 	powerCapPreserved bool
-	powerCapPending   bool
 }
 
 func newGroveWorkloadRenderer(
@@ -120,9 +119,8 @@ func (r *groveWorkloadRenderer) Render(
 	)
 
 	// Prove cap-only divergence against the observed PCS before choosing its generation identity.
-	// While Grove has not acknowledged or finished an update, the retained render defers propagation too.
-	preserved, pending := false, false
-	if len(desiredWorkerPowerCaps(req.DGD)) > 0 && !powerCapRolloutBlocked(req.DGD.Status.RollingUpdate) && existingPodCliqueSet != nil && metav1.IsControlledBy(existingPodCliqueSet, req.DGD) {
+	preserved := false
+	if len(dynamo.DesiredWorkerPowerCaps(req.DGD)) > 0 && !powerCapRolloutBlocked(req.DGD.Status.RollingUpdate) && existingPodCliqueSet != nil && metav1.IsControlledBy(existingPodCliqueSet, req.DGD) {
 		retained, applicable := retainedGrovePowerCaps(req, existingPodCliqueSet)
 		if applicable {
 			candidate, renderErr := dynamo.GenerateGrovePodCliqueSet(ctx, req.DGD, req.IsDelegated, r.config, r.runtimeConfig, r.reader, r.dockerSecretRetriever, restartState, existingPodCliqueSet, false, checkpointInfos, &retained)
@@ -141,7 +139,7 @@ func (r *groveWorkloadRenderer) Render(
 				return nil, err
 			}
 			if apiequality.Semantic.DeepEqual(grovePowerCapWorkerSpec(comparisonCandidate), grovePowerCapWorkerSpec(existingPodCliqueSet)) {
-				desired, preserved, pending = candidate, true, groveUpdateUnacknowledged(existingPodCliqueSet)
+				desired, preserved = candidate, true
 			}
 		}
 	}
@@ -156,17 +154,7 @@ func (r *groveWorkloadRenderer) Render(
 		gpuShapes:         gpuShapes,
 		runtimeStatuses:   dynamo.ResolveGroveComponentRuntimeStatuses(req.DGD, desired),
 		powerCapPreserved: preserved,
-		powerCapPending:   pending,
 	}, nil
-}
-
-// groveUpdateUnacknowledged reports a PCS spec Grove has not observed or an update it has not finished.
-// A missing observedGeneration is unacknowledged. pcs must be non-nil.
-func groveUpdateUnacknowledged(pcs *grovev1alpha1.PodCliqueSet) bool {
-	if pcs.Status.ObservedGeneration == nil || *pcs.Status.ObservedGeneration != pcs.Generation {
-		return true
-	}
-	return pcs.Status.UpdateProgress != nil && pcs.Status.UpdateProgress.UpdateEndedAt == nil
 }
 
 // grovePowerCapWorkerSpec compares worker intent using the pinned Grove alpha.15 admission defaults.

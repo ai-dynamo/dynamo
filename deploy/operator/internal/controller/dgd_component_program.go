@@ -23,6 +23,7 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -69,9 +70,9 @@ func (p *componentProgram) Reconcile(
 	req workloadProgramRequest,
 ) (programResult workloadProgramResult, retErr error) {
 	programResult = newWorkloadProgramResult(req.DGD)
-	caps := desiredWorkerPowerCaps(req.DGD)
+	caps := dynamo.DesiredWorkerPowerCaps(req.DGD)
 
-	// Classify workload failures, then report cap propagation without changing workload readiness.
+	// Classify workload failures; the power controller owns cap propagation.
 	defer func() {
 		if errors.Is(retErr, reconcile.TerminalError(nil)) {
 			return
@@ -83,7 +84,6 @@ func (p *componentProgram) Reconcile(
 			}
 			programResult.Fail(req.DGD.Generation, reason, retErr)
 		}
-		reconcilePowerCaps(ctx, p.rollout.Client, req.DGD, caps, false, &programResult)
 	}()
 	clearComponentGPUShapes(programResult.Status.Components)
 	clearComponentRuntimeStatuses(programResult.Status.Components)

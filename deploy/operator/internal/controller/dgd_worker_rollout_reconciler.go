@@ -1034,7 +1034,7 @@ func (r *dgdWorkerRolloutReconciler) listDGDComponentPods(
 		podList,
 		client.InNamespace(dgd.Namespace),
 		client.MatchingFields{
-			dgdComponentPodIndex: dgdComponentPodIndexValue(dgd.Name, componentName),
+			dynamo.ComponentPodIndex: dynamo.ComponentPodIndexValue(dgd.Name, componentName),
 		},
 	); err != nil {
 		return nil, fmt.Errorf("failed to list pods for DGD %s component %s: %w", dgd.Name, componentName, err)

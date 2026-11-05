@@ -58,11 +58,12 @@ recorded the DGD's `nvidia.com/current-worker-hash-v2` annotation for a graph
 created before that annotation existed. Grove rollouts are not visible to
 admission. A cap-only edit made while Grove has not yet acknowledged or finished a
 `PodCliqueSet` update waits: the operator keeps the current worker templates and
-patches no Pods until the update completes.
+patches no Pods until Grove finishes the update.
 
 For a cap-only DGD edit, the operator retains worker creation templates and identities
-at their previous cap and patches the owned live Pod annotations. Replacement and
-scale-up Pods can briefly carry the retained cap before reconciliation. On the
+at their previous cap. A separate power-cap controller patches the owned live Pod
+annotations, independently of DGD workload reconciliation. Replacement and scale-up
+Pods can briefly carry the retained cap until that controller observes them. On the
 component pathway, a restart requested with `spec.restart` restarts the retained
 workers in place. Under Grove, a restart during a retained cap edit rolls the
 workers to the latest desired cap. A change to
