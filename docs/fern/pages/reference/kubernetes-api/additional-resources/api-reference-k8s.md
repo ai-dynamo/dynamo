@@ -4120,6 +4120,22 @@ _Appears in:_
 | `profile` _string_ | Profile is the localhost seccomp profile path. Empty falls back to<br />DefaultSeccompProfile. Ignored when Disabled is true. |  |  |
 
 
+#### DGDRConfiguration
+
+
+
+DGDRConfiguration holds operator-wide profiling Job settings.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `outputCopierImage` _string_ | OutputCopierImage is a complete image reference for the output-copier sidecar.<br />Empty uses DefaultDGDROutputCopierImage. The image must provide /bin/sh,<br />kubectl and the shell utilities used by the copier. Per-request profiling<br />Job container image overrides take precedence. Existing Jobs keep their image. |  |  |
+
+
 #### DRAConfiguration
 
 
@@ -4462,6 +4478,7 @@ OperatorConfiguration is the Schema for the operator configuration.
 | `checkpoint` _[CheckpointConfiguration](#checkpointconfiguration)_ | Checkpoint/restore configuration |  |  |
 | `discovery` _[DiscoveryConfiguration](#discoveryconfiguration)_ | Discovery backend configuration |  |  |
 | `gpu` _[GPUConfiguration](#gpuconfiguration)_ | GPU discovery configuration |  |  |
+| `dgdr` _[DGDRConfiguration](#dgdrconfiguration)_ | DGDR configures profiling Jobs created for v1beta1 deployment requests. |  |  |
 | `logging` _[LoggingConfiguration](#loggingconfiguration)_ | Logging configuration |  |  |
 | `security` _[SecurityConfiguration](#securityconfiguration)_ | HTTP/2 and TLS settings |  |  |
 | `lpx` _[LPXConfiguration](#lpxconfiguration)_ | LPX scheduler integration and model-registry configuration. |  |  |
