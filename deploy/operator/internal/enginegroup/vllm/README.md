@@ -75,6 +75,27 @@ does not establish native gRPC or sidecar conformance.
 Tests cover native protocol validation, exact all-rank fan-out, plan-specific
 preflight, ambiguous transport outcomes and restart recovery of durable bindings.
 
+## Grove deployment
+
+The image must also include native automatic bootstrap from
+[vLLM #62973](https://github.com/vllm-project/vllm/pull/62973). The template declares
+the native command, `--elastic-ep-auto-bootstrap`, the immutable initial DP size,
+and `$(DYNAMO_RANK)` / `$(DYNAMO_LEADER_ADDRESS)` references. It omits
+`--data-parallel-size`: the joiner learns the complete target through vLLM's
+native handshake. The operator neither rewrites that command nor distributes
+an executable launch assignment.
+
+The standard Pod renderer supplies infrastructure defaults. The Engine Group
+renderer maps the portable topology references to Grove identity and preserves
+explicit user probes instead of adding inference probes to waiting joiners.
+Each Pod owns one native DP member and its complete fixed TP subgroup.
+
+The capacity adapter retains the clique UID and each slot's exact Pod UID across
+Pod disappearance. A replacement occupant requires recovery; it cannot inherit
+an old process's evidence. This is a physical identity catalog, not a launch
+command or native transaction journal. Container restarts, packed launches,
+replacement recovery and complete-world retirement are unsupported.
+
 ## Bounded native submission
 
 The native prerequisites must expose bounded `submit_elastic_ep` acceptance.
