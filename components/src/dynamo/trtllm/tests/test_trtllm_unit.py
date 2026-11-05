@@ -180,22 +180,22 @@ def test_publish_metrics_is_independent_from_kv_events(monkeypatch):
     assert config.use_kv_events is False
 
 
-def test_publish_request_metrics_is_a_separate_opt_in(monkeypatch):
+def test_publish_per_request_metrics_is_a_separate_opt_in(monkeypatch):
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
-    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_REQUEST_METRICS", raising=False)
-    assert parse_args(["--publish-metrics"]).publish_request_metrics is False
-    config = parse_args(["--publish-metrics", "--publish-request-metrics"])
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_PER_REQUEST_METRICS", raising=False)
+    assert parse_args(["--publish-metrics"]).publish_per_request_metrics is False
+    config = parse_args(["--publish-metrics", "--publish-per-request-metrics"])
     assert config.publish_metrics is True
-    assert config.publish_request_metrics is True
+    assert config.publish_per_request_metrics is True
 
 
-def test_publish_request_metrics_requires_publish_metrics(monkeypatch):
+def test_publish_per_request_metrics_requires_publish_metrics(monkeypatch):
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
-    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_REQUEST_METRICS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_PER_REQUEST_METRICS", raising=False)
     with pytest.raises(
-        ValueError, match="--publish-request-metrics requires --publish-metrics"
+        ValueError, match="--publish-per-request-metrics requires --publish-metrics"
     ):
-        parse_args(["--publish-request-metrics"])
+        parse_args(["--publish-per-request-metrics"])
 
 
 def test_deprecated_publish_events_flag_alias_maps_to_both_controls(
@@ -560,7 +560,7 @@ def test_config_publish_forward_pass_metrics_opt_in(
     [
         (["--publish-kv-events"], None, False, False),
         (["--publish-metrics"], None, True, False),
-        (["--publish-metrics", "--publish-request-metrics"], None, True, True),
+        (["--publish-metrics", "--publish-per-request-metrics"], None, True, True),
         (["--fpm-trace"], None, True, False),
         ([], "20380", True, False),
         ([], None, False, False),
@@ -578,7 +578,7 @@ async def test_init_llm_worker_engine_args_without_overrides(
 ):
     """Iteration stats follow --publish-metrics and the forward-pass metrics
     opt-in, never --publish-kv-events alone. Per-request perf metrics follow
-    only --publish-request-metrics, and the engine-level return_perf_metrics
+    only --publish-per-request-metrics, and the engine-level return_perf_metrics
     default stays off regardless."""
     monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
@@ -586,7 +586,7 @@ async def test_init_llm_worker_engine_args_without_overrides(
     monkeypatch.delenv("DYN_TRTLLM_OVERRIDE_ENGINE_ARGS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
-    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_REQUEST_METRICS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_PER_REQUEST_METRICS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", raising=False)
     monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
     monkeypatch.setenv("DYN_FPM_TRACE", "0")

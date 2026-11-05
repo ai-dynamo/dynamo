@@ -355,7 +355,7 @@ class DynamoWorkerProcess(ManagedProcess):
             command += ["--extra-engine-args", str(config_file)]
         if publish_metrics:
             # The KV-transfer metrics this test reads are per-request metrics.
-            command += ["--publish-metrics", "--publish-request-metrics"]
+            command += ["--publish-metrics", "--publish-per-request-metrics"]
         command.extend(build_trtllm_override_args(env))
 
         # Set environment variables

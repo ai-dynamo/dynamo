@@ -712,7 +712,7 @@ async def init_llm_worker(
     # processes them for every finished request in this worker's serving
     # process, which costs throughput on long prompts.
     if hasattr(default_sampling_params, "return_perf_metrics"):
-        default_sampling_params.return_perf_metrics = config.publish_request_metrics
+        default_sampling_params.return_perf_metrics = config.publish_per_request_metrics
     model_input = ModelInput.Tokens
 
     # Set model type based on disaggregation mode. Prefill and encode workers

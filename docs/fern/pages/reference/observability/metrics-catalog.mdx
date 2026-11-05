@@ -560,7 +560,7 @@ The embedding cache metrics require `--multimodal-embedding-cache-capacity-gb` g
 
 ### TensorRT-LLM Metrics Computed by Dynamo
 
-TensorRT-LLM workers started with `--publish-metrics` add these to the engine's own `trtllm_*` metrics; the `trtllm_kv_transfer_*` metrics also need `--publish-request-metrics`. They carry `model_name`, `disaggregation_mode`, and `engine_type`, plus the labels Dynamo adds to [engine metrics](#engine-metrics).
+TensorRT-LLM workers started with `--publish-metrics` add these to the engine's own `trtllm_*` metrics; the `trtllm_kv_transfer_*` metrics also need `--publish-per-request-metrics`. They carry `model_name`, `disaggregation_mode`, and `engine_type`, plus the labels Dynamo adds to [engine metrics](#engine-metrics).
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
@@ -991,7 +991,7 @@ Backend workers also expose their inference engine's own metrics at `/metrics` o
 |--------|--------|------------|------------------|--------------|
 | vLLM | `vllm:`, plus `lmcache:` with LMCache | On by default; `--disable-log-stats` turns it off | [vLLM Production Metrics](https://docs.vllm.ai/en/stable/usage/metrics/) | [vLLM Observability](../../developer-guide/knowledge-base/modular-components/backends/vllm/observability.md) |
 | SGLang | `sglang:` | `--enable-metrics` | [SGLang Production Metrics](https://docs.sglang.io/docs/references/production_metrics) | [SGLang Observability](../../developer-guide/knowledge-base/modular-components/backends/sglang/observability.md) |
-| TensorRT-LLM | `trtllm_` | `--publish-metrics`; per-request metrics also need `--publish-request-metrics` | [TensorRT-LLM metrics collector](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/metrics/collector.py) | [TensorRT-LLM Observability](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/observability.md) |
+| TensorRT-LLM | `trtllm_` | `--publish-metrics`; per-request metrics also need `--publish-per-request-metrics` | [TensorRT-LLM metrics collector](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/metrics/collector.py) | [TensorRT-LLM Observability](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/observability.md) |
 
 Some `trtllm_*` metrics are computed by Dynamo, not by TensorRT-LLM; see [TensorRT-LLM Metrics Computed by Dynamo](#tensorrt-llm-metrics-computed-by-dynamo). To compare equivalent metrics across engines, see [Metrics Comparison](metrics-comparison.md).
 

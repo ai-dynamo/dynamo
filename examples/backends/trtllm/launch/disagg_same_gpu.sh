@@ -111,7 +111,7 @@ python3 -m "$WORKER_MODULE" \
   --modality "$MODALITY" \
   --publish-kv-events \
   --publish-metrics \
-  --publish-request-metrics \
+  --publish-per-request-metrics \
   --disaggregation-mode prefill \
   "${OVERRIDE_ARGS[@]}" &
 
@@ -133,7 +133,7 @@ python3 -m "$WORKER_MODULE" \
   --modality "$MODALITY" \
   --publish-kv-events \
   --publish-metrics \
-  --publish-request-metrics \
+  --publish-per-request-metrics \
   --disaggregation-mode decode \
   "${OVERRIDE_ARGS[@]}" &
 
