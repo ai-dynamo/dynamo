@@ -381,46 +381,63 @@ mod tests {
 
     const CAP: Option<u64> = Some(1_000);
 
-    /// A rank wins on the fit boundary only while the request still fits on it.
+    /// A rank wins on the fit boundary only while the request still fits on it. In each case the
+    /// rank one block over would win if it fit, and the boundary rank, if it did not fit, would
+    /// lose to the rank with more requests.
     #[test]
     fn the_fit_test_decides_at_its_boundary() {
         let p = Parameters::default();
-        // The fewest-request rank would overflow, so the next fitting one wins.
+        // Exactly at capacity fits; one block more does not.
         assert_eq!(
             ties(
                 &p,
                 &[
-                    (1_100, 0, CAP, None),
-                    (500, 1, CAP, None),
-                    (500, 2, CAP, None)
+                    (1_000, 1, CAP, None),
+                    (1_001, 0, CAP, None),
+                    (100, 2, CAP, None)
                 ]
             ),
-            [1]
+            [0]
         );
-        // Exactly at capacity fits; one block more does not.
-        assert_eq!(ties(&p, &[(1_000, 0, CAP, None), (100, 1, CAP, None)]), [0]);
-        assert_eq!(ties(&p, &[(1_001, 0, CAP, None), (100, 1, CAP, None)]), [1]);
         // 0.95 x 16,001 = 15,200.95: 15,200 fits, 15,201 does not.
         let p = parameters(0.95, true, 0.0);
         let cap = Some(16_001);
         assert_eq!(
-            ties(&p, &[(15_200, 0, cap, None), (100, 1, cap, None)]),
+            ties(
+                &p,
+                &[
+                    (15_200, 1, cap, None),
+                    (15_201, 0, cap, None),
+                    (100, 2, cap, None)
+                ]
+            ),
             [0]
-        );
-        assert_eq!(
-            ties(&p, &[(15_201, 0, cap, None), (100, 1, cap, None)]),
-            [1]
         );
         // 0.7 x 90 = 63 exactly, although the f64 product is 62.999...: 63 fits, 64 does not.
         let p = parameters(0.7, true, 0.0);
         let cap = Some(90);
-        assert_eq!(ties(&p, &[(63, 0, cap, None), (10, 1, cap, None)]), [0]);
-        assert_eq!(ties(&p, &[(64, 0, cap, None), (10, 1, cap, None)]), [1]);
+        assert_eq!(
+            ties(
+                &p,
+                &[(63, 1, cap, None), (64, 0, cap, None), (10, 2, cap, None)]
+            ),
+            [0]
+        );
         // A rank without a capacity is not filtered.
-        assert_eq!(ties(&p, &[(5_000, 0, None, None), (10, 1, cap, None)]), [0]);
+        assert_eq!(
+            ties(
+                &p,
+                &[
+                    (5_000, 0, None, None),
+                    (10, 1, cap, None),
+                    (64, 0, cap, None)
+                ]
+            ),
+            [0]
+        );
     }
 
-    /// Among fitting ranks the request count comes first, then `D + W * N`.
+    /// Among fitting ranks the request count comes first, then `D + W * N`; equal keys tie.
     #[test]
     fn fitting_ranks_are_ordered_by_count_then_cost() {
         let p = Parameters::default();
@@ -430,14 +447,11 @@ mod tests {
                 &[
                     (600, 1, CAP, None),
                     (500, 1, CAP, None),
-                    (100, 2, CAP, None)
+                    (100, 2, CAP, None),
+                    (500, 1, CAP, None)
                 ]
             ),
-            [1]
-        );
-        assert_eq!(
-            ties(&p, &[(500, 1, CAP, None), (500, 1, CAP, None)]),
-            [0, 1]
+            [1, 3]
         );
         // Without count priority, the default cost decides: 2,100 / 2,200 / 1,900.
         let p = parameters(1.0, false, 1_000.0);
@@ -479,10 +493,17 @@ mod tests {
             (1_300, 1, CAP, Some(0.4)),
         ];
         assert_eq!(tie_set(&p, &ranks(&rows)), (vec![1], true));
-        // A preferred rank that does not fit loses to one that does.
+        // A preferred rank that does not fit loses; one that fits wins: 900 / 950 x 0.4 = 380.
         assert_eq!(
-            ties(&p, &[(1_100, 0, CAP, Some(0.4)), (900, 1, CAP, None)]),
-            [1]
+            ties(
+                &p,
+                &[
+                    (1_100, 0, CAP, Some(0.4)),
+                    (900, 1, CAP, None),
+                    (950, 1, CAP, Some(0.4))
+                ]
+            ),
+            [2]
         );
     }
 
@@ -490,14 +511,15 @@ mod tests {
     #[test]
     fn taint_scales_the_cost_after_the_count() {
         let p = Parameters::default();
-        // Keys: (1, 500), (1, 600 x 0.5 = 300), (2, 100 x 0.5 = 50).
+        // Keys: (1, 500), (1, 600 x 0.8 = 480), (2, 100 x 0.4 = 40). A multiplier that also
+        // scaled the count would let rank 2 win.
         assert_eq!(
             ties(
                 &p,
                 &[
                     (500, 1, CAP, None),
-                    (600, 1, CAP, Some(0.5)),
-                    (100, 2, CAP, Some(0.5))
+                    (600, 1, CAP, Some(0.8)),
+                    (100, 2, CAP, Some(0.4))
                 ]
             ),
             [1]
