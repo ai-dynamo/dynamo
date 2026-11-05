@@ -5,6 +5,10 @@ title: KVBM Configuration Reference
 subtitle: Field reference for the KV Block Manager environment variables and the layered KVBM_* / TOML configuration system.
 ---
 
+<Warning>
+  KVBM (KV Block Manager) is deprecated in v1.5.0 and removal is targeted for v1.7.0. Use the engine's native KV offloading for host and disk tiering. Cross-node KV cache sharing is the scope of the separate, early-stage KV Cache Runner (KVCR) project, which does not replace KVBM. See the [Deprecations](../general/releases/deprecations.mdx#v150) ledger.
+</Warning>
+
 The KV Block Manager (KVBM) is configured through two layers:
 
 - **`DYN_KVBM_*` runtime environment variables** — the primary, user-facing controls for cache tier sizing, offload behavior, object storage, distributed (leader/worker) mode, and metrics. Set these in the worker container `env`. This is what most deployments use.
