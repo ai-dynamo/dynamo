@@ -1319,8 +1319,12 @@ func TestGroveProgram_CrashLoopFailsGraph(t *testing.T) {
 }
 
 func TestGroveProgramRequeuesAfterRestartProgressChange(t *testing.T) {
-	sequential := &nvidiacomv1beta1.RestartStrategy{Type: nvidiacomv1beta1.RestartStrategyTypeSequential, Order: []string{"Frontend", "prefill", "decode"}}
-	parallel := &nvidiacomv1beta1.RestartStrategy{Type: nvidiacomv1beta1.RestartStrategyTypeParallel}
+	sequential := func() *nvidiacomv1beta1.RestartStrategy {
+		return &nvidiacomv1beta1.RestartStrategy{Type: nvidiacomv1beta1.RestartStrategyTypeSequential, Order: []string{"Frontend", "prefill", "decode"}}
+	}
+	parallel := func() *nvidiacomv1beta1.RestartStrategy {
+		return &nvidiacomv1beta1.RestartStrategy{Type: nvidiacomv1beta1.RestartStrategyTypeParallel}
+	}
 	restarting := func(id string, inProgress ...string) *nvidiacomv1beta1.RestartStatus {
 		return &nvidiacomv1beta1.RestartStatus{ObservedID: id, Phase: nvidiacomv1beta1.RestartPhaseRestarting, InProgress: inProgress}
 	}
@@ -1338,7 +1342,7 @@ func TestGroveProgramRequeuesAfterRestartProgressChange(t *testing.T) {
 			name:          "interrupted sequential restart",
 			interruptedID: "restart",
 			id:            "restart-urgent",
-			strategy:      sequential,
+			strategy:      sequential(),
 			progression: []*nvidiacomv1beta1.RestartStatus{
 				restarting("restart-urgent", "Frontend"),
 				restarting("restart-urgent", "prefill"),
@@ -1349,7 +1353,7 @@ func TestGroveProgramRequeuesAfterRestartProgressChange(t *testing.T) {
 		{
 			name:     "ordinary sequential restart",
 			id:       "r1",
-			strategy: sequential,
+			strategy: sequential(),
 			progression: []*nvidiacomv1beta1.RestartStatus{
 				restarting("r1", "Frontend"),
 				restarting("r1", "prefill"),
@@ -1360,7 +1364,7 @@ func TestGroveProgramRequeuesAfterRestartProgressChange(t *testing.T) {
 		{
 			name:     "parallel restart",
 			id:       "r1",
-			strategy: parallel,
+			strategy: parallel(),
 			progression: []*nvidiacomv1beta1.RestartStatus{
 				restarting("r1", "Frontend", "decode", "prefill"),
 				completed("r1"),
