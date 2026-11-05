@@ -304,11 +304,12 @@ class RouterArgGroup(ArgGroup):
                 env_var="DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES",
                 default=DEFAULT_SESSION_AFFINITY_MAX_ENTRIES,
                 help=(
-                    "Most sessions one frontend's session-affinity table holds at once. "
-                    "A request that would start a new session past this limit is "
-                    "rejected as resource exhausted (HTTP 529 by default) until an idle "
-                    "session expires. Replica sync copies bindings to every frontend, so the "
-                    "limit is effectively fleet-wide. Has no effect unless "
+                    "Most sessions each session-affinity table holds at once; the "
+                    "frontend keeps one table per worker set. A request that would start a "
+                    "new session past this limit is rejected as resource exhausted (HTTP "
+                    "529 by default) until an idle session expires. Replica sync copies "
+                    "bindings to every frontend, so size it for the sessions live across "
+                    "all frontends. Has no effect unless "
                     "--router-session-affinity-ttl-secs is set. This is exported as "
                     "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES, where every affinity table "
                     "reads it."
