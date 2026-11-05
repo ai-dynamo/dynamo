@@ -619,12 +619,9 @@ pub(crate) fn stream_error_to_dynamo(error: &pb::GenerateStreamError) -> DynamoE
     coded_error("Generate", message, stream_error_code(error))
 }
 
-/// Classify a failure SGLang's Rust server reports with an HTTP status code,
-/// as a gRPC error item or a native HTTP error frame. As in
-/// `terminal_failure`, a 4xx is the request's fault and anything else, 503
-/// included, the engine's; neither is a transport failure, so migration does
-/// not retry it on another worker. A 499 is a cancellation. The engine message
-/// stays private here, so the OpenAI surfaces return only the error category.
+/// Classify a gRPC error item or native HTTP error frame by its HTTP status:
+/// 499 is a cancellation, another 4xx the request's fault, anything else
+/// (503 included) the engine's, so none migrates. The message stays private.
 pub(crate) fn coded_error(operation: &str, message: &str, code: u32) -> DynamoError {
     let detail = format!("{operation}: {message} (code {code})");
     match code {
