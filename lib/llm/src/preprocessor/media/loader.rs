@@ -560,8 +560,14 @@ impl MediaLoader {
         h.finish()
     }
 
-    pub fn new(media_decoder: MediaDecoder, media_fetcher: Option<MediaFetcher>) -> Result<Self> {
+    pub fn new(
+        mut media_decoder: MediaDecoder,
+        media_fetcher: Option<MediaFetcher>,
+    ) -> Result<Self> {
         media_decoder.warn_if_unavailable_backends();
+        if let Some(image) = &mut media_decoder.image {
+            image.apply_exif_orientation = media_decoder.apply_exif_orientation;
+        }
 
         // Fall back to env-aware defaults so `DYN_MM_ALLOW_INTERNAL=1` is
         // honored even when the caller doesn't pass an explicit fetcher.
@@ -761,6 +767,31 @@ mod tests {
     use super::*;
     use dynamo_protocols::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
 
+    /// The card sets EXIF orientation for every image decode; a request
+    /// cannot change it.
+    #[test]
+    fn exif_orientation_comes_from_the_card() {
+        for apply in [false, true] {
+            let card = MediaDecoder {
+                image: Some(ImageDecoder::default()),
+                #[cfg(feature = "media-ffmpeg")]
+                video: None,
+                apply_exif_orientation: apply,
+            };
+            let loader = MediaLoader::new(card, None).unwrap();
+            let image = loader.media_decoder.image.as_ref().unwrap();
+            assert_eq!(image.apply_exif_orientation, apply);
+            let kwargs = serde_json::json!({"image": {}, "apply_exif_orientation": !apply});
+            let request: MediaDecoder = serde_json::from_value(kwargs).unwrap();
+            assert_eq!(
+                image
+                    .with_runtime(request.image.as_ref())
+                    .apply_exif_orientation,
+                apply
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_fetch_and_decode() {
         let test_image_bytes =
@@ -779,6 +810,7 @@ mod tests {
             image: Some(ImageDecoder::default()),
             #[cfg(feature = "media-ffmpeg")]
             video: None,
+            ..Default::default()
         };
         let fetcher = MediaFetcher {
             allow_direct_ip: true,
@@ -899,6 +931,7 @@ mod tests {
             image: Some(ImageDecoder::default()),
             #[cfg(feature = "media-ffmpeg")]
             video: Some(Default::default()),
+            ..Default::default()
         };
         let fetcher = MediaFetcher {
             allow_direct_ip: true,
@@ -971,6 +1004,7 @@ mod tests {
             image: Some(ImageDecoder::default()),
             #[cfg(feature = "media-ffmpeg")]
             video: None,
+            ..Default::default()
         };
         let fetcher = MediaFetcher {
             allow_direct_ip: true,
@@ -1081,6 +1115,7 @@ mod tests {
             image: Some(ImageDecoder::default()),
             #[cfg(feature = "media-ffmpeg")]
             video: None,
+            ..Default::default()
         };
         let fetcher = MediaFetcher {
             allow_direct_ip: true,

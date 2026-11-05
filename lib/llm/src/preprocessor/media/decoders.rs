@@ -56,6 +56,12 @@ pub struct MediaDecoder {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<VideoDecoder>,
     // TODO: audio decoder
+    /// Rotate each decoded image by its EXIF orientation. A worker turns it on
+    /// when its own image loader does the same, so that the pixels match. It
+    /// is not in `image`: older frontends reject unknown `image` fields, but
+    /// ignore unknown fields here.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub apply_exif_orientation: bool,
 }
 
 impl MediaDecoder {
@@ -71,4 +77,35 @@ pub enum DecodedMediaMetadata {
     Image(ImageMetadata),
     #[cfg(feature = "media-ffmpeg")]
     Video(VideoMetadata),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A card without `apply_exif_orientation` keeps the stored orientation,
+    /// and a card that sets it keeps an `image` section that older frontends
+    /// read.
+    #[test]
+    fn exif_orientation_is_off_unless_the_card_sets_it() {
+        let old_card: MediaDecoder =
+            serde_json::from_value(serde_json::json!({"image": {}})).unwrap();
+        assert!(!old_card.apply_exif_orientation);
+        let default = serde_json::to_value(&old_card).unwrap();
+        assert!(default.get("apply_exif_orientation").is_none());
+
+        let card = serde_json::to_value(MediaDecoder {
+            apply_exif_orientation: true,
+            ..old_card
+        })
+        .unwrap();
+        assert_eq!(card["apply_exif_orientation"], true);
+        // Older frontends reject unknown fields in `image`.
+        assert!(card["image"].get("apply_exif_orientation").is_none());
+        assert!(
+            serde_json::from_value::<MediaDecoder>(card)
+                .unwrap()
+                .apply_exif_orientation
+        );
+    }
 }

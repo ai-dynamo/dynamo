@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::io::Cursor;
 use std::sync::Once;
 
-use anyhow::Result;
-use image::{ColorType, ImageFormat};
+use anyhow::{Context as _, Result};
+use image::metadata::Orientation;
+use image::{ColorType, DynamicImage, ImageDecoder as _, ImageFormat, ImageReader};
 use ndarray::Array3;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -14,7 +16,7 @@ use super::super::rdma::DecodedMediaData;
 use super::{DecodedMediaMetadata, Decoder};
 use backends::{
     BackendAvailability, BackendDecline, DecodedImage, ImageDecodeBackend, ImageDecodeOutcome,
-    ImageDecodeRequest, image_reader_backend, turbojpeg_backend,
+    ImageDecodeRequest, PixelFormat, image_reader_backend, turbojpeg_backend,
 };
 
 mod backends;
@@ -92,6 +94,12 @@ pub struct ImageDecoder {
     #[serde(skip, default = "default_enable_libjpeg")]
     #[schema(ignore)]
     pub(crate) enable_libjpeg: bool,
+    /// The media loader copies it from
+    /// [`super::MediaDecoder::apply_exif_orientation`]; it is never part of the
+    /// `image` configuration.
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub(crate) apply_exif_orientation: bool,
 }
 
 impl Default for ImageDecoder {
@@ -99,6 +107,7 @@ impl Default for ImageDecoder {
         Self {
             limits: ImageDecoderLimits::default(),
             enable_libjpeg: default_enable_libjpeg(),
+            apply_exif_orientation: false,
         }
     }
 }
@@ -123,6 +132,7 @@ impl Decoder for ImageDecoder {
                 let mut d = r.clone();
                 d.limits.clone_from(&self.limits);
                 d.enable_libjpeg = self.enable_libjpeg;
+                d.apply_exif_orientation = self.apply_exif_orientation;
                 d
             }
             None => self.clone(),
@@ -157,8 +167,58 @@ impl Decoder for ImageDecoder {
             decode_required_backend(image_reader, request)?
         };
 
+        let image = if self.apply_exif_orientation {
+            oriented(image, exif_orientation(&bytes, format))?
+        } else {
+            image
+        };
         decoded_image_to_media_data(image)
     }
+}
+
+/// The EXIF orientation of an encoded image. Unreadable metadata counts as no
+/// rotation.
+fn exif_orientation(bytes: &[u8], format: ImageFormat) -> Orientation {
+    ImageReader::with_format(Cursor::new(bytes), format)
+        .into_decoder()
+        .and_then(|mut decoder| decoder.orientation())
+        .unwrap_or(Orientation::NoTransforms)
+}
+
+fn oriented(image: DecodedImage, orientation: Orientation) -> Result<DecodedImage> {
+    if orientation == Orientation::NoTransforms {
+        return Ok(image);
+    }
+    let DecodedImage {
+        source_format,
+        width,
+        height,
+        pixel_format,
+        pixels,
+    } = image;
+    let mut image = match pixel_format {
+        PixelFormat::L8 => {
+            image::GrayImage::from_raw(width, height, pixels).map(DynamicImage::from)
+        }
+        PixelFormat::La8 => {
+            image::GrayAlphaImage::from_raw(width, height, pixels).map(DynamicImage::from)
+        }
+        PixelFormat::Rgb8 => {
+            image::RgbImage::from_raw(width, height, pixels).map(DynamicImage::from)
+        }
+        PixelFormat::Rgba8 => {
+            image::RgbaImage::from_raw(width, height, pixels).map(DynamicImage::from)
+        }
+    }
+    .context("decoded pixels do not fit their dimensions")?;
+    image.apply_orientation(orientation);
+    Ok(DecodedImage {
+        source_format,
+        width: image.width(),
+        height: image.height(),
+        pixel_format,
+        pixels: image.into_bytes(),
+    })
 }
 
 fn ensure_fallback_allowed(
@@ -273,6 +333,69 @@ mod tests {
             .write_to(&mut Cursor::new(&mut bytes), format)
             .expect("Failed to encode test image");
         bytes
+    }
+
+    /// EXIF with orientation 6 (rotate 90 degrees clockwise), as a camera
+    /// stores a portrait photo.
+    fn exif_rotate_90() -> Vec<u8> {
+        let mut exif = b"II*\0\x08\0\0\0\x01\0".to_vec();
+        exif.extend_from_slice(&[0x12, 0x01, 0x03, 0, 0x01, 0, 0, 0, 0x06, 0, 0, 0]);
+        exif.extend_from_slice(&[0, 0, 0, 0]);
+        exif
+    }
+
+    fn encode_with_exif<E: image::ImageEncoder>(mut encoder: E, image: &image::RgbImage) {
+        encoder.set_exif_metadata(exif_rotate_90()).unwrap();
+        encoder
+            .write_image(
+                image.as_raw(),
+                image.width(),
+                image.height(),
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+    }
+
+    #[rstest]
+    fn test_exif_orientation_is_applied_only_when_enabled(
+        #[values(ImageFormat::Png, ImageFormat::Jpeg)] format: ImageFormat,
+        #[values(false, true)] apply_exif_orientation: bool,
+    ) {
+        use dynamo_memory::actions::Slice as _;
+
+        // 3 wide, 2 tall; only the top-left pixel is red.
+        let mut source = image::RgbImage::new(3, 2);
+        source.put_pixel(0, 0, image::Rgb([255, 0, 0]));
+        let mut bytes = Vec::new();
+        match format {
+            ImageFormat::Png => {
+                encode_with_exif(image::codecs::png::PngEncoder::new(&mut bytes), &source)
+            }
+            _ => encode_with_exif(
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 100),
+                &source,
+            ),
+        }
+
+        let decoded = ImageDecoder {
+            apply_exif_orientation,
+            ..Default::default()
+        }
+        .decode(create_encoded_media_data(bytes))
+        .unwrap();
+        // Upright: 2 wide, 3 tall, and the red pixel moved to the top right.
+        // Stored: 3 wide, 2 tall, and the red pixel stays at the top left.
+        let (shape, first_pixels) = if apply_exif_orientation {
+            (vec![3, 2, 3], [0, 0, 0, 255, 0, 0])
+        } else {
+            (vec![2, 3, 3], [255, 0, 0, 0, 0, 0])
+        };
+        assert_eq!(decoded.tensor_info.shape, shape);
+        if format == ImageFormat::Png {
+            // SAFETY: nothing else holds the storage.
+            let pixels = unsafe { decoded.data.as_slice() }.unwrap();
+            assert_eq!(&pixels[..6], &first_pixels);
+        }
     }
 
     #[rstest]
