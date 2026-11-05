@@ -41,12 +41,100 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 
 ## Upgrading
 
+Dynamo supports Helm upgrades and downgrades within the installed minor release and between
+adjacent minor releases: `N.M` to `N.(M+1)` for upgrades and `N.(M+1)` to `N.M` for downgrades.
+Move through every intermediate minor release; skipping a minor release is unsupported.
+
+When `dynamo-operator.enabled=true`, the chart runs a read-only `pre-install,pre-upgrade` Job before
+changing the operator Deployment. A first installation passes because no existing Deployment is
+present. Helm and Flux execute the hook directly; Argo CD maps it to PreSync. Raw `kubectl apply`,
+Argo CD selective sync, or disabled hooks do not enforce the check. When the operator subchart is
+disabled, the hook is omitted because the separately managed operator release owns its upgrade policy.
+
+The upgrade-path check is enforced by target charts v1.7.0 and later. Upgrades or downgrades **to**
+earlier charts are not checked.
+
+> [!IMPORTANT]
+> Flux users need helm-controller v1.7.0 or later, first included in Flux v2.10.0. Earlier
+> helm-controller versions panic on this chart's `helm.sh/hook-output-log-policy` annotation.
+> Flux does not forward hook output to controller logs or events; inspect the retained Job Pod logs
+> when a preflight fails.
+
+The Job reads the installed operator version and rejects larger minor jumps and major-version
+changes. After separately validating an unsupported transition, authorize only that target minor
+with the matching override:
+
+```yaml
+dynamo-operator:
+  upgradePreflight:
+    checks:
+      upgradePath:
+        # For an unsupported upgrade from 1.7.x to 1.9.x:
+        unsupportedUpgradeOverride: "1.9"
+        # For an unsupported downgrade from 1.9.x to 1.7.x:
+        unsupportedDowngradeOverride: "1.7"
+```
+
+The value must match the target operator's `N.M` version. If you leave the override in your values,
+it has no effect on later upgrades or downgrades to a different minor. It applies only to the
+upgrade-path check; other preflight checks still run. An override does not make the path supported.
+
+The Job uses Python's standard library and read-only Deployment access. Configure
+`dynamo-operator.upgradePreflight.job.image` and `imagePullSecrets` for an internal registry. Failed
+Jobs are retained for log inspection. The supporting ServiceAccount, Role, and RoleBinding persist
+until the next attempt and require manual removal when retiring the release.
+
+Before uninstalling, record the hook resource names with `helm get hooks <release> -n $NAMESPACE`.
+After uninstalling the default release `dynamo-platform`, without operator name overrides, clean
+them up with:
+
+```bash
+kubectl delete job,serviceaccount,role,rolebinding dynamo-platform-dynamo-operator-check-upgrade-path \
+  --namespace $NAMESPACE --ignore-not-found
+```
+
+For customized names, use the exact resource names from the rendered hooks.
+
+Settings under `upgradePreflight.job` are shared defaults. A check can override individual fields
+under `upgradePreflight.checks.<checkName>.job`. Unspecified fields inherit the shared value;
+`affinity`, `podSecurityContext`, and `imagePullSecrets` replace the shared field as a whole.
+
 Releases are listed newest first. Read bottom-up through releases newer than your installed version,
 up to your target version. Each entry describes changes introduced in that release. Releases and
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
 versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
 
 ### v1.7.0
+
+#### Deployment Tool Compatibility
+
+##### Upgrade-Path Preflight Enforcement
+
+**Change:** When `dynamo-operator.enabled=true`, target charts v1.7.0 and later reject skipped-minor
+and major-version upgrades or downgrades before changing the operator Deployment. An initial
+installation passes when no operator Deployment exists. Target charts older than v1.7.0 do not
+contain this check.
+
+**Affected:** Existing releases upgrading from v1.5.x or earlier directly to v1.7.x, and releases
+downgrading across more than one minor to a chart that includes the check.
+
+**Action:** Move through each intermediate minor. After separately validating an unsupported path,
+set `dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride` (or
+`unsupportedDowngradeOverride`) to the target `N.M`, as shown above. Other preflight checks still run.
+
+##### Flux Requires helm-controller v1.7.0 or Later
+
+**Change:** Upgrade preflight Jobs use the `helm.sh/hook-output-log-policy: hook-failed`
+annotation. Flux support requires helm-controller v1.7.0 or later, which includes the fix for
+[fluxcd/helm-controller#1604](https://github.com/fluxcd/helm-controller/pull/1604). Flux v2.10.0
+is the first Flux release that includes a compatible controller.
+
+**Affected:** Flux installations using helm-controller v1.6.5 or earlier. Those versions panic
+when they process a hook with this annotation.
+
+**Action:** Upgrade to Flux v2.10.0 or later, or helm-controller v1.7.0 or later, before upgrading
+Dynamo. If a preflight Job fails, inspect the retained Job Pod logs. The helm-controller fix
+prevents the panic but does not forward hook output to controller logs or events.
 
 #### Runtime Compatibility
 
@@ -134,6 +222,31 @@ own value; rename that variable before upgrading.
 **Existing deployments:** Reconciliation rolls each LPX workload once without an
 authored manifest change.
 
+##### Hybrid LPX conductors require the runtime sidecar
+
+**Change:** Reconciliation rejects a hybrid LPX build whose conductor template declares no
+`spec.initContainers[name=runtime]`, and the DGD reports `status.state: failed`. Previously the
+operator ran the conductor's `main` container as a Dynamo worker. Operator v1.6.x rejects a
+`runtime` init container in LPX role templates, so affected DGDs can migrate only after the
+upgrade.
+
+**Affected:** DGDs with a hybrid LPX component whose conductor role has no runtime sidecar.
+
+**Action:** After upgrading to v1.7.0, add the `runtime` init container to the conductor template,
+as described in
+[Dynamo Sidecar Mode](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-component-deployment.mdx#dynamo-sidecar-mode),
+with an engine image that serves through it. Run the sidecar with the `lpx` subcommand,
+`--grpc-endpoint` set to the engine's endpoint, and `--model-path` set to the model's tokenizer
+directory, such as `$(LPX_MODEL_PATH)/tokenizer`. Mount the volume the sidecar uses to reach the
+engine in both containers. The sidecar takes over the `system` port and the Dynamo environment, so
+probe the engine on its own port and remove references such as `$(DYN_NAMESPACE)` or `$(POD_IP)`
+from `main`. The edit changes the DGD's serving revision, so its other workers also roll once.
+
+**Existing deployments:** Until the conductor declares the sidecar, the operator still deletes
+released Agent Pods, which Grove recreates, but makes no other change to the LPX workload. It does
+not update its templates or replica count, and it does not retire or republish pipeline requests,
+so a faulted pipeline does not recover.
+
 #### New behavior
 
 ##### LWS no longer requires Volcano
@@ -154,22 +267,87 @@ Without separately configured gang scheduling or group admission
 (e.g., through Kueue), multinode DGD/DCD workloads using LWS may remain
 partially scheduled.
 
-##### Multinode sidecars for SGLang and vLLM
+##### Multinode sidecars for SGLang, vLLM, and TensorRT-LLM
 
 **Change:** Admission accepts `multinode` on a component that declares a `runtime` init
-container when `backendFramework` is `sglang` or `vllm` and the component supplies complete
-`leader` and `worker` role templates. The operator renders the authored engine commands,
+container when the component supplies complete `leader` and `worker` role templates. Set
+`backendFramework` explicitly, as the examples do; the operator does not infer a backend from
+a native engine command. The operator renders the authored engine commands,
 probes, and ports unchanged and merges Dynamo defaults into each declared `runtime`.
 
 **Affected:** New multinode DGDs that opt into sidecar mode.
 
 **Action:** None for existing workloads. To opt in, see the
-[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes)
-and [vLLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md#deploy-on-kubernetes)
+[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes),
+[vLLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md#deploy-on-kubernetes),
+and [TensorRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/sidecar.md#deploy-on-kubernetes)
 sidecar guides.
 
 **Existing deployments:** No existing workload rolls. Components without a `runtime` init
 container keep running the engine and Dynamo together in `main`.
+
+##### Bundled KAI Queue creation waits for the queue webhook
+
+**Change:** With `global.kai-scheduler.install=true`, a `post-install,post-upgrade` Job holds the
+`dynamo-default` and `dynamo` Queue hooks until KAI's `queue-controller` is Available, the
+`kai-queue-validation-v2` webhook configuration exists, and the webhook admits a server-side
+dry-run Queue. This fixes `helm install --wait` failing with
+`failed calling webhook "queue-validation.kai.scheduler"`.
+
+**Affected:** Bundled KAI installations whose queue-controller is enabled and whose `kai-config`
+is applied by the chart (the default `kaiConfigDeployer`, or `kaiConfig.render=true`).
+
+**Action:** Mirror `kaiQueueWait.image` (`registry.k8s.io/kubectl`) for restricted registries.
+Set `kaiQueueWait.enabled=false` only when the queue webhook is known to be serving, or when
+kai-config disables Queue validation (`spec.queueController.webhooks.enableValidation=false`) or
+changes its webhook name prefix; otherwise the Job waits for a webhook that never appears. The Job
+waits up to `kaiQueueWait.activeDeadlineSeconds` (600), within Helm's `--timeout`.
+
+**Existing deployments:** Successful runs delete the Job and its ServiceAccount, Role,
+ClusterRole, bindings, and ConfigMap. After a failure they persist for diagnosis until the next
+install or upgrade replaces them. `helm uninstall` does not remove them, so delete them manually
+when retiring a failed release.
+
+#### Dependency compatibility
+
+##### Grove v0.2.0-beta1
+
+**Change:** The bundled Grove chart and Go API dependency are now `v0.2.0-beta1`.
+Grove stores resources as `grove.io/v1beta1` and continues serving the
+`grove.io/v1alpha1` API used by Dynamo. The external Grove preflight accepts beta
+release tags and requires the pinned version or later.
+
+**Affected:** All Grove-backed deployments upgrading to Dynamo 1.7.0.
+
+**Action:** Upgrade externally managed Grove and matching CRDs first, with
+`crdInstaller.upgradeCRDs=true`. The platform chart enables this setting for
+bundled Grove, replacing `grove.crdInstaller.enabled`. The API server must be able
+to reach Grove's conversion webhook. With Grove integration enabled, Dynamo's
+alpha informers depend on that webhook to read beta-stored resources. If it is
+unavailable during initial cache synchronization, the shared Dynamo manager can
+fail to start, affecting non-Grove workloads handled by that manager too. After
+startup, failed LIST/WATCH reconnects can leave Grove observations stale while
+cached reads continue to work. This Grove informer dependency does not apply
+when Grove integration is disabled. Read the
+[Grove upgrade and downgrade guide](https://github.com/ai-dynamo/grove/blob/v0.2.0-beta1/docs/user-guide/upgrading-to-v1beta1-v0.2.0-beta1.md)
+before upgrading. Run the downgrade migration back to `v1alpha1` while the
+`v0.2.0-beta1` operator is still running, then roll back to Grove
+`v0.1.0-alpha.16`.
+Earlier CRDs can drop fields written by newer releases.
+
+For bundled Grove, prepare the rollback platform chart with its
+`dynamo.nvidia.com/grove-version` annotation and `grove` dependency pinned to
+`v0.1.0-alpha.16`, then rebuild its dependencies with `helm dependency update`.
+After the migration, deploy that chart with `helm upgrade` to the same release
+and namespace, using saved pre-upgrade values, `global.grove.install=true`, and
+`grove.crdInstaller.enabled=true`. Use client-side apply for this rollback:
+Helm 3 does so by default; with Helm 4, pass `--server-side=false`. Do not roll
+back to an unmodified older platform chart: Dynamo `v1.6.0` bundles `alpha.14`,
+and pre-upgrade `main` bundles `alpha.15`.
+
+**Existing deployments:** Grove converts existing alpha resources without requiring
+manifest changes. An unset clique or scaling-group `scaleConfig.minReplicas` now
+defaults to `minAvailable` rather than `replicas`; existing explicit minima are retained.
 
 ### v1.6.0
 
@@ -520,7 +698,7 @@ Kubernetes: `>=1.30.0-0`
 | file://components/operator | dynamo-operator | 1.7.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.15 |
+| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.2.0-beta1 |
 | oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.2.0 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.17.0 |
 
@@ -546,7 +724,16 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.grovePreflight.deploymentName | string | `""` | External Grove Deployment name. Requires namespace; empty discovers by container name. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
 | dynamo-operator.upgradeCRD | bool | `true` | Whether the cluster-wide operator applies CRDs from its image through the crd-apply init container. When false, the chart installs no CRDs; apply them separately before starting a cluster-wide operator. Namespace-restricted installations must set this to false and use the CRDs managed by the cluster-wide operator. |
+| dynamo-operator.upgradePreflight.job.image | string | `"docker.io/library/python:3.12-slim"` | Image containing Python 3 (standard library only). Override for an internal registry. |
+| dynamo-operator.upgradePreflight.job.imagePullSecrets | list | `[]` | Existing pull secrets shared by the upgrade preflight Jobs. |
+| dynamo-operator.upgradePreflight.job.activeDeadlineSeconds | int | `120` | Maximum duration of each preflight Job in seconds, including retries. |
+| dynamo-operator.upgradePreflight.job.affinity | object | `{}` | Independent preflight affinity. Does not inherit controllerManager.affinity. |
+| dynamo-operator.upgradePreflight.job.podSecurityContext | string | `nil` | Full replacement of the preflight pod security context. Null uses runAsNonRoot: true, runAsUser: 65532, and seccompProfile.type: RuntimeDefault. Omit runAsUser on OpenShift for admission to assign the namespace UID. |
+| dynamo-operator.upgradePreflight.checks.upgradePath.job | object | `{}` | Per-check overrides of upgradePreflight.job. Unspecified fields inherit the shared defaults; affinity, podSecurityContext, and imagePullSecrets replace them as whole values. |
+| dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported forward upgrade. The value is ignored for other target minors and never bypasses other checks. |
+| dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported downgrade. The value is ignored for other target minors and never bypasses other checks. |
 | dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2 Request API with conversion and install the Run and Candidate APIs. Run and Candidate objects are persisted in etcd; incompatible schema changes may make them unreadable or block future CRD upgrades. When true, the operator reconciles v1beta2 Requests into Runs and executes each Run as an AISimulate planner Job with a publisher sidecar that persists deployment Candidates. |
+| dynamo-operator.dgdrV1Beta2.plannerLiveRetune | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: With dgdrV1Beta2.enabled, grant every Planner ServiceAccount what Planner live retune (retune.executor: dgdr) needs: create, read and delete DGDR v1beta2 Requests, read their Runs and Candidates, and read, create, update and delete any Lease in the namespace. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
@@ -609,10 +796,16 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.checkpoint.enabled | bool | `false` | Whether to enable checkpoint/restore functionality |
 | grove.tolerations | list | `[]` | Node tolerations for Grove pods |
 | grove.affinity | object | `{}` | Affinity for Grove pods |
-| grove.crdInstaller.enabled | bool | `true` | Upgrade Grove CRDs before the bundled operator starts. |
+| grove.crdInstaller.upgradeCRDs | bool | `true` | Upgrade Grove CRDs before the bundled operator starts. |
 | grove.config.server.healthProbes.enable | bool | `true` | Enable Grove's webhook-aware liveness and readiness probes. The readiness endpoint stays false until certificates and the webhook server are ready. |
 | kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
 | kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
+| kaiQueueWait.enabled | bool | `true` | Wait for the bundled KAI queue-controller before creating the Dynamo Queues. Disable only when the webhook is known to be serving, or when Queue validation is disabled in kai-config. |
+| kaiQueueWait.image | string | `"registry.k8s.io/kubectl:v1.34.12"` | Image providing kubectl 1.31 or later, which can wait for a resource to be created. Override for an internal registry. |
+| kaiQueueWait.imagePullSecrets | list | `[]` | Existing pull secrets for the wait image. |
+| kaiQueueWait.activeDeadlineSeconds | int | `600` | Maximum Job duration in seconds, including retries. The Helm timeout still bounds the hook. |
+| kaiQueueWait.affinity | object | `{}` | Affinity for the wait Job. Tolerations are inherited from kai-scheduler.global.tolerations. |
+| kaiQueueWait.podSecurityContext | object | `nil` | Full replacement of the wait pod security context. Null defaults to runAsNonRoot=true, runAsUser=65532 and seccompProfile.type=RuntimeDefault. On OpenShift, supply a context without runAsUser for admission to assign it. |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
 
 ### LPX Integration
@@ -683,6 +876,7 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.12-rc1 |
 | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
 | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.15 |
+| 1.7.x           | >= v0.17.0    | >= v0.2.0-beta1 |
 
 Upgrade Grove in lockstep with Dynamo while Grove APIs are not stable. See the
 [v1.4.0 upgrade notes](#v140) for the topology API transition and the

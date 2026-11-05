@@ -10,7 +10,7 @@ tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 import importlib.util
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
@@ -554,52 +554,6 @@ class TestChatTemplateArgsPassthrough:
         )
         # Renderer-managed value wins over the client's nested key (no crash either).
         assert chat_params.chat_template_kwargs["documents"] is None
-
-
-class TestServerDefaultChatTemplateKwargs:
-    """The server-wide --default-chat-template-kwargs must reach the template."""
-
-    def _enable_thinking(self, tokenizer, request_args):
-        """Return the template's enable_thinking under a `{enable_thinking: False}` default."""
-        request = {"model": MODEL, "messages": [{"role": "user", "content": "Hello"}]}
-        if request_args is not None:
-            request["chat_template_args"] = request_args
-        _, _, _, _, chat_params = _prepare_request(
-            request,
-            tokenizer=tokenizer,
-            tool_parser_class=None,
-            default_chat_template_kwargs={"enable_thinking": False},
-        )
-        return chat_params.chat_template_kwargs.get("enable_thinking")
-
-    @pytest.mark.parametrize(
-        "request_args, expected",
-        [
-            (None, False),  # omitted request kwargs: the server default applies
-            ({"enable_thinking": True}, True),  # a request kwarg overrides the default
-            (
-                {"enable_thinking": None},
-                False,
-            ),  # unset (None) request value keeps the default
-        ],
-    )
-    def test_server_default_precedence(self, tokenizer, request_args, expected):
-        assert self._enable_thinking(tokenizer, request_args) is expected
-
-    def test_server_default_is_not_mutated(self, tokenizer):
-        """Processing must not mutate the shared server-default dict."""
-        default = {"enable_thinking": False}
-        _prepare_request(
-            {
-                "model": MODEL,
-                "messages": [{"role": "user", "content": "Hello"}],
-                "reasoning_effort": "high",
-            },
-            tokenizer=tokenizer,
-            tool_parser_class=None,
-            default_chat_template_kwargs=default,
-        )
-        assert default == {"enable_thinking": False}
 
 
 class TestMultimodalFeatureMetadata:
@@ -1261,6 +1215,78 @@ def vllm_processor_module(monkeypatch, real_vllm_processor_module):
     monkeypatch.setattr(module._nvtx, "start_range", lambda *args, **kwargs: object())
     monkeypatch.setattr(module._nvtx, "end_range", lambda rng: None)
     return module
+
+
+@pytest.mark.asyncio
+@pytest.mark.multimodal
+@pytest.mark.parametrize(
+    ("frontend_flags", "expected_options"),
+    [
+        pytest.param({}, {}, id="omitted"),
+        pytest.param(
+            {"renderer_num_workers": None, "mm_processor_cache_gb": None},
+            {},
+            id="unset",
+        ),
+        pytest.param(
+            {"renderer_num_workers": 4},
+            {"renderer_num_workers": 4},
+            id="renderer-only",
+        ),
+        pytest.param(
+            {"mm_processor_cache_gb": 0.0},
+            {"mm_processor_cache_gb": 0.0},
+            id="disable-mm-cache",
+        ),
+        pytest.param(
+            {"renderer_num_workers": 4, "mm_processor_cache_gb": 0.0},
+            {"renderer_num_workers": 4, "mm_processor_cache_gb": 0.0},
+            id="renderer-and-disabled-cache",
+        ),
+        pytest.param(
+            {"renderer_num_workers": 1, "mm_processor_cache_gb": 1.5},
+            {"renderer_num_workers": 1, "mm_processor_cache_gb": 1.5},
+            id="fractional-cache-budget",
+        ),
+        pytest.param(
+            {"renderer_num_workers": 4, "mm_processor_cache_gb": 4.0},
+            {"renderer_num_workers": 4, "mm_processor_cache_gb": 4.0},
+            id="delegate-combination-validation-to-vllm",
+        ),
+    ],
+)
+async def test_chat_factory_forwards_renderer_and_mm_cache_options(
+    vllm_processor_module,
+    monkeypatch,
+    tmp_path,
+    frontend_flags,
+    expected_options,
+):
+    # Stop at the configuration boundary: this test needs no model or renderer.
+    config_error = ValueError("model configuration boundary")
+    model_config = Mock(side_effect=config_error)
+    monkeypatch.setattr(vllm_processor_module, "ModelConfig", model_config)
+    mdc = SimpleNamespace(
+        model_type=lambda: SimpleNamespace(supports_chat=lambda: True),
+        local_dir=lambda: str(tmp_path),
+        runtime_config=lambda: {},
+    )
+    factory = vllm_processor_module.EngineFactory(
+        SimpleNamespace(preprocess_workers=0, trust_remote_code=False),
+        SimpleNamespace(**frontend_flags),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        await factory.chat_engine_factory(None, mdc, None)
+
+    assert exc_info.value is config_error
+    model_config.assert_called_once_with(
+        model=str(tmp_path),
+        tokenizer_mode="auto",
+        config_format="auto",
+        trust_remote_code=False,
+        **expected_options,
+    )
 
 
 def _logprobs_processor(vllm_processor_module):

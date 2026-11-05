@@ -12,11 +12,8 @@ use dynamo_kv_router::{
     config::KvRouterConfig,
 };
 use dynamo_runtime::{
-    component::Endpoint,
-    discovery::DiscoveryQuery,
-    pipeline::{PushRouter, RouterMode},
+    component::Endpoint, discovery::DiscoveryQuery, pipeline::RouterMode,
     prelude::DistributedRuntimeProvider,
-    protocols::annotated::Annotated,
 };
 
 use super::{PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillRouter};
@@ -33,10 +30,7 @@ use crate::{
     discovery::{LoadThresholdHandle, ModelManager, WorkerSetTarget},
     kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext, SelectionPolicySource},
     model_card::ModelDeploymentCard,
-    protocols::common::{
-        llm_backend::{LLMEngineOutput, PreprocessedRequest},
-        timing::WORKER_TYPE_PREFILL,
-    },
+    protocols::common::timing::WORKER_TYPE_PREFILL,
     session_affinity::{SessionAffinityMode, create_affinity_coordinator},
 };
 
@@ -145,6 +139,7 @@ impl PrefillRouter {
             Some(activation_rx),
             model_manager,
             decode_router_mode,
+            false,
             kv_cache_block_size,
             kv_router_config,
             SelectionPolicySource::Registry,
@@ -176,6 +171,7 @@ impl PrefillRouter {
             model_manager,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             decode_router_mode,
+            decode_supports_prefill_cancellation: false,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             session_affinity_mode,
             conditional_disagg_policy: make_conditional_disagg_policy(None),
@@ -196,6 +192,7 @@ impl PrefillRouter {
         activation_rx: Option<oneshot::Receiver<Endpoint>>,
         model_manager: Arc<ModelManager>,
         decode_router_mode: RouterMode,
+        decode_supports_prefill_cancellation: bool,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         selection_policy: SelectionPolicySource,
@@ -228,6 +225,7 @@ impl PrefillRouter {
             model_manager: model_manager.clone(),
             cancel_token: cancel_token.clone(),
             decode_router_mode,
+            decode_supports_prefill_cancellation,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             session_affinity_mode,
             conditional_disagg_policy,
@@ -391,20 +389,14 @@ impl PrefillRouter {
             )
             .await?;
 
-            // Build the PushRouter for prefill with KV mode using the shared client
-            let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
-                client,
-                RouterMode::KV,
-                None, // worker_monitor
+            Arc::new(
+                RoutingHost::builder(client, RouterMode::KV)
+                    .kv_router(kv_chooser)
+                    .load_context(load_context.clone())
+                    .affinity_coordinator(affinity)
+                    .build()
+                    .await?,
             )
-            .await?;
-
-            Arc::new(RoutingHost::new_with_load_context_and_coordinator(
-                push_router,
-                kv_chooser,
-                load_context.clone(),
-                affinity,
-            ))
         } else {
             let affinity = create_affinity_coordinator(
                 prefill_session_affinity_ttl,
@@ -413,21 +405,15 @@ impl PrefillRouter {
             )
             .await?;
 
-            // Create the transport and discovery layer for the builtin policy.
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
             // available in KV routing mode where the router has actual bookkeeping.
-            let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
-                client,
-                prefill_router_mode,
-                None, // worker_monitor
+            Arc::new(
+                RoutingHost::builder(client, prefill_router_mode)
+                    .load_context(load_context.clone())
+                    .affinity_coordinator(affinity)
+                    .build()
+                    .await?,
             )
-            .await?;
-
-            Arc::new(RoutingHost::new_builtin_with_coordinator(
-                push_router,
-                load_context.clone(),
-                affinity,
-            )?)
         };
 
         Ok(PrefillBinding {
@@ -680,8 +666,10 @@ mod tests {
     use crate::discovery::CommittedWorkerSetTarget;
     use crate::entrypoint::RouterConfig;
     use crate::kv_router::prefill_router::PrefillRouterLifecycle;
+    use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
     use dynamo_kv_router::config::KvRouterConfig;
     use dynamo_kv_router::protocols::RoutingConstraints;
+    use dynamo_runtime::protocols::annotated::Annotated;
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         discovery::{DiscoverySpec, EventTransportKind},
@@ -953,6 +941,7 @@ mod tests {
             None,
             Arc::new(ModelManager::new()),
             RouterMode::RoundRobin,
+            false,
             16,
             None,
             SelectionPolicySource::Registry,
@@ -1260,6 +1249,7 @@ mod tests {
             None,
             Arc::new(ModelManager::new()),
             RouterMode::KV,
+            false,
             64,
             None,
             SelectionPolicySource::Registry,
@@ -1577,6 +1567,7 @@ mod tests {
             None,
             Arc::new(ModelManager::new()),
             RouterMode::KV,
+            false,
             64,
             None,
             SelectionPolicySource::Registry,

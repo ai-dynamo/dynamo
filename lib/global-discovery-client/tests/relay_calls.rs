@@ -8,10 +8,10 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use dynamo_global_discovery_client::{
-    Capacity, DiscoveryClientError, GlobalDiscoveryClient, Lease, PoolKey, PoolLocation,
-    PoolRegistration, RouterReplica, RouterReplicaId,
+    Capacity, DiscoveryClientError, GlobalDiscoveryClient, Lease, PoolKey, PoolListing,
+    PoolLocation, PoolRegistration, RouterReplica, RouterReplicaId,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,6 +24,7 @@ struct FakeService(Arc<Mutex<FakeState>>);
 struct FakeState {
     routers_status: StatusCode,
     routers_body: String,
+    pools_body: String,
     /// Registrations as the JSON the service received.
     registrations: Vec<Value>,
 }
@@ -33,6 +34,7 @@ impl FakeService {
         Self(Arc::new(Mutex::new(FakeState {
             routers_status: StatusCode::OK,
             routers_body: routers_body.to_owned(),
+            pools_body: r#"{ "pools": [], "complete": true }"#.to_owned(),
             registrations: Vec::new(),
         })))
     }
@@ -42,7 +44,7 @@ impl FakeService {
     async fn client(&self) -> GlobalDiscoveryClient {
         let app = axum::Router::new()
             .route("/discovery/routers", get(serve_routers))
-            .route("/discovery/pools", post(serve_register))
+            .route("/discovery/pools", get(serve_pools).post(serve_register))
             .with_state(self.clone());
         let address = serve(app).await;
         let base_url = Url::parse(&format!("http://{address}/discovery")).unwrap();
@@ -65,6 +67,14 @@ async fn serve_routers(State(fake): State<FakeService>) -> Response {
     (
         [(header::CONTENT_TYPE, "application/json")],
         state.routers_body.clone(),
+    )
+        .into_response()
+}
+
+async fn serve_pools(State(fake): State<FakeService>) -> Response {
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        fake.0.lock().unwrap().pools_body.clone(),
     )
         .into_response()
 }
@@ -152,6 +162,40 @@ async fn reports_a_non_2xx_status() {
 }
 
 #[tokio::test]
+async fn keeps_only_the_start_of_a_long_error_body() {
+    // The error body never ends, so the call returns only if it stops reading
+    // once it has enough. Byte 1024 falls inside an "é", so the cut must step
+    // back one byte.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        let _ = socket.read(&mut request).await.unwrap();
+        socket
+            .write_all(b"HTTP/1.1 502 Bad Gateway\r\nconnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        socket
+            .write_all(format!("a{}", "é".repeat(2000)).as_bytes())
+            .await
+            .unwrap();
+        std::future::pending::<()>().await;
+    });
+    let base_url = Url::parse(&format!("http://{address}/")).unwrap();
+    let client = GlobalDiscoveryClient::new(base_url, Duration::from_secs(60)).unwrap();
+
+    let error = tokio::time::timeout(Duration::from_secs(5), client.routers())
+        .await
+        .expect("the client waited for the whole error body")
+        .unwrap_err();
+    let DiscoveryClientError::Status { body, .. } = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(body, &format!("a{}", "é".repeat(511)));
+}
+
+#[tokio::test]
 async fn a_cut_off_body_is_a_request_error() {
     // The body ends before its Content-Length. That is a transport failure,
     // not a change in the JSON shape, so it must not be reported as `Decode`.
@@ -172,6 +216,57 @@ async fn a_cut_off_body_is_a_request_error() {
     let error = client.routers().await.unwrap_err();
     assert!(
         matches!(error, DiscoveryClientError::Request { .. }),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn lists_pools_and_whether_the_list_is_complete() {
+    let fake = FakeService::new(r#"{ "routers": [] }"#);
+    fake.0.lock().unwrap().pools_body = r#"{
+        "pools": [{
+            "key": { "cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1" },
+            "location": { "region": "us-west-2", "availability_zone": "usw2-az1", "datacenter": null },
+            "model": "Qwen/Qwen3-0.6B",
+            "capabilities": ["aggregated"],
+            "frontends": ["http://10.1.22.20:8000/"],
+            "capacity": [{ "sku": "H100", "workers": 8 }],
+            "relay_identities": ["ip:10.1.22.30"]
+        }],
+        "complete": false
+    }"#
+    .to_owned();
+    let client = fake.client().await;
+
+    let listed = client.pools().await.unwrap();
+
+    assert!(!listed.complete);
+    let registered = registration();
+    assert_eq!(
+        listed.pools,
+        [PoolListing {
+            key: registered.key,
+            location: registered.location,
+            model: Some(registered.model),
+            capabilities: registered.capabilities,
+            frontends: registered.frontends,
+            capacity: registered.capacity,
+            relay_identities: vec!["ip:10.1.22.30".into()],
+        }]
+    );
+}
+
+#[tokio::test]
+async fn one_bad_pool_fails_the_whole_list() {
+    let fake = FakeService::new(r#"{ "routers": [] }"#);
+    let mut body = serde_json::from_str::<Value>(&pools_body(&["west-1", "west-2"], true)).unwrap();
+    body["pools"][1]["key"]["dgd_name"] = json!(" ");
+    fake.0.lock().unwrap().pools_body = body.to_string();
+    let client = fake.client().await;
+
+    let error = client.pools().await.unwrap_err();
+    assert!(
+        matches!(error, DiscoveryClientError::Decode { .. }),
         "{error:?}"
     );
 }
@@ -222,4 +317,19 @@ async fn a_redirect_is_an_error() {
         matches!(&error, DiscoveryClientError::Status { status, .. } if *status == StatusCode::MOVED_PERMANENTLY),
         "{error:?}"
     );
+}
+
+/// A `GET /pools` body listing each DGD name.
+fn pools_body(dgd_names: &[&str], complete: bool) -> String {
+    let pools = dgd_names
+        .iter()
+        .map(|dgd_name| {
+            json!({
+                "key": { "cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": dgd_name },
+                "location": { "region": "us-west-2", "availability_zone": null, "datacenter": null },
+                "model": "Qwen/Qwen3-0.6B"
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({ "pools": pools, "complete": complete }).to_string()
 }

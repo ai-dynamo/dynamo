@@ -129,6 +129,13 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_token_budget: Option<u32>,
 
+    /// Keep prior assistant reasoning in the rendered history (Beam serving path).
+    /// Beam-route request extension: supplied prior-turn reasoning is always kept in the
+    /// rendered prompt (`true` and omitted are the same); `false` is accepted for
+    /// compatibility and has no effect — omit `reasoning_content` to drop reasoning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserve_thinking: Option<bool>,
+
     /// Runtime media decoding parameters, forwarded verbatim to the worker when the
     /// worker owns decoding. When the frontend decodes, these override the MDC defaults.
     /// Kept opaque so options the frontend does not own pass through untouched.
@@ -244,6 +251,11 @@ impl NvCreateChatCompletionRequest {
 const THINKING_TOGGLES: [&str; 2] = ["thinking", "enable_thinking"];
 const THINKING_KEYS: [&str; 3] = ["thinking", "enable_thinking", "thinking_mode"];
 
+/// A `chat_template_kwargs` key that the normalizer reads as a thinking control.
+pub(crate) fn is_thinking_control_key(key: &str) -> bool {
+    THINKING_KEYS.contains(&key) || key == "reasoning_effort"
+}
+
 fn set_thinking(args: &mut HashMap<String, serde_json::Value>, on: bool) {
     args.insert("thinking".to_string(), serde_json::Value::Bool(on));
     args.insert("enable_thinking".to_string(), serde_json::Value::Bool(on));
@@ -315,6 +327,15 @@ pub struct NvCreateChatCompletionResponse {
 }
 
 /// Parser lifecycle evidence carried between serving components, never to OpenAI clients.
+///
+/// Evidence is keyed by choice and tool index. It may repeat or arrive without
+/// a matching choice or tool-call delta.
+///
+/// In unified-parser output, `complete` reflects parser state after processing
+/// the source chunk. Multiple rewritten children can carry that final state,
+/// including a name-only child before its argument fragments. It is not an
+/// argument-delivery barrier: consumers must not infer that all arguments have
+/// arrived, or interpret empty arguments as a parameterless call, from it alone.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallCompletion {
     pub choice_index: u32,
@@ -349,6 +370,12 @@ pub struct NvCreateChatCompletionStreamResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schema(ignore)]
     pub tool_call_completion: Vec<ToolCallCompletion>,
+    /// Choice indices with confirmed model EOS under an installed Beam turn grammar.
+    /// User stops, unconstrained output and transport EOF never authorize closure.
+    /// Defaulting makes older frontend/worker transports conservative; HTTP removes it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(ignore)]
+    pub model_eos: Vec<u32>,
 }
 
 fn deserialize_prompt_logprobs<'de, D>(
@@ -422,6 +449,7 @@ pub(crate) fn scrub_synthetic_chunk_metadata(
     data.llm_metrics = None;
     data.tool_call_completion.clear();
     data.message_boundary = None;
+    data.model_eos.clear();
     data.nvext = None;
     data.prompt_logprobs = None;
     Some(())
@@ -2378,5 +2406,73 @@ mod tests {
             .extract_stop_conditions()
             .expect("Failed to extract stop conditions");
         assert_eq!(stop_conditions.max_thinking_tokens, None);
+    }
+}
+
+#[cfg(test)]
+mod preserve_thinking_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn chat_request_with(extra: &serde_json::Value) -> NvCreateChatCompletionRequest {
+        let mut body = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 20
+        });
+        for (key, value) in extra.as_object().expect("fixture is an object") {
+            body[key] = value.clone();
+        }
+        serde_json::from_value(body).expect("Failed to deserialize request")
+    }
+
+    #[test]
+    fn preserve_thinking_omitted_is_none_and_not_serialized() {
+        let request = chat_request_with(&json!({}));
+        assert_eq!(request.preserve_thinking, None);
+        assert!(request.unsupported_fields.is_empty());
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("preserve_thinking")
+                .is_none()
+        );
+        ValidateRequest::validate(&request).unwrap();
+    }
+
+    #[test]
+    fn preserve_thinking_true_roundtrips_and_validates() {
+        let request = chat_request_with(&json!({"preserve_thinking": true}));
+        assert_eq!(request.preserve_thinking, Some(true));
+        assert!(request.unsupported_fields.is_empty());
+        ValidateRequest::validate(&request).unwrap();
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["preserve_thinking"], json!(true));
+        let back: NvCreateChatCompletionRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(back.preserve_thinking, Some(true));
+    }
+
+    #[test]
+    fn preserve_thinking_false_roundtrips_and_validates() {
+        let request = chat_request_with(&json!({"preserve_thinking": false}));
+        assert_eq!(request.preserve_thinking, Some(false));
+        ValidateRequest::validate(&request).unwrap();
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["preserve_thinking"], json!(false));
+    }
+
+    #[test]
+    fn preserve_thinking_rejects_non_bool_values() {
+        for bad in [json!("true"), json!(1), json!({})] {
+            let body = json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "preserve_thinking": bad,
+            });
+            assert!(
+                serde_json::from_value::<NvCreateChatCompletionRequest>(body).is_err(),
+                "{bad} must not deserialize"
+            );
+        }
     }
 }

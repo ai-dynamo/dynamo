@@ -6,14 +6,52 @@ subtitle: Run Dynamo beside a stock inference engine through its native gRPC API
 ---
 
 > [!WARNING]
-> **Experimental.** Sidecar packaging, launchers, and API coverage are still
-> evolving. The sidecar path does not yet match every feature of the in-process
-> backends.
+> **Experimental.** Sidecar integration is under active development, so this page and the linked support notes may become stale. The sidecar path does not yet match every feature of the in-process backends.
 
 A Dynamo sidecar runs beside the inference engine process. It registers the
 engine with Dynamo discovery, forwards engine events into the Dynamo event
 plane, and serves requests from the Dynamo frontend by calling the engine's
 native gRPC API.
+
+## Backend Support Matrix
+
+**Legend:** Supported = available through the sidecar; Limited = available with restrictions; Engine-configured = enabled in the native engine; No = unavailable. See the linked backend support notes for details.
+
+| Capability | [vLLM](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/SUPPORT_NOTES.md#vllm) | [SGLang](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/SUPPORT_NOTES.md#sglang) | [TensorRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/SUPPORT_NOTES.md#tensorrt-llm) |
+|---|---|---|---|
+| Text generation, streaming, and cancellation | Supported | Supported | Supported |
+| Tool calling through the Dynamo frontend | Supported | Supported | Supported |
+| Disaggregated prefill/decode serving | Supported | Supported | Supported |
+| KV-aware routing | Supported | Supported | Supported |
+| Multimodal input | Supported: image, video, audio | Supported: image, video, audio | Limited: images and video |
+| Separate multimodal encoder workers | Supported | No | No |
+| LoRA adapters | Supported | No | No |
+| Structured output and logprobs | Supported | Supported | Supported: no prompt logprobs |
+| Embedding endpoints | No | No | No |
+| Runtime weight updates and sleep/wake controls | Limited | No | No |
+
+### Deployment
+
+| Capability | vLLM | SGLang | TensorRT-LLM |
+|---|---|---|---|
+| Kubernetes single-node deployment | Supported | Supported | Supported |
+| Kubernetes multinode deployment | Supported | Supported | Supported |
+
+### Operations and Recovery
+
+| Capability | vLLM | SGLang | TensorRT-LLM |
+|---|---|---|---|
+| Observability: metrics, logs, and tracing | Limited | Limited | Limited |
+| SLA-based planner and autoscaling | No | No | No |
+| Native engine cache offloading | Engine-configured | Engine-configured | Engine-configured |
+| GPU Memory Service (GMS) | Requires separate integration | Requires separate integration | Requires separate integration |
+| Checkpoint/restore | Requires separate integration | Requires separate integration | Requires separate integration |
+| Shadow-engine failover | Requires separate integration | Requires separate integration | Requires separate integration |
+| In-flight request migration | Supported: opt-in token replay | Supported: opt-in token replay | Supported: opt-in token replay |
+| Graceful shutdown and draining | Limited: bounded drain | Limited: bounded drain | Limited: bounded drain |
+| Speculative decoding | Engine-configured | Engine-configured | Engine-configured |
+
+For engine-version requirements and launch examples, see [vLLM](../../modular-components/backends/vllm/sidecar.md), [SGLang](../../modular-components/backends/sglang/sidecar.md), and [TensorRT-LLM](../../modular-components/backends/tensorrt-llm/sidecar.md).
 
 ## Design Goals
 
@@ -109,12 +147,13 @@ port `9090`; in host-network LPX Agent Pods the sidecar keeps only the probes it
 template declares. These probes do not track engine loading, so keep the engine's own
 probes on `main`. Sidecar mode supports worker, prefill, and decode components,
 and LPX components through their role templates.
-SGLang and vLLM multinode deployments require explicit leader and worker role
-PodTemplates and an explicit `backendFramework`. The leader declares `runtime`.
-Worker placement depends on the engine topology. TensorRT-LLM does not yet support
-operator-managed multinode sidecars. See the
-[SGLang guide](../../modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes)
-and the [vLLM guide](../../modular-components/backends/vllm/sidecar.md#deploy-on-kubernetes).
+SGLang, vLLM, and TensorRT-LLM multinode deployments require explicit leader and
+worker role PodTemplates. Set `backendFramework` explicitly, as the examples do: the
+operator does not infer a backend from a native engine command. The leader declares
+`runtime`. Worker placement depends on the engine topology. See the
+[SGLang guide](../../modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes),
+the [vLLM guide](../../modular-components/backends/vllm/sidecar.md#deploy-on-kubernetes),
+and the [TensorRT-LLM guide](../../modular-components/backends/tensorrt-llm/sidecar.md#deploy-on-kubernetes).
 
 ## Topologies
 

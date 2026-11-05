@@ -28,6 +28,7 @@ import (
 type ModelSpec struct {
 	// Name identifies the model in the syntax accepted by the selected backend.
 	// +kubebuilder:validation:MinLength=1
+	// +required
 	Name string `json:"name"`
 }
 
@@ -91,12 +92,14 @@ type KVCapacityFractionRange struct {
 	// +kubebuilder:validation:ExclusiveMinimum=true
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1
+	// +required
 	Min float64 `json:"min"`
 
 	// Max is the upper end of the searched fraction range.
 	// +kubebuilder:validation:ExclusiveMinimum=true
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1
+	// +required
 	Max float64 `json:"max"`
 }
 
@@ -154,13 +157,99 @@ type StaticWorkloadSpec struct {
 	Load *StaticLoadSpec `json:"load,omitempty"`
 }
 
-// WorkloadSpec defines the synthetic traffic model used for every candidate evaluation.
+// TraceFormat identifies the decoder of a recorded request trace. Lowering translates it to
+// AISimulate's native traffic.source.format.
+// +kubebuilder:validation:Enum=Dynamo
+type TraceFormat string
+
+const (
+	// TraceFormatDynamo is the Dynamo request trace (dynamo.request.trace.v1) that the frontend
+	// records, as JSON Lines or gzip-compressed JSON Lines. It lowers to AISimulate's dynamo format.
+	TraceFormatDynamo TraceFormat = "Dynamo"
+)
+
+// TracePVCSource names one trace file on a PersistentVolumeClaim in the Request namespace.
+type TracePVCSource struct {
+	// ClaimName is the PersistentVolumeClaim, in the Request namespace, that holds the trace.
+	// The Run Job mounts only the trace file from it, read-only, and only into the AISimulate
+	// container. Each Run protects the claim with the finalizer `nvidia.com/dgdr-run-<run-uid>`
+	// until the Run completes or, for a Run deleted before it completes, until no Job of the Run
+	// is left. Garbage collection deletes the Job of a deleted Run before the Job's pod, so the
+	// finalizer of a deleted Run can be released while that pod still stops; Kubernetes
+	// PersistentVolumeClaim protection keeps the claim until no pod uses it. Deleting the claim
+	// cancels the Runs that read it.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	ClaimName string `json:"claimName"`
+
+	// SubPath names one trace file relative to the root of the claim; the Run Job mounts it as
+	// the subPath of the claim volume. It is neither a directory nor a glob. It must not start or
+	// end with '/' and must not contain empty, '.' or '..' segments or a NUL character, which no
+	// file name can hold. The file must be complete before the Request is created and must never
+	// be rewritten: every Run of the Request reads it when its Job starts.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	// +kubebuilder:validation:XValidation:rule="!self.startsWith('/') && !self.endsWith('/') && !self.contains('//') && !self.matches('(^|/)[.][.]?(/|$)')",message="subPath must be relative to the claim root without empty, '.' or '..' segments"
+	// +kubebuilder:validation:XValidation:rule="!self.contains('\\u0000')",message="subPath must not contain a NUL character"
+	SubPath string `json:"subPath"`
+}
+
+// TraceSourceSpec identifies exactly one trace artifact. A PersistentVolumeClaim is the only
+// source in this release.
+// +kubebuilder:validation:XValidation:rule="has(self.persistentVolumeClaim)",message="persistentVolumeClaim is required"
+type TraceSourceSpec struct {
+	// PersistentVolumeClaim reads the trace from a PersistentVolumeClaim in the Request
+	// namespace.
+	// +optional
+	PersistentVolumeClaim *TracePVCSource `json:"persistentVolumeClaim,omitempty"`
+}
+
+// TraceReplaySpec configures how AISimulate replays a decoded trace.
+type TraceReplaySpec struct {
+	// ArrivalSpeedupRatio multiplies the recorded request-arrival rate. 1.0 preserves it.
+	// When omitted, the recorded arrival times are replayed unchanged.
+	// +optional
+	// +kubebuilder:validation:ExclusiveMinimum=true
+	// +kubebuilder:validation:Minimum=0
+	ArrivalSpeedupRatio *float64 `json:"arrivalSpeedupRatio,omitempty"`
+}
+
+// TraceWorkloadSpec replays a recorded request trace open loop at its recorded arrival times.
+type TraceWorkloadSpec struct {
+	// Format identifies the trace decoder. Defaults to Dynamo.
+	// +optional
+	// +kubebuilder:default=Dynamo
+	Format TraceFormat `json:"format,omitempty"`
+
+	// Source identifies the trace artifact.
+	// +required
+	Source TraceSourceSpec `json:"source"`
+
+	// Replay configures how the decoded trace is replayed.
+	// +optional
+	Replay *TraceReplaySpec `json:"replay,omitempty"`
+}
+
+// WorkloadSpec defines the traffic model used for every candidate evaluation. static and
+// trace are mutually exclusive.
+// +kubebuilder:validation:XValidation:rule="!(has(self.static) && has(self.trace))",message="static and trace are mutually exclusive"
 type WorkloadSpec struct {
-	// Static defines AISimulate synthetic traffic. When omitted, admission supplies the
-	// complete static default. An explicit empty object opts out; any nonempty object is
-	// completed with omitted inputTokens, outputTokens and load defaults.
+	// Static defines AISimulate synthetic traffic. When omitted without a trace, admission
+	// supplies the complete static default. An explicit empty object opts out; any nonempty
+	// object is completed with omitted inputTokens, outputTokens and load defaults.
 	// +optional
 	Static *StaticWorkloadSpec `json:"static,omitempty"`
+
+	// Trace replays a recorded request trace from a PersistentVolumeClaim in the Request
+	// namespace. Admission supplies no static default when it is set. The Run Job mounts only the
+	// trace file, read-only through a subPath of the claim, at /var/run/aisimulate/trace/trace.jsonl,
+	// or trace.jsonl.gz when subPath ends in .gz. The trace lowers to the default traffic.source
+	// and traffic.load, which spec.aisim.inputOverrides can replace or delete.
+	// +optional
+	Trace *TraceWorkloadSpec `json:"trace,omitempty"`
 }
 
 // ObjectiveMode selects the optimization mode. Pareto is reserved for a future
@@ -223,25 +312,35 @@ type ObjectiveSpec struct {
 
 	// SLA defines per-request latency bounds used to calculate goodput. Admission defaults an
 	// omitted SLA to TTFT 2000 ms and ITL 30 ms. An explicit empty object opts out of those
-	// defaults. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names.
+	// defaults. spec.aisim.inputOverrides.evaluation.sla overrides the bounds it names.
 	// +optional
 	SLA *ObjectiveSLASpec `json:"sla,omitempty"`
 }
 
-// AISimulateSpec supplies public recommendation input to the AISimulate version in the operator's configured
+// AISimSpec supplies public recommendation input to the AISimulate version in the operator's configured
 // planner image.
-type AISimulateSpec struct {
+type AISimSpec struct {
 	// InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from
 	// the typed fields. It uses the upstream AISimulate JSON contract, including
 	// snake_case names. Values here take precedence, and null deletes a lowered
 	// field. The dgdr_run member must remain an object, and its operator-owned
 	// transport, identity, and runtime fields name, max_candidates, snapshot_dir,
 	// runtime_image, runtime_version_override, derive_runtime_images,
-	// num_gpus_per_node, and namespace are operator-owned. Request admission
+	// num_gpus_per_node, and namespace are operator-owned. Request and Run admission
 	// rejects them, and the Run controller enforces its values while lowering the
-	// immutable snapshot. The operator runs the AISimulate version from its
-	// configured planner image; Requests and Runs cannot select a different image
-	// or version.
+	// immutable snapshot. A typed spec.workload.trace is an underlay like the other
+	// typed fields: it supplies the default traffic.source (type trace, format
+	// dynamo and the mounted trace file in paths) and the recorded-arrival
+	// traffic.load. Overrides can replace those values, including
+	// traffic.source.type, format, and paths, and null deletes the named field or
+	// parent object; the Run controller does not restore it. The typed
+	// PersistentVolumeClaim source alone decides the Run Job's trace mount and its
+	// claim dependency, so overriding a native path adds no volume mount.
+	// The operator runs the AISimulate version from its configured planner image;
+	// Requests and Runs cannot select a different image or version.
+	// Request and Run creation validate the merged input against the bundled AISimulate input
+	// schema. Request spec changes require the same validation; Run specs are immutable.
+	// Unchanged specs remain metadata-updatable after a bundled schema change.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
@@ -257,6 +356,32 @@ type RecommendationSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	MaxCandidates int32 `json:"maxCandidates,omitempty"`
+}
+
+// OverridesSpec patches the generated deployment independently for every selected Candidate.
+type OverridesSpec struct {
+	// DGD is one partial nvidia.com/v1beta1 DynamoGraphDeployment applied by the publisher
+	// using the DGD schema's Server-Side Apply merge rules. Other API versions are not supported.
+	// Components must already exist; named containers may be added. Atomic lists, including
+	// container command and args, replace the generated lists. The supported customization
+	// $patch: {args: append} on a container appends to its explicit generated args list;
+	// both the container and its args must already exist. No other $patch operation is supported.
+	// Application is atomic: a merge failure retains the unchanged generated deployment
+	// with Valid=False. A successful merge is checked by strict server-side dry-run;
+	// the dry-run response and its defaults are discarded. The Candidate retains the
+	// unpruned payload from before the check. Invalid Candidates count toward maxCandidates.
+	// Overrides may change any deployment configuration. Evaluation metrics are not
+	// recomputed and continue to describe the original AISimulate configuration.
+	// DGD labels and annotations become Candidate labels and annotations. A failed merge
+	// retains only the original generated metadata; a successful merge followed by failed
+	// dry-run validation retains the merged metadata on the invalid Candidate. Other metadata
+	// and publisher-owned keys cannot be overridden; such attempts fail atomically.
+	// The complete Candidate metadata must satisfy Kubernetes limits, including generated
+	// and reserved annotations. An override that exceeds those limits fails atomically.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:EmbeddedResource
+	DGD *runtime.RawExtension `json:"dgd,omitempty"`
 }
 
 // NativeSearchInput defines the v1beta2 search input shared by Requests and
@@ -279,12 +404,14 @@ type NativeSearchInput struct {
 	// +optional
 	Hardware *HardwareSpec `json:"hardware,omitempty"`
 
-	// Workload defines the synthetic traffic model used for every candidate evaluation.
+	// Workload defines the traffic model used for every candidate evaluation: synthetic static
+	// traffic or a recorded trace.
 	// When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;
 	// an explicit empty workload receives the same shape. workload.static: {} opts out of all
-	// traffic defaults. Any other static object is completed with its missing defaults.
-	// spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over
-	// every lowered traffic field it names.
+	// traffic defaults. Any other static object is completed with its missing defaults, and a
+	// trace workload receives no static default.
+	// spec.aisim.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over
+	// every lowered traffic field it names, including the fields a trace lowers.
 	// The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction
 	// search. Lowering independently defaults optimizer.max_trials to 320.
 	// +optional
@@ -296,13 +423,17 @@ type NativeSearchInput struct {
 	// +optional
 	Objective *ObjectiveSpec `json:"objective,omitempty"`
 
-	// AISimulate supplies public recommendation input to the operator's AISimulate execution bundle.
+	// AISim supplies public recommendation input to the operator's AISimulate execution bundle.
 	// +optional
-	AISimulate *AISimulateSpec `json:"aisimulate,omitempty"`
+	AISim *AISimSpec `json:"aisim,omitempty"`
 
 	// Recommendation controls bounded projection into DGDC resources.
 	// +optional
 	Recommendation *RecommendationSpec `json:"recommendation,omitempty"`
+
+	// Overrides customizes the generated DGD without changing AISimulate execution.
+	// +optional
+	Overrides *OverridesSpec `json:"overrides,omitempty"`
 }
 
 // DynamoGraphDeploymentRequestNativeSpec contains the native v1beta2 request fields.
@@ -313,7 +444,7 @@ type DynamoGraphDeploymentRequestNativeSpec struct {
 // DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
 // Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta1) != has(self.model)",message="exactly one of native v1beta2 fields or v1beta1 must be specified"
-// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisim) || has(self.recommendation) || has(self.overrides))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta1) == has(oldSelf.v1beta1) && (!has(self.v1beta1) || self.v1beta1 == oldSelf.v1beta1)",message="the conversion carrier is immutable"
 type DynamoGraphDeploymentRequestSpec struct {
 	DynamoGraphDeploymentRequestNativeSpec `json:",inline"`
@@ -374,10 +505,14 @@ type DynamoGraphDeploymentRequestStatus struct {
 
 // DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
 type DynamoGraphDeploymentRequest struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DynamoGraphDeploymentRequestSpec   `json:"spec"`
+	// +required
+	Spec DynamoGraphDeploymentRequestSpec `json:"spec"`
+
+	// +optional
 	Status DynamoGraphDeploymentRequestStatus `json:"status,omitempty"`
 }
 

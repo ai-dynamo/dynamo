@@ -92,6 +92,12 @@ struct RegisterRequest {
     block_size: u32,
     dp_rank: Option<u32>,
     replay_endpoint: Option<String>,
+    /// The source derives multimodal pad values from engine identities (SGLang
+    /// after sgl-project/sglang#43043): exclude every event token at or above
+    /// `MM_PAD_SHIFT_VALUE`. Otherwise only values that do not fit in `u32`
+    /// are excluded.
+    #[serde(default)]
+    engine_owned_mm_identity: bool,
     /// Optional per-tenant salt (Mooncake RFC #1403 `additionalsalt`).
     /// Currently accepted but not yet mixed into hashes — engines apply
     /// their own salt internally. Plumbed for forward compatibility.
@@ -177,6 +183,7 @@ async fn register(
             req.routing_group,
             req.block_size,
             req.replay_endpoint,
+            req.engine_owned_mm_identity,
         )
         .await
     {
@@ -731,6 +738,7 @@ mod tests {
                 "acme".to_string(),
                 4,
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -745,6 +753,7 @@ mod tests {
                 "other".to_string(),
                 8,
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -913,6 +922,7 @@ mod tests {
                 "default".to_string(),
                 4,
                 None,
+                false,
             )
             .await
             .unwrap();
