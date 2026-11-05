@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Replace <tag> with a supported SGLang image tag before deploying.
 # EXPERIMENTAL: engine-primary aggregated SGLang behind Dynamo's KV-aware router
 
 apiVersion: nvidia.com/v1beta1
@@ -40,7 +41,7 @@ spec:
               optional: true
         containers:
         - name: main
-          image: lmsysorg/sglang:v0.5.22
+          image: lmsysorg/sglang:<tag>
           # All probes pass only for HealthCheckResponse.healthy=true;
           # its raw protobuf encoding is 0x08 0x01.
           startupProbe:

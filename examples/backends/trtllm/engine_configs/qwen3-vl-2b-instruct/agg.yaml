@@ -29,5 +29,5 @@ kv_cache_config:
   free_gpu_memory_fraction: 0.30
   enable_block_reuse: false
 
-cache_transceiver_config:
-  backend: DEFAULT
+# No cache_transceiver_config: agg and E/PD pd workers transfer no KV cache, and
+# multimodal KV events need KV cache manager v1, which TensorRT-LLM pairs only with CPP.

@@ -244,6 +244,40 @@ def runtime_candidate_errors(
     )
 
 
+def live_retune_sla_errors(
+    config: PlannerConfig, candidate: PlannerConfig
+) -> list[str]:
+    """Return why ``candidate`` cannot replace ``config`` under live retune.
+
+    The live retune controller and the supervisor's state fingerprint read
+    the scoring SLA only when they are built: at startup, or at a rebuild for
+    a spec, P4 or DGD change. A runtime change of an inherited ``ttft_ms`` or
+    ``itl_ms`` would leave the running controller scoring with the old SLA
+    until such a rebuild, which would then apply the new SLA and, through its
+    new fingerprint, reset the persisted retune state.
+    """
+
+    if config.retune is None or candidate.retune is None:
+        return []
+    current = config.retune.scoring_sla(config.ttft_ms, config.itl_ms)
+    proposed = candidate.retune.scoring_sla(candidate.ttft_ms, candidate.itl_ms)
+    changed = [
+        field
+        for field, old, new in zip(("ttft_ms", "itl_ms"), current, proposed)
+        if old != new
+    ]
+    if not changed:
+        return []
+    fields = " and ".join(changed)
+    overrides = " and ".join(f"retune.sla_{field}" for field in changed)
+    return [
+        f"cannot change {fields} at runtime while retune.executor is 'dgdr': "
+        f"live retune inherits its scoring SLA from {fields} ({overrides} unset); "
+        f"restart the planner with the new {fields}, or restart it with "
+        f"{overrides} set to keep {fields} changeable at runtime"
+    ]
+
+
 def prepare_predictor(
     config: PlannerConfig,
     capabilities: WorkerCapabilities,

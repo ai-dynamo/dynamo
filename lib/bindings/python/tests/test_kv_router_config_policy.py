@@ -70,6 +70,16 @@ def test_to_json_round_trip_is_idempotent() -> None:
     assert KvRouterConfig.from_json(text).to_json() == text
 
 
+def test_router_queue_policy_keeps_fcfs_default_and_accepts_edf() -> None:
+    # Configured policy classes default to EDF; the router-wide policy stays FCFS.
+    assert json.loads(KvRouterConfig().to_json())["router_queue_policy"] == "fcfs"
+    text = KvRouterConfig(router_queue_policy="edf").to_json()
+    assert json.loads(text)["router_queue_policy"] == "edf"
+    assert KvRouterConfig.from_json(text).to_json() == text
+    with pytest.raises(ValueError, match="expected 'edf', 'fcfs', 'lcfs', or 'wspt'"):
+        KvRouterConfig(router_queue_policy="random")
+
+
 def test_policy_parameters_resolve_every_worker_type() -> None:
     config = _non_default_config()
     for worker_type in ("aggregated", "prefill"):

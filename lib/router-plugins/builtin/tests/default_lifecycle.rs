@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-use dynamo_custom_policy_builtin::default_factory;
 use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_kv_router::services::selection::{
     PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore, WorkerRequest,
 };
 use dynamo_kv_router::{KvRouterConfig, RoutingPartitionId};
+use dynamo_router_policies::default_factory;
 
 fn worker(worker_id: u64) -> WorkerRequest {
     WorkerRequest {
@@ -138,21 +138,25 @@ async fn runtime_updates_are_conditional_and_cancelled_writes_do_not_apply() {
 
 #[tokio::test]
 async fn scoring_error_does_not_book_and_allows_retry() {
-    use dynamo_kv_router::{
+    use dynamo_kv_router::WorkerSelectionPolicyError;
+    use dynamo_kv_router::plugins::worker_selection::{
         WorkerCandidates, WorkerInputView, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-        WorkerSelectionPolicy, WorkerSelectionPolicyError,
+        WorkerSelectionPolicy,
     };
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
-    struct FailOnce(bool);
+    struct FailOnce(AtomicBool);
     impl WorkerScorer for FailOnce {
         fn score(
-            &mut self,
+            &self,
             _: &WorkerSelectionContext<'_>,
             _: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
-            if std::mem::take(&mut self.0) {
+            if self.0.swap(false, Ordering::Relaxed) {
                 return Err(WorkerSelectionPolicyError::failed("score failed"));
             }
             costs.fill(0.0);
@@ -162,7 +166,7 @@ async fn scoring_error_does_not_book_and_allows_retry() {
     struct First;
     impl WorkerPicker for First {
         fn pick(
-            &mut self,
+            &self,
             _: &WorkerSelectionContext<'_>,
             _: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -182,7 +186,7 @@ async fn scoring_error_does_not_book_and_allows_retry() {
             WorkerSelectionPolicy::new(
                 config.clone(),
                 role.default_selector_label(),
-                vec![Box::new(FailOnce(true))],
+                vec![Box::new(FailOnce(AtomicBool::new(true)))],
                 Box::new(First),
             )
         }),
