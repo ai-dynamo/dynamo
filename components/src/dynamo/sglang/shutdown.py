@@ -5,6 +5,7 @@ import asyncio
 import inspect
 import logging
 import signal
+import sys
 from collections import defaultdict
 from typing import Any, Awaitable, Callable, DefaultDict
 
@@ -39,13 +40,24 @@ def install_graceful_shutdown(
 
     shutdown_started = False
     shutdown_signum: int | None = None
-    deferred_handlers_ran = False
+    deferred_task: asyncio.Task[None] | None = None
+    shutdown_task: asyncio.Task[None] | None = None
 
-    async def run_deferred_handlers() -> None:
-        nonlocal deferred_handlers_ran
-        if not shutdown_started or deferred_handlers_ran:
-            return
-        deferred_handlers_ran = True
+    async def _run_deferred_handlers() -> None:
+        shutdown_error: Exception | None = None
+
+        # Join the shutdown sequence first. It is a detached task, and it sets
+        # `shutdown_event` *before* awaiting the runtime teardown — so the serve
+        # loop that called us has already returned and the loop is about to
+        # close. Without this the teardown is destroyed while still suspended.
+        if shutdown_task is not None:
+            try:
+                await asyncio.shield(shutdown_task)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                shutdown_error = error
+                logging.exception("Graceful shutdown sequence failed")
 
         signums = (
             [shutdown_signum]
@@ -60,6 +72,32 @@ def install_graceful_shutdown(
                         await res
                 except Exception:
                     logging.exception("Deferred signal callback failed: %r", cb)
+
+        if shutdown_error is not None:
+            raise shutdown_error
+
+    async def run_deferred_handlers() -> None:
+        nonlocal deferred_task
+        if not shutdown_started:
+            return
+        application_error = sys.exc_info()[1]
+        if deferred_task is None:
+            deferred_task = asyncio.create_task(_run_deferred_handlers())
+        # Own the entire operation, including callbacks. Cancelling a waiter
+        # must neither interrupt cleanup nor make a second waiter skip it.
+        cancelled = False
+        while not deferred_task.done():
+            try:
+                await asyncio.wait([deferred_task])
+            except asyncio.CancelledError:
+                cancelled = True
+        try:
+            deferred_task.result()
+        except Exception:
+            if application_error is None and not cancelled:
+                raise
+        if cancelled and application_error is None:
+            raise asyncio.CancelledError
 
     async def _shutdown_sequence(signum: int, frame: Any | None) -> None:
         nonlocal shutdown_started, shutdown_signum
@@ -78,7 +116,9 @@ def install_graceful_shutdown(
 
     def _schedule_shutdown(signum: int, frame: Any | None) -> None:
         def _kick() -> None:
-            asyncio.create_task(_shutdown_sequence(signum, frame))
+            nonlocal shutdown_task
+            if shutdown_task is None:
+                shutdown_task = asyncio.create_task(_shutdown_sequence(signum, frame))
 
         loop.call_soon_threadsafe(_kick)
 

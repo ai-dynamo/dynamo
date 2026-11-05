@@ -61,17 +61,9 @@ fn run_worker(
     let secondary = runtime.secondary();
 
     secondary.block_on(async move {
-        let result = build(config)
-            .run(runtime.clone())
+        build(config)
+            .run(runtime)
             .await
-            .map_err(anyhow::Error::from);
-
-        // Trigger Phase 1/2/3 token cancellation + NATS/etcd disconnect.
-        // Worker::run has already done discovery unregister, drain, and
-        // engine.cleanup() at this point, so this is purely transport
-        // teardown.
-        runtime.shutdown();
-
-        result
+            .map_err(anyhow::Error::from)
     })
 }
