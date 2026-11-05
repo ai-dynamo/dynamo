@@ -2580,7 +2580,9 @@ _SEVEN_ROW_BINDINGS: dict[str, dict[str, Any]] = {
 def _assert_seven_row_binding(row: SettingDecision, items: Iterable[Any]) -> None:
     spec = _SEVEN_ROW_BINDINGS.get(row.name)
     if spec is None:
-        raise AssertionError(f"{row.name} is not in the closed seven-row binding oracle")
+        raise AssertionError(
+            f"{row.name} is not in the closed seven-row binding oracle"
+        )
     for field in ("status", "observer", "flags", "env", "schema_fields"):
         got = getattr(row, field)
         wanted = spec[field]
@@ -3974,8 +3976,7 @@ def assert_session_inputs_stack_uses_ttl_300() -> None:
         [
             n
             for n in parity.body
-            if isinstance(n, ast.ClassDef)
-            and n.name == "EppFrontendRoutingParityStack"
+            if isinstance(n, ast.ClassDef) and n.name == "EppFrontendRoutingParityStack"
         ],
         "top-level EppFrontendRoutingParityStack",
     )
@@ -4015,7 +4016,8 @@ def assert_session_inputs_stack_uses_ttl_300() -> None:
     if not _expr_eq(session_assign.value, hard_env):
         raise AssertionError("TTL If lost Hard/TTL session_env dict")
     if not any(
-        isinstance(n, ast.Expr) and _expr_eq(n.value, "frontend_env.update(session_env)")
+        isinstance(n, ast.Expr)
+        and _expr_eq(n.value, "frontend_env.update(session_env)")
         for n in ttl_if.body
     ):
         raise AssertionError("TTL If lost frontend_env.update(session_env)")
@@ -5210,7 +5212,6 @@ def _cached_stripped_file(path: Path, file_text: dict[Path, str]) -> str:
     return file_text[path]
 
 
-
 def prefill_admission_consumer_env(profile_name: str) -> dict[str, str | None]:
     if profile_name not in PREFILL_ADMISSION_PROFILES:
         raise AssertionError(
@@ -5248,13 +5249,13 @@ def clear_ais_identity_envs(monkeypatch) -> None:
         monkeypatch.delenv("DYN_AIC_" + field.upper(), raising=False)
 
 
-def _require_attr(mapping: Mapping[str, Any], name: str, expected: Any, label: str) -> None:
+def _require_attr(
+    mapping: Mapping[str, Any], name: str, expected: Any, label: str
+) -> None:
     if name not in mapping:
         raise AssertionError(f"{label} missing field {name!r}")
     if mapping[name] != expected:
-        raise AssertionError(
-            f"{label} {name}={mapping[name]!r} != {expected!r}"
-        )
+        raise AssertionError(f"{label} {name}={mapping[name]!r} != {expected!r}")
 
 
 def assert_input_startup_capability_source_contracts() -> None:
@@ -5393,11 +5394,15 @@ def assert_input_startup_capability_source_contracts() -> None:
         "PrefillRouter::new→new_with_selection_policy",
         14,
     )
-    if delegated[6:9] != [
-        "prefill_load_estimator",
-        "session_affinity_ttl_secs",
-        "session_affinity_mode",
-    ] or delegated[11] != "load_thresholds":
+    if (
+        delegated[6:9]
+        != [
+            "prefill_load_estimator",
+            "session_affinity_ttl_secs",
+            "session_affinity_mode",
+        ]
+        or delegated[11] != "load_thresholds"
+    ):
         raise AssertionError(
             "PrefillRouter::new lost estimator/TTL/mode/handle forwards: "
             f"{delegated[6:9]!r}/{delegated[11]!r}"
@@ -5484,7 +5489,10 @@ def assert_input_startup_capability_source_contracts() -> None:
         raise AssertionError("AIS validation requiring prefill tracking is gone")
 
     apply_body = cached["router_settings_apply"]
-    if "serve_indexer" not in apply_body or "router_prefill_load_model" not in apply_body:
+    if (
+        "serve_indexer" not in apply_body
+        or "router_prefill_load_model" not in apply_body
+    ):
         raise AssertionError("RouterSettings::apply lost serve_indexer/AIS whitelist")
     for banned in ("router_mode", "min_initial_workers", "session_affinity_mode"):
         if banned in apply_body:
@@ -5589,9 +5597,7 @@ def assert_input_startup_capability_source_contracts() -> None:
         )
     select_engine = _fn_decl_and_body(
         _cached_stripped_file(RUST_PYO3_ENTRYPOINT, file_text),
-        re.compile(
-            r"async\s+fn\s+select_engine\s*\([^;{]*?\)\s*(?:->[^;{]+)?\s*\{"
-        ),
+        re.compile(r"async\s+fn\s+select_engine\s*\([^;{]*?\)\s*(?:->[^;{]+)?\s*\{"),
         "select_engine",
     )
     if "create_ais_prefill_load_estimator" not in select_engine:
@@ -5605,7 +5611,9 @@ def assert_input_startup_capability_source_contracts() -> None:
     ):
         hint = _fn_decl_and_body(
             _cached_stripped_file(path, file_text),
-            re.compile(r"fn\s+prefill_load_hint_for\s*\([^;{]*?\)\s*(?:->[^;{]+)?\s*\{"),
+            re.compile(
+                r"fn\s+prefill_load_hint_for\s*\([^;{]*?\)\s*(?:->[^;{]+)?\s*\{"
+            ),
             label,
         )
         if "None => None," not in hint and "None => None" not in hint:
@@ -5614,12 +5622,9 @@ def assert_input_startup_capability_source_contracts() -> None:
     assert_session_inputs_stack_uses_ttl_300()
 
 
-
 def run_input_startup_capability_decisions(monkeypatch) -> None:
     """Ordinary FE parser→validate→native controls for the seven decisions."""
-    from dynamo.common.configuration.groups.router_args import (
-        logger as router_logger,
-    )
+    from dynamo.common.configuration.groups.router_args import logger as router_logger
     from dynamo.llm import RouterMode
 
     assert_input_startup_capability_source_contracts()
