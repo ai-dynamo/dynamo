@@ -155,6 +155,9 @@ impl RuntimeConfig {
 /// Per-worker runtime configuration.
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
+    /// Optional worker-group routing override advertised to the frontend.
+    /// None preserves inheritance from the frontend's routing defaults.
+    pub router_config: Option<dynamo_llm::entrypoint::RouterConfig>,
     /// Dynamo namespace for discovery routing.
     pub namespace: String,
     /// Component name within the namespace.
@@ -244,6 +247,7 @@ impl WorkerConfig {
 impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
+            router_config: None,
             namespace: "dynamo".to_string(),
             component: "backend".to_string(),
             endpoint: "generate".to_string(),
@@ -2277,6 +2281,7 @@ async fn build_local_model(
 
     let mut builder = LocalModelBuilder::default();
     builder
+        .router_config(config.router_config.clone())
         .model_name(served_name)
         .model_aliases(engine_config.model_aliases.clone())
         .kv_cache_block_size(llm.kv_cache_block_size)
@@ -2590,6 +2595,41 @@ mod tests {
             e.error_type(),
             ErrorType::Backend(BackendError::InvalidArgument)
         );
+    }
+
+    #[tokio::test]
+    async fn build_local_model_advertises_only_the_configured_worker_group_policy() {
+        use dynamo_llm::entrypoint::RouterConfig;
+        use dynamo_runtime::pipeline::RouterMode;
+
+        let mut routing = RouterConfig {
+            router_mode: RouterMode::KV,
+            session_affinity_ttl_secs: Some(3600),
+            ..Default::default()
+        };
+        routing.kv_router_config.router_replica_sync = true;
+        let prefill = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Prefill,
+            router_config: Some(routing.clone()),
+            ..Default::default()
+        };
+        let engine = EngineConfig {
+            model: "routing-test".into(),
+            ..Default::default()
+        };
+        let model = build_local_model(&prefill, &engine, false).await.unwrap();
+        // Assert the published card, not just the intermediate WorkerConfig.
+        assert_eq!(
+            serde_json::to_value(&model.card().router_config).unwrap(),
+            serde_json::to_value(Some(routing)).unwrap()
+        );
+
+        let decode = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Decode,
+            ..Default::default()
+        };
+        let model = build_local_model(&decode, &engine, false).await.unwrap();
+        assert!(model.card().router_config.is_none());
     }
 
     #[tokio::test]

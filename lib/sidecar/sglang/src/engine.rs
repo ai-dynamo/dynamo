@@ -125,6 +125,7 @@ impl SglangSidecarEngine {
     }
 
     pub(crate) fn validate_args(args: &Args) -> Result<(), DynamoError> {
+        args.routing.router_config().map_err(client::invalid_arg)?;
         if args.sidecar.common.route_to_encoder {
             return Err(client::invalid_arg(
                 "route-to-encoder is not supported by the SGLang sidecar",
@@ -179,6 +180,7 @@ impl SglangSidecarEngine {
         let common = args.sidecar.common;
         let structural_tag = common.structural_tag(true);
         let config = WorkerConfig {
+            router_config: args.routing.router_config().map_err(client::invalid_arg)?,
             runtime: common.runtime,
             namespace: common.namespace,
             component: if disaggregation_mode == DisaggregationMode::Aggregated {
@@ -911,6 +913,33 @@ mod tests {
             "11",
         ])
         .unwrap()
+    }
+
+    #[test]
+    fn worker_preserves_routing_advertisement_without_changing_decode_defaults() {
+        use dynamo_runtime::pipeline::RouterMode;
+
+        let mut prefill_args = args();
+        prefill_args.bootstrap_host = Some("worker.example".into());
+        prefill_args.routing.router_mode = Some(RouterMode::KV);
+        prefill_args.routing.router_replica_sync = Some(true);
+        prefill_args.routing.router_session_affinity_ttl_secs = Some(3600);
+        let prefill = discovery(|reported| {
+            reported.server.disaggregation_mode = "prefill".into();
+            reported.server.port = 30000;
+            reported.deployment.disaggregation_bootstrap_port = Some(30000);
+        });
+        let (_, config) = SglangSidecarEngine::from_discovered(prefill_args, prefill).unwrap();
+        let routing = config.router_config.unwrap();
+        assert_eq!(routing.router_mode, RouterMode::KV);
+        assert!(routing.kv_router_config.router_replica_sync);
+        assert_eq!(routing.session_affinity_ttl_secs, Some(3600));
+
+        let decode = discovery(|reported| {
+            reported.server.disaggregation_mode = "decode".into();
+        });
+        let (_, config) = SglangSidecarEngine::from_discovered(args(), decode).unwrap();
+        assert!(config.router_config.is_none());
     }
 
     #[test]

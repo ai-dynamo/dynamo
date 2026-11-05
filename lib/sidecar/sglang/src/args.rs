@@ -20,6 +20,9 @@ pub struct Args {
     #[command(flatten)]
     pub sidecar: SidecarArgs,
 
+    #[command(flatten)]
+    pub routing: dynamo_backend_common::router_args::WorkerRouterArgs,
+
     /// Reachable host that decode workers use to connect to a prefill worker's
     /// SGLang disaggregation bootstrap port. By default this is derived from
     /// SGLang's concrete `host`, then `dist_init_addr`, then a routable local
