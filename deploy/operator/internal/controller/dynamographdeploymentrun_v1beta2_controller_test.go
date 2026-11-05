@@ -11,7 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,7 @@ import (
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdrrunpublisher"
+	yamlv3 "go.yaml.in/yaml/v3"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -204,6 +207,80 @@ func TestV1beta2RunControllerCreatesOneIsolatedAISimulateJob(t *testing.T) {
 	stored := f.run()
 	assertDGDRRunPendingStatus(t, stored, job.Name)
 	assertDGDRRunStatusInputMatchesConfigMap(t, f.client, stored, job)
+}
+
+// pyYAMLFloat is PyYAML's YAML 1.1 implicit float pattern (yaml/resolver.py in PyYAML 6.0.3).
+// AISimulate loads input.yaml with yaml.safe_load, so a float that does not match arrives as a string.
+var pyYAMLFloat = regexp.MustCompile(`^(?:[-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][-+][0-9]+)?` +
+	`|\.[0-9][0-9_]*(?:[eE][-+][0-9]+)?` +
+	`|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*` +
+	`|[-+]?\.(?:inf|Inf|INF)` +
+	`|\.(?:nan|NaN|NAN))$`)
+
+func TestV1beta2RunControllerWritesSLAsAsPyYAMLFloats(t *testing.T) {
+	tests := []struct {
+		name string
+		sla  nvidiacomv1beta2.ObjectiveSLASpec
+		want map[string]float64
+	}{
+		{
+			name: "token latency",
+			sla:  nvidiacomv1beta2.ObjectiveSLASpec{TTFTMs: new(0.000001), ITLMs: new(1e-7)},
+			want: map[string]float64{"ttft_ms": 1e-6, "itl_ms": 1e-7},
+		},
+		{
+			// AISimulate does not accept e2e_ms together with ttft_ms or itl_ms.
+			name: "end to end",
+			sla:  nvidiacomv1beta2.ObjectiveSLASpec{E2EMs: new(1e-6)},
+			want: map[string]float64{"e2e_ms": 1e-6},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Reconcile a Run whose typed SLA has values Go formats with an exponent")
+			run := dgdrRunForTest(t, map[string]any{})
+			run.Spec.Objective.SLA = &tt.sla
+			f := newDGDRRunFixture(t, run)
+			f.reconcile()
+			f.reconcile()
+
+			t.Log("Read the raw input.yaml text that AISimulate loads")
+			configMap := &corev1.ConfigMap{}
+			if err := f.client.Get(t.Context(), client.ObjectKeyFromObject(f.job()), configMap); err != nil {
+				t.Fatalf("get input ConfigMap: %v", err)
+			}
+			contents := configMap.Data[dgdrRunInputKey]
+			var doc yamlv3.Node
+			if err := yamlv3.Unmarshal([]byte(contents), &doc); err != nil {
+				t.Fatalf("parse input.yaml: %v", err)
+			}
+
+			t.Log("Each SLA must be a YAML 1.1 float that keeps its value")
+			sla := yamlMappingValue(t, yamlMappingValue(t, doc.Content[0], "evaluation"), "sla")
+			for key, want := range tt.want {
+				text := yamlMappingValue(t, sla, key).Value
+				if !pyYAMLFloat.MatchString(text) {
+					t.Fatalf("evaluation.sla.%s = %q, which PyYAML reads as a string:\n%s", key, text, contents)
+				}
+				if got, err := strconv.ParseFloat(text, 64); err != nil || got != want {
+					t.Fatalf("evaluation.sla.%s = %q, want %v", key, text, want)
+				}
+			}
+		})
+	}
+}
+
+func yamlMappingValue(t *testing.T, mapping *yamlv3.Node, key string) *yamlv3.Node {
+	t.Helper()
+	if mapping.Kind == yamlv3.MappingNode {
+		for i := 0; i+1 < len(mapping.Content); i += 2 {
+			if mapping.Content[i].Value == key {
+				return mapping.Content[i+1]
+			}
+		}
+	}
+	t.Fatalf("YAML mapping has no key %q", key)
+	return nil
 }
 
 func TestV1beta2RunControllerRetainsAndTerminalizesASupersededRun(t *testing.T) {

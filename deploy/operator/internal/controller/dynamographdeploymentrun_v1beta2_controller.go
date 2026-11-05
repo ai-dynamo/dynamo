@@ -942,7 +942,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 	if err != nil {
 		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: err}
 	}
-	contents, err := yaml.Marshal(input)
+	contents, err := aisimulate.MarshalInput(input)
 	if err != nil {
 		return dgdrRunExecution{}, &dgdrRunPermanentExecutionError{cause: fmt.Errorf("encode AISimulate input: %w", err)}
 	}
