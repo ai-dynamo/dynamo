@@ -6869,6 +6869,18 @@ mod tests {
             &muse_tool_parser_only,
             Some(&chat_template_args)
         ));
+
+        // `reasoning_effort: "none"` reaches here as `thinking_mode: "disabled"`;
+        // M3 may still run its parser, so the fallback stays on.
+        let minimax_m3 = ParsingOptions::new(None, Some("minimax_m3".into()));
+        chat_template_args.insert(
+            "thinking_mode".to_string(),
+            serde_json::Value::String("disabled".to_string()),
+        );
+        assert!(request_stream_can_defer_all_output(
+            &minimax_m3,
+            Some(&chat_template_args)
+        ));
     }
 
     #[test]
