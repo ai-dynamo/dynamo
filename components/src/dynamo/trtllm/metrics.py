@@ -185,6 +185,20 @@ class AdditionalMetricsCollector:
             labelnames=self._labelnames,
         )
 
+        for metric in (
+            self.num_aborted_requests,
+            self.request_type_image,
+            self.request_type_structured_output,
+            self.kv_transfer_success,
+            self.kv_transfer_latency,
+            self.kv_transfer_bytes,
+            self.kv_transfer_speed,
+            self.kv_event_buffer_capacity,
+            self.kv_event_drain_batch_size,
+            self.kv_event_id_gap_events,
+        ):
+            metric.labels(*self._labelvalues)
+
         logger.info("AdditionalMetricsCollector initialized")
 
     # --- Request helpers ---
