@@ -217,7 +217,7 @@ volumes:
 
 ## Known Issues
 
-One issue currently affects default-built Dynamo EFA images.
+Two issues currently affect default-built Dynamo EFA images.
 
 ### Issue 1: libfabric on GB200 fails `fi_mr_reg` on CUDA VRAM
 
@@ -244,6 +244,49 @@ One issue currently affects default-built Dynamo EFA images.
    # Then rebuild aws-ofi-nccl from source against the patched libfabric (do not mix versions)
   ```
 2. **Replace bundled libfabric with `ofiwg/libfabric@v2.5.1`** (or newer). The upstream rewrite is already present; no patch needed. Rebuild `aws-ofi-nccl` against it.
+
+### Issue 2: TRT-LLM KV cache transfer fails with "Failed to set CUDA context"
+
+**Known affected images:** the TRT-LLM EFA image from Dynamo 1.7.0 (TensorRT-LLM `1.4.0rc2`), with `TRTLLM_NIXL_KVCACHE_BACKEND=LIBFABRIC` and the default TensorRT-LLM KV cache settings. The 1.6.0 TRT-LLM EFA images are not affected. vLLM and SGLang images are not affected, because they do not use TensorRT-LLM's KV cache manager.
+
+**Symptom:** Workers start, NIXL selects LIBFABRIC, and the EFA provider inserts the remote addresses. Then every disaggregated request fails. The prefill worker logs:
+
+```text
+libfabric_backend.cpp:1130] Failed to set CUDA context before posting descriptors
+nixl_agent.cpp:1221] postXferReq: backend 'LIBFABRIC' failed to post the transfer request with status NIXL_ERR_BACKEND
+[TRT-LLM] ... KV transfer agent failed ... op=TransferOp.WRITE ... nixl_status=NIXL_ERR_BACKEND
+```
+
+The decode worker logs `Error in kv cache transfer for generation requests`, and the frontend returns `500 Internal Server Error`.
+
+**Root cause:** TensorRT-LLM 1.4.0rc2 changed the default of `kv_cache_config.use_kv_cache_manager_v2` from `auto` (KV cache manager v1 for most models) to `true`, and its default `PYTHON` transceiver requires KV cache manager v2. KV cache manager v2 allocates KV cache memory with CUDA virtual memory management (`cuMemCreate` / `cuMemMap`). That memory has no owning CUDA context. Two libraries in the image do not handle this yet:
+
+- **NIXL LIBFABRIC plugin.** The image runs Dynamo's NIXL `v1.3.1` build. Its plugin caches the owning CUDA context of the first registered VRAM buffer. For virtual memory that context is NULL, and the check before posting descriptors then fails at `libfabric_backend.cpp:1130`. Fixed in [ai-dynamo/nixl#2425](https://github.com/ai-dynamo/nixl/pull/2425), first released in NIXL `v1.5.1`.
+- **libfabric EFA provider.** The EFA provider sets `CU_POINTER_ATTRIBUTE_SYNC_MEMOPS` on CUDA buffers. The CUDA driver returns `CUDA_ERROR_NOT_SUPPORTED` for virtual memory, so RMA writes and reads fail with `-FI_EINVAL` ([ofiwg/libfabric#12853](https://github.com/ofiwg/libfabric/issues/12853)). Fixed on the `v2.7.x` branch by [ofiwg/libfabric#12972](https://github.com/ofiwg/libfabric/pull/12972), after `v2.7.0`. The image uses the libfabric from EFA installer 1.50.0.
+
+The 1.6.0 images use TensorRT-LLM `1.3.0rc29`, which defaults to the `CPP` transceiver and KV cache manager v1. KV cache manager v1 allocates KV cache memory with `cudaMalloc`, which has an owning context, so neither defect is reached.
+
+**Upstream status:** The image stays affected until it ships NIXL `v1.5.1` or newer and a libfabric that contains [ofiwg/libfabric#12972](https://github.com/ofiwg/libfabric/pull/12972). No libfabric release tag contains that fix yet.
+
+**Workaround:** Select the `CPP` transceiver and KV cache manager v1. Set this identically on **both** the prefill and decode workers, in the TensorRT-LLM engine configuration file:
+
+```yaml
+cache_transceiver_config:
+  backend: NIXL
+  transceiver_runtime: CPP
+kv_cache_config:
+  use_kv_cache_manager_v2: false
+```
+
+Or pass the same values on the worker command line:
+
+```bash
+--override-engine-args '{"cache_transceiver_config":{"backend":"NIXL","transceiver_runtime":"CPP"},"kv_cache_config":{"use_kv_cache_manager_v2":false}}'
+```
+
+`--override-engine-args` merges these keys into the engine configuration and cannot be combined with `--trtllm.<group>.<key>` flags. A prefill and decode pair with different transceivers starts cleanly but fails every request. See [Transceiver Runtime](../../../developer-guide/additional-resources/tensorrt-llm-details/kv-cache-transfer.md#transceiver-runtime) for the pairing rules.
+
+This workaround does not apply to models that require the `PYTHON` transceiver and KV cache manager v2, such as hybrid Mamba models like Nemotron 3.5 Super VL. These models have no workaround on this image. Setting `NIXL_DISABLE_CUDA_ADDR_WA=1` skips the NIXL check but leaves the libfabric defect, so it is not a workaround either.
 
 
 ## Verification
@@ -319,6 +362,7 @@ Do not use `rdma_write_bytes` or other `/sys/class/infiniband/*/counters/*` chec
 | TTFT ~10 s, throughput 1–5 GB/s                        | UCX host-staged (no GPU-Direct on kernel ≥ 6.8)                      | Switch to LIBFABRIC backend                                                   |
 | Pod fails at startup with `fi_mr_reg` EFAULT on GB200  | Issue 1 (libfabric CUDA dmabuf bug)                                  | Apply patch or use ofiwg/libfabric v2.5.1                                     |
 | Pod fails at startup with `fi_mr_reg` EFAULT on x86_64 | `privileged: true` missing OR `efa_nv_peermem` missing on old kernel | Verify Step 5 security context                                                |
+| TRT-LLM requests return HTTP 500; prefill logs `Failed to set CUDA context before posting descriptors` | Issue 2 (KV cache manager v2 memory on NIXL LIBFABRIC) | Set `transceiver_runtime: CPP` and `use_kv_cache_manager_v2: false` on both workers |
 | Bandwidth halves after image rebuild                   | libfabric / aws-ofi-nccl ABI mismatch                                | Rebuild aws-ofi-nccl from source against the libfabric used in the same image |
 | `rdma_write_bytes` shows 0                             | **Not a failure** — EFA SRD uses SEND, not WRITE                     | Use Prometheus `nixl_bytes_transferred` instead                               |
 
