@@ -36,7 +36,7 @@ from dynamo.llm.exceptions import InvalidArgument
 from .responses_history import responses_history_recipients, responses_tools_request
 from .structural_tag_policy import (
     ToolChoiceKind,
-    effective_tool_strict,
+    guidance_tool_schema,
     should_attempt_structural_tag,
 )
 from .thinking import apply_default_thinking_mode_to_template_kwargs
@@ -231,8 +231,14 @@ def convert_tools(
         if defer_loading is None:
             defer_loading = tool.get("defer_loading")
         strict = func.get("strict", False)
+        parameters = func.get("parameters")
         if structural_tag_schema is not None:
-            strict = effective_tool_strict(func.get("strict"), structural_tag_schema)
+            parameters, strict = guidance_tool_schema(
+                func.get("strict"),
+                structural_tag_schema,
+                parameters,
+                tool_name=func.get("name"),
+            )
         sglang_tools.append(
             SglangTool(
                 type=tool.get("type", "function"),
@@ -240,7 +246,7 @@ def convert_tools(
                 function=SglangFunction(
                     name=func.get("name", ""),
                     description=func.get("description"),
-                    parameters=func.get("parameters"),
+                    parameters=parameters,
                     strict=strict,
                     defer_loading=defer_loading,
                 ),
