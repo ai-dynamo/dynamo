@@ -54,8 +54,9 @@ class MediaResponseTests(unittest.TestCase):
             {"prompt_tokens": 0, "completion_tokens": 17},
             {"prompt_tokens": 4, "completion_tokens": 0},
         ):
-            with self.subTest(usage=usage), self.assertRaisesRegex(
-                AssertionError, "token usage"
+            with (
+                self.subTest(usage=usage),
+                self.assertRaisesRegex(AssertionError, "token usage"),
             ):
                 runner.validate_response("audio", "Thoughts affected Hester.", usage, 0)
 
@@ -133,9 +134,10 @@ class MediaResponseTests(unittest.TestCase):
     def test_media_failures_keep_the_selected_scenario_in_junit(self):
         for media in ("image", "video", "audio"):
             for flag in ("--media", "--scenario"):
-                with self.subTest(
-                    media=media, flag=flag
-                ), tempfile.TemporaryDirectory() as tmp:
+                with (
+                    self.subTest(media=media, flag=flag),
+                    tempfile.TemporaryDirectory() as tmp,
+                ):
                     argv = [
                         "run_image_test.py",
                         flag,
@@ -166,6 +168,35 @@ class MediaResponseTests(unittest.TestCase):
                         case.attrib["name"], f"tests::e2e::e2e_real_openengine_{media}"
                     )
                     self.assertIn("engine failed", case.find("failure").text)
+
+    def test_epd_failures_are_reported_without_skipping(self):
+        for scenario, test in runner.EPD_TESTS.items():
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp:
+                argv = [
+                    "run_image_test.py",
+                    "--scenario",
+                    scenario,
+                    "--binary",
+                    "unused",
+                    "--config",
+                    "unused",
+                    "--results",
+                    tmp,
+                ]
+                with (
+                    patch("sys.argv", argv),
+                    patch.object(
+                        runner, "run", side_effect=RuntimeError("EPD unsupported")
+                    ) as run,
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(runner.main(), 1)
+                self.assertEqual(run.call_args.args[0].media, "image")
+                self.assertEqual(run.call_args.args[0].scenario, scenario)
+                suite = ET.parse(Path(tmp) / "junit.xml").getroot()
+                self.assertEqual(suite.attrib["failures"], "1")
+                self.assertEqual(suite.attrib["skipped"], "0")
+                self.assertEqual(suite.find("testcase").attrib["name"], test)
 
 
 if __name__ == "__main__":

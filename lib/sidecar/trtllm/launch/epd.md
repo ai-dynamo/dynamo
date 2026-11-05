@@ -80,3 +80,17 @@ Set `TRTLLM_OPENENGINE_ENCODER_TRANSFER=nixl` and
 consumers. Encoder control and native transfer endpoints must be reachable across
 hosts. A shared model-cache filesystem is optional; every engine must have the
 matching checkpoint locally.
+
+## Upstream-nightly CI
+
+The shared TRT-LLM media workflow runs `image-epd` (E+PD) and
+`image-epd-disaggregated` (E+P+D) against the latest published official nightly.
+Each job runs its engine roles on one GPU, sequentially after an aggregated
+baseline. Two opposite-color images must produce the expected captions and match
+the baseline's output tokens and expanded usage. The tests also check encoder
+capabilities, single-use references, and KV-only decode continuation.
+
+These tests exercise the Rust sidecar adapters and native engines directly;
+Dynamo HTTP routing and cross-host transfers require separate validation.
+Missing runtime capabilities fail the job rather than skipping it. The EPD
+prerequisites must be published in the upstream nightly before these jobs can pass.
