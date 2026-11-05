@@ -43,6 +43,6 @@ tensorboardX==2.6.2.2
 # inherit mutually incompatible framework-specific requirements instead:
 # vLLM 0.28.0 requires >=5.5.3, TensorRT-LLM 1.3.0rc24 pins 5.5.4, and
 # SGLang 0.5.16 pins 5.12.1.
-transformers>=4.56.0
+transformers>=5.10.2
 uvicorn==0.38.0
 zstandard==0.25.0
