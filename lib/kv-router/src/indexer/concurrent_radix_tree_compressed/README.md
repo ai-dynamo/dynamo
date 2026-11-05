@@ -202,8 +202,11 @@ waits for that gate.
   produce a suffix that is dead from birth, which no removal will kill; the
   splitting lane queues it with the prefix as its parent.
 - **Background sweep.** `ThreadPoolIndexer` runs a `kv-maint` thread that
-  sweeps once 1,024 nodes have died since the last sweep or 30 s have passed,
-  checking every 50 ms. The walk takes no gates: it records holder-less
+  sweeps once the nodes that died since the last sweep reach the larger of
+  1,024 and an eighth of the nodes that sweep visited, or 30 s have passed,
+  checking every 50 ms. The walk visits the whole tree; sizing the threshold by
+  the last walk keeps each walk near eight node visits per death. The walk takes
+  no gates: it records holder-less
   children under the root and every anchor, descending only into nodes with
   children. Each parent's candidates are re-checked and unlinked under one
   try-locked gate, deepest parents first. The sweep catches what the drain
