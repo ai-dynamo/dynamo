@@ -17,15 +17,11 @@ use crate::{
     local_model::runtime_config::TokenizerBackend,
     model_type::ModelType,
     namespace::NamespaceFilter,
-    types::openai::{
-        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+    types::openai::chat_completions::{
+        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
 };
-use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerType,
-    plugins::{RouterPlugins, request_classifier::RequestClassifierFactory},
-};
+use dynamo_kv_router::plugins::{RouterPlugins, request_classifier::RequestClassifierFactory};
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
 
@@ -43,8 +39,7 @@ impl HttpFrontend {
     /// Install a resolved plugin bundle for all routers created by this frontend.
     ///
     /// This replaces all previously configured plugins. Call this before
-    /// [`Self::worker_selection_policy_factory`] or [`Self::request_classifier_factory`]
-    /// to retain overrides made by those setters.
+    /// [`Self::request_classifier_factory`] to retain the override made by that setter.
     pub fn plugins(mut self, plugins: RouterPlugins) -> Self {
         self.plugins = plugins;
         self
@@ -56,28 +51,6 @@ impl HttpFrontend {
         frontend_route_extensions: Vec<FrontendRouteExtension>,
     ) -> Self {
         self.frontend_route_extensions = frontend_route_extensions;
-        self
-    }
-
-    /// Replace the registry-resolved worker-selection policy with a statically linked native one.
-    ///
-    /// The factory is called when each decode or prefill worker set is constructed, not per
-    /// request. Workers must advertise an explicit typed role; legacy untyped cards are rejected
-    /// because decode and aggregated workers cannot be distinguished. Dynamo continues to own
-    /// discovery, scheduling, validation, and accounting.
-    // TODO(v1.7): Remove this compatibility setter; use plugins with RouterPlugins::with_worker_selection.
-    pub fn worker_selection_policy_factory<F>(mut self, factory: F) -> Self
-    where
-        F: for<'a> Fn(
-                &KvRouterConfig,
-                WorkerType,
-                RoutingPartitionRef<'a>,
-            ) -> WorkerSelectionPolicy
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.plugins = self.plugins.with_worker_selection(Arc::new(factory));
         self
     }
 
@@ -323,11 +296,8 @@ async fn run_with_router_plugins(
             .await?;
             manager.add_chat_completions_model(model.display_name(), checksum, chat_pipeline)?;
 
-            let cmpl_pipeline = common::build_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(model.card(), inner_engine, tokenizer)
-            .await?;
+            let cmpl_pipeline =
+                common::build_completions_pipeline(model.card(), inner_engine, tokenizer)?;
             manager.add_completions_model(model.display_name(), checksum, cmpl_pipeline)?;
             enable_in_process_model_endpoints(&http_service)?;
             http_service
@@ -342,7 +312,8 @@ async fn run_with_router_plugins(
             .collect::<Vec<String>>()
     );
 
-    let run_result = http_service.run(distributed_runtime.primary_token()).await;
+    let _graceful_task = distributed_runtime.register_graceful_task();
+    let run_result = http_service.run(distributed_runtime.child_token()).await;
 
     // Initiate runtime shutdown whenever the server exits, including bind
     // failures, for both discovery-backed and in-process engines.
@@ -500,6 +471,7 @@ mod tests {
     use crate::engines::make_echo_engine;
     use crate::model_card::{LoraInfo, ModelDeploymentCard};
     use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+    use dynamo_kv_router::KvRouterConfig;
 
     #[tokio::test]
     async fn configured_classifier_requires_installed_plugin() {

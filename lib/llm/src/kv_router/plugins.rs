@@ -3,10 +3,11 @@
 
 //! Host construction for the resolved router plugin bundle.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
 use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPlugins};
+use dynamo_runtime::pipeline::{InstanceSelector, ModeSelectors, PushRouterOptions};
 
 use super::{KvRouter, SelectionPolicySource};
 
@@ -16,22 +17,48 @@ static INSTALLED_PLUGINS: OnceLock<RouterPluginRegistry> = OnceLock::new();
 /// `default` selection. Every host install path reads it from here, so changing the default
 /// policy is a change to this function alone.
 fn host_default_factory() -> WorkerSelectionPolicyFactory {
-    dynamo_custom_policy_builtin::default_factory()
+    dynamo_router_policies::default_factory()
 }
 
-/// Install the linked catalog once for frontend and embedded router construction.
-/// Returns `false` if a catalog has already been installed.
+/// Install the linked catalog once for frontend and embedded router construction, adding
+/// Dynamo's default and any routing mode it lacks. Returns `false` if a catalog has already
+/// been installed.
 pub fn install_router_plugin_registry(registry: RouterPluginRegistry) -> bool {
     INSTALLED_PLUGINS
-        .set(registry.with_default_factory(host_default_factory()))
+        .set(
+            dynamo_router_policies::with_defaults(registry)
+                .with_default_factory(host_default_factory()),
+        )
         .is_ok()
 }
 
 /// The installed catalog, or the required builtin default policy.
 pub fn router_plugin_registry() -> RouterPluginRegistry {
     INSTALLED_PLUGINS.get().cloned().unwrap_or_else(|| {
-        RouterPluginRegistry::default().with_default_factory(host_default_factory())
+        dynamo_router_policies::default_registry().with_default_factory(host_default_factory())
     })
+}
+
+/// The router-mode plugins as `PushRouter` instance selectors, resolved from the installed
+/// catalog. Each call to the returned function builds a fresh plugin, so every router keeps
+/// its own state, such as its round-robin rotation.
+pub fn mode_selectors() -> ModeSelectors {
+    Arc::new(|mode| {
+        let picker = super::routing_host::hosted_picker(mode)
+            .inspect_err(|error| {
+                tracing::warn!(?mode, %error, "router-mode plugin unavailable");
+            })
+            .ok()?;
+        Some(Arc::new(picker) as Arc<dyn InstanceSelector>)
+    })
+}
+
+/// `PushRouter` options that pick with the router-mode plugins.
+pub fn push_router_options<T, U>() -> PushRouterOptions<T, U> {
+    PushRouterOptions {
+        selectors: Some(mode_selectors()),
+        ..PushRouterOptions::default()
+    }
 }
 
 /// Carries configured plugins through the host's shared router construction.

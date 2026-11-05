@@ -18,44 +18,67 @@
 package v1beta2
 
 import (
-	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
+// DGDCConditionValid reports whether the pre-defaulting DGD passed strict server-side dry-run.
+const DGDCConditionValid = "Valid"
+
 // DynamoGraphDeploymentCandidateStatus describes evaluation, never deployment health.
 type DynamoGraphDeploymentCandidateStatus struct {
+	// Parameters are the original resolved evaluation inputs. Overrides do not change them.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	Parameters *runtime.RawExtension `json:"parameters,omitempty"`
+
 	// Metrics are the resolved evaluation metrics for this point.
+	// They describe the original evaluated configuration, not a deployment changed by overrides.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
 	Metrics *runtime.RawExtension `json:"metrics,omitempty"`
-}
 
-// DynamoGraphDeploymentCandidateSpec is an immutable evaluated point: the
-// inline DGD spec plus its resolved evaluation parameters.
-type DynamoGraphDeploymentCandidateSpec struct {
-	v1beta1.DynamoGraphDeploymentSpec `json:",inline"`
-
-	// Parameters are the resolved evaluation parameters for this point.
-	// +kubebuilder:pruning:PreserveUnknownFields
-	// +kubebuilder:validation:Type=object
-	Parameters runtime.RawExtension `json:"parameters"`
+	// Conditions records the final Valid result for the Candidate's DGD:
+	// - Valid=True, ValidationSucceeded: atomic override application and strict server-side
+	//   dry-run succeeded; the API object is structurally valid and passed admission at checking time.
+	// - Valid=False, OverrideTargetNotFound: an override names a component absent from the generated DGD.
+	// - Valid=False, OverrideFailed: the override could not be applied in full, for example because
+	//   it changes reserved metadata or supplies an invalid merge directive. The original DGD is retained.
+	// - Valid=False, ValidationFailed: the resulting DGD was rejected by strict dry-run admission.
+	// Check for Valid=True before using spec as a DGD. An absent condition is not success.
+	// Valid reports API validity, not deployment readiness or successful image pulls and GPU scheduling.
+	// Invalid Candidates remain visible and count toward recommendation.maxCandidates.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=dgdc
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || self.spec == oldSelf.spec",message="spec is immutable"
 // +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.spec.backendFramework`
+// +kubebuilder:printcolumn:name="Valid",type=string,JSONPath=`.status.conditions[?(@.type=="Valid")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
 type DynamoGraphDeploymentCandidate struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DynamoGraphDeploymentCandidateSpec   `json:"spec"`
+	// Spec is exactly the unpruned DGD spec, before dry-run defaulting or webhook mutation.
+	// It is opaque so invalid field types and unknown fields can be retained with Valid=False.
+	// A failed override leaves the generated spec unchanged. Immutability is enforced by admission
+	// because CEL cannot inspect fields in an opaque object.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	// +required
+	Spec runtime.RawExtension `json:"spec"`
+
+	// +optional
 	Status DynamoGraphDeploymentCandidateStatus `json:"status,omitempty"`
 }
 
