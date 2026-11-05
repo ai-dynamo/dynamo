@@ -1,0 +1,128 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Slime Integration Installation
+subtitle: Prepare a Kubernetes cluster and your workstation to run Slime with Dynamo
+---
+
+**Experimental.** Slime with Dynamo runs as two Kubernetes workloads: a DynamoGraphDeployment (DGD) that serves rollouts and a KubeRay `RayCluster` that runs the Slime trainer. This page installs the operators and tools that both workloads need. You do not build or install Slime. The Slime container image already includes Slime, Megatron-LM, SGLang, and Ray.
+
+## Requirements
+
+| Requirement | Used for |
+|---|---|
+| Kubernetes cluster with NVIDIA GPUs and the `nvidia.com/gpu` resource | Trainer and SGLang engines |
+| NVIDIA driver that supports CUDA 13.0 (R580 or later) on GPU nodes | The CUDA 13 Slime and Dynamo images |
+| Dynamo Kubernetes Platform | Runs the DGD |
+| KubeRay operator | Runs the Slime trainer as a Ray cluster |
+| `ReadWriteMany` StorageClass | Shares the model, dataset, checkpoints, and weight updates between the trainer and the engines |
+| `kubectl` and Helm | Installing operators and applying manifests |
+| Ray CLI | Submitting training jobs from your workstation |
+
+## Source Repositories
+
+You do not need to clone a repository to run the [tutorial](tutorial.mdx).
+
+| Component | Where it comes from |
+|---|---|
+| Slime, Megatron-LM, and Ray | The `slimerl/slime` image. Slime source is at `/root/slime` and is installed in editable mode. Megatron-LM is at `/root/Megatron-LM`. |
+| Dynamo frontend and SGLang engines | The `nvcr.io/nvidia/ai-dynamo/dynamo-frontend` and `nvcr.io/nvidia/ai-dynamo/sglang-runtime` images |
+| Dynamo generate function | A ConfigMap that the tutorial creates. The same logic is in [`examples/rl/slime/dynamo_generate.py`](https://github.com/ai-dynamo/dynamo/blob/main/examples/rl/slime/dynamo_generate.py). |
+
+Clone [Slime](https://github.com/THUDM/slime) only when you change Slime code, such as a custom rollout or reward function. Use a Slime revision that includes [THUDM/slime#2272](https://github.com/THUDM/slime/pull/2272).
+
+## Validated Versions
+
+The tutorial was validated with these versions on Azure Kubernetes Service (AKS) with H100 GPUs.
+
+| Component | Version |
+|---|---|
+| Dynamo `dynamo-frontend` and `sglang-runtime` images | 1.6.1 (SGLang 0.5.21) |
+| Dynamo Kubernetes Platform | 1.5.1 |
+| Slime image | `slimerl/slime:nightly-dev-20261027a-cu130` (Slime 0.4.0, SGLang 0.5.21, Ray 2.59.0, PyTorch 2.13) |
+| KubeRay operator | 1.7.1 |
+| Kubernetes | 1.34 |
+
+<Steps toc={true}>
+  <Step title="Install the Dynamo Kubernetes Platform">
+
+Follow [Install Dynamo on Kubernetes](../../../kubernetes/installation/install-dynamo.md). The guide also covers the GPU Operator that provides the `nvidia.com/gpu` resource.
+
+Confirm that the DGD custom resource exists:
+
+```bash
+kubectl get crd dynamographdeployments.nvidia.com
+```
+
+  </Step>
+  <Step title="Install the KubeRay operator">
+
+The KubeRay operator creates the Ray head and worker Pods for the Slime trainer from a `RayCluster` resource. Install it with Helm:
+
+```bash
+helm repo add kuberay https://ray-project.github.io/kuberay-helm/
+helm repo update
+helm install kuberay-operator kuberay/kuberay-operator \
+  --version 1.7.1 \
+  --namespace kuberay \
+  --create-namespace
+```
+
+Confirm that the operator is running:
+
+```bash
+kubectl get pods -n kuberay
+```
+
+```text
+NAME                                READY   STATUS    RESTARTS   AGE
+kuberay-operator-6b9c8d7f5d-x2q7z   1/1     Running   0          1m
+```
+
+  </Step>
+  <Step title="Choose a shared StorageClass">
+
+The trainer and the SGLang engines must read and write the same files. Slime writes each new policy as a Hugging Face checkpoint under a shared directory, and every engine reloads it from the same path. List the StorageClasses in your cluster:
+
+```bash
+kubectl get storageclass
+```
+
+Pick one whose provisioner supports the `ReadWriteMany` access mode. On AKS, `azurefile-csi-premium` works. Note the name for the tutorial's `STORAGE_CLASS` variable.
+
+  </Step>
+  <Step title="Install the Ray CLI">
+
+Install the Ray CLI on your workstation with Python 3.10 or later. Match the Ray version in the Slime image:
+
+```bash
+python3 -m pip install "ray[default]==2.59.0"
+```
+
+The `[default]` extra installs the job-submission client. To use a different Slime image, check its Ray version after the trainer starts with `kubectl exec` and `ray --version`, and install that version locally.
+
+  </Step>
+  <Step title="Verify the installation">
+
+```bash
+kubectl get crd dynamographdeployments.nvidia.com rayclusters.ray.io
+ray --version
+```
+
+```text
+NAME                                CREATED AT
+dynamographdeployments.nvidia.com   2026-07-01T15:17:29Z
+rayclusters.ray.io                  2026-07-09T18:47:32Z
+ray, version 2.59.0
+```
+
+  </Step>
+</Steps>
+
+## Hugging Face Access
+
+The tutorial uses the public `Qwen/Qwen3-0.6B` model and `zhuzilin/gsm8k` dataset, so it needs no token. For a gated model, create a Secret with your token and expose `HF_TOKEN` to both the SGLang workers and the Ray head container.
+
+## Next Steps
+
+Run the [tutorial](tutorial.mdx) to train Qwen3-0.6B with rollouts served by Dynamo.
