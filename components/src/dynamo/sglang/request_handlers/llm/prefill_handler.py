@@ -181,9 +181,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 logging.debug(f"Using router-provided bootstrap_room: {bootstrap_room}")
 
         if is_local_probe and bootstrap_host != FAKE_BOOTSTRAP_HOST:
-            # No decode worker consumes a health probe, so it must never ask
-            # SGLang for a real KV handoff. SGLang selects its fake transfer
-            # backend by host alone, so keep the probe's port and room.
+            # No decode worker consumes a probe's KV. SGLang picks fake transfer
+            # by host alone, so the probe keeps its port and room.
             logging.debug(
                 f"Health probe bootstrap_host {bootstrap_host} replaced with "
                 f"{FAKE_BOOTSTRAP_HOST}"
