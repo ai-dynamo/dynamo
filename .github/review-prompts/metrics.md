@@ -142,9 +142,9 @@ rule violation is a contract defect, not a style preference.
     add a new metric and deprecate the old one. Report a deprecation whose entry at the pull
     request head lacks the catalog mark, or that lacks the help-text note, the replacement or
     PromQL recipe, or the removal release. Report a removal of a stable metric that has not been
-    deprecated for two releases, or any removal on a `release/*` base branch. Search the in-repo
-    readers (dashboards under `dev/observability/` and `deploy/observability/`, and the planner)
-    for a renamed or removed name, and report each reader that still uses it.
+    deprecated for two releases, or a removal of a deprecated metric in a patch release.
+    Search the in-repo readers (dashboards under `dev/observability/` and `deploy/observability/`,
+    and the planner) for a renamed or removed name, and report each reader that still uses it.
 
 ### Documentation
 

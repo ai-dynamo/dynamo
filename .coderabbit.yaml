@@ -40,7 +40,7 @@ reviews:
     - path: "**/*.{rs,py,go}"
       instructions: "If the change adds or modifies a metric, a log event, or a trace span, review it against .ai/metrics-guidelines.md, using the checks and finding format in .github/review-prompts/metrics.md."
     - path: "docs/fern/pages/reference/observability/*.mdx"
-      instructions: "Review metric entries that the change adds, deprecates, or removes against the Stability and Documentation rules in .ai/metrics-guidelines.md."
+      instructions: "Review metric entries that the change adds, deprecates, or removes against the Stability and Documentation rules in .ai/metrics-guidelines.md, using steps 18 and 19 and the finding format in .github/review-prompts/metrics.md."
 knowledge_base:
   code_guidelines:
     filePatterns:
