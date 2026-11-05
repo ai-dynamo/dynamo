@@ -744,9 +744,12 @@ impl SelectionCore {
             };
             (tiered, started.elapsed())
         };
+        // Shared-cache lookups hash tokens alone, but an adapter's KV differs from
+        // the base model's, and SGLang keys adapter pages apart from base pages.
         let shared_cache = query_shared_cache
             .then_some(self.host.cache.shared.as_deref())
             .flatten()
+            .filter(|_| prompt.lora_name.is_none_or(str::is_empty))
             .zip(prompt.token_ids);
         // `(hits, duration, failed)`; all `None`/`false` without a shared cache.
         let shared_cache_lookup = async {

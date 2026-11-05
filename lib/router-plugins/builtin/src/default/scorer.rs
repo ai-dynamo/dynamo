@@ -146,9 +146,12 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                 estimated_overlap
             };
             let shared_credit = if SHARED_CREDIT {
-                let shared = cache
-                    .shared_hits()
-                    .map_or(0, |hits| hits.hits_beyond(device.round().max(0.0) as u32));
+                // Host and disk blocks already earn their own tier credit; the
+                // shared cache extends the prefix from where the worker's ends.
+                let shared = cache.shared_hits().map_or(0, |hits| {
+                    let local = device + cache.host_overlap_blocks() + cache.disk_overlap_blocks();
+                    hits.loadable_beyond(local.round().max(0.0) as u32)
+                });
                 // Blocks a KV fetch would add beyond everything this worker holds.
                 let fetchable = if prepared.has_kv_transfer {
                     candidate

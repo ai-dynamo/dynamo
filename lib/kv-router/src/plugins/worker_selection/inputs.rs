@@ -560,7 +560,8 @@ impl ScoredWorkerCandidate {
 impl<'a> WorkerCacheInput<'a> {
     /// Unweighted shared-cache ranges in KV block positions, or None if no result was supplied.
     /// The host owns this snapshot. It does not change during the callback, and may lag engine state.
-    /// Use `hits_beyond(prefix)` to exclude hits already covered by the policy's chosen prefix.
+    /// Use `loadable_beyond(prefix)` for the blocks the engine can load after a worker's local
+    /// prefix; `hits_beyond(prefix)` also counts hits after a gap, which the engine cannot load.
     pub fn shared_hits(self) -> Option<&'a SharedCacheHits> {
         self.snapshot.shared_hits
     }
