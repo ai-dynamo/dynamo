@@ -38,10 +38,9 @@ pass. Three properties of the upstream class make that safe (verified against
 
 Frames are decoded into device memory and copied to the host by
 ``_frame_to_rgb_hwc`` after a device synchronize. In host-memory mode,
-PyNvVideoCodec hands back a host buffer that its own CUDA streams fill, and a
-CPU DLPack import carries no stream handshake, so nothing orders our read after
-the library's writes. After each frame was copied on return, the H.265 E/PD
-serve test on an L4 sent the model frames it called "no video" (DYN-5446).
+PyNvVideoCodec fills the returned host buffer from its own CUDA streams, and
+a CPU DLPack import carries no stream handshake, so nothing documented
+orders our read after the library's writes (suspected cause of DYN-5446).
 """
 
 from __future__ import annotations
