@@ -23,16 +23,20 @@ import (
 	"maps"
 	"time"
 
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
+
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 type groveProgram struct {
+	reader             client.Reader
 	sharedResources    *dgdSharedResourcesReconciler
 	rollout            *dgdWorkerRolloutReconciler
 	restart            *dgdRestartReconciler
@@ -84,6 +88,7 @@ func (r groveReconcileRequest) DelegatedComponents() []nvidiacomv1beta1.DynamoCo
 func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
 	return &groveProgram{
+		reader: r.Client,
 		sharedResources: newDGDSharedResourcesReconciler(
 			r.Client,
 			r.Recorder,
@@ -236,6 +241,22 @@ func (p *groveProgram) Reconcile(
 			}
 		}
 	}
+
+	// Grove readiness reports a crash-looping component only as not ready.
+	managed := req.ManagedComponents()
+	componentNames := make([]string, 0, len(managed))
+	for i := range managed {
+		componentNames = append(componentNames, managed[i].ComponentName)
+	}
+	crashLoops, err := podcontroller.ComponentCrashLoops(ctx, p.reader, req.DGD.Namespace, req.DGD.Name, componentNames)
+	if err != nil {
+		return programResult, fmt.Errorf("find crash-looping Grove Pods: %w", err)
+	}
+	diagnoses := make(map[string]string, len(crashLoops))
+	for component, crashLoop := range crashLoops {
+		diagnoses[component] = crashLoop.String()
+	}
+	result = failCrashLoopingComponents(result, diagnoses)
 
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
 
