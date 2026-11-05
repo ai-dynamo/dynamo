@@ -2765,6 +2765,23 @@ where
 {
     match serde_json::from_slice(body) {
         Ok(request) => Ok(request),
+        Err(original_error)
+            if original_error
+                .to_string()
+                .contains("duplicate field `reasoning_content`") =>
+        {
+            // `reasoning` is an alias of `reasoning_content` on assistant messages, so a
+            // client that echoes both (as some SDKs do) trips serde's duplicate-field check.
+            drop_duplicate_reasoning(body)
+                .and_then(|deduped| serde_json::from_slice(&deduped).ok())
+                .inspect(|_| {
+                    tracing::warn!(
+                        endpoint,
+                        "Dropped `reasoning` duplicating `reasoning_content` in a message"
+                    );
+                })
+                .ok_or_else(|| json_deserialize_error(original_error))
+        }
         Err(original_error) => {
             if let Some(escaped_body) = escape_json_string_control_chars(body) {
                 match serde_json::from_slice(&escaped_body) {
@@ -2784,6 +2801,20 @@ where
             }
         }
     }
+}
+
+/// Remove `reasoning` from every message that also carries `reasoning_content`.
+fn drop_duplicate_reasoning(body: &[u8]) -> Option<Vec<u8>> {
+    let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let messages = value.get_mut("messages")?.as_array_mut()?;
+    for message in messages.iter_mut() {
+        if let Some(object) = message.as_object_mut()
+            && object.contains_key("reasoning_content")
+        {
+            object.remove("reasoning");
+        }
+    }
+    serde_json::to_vec(&value).ok()
 }
 
 fn parse_json_request_lossy<T>(endpoint: &'static str, body: &[u8]) -> Result<T, serde_json::Error>
@@ -6557,6 +6588,24 @@ mod tests {
             panic!("expected text content");
         };
         assert_eq!(content, "log \u{1b}[33mPK\u{3}\u{4}");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_drops_duplicate_reasoning() {
+        let body = br#"{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"a","reasoning":"r1","reasoning_content":"r2"},{"role":"user","content":"again"}]}"#;
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        assert_eq!(request.inner.messages.len(), 3);
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "r2");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_still_rejects_other_duplicate_fields() {
+        let body = br#"{"model":"m","model":"n","messages":[{"role":"user","content":"hi"}]}"#;
+        assert!(
+            parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body).is_err()
+        );
     }
 
     #[test]
