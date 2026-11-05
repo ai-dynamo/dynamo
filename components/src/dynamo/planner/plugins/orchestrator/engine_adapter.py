@@ -580,13 +580,18 @@ class OrchestratorEngineAdapter:
 
         A builtin the policy no longer runs is unregistered; one it newly
         runs is registered as at startup, so it first fires one interval
-        after registration; one it keeps is updated in place (interval,
-        observation window and needs), keeping its state and phase. A new
-        or kept load predictor takes ``predictor``'s prepared forecasts when
-        given. Turning throughput scaling off also drops the throughput
-        lower bounds, which would otherwise keep flooring load scaling at
-        the last throughput target.
+        after registration, and its loop restarts with it; one it keeps is
+        updated in place (interval, observation window and needs), keeping
+        its state, its phase and its loop's phase. A new or kept load
+        predictor takes ``predictor``'s prepared forecasts when given.
+
+        The throughput lower bounds are dropped when throughput scaling
+        turns off, and when load scaling turns on: the throughput loop sets
+        them only while load scaling runs, so a bound left from before load
+        scaling went off would floor its first decisions at a stale target.
         """
+        load_was_running = "load_propose" in self._builtins
+        throughput_was_running = "throughput_propose" in self._builtins
         desired = self._builtin_registrations()
         for name in [name for name in self._builtins if name not in desired]:
             removed: Any = self._builtins.pop(name)
@@ -619,13 +624,17 @@ class OrchestratorEngineAdapter:
             plugin.requires_produced_fields = list(
                 registration["requires_produced_fields"]
             )
-        if not self._config.enable_throughput_scaling:
+        load_started = self._config.enable_load_scaling and not load_was_running
+        if not self._config.enable_throughput_scaling or load_started:
             self._scaling_state.reset_throughput_lower_bounds()
             for component in ("prefill", "decode"):
                 self._orchestrator.set_throughput_lower_bound(component, 1)
-        # The loop pointers restart with the policy, as at startup.
-        self._last_load_loop_monotonic = self._last_tick_monotonic
-        self._last_throughput_loop_monotonic = self._last_tick_monotonic
+        # A loop restarts with its newly registered builtins, as at startup;
+        # a kept loop keeps the phase its kept builtins fire at.
+        if load_started:
+            self._last_load_loop_monotonic = self._last_tick_monotonic
+        if self._config.enable_throughput_scaling and not throughput_was_running:
+            self._last_throughput_loop_monotonic = self._last_tick_monotonic
 
     # ------------------------------------------------------------------
     # Bootstrap API (delegates to orchestrator)

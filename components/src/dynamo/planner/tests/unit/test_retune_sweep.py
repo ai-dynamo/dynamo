@@ -35,6 +35,7 @@ from dynamo.planner.retune import sweep as sweep_module
 from dynamo.planner.retune.sweep import (
     _OBJECTIVES,
     GOODPUT_KEY,
+    evaluated_params,
     objective_maximized,
     score_summary,
     with_predictor_fields,
@@ -815,3 +816,58 @@ def test_presweep_dispatch_does_not_wait_for_workers_that_are_not_reading(tmp_pa
     for process, conn in zip(processes, unread):
         process.release()
         conn.close()
+
+
+def test_evaluated_params_folds_the_predictor_without_throughput_scaling():
+    # The running planner scales on throughput with kalman; the startup
+    # point (load only) still carries the arima it started with.
+    policy = {
+        "enable_load_scaling": True,
+        "load_adjustment_interval_seconds": 5,
+        "throughput_adjustment_interval_seconds": 180,
+    }
+    running = {**policy, "enable_throughput_scaling": True, "load_predictor": "kalman"}
+    baseline = RetuneParams(planner=dict(running))
+    startup = RetuneParams(
+        planner={
+            **policy,
+            "enable_throughput_scaling": False,
+            "load_predictor": "arima",
+        }
+    )
+    grid = RetuneParams(planner={**policy, "enable_throughput_scaling": False})
+    evaluated = [evaluated_params(c, baseline, None, running) for c in (startup, grid)]
+    # One replay, and no inert predictor change to apply.
+    assert len({point.key() for point in evaluated}) == 1
+    assert evaluated[0].planner["load_predictor"] == "kalman"
+
+
+def test_evaluated_params_keeps_the_running_predictor_without_a_winner():
+    def policy(interval: int) -> dict:
+        return {
+            "enable_throughput_scaling": True,
+            "enable_load_scaling": True,
+            "throughput_adjustment_interval_seconds": interval,
+            "load_adjustment_interval_seconds": 5,
+        }
+
+    running = {**policy(180), "load_predictor": "kalman", "kalman_min_points": 5}
+    baseline = RetuneParams(planner=dict(running))
+    startup = RetuneParams(
+        planner={**policy(600), "load_predictor": "constant", "kalman_min_points": 5}
+    )
+    grid = RetuneParams(planner=policy(600))
+    # The pre-sweep found no winner at 600 s (a window shorter than 600 s).
+    presweep = {
+        "by_interval": {
+            "180": {"fields": {"load_predictor": "kalman"}},
+            "600": {"fields": {}},
+        }
+    }
+    at_600 = {
+        evaluated_params(c, baseline, presweep, running).planner["load_predictor"]
+        for c in (startup, grid)
+    }
+    # Candidates at one interval share one predictor, the one the swap
+    # for that interval is prepared with.
+    assert at_600 == {"kalman"}

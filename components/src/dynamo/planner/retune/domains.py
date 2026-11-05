@@ -73,12 +73,26 @@ SCALING_POLICY_KEYS: tuple[str, ...] = (
     THROUGHPUT_INTERVAL,
     LOAD_INTERVAL,
 )
+# The load predictor's fields (``reconfiguration.PREDICTOR_FIELDS``).
+PREDICTOR_KEYS: tuple[str, ...] = (
+    "load_predictor",
+    "load_predictor_log1p",
+    "prophet_window_size",
+    "kalman_q_level",
+    "kalman_q_trend",
+    "kalman_r",
+    "kalman_min_points",
+)
 # Fields that act only with load or only with throughput scaling. Without
 # their mode a point folds them to the running value. The load interval is
 # not among them: it is also the cadence at which live FPM observations
 # refit the performance model that throughput scaling uses.
 LOAD_ONLY_KEYS: tuple[str, ...] = (LOAD_SCALING_DOWN_SENSITIVITY,)
-THROUGHPUT_ONLY_KEYS: tuple[str, ...] = (THROUGHPUT_INTERVAL, MAX_THROUGHPUT_REPLICAS)
+THROUGHPUT_ONLY_KEYS: tuple[str, ...] = (
+    THROUGHPUT_INTERVAL,
+    MAX_THROUGHPUT_REPLICAS,
+    *PREDICTOR_KEYS,
+)
 # Combinations a ``preset: false`` group may expand to before deduplication,
 # which bounds the expansion's memory. The AISimulate default load-predictor
 # domain is 256 combinations.
