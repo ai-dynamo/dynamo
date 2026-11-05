@@ -50,6 +50,10 @@ from dynamo.sglang.thinking_budget import (
 # an unresolved data-parallel rank in-band instead of omitting the field.
 _DP_RANK_UNSET = 2**32 - 1
 
+# Request annotation asking prefill to forward its final native response.
+# Matches PREFILL_OUTPUT_ANNOTATION in lib/llm/src/protocols/response_merge.rs.
+_PREFILL_OUTPUT_ANNOTATION = "prefill_output"
+
 
 class PrefillWorkerHandler(BaseWorkerHandler):
     """Handler for prefill workers in disaggregated serving mode."""
@@ -141,6 +145,12 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 self.config.dynamo_args.enable_rl,
             )
         native_payload = native_generate_payload(inner_request)
+        # Decode cannot compute prompt-side outputs (prompt logprobs, routed
+        # experts, indexer top-k), so the frontend asks prefill for them.
+        keep_prefill_output = (
+            native_payload is not None
+            and _PREFILL_OUTPUT_ANNOTATION in (inner_request.get("annotations") or [])
+        )
         has_thinking_budget = False
         if native_payload is None:
             has_thinking_budget = thinking_budget_requested(inner_request)
@@ -298,9 +308,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         self._consume_tasks.add(task)
         task.add_done_callback(self._consume_tasks.discard)
 
-        final_meta_info = await task
-        if final_meta_info is None:
+        final = await task
+        if final is None:
             return
+        final_meta_info, final_native_response = final
         finish_reason = final_meta_info.get("finish_reason")
         if isinstance(finish_reason, dict) and finish_reason.get("type") == "abort":
             # Unsolicited error-bearing aborts raise while consuming the stream.
@@ -308,18 +319,24 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             # rather than looking like a successful prefill handoff.
             yield {"token_ids": [], "finish_reason": "cancelled"}
             return
-        # Bootstrap happens before prefill runs, so the cache-hit report for
-        # this attempt needs its own trailing chunk.
+        # Bootstrap happens before prefill runs, so the cache-hit report and
+        # any requested prompt-side output need their own trailing chunk. Both
+        # share one chunk: the prefill router keeps only the last engine_data.
+        engine_data: Dict[str, Any] = {}
+        if keep_prefill_output and final_native_response is not None:
+            engine_data["sglang_response"] = final_native_response
         kv_cache_hit = _kv_cache_hit_engine_data(final_meta_info)
         if kv_cache_hit:
-            yield {"token_ids": [], "engine_data": {"kv_cache_hit": kv_cache_hit}}
+            engine_data["kv_cache_hit"] = kv_cache_hit
+        if engine_data:
+            yield {"token_ids": [], "engine_data": engine_data}
 
     async def _consume_results(
         self,
         results: AsyncIterator[Any],
         submitted_request_id: str | None,
         context: Context,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[tuple[Dict[str, Any], Optional[Dict[str, Any]]]]:
         """Consume async generator results without forwarding them.
 
         Args:
@@ -328,12 +345,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             context: Context object for cancellation handling.
 
         Returns:
-            The finished result's ``meta_info``, or None when the request was
-            cancelled or never finished.
+            The finished result's ``meta_info`` and its native SGLang response
+            (None off the native path), or None when the request was cancelled
+            or never finished.
         """
         # Preserve the response ID as a fallback if SGLang replaces the submitted ID.
         request_id_future: asyncio.Future[str] = asyncio.Future()
-        final_meta_info: Optional[Dict[str, Any]] = None
+        final: Optional[tuple[Dict[str, Any], Optional[Dict[str, Any]]]] = None
         async with self._cancellation_monitor(
             request_id_future, context, submitted_request_id
         ) as cancellation_task:
@@ -346,7 +364,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     .get("meta_info", {})
                 )
                 if meta_info.get("finish_reason"):
-                    final_meta_info = meta_info
+                    # Keep a reference; routed-expert payloads can be large.
+                    final = (
+                        meta_info,
+                        res.get("engine_data", {}).get("sglang_response"),
+                    )
                 if not request_id_future.done():
                     sglang_request_id = meta_info.get("id")
                     if sglang_request_id:
@@ -367,4 +389,4 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
             if cancellation_task.done():
                 return None
-        return final_meta_info
+        return final
