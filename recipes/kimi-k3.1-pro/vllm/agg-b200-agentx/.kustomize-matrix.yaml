@@ -17,16 +17,8 @@ source: kustomize/base
 nameTemplate: ${variant}
 matrix:
   variant:
-  - name: generic
-    components: []
   - name: b200
-    components:
-    - kustomize/components/deployment-identity
-    - kustomize/components/registry-credentials
-    - kustomize/components/scheduling
+    components: []
   - name: b200-synthetic-al
     components:
-    - kustomize/components/deployment-identity
-    - kustomize/components/registry-credentials
-    - kustomize/components/scheduling
     - kustomize/components/synthetic-al

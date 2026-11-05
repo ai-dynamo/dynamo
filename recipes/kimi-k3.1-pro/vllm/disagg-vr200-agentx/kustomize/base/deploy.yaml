@@ -16,7 +16,9 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: kimi-k3-1-vllm-disagg-vr200-agentx
+  annotations:
+    nvidia.com/kai-scheduler-queue: default-queue
+  name: kimi-k3-1-pro-vllm-vr200-disagg-agentic
 spec:
   backendFramework: vllm
   components:
@@ -53,7 +55,7 @@ spec:
             value: '1'
           - name: DYN_ROUTER_MODE
             value: kv
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -64,9 +66,6 @@ spec:
           - mountPath: /shared-model-cache
             name: shared-model-cache
             readOnly: true
-        nodeSelector:
-          kubernetes.io/arch: arm64
-          nvidia.com/gpu.machine: VR-NVL72
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
@@ -75,16 +74,18 @@ spec:
           runAsUser: 0
           runAsGroup: 0
     replicas: 1
-    runtimeVersionOverride: 1.7.0
     type: frontend
   - multinode:
       nodeCount: 2
-    name: prefill
+    name: PrefillWorker
     podTemplate:
       metadata:
         annotations:
           nvidia.com/vllm-distributed-executor-backend: mp
       spec:
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: kimi-k3-1-pro-vllm-vr200-disagg-agentic-compute-domain-channel
         containers:
         - args:
           - |
@@ -200,10 +201,12 @@ spec:
             value: '256'
           - name: SPECULATIVE_CONFIG
             value: '{"method":"dspark","model":"/shared-model-cache/Inferact/Kimi-K3-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
           imagePullPolicy: IfNotPresent
           name: main
           resources:
+            claims:
+            - name: compute-domain-channel
             limits:
               nvidia.com/gpu: '4'
             requests:
@@ -223,9 +226,6 @@ spec:
           volumeMounts:
           - mountPath: /shared-model-cache
             name: shared-model-cache
-        nodeSelector:
-          kubernetes.io/arch: arm64
-          nvidia.com/gpu.machine: VR-NVL72
         terminationGracePeriodSeconds: 60
         volumes:
         - name: shared-model-cache
@@ -235,17 +235,19 @@ spec:
           runAsUser: 0
           runAsGroup: 0
     replicas: 2
-    runtimeVersionOverride: 1.7.0
     sharedMemorySize: 264Gi
     type: prefill
   - multinode:
       nodeCount: 2
-    name: decode
+    name: DecodeWorker
     podTemplate:
       metadata:
         annotations:
           nvidia.com/vllm-distributed-executor-backend: mp
       spec:
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: kimi-k3-1-pro-vllm-vr200-disagg-agentic-compute-domain-channel
         containers:
         - args:
           - |
@@ -362,10 +364,12 @@ spec:
             value: '256'
           - name: SPECULATIVE_CONFIG
             value: '{"method":"dspark","model":"/shared-model-cache/Inferact/Kimi-K3-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
           imagePullPolicy: IfNotPresent
           name: main
           resources:
+            claims:
+            - name: compute-domain-channel
             limits:
               nvidia.com/gpu: '4'
             requests:
@@ -385,9 +389,6 @@ spec:
           volumeMounts:
           - mountPath: /shared-model-cache
             name: shared-model-cache
-        nodeSelector:
-          kubernetes.io/arch: arm64
-          nvidia.com/gpu.machine: VR-NVL72
         terminationGracePeriodSeconds: 60
         volumes:
         - name: shared-model-cache
@@ -397,6 +398,16 @@ spec:
           runAsUser: 0
           runAsGroup: 0
     replicas: 1
-    runtimeVersionOverride: 1.7.0
     sharedMemorySize: 264Gi
     type: decode
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: kimi-k3-1-pro-vllm-vr200-disagg-agentic-compute-domain
+spec:
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: kimi-k3-1-pro-vllm-vr200-disagg-agentic-compute-domain-channel
+  numNodes: 0

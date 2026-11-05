@@ -12,7 +12,4 @@ sortOptions:
 resources:
   - "../../base"
 components:
-  - "../../components/deployment-identity"
-  - "../../components/registry-credentials"
-  - "../../components/scheduling"
   - "../../components/synthetic-al"

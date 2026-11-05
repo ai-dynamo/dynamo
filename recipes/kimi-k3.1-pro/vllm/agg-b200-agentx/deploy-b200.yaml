@@ -25,7 +25,7 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: kimi-k3-1-pro-vllm-aggregate-b200
+  name: kimi-k3-1-pro-vllm-b200-agg-agentic
 spec:
   backendFramework: vllm
   components:
@@ -64,25 +64,14 @@ spec:
             value: "1"
           - name: DYN_ROUTER_MODE
             value: kv
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
           imagePullPolicy: IfNotPresent
           name: main
           resources:
             requests:
               cpu: "16"
               memory: 128Gi
-        imagePullSecrets:
-        - name: ngc-pull-secret
-        - name: acr-pull-secret
-        nodeSelector:
-          kubernetes.io/arch: amd64
-          nvidia.com/gpu.product: NVIDIA-B200
-        tolerations:
-        - effect: NoSchedule
-          key: nvidia.com/gpu
-          operator: Exists
     replicas: 1
-    runtimeVersionOverride: 1.7.0
     type: frontend
   - multinode:
       nodeCount: 2
@@ -196,7 +185,7 @@ spec:
             value: /tmp/hf-modules
           - name: XDG_CACHE_HOME
             value: /tmp/xdg
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -219,22 +208,11 @@ spec:
           volumeMounts:
           - mountPath: /shared-model-cache
             name: shared-model-cache
-        imagePullSecrets:
-        - name: ngc-pull-secret
-        - name: acr-pull-secret
-        nodeSelector:
-          kubernetes.io/arch: amd64
-          nvidia.com/gpu.product: NVIDIA-B200
         terminationGracePeriodSeconds: 60
-        tolerations:
-        - effect: NoSchedule
-          key: nvidia.com/gpu
-          operator: Exists
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
     replicas: 1
-    runtimeVersionOverride: 1.7.0
     sharedMemorySize: 64Gi
     type: worker

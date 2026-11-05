@@ -16,7 +16,7 @@
 # Loads the vision tower and enables image/video input (text-only is the default, measured recipe).
 - op: test
   path: /spec/components/1/name
-  value: worker
+  value: Worker
 - op: test
   path: /spec/components/1/type
   value: worker

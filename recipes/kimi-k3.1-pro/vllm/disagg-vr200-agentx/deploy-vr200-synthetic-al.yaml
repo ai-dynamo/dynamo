@@ -26,7 +26,7 @@ kind: DynamoGraphDeployment
 metadata:
   annotations:
     nvidia.com/kai-scheduler-queue: default-queue
-  name: kimi-k3-1-pro-vllm-disagg-vr200
+  name: kimi-k3-1-pro-vllm-vr200-disagg-agentic
 spec:
   backendFramework: vllm
   components:
@@ -63,7 +63,7 @@ spec:
             value: "1"
           - name: DYN_ROUTER_MODE
             value: kv
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -74,29 +74,18 @@ spec:
           - mountPath: /shared-model-cache
             name: shared-model-cache
             readOnly: true
-        imagePullSecrets:
-        - name: ngc-pull-secret
-        - name: acr-pull-secret
-        nodeSelector:
-          kubernetes.io/arch: arm64
-          nvidia.com/gpu.machine: VR-NVL72
         securityContext:
           runAsGroup: 0
           runAsUser: 0
-        tolerations:
-        - effect: NoSchedule
-          key: nvidia.com/gpu
-          operator: Exists
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
     replicas: 1
-    runtimeVersionOverride: 1.7.0
     type: frontend
   - multinode:
       nodeCount: 2
-    name: prefill
+    name: PrefillWorker
     podTemplate:
       metadata:
         annotations:
@@ -217,7 +206,7 @@ spec:
             value: "256"
           - name: SPECULATIVE_CONFIG
             value: '{"method":"dspark","model":"/shared-model-cache/Inferact/Kimi-K3-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.84}'
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -242,34 +231,23 @@ spec:
           volumeMounts:
           - mountPath: /shared-model-cache
             name: shared-model-cache
-        imagePullSecrets:
-        - name: ngc-pull-secret
-        - name: acr-pull-secret
-        nodeSelector:
-          kubernetes.io/arch: arm64
-          nvidia.com/gpu.machine: VR-NVL72
         resourceClaims:
         - name: compute-domain-channel
-          resourceClaimTemplateName: kimi-k3-1-pro-vllm-disagg-vr200-compute-domain-channel
+          resourceClaimTemplateName: kimi-k3-1-pro-vllm-vr200-disagg-agentic-compute-domain-channel
         securityContext:
           runAsGroup: 0
           runAsUser: 0
         terminationGracePeriodSeconds: 60
-        tolerations:
-        - effect: NoSchedule
-          key: nvidia.com/gpu
-          operator: Exists
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
     replicas: 2
-    runtimeVersionOverride: 1.7.0
     sharedMemorySize: 264Gi
     type: prefill
   - multinode:
       nodeCount: 2
-    name: decode
+    name: DecodeWorker
     podTemplate:
       metadata:
         annotations:
@@ -391,7 +369,7 @@ spec:
             value: "256"
           - name: SPECULATIVE_CONFIG
             value: '{"method":"dspark","model":"/shared-model-cache/Inferact/Kimi-K3-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.84}'
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -416,52 +394,28 @@ spec:
           volumeMounts:
           - mountPath: /shared-model-cache
             name: shared-model-cache
-        imagePullSecrets:
-        - name: ngc-pull-secret
-        - name: acr-pull-secret
-        nodeSelector:
-          kubernetes.io/arch: arm64
-          nvidia.com/gpu.machine: VR-NVL72
         resourceClaims:
         - name: compute-domain-channel
-          resourceClaimTemplateName: kimi-k3-1-pro-vllm-disagg-vr200-compute-domain-channel
+          resourceClaimTemplateName: kimi-k3-1-pro-vllm-vr200-disagg-agentic-compute-domain-channel
         securityContext:
           runAsGroup: 0
           runAsUser: 0
         terminationGracePeriodSeconds: 60
-        tolerations:
-        - effect: NoSchedule
-          key: nvidia.com/gpu
-          operator: Exists
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
     replicas: 1
-    runtimeVersionOverride: 1.7.0
     sharedMemorySize: 264Gi
     type: decode
 ---
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:
-  name: kimi-k3-1-pro-vllm-disagg-vr200-compute-domain
+  name: kimi-k3-1-pro-vllm-vr200-disagg-agentic-compute-domain
 spec:
   channel:
     allocationMode: Single
     resourceClaimTemplate:
-      name: kimi-k3-1-pro-vllm-disagg-vr200-compute-domain-channel
+      name: kimi-k3-1-pro-vllm-vr200-disagg-agentic-compute-domain-channel
   numNodes: 0

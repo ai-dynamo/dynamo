@@ -17,19 +17,18 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: kimi-k3-1-pro-vllm-aggregate-gb300
+  name: kimi-k3-1-pro-vllm-gb300-agg-agentic
 spec:
   backendFramework: vllm
   components:
   - name: Frontend
     type: frontend
-    runtimeVersionOverride: 1.7.0
     replicas: 1
     podTemplate:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
           imagePullPolicy: IfNotPresent
           command:
           - python3
@@ -69,19 +68,21 @@ spec:
           persistentVolumeClaim:
             claimName: shared-model-cache
             readOnly: true
-  - name: worker
+  - name: Worker
     type: worker
-    runtimeVersionOverride: 1.7.0
     replicas: 1
     multinode:
       nodeCount: 2
     sharedMemorySize: 64Gi
     podTemplate:
       spec:
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: kimi-k3-1-pro-vllm-gb300-agg-agentic-compute-domain-channel
         terminationGracePeriodSeconds: 60
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
           imagePullPolicy: IfNotPresent
           command:
           - /bin/bash
@@ -139,7 +140,13 @@ spec:
             value: NVL
           - name: MODEL_PATH
             value: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
+          - name: NCCL_MNNVL_ENABLE
+            value: '1'
+          - name: NCCL_NVLS_ENABLE
+            value: '1'
           resources:
+            claims:
+            - name: compute-domain-channel
             requests:
               cpu: '72'
               memory: 512Gi
@@ -163,3 +170,14 @@ spec:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: kimi-k3-1-pro-vllm-gb300-agg-agentic-compute-domain
+spec:
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: kimi-k3-1-pro-vllm-gb300-agg-agentic-compute-domain-channel
+  numNodes: 0

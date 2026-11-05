@@ -17,7 +17,7 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: kimi-k3-1-pro-sglang-aggregate-gb300
+  name: kimi-k3-1-pro-sglang-gb300-agg-agentic
 spec:
   backendFramework: sglang
   components:
@@ -52,7 +52,7 @@ spec:
             value: '3600'
           - name: DYN_TOKENIZER_CACHE_BYTES
             value: '8589934592'
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.7.0-kimi-k3.1-pro-dev.1
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:e7392b04e4b1e1142dbf0e4d31285a16728f430b6f9a331ac339682bb014d84d
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -69,13 +69,15 @@ spec:
             claimName: shared-model-cache
             readOnly: true
     replicas: 1
-    runtimeVersionOverride: 1.7.0
     type: frontend
   - multinode:
       nodeCount: 2
     name: Worker
     podTemplate:
       spec:
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: kimi-k3-1-pro-sglang-gb300-agg-agentic-compute-domain-channel
         containers:
         - args:
           - |
@@ -144,10 +146,12 @@ spec:
             value: NVL
           - name: MODEL_PATH
             value: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.7.0-kimi-k3.1-pro-dev.1
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:e7392b04e4b1e1142dbf0e4d31285a16728f430b6f9a331ac339682bb014d84d
           imagePullPolicy: IfNotPresent
           name: main
           resources:
+            claims:
+            - name: compute-domain-channel
             limits:
               nvidia.com/gpu: '4'
             requests:
@@ -173,6 +177,16 @@ spec:
           persistentVolumeClaim:
             claimName: shared-model-cache
     replicas: 1
-    runtimeVersionOverride: 1.7.0
     sharedMemorySize: 64Gi
     type: worker
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: kimi-k3-1-pro-sglang-gb300-agg-agentic-compute-domain
+spec:
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: kimi-k3-1-pro-sglang-gb300-agg-agentic-compute-domain-channel
+  numNodes: 0

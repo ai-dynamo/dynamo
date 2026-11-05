@@ -16,7 +16,7 @@
 # Enables image/video input on the prefill and decode workers (text-only is the default, measured recipe).
 - op: test
   path: /spec/components/1/name
-  value: prefill
+  value: PrefillWorker
 - op: test
   path: /spec/components/1/type
   value: prefill
@@ -47,7 +47,7 @@
         --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
 - op: test
   path: /spec/components/2/name
-  value: decode
+  value: DecodeWorker
 - op: test
   path: /spec/components/2/type
   value: decode

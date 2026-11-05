@@ -17,21 +17,11 @@ source: kustomize/base
 nameTemplate: ${variant}
 matrix:
   variant:
-  - name: generic
-    components: []
   - name: vr200
-    components:
-    - kustomize/components/deployment-identity
-    - kustomize/components/registry-credentials
-    - kustomize/components/scheduling
-    - kustomize/components/compute-domain
+    components: []
   - name: generic-synthetic-al
     components:
     - kustomize/components/synthetic-al
   - name: vr200-synthetic-al
     components:
-    - kustomize/components/deployment-identity
-    - kustomize/components/registry-credentials
-    - kustomize/components/scheduling
-    - kustomize/components/compute-domain
     - kustomize/components/synthetic-al
