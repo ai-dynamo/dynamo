@@ -119,8 +119,8 @@ RUN apt-get update && \
 {% endif %}
 
 {% if variant == "enterprise" %}
-# The NIM base assigns UID 1000 to `nim`. Remove the account but keep its
-# /opt/nim home, which holds the NIM venv.
+# Remove the NIM base's `nim` account so it cannot hold a UID the dynamo user
+# needs. Keep its /opt/nim home, which holds the NIM venv.
 RUN userdel nim
 {% endif %}
 # Create dynamo user with group 0 for OpenShift compatibility.
