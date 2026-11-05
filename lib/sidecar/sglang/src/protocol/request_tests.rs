@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
+
 use super::*;
 use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
@@ -183,7 +185,7 @@ fn request_refusal_is_public() {
     let error = build(&refused, DisaggregationMode::Aggregated).unwrap_err();
     assert_eq!(
         error.public_message(),
-        Some("multimodal payloads are not supported by SGLang's native Generate RPC")
+        Some("mm_processor_kwargs are not supported by SGLang's native Generate RPC")
     );
 
     let mut embeds = request();
@@ -381,6 +383,13 @@ fn unsupported_sampling_controls_are_rejected() {
             },
             "include_stop_str_in_output",
         ),
+        (
+            SamplingOptions {
+                logit_bias: Some(std::collections::HashMap::from([(18, -10.0)])),
+                ..Default::default()
+            },
+            "logit_bias",
+        ),
     ] {
         let mut request = request();
         request.sampling_options = options;
@@ -398,6 +407,8 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
         "prompt_embeds",
         "multimodal",
         "mm_processor_kwargs",
+        "multi_modal_uuids",
+        "encoder_result",
     ] {
         let mut request = request();
         let message = match field {
@@ -415,7 +426,18 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
             }
             "mm_processor_kwargs" => {
                 request.mm_processor_kwargs = Some(json!({}));
-                "multimodal"
+                "mm_processor_kwargs"
+            }
+            "multi_modal_uuids" => {
+                request.multi_modal_uuids = Some(HashMap::from([(
+                    "image_url".to_string(),
+                    vec![None, Some("image-a".to_string())],
+                )]));
+                "media uuids"
+            }
+            "encoder_result" => {
+                request.encoder_result = Some(json!({}));
+                "encoder_result"
             }
             _ => unreachable!(),
         };

@@ -7,7 +7,7 @@
 # separately staged AISimulate wheel.
 aiofiles<=25.1.0
 aiohttp>=3.14.3,<4.0
-certifi==2026.10.19
+certifi==2026.10.23
 filterpy==1.4.5
 # gRPC + protobuf are runtime deps for the plugin-orchestrator transport.
 # Pin in sync with requirements.common.txt.
@@ -22,5 +22,6 @@ pmdarima==2.1.1
 prometheus-api-client==0.6.0
 prophet==1.2.1
 protobuf==6.33.6
+redis>=6.2.0,<9.0.0
 scikit-learn==1.7.2
 scipy>=1.14.0,<2.0

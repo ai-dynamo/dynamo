@@ -54,6 +54,14 @@ func (c incompatibleUpgradeClient) Get(ctx context.Context, key client.ObjectKey
 }
 
 func testUpgradeComponentHistoryBarrier(t *testing.T) {
+	for _, topology := range []string{"single", "multi"} {
+		t.Run(topology, func(t *testing.T) {
+			testUpgradeComponentHistory(t, "testdata/upgrade/latest/sglang/aggregated/"+topology+"/component/input.yaml")
+		})
+	}
+}
+
+func testUpgradeComponentHistory(t *testing.T, input string) {
 	var snapshot []unstructured.Unstructured
 	var namespace string
 	var seedClient client.Client
@@ -63,7 +71,7 @@ func testUpgradeComponentHistoryBarrier(t *testing.T) {
 		env := clusterTestEnv.RunT(t)
 		namespace, seedClient = env.Namespace(), env.Client()
 		env.BlockWorkloads()
-		objects, err := golden.ReadManifests("testdata/upgrade/latest/sglang/aggregated/single/component/input.yaml")
+		objects, err := golden.ReadManifests(input)
 		require.NoError(t, err)
 		for i := range objects {
 			objects[i].SetNamespace(namespace)

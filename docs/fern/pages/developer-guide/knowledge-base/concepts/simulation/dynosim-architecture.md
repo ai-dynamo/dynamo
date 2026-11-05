@@ -13,7 +13,7 @@ workers without replay orchestration.
 
 For task-oriented instructions, see [Run a DynoSim Simulation](../../../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx),
 [Sweep DynoSim Configurations](../../../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx), and
-[Benchmark Planner Decisions](../../../../kubernetes/operations/simulation-with-dynosim/dynosim-planner-replay.mdx). For engine-core details, see
+[Simulate Planner Decisions with AISimulate](../../modular-components/planner/aisimulate-planner-replay.mdx). For engine-core details, see
 [Mocker Engine Architecture](../../modular-components/backends/mocker/mocker-engine-architecture.md).
 
 ## Replay harness
@@ -106,16 +106,15 @@ The router observes request admission, prefill completion, and sequence release.
 prompt-side load from token counts or an AIConfigurator timing model. These estimates influence
 worker selection but do not replace the engine scheduler's own queue and KV-cache behavior.
 
-Policy-class replay uses the same policy-family and cache-bucket model as the live router:
+Policy-class replay resolves classes the same way as the live router:
 
 ```mermaid
 flowchart LR
     R["Replay request"] --> C{"policy_class"}
-    C -->|Exact explicit class| Q["Physical policy queue"]
-    C -->|Known family| B["Observed uncached-ISL bucket"]
-    C -->|Missing or unknown| F["default_policy_family"]
-    F --> B
-    B --> Q
+    C -->|Configured class name| Q["Policy class queue"]
+    C -->|Missing| F["default_policy_class"]
+    C -->|Unknown| X["Request fails"]
+    F --> Q
     Q --> D["Deficit round-robin dispatch"]
 ```
 
@@ -142,9 +141,11 @@ Speculative decoding changes the Planner's effective decode latency and capacity
 does not rewrite raw output length, which remains the input for KV residency, context-length, and
 request-length calculations.
 
-The simulation adapter cannot auto-detect the GPU count from a deployment. Planner experiments must
-set `prefill_engine_num_gpu` and `decode_engine_num_gpu` explicitly when cumulative GPU-hours are
-part of the analysis.
+The replay summary reports provisioned GPU time as `gpu_hours`, computed from each role's engine
+parallelism. The Planner's own HTML diagnostics report, which only the Python replay API writes,
+computes GPU-hours from `prefill_engine_num_gpu` and `decode_engine_num_gpu`; set them in the
+Planner configuration for that report. `aisimulate predict` derives both from the engine's
+`parallelism`.
 
 ## Timing models
 

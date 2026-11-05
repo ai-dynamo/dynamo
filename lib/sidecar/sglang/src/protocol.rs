@@ -350,9 +350,29 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     if request.token_ids.is_empty() {
         return Err(client::invalid_request("token_ids must not be empty"));
     }
-    if request.multi_modal_data.is_some() || request.mm_processor_kwargs.is_some() {
+    if request.multi_modal_data.is_some() {
         return Err(client::invalid_request(
             "multimodal payloads are not supported by SGLang's native Generate RPC",
+        ));
+    }
+    if request.mm_processor_kwargs.is_some() {
+        return Err(client::invalid_request(
+            "mm_processor_kwargs are not supported by SGLang's native Generate RPC",
+        ));
+    }
+    if request
+        .multi_modal_uuids
+        .iter()
+        .flat_map(|uuids| uuids.values().flatten())
+        .any(|uuid| uuid.as_deref().is_some_and(|uuid| !uuid.is_empty()))
+    {
+        return Err(client::invalid_request(
+            "media uuids are not supported by SGLang's native Generate RPC",
+        ));
+    }
+    if request.encoder_result.is_some() {
+        return Err(client::invalid_request(
+            "encoder handoff (encoder_result) is not supported by the SGLang sidecar",
         ));
     }
     if request.sampling_options.n.unwrap_or(1) != 1 {
@@ -368,6 +388,16 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     if request.sampling_options.use_beam_search.unwrap_or(false) {
         return Err(client::invalid_request(
             "beam search is not represented by SGLang's native gRPC proto",
+        ));
+    }
+    if request
+        .sampling_options
+        .logit_bias
+        .as_ref()
+        .is_some_and(|bias| !bias.is_empty())
+    {
+        return Err(client::invalid_request(
+            "logit_bias is not represented by SGLang's native gRPC proto",
         ));
     }
     if let Some(penalty) = request.sampling_options.length_penalty
