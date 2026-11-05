@@ -92,14 +92,13 @@ impl Default for MockerServerConfig {
 #[derive(Clone, Debug)]
 struct DiscoveryMetadata {
     page_size: u32,
-    /// The bound KV-event publisher port.
     kv_event_port: Option<u16>,
     max_total_num_tokens: usize,
     max_running_requests: usize,
     max_prefill_tokens: usize,
 }
 
-/// SGLang-compatible service driven by one Mocker scheduler.
+/// SGLang-compatible service driven by one shared Mocker scheduler.
 #[derive(Clone)]
 pub struct SglangMockerService {
     config: Arc<MockerServerConfig>,
@@ -301,7 +300,6 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
         let prepared =
             PreparedRequest::new(request.into_inner(), &self.config).map_err(|status| *status)?;
         if let Some(message) = prepared.context_error.clone() {
-            // SGLang checks the context after admission, inside the stream.
             let item = error_item(400, message);
             return Ok(Response::new(Box::pin(futures::stream::once(async move {
                 let _permit = permit;
@@ -403,7 +401,7 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
         request: Request<pb::AbortRequest>,
     ) -> Result<Response<pb::AbortResponse>, Status> {
         let request = request.into_inner();
-        if request.abort_all != request.rid.is_empty() {
+        if request.abort_all != request.rid.trim().is_empty() {
             return Err(Status::invalid_argument(
                 "provide either a nonempty rid or abort_all=true, not both",
             ));
@@ -420,7 +418,6 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
         Ok(Response::new(pb::AbortResponse { success }))
     }
 
-    // The Mocker has no hierarchical cache storage backend to manage.
     async fn get_hi_cache_storage(
         &self,
         _request: Request<pb::GetHiCacheStorageRequest>,
@@ -467,8 +464,6 @@ fn error_item(code: u32, message: String) -> pb::GenerateStreamItem {
     }
 }
 
-/// The signal's token, or the code and message of the error item that ends
-/// the stream instead.
 fn checked_token(signal: &OutputSignal) -> Result<u32, (u32, &'static str)> {
     if signal.rejected {
         // SGLang reports scheduler overload as 503.

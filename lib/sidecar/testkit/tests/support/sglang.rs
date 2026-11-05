@@ -53,8 +53,6 @@ pub struct Fixture {
 }
 
 impl Fixture {
-    /// The Rust server serves native `/generate` on the HTTP port GetServerInfo
-    /// reports; the peer imitates it, and Abort RPCs reach this fixture.
     pub async fn start_http(control: Controller<http::Adapter>, config: FixtureConfig) -> Self {
         let mut fixture = Self::start(Controller::default(), config).await;
         let http = http::Peer::start(control, fixture.aborts.clone()).await;
@@ -170,7 +168,7 @@ impl SidecarFixture for Fixture {
     }
 
     async fn engine(&self) -> Self::Engine {
-        let argv: Vec<String> = vec![
+        let argv = vec![
             "dynamo-sglang-sidecar".into(),
             "--grpc-endpoint".into(),
             self.server.endpoint(),
@@ -660,7 +658,6 @@ impl Protocol for Adapter {
         !ids.is_empty()
     }
 
-    /// SGLang ends a request's stream after its terminal frame or error item.
     fn is_terminal(response: &Self::Response) -> bool {
         match response.item.as_ref() {
             Some(Item::Frame(frame)) => frame
@@ -728,7 +725,6 @@ impl ProcessFixture for Fixture {
         request.output_options.logprobs = Some(2);
         request.output_options.prompt_logprobs = Some(1);
         request.mdc_sum = Some("request-cache-key".into());
-        // The router names rank 0, the engine's only DP rank.
         request.routing = Some(RoutingHints {
             lora_name: Some("test-adapter".into()),
             dp_rank: Some(0),
@@ -812,10 +808,9 @@ pub mod http {
     use tokio::net::TcpStream;
     use tokio::sync::{Notify, watch};
 
-    /// The Abort RPCs the gRPC fixture records, with whether each matched.
-    /// SGLang's Rust server serves no `/abort_request`; the Abort RPC cancels
-    /// its native requests. The peer, not the Mocker, serves them, so none
-    /// matches.
+    /// Abort RPCs the gRPC fixture recorded. The Rust server has no
+    /// `/abort_request`, so native requests are aborted by RPC and match no
+    /// Mocker request.
     #[derive(Clone)]
     struct Aborts(watch::Receiver<Vec<(String, bool)>>);
 
@@ -943,7 +938,6 @@ pub mod http {
         if reader.read_line(&mut line).await? == 0 {
             return Ok(());
         }
-        // SGLang's Rust server serves no `/abort_request`.
         let is_health = line.starts_with("GET /health ");
         assert!(is_health || line.starts_with("POST /generate "), "{line}");
         let mut length = 0;
@@ -987,7 +981,6 @@ pub mod http {
                 let opened = control.open(&request).await?;
                 writer.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await?;
                 let mut responses = if let Some(gate) = gate {
-                    // The Rust server omits output_ids while a frame has no tokens.
                     let empty = json!({"text": "", "meta_info": {"finish_reason": null}});
                     writer.write_all(format!("data: {empty}\n\n").as_bytes()).await?;
                     gate.empty_sent.send_replace(true);
@@ -1051,7 +1044,6 @@ pub mod http {
             !ids.is_empty()
         }
 
-        /// SGLang ends a request's stream after its finish or error.
         fn is_terminal(response: &Value) -> bool {
             response.get("error").is_some() || !response["meta_info"]["finish_reason"].is_null()
         }

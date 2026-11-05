@@ -27,7 +27,6 @@ pub(super) struct PreparedRequest {
     output_token_ids: Vec<u32>,
     stop_token: Option<u32>,
     response_metadata: ResponseMetadata,
-    /// SGLang's in-stream rejection of a request that cannot fit the context.
     pub(super) context_error: Option<String>,
     started: Instant,
 }
