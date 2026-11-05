@@ -52,6 +52,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
 )
 
@@ -1315,4 +1316,204 @@ func TestGroveProgram_CrashLoopFailsGraph(t *testing.T) {
 			require.Equal(t, "Component frontend is crash-looping: pod graph-0-frontend-a container main restarted 3 times, last exit code 1 (Error)", ready.Message)
 		})
 	}
+}
+
+func TestGroveProgramRequeuesAfterRestartProgressChange(t *testing.T) {
+	sequential := &nvidiacomv1beta1.RestartStrategy{Type: nvidiacomv1beta1.RestartStrategyTypeSequential, Order: []string{"Frontend", "prefill", "decode"}}
+	parallel := &nvidiacomv1beta1.RestartStrategy{Type: nvidiacomv1beta1.RestartStrategyTypeParallel}
+	restarting := func(id string, inProgress ...string) *nvidiacomv1beta1.RestartStatus {
+		return &nvidiacomv1beta1.RestartStatus{ObservedID: id, Phase: nvidiacomv1beta1.RestartPhaseRestarting, InProgress: inProgress}
+	}
+	completed := func(id string) *nvidiacomv1beta1.RestartStatus {
+		return &nvidiacomv1beta1.RestartStatus{ObservedID: id, Phase: nvidiacomv1beta1.RestartPhaseCompleted}
+	}
+	for _, test := range []struct {
+		name          string
+		interruptedID string
+		id            string
+		strategy      *nvidiacomv1beta1.RestartStrategy
+		progression   []*nvidiacomv1beta1.RestartStatus
+	}{
+		{
+			name:          "interrupted sequential restart",
+			interruptedID: "restart",
+			id:            "restart-urgent",
+			strategy:      sequential,
+			progression: []*nvidiacomv1beta1.RestartStatus{
+				restarting("restart-urgent", "Frontend"),
+				restarting("restart-urgent", "prefill"),
+				restarting("restart-urgent", "decode"),
+				completed("restart-urgent"),
+			},
+		},
+		{
+			name:     "ordinary sequential restart",
+			id:       "r1",
+			strategy: sequential,
+			progression: []*nvidiacomv1beta1.RestartStatus{
+				restarting("r1", "Frontend"),
+				restarting("r1", "prefill"),
+				restarting("r1", "decode"),
+				completed("r1"),
+			},
+		},
+		{
+			name:     "parallel restart",
+			id:       "r1",
+			strategy: parallel,
+			progression: []*nvidiacomv1beta1.RestartStatus{
+				restarting("r1", "Frontend", "decode", "prefill"),
+				completed("r1"),
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := t.Context()
+			t.Log("Serve a ready Frontend, prefill and decode through Grove")
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+				Name: "graph", Namespace: "default", UID: "dgd-uid", Generation: 1,
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "Frontend", ComponentType: consts.ComponentTypeFrontend},
+					{ComponentName: "prefill", ComponentType: consts.ComponentTypePrefill},
+					{ComponentName: "decode", ComponentType: consts.ComponentTypeDecode},
+				}},
+			}
+			objects := []client.Object{dgd}
+			for _, name := range []string{"frontend", "prefill", "decode"} {
+				objects = append(objects, &grovev1alpha1.PodClique{Name: "graph-0-" + name, Namespace: "default", Generation: 1, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}, Status: grovev1alpha1.PodCliqueStatus{Replicas: 1, ReadyReplicas: 1, UpdatedReplicas: 1, ScheduledReplicas: 1, ObservedGeneration: new(int64(1))}})
+			}
+			config := &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}}
+			runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}
+			secrets := &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}
+			kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues).WithObjects(objects...).WithStatusSubresource(dgd, &grovev1alpha1.PodCliqueSet{}).Build()
+			reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, Config: config, RuntimeConfig: runtimeConfig, Recorder: events.NewFakeRecorder(100), DockerSecretRetriever: secrets}
+			pcs := &grovev1alpha1.PodCliqueSet{}
+			stored := &nvidiacomv1beta1.DynamoGraphDeployment{}
+
+			t.Log("Settle the graph before any restart is requested")
+			result, err := reconciler.newGroveProgram().Reconcile(ctx, workloadProgramRequest{DGD: dgd})
+			require.NoError(t, err)
+			require.Nil(t, result.Status.Restart)
+			require.Zero(t, result.Result)
+			require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), stored))
+			stored.Status = result.Status
+			require.NoError(t, kubeClient.Status().Update(ctx, stored))
+			require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), pcs))
+			pcs.Status.ObservedGeneration = new(pcs.Generation)
+			require.NoError(t, kubeClient.Status().Update(ctx, pcs))
+
+			if test.interruptedID != "" {
+				t.Log("Start the first restart and persist Frontend in progress")
+				require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+				dgd.Spec.Restart = &nvidiacomv1beta1.Restart{ID: test.interruptedID, Strategy: test.strategy}
+				require.NoError(t, kubeClient.Update(ctx, dgd))
+				result, err = reconciler.newGroveProgram().Reconcile(ctx, workloadProgramRequest{DGD: dgd})
+				require.NoError(t, err)
+				require.Equal(t, restarting(test.interruptedID, "Frontend"), result.Status.Restart)
+				require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), stored))
+				stored.Status = result.Status
+				require.NoError(t, kubeClient.Status().Update(ctx, stored))
+				require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), pcs))
+				pcs.Status.ObservedGeneration = new(pcs.Generation)
+				require.NoError(t, kubeClient.Status().Update(ctx, pcs))
+			}
+
+			t.Log("Request the restart under test")
+			require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+			dgd.Spec.Restart = &nvidiacomv1beta1.Restart{ID: test.id, Strategy: test.strategy}
+			require.NoError(t, kubeClient.Update(ctx, dgd))
+
+			t.Log("Every reconcile that changes restart progress requeues, because its status write alone wakes nothing")
+			for step, expected := range test.progression {
+				require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+				result, err = reconciler.newGroveProgram().Reconcile(ctx, workloadProgramRequest{DGD: dgd})
+				require.NoError(t, err)
+				require.Equal(t, expected, result.Status.Restart, "step %d", step)
+				require.Positive(t, result.RequeueAfter, "step %d changed restart progress and must requeue", step)
+				require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), stored))
+				stored.Status = result.Status
+				require.NoError(t, kubeClient.Status().Update(ctx, stored))
+				require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), pcs))
+				pcs.Status.ObservedGeneration = new(pcs.Generation)
+				require.NoError(t, kubeClient.Status().Update(ctx, pcs))
+			}
+
+			t.Log("A completed restart does not requeue again")
+			require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+			result, err = reconciler.newGroveProgram().Reconcile(ctx, workloadProgramRequest{DGD: dgd})
+			require.NoError(t, err)
+			require.Equal(t, completed(test.id), result.Status.Restart)
+			require.Zero(t, result.Result)
+		})
+	}
+}
+
+func TestDynamoGraphDeploymentReconcileRetriesGroveRestartAfterStatusConflict(t *testing.T) {
+	ctx := t.Context()
+	t.Log("Serve a ready Frontend through a finalized Grove DGD")
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		Name: "graph", Namespace: "default", UID: "dgd-uid", Generation: 1,
+		Annotations: map[string]string{consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			{ComponentName: "Frontend", ComponentType: consts.ComponentTypeFrontend},
+		}},
+	}
+	commoncontroller.AddFinalizer(dgd)
+	pclq := &grovev1alpha1.PodClique{Name: "graph-0-frontend", Namespace: "default", Generation: 1, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}, Status: grovev1alpha1.PodCliqueStatus{Replicas: 1, ReadyReplicas: 1, UpdatedReplicas: 1, ScheduledReplicas: 1, ObservedGeneration: new(int64(1))}}
+	conflictDGDStatus := false
+	kubeClient := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues).WithObjects(dgd, pclq).WithStatusSubresource(dgd, &grovev1alpha1.PodCliqueSet{}).WithInterceptorFuncs(interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, delegated client.Client, subresource string, object client.Object, opts ...client.SubResourceUpdateOption) error {
+			if _, ok := object.(*nvidiacomv1beta1.DynamoGraphDeployment); ok && conflictDGDStatus {
+				conflictDGDStatus = false
+				return apierrors.NewConflict(nvidiacomv1beta1.GroupVersion.WithResource("dynamographdeployments").GroupResource(), object.GetName(), errors.New("stale resource version"))
+			}
+			return delegated.SubResource(subresource).Update(ctx, object, opts...)
+		},
+	}).Build()
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:                kubeClient,
+		Config:                &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}},
+		RuntimeConfig:         &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}},
+		Recorder:              events.NewFakeRecorder(100),
+		DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
+	}
+	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(dgd)}
+
+	t.Log("Settle the graph and let Grove observe the PodCliqueSet")
+	_, err := reconciler.Reconcile(ctx, request)
+	require.NoError(t, err)
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), pcs))
+	pcs.Status.ObservedGeneration = new(pcs.Generation)
+	require.NoError(t, kubeClient.Status().Update(ctx, pcs))
+
+	t.Log("Request a sequential restart")
+	stored := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), stored))
+	stored.Spec.Restart = &nvidiacomv1beta1.Restart{ID: "r1", Strategy: &nvidiacomv1beta1.RestartStrategy{Type: nvidiacomv1beta1.RestartStrategyTypeSequential}}
+	require.NoError(t, kubeClient.Update(ctx, stored))
+
+	t.Log("A conflicting status write returns an error for controller backoff and persists no progress")
+	conflictDGDStatus = true
+	_, err = reconciler.Reconcile(ctx, request)
+	require.True(t, apierrors.IsConflict(err), "got %v", err)
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), stored))
+	require.Nil(t, stored.Status.Restart)
+
+	t.Log("The retry persists the restart progress and requeues to continue it")
+	result, err := reconciler.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.Positive(t, result.RequeueAfter)
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), stored))
+	require.Equal(t, &nvidiacomv1beta1.RestartStatus{ObservedID: "r1", Phase: nvidiacomv1beta1.RestartPhaseRestarting, InProgress: []string{"Frontend"}}, stored.Status.Restart)
+
+	t.Log("The requeued reconcile finds Frontend ready and completes the restart")
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), pcs))
+	pcs.Status.ObservedGeneration = new(pcs.Generation)
+	require.NoError(t, kubeClient.Status().Update(ctx, pcs))
+	result, err = reconciler.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.Positive(t, result.RequeueAfter)
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), stored))
+	require.Equal(t, &nvidiacomv1beta1.RestartStatus{ObservedID: "r1", Phase: nvidiacomv1beta1.RestartPhaseCompleted}, stored.Status.Restart)
 }
