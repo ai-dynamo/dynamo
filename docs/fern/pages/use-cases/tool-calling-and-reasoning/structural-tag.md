@@ -134,6 +134,7 @@ python3 -m dynamo.vllm ... --dyn-structural-tag false
 python3 -m dynamo.sglang ... --dyn-structural-tag false
 python3 -m dynamo.trtllm ... --dyn-structural-tag false
 dynamo-sglang-sidecar ... --dyn-structural-tag false
+dynamo-vllm-sidecar ... --dyn-structural-tag false
 ```
 
 Or set the equivalent environment variable before starting the worker:
@@ -169,10 +170,12 @@ environment variables remain accepted with a deprecation warning.
 The native Rust sidecars accept `--dyn-structural-tag` and `DYN_STRUCTURAL_TAG`
 as described in [CLI Flags](#cli-flags), but not the legacy flags or their
 environment variables. The SGLang sidecar uses the same default-on policy. The
-vLLM and TensorRT-LLM sidecars default to `false`: vLLM's gRPC server compiles
-structured outputs with guidance, which rejects these tags until
-vllm-project/vllm#61892, and the xgrammar version TensorRT-LLM pins rejects
-several tool-call tag formats.
+vLLM sidecar uses it when vLLM reports version 0.33 or later, the first release
+whose gRPC server compiles these tags with xgrammar. Against older vLLM it
+defaults to `false`, because that gRPC server compiles them with guidance,
+which rejects them. 0.33 release candidates and development builds also use
+it. The TensorRT-LLM sidecar defaults to `false`: the
+xgrammar version TensorRT-LLM pins rejects several tool-call tag formats.
 
 Setting `strict: false` on a tool relaxes its argument schema. On vLLM
 0.30.0, pinned by Dynamo's CUDA image, auto choice with every tool explicitly
