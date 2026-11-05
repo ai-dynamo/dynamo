@@ -531,7 +531,7 @@ async_main()
 Initializes the distributed runtime, configures routing, and starts
 the HTTP server or interactive mode based on command-line arguments.
 
-[`components/src/dynamo/frontend/main.py#L386`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L386)
+[`components/src/dynamo/frontend/main.py#L388`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L388)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-utils-backend-invalid-argument-to-http-error" title="backend_invalid_argument_to_http_error (function)">
@@ -753,7 +753,7 @@ graceful_shutdown(runtime: DistributedRuntime) -> None
 The DistributedRuntime instance to shut down.
 </ParamField>
 
-[`components/src/dynamo/frontend/main.py#L528`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L528)
+[`components/src/dynamo/frontend/main.py#L530`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L530)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-utils-handle-engine-error" title="handle_engine_error (function)">
@@ -800,7 +800,7 @@ load_frontend_route_extensions(extension_names: list[str]) -> list[FrontendRoute
 Each value is either a name registered under the ``dynamo.frontend.routes``
 entry-point group (preferred) or a direct ``module:function`` path.
 
-[`components/src/dynamo/frontend/main.py#L218`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L218)
+[`components/src/dynamo/frontend/main.py#L217`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L217)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-main-main" title="main (function)">
@@ -814,7 +814,7 @@ from dynamo.frontend.main import main
 main() -> None
 ```
 
-[`components/src/dynamo/frontend/main.py#L537`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L537)
+[`components/src/dynamo/frontend/main.py#L539`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L539)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-utils-make-backend-error" title="make_backend_error (function)">
@@ -902,7 +902,7 @@ parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]
 
 - `tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]` — Tuple of (FrontendConfig, vllm_flags, sglang_flags).
 
-[`components/src/dynamo/frontend/main.py#L260`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L260)
+[`components/src/dynamo/frontend/main.py#L259`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L259)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-prepost-preprocess-chat-request" title="preprocess_chat_request (function)">
@@ -1158,7 +1158,7 @@ from dynamo.frontend.main import setup_engine_factory
 setup_engine_factory(config: FrontendConfig, vllm_flags: Namespace) -> EngineFactory
 ```
 
-[`components/src/dynamo/frontend/main.py#L101`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L101)
+[`components/src/dynamo/frontend/main.py#L100`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L100)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-main-setup-sglang-engine-factory" title="setup_sglang_engine_factory (function)">
@@ -1172,7 +1172,7 @@ from dynamo.frontend.main import setup_sglang_engine_factory
 setup_sglang_engine_factory(config: FrontendConfig, sglang_flags: Optional[Namespace] = None)
 ```
 
-[`components/src/dynamo/frontend/main.py#L114`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L114)
+[`components/src/dynamo/frontend/main.py#L113`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/main.py#L113)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-structural-tag-policy-should-attempt-structural-tag" title="should_attempt_structural_tag (function)">
