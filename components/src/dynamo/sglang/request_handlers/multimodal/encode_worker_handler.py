@@ -64,6 +64,7 @@ from dynamo.sglang._compat import (
     mm_encode,
 )
 from dynamo.sglang.args import Config
+from dynamo.sglang.media_limits import raise_if_mm_limit_exceeded
 from dynamo.sglang.protocol import (
     MultiModalGroup,
     MultiModalInput,
@@ -1052,6 +1053,10 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         """
         if isinstance(raw_request, str):
             raw_request = json.loads(raw_request)
+
+        raise_if_mm_limit_exceeded(
+            raw_request, getattr(self.config.dynamo_args, "limit_mm_per_prompt", None)
+        )
 
         # Keep URL inputs on SGLang's existing loading path and materialize only
         # frontend-decoded images received through NIXL.

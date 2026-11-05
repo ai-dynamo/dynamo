@@ -41,6 +41,7 @@ from dynamo.sglang.engine_generate import (
     new_sglang_request_id,
 )
 from dynamo.sglang.kv_hints import kv_hint_kwargs
+from dynamo.sglang.media_limits import raise_if_mm_limit_exceeded
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
@@ -742,6 +743,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Raises:
             RuntimeError: If no bootstrap info received from prefill worker.
         """
+        raise_if_mm_limit_exceeded(
+            request, getattr(self.config.dynamo_args, "limit_mm_per_prompt", None)
+        )
         if self.serving_mode == DisaggregationMode.DECODE:
             validate_disagg_parallel_sampling(request)
         logging.debug(f"New Request ID: {context.id()}")

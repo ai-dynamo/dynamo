@@ -16,6 +16,7 @@ from dynamo.common.configuration.utils import add_argument, add_negatable_bool_a
 from dynamo.common.constants import EmbeddingTransferMode
 
 from . import __version__
+from .media_limits import parse_mm_limits
 
 # Env vars of the removed multimodal role flags. The flags fail at argparse,
 # but a leftover env var would otherwise be silently ignored and start the
@@ -183,6 +184,19 @@ class DynamoSGLangArgGroup(ArgGroup):
             ),
         )
 
+        add_argument(
+            g,
+            flag_name="--limit-mm-per-prompt",
+            env_var="DYN_SGL_LIMIT_MM_PER_PROMPT",
+            default=None,
+            arg_type=parse_mm_limits,
+            help=(
+                'Maximum raw media items per prompt as JSON, e.g. {"image": 10}. '
+                "Keys: image, video, audio. Zero disables a modality; "
+                "unlisted modalities are unlimited."
+            ),
+        )
+
         # Topology constraints for --frontend-decoding are enforced in
         # DynamoSGLangConfig.validate() below.
         add_frontend_decoding_arg(g, env_prefix="SGL")
@@ -235,6 +249,7 @@ class DynamoSGLangConfig(ConfigBase):
     frontend_decoding: bool = False
     freeze_gc_after_init: bool = False
     sglang_trace_level: int
+    limit_mm_per_prompt: dict[str, int] | None = None
 
     # Extra served names beyond the primary, parsed from --served-model-name.
     # None (not []) since ConfigBase copies class defaults by reference.

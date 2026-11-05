@@ -120,6 +120,16 @@ The SGLang wrapper selects a worker role from these flags and the native `--disa
 
 ## Multimodal decoding
 
+<ParamField path="--limit-mm-per-prompt" type="JSON object" default="null">
+  Maximum raw media items per prompt, using keys `image`, `video`, and `audio` with non-negative integer values. For example, `'{"image": 10, "video": 0}'` allows up to ten images and refuses videos. Unlisted modalities are unlimited; unset or `{}` adds no limits.
+
+  LLM aggregated, prefill, and decode workers and the dedicated multimodal encode worker reject requests over the limit before their media processing or engine dispatch. Native Generate media fields are counted too. In disaggregated deployments, configure the limit on every worker that accepts raw media. Frontend decoding can already have loaded media before the worker receives it; this flag does not bound frontend decoding.
+
+  Rejections use the invalid-request error (HTTP 400 before streaming starts, or an error event after streaming headers have been sent). Malformed limits fail at startup.
+
+  Environment variable: `DYN_SGL_LIMIT_MM_PER_PROMPT`
+</ParamField>
+
 <ParamField path="--frontend-decoding" type="boolean" default="false">
   Decode multimodal images and supported videos in the Rust frontend and transfer the pre-decoded pixels to the backend via NIXL RDMA, bypassing in-engine HTTP fetch and decode. Use it on an aggregated or native worker, or on the frontend-facing `--disaggregation-mode=encode` worker. Do not set it on internal workers selected by `--dedicated-mm-encoder`.
 
