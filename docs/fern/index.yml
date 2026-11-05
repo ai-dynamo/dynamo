@@ -727,8 +727,14 @@ navigation:
                 path: pages/use-cases/reinforcement-learning/verl.md
               - page: NeMo RL Integration
                 path: pages/use-cases/reinforcement-learning/nemo-rl.md
-              - page: Slime Integration
-                path: pages/use-cases/reinforcement-learning/slime.md
+              - section: Slime Integration
+                contents:
+                  - page: Overview
+                    path: pages/use-cases/reinforcement-learning/slime/overview.md
+                  - page: Installation
+                    path: pages/use-cases/reinforcement-learning/slime/installation.mdx
+                  - page: Tutorial
+                    path: pages/use-cases/reinforcement-learning/slime/tutorial.mdx
               - page: External Trainer Integration
                 path: pages/use-cases/reinforcement-learning/implementation-guide.md
               - page: RL Integration Reference
