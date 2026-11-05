@@ -189,8 +189,6 @@ spec:
             value: /tmp/hf-modules
           - name: XDG_CACHE_HOME
             value: /tmp/xdg
-          - name: PYTHONDONTWRITEBYTECODE
-            value: "1"
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
           imagePullPolicy: IfNotPresent
           name: main
@@ -214,7 +212,6 @@ spec:
           volumeMounts:
           - mountPath: /shared-model-cache
             name: shared-model-cache
-            readOnly: true
         nodeSelector:
           kubernetes.io/arch: amd64
           nvidia.com/gpu.product: NVIDIA-B200
@@ -223,7 +220,6 @@ spec:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-            readOnly: true
     replicas: 1
     runtimeVersionOverride: 1.7.0
     sharedMemorySize: 64Gi

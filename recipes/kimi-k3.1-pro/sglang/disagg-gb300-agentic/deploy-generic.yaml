@@ -26,9 +26,6 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  labels:
-    app.kubernetes.io/name: kimi-k3-1-pro-sglang-disagg-gb300
-    app.kubernetes.io/part-of: dynamo
   name: kimi-k3-1-pro-sglang-disagg-gb300
 spec:
   backendFramework: sglang
@@ -44,8 +41,6 @@ spec:
           - "8000"
           - --dyn-chat-processor
           - dynamo
-          - --router-mode
-          - round-robin
           - --router-session-affinity-ttl-secs
           - "900"
           - --trust-remote-code
@@ -54,6 +49,8 @@ spec:
           - -m
           - dynamo.frontend
           env:
+          - name: DYN_ROUTER_MODE
+            value: round-robin
           - name: DYN_SGL_FRONTEND_DECODING
             value: "true"
           - name: HF_HUB_OFFLINE
@@ -64,8 +61,6 @@ spec:
             value: "3600"
           - name: DYN_TOKENIZER_CACHE_BYTES
             value: "8589934592"
-          - name: MODEL_PATH
-            value: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
           image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.7.0-kimi-k3.1-pro-dev.1
           imagePullPolicy: IfNotPresent
           name: main
@@ -139,8 +134,6 @@ spec:
             value: "true"
           - name: HOME
             value: /tmp/k31-home
-          - name: PYTHONUNBUFFERED
-            value: "1"
           - name: SGLANG_CUSTOM_ALL_REDUCE_V2_MAX_SIZE_KB
             value: "32768"
           - name: SGLANG_UNBALANCED_MODEL_LOADING_TIMEOUT_S
@@ -206,13 +199,11 @@ spec:
           volumeMounts:
           - mountPath: /shared-model-cache
             name: shared-model-cache
-            readOnly: true
         terminationGracePeriodSeconds: 60
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-            readOnly: true
     replicas: 1
     runtimeVersionOverride: 1.7.0
     sharedMemorySize: 64Gi
@@ -270,8 +261,6 @@ spec:
             value: "true"
           - name: HOME
             value: /tmp/k31-home
-          - name: PYTHONUNBUFFERED
-            value: "1"
           - name: SGLANG_CUSTOM_ALL_REDUCE_V2_MAX_SIZE_KB
             value: "32768"
           - name: SGLANG_UNBALANCED_MODEL_LOADING_TIMEOUT_S
@@ -341,13 +330,11 @@ spec:
           volumeMounts:
           - mountPath: /shared-model-cache
             name: shared-model-cache
-            readOnly: true
         terminationGracePeriodSeconds: 60
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-            readOnly: true
     replicas: 1
     runtimeVersionOverride: 1.7.0
     sharedMemorySize: 64Gi

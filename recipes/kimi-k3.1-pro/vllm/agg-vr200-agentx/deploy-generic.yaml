@@ -224,7 +224,6 @@ spec:
           volumeMounts:
           - mountPath: /shared-model-cache
             name: shared-model-cache
-            readOnly: true
         nodeSelector:
           kubernetes.io/arch: arm64
           nvidia.com/gpu.machine: VR-NVL72

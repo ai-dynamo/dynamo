@@ -25,9 +25,6 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  labels:
-    app.kubernetes.io/name: kimi-k3-1-pro-vllm-aggregate-b200
-    app.kubernetes.io/part-of: dynamo
   name: kimi-k3-1-pro-vllm-aggregate-b200
 spec:
   backendFramework: vllm
@@ -199,8 +196,6 @@ spec:
             value: /tmp/hf-modules
           - name: XDG_CACHE_HOME
             value: /tmp/xdg
-          - name: PYTHONDONTWRITEBYTECODE
-            value: "1"
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
           imagePullPolicy: IfNotPresent
           name: main
@@ -224,7 +219,6 @@ spec:
           volumeMounts:
           - mountPath: /shared-model-cache
             name: shared-model-cache
-            readOnly: true
         imagePullSecrets:
         - name: ngc-pull-secret
         - name: acr-pull-secret
@@ -240,7 +234,6 @@ spec:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-            readOnly: true
     replicas: 1
     runtimeVersionOverride: 1.7.0
     sharedMemorySize: 64Gi

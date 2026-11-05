@@ -18,9 +18,6 @@ apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: kimi-k3-1-pro-vllm-disagg-gb300
-  labels:
-    app.kubernetes.io/name: kimi-k3-1-pro-vllm-disagg-gb300
-    app.kubernetes.io/part-of: dynamo
 spec:
   backendFramework: vllm
   components:
@@ -45,8 +42,6 @@ spec:
           - '8000'
           - --dyn-chat-processor
           - dynamo
-          - --router-mode
-          - kv
           - --router-kv-events
           - --router-session-affinity-mode
           - hard
@@ -54,6 +49,8 @@ spec:
           - '7200'
           - --trust-remote-code
           env:
+          - name: DYN_ROUTER_MODE
+            value: kv
           - name: HF_HUB_OFFLINE
             value: '1'
           - name: TRANSFORMERS_OFFLINE
@@ -62,8 +59,6 @@ spec:
             value: '3600'
           - name: DYN_TOKENIZER_CACHE_BYTES
             value: '8589934592'
-          - name: MODEL_PATH
-            value: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
           resources:
             requests:
               cpu: '16'
@@ -109,7 +104,6 @@ spec:
               --attention-backend FLASHMLA_SPARSE \
               --trust-remote-code \
               --language-model-only \
-              --enable-logging-iteration-details \
               --gpu-memory-utilization 0.92 \
               --load-format fastsafetensors \
               --no-enable-flashinfer-autotune \
@@ -173,12 +167,10 @@ spec:
           volumeMounts:
           - name: shared-model-cache
             mountPath: /shared-model-cache
-            readOnly: true
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-            readOnly: true
   - name: decode
     type: decode
     runtimeVersionOverride: 1.7.0
@@ -211,7 +203,6 @@ spec:
               --attention-backend FLASHMLA_SPARSE \
               --trust-remote-code \
               --language-model-only \
-              --enable-logging-iteration-details \
               --additional-config '{"decode_backend":"latency_specialized"}' \
               --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":1024,"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,32,48,64,96,128,192,256,512,1024]}' \
               --gpu-memory-utilization 0.92 \
@@ -277,9 +268,7 @@ spec:
           volumeMounts:
           - name: shared-model-cache
             mountPath: /shared-model-cache
-            readOnly: true
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-            readOnly: true

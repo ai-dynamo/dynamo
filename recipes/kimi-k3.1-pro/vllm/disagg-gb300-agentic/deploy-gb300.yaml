@@ -26,9 +26,6 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  labels:
-    app.kubernetes.io/name: kimi-k3-1-pro-vllm-disagg-gb300
-    app.kubernetes.io/part-of: dynamo
   name: kimi-k3-1-pro-vllm-disagg-gb300
 spec:
   backendFramework: vllm
@@ -44,8 +41,6 @@ spec:
           - "8000"
           - --dyn-chat-processor
           - dynamo
-          - --router-mode
-          - kv
           - --router-kv-events
           - --router-session-affinity-mode
           - hard
@@ -57,6 +52,8 @@ spec:
           - -m
           - dynamo.frontend
           env:
+          - name: DYN_ROUTER_MODE
+            value: kv
           - name: HF_HUB_OFFLINE
             value: "1"
           - name: TRANSFORMERS_OFFLINE
@@ -65,8 +62,6 @@ spec:
             value: "3600"
           - name: DYN_TOKENIZER_CACHE_BYTES
             value: "8589934592"
-          - name: MODEL_PATH
-            value: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
           imagePullPolicy: IfNotPresent
           name: main
@@ -117,7 +112,6 @@ spec:
               --attention-backend FLASHMLA_SPARSE \
               --trust-remote-code \
               --language-model-only \
-              --enable-logging-iteration-details \
               --gpu-memory-utilization 0.92 \
               --load-format fastsafetensors \
               --no-enable-flashinfer-autotune \
@@ -189,7 +183,6 @@ spec:
           volumeMounts:
           - mountPath: /shared-model-cache
             name: shared-model-cache
-            readOnly: true
         imagePullSecrets:
         - name: ngc-pull-secret
         - name: acr-pull-secret
@@ -208,7 +201,6 @@ spec:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-            readOnly: true
     replicas: 2
     runtimeVersionOverride: 1.7.0
     sharedMemorySize: 64Gi
@@ -234,7 +226,6 @@ spec:
               --attention-backend FLASHMLA_SPARSE \
               --trust-remote-code \
               --language-model-only \
-              --enable-logging-iteration-details \
               --additional-config '{"decode_backend":"latency_specialized"}' \
               --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":1024,"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,32,48,64,96,128,192,256,512,1024]}' \
               --gpu-memory-utilization 0.92 \
@@ -308,7 +299,6 @@ spec:
           volumeMounts:
           - mountPath: /shared-model-cache
             name: shared-model-cache
-            readOnly: true
         imagePullSecrets:
         - name: ngc-pull-secret
         - name: acr-pull-secret
@@ -327,7 +317,6 @@ spec:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-            readOnly: true
     replicas: 1
     runtimeVersionOverride: 1.7.0
     sharedMemorySize: 64Gi

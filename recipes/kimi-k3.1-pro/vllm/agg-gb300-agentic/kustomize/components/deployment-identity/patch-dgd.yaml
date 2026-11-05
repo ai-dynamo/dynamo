@@ -20,6 +20,3 @@
   path: /metadata
   value:
     name: kimi-k3-1-pro-vllm-aggregate-gb300
-    labels:
-      app.kubernetes.io/name: kimi-k3-1-pro-vllm-aggregate-gb300
-      app.kubernetes.io/part-of: dynamo

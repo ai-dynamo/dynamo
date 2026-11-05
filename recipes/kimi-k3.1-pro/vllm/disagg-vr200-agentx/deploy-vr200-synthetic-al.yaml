@@ -26,9 +26,6 @@ kind: DynamoGraphDeployment
 metadata:
   annotations:
     nvidia.com/kai-scheduler-queue: default-queue
-  labels:
-    app.kubernetes.io/name: kimi-k3-1-pro-vllm-disagg-vr200
-    app.kubernetes.io/part-of: dynamo
   name: kimi-k3-1-pro-vllm-disagg-vr200
 spec:
   backendFramework: vllm
@@ -245,7 +242,6 @@ spec:
           volumeMounts:
           - mountPath: /shared-model-cache
             name: shared-model-cache
-            readOnly: true
         imagePullSecrets:
         - name: ngc-pull-secret
         - name: acr-pull-secret
@@ -420,7 +416,6 @@ spec:
           volumeMounts:
           - mountPath: /shared-model-cache
             name: shared-model-cache
-            readOnly: true
         imagePullSecrets:
         - name: ngc-pull-secret
         - name: acr-pull-secret

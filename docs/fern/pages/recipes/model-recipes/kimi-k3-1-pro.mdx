@@ -22,7 +22,7 @@ body:has(#recipe-framework-vllm:checked):has(#recipe-sku-vr200:checked):has(#rec
 }
 `}</style>
 
-Serve `moonshotai/Kimi-K3.1-Pro` with NVIDIA Dynamo using vLLM or SGLang. Pick your framework, GPU, and serving topology; deployment commands update to match. SGLang targets are experimental, text-only, and functional-only; no performance claims are made.
+Serve `moonshotai/Kimi-K3.1-Pro` (currently private; authorized access required) with NVIDIA Dynamo using vLLM or SGLang. Pick your framework, GPU, and serving topology; deployment commands update to match. SGLang targets are experimental, text-only, and functional-only; no performance claims are made.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -282,6 +282,23 @@ kubectl apply -f recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/deploy-vr200.yam
 
 </div>
 
+You can also apply the B200 or VR200 target overlay directly:
+
+```bash
+kubectl apply -k recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/kustomize/overlays/b200 -n ${NAMESPACE}
+# Or choose one VR200 topology:
+kubectl apply -k recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/kustomize/overlays/vr200 -n ${NAMESPACE}
+kubectl apply -k recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/kustomize/overlays/vr200 -n ${NAMESPACE}
+```
+
+To render and apply a generic overlay, for example:
+
+```bash
+kubectl kustomize recipes/kimi-k3.1-pro/sglang/agg-gb300-agentic/kustomize/overlays/generic | kubectl apply -f - -n ${NAMESPACE}
+```
+
+Use the SKU overlay (for example `gb300`) to add scheduling, registry credentials, and ComputeDomain settings for your cluster.
+
 Each target also has a `generic` Kustomize overlay for customization. It inherits the base model paths and hardware requirements. B200 and VR200 targets enable DSpark; separate `*-synthetic-al` overlays change draft acceptance for benchmarking.
 
 ## Smoke Test
@@ -360,15 +377,15 @@ All results below measure text-only traffic; the selected target is highlighted.
 
 <div className="dynamo-variant-table-wrap">
 <table className="dynamo-variant-table dynamo-kimi-comparison">
-<thead><tr><th>Workload</th><th>Recipe</th><th>Framework</th><th>SKU</th><th>GPUs</th><th>Concurrency</th><th>System Output Tokens/s</th><th>System Output Tokens/s/GPU</th><th>User Output Tokens/s (P50)</th><th>TTFT P50 (ms)</th></tr></thead>
+<thead><tr><th>Workload</th><th>Recipe</th><th>Framework</th><th>SKU</th><th>Concurrency</th><th>System Output Tokens/s/GPU</th><th>User Output Tokens/s (P50)</th><th>TTFT P50 (ms)</th></tr></thead>
 <tbody>
-<tr data-highlight-target="vllm-vr200-agg"><td>AgentX</td><td>aggregated, 2 replicas</td><td>vLLM</td><td>VR200</td><td>16</td><td>180</td><td>2,448.08</td><td>153.01</td><td>57.71</td><td>1,534</td></tr>
-<tr data-highlight-target="vllm-vr200-disagg"><td>AgentX</td><td>disaggregated 2P1D</td><td>vLLM</td><td>VR200</td><td>24</td><td>174</td><td>2,932.63</td><td>122.19</td><td>73.93</td><td>1,761</td></tr>
-<tr data-highlight-target="vllm-b200-agg"><td>AgentX</td><td>aggregated</td><td>vLLM</td><td>B200</td><td>16</td><td>48</td><td>422.50</td><td>≈26.41</td><td>64.02</td><td>550.45</td></tr>
-<tr data-highlight-target="vllm-gb300-agg"><td>AgentX</td><td>aggregated TP8</td><td>vLLM</td><td>GB300</td><td>8 (2 nodes)</td><td>32</td><td>≈319.12</td><td>39.89</td><td>76.7</td><td>428</td></tr>
-<tr data-highlight-target="vllm-gb300-disagg"><td>AgentX</td><td>disaggregated 2P1D</td><td>vLLM</td><td>GB300</td><td>24</td><td>48</td><td>≈553.92</td><td>23.08</td><td>87.1</td><td>656</td></tr>
-<tr data-highlight-target="vllm-gb300-agg"><td>AgentX</td><td>aggregated multimodal overlay (pre-release)</td><td>vLLM</td><td>GB300</td><td>8 (2 nodes)</td><td>32</td><td>≈316.48</td><td>39.56</td><td>70.9</td><td>440</td></tr>
-<tr data-highlight-target="vllm-gb300-disagg"><td>AgentX</td><td>disaggregated multimodal overlay (pre-release)</td><td>vLLM</td><td>GB300</td><td>24</td><td>48</td><td>≈561.12</td><td>23.38</td><td>85.7</td><td>693</td></tr>
+<tr data-highlight-target="vllm-vr200-agg"><td>AgentX</td><td>aggregated, 2 replicas</td><td>vLLM</td><td>VR200</td><td>180</td><td>153.01</td><td>57.71</td><td>1,534</td></tr>
+<tr data-highlight-target="vllm-vr200-disagg"><td>AgentX</td><td>disaggregated 2P1D</td><td>vLLM</td><td>VR200</td><td>174</td><td>122.19</td><td>73.93</td><td>1,761</td></tr>
+<tr data-highlight-target="vllm-b200-agg"><td>AgentX</td><td>aggregated</td><td>vLLM</td><td>B200</td><td>48</td><td>≈26.41</td><td>64.02</td><td>550.45</td></tr>
+<tr data-highlight-target="vllm-gb300-agg"><td>AgentX</td><td>aggregated TP8</td><td>vLLM</td><td>GB300</td><td>32</td><td>39.89</td><td>76.7</td><td>428</td></tr>
+<tr data-highlight-target="vllm-gb300-disagg"><td>AgentX</td><td>disaggregated 2P1D</td><td>vLLM</td><td>GB300</td><td>48</td><td>23.08</td><td>87.1</td><td>656</td></tr>
+<tr data-highlight-target="vllm-gb300-agg"><td>AgentX</td><td>aggregated multimodal overlay (pre-release)</td><td>vLLM</td><td>GB300</td><td>32</td><td>39.56</td><td>70.9</td><td>440</td></tr>
+<tr data-highlight-target="vllm-gb300-disagg"><td>AgentX</td><td>disaggregated multimodal overlay (pre-release)</td><td>vLLM</td><td>GB300</td><td>48</td><td>23.38</td><td>85.7</td><td>693</td></tr>
 </tbody>
 </table>
 </div>
@@ -377,6 +394,18 @@ All results below measure text-only traffic; the selected target is highlighted.
 
 
 ## Compare All Targets
+
+| Target | GPUs | Parallelism | Validation |
+| --- | ---: | --- | --- |
+| [GB300 vLLM aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-gb300-agentic/deploy-gb300.yaml) | 8 | TP8 per worker | Text-only benchmark |
+| [GB300 vLLM aggregated multimodal](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-gb300-agentic/deploy-gb300-multimodal.yaml) | 8 | TP8 per worker | Text-only benchmark with pre-release weights; image input validated |
+| [GB300 vLLM disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/disagg-gb300-agentic/deploy-gb300.yaml) | 24 | TP8 per worker | Text-only benchmark |
+| [GB300 vLLM disaggregated multimodal](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/disagg-gb300-agentic/deploy-gb300-multimodal.yaml) | 24 | TP8 per worker | Text-only benchmark with pre-release weights; image input validated |
+| [GB300 SGLang aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/sglang/agg-gb300-agentic/deploy-gb300.yaml) | 8 | TP8 per worker | Functional only; no performance claim |
+| [GB300 SGLang disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/sglang/disagg-gb300-agentic/deploy-gb300.yaml) | 16 | TP8 per worker | Functional only; no performance claim |
+| [B200 vLLM aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/deploy-b200.yaml) | 16 | TP8 × PP2 | Text-only benchmark |
+| [VR200 vLLM aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/deploy-vr200.yaml) | 16 | TP8 per worker | Text-only benchmark |
+| [VR200 vLLM disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/deploy-vr200.yaml) | 24 | TP8 per worker | Text-only benchmark |
 
 GPU counts below describe the checked-in manifests. P counts prefill workers; D counts decode workers.
 
@@ -398,7 +427,6 @@ GPU counts below describe the checked-in manifests. P counts prefill workers; D 
 ## Notes
 
 - SGLang targets are experimental, text-only, and functional-only. No SGLang performance claims are made. Use the vLLM multimodal overlays for image and video input.
-The SGLang frontends run the Dynamo chat processor (`--dyn-chat-processor dynamo`, `DYN_SGL_FRONTEND_DECODING=true`). With the SGLang chat processor, strict `json_schema` output with thinking enabled was returned in `reasoning_content`; if you switch processors, disable thinking for `json_schema` requests (`"chat_template_kwargs": {"thinking": false}`).
 - Synthetic draft acceptance is for benchmarking. Use the natural-acceptance variants for normal serving.
 - Disaggregated performance depends on your fabric; RDMA tuning is cluster-specific.
 

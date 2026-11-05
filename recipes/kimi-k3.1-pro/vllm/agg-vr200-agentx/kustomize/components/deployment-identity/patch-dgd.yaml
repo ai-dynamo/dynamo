@@ -21,7 +21,4 @@
   value:
     annotations:
       nvidia.com/kai-scheduler-queue: default-queue
-    labels:
-      app.kubernetes.io/name: kimi-k3-1-pro-vllm-aggregate-vr200
-      app.kubernetes.io/part-of: dynamo
     name: kimi-k3-1-pro-vllm-aggregate-vr200

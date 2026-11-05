@@ -19,7 +19,4 @@
 - op: replace
   path: /metadata
   value:
-    labels:
-      app.kubernetes.io/name: kimi-k3-1-pro-vllm-aggregate-b200
-      app.kubernetes.io/part-of: dynamo
     name: kimi-k3-1-pro-vllm-aggregate-b200
