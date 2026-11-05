@@ -182,13 +182,13 @@ async fn frontend_with_selection_core(pools: Vec<Pool>) -> GlobalFrontend {
             .unwrap();
     let selection_core = Arc::new(selection_core);
     let (sender, receiver) = watch::channel(Arc::new(PoolSnapshot::new(pools)));
-    let (first_snapshot, reconcile) =
-        selection_core.reconcile_catalog(receiver.clone(), CancellationToken::new());
+    let (mut applied, reconcile) =
+        selection_core.reconcile_catalog(receiver, CancellationToken::new());
     tokio::spawn(reconcile);
-    first_snapshot.await.unwrap();
+    applied.changed().await.unwrap();
     let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
     let app = dynamo_global_frontend::app_with_selection_core(
-        receiver,
+        applied,
         selection_core,
         in_flight,
         client(),
