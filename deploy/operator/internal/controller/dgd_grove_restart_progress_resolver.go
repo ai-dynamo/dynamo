@@ -131,9 +131,8 @@ func (r *groveRestartProgressResolver) Resolve(
 	return updatedInProgress
 }
 
-// groveRestartApplied requires the requested restart on every clique rendered
-// for componentName in the observed PodCliqueSet spec. pcs is non-nil and is
-// never mutated.
+// groveRestartApplied requires restartID on every clique rendered for
+// componentName in the observed PodCliqueSet spec. pcs is non-nil, never mutated.
 func groveRestartApplied(pcs *grovev1alpha1.PodCliqueSet, componentName string, restartID string) bool {
 	if restartID == "" {
 		return false

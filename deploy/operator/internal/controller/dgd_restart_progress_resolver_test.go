@@ -163,10 +163,8 @@ func restartClique(name, componentName, restartID string) *grovev1alpha1.PodCliq
 	return template
 }
 
-// The Grove program lists Pods through a manager-cache field index that the
-// raw envtest client lacks, so this drives the program through an indexed fake
-// client that emulates PodCliqueSet generations. The DGD has no status
-// subresource here, so Update persists the status the outer controller would.
+// Uses an indexed fake client: the Grove program needs a manager-cache field
+// index envtest lacks, and Update stands in for the missing status subresource.
 func TestGroveRestartWaitsForRequestedRevisionAfterFailedWrite(t *testing.T) {
 	for _, strategy := range []nvidiacomv1beta1.RestartStrategyType{
 		nvidiacomv1beta1.RestartStrategyTypeSequential,
@@ -305,9 +303,8 @@ func TestGroveRestartWaitsForRequestedRevisionAfterFailedWrite(t *testing.T) {
 	}
 }
 
-// markRestartGroveComponentsReady reports the PodCliqueSet as observed and
-// replaces each component's PodClique with a ready one, standing in for the
-// Grove controller.
+// markRestartGroveComponentsReady marks the PodCliqueSet observed and each
+// component's PodClique ready, standing in for the Grove controller.
 func markRestartGroveComponentsReady(t *testing.T, c client.Client, namespace, pcsName string, components []string) {
 	t.Helper()
 	pcs := &grovev1alpha1.PodCliqueSet{}
