@@ -63,6 +63,7 @@ from dynamo.planner.core.types import (
 from dynamo.planner.reconfiguration import PREDICTOR_FIELDS, prepare_predictor
 from dynamo.planner.retune.domains import (
     ENABLE_THROUGHPUT,
+    PREDICTOR_KEYS,
     THROUGHPUT_INTERVAL,
     PredictorCandidate,
     canonical_planner_point,
@@ -365,7 +366,8 @@ def evaluated_params(
       values (``canonical_planner_point``), so an inactive difference is
       neither replayed nor applied;
     - when it scales on throughput, carries the pre-sweep winner of its
-      throughput interval (``presweep_fields``).
+      throughput interval (``presweep_fields``), else the running
+      predictor, so candidates at one interval share one predictor.
 
     That leaves the inner planner unchanged where the base planner already
     holds the current values, and gives a candidate equivalent to the
@@ -379,8 +381,17 @@ def evaluated_params(
         running = _running_planner(baseline, base_planner)
         planner = canonical_planner_point(planner, running)
         interval = scales_on_throughput(planner, running)
-        fields = None if interval is None else presweep_fields(presweep, interval)
-        planner.update(fields or {})
+        if interval is not None:
+            fields = presweep_fields(presweep, interval)
+            if not fields:
+                # No winner at this interval: the predictor is not searched
+                # there, so the candidate keeps the running one.
+                fields = {
+                    key: running[key]
+                    for key in PREDICTOR_KEYS
+                    if key in planner and key in running
+                }
+            planner.update(fields)
     elif presweep is not None:
         # No inner planner to read the interval from: one pre-sweep summary.
         planner.update(presweep.get("fields") or {})

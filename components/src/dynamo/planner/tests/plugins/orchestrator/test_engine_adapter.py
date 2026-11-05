@@ -2169,6 +2169,87 @@ def test_throughput_only_sla_still_pulls_fpm_for_live_regression():
     assert not load_interval_tick.run_throughput_scaling
 
 
+def test_load_scaling_turned_back_on_drops_a_stale_throughput_floor():
+    # Imported here: reconfiguration pulls in the planner core.
+    from dynamo.planner.reconfiguration import candidate_config
+
+    cfg = PlannerConfig.model_validate(
+        {
+            "mode": "disagg",
+            "enable_load_scaling": True,
+            "enable_throughput_scaling": True,
+            "optimization_target": "sla",
+            "served_model_name": "test",
+            "load_adjustment_interval_seconds": 5,
+            "throughput_adjustment_interval_seconds": 60,
+            "load_predictor": "constant",
+        }
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=VirtualClock())
+    adapter.initial_tick(start_s=0.0)
+    state = adapter._scaling_state
+
+    def apply(updates):
+        adapter.apply_runtime_configuration(
+            candidate_config(cfg, updates), list(updates), None
+        )
+
+    # Hybrid: the throughput loop floored load scaling at (4, 4).
+    state._throughput_lower_bound_p = 4
+    state._throughput_lower_bound_d = 4
+    # Throughput-only: the throughput loop scales directly and no longer
+    # refreshes the floor, which is harmless while load scaling is off.
+    apply({"enable_load_scaling": False})
+    assert (state._throughput_lower_bound_p, state._throughput_lower_bound_d) == (4, 4)
+    # Load scaling back on: its first decisions, before the next throughput
+    # tick, must not be floored at the target of the earlier hybrid phase.
+    apply({"enable_load_scaling": True})
+    assert (state._throughput_lower_bound_p, state._throughput_lower_bound_d) == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_a_kept_throughput_loop_keeps_its_phase_on_a_load_interval_change():
+    # Imported here: reconfiguration pulls in the planner core.
+    from dynamo.planner.reconfiguration import candidate_config
+
+    cfg = PlannerConfig.model_validate(
+        {
+            "mode": "agg",
+            "enable_load_scaling": True,
+            "enable_throughput_scaling": True,
+            "optimization_target": "sla",
+            "served_model_name": "test",
+            "load_adjustment_interval_seconds": 10,
+            "throughput_adjustment_interval_seconds": 60,
+            "scheduling": {"scale_interval_seconds": 5.0},
+            "load_predictor": "constant",
+        }
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=VirtualClock())
+    registry = adapter._orchestrator.registry
+    tick = adapter.initial_tick(start_s=0.0)
+    observations = FpmObservations(decode={("w1", 0): _make_fpm("w1")})
+    traffic = TrafficObservation(60.0, 10.0, 100.0, 10.0)
+    rows = []
+    while tick.at_s <= 240:
+        before = registry.get_plugin("builtin_load_predict").last_call_at
+        effects = await adapter.tick(
+            tick,
+            TickInput(now_s=tick.at_s, fpm_observations=observations, traffic=traffic),
+        )
+        fired = registry.get_plugin("builtin_load_predict").last_call_at != before
+        if tick.run_throughput_scaling or fired:
+            rows.append((tick.at_s, tick.run_throughput_scaling, fired))
+        if tick.at_s == 90.0:
+            updates = {"load_adjustment_interval_seconds": 5}
+            adapter.apply_runtime_configuration(
+                candidate_config(cfg, updates), list(updates), None
+            )
+        tick = effects.next_tick
+    # The throughput loop's flag follows the kept predictor's phase.
+    assert rows and all(run == fired for _, run, fired in rows), rows
+
+
 @pytest.mark.asyncio
 async def test_runtime_scaling_policy_change_reregisters_builtins():
     # Imported here: reconfiguration pulls in the planner core.
