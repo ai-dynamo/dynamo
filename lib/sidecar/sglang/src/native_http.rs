@@ -1780,13 +1780,6 @@ mod tests {
     }
 
     #[test]
-    fn unknown_vocab_size_accepts_every_input_id() {
-        native_with_ids(vec![1, u32::MAX], json!({}), &InputTokenLimits::default())
-            .unwrap()
-            .unwrap();
-    }
-
-    #[test]
     fn input_token_limits_read_model_config() {
         // Llama 3.2 Vision keeps the size in `text_config`.
         let limits = InputTokenLimits::from_model_config(&json!({

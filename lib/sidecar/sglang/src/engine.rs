@@ -1010,6 +1010,10 @@ fn sglang_eagle_enabled(server_info: &Value) -> bool {
         })
 }
 
+/// Bounds the `config.json` fetch so a stalled Hub or ModelExpress fetch cannot
+/// consume the startup deadline that later multi-node rendezvous still needs.
+const INPUT_TOKEN_LIMITS_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Read native input-ID bounds from the model's `config.json`. SGLang does not
 /// report `vocab_size`, so use the local model directory or fetch the config
 /// (no weights) like the worker does. Any failure disables the check.
@@ -1021,7 +1025,8 @@ async fn resolve_input_token_limits(model_path: &str, deadline: Instant) -> Inpu
     let model_dir = if local.is_dir() {
         Ok(local)
     } else {
-        tokio::time::timeout_at(deadline, LocalModel::fetch(model_path, true))
+        let fetch_deadline = deadline.min(Instant::now() + INPUT_TOKEN_LIMITS_FETCH_TIMEOUT);
+        tokio::time::timeout_at(fetch_deadline, LocalModel::fetch(model_path, true))
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("model configuration fetch timed out")))
     };
