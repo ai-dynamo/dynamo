@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import tarfile
+import time
 import tomllib
 import urllib.parse
 import urllib.request
@@ -56,14 +57,25 @@ def _path(path: str) -> str:
 
 
 def _read_url(url: str) -> bytes:
+    """Retry bounded transient registry failures without hiding permanent errors."""
     request = urllib.request.Request(
         url,
         headers={
             "User-Agent": "dynamo-compliance/1 (https://github.com/ai-dynamo/dynamo)"
         },
     )
-    with urllib.request.urlopen(request, timeout=60) as response:
-        return response.read()
+    for delay in (2, 4, 8, 0):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return response.read()
+        except OSError as exc:  # URLError, HTTPError, timeouts, resets
+            code = getattr(exc, "code", None)
+            permanent = isinstance(code, int) and 400 <= code < 500 and code != 429
+            if permanent or not delay:
+                raise
+            logger.warning("Retrying %s in %ss: %s", url, delay, exc)
+            time.sleep(delay)
+    raise RuntimeError(f"unreachable: {url}")
 
 
 def _license_files(archive: tarfile.TarFile) -> str:
@@ -316,6 +328,51 @@ def _system_python(
     return spdx, text, package.get("purl", "")
 
 
+def _bundled_cpython(artifact: dict, root: Path) -> tuple[str, str, str]:
+    """Attribute a version-matched standalone CPython from its complete notice."""
+    version = artifact.get("version", "")
+    if (
+        artifact["name"] != "python"
+        or artifact["type"] != "binary"
+        or not re.fullmatch(r"3\.\d+\.\d+", version)
+    ):
+        return common.UNKNOWN, "", ""
+    major_minor = version.rsplit(".", 1)[0]
+    notices = []
+    for location in artifact.get("locations", []):
+        path = _path(location["path"])
+        match = re.fullmatch(
+            rf"(/opt/python/cpython-{re.escape(version)}-[^/]+)/bin/python{re.escape(major_minor)}",
+            path,
+        )
+        if not match:
+            return common.UNKNOWN, "", ""
+        notice = root / match[1].lstrip("/") / f"lib/python{major_minor}/LICENSE.txt"
+        if not notice.is_file():
+            return common.UNKNOWN, "", ""
+        text = notice.read_text()
+        # Python-2.0 covers the historical PSF, BeOpen, CNRI and CWI terms.
+        # Keep the whole bundled file, including any additional notices.
+        if not all(
+            heading in text
+            for heading in (
+                "PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2",
+                "BEOPEN.COM LICENSE AGREEMENT FOR PYTHON 2.0",
+                "CNRI LICENSE AGREEMENT FOR PYTHON 1.6.1",
+                "CWI LICENSE AGREEMENT FOR PYTHON 0.9.0 THROUGH 1.2",
+            )
+        ):
+            return common.UNKNOWN, "", ""
+        notices.append(text)
+    if not notices:
+        return common.UNKNOWN, "", ""
+    return (
+        "Python-2.0",
+        "\n\n".join(dict.fromkeys(notices)),
+        f"https://github.com/python/cpython/blob/v{version}/LICENSE",
+    )
+
+
 def _resource(
     artifact: dict, owners: dict[str, list[dict]], root: Path
 ) -> tuple[str, str, str]:
@@ -451,6 +508,16 @@ def supplement(
                 spdx, text = _local_crate(artifact, root)
                 spdx = overrides.lookup("rust", name, version) or spdx
                 if (
+                    not text
+                    and (name == "uv" or name.startswith("uv-"))
+                    and spdx == "MIT OR Apache-2.0"
+                ):
+                    # Only individually reviewed overrides enter this branch;
+                    # a new uv-* crate still fails closed until attributed.
+                    text = (
+                        Path(__file__).parent / "resource_notices/uv.txt"
+                    ).read_text()
+                if (
                     spdx == common.UNKNOWN
                     and not text
                     and not artifact.get("metadata", {}).get("source")
@@ -464,6 +531,8 @@ def supplement(
             spdx, text, source = _python_metadata(artifact, root)
             if spdx == common.UNKNOWN:
                 spdx, text, source = _system_python(artifact, artifacts, root)
+        elif artifact["type"] == "binary" and name == "python":
+            spdx, text, source = _bundled_cpython(artifact, root)
         elif artifact["type"] not in _TYPES or name == "my-test-package":
             spdx, text, source = _resource(artifact, owners, root)
         elif (

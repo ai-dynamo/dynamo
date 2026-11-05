@@ -7,6 +7,7 @@ import io
 import json
 import subprocess
 import tarfile
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from compliance.policy.validate import load_policy, validate_row
 from jinja2 import Environment, StrictUndefined
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+_READ_URL = shipped._read_url  # The autouse fixture blocks production network reads.
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +52,157 @@ def owner(path, name="setuptools", license_id="MIT"):
         licenses=[{"spdxExpression": license_id}],
         metadata={"sitePackagesRootPath": "site", "files": [{"path": path}]},
     )
+
+
+@pytest.mark.parametrize("code", [None, 429, 503])
+def test_registry_reads_retry_transient_failures(monkeypatch, code):
+    attempts, delays = [], []
+    failure = (
+        urllib.error.URLError("temporary failure")
+        if code is None
+        else urllib.error.HTTPError("https://registry.test/", code, "retry", {}, None)
+    )
+
+    def flaky(request, timeout):
+        attempts.append(request.full_url)
+        if len(attempts) < 3:
+            raise failure
+        return io.BytesIO(b"verified archive")
+
+    monkeypatch.setattr("urllib.request.urlopen", flaky)
+    monkeypatch.setattr("time.sleep", delays.append)
+    assert _READ_URL("https://registry.test/") == b"verified archive"
+    assert len(attempts) == 3
+    assert delays == [2, 4]
+
+
+@pytest.mark.parametrize("code, count", [(404, 1), (403, 1), (503, 4)])
+def test_registry_reads_fail_on_permanent_error_or_exhaustion(monkeypatch, code, count):
+    attempts, delays = [], []
+
+    def fail(request, timeout):
+        attempts.append(request.full_url)
+        raise urllib.error.HTTPError(request.full_url, code, "failed", {}, None)
+
+    monkeypatch.setattr("urllib.request.urlopen", fail)
+    monkeypatch.setattr("time.sleep", delays.append)
+    with pytest.raises(urllib.error.HTTPError):
+        _READ_URL("https://registry.test/")
+    assert len(attempts) == count
+    assert delays == ([2, 4, 8] if count == 4 else [])
+
+
+@pytest.mark.parametrize("version", ["0.0.93", "0.0.97", "0.0.98"])
+def test_uv_workspace_crates_retain_upstream_notices(tmp_path, version):
+    # The 22 local crates reported by the SGLang 0.5.22 image audit.
+    names = [
+        "uv-audit-operations",
+        "uv-build-commands",
+        "uv-command-support",
+        "uv-environment-operations",
+        "uv-install-operations",
+        "uv-lock",
+        "uv-lock-operations",
+        "uv-macros",
+        "uv-pip-commands",
+        "uv-project-commands",
+        "uv-project-edit",
+        "uv-publish-commands",
+        "uv-python-commands",
+        "uv-python-discovery",
+        "uv-python-interpreter",
+        "uv-python-managed",
+        "uv-python-types",
+        "uv-resolve-operations",
+        "uv-resolver-types",
+        "uv-threads",
+        "uv-tool-commands",
+        "uv-workspace-commands",
+    ]
+    items = [
+        artifact(
+            name,
+            "rust-crate",
+            "/usr/local/bin/uv",
+            version,
+            metadata={"source": "local"},
+        )
+        for name in names + ["uv-unreviewed"]
+    ]
+    components = shipped.supplement(
+        {"artifacts": items},
+        [],
+        tmp_path,
+        tmp_path / "cache",
+        set(),
+        tmp_path / "legal",
+    )
+    by_name = {c.name: c for c in components}
+    for name in names:
+        assert by_name[name].spdx == "MIT OR Apache-2.0"
+        assert "Astral" in by_name[name].license_text
+        assert "Apache License" in by_name[name].license_text
+        assert not by_name[name].license_text_is_canonical
+    assert by_name["uv-unreviewed"].spdx == "UNKNOWN"
+
+
+@pytest.mark.parametrize("version", ["3.12.15", "3.12.16"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "none",
+        "missing",
+        "wrong-license",
+        "wrong-version",
+        "extra-location",
+        "wrong-name",
+    ],
+)
+def test_bundled_cpython_requires_matching_installation_and_notice(
+    tmp_path, change, version
+):
+    prefix = f"opt/python/cpython-{version}-linux-x86_64-gnu"
+    path = f"{prefix}/bin/python3.12"
+    notice = tmp_path / prefix / "lib/python3.12/LICENSE.txt"
+    notice.parent.mkdir(parents=True)
+    text = (
+        "A. HISTORY OF THE SOFTWARE\n"
+        "PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2\n"
+        "BEOPEN.COM LICENSE AGREEMENT FOR PYTHON 2.0\n"
+        "CNRI LICENSE AGREEMENT FOR PYTHON 1.6.1\n"
+        "CWI LICENSE AGREEMENT FOR PYTHON 0.9.0 THROUGH 1.2\n"
+        "Retain this complete upstream notice.\n"
+    )
+    if change != "missing":
+        notice.write_text(
+            "unrelated MIT license" if change == "wrong-license" else text
+        )
+    item = artifact("python", "binary", path, version)
+    if change == "wrong-version":
+        item["version"] = "3.12.14"
+    if change == "extra-location":
+        item["locations"].append({"path": "/opt/other/bin/python3.12"})
+    if change == "wrong-name":
+        item["name"] = "unreviewed"
+    components = shipped.supplement(
+        {"artifacts": [item]},
+        [],
+        tmp_path,
+        tmp_path / "cache",
+        set(),
+        tmp_path / "legal",
+    )
+    component = components[0]
+    if change == "none":
+        assert component.spdx == "Python-2.0"
+        assert component.license_text == text
+        assert not component.license_text_is_canonical
+        policy = load_policy(
+            Path(__file__).resolve().parents[1] / "policy/licenses.toml"
+        )
+        assert validate_row(policy, "native", "python", version, component.spdx) is None
+    else:
+        assert component.spdx == "UNKNOWN"
 
 
 def test_nested_distributions_are_attributed_under_their_own_license(tmp_path):
