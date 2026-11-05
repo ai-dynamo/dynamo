@@ -22,7 +22,6 @@ import (
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -116,11 +115,9 @@ func TestCreatePlaceholderSecretIfNotExists_CreatesWhenMissing(t *testing.T) {
 
 func TestCreatePlaceholderSecretIfNotExists_NoopWhenExists(t *testing.T) {
 	existing := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: testNamespace,
-			Name:      testSecretName,
-		},
-		Type: corev1.SecretTypeTLS,
+		Namespace: testNamespace,
+		Name:      testSecretName,
+		Type:      corev1.SecretTypeTLS,
 		Data: map[string][]byte{
 			defaultCertName:   []byte("existing-cert"),
 			defaultKeyName:    []byte("existing-key"),
@@ -291,10 +288,8 @@ func TestWaitForMountedCertificate_WaitsWhenKeyPairIsMissing(t *testing.T) {
 
 func TestInjectIntoValidatingWebhooks(t *testing.T) {
 	wc := &admissionregistrationv1.ValidatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "test-validating",
-			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
-		},
+		Name:   "test-validating",
+		Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
 		Webhooks: []admissionregistrationv1.ValidatingWebhook{
 			{
 				Name:                    "test.webhook.io",
@@ -326,10 +321,8 @@ func TestInjectIntoValidatingWebhooks(t *testing.T) {
 
 func TestInjectIntoValidatingWebhooks_SkipsNonMatchingLabels(t *testing.T) {
 	wc := &admissionregistrationv1.ValidatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "other-validating",
-			Labels: map[string]string{"app.kubernetes.io/part-of": "other-operator"},
-		},
+		Name:   "other-validating",
+		Labels: map[string]string{"app.kubernetes.io/part-of": "other-operator"},
 		Webhooks: []admissionregistrationv1.ValidatingWebhook{
 			{
 				Name:                    "other.webhook.io",
@@ -365,10 +358,8 @@ func TestInjectIntoValidatingWebhooks_SkipsNonMatchingLabels(t *testing.T) {
 
 func TestInjectIntoValidatingWebhooks_SkipsDifferentNamespace(t *testing.T) {
 	wc := &admissionregistrationv1.ValidatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "other-ns-validating",
-			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: "other-ns"},
-		},
+		Name:   "other-ns-validating",
+		Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: "other-ns"},
 		Webhooks: []admissionregistrationv1.ValidatingWebhook{
 			{
 				Name:                    "test.webhook.io",
@@ -404,10 +395,8 @@ func TestInjectIntoValidatingWebhooks_SkipsDifferentNamespace(t *testing.T) {
 
 func TestInjectIntoMutatingWebhooks(t *testing.T) {
 	wc := &admissionregistrationv1.MutatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   "test-mutating",
-			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
-		},
+		Name:   "test-mutating",
+		Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
 		Webhooks: []admissionregistrationv1.MutatingWebhook{
 			{
 				Name:                    "mutate.webhook.io",
@@ -483,14 +472,12 @@ func TestInjectHonorsNamespaceScope(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Seed webhook resources with distinct operator and cluster CA bundles")
 			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testSecretName},
-				Data:       map[string][]byte{defaultCACertName: []byte("operator-ca")},
+				Namespace: testNamespace, Name: testSecretName,
+				Data: map[string][]byte{defaultCACertName: []byte("operator-ca")},
 			}
 			validating := &admissionregistrationv1.ValidatingWebhookConfiguration{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   "test-validating",
-					Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
-				},
+				Name:   "test-validating",
+				Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
 				Webhooks: []admissionregistrationv1.ValidatingWebhook{{
 					Name: "validate.webhook.io",
 					ClientConfig: admissionregistrationv1.WebhookClientConfig{
@@ -572,9 +559,7 @@ func TestInjectHonorsNamespaceScope(t *testing.T) {
 func newConversionCRD(name, plural, singular, kind string) *apiextensionsv1.CustomResourceDefinition {
 	path := testManifestPath
 	return &apiextensionsv1.CustomResourceDefinition{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
+		Name: name,
 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
 			Group: "nvidia.com",
 			Names: apiextensionsv1.CustomResourceDefinitionNames{
@@ -615,10 +600,8 @@ func newDGDConversionCRD() *apiextensionsv1.CustomResourceDefinition {
 
 func TestInjectCRDConversionCA_ReadsCABundleAndPatchesOnlyCABundle(t *testing.T) {
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: testNamespace,
-			Name:      testSecretName,
-		},
+		Namespace: testNamespace,
+		Name:      testSecretName,
 		Data: map[string][]byte{
 			defaultCertName:   []byte("cert-data"),
 			defaultKeyName:    []byte("key-data"),
@@ -707,10 +690,8 @@ func TestEnsureCRDConversionCA_SkipsWhenCRDNotFound(t *testing.T) {
 
 func TestReadCABundle(t *testing.T) {
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: testNamespace,
-			Name:      testSecretName,
-		},
+		Namespace: testNamespace,
+		Name:      testSecretName,
 		Data: map[string][]byte{
 			defaultCertName:   []byte("cert-data"),
 			defaultKeyName:    []byte("key-data"),
@@ -732,10 +713,8 @@ func TestReadCABundle(t *testing.T) {
 
 func TestReadCABundle_ErrorOnMissingCA(t *testing.T) {
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: testNamespace,
-			Name:      testSecretName,
-		},
+		Namespace: testNamespace,
+		Name:      testSecretName,
 		Data: map[string][]byte{
 			defaultCertName: []byte("cert-data"),
 			defaultKeyName:  []byte("key-data"),

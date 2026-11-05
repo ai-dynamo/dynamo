@@ -13,14 +13,16 @@
 //!   - **tracking mode**: call `start_tracking()` once, then `get_recent_stats()` to
 //!     retrieve the latest FPM bytes keyed by `(worker_id, dp_rank)`.
 
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 use dynamo_mocker::common::protocols::{ForwardPassSnapshot, FpmPublisher};
 use futures::StreamExt;
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::*;
@@ -33,8 +35,157 @@ use dynamo_runtime::discovery::{
 };
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
+use llm_rs::local_model::runtime_config::ModelRuntimeConfig;
 
 const FPM_TOPIC: &str = "forward-pass-metrics";
+const DEFAULT_FPM_MAX_AGE: Duration = Duration::from_secs(15);
+const FPM_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
+
+struct TrackedFpm {
+    payload: Vec<u8>,
+    received_at: Instant,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+enum FpmWorkerLifecycle {
+    #[default]
+    Unjoined,
+    Active {
+        registered_at: Instant,
+    },
+    Removed {
+        last_activity: Instant,
+    },
+}
+
+#[derive(Default)]
+struct WorkerFpm {
+    lifecycle: FpmWorkerLifecycle,
+    ranks: HashMap<i64, TrackedFpm>,
+    model_cards: WorkerModelCards,
+}
+
+impl WorkerFpm {
+    fn activate(&mut self, registered_at: Instant) {
+        if !matches!(self.lifecycle, FpmWorkerLifecycle::Active { .. }) {
+            self.ranks.clear();
+            self.lifecycle = FpmWorkerLifecycle::Active { registered_at };
+        }
+    }
+
+    fn remove(&mut self, removed_at: Instant) {
+        self.lifecycle = FpmWorkerLifecycle::Removed {
+            last_activity: removed_at,
+        };
+        self.ranks.clear();
+    }
+
+    fn reconcile_ranks(&mut self, previous: Option<Range<u32>>) {
+        let expected = self.model_cards.selected_ranks();
+        if expected == previous.as_ref() {
+            return;
+        }
+        // Retain already-invalid ranks as evidence of a bad publisher.
+        self.ranks.retain(|rank, _| {
+            let Ok(rank) = u32::try_from(*rank) else {
+                return true;
+            };
+            !previous.as_ref().is_some_and(|ranks| ranks.contains(&rank))
+                || expected.is_some_and(|ranks| ranks.contains(&rank))
+        });
+    }
+}
+
+type FpmSnapshot = HashMap<(String, i64), Vec<u8>>;
+
+/// Fresh samples and completeness diagnostics for the subscribed worker pool.
+#[pyclass(get_all)]
+#[derive(Default)]
+pub(crate) struct FpmHealthSnapshot {
+    snapshot: FpmSnapshot,
+    unjoined_worker_ids: Vec<String>,
+    stale_rank_count: usize,
+    missing_rank_count: usize,
+}
+
+fn record_fpm(
+    workers: &DashMap<String, WorkerFpm>,
+    (worker_id, rank): (String, i64),
+    payload: Vec<u8>,
+    received_at: Instant,
+) {
+    let mut worker = workers.entry(worker_id).or_default();
+    match &mut worker.lifecycle {
+        FpmWorkerLifecycle::Active { registered_at } if received_at < *registered_at => return,
+        FpmWorkerLifecycle::Removed { last_activity } => {
+            *last_activity = (*last_activity).max(received_at);
+            return;
+        }
+        _ => {}
+    }
+    worker.ranks.insert(
+        rank,
+        TrackedFpm {
+            payload,
+            received_at,
+        },
+    );
+}
+
+fn prune_inactive_workers(workers: &DashMap<String, WorkerFpm>, now: Instant, max_age: Duration) {
+    workers.retain(|_, worker| match worker.lifecycle {
+        FpmWorkerLifecycle::Active { .. } => true,
+        FpmWorkerLifecycle::Removed { last_activity } => {
+            now.saturating_duration_since(last_activity) <= max_age
+        }
+        FpmWorkerLifecycle::Unjoined => {
+            worker
+                .ranks
+                .retain(|_, sample| now.saturating_duration_since(sample.received_at) <= max_age);
+            !worker.ranks.is_empty()
+        }
+    });
+}
+
+fn fresh_fpm_snapshot(
+    workers: &DashMap<String, WorkerFpm>,
+    now: Instant,
+    max_age: Duration,
+) -> FpmHealthSnapshot {
+    let mut health = FpmHealthSnapshot::default();
+    for worker in workers {
+        if matches!(worker.lifecycle, FpmWorkerLifecycle::Removed { .. }) {
+            continue;
+        }
+        let expected = worker.model_cards.selected_ranks();
+        let mut fresh_count = 0;
+        let mut unjoined = false;
+        for (&rank, sample) in &worker.ranks {
+            let expired = now.saturating_duration_since(sample.received_at) > max_age;
+            let rank_is_expected = expected
+                .is_some_and(|ranks| u32::try_from(rank).is_ok_and(|rank| ranks.contains(&rank)));
+            if !rank_is_expected {
+                unjoined |= !expired;
+            } else if expired {
+                health.stale_rank_count += 1;
+            } else {
+                health
+                    .snapshot
+                    .insert((worker.key().clone(), rank), sample.payload.clone());
+                fresh_count += 1;
+            }
+        }
+        if unjoined {
+            health.unjoined_worker_ids.push(worker.key().clone());
+        }
+        if matches!(worker.lifecycle, FpmWorkerLifecycle::Active { .. }) {
+            health.missing_rank_count +=
+                expected.map_or(1, |ranks| ranks.len().saturating_sub(fresh_count));
+        }
+    }
+    health.unjoined_worker_ids.sort_unstable();
+    health
+}
 
 // ---------------------------------------------------------------------------
 // Relay: raw ZMQ (child process) -> event plane
@@ -58,8 +209,12 @@ impl FpmEventRelay {
     ///         (e.g., "tcp://127.0.0.1:20380").
     #[new]
     #[pyo3(signature = (endpoint, zmq_endpoint))]
-    fn new(endpoint: Endpoint, zmq_endpoint: String) -> PyResult<Self> {
-        let inner = llm_rs::fpm_publisher::FpmEventRelay::new(endpoint.inner.clone(), zmq_endpoint)
+    fn new(py: Python<'_>, endpoint: Endpoint, zmq_endpoint: String) -> PyResult<Self> {
+        // Don't hold the GIL while blocking on the runtime; its tasks may need it.
+        let inner = py
+            .allow_threads(move || {
+                llm_rs::fpm_publisher::FpmEventRelay::new(endpoint.inner, zmq_endpoint)
+            })
             .map_err(to_pyerr)?;
         Ok(Self { inner })
     }
@@ -101,12 +256,16 @@ impl FpmDirectPublisher {
     ///         attention DP is disabled.
     #[new]
     #[pyo3(signature = (endpoint, worker_id, dp_size=1))]
-    fn new(endpoint: Endpoint, worker_id: String, dp_size: u32) -> PyResult<Self> {
+    fn new(py: Python<'_>, endpoint: Endpoint, worker_id: String, dp_size: u32) -> PyResult<Self> {
         let rt = endpoint.inner.component().drt().runtime().secondary();
-        let (inner, publishers) = rt
-            .block_on(async {
-                llm_rs::fpm_publisher::FpmDirectPublisher::new(endpoint.inner, worker_id, dp_size)
-                    .await
+        // Don't hold the GIL while blocking on the runtime; its tasks may need it.
+        let (inner, publishers) = py
+            .allow_threads(move || {
+                rt.block_on(llm_rs::fpm_publisher::FpmDirectPublisher::new(
+                    endpoint.inner,
+                    worker_id,
+                    dp_size,
+                ))
             })
             .map_err(to_pyerr)?;
         Ok(Self { inner, publishers })
@@ -399,44 +558,17 @@ fn read_u32(cursor: &mut std::io::Cursor<&[u8]>) -> Option<u32> {
 /// 2. **tracking mode**: call `start_tracking()` once, then poll `get_recent_stats()`
 ///    to retrieve the latest FPM bytes keyed by `(worker_id, dp_rank)`.
 ///
-/// # Tracking mode concurrency design
-///
-/// Three concurrent actors access shared state:
-///
-/// - **Task 1** (event consumption, tokio): writes to `latest_stats` on every FPM.
-/// - **Task 2** (MDC discovery watch, tokio): maintains `known_workers` set and
-///   removes dead-worker entries from `latest_stats` on `Removed` events.
-/// - **`get_recent_stats()`** (Python thread): reads both `latest_stats` and
-///   `known_workers` to produce a filtered snapshot.
-///
-/// Both collections use `DashMap`/`DashSet` (sharded concurrent maps) so that
-/// `get_recent_stats()` never blocks Task 1's high-frequency writes.  Per-shard
-/// locking means readers and writers only contend if they happen to hit the same
-/// shard, which is rare in practice.
-///
-/// Ghost entries (FPM arriving after its worker's MDC `Removed` event) are
-/// filtered out by the `known_workers` check in `get_recent_stats()` and eagerly
-/// pruned from `latest_stats` on `Removed` events.
+/// Lifecycle, model cards, and rank samples share one worker entry, so registration,
+/// removal, event writes, and snapshots never acquire multiple map locks.
 #[pyclass]
 pub(crate) struct FpmEventSubscriber {
     endpoint: RuntimeEndpoint,
     cancel: CancellationToken,
-
-    // recv mode state (lazily initialised on first recv() call)
     recv_started: Arc<AtomicBool>,
     rx: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>>,
-
-    // tracking mode state
     tracking_started: Arc<AtomicBool>,
-    latest_stats: Arc<DashMap<(String, i64), Vec<u8>>>,
-    // Worker IDs currently registered in MDC.  Maintained by Task 2
-    // (insert on Added, remove on Removed).  Used by get_recent_stats()
-    // to filter out ghost entries without contending with Task 1's writes.
-    known_workers: Arc<DashSet<String>>,
-    // Serialized ModelDeploymentCards grouped by worker. Each worker retains
-    // complete card identities for exact removal and one selected base/fallback
-    // card for snapshots.
-    worker_model_cards: Arc<DashMap<String, WorkerModelCards>>,
+    workers: Arc<DashMap<String, WorkerFpm>>,
+    max_age: Duration,
 }
 
 #[derive(Default)]
@@ -449,12 +581,33 @@ struct WorkerModelCards {
 struct IndexedModelCard {
     card: String,
     index: usize,
+    dp_ranks: Option<Range<u32>>,
+}
+
+fn expected_fpm_ranks(card: &str) -> anyhow::Result<Range<u32>> {
+    let mut card: serde_json::Map<String, serde_json::Value> = serde_json::from_str(card)?;
+    let config: ModelRuntimeConfig = match card.get_mut("runtime_config") {
+        Some(config) => serde_json::from_value(config.take())?,
+        None => ModelRuntimeConfig::default(),
+    };
+    config
+        .data_parallel_rank_range()
+        .map_err(anyhow::Error::msg)
 }
 
 impl WorkerModelCards {
     fn insert(&mut self, card_id: ModelCardInstanceId, card: String) {
+        let dp_ranks = match expected_fpm_ranks(&card) {
+            Ok(ranks) => Some(ranks),
+            Err(error) => {
+                tracing::warn!(worker_id = card_id.instance_id, error = %error,
+                    "FPM tracker: invalid model-card runtime configuration");
+                None
+            }
+        };
         if let Some(existing) = self.cards.get_mut(&card_id) {
             existing.card = card;
+            existing.dp_ranks = dp_ranks;
             return;
         }
 
@@ -463,7 +616,14 @@ impl WorkerModelCards {
         }
         let index = self.card_ids.len();
         self.card_ids.push(card_id.clone());
-        self.cards.insert(card_id, IndexedModelCard { card, index });
+        self.cards.insert(
+            card_id,
+            IndexedModelCard {
+                card,
+                index,
+                dp_ranks,
+            },
+        );
     }
 
     fn remove(&mut self, card_id: &ModelCardInstanceId) {
@@ -489,11 +649,19 @@ impl WorkerModelCards {
     }
 
     fn selected_card(&self) -> Option<&str> {
+        self.selected_entry().map(|entry| entry.card.as_str())
+    }
+
+    fn selected_ranks(&self) -> Option<&Range<u32>> {
+        self.selected_entry()?.dp_ranks.as_ref()
+    }
+
+    fn selected_entry(&self) -> Option<&IndexedModelCard> {
         let card_id = self
             .base_card_id
             .as_ref()
             .or_else(|| self.card_ids.first())?;
-        self.cards.get(card_id).map(|entry| entry.card.as_str())
+        self.cards.get(card_id)
     }
 
     fn is_empty(&self) -> bool {
@@ -502,23 +670,27 @@ impl WorkerModelCards {
 }
 
 fn insert_worker_model_card(
-    cards: &DashMap<String, WorkerModelCards>,
+    workers: &DashMap<String, WorkerFpm>,
     worker_id: String,
     card_id: ModelCardInstanceId,
     card: String,
 ) {
-    cards.entry(worker_id).or_default().insert(card_id, card);
+    let mut worker = workers.entry(worker_id).or_default();
+    worker.activate(Instant::now());
+    let previous = worker.model_cards.selected_ranks().cloned();
+    worker.model_cards.insert(card_id, card);
+    worker.reconcile_ranks(previous);
 }
 
 fn update_worker_model_card_taints(
-    cards: &DashMap<String, WorkerModelCards>,
+    workers: &DashMap<String, WorkerFpm>,
     update: &ModelTaintsUpdate,
 ) -> anyhow::Result<bool> {
     let worker_id = update.id.instance_id.to_string();
-    let Some(mut worker_cards) = cards.get_mut(&worker_id) else {
+    let Some(mut worker) = workers.get_mut(&worker_id) else {
         return Ok(false);
     };
-    let Some(indexed) = worker_cards.cards.get_mut(&update.id) else {
+    let Some(indexed) = worker.model_cards.cards.get_mut(&update.id) else {
         return Ok(false);
     };
     let mut card: serde_json::Value = serde_json::from_str(&indexed.card)?;
@@ -543,20 +715,18 @@ fn update_worker_model_card_taints(
 }
 
 fn remove_worker_model_card(
-    cards: &DashMap<String, WorkerModelCards>,
+    workers: &DashMap<String, WorkerFpm>,
     worker_id: &str,
     card_id: &ModelCardInstanceId,
 ) -> bool {
-    let Some(mut worker_cards) = cards.get_mut(worker_id) else {
-        return false;
-    };
-    worker_cards.remove(card_id);
-    if !worker_cards.is_empty() {
+    let mut worker = workers.entry(worker_id.to_string()).or_default();
+    let previous = worker.model_cards.selected_ranks().cloned();
+    worker.model_cards.remove(card_id);
+    if !worker.model_cards.is_empty() {
+        worker.reconcile_ranks(previous);
         return true;
     }
-
-    drop(worker_cards);
-    cards.remove(worker_id);
+    worker.remove(Instant::now());
     false
 }
 
@@ -577,9 +747,8 @@ impl FpmEventSubscriber {
             recv_started: Arc::new(AtomicBool::new(false)),
             rx: Arc::new(std::sync::Mutex::new(None)),
             tracking_started: Arc::new(AtomicBool::new(false)),
-            latest_stats: Arc::new(DashMap::new()),
-            known_workers: Arc::new(DashSet::new()),
-            worker_model_cards: Arc::new(DashMap::new()),
+            workers: Arc::new(DashMap::new()),
+            max_age: DEFAULT_FPM_MAX_AGE,
         })
     }
 
@@ -663,22 +832,14 @@ impl FpmEventSubscriber {
         })
     }
 
-    /// Start background tracking of the latest FPM per `(worker_id, dp_rank)`.
-    ///
-    /// Spawns two background tasks:
-    ///
-    /// 1. **Event consumption** (Task 1): subscribes to FPM events, extracts
-    ///    `(worker_id, dp_rank)` from the msgpack payload, stores the latest
-    ///    raw bytes in `latest_stats`.  Uses per-shard locking via `DashMap`
-    ///    so contention with concurrent readers is minimal.
-    ///
-    /// 2. **MDC discovery watch** (Task 2): monitors `EndpointModels` for the
-    ///    target endpoint.  Maintains `known_workers` (the set of currently
-    ///    alive worker IDs) and eagerly removes dead-worker entries from
-    ///    `latest_stats` on `Removed` events.
-    ///
-    /// After calling this method, `recv()` will raise an error.
-    fn start_tracking(&self) -> PyResult<()> {
+    /// Track samples and discovery state with a fixed freshness and cleanup window.
+    /// Legacy snapshots retain samples until worker removal; health snapshots filter by age.
+    #[pyo3(signature = (max_age_seconds = DEFAULT_FPM_MAX_AGE.as_secs_f64()))]
+    fn start_tracking(&mut self, max_age_seconds: f64) -> PyResult<()> {
+        let max_age = Duration::try_from_secs_f64(max_age_seconds)
+            .ok()
+            .filter(|age| !age.is_zero())
+            .ok_or_else(|| PyValueError::new_err("max_age_seconds must be finite and positive"))?;
         if self.recv_started.load(Ordering::SeqCst) {
             return Err(PyRuntimeError::new_err(
                 "Cannot call start_tracking() after recv()",
@@ -691,21 +852,13 @@ impl FpmEventSubscriber {
         let endpoint = self.endpoint.clone();
         let rt = endpoint.component().drt().runtime().secondary();
         let cancel = self.cancel.clone();
-        let stats = self.latest_stats.clone();
-        let known = self.known_workers.clone();
+        self.max_age = max_age;
+        let workers = self.workers.clone();
 
-        // Task 1: event consumption.
-        //
-        // Inserts every FPM into latest_stats without checking known_workers.
-        // Ghost entries (from workers that have already been removed) are
-        // filtered out by get_recent_stats() at read time.  DashMap's
-        // per-shard locking keeps contention low but does not eliminate it
-        // entirely -- a concurrent reader hitting the same shard will briefly
-        // wait for the insert to complete.
         rt.spawn({
             let cancel = cancel.clone();
             let endpoint = endpoint.clone();
-            let stats = stats.clone();
+            let workers = workers.clone();
             async move {
                 let mut subscriber =
                     match EventSubscriber::for_endpoint(&endpoint, FPM_TOPIC).await {
@@ -717,6 +870,8 @@ impl FpmEventSubscriber {
                     };
 
                 tracing::info!("FPM tracker: listening for forward-pass-metrics events");
+                let mut cleanup_tick = tokio::time::interval(FPM_CLEANUP_INTERVAL);
+                cleanup_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
                 loop {
                     tokio::select! {
@@ -725,12 +880,20 @@ impl FpmEventSubscriber {
                             tracing::info!("FPM tracker: shutting down event task");
                             break;
                         }
+                        _ = cleanup_tick.tick() => {
+                            prune_inactive_workers(&workers, Instant::now(), max_age);
+                        }
                         event = subscriber.next() => {
                             match event {
                                 Some(Ok(envelope)) => {
                                     let payload = envelope.payload.to_vec();
                                     if let Some(key) = extract_fpm_key(&payload) {
-                                        stats.insert(key, payload);
+                                        record_fpm(
+                                            &workers,
+                                            key,
+                                            payload,
+                                            Instant::now(),
+                                        );
                                     } else {
                                         tracing::warn!(
                                             "FPM tracker: failed to extract key from payload ({} bytes)",
@@ -752,20 +915,9 @@ impl FpmEventSubscriber {
             }
         });
 
-        // Task 2: MDC discovery watch.
-        //
-        // Maintains known_workers (insert on Added, remove on Removed) and
-        // eagerly prunes latest_stats on Removed events.  This handles the
-        // normal scale-down path.  Any ghost entries created by the race
-        // condition (FPM arriving *after* the Removed event) are caught by the
-        // known_workers filter in get_recent_stats().
-        let cards = self.worker_model_cards.clone();
         rt.spawn({
             let cancel = cancel.clone();
             let endpoint = endpoint.clone();
-            let stats = stats.clone();
-            let known = known.clone();
-            let cards = cards.clone();
             async move {
                 let discovery = endpoint.component().drt().discovery();
                 let endpoint_id = endpoint.id();
@@ -807,7 +959,7 @@ impl FpmEventSubscriber {
                                                     unreachable!("model instance must have a model identity");
                                                 };
                                                 insert_worker_model_card(
-                                                    &cards,
+                                                    &workers,
                                                     wid.clone(),
                                                     card_id,
                                                     s,
@@ -820,11 +972,10 @@ impl FpmEventSubscriber {
                                             }
                                         }
                                     }
-                                    known.insert(wid.clone());
-                                    tracing::debug!("FPM tracker: worker {wid} added to known set");
+                                    tracing::debug!(worker_id = %wid, "FPM tracker: model card added");
                                 }
                                 Some(Ok(DiscoveryEvent::ModelTaintsUpdated(update))) => {
-                                    match update_worker_model_card_taints(&cards, &update) {
+                                    match update_worker_model_card_taints(&workers, &update) {
                                         Ok(true) => tracing::debug!(
                                             instance_id = update.id.instance_id,
                                             "FPM tracker: model-card taints updated"
@@ -848,7 +999,7 @@ impl FpmEventSubscriber {
                                         continue;
                                     };
                                     let removed_id = card_id.instance_id.to_string();
-                                    if remove_worker_model_card(&cards, &removed_id, &card_id) {
+                                    if remove_worker_model_card(&workers, &removed_id, &card_id) {
                                         tracing::debug!(
                                             "FPM tracker: model card removed for worker {removed_id}; \
                                              other cards remain"
@@ -856,19 +1007,7 @@ impl FpmEventSubscriber {
                                         continue;
                                     }
 
-                                    known.remove(&removed_id);
-
-                                    // Eagerly prune latest_stats for the common case
-                                    // (worker removed cleanly before any late FPMs arrive).
-                                    let before = stats.len();
-                                    stats.retain(|(worker_id, _), _| *worker_id != removed_id);
-                                    let removed = before - stats.len();
-                                    if removed > 0 {
-                                        tracing::info!(
-                                            "FPM tracker: removed {removed} entries for \
-                                             worker_id={removed_id} (MDC removed)"
-                                        );
-                                    }
+                                    tracing::debug!(worker_id = %removed_id, "FPM tracker: worker removed");
                                 }
                                 Some(Ok(DiscoveryEvent::Resync(_))) => {}
                                 Some(Err(e)) => {
@@ -888,62 +1027,56 @@ impl FpmEventSubscriber {
         Ok(())
     }
 
-    /// Return the latest FPM bytes for every tracked `(worker_id, dp_rank)`.
-    ///
-    /// The returned snapshot is filtered against `known_workers` so that
-    /// ghost entries (late FPMs from already-removed workers) are excluded.
-    /// Uses `DashMap`/`DashSet` with per-shard locking so contention with
-    /// the hot-path writer is minimal (but not zero -- a reader and writer
-    /// hitting the same shard will briefly contend).
-    ///
-    /// Returns:
-    ///     dict mapping `(worker_id: str, dp_rank: int)` to raw msgspec bytes.
-    fn get_recent_stats(&self) -> PyResult<HashMap<(String, i64), Vec<u8>>> {
+    /// Latest samples for active workers, without age filtering (legacy API).
+    fn get_recent_stats(&self) -> PyResult<FpmSnapshot> {
         if !self.tracking_started.load(Ordering::SeqCst) {
             return Err(PyRuntimeError::new_err(
                 "start_tracking() has not been called",
             ));
         }
-
-        let snapshot = self
-            .latest_stats
-            .iter()
-            .filter(|entry| self.known_workers.contains(&entry.key().0))
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect();
-
+        let mut snapshot = HashMap::new();
+        for worker in self.workers.iter() {
+            if matches!(worker.lifecycle, FpmWorkerLifecycle::Active { .. }) {
+                for (&rank, sample) in &worker.ranks {
+                    snapshot.insert((worker.key().clone(), rank), sample.payload.clone());
+                }
+            }
+        }
         Ok(snapshot)
     }
 
-    /// Snapshot of model deployment cards keyed by worker id.
-    ///
-    /// The snapshot is filtered against `known_workers` so entries for
-    /// already-removed workers are not returned.  Values are the raw
-    /// `ModelDeploymentCard` serialized as a JSON string; callers parse
-    /// whichever fields they need (e.g. `runtime_config`, `display_name`).
-    ///
-    /// Returns:
-    ///     dict mapping `worker_id: str` to `card_json: str`.
+    /// Freshness uses local receive time, including idle heartbeats.
+    fn get_recent_stats_with_health(&self) -> PyResult<FpmHealthSnapshot> {
+        if !self.tracking_started.load(Ordering::SeqCst) {
+            return Err(PyRuntimeError::new_err(
+                "start_tracking() has not been called",
+            ));
+        }
+        Ok(fresh_fpm_snapshot(
+            &self.workers,
+            Instant::now(),
+            self.max_age,
+        ))
+    }
+
+    /// Selected model deployment cards for active workers, as serialized JSON.
     fn get_model_cards(&self) -> PyResult<HashMap<String, String>> {
         if !self.tracking_started.load(Ordering::SeqCst) {
             return Err(PyRuntimeError::new_err(
                 "start_tracking() has not been called",
             ));
         }
-
-        let snapshot = self
-            .worker_model_cards
+        Ok(self
+            .workers
             .iter()
-            .filter(|entry| self.known_workers.contains(entry.key()))
-            .filter_map(|entry| {
-                entry
-                    .value()
+            .filter(|worker| matches!(worker.lifecycle, FpmWorkerLifecycle::Active { .. }))
+            .filter_map(|worker| {
+                worker
+                    .model_cards
                     .selected_card()
-                    .map(|card| (entry.key().clone(), card.to_string()))
+                    .map(|card| (worker.key().clone(), card.to_string()))
             })
-            .collect();
-
-        Ok(snapshot)
+            .collect())
     }
 
     /// Shut down the subscriber (all background tasks).
@@ -961,6 +1094,175 @@ impl Drop for FpmEventSubscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn active_worker(ranks: Range<u32>, now: Instant) -> WorkerFpm {
+        let mut worker = WorkerFpm::default();
+        worker.activate(now);
+        worker.model_cards.insert(
+            card_id(42, None),
+            serde_json::json!({
+                "runtime_config": {
+                    "data_parallel_start_rank": ranks.start,
+                    "data_parallel_size": ranks.len(),
+                }
+            })
+            .to_string(),
+        );
+        worker
+    }
+
+    #[test]
+    fn re_registration_discards_prior_lifecycle_samples() {
+        let workers = DashMap::new();
+        let now = Instant::now();
+        workers.insert("worker".to_string(), active_worker(0..2, now));
+        record_fpm(&workers, ("worker".to_string(), 0), vec![1], now);
+        workers.get_mut("worker").unwrap().remove(now);
+        let registered_at = now + Duration::from_secs(1);
+        workers.get_mut("worker").unwrap().activate(registered_at);
+        // A write captured before registration cannot repopulate the new epoch.
+        record_fpm(&workers, ("worker".to_string(), 1), vec![2], now);
+        let health = fresh_fpm_snapshot(&workers, registered_at, Duration::from_secs(2));
+        assert!(health.snapshot.is_empty());
+        assert_eq!(health.missing_rank_count, 2);
+        record_fpm(&workers, ("worker".to_string(), 0), vec![3], registered_at);
+        workers
+            .get_mut("worker")
+            .unwrap()
+            .activate(registered_at + Duration::from_secs(1));
+        assert_eq!(workers.get("worker").unwrap().ranks[&0].payload, vec![3]);
+    }
+
+    #[test]
+    fn stale_samples_are_missing_until_a_fresh_idle_heartbeat() {
+        let workers = DashMap::new();
+        let now = Instant::now();
+        workers.insert("worker".to_string(), active_worker(0..1, now));
+        record_fpm(&workers, ("worker".to_string(), 0), vec![0], now);
+        let later = now + Duration::from_secs(2);
+        let health = fresh_fpm_snapshot(&workers, later, Duration::from_secs(1));
+        assert!(health.snapshot.is_empty());
+        assert_eq!(health.stale_rank_count, 1);
+        assert_eq!(health.missing_rank_count, 1);
+        assert_eq!(workers.get("worker").unwrap().ranks.len(), 1);
+        record_fpm(&workers, ("worker".to_string(), 0), vec![0], later);
+        let health = fresh_fpm_snapshot(&workers, later, Duration::from_secs(1));
+        assert_eq!(health.snapshot.len(), 1);
+        assert_eq!(health.stale_rank_count, 0);
+        assert_eq!(health.missing_rank_count, 0);
+    }
+
+    #[test]
+    fn partial_dp_pool_reports_missing_ranks_and_unknown_publishers() {
+        let workers = DashMap::new();
+        let now = Instant::now();
+        workers.insert("worker".to_string(), active_worker(4..6, now));
+        workers.insert("silent".to_string(), active_worker(0..1, now));
+        record_fpm(&workers, ("worker".to_string(), 4), vec![1], now);
+        record_fpm(&workers, ("orphan".to_string(), 0), vec![2], now);
+        let health = fresh_fpm_snapshot(&workers, now, Duration::from_secs(1));
+        assert_eq!(health.snapshot.len(), 1);
+        assert_eq!(health.missing_rank_count, 2);
+        assert_eq!(health.unjoined_worker_ids, ["orphan"]);
+        for (worker, rank) in [("worker", 5), ("silent", 0)] {
+            record_fpm(&workers, (worker.to_string(), rank), vec![3], now);
+        }
+        assert_eq!(
+            fresh_fpm_snapshot(&workers, now, Duration::from_secs(1)).missing_rank_count,
+            0
+        );
+    }
+
+    #[test]
+    fn cleanup_reclaims_quiet_workers_without_storing_removed_samples() {
+        let workers = DashMap::new();
+        let now = Instant::now();
+        let mut removed = WorkerFpm::default();
+        removed.remove(now + Duration::from_millis(500));
+        workers.insert("removed".to_string(), removed);
+        record_fpm(&workers, ("removed".to_string(), 0), vec![0], now);
+        assert_eq!(
+            workers.get("removed").unwrap().lifecycle,
+            FpmWorkerLifecycle::Removed {
+                last_activity: now + Duration::from_millis(500)
+            }
+        );
+        record_fpm(
+            &workers,
+            ("removed".to_string(), 0),
+            vec![1],
+            now + Duration::from_millis(750),
+        );
+        record_fpm(&workers, ("orphan".to_string(), 0), vec![2], now);
+        assert!(workers.get("removed").unwrap().ranks.is_empty());
+        prune_inactive_workers(
+            &workers,
+            now + Duration::from_millis(1600),
+            Duration::from_secs(1),
+        );
+        assert!(workers.contains_key("removed"));
+        assert!(!workers.contains_key("orphan"));
+        prune_inactive_workers(
+            &workers,
+            now + Duration::from_secs(2),
+            Duration::from_secs(1),
+        );
+        assert!(workers.is_empty());
+    }
+
+    #[test]
+    fn expected_ranks_use_runtime_config_defaults_and_validation() {
+        assert!(expected_fpm_ranks("[]").is_err());
+        assert_eq!(expected_fpm_ranks("{}").unwrap(), 0..1);
+        assert_eq!(
+            expected_fpm_ranks(r#"{"runtime_config":{"unknown_future_field":true}}"#).unwrap(),
+            0..1
+        );
+        assert_eq!(
+            expected_fpm_ranks(
+                r#"{"runtime_config":{"data_parallel_start_rank":4,"data_parallel_size":2}}"#
+            )
+            .unwrap(),
+            4..6
+        );
+        for invalid in [0, 4097] {
+            assert!(
+                expected_fpm_ranks(
+                    &serde_json::json!({"runtime_config":{"data_parallel_size":invalid}})
+                        .to_string()
+                )
+                .is_err()
+            );
+        }
+        assert!(expected_fpm_ranks(r#"{"runtime_config":{"data_parallel_size":"bad"}}"#).is_err());
+    }
+
+    #[test]
+    fn card_update_drops_obsolete_rank_and_preserves_valid_sample() {
+        let workers = DashMap::new();
+        let now = Instant::now();
+        workers.insert("42".to_string(), active_worker(4..6, now));
+        for rank in [4, 5] {
+            record_fpm(&workers, ("42".to_string(), rank), vec![1], now);
+        }
+        insert_worker_model_card(
+            &workers,
+            "42".to_string(),
+            card_id(42, None),
+            serde_json::json!({
+                "runtime_config": {"data_parallel_start_rank": 5, "data_parallel_size": 1}
+            })
+            .to_string(),
+        );
+
+        let health = fresh_fpm_snapshot(&workers, now, Duration::from_secs(1));
+        assert_eq!(
+            health.snapshot,
+            HashMap::from([(("42".to_string(), 5), vec![1])])
+        );
+        assert!(health.unjoined_worker_ids.is_empty());
+        assert_eq!(health.missing_rank_count, 0);
+    }
 
     fn card_id(instance_id: u64, model_suffix: Option<&str>) -> ModelCardInstanceId {
         ModelCardInstanceId {
@@ -1003,13 +1305,26 @@ mod tests {
         );
 
         assert!(remove_worker_model_card(&cards, "42", &base));
-        assert_eq!(cards.get("42").unwrap().selected_card(), Some("lora-b"));
+        assert_eq!(
+            cards.get("42").unwrap().model_cards.selected_card(),
+            Some("lora-b")
+        );
 
         assert!(remove_worker_model_card(&cards, "42", &lora_b));
-        assert_eq!(cards.get("42").unwrap().selected_card(), Some("lora-a"));
+        assert_eq!(
+            cards.get("42").unwrap().model_cards.selected_card(),
+            Some("lora-a")
+        );
+        assert!(matches!(
+            cards.get("42").unwrap().lifecycle,
+            FpmWorkerLifecycle::Active { .. }
+        ));
 
         assert!(!remove_worker_model_card(&cards, "42", &lora_a));
-        assert!(!cards.contains_key("42"));
+        assert!(matches!(
+            cards.get("42").unwrap().lifecycle,
+            FpmWorkerLifecycle::Removed { .. }
+        ));
     }
 
     #[test]
@@ -1033,8 +1348,15 @@ mod tests {
             )
             .unwrap()
         );
-        let card: serde_json::Value =
-            serde_json::from_str(cards.get("42").unwrap().selected_card().unwrap()).unwrap();
+        let card: serde_json::Value = serde_json::from_str(
+            cards
+                .get("42")
+                .unwrap()
+                .model_cards
+                .selected_card()
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             card["runtime_config"]["taints"],
             serde_json::json!(["blue", "gpu"])

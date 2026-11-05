@@ -12,7 +12,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -32,14 +31,12 @@ func GetK8sDiscoveryServiceAccount(dgdName string, namespace string) *corev1.Ser
 	name := GetK8sDiscoveryServiceAccountName(dgdName)
 	labelValue := getK8sDiscoveryLabelValue(name)
 	return &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "dynamo-operator",
-				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       labelValue,
-			},
+		Name:      name,
+		Namespace: namespace,
+		Labels: map[string]string{
+			"app.kubernetes.io/managed-by": "dynamo-operator",
+			"app.kubernetes.io/component":  "rbac",
+			"app.kubernetes.io/name":       labelValue,
 		},
 	}
 }
@@ -49,14 +46,12 @@ func GetK8sDiscoveryRole(dgdName string, namespace string) *rbacv1.Role {
 	labelValue := getK8sDiscoveryLabelValue(name)
 	roleName := name + "-role"
 	return &rbacv1.Role{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      roleName,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "dynamo-operator",
-				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       labelValue,
-			},
+		Name:      roleName,
+		Namespace: namespace,
+		Labels: map[string]string{
+			"app.kubernetes.io/managed-by": "dynamo-operator",
+			"app.kubernetes.io/component":  "rbac",
+			"app.kubernetes.io/name":       labelValue,
 		},
 		Rules: []rbacv1.PolicyRule{
 			{
@@ -84,14 +79,12 @@ func GetK8sDiscoveryRoleBinding(dgdName, namespace string) *rbacv1.RoleBinding {
 	roleName := name + "-role"
 	bindingName := name + "-binding"
 	return &rbacv1.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      bindingName,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "dynamo-operator",
-				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       labelValue,
-			},
+		Name:      bindingName,
+		Namespace: namespace,
+		Labels: map[string]string{
+			"app.kubernetes.io/managed-by": "dynamo-operator",
+			"app.kubernetes.io/component":  "rbac",
+			"app.kubernetes.io/name":       labelValue,
 		},
 		Subjects: []rbacv1.Subject{
 			{

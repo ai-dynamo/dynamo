@@ -3,32 +3,41 @@
 
 //! Opaque transport for SGLang's native streaming `/generate` API.
 
-use std::{collections::HashMap, io, time::Duration};
+use std::{
+    collections::HashMap,
+    io,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use dynamo_backend_common::{
-    DisaggregationMode, DynamoError, GenerateContext, LLMEngineOutput, PreprocessedRequest,
+    AsyncEngineContext, DisaggregationMode, DynamoError, FirstTokenNotifier, GenerateContext,
+    LLMEngineOutput, PreprocessedRequest,
 };
+use dynamo_llm::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION;
+use dynamo_sglang_generate::{Inspected, PAYLOAD_KEY, inspect};
 use dynamo_sidecar_common::{GrpcEndpoint, HttpEndpoint};
-use futures::{StreamExt, TryStreamExt, stream::BoxStream};
+use futures::{StreamExt, TryStreamExt, future::BoxFuture, stream::BoxStream};
 use reqwest::{Response, StatusCode, header};
 use serde_json::{Map, Value};
 use tokio::time::Instant;
 use tokio_util::{
-    codec::{FramedRead, LinesCodec},
+    codec::{FramedRead, LinesCodec, LinesCodecError},
     io::StreamReader,
     sync::CancellationToken,
 };
 
 use crate::{client, client::Discovery, protocol};
 
-const PAYLOAD_KEY: &str = "sglang_tito";
-const MAX_EVENT_BYTES: usize = 64 * 1024 * 1024;
-/// `dynamo_llm::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION`.
-const PREFILL_OUTPUT_ANNOTATION: &str = "prefill_output";
-
+/// SGLang disaggregation waiting timeout.
+const DECODE_DRAIN_TIMEOUT: Duration = Duration::from_secs(300);
 pub(crate) struct NativeRequest {
     body: Value,
+    /// Unique per dispatch: a retry may reach an engine still running the
+    /// failed attempt, and SGLang rejects a duplicate request ID.
+    rid: String,
     is_prefill: bool,
+    is_decode: bool,
     prefill_handoff: Option<Value>,
     /// Return prefill's final native response for the frontend to join.
     keep_prefill_output: bool,
@@ -61,8 +70,9 @@ pub(crate) fn request(
         ));
     }
 
+    let rid = format!("{request_id}-{:08x}", rand::random::<u32>());
     body.insert("input_ids".into(), serde_json::json!(request.token_ids));
-    body.insert("rid".into(), Value::String(request_id.to_string()));
+    body.insert("rid".into(), Value::String(rid.clone()));
     body.insert("stream".into(), Value::Bool(true));
 
     let routing = request.routing.as_ref();
@@ -128,7 +138,9 @@ pub(crate) fn request(
     };
     Ok(Some(NativeRequest {
         body: Value::Object(body),
+        rid,
         is_prefill: mode.is_prefill(),
+        is_decode: mode.is_decode(),
         prefill_handoff,
         keep_prefill_output: request
             .annotations
@@ -141,6 +153,121 @@ pub(crate) fn request(
 pub(crate) struct NativeHttp {
     client: reqwest::Client,
     endpoint: HttpEndpoint,
+    max_event_bytes: usize,
+    rids: Arc<Mutex<HashMap<usize, String>>>,
+    abort_timeout: Duration,
+    decode_drain_timeout: Duration,
+}
+
+// Closing the SSE connection does not reliably stop SGLang scheduler work.
+struct AbortGuard<'a> {
+    native_http: &'a NativeHttp,
+    request_id: Option<String>,
+    runtime: Option<tokio::runtime::Handle>,
+    opening: Option<BoxFuture<'static, Result<Response, DynamoError>>>,
+    stream: BoxStream<'static, Result<String, LinesCodecError>>,
+    needs_first_token: bool,
+    first_token: Option<FirstTokenNotifier>,
+}
+
+impl Drop for AbortGuard<'_> {
+    fn drop(&mut self) {
+        let Some(request_id) = self.request_id.take() else {
+            return;
+        };
+        let Some(runtime) = self.runtime.as_ref() else {
+            return;
+        };
+        let native_http = self.native_http.clone();
+        let mut opening = self.opening.take();
+        let mut stream = std::mem::replace(&mut self.stream, Box::pin(futures::stream::empty()));
+        let needs_first_token = self.needs_first_token;
+        let first_token = self.first_token.clone();
+        runtime.spawn(async move {
+            // Decode must finish receiving KV before abort can release its destination pages.
+            if needs_first_token {
+                let drain = async {
+                    if let Some(pending) = opening.as_mut() {
+                        let response = pending.await;
+                        opening = None;
+                        match response {
+                            Ok(response) => stream = response_stream(response, native_http.max_event_bytes),
+                            Err(error) => {
+                                tracing::debug!(%request_id, %error, "SGLang native decode ended before first output");
+                                return false;
+                            }
+                        }
+                    }
+                    loop {
+                        let response = match next_response(&mut stream, native_http.max_event_bytes).await {
+                            Ok(response) => response,
+                            Err(error) => {
+                                tracing::debug!(%request_id, %error, "SGLang native decode drain failed; aborting");
+                                return true;
+                            }
+                        };
+                        let inspected = match inspect(response, false) {
+                            Ok(inspected) => inspected,
+                            Err(error) => {
+                                tracing::debug!(%request_id, %error, "invalid SGLang native decode response during drain; aborting");
+                                return true;
+                            }
+                        };
+                        if inspected.has_output && let Some(first_token) = &first_token {
+                            first_token.notify();
+                        }
+                        if inspected.terminal { return false; }
+                        if inspected.has_output { return true; }
+                    }
+                };
+                match tokio::time::timeout(native_http.decode_drain_timeout, drain).await {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(_) => tracing::warn!(
+                        %request_id,
+                        timeout_secs = native_http.decode_drain_timeout.as_secs(),
+                        "SGLang native decode produced no output before the drain deadline; forcing abort"
+                    ),
+                }
+            }
+            let result = native_http.abort(&request_id, native_http.abort_timeout).await;
+            // Disconnecting first removes the request state needed by SGLang's abort handler.
+            drop(opening);
+            drop(stream);
+            if let Err(error) = result {
+                tracing::debug!(%request_id, %error, "failed to abort SGLang native HTTP request");
+            }
+        });
+    }
+}
+
+/// Forgets a dispatch's SGLang request ID when its stream ends.
+struct Dispatched {
+    rids: Arc<Mutex<HashMap<usize, String>>>,
+    // Keep the allocation alive until its map entry has been removed.
+    context: Arc<dyn AsyncEngineContext>,
+    rid: String,
+}
+
+impl Drop for Dispatched {
+    fn drop(&mut self) {
+        let mut rids = self.rids.lock().unwrap_or_else(|e| e.into_inner());
+        let key = Arc::as_ptr(&self.context).addr();
+        if rids.get(&key) == Some(&self.rid) {
+            rids.remove(&key);
+        }
+    }
+}
+
+fn build_http_client(connect_timeout: Duration) -> Result<reqwest::Client, DynamoError> {
+    reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        // Retire idle connections before SGLang's default 5s keep-alive closes them.
+        .pool_idle_timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|error| {
+            client::invalid_arg(format!("could not configure SGLang HTTP client: {error}"))
+        })
 }
 
 impl NativeHttp {
@@ -148,6 +275,7 @@ impl NativeHttp {
         grpc_endpoint: &GrpcEndpoint,
         discovery: &Discovery,
         connect_timeout: Duration,
+        max_event_bytes: usize,
     ) -> Result<Option<Self>, DynamoError> {
         let Some(raw_port) = discovery.server_info.get("port") else {
             return Ok(None);
@@ -175,13 +303,15 @@ impl NativeHttp {
         let endpoint = HttpEndpoint::from_grpc(grpc_endpoint, port).map_err(|error| {
             client::protocol_error(format!("invalid SGLang HTTP endpoint: {error}"))
         })?;
-        let client = reqwest::Client::builder()
-            .connect_timeout(connect_timeout)
-            .build()
-            .map_err(|error| {
-                client::invalid_arg(format!("could not configure SGLang HTTP client: {error}"))
-            })?;
-        Ok(Some(Self { client, endpoint }))
+        let client = build_http_client(connect_timeout)?;
+        Ok(Some(Self {
+            client,
+            endpoint,
+            max_event_bytes,
+            abort_timeout: connect_timeout,
+            decode_drain_timeout: DECODE_DRAIN_TIMEOUT,
+            rids: Default::default(),
+        }))
     }
 
     pub(crate) async fn await_ready(
@@ -224,12 +354,33 @@ impl NativeHttp {
         }
     }
 
-    async fn open(&self, body: &Value) -> Result<Response, DynamoError> {
+    /// The context allocation identifies a local dispatch, even when public IDs repeat.
+    /// Its Arc is held by both the stream and the adapter's abort callback.
+    pub(crate) fn request_id(&self, ctx: &Arc<dyn AsyncEngineContext>) -> Option<String> {
+        self.rids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&Arc::as_ptr(ctx).addr())
+            .cloned()
+    }
+
+    pub(crate) async fn abort(&self, rid: &str, timeout: Duration) -> Result<(), reqwest::Error> {
+        self.client
+            .post(self.endpoint.with_path("/abort_request"))
+            .json(&serde_json::json!({"rid": rid, "abort_all": false}))
+            .timeout(timeout)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    async fn open(self, body: Value) -> Result<Response, DynamoError> {
         let response = self
             .client
             .post(self.endpoint.with_path("/generate"))
             .header(header::ACCEPT, "text/event-stream")
-            .json(body)
+            .json(&body)
             .send()
             .await
             .map_err(request_error)?;
@@ -251,27 +402,50 @@ impl NativeHttp {
         ctx: GenerateContext,
         cancel: CancellationToken,
     ) -> BoxStream<'static, Result<LLMEngineOutput, DynamoError>> {
+        let context = ctx.inner_arc();
+        let context_key = Arc::as_ptr(&context).addr();
+        self.rids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(context_key, request.rid.clone());
+        let dispatched = Dispatched {
+            rids: self.rids.clone(),
+            context,
+            rid: request.rid.clone(),
+        };
         Box::pin(async_stream::stream! {
+            let _dispatched = dispatched;
             let is_prefill = request.is_prefill;
             let keep_prefill_output = request.keep_prefill_output;
             let mut prefill_handoff = request.prefill_handoff;
             let stopped_ctx = ctx.inner_arc();
             let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
             let mut shutdown_cancellation = Box::pin(async move { cancel.cancelled().await });
+            let mut abort_guard = AbortGuard {
+                native_http: &self,
+                request_id: Some(request.rid),
+                runtime: tokio::runtime::Handle::try_current().ok(),
+                opening: Some(Box::pin(self.clone().open(request.body))),
+                stream: Box::pin(futures::stream::empty()),
+                needs_first_token: request.is_decode,
+                first_token: ctx.first_token_notifier().cloned(),
+            };
             tracing::debug!(request_id = %ctx.id(), endpoint = %self.endpoint.with_path("/generate"), "sending native request to SGLang HTTP");
             let opened = tokio::select! {
                 biased;
                 _ = &mut request_cancellation => None,
                 _ = &mut shutdown_cancellation => None,
-                response = self.open(&request.body) => Some(response),
+                response = abort_guard.opening.as_mut().unwrap() => Some(response),
             };
             let Some(response) = opened else {
+                drop(abort_guard);
                 yield Err(client::cancelled(format!(
                     "SGLang native request {} was cancelled",
                     ctx.id()
                 )));
                 return;
             };
+            abort_guard.opening = None;
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
@@ -279,6 +453,7 @@ impl NativeHttp {
                     return;
                 }
             };
+            abort_guard.stream = response_stream(response, self.max_event_bytes);
             if is_prefill {
                 let Some(handoff) = prefill_handoff.take() else {
                     yield Err(client::protocol_error(
@@ -295,63 +470,26 @@ impl NativeHttp {
                 });
             }
 
-            let bytes = response.bytes_stream().map_err(io::Error::other);
-            let reader = StreamReader::new(bytes);
-            let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(MAX_EVENT_BYTES));
             let mut first_output_seen = false;
             loop {
                 let selected = tokio::select! {
                     biased;
                     _ = &mut request_cancellation => None,
                     _ = &mut shutdown_cancellation => None,
-                    line = lines.next() => Some(line),
+                    response = next_response(&mut abort_guard.stream, self.max_event_bytes) => Some(response),
                 };
-                let Some(line) = selected else {
+                let Some(response) = selected else {
+                    drop(abort_guard);
                     yield Err(client::cancelled(format!(
                         "SGLang native request {} was cancelled",
                         ctx.id()
                     )));
                     return;
                 };
-                let line = match line {
-                    Some(Ok(line)) => line,
-                    Some(Err(error)) => {
-                        yield Err(client::protocol_error(format!(
-                            "invalid SGLang /generate stream: {error}"
-                        )));
-                        return;
-                    }
-                    None => {
-                        yield Err(client::protocol_error(
-                            "SGLang /generate closed before a terminal response",
-                        ));
-                        return;
-                    }
-                };
-                if line.is_empty() {
-                    continue;
-                }
-                let Some(data) = line.strip_prefix("data:") else {
-                    // SSE comments and fields such as event, id, and retry do not
-                    // carry the SGLang response payload.
-                    continue;
-                };
-                let data = data.strip_prefix(' ').unwrap_or(data);
-                if data.is_empty() {
-                    continue;
-                }
-                if data == "[DONE]" {
-                    yield Err(client::protocol_error(
-                        "SGLang /generate finished without a terminal response",
-                    ));
-                    return;
-                }
-                let response: Value = match serde_json::from_str(data) {
+                let response = match response {
                     Ok(response) => response,
                     Err(error) => {
-                        yield Err(client::protocol_error(format!(
-                            "SGLang /generate returned invalid JSON: {error}"
-                        )));
+                        yield Err(error);
                         return;
                     }
                 };
@@ -362,12 +500,25 @@ impl NativeHttp {
                     && let Some(kind @ ("abort" | "error" | "cancelled")) =
                         finish.get("type").and_then(Value::as_str)
                 {
+                    abort_guard.request_id = None;
                     yield Err(protocol::terminal_failure(kind, finish));
                     return;
                 }
-                let has_output = response_has_output(&response);
-                let (mut output, terminal) = output(response, &mut prefill_handoff);
+                // The router counts decode output from token_ids; clients get the
+                // opaque response. Prefill reports none, as on the gRPC path, and
+                // fails on backend errors before its payload is discarded.
+                let Inspected { mut output, terminal, has_output } = match inspect(response, is_prefill) {
+                    Ok(inspected) => inspected,
+                    Err(error) => {
+                        yield Err(error);
+                        return;
+                    }
+                };
+                if terminal {
+                    output.disaggregated_params = prefill_handoff.take();
+                }
                 if !first_output_seen && has_output && (!is_prefill || terminal) {
+                    abort_guard.needs_first_token = false;
                     ctx.notify_first_token();
                     first_output_seen = true;
                 }
@@ -379,6 +530,9 @@ impl NativeHttp {
                         output.engine_data = None;
                     }
                 }
+                if terminal {
+                    abort_guard.request_id = None;
+                }
                 yield Ok(output);
                 if terminal {
                     return;
@@ -388,39 +542,51 @@ impl NativeHttp {
     }
 }
 
-fn response_has_output(response: &Value) -> bool {
-    [response.get("output_ids"), response.get("text")]
-        .into_iter()
-        .flatten()
-        .any(|value| match value {
-            Value::Array(values) => !values.is_empty(),
-            Value::String(value) => !value.is_empty(),
-            _ => false,
-        })
+fn response_stream(
+    response: Response,
+    max_event_bytes: usize,
+) -> BoxStream<'static, Result<String, LinesCodecError>> {
+    let bytes = response.bytes_stream().map_err(io::Error::other);
+    let reader = StreamReader::new(bytes);
+    Box::pin(FramedRead::new(
+        reader,
+        LinesCodec::new_with_max_length(max_event_bytes),
+    ))
 }
 
-fn output(response: Value, prefill_handoff: &mut Option<Value>) -> (LLMEngineOutput, bool) {
-    let error = response.get("error");
-    let finished = error.is_some()
-        || response
-            .pointer("/meta_info/finish_reason")
-            .is_some_and(|reason| !reason.is_null());
-    let mut output = match error {
-        Some(error) => LLMEngineOutput::error(
-            error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("SGLang generation failed")
-                .to_string(),
-        ),
-        None if finished => LLMEngineOutput::stop(),
-        None => LLMEngineOutput::default(),
-    };
-    output.engine_data = Some(serde_json::json!({"sglang_response": response}));
-    if finished {
-        output.disaggregated_params = prefill_handoff.take();
+async fn next_response(
+    stream: &mut BoxStream<'static, Result<String, LinesCodecError>>,
+    max_event_bytes: usize,
+) -> Result<Value, DynamoError> {
+    loop {
+        let line = stream
+            .next()
+            .await
+            .ok_or_else(|| {
+                client::stream_incomplete("SGLang /generate closed before a terminal response")
+            })?
+            .map_err(|error| match error {
+                LinesCodecError::MaxLineLengthExceeded => client::protocol_error(format!(
+                    "SGLang /generate event exceeded {max_event_bytes} bytes; raise --native-http-max-event-bytes (DYN_SGLANG_NATIVE_HTTP_MAX_EVENT_BYTES)"
+                )),
+                error => client::stream_incomplete(format!("invalid SGLang /generate stream: {error}")),
+            })?;
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.strip_prefix(' ').unwrap_or(data);
+        if data.is_empty() {
+            continue;
+        }
+        if data == "[DONE]" {
+            return Err(client::protocol_error(
+                "SGLang /generate finished without a terminal response",
+            ));
+        }
+        return serde_json::from_str(data).map_err(|error| {
+            client::protocol_error(format!("SGLang /generate returned invalid JSON: {error}"))
+        });
     }
-    (output, finished)
 }
 
 fn request_error(error: reqwest::Error) -> DynamoError {
@@ -473,10 +639,11 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::{
-        NativeHttp, NativeRequest, authentication_error, output, request, response_error,
-        response_has_output,
+        NativeHttp, NativeRequest, authentication_error, build_http_client, request, response_error,
     };
     use crate::client::Discovery;
+
+    const MAX_EVENT_BYTES: usize = crate::args::DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES.get();
 
     fn canonical_request() -> PreprocessedRequest {
         PreprocessedRequest::builder()
@@ -503,8 +670,12 @@ mod tests {
     fn native_http(port: u16) -> NativeHttp {
         let grpc = GrpcEndpoint::parse("127.0.0.1:30001", "test").unwrap();
         NativeHttp {
-            client: reqwest::Client::new(),
+            client: build_http_client(Duration::from_secs(1)).unwrap(),
             endpoint: HttpEndpoint::from_grpc(&grpc, port).unwrap(),
+            max_event_bytes: MAX_EVENT_BYTES,
+            rids: Default::default(),
+            abort_timeout: Duration::from_secs(1),
+            decode_drain_timeout: Duration::from_secs(1),
         }
     }
 
@@ -589,7 +760,8 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(native.body["input_ids"], json!([1, 2, 3]));
-        assert_eq!(native.body["rid"], "actual-rid");
+        assert!(native.rid.starts_with("actual-rid-"));
+        assert_eq!(native.body["rid"], native.rid.as_str());
         assert_eq!(native.body["stream"], true);
         assert_eq!(native.body["priority"], -5);
         assert_eq!(native.body["routed_dp_rank"], 2);
@@ -778,53 +950,24 @@ mod tests {
     }
 
     #[test]
-    fn native_output_preserves_the_envelope_and_marks_terminals() {
-        let chunk = json!({"output_ids": [10], "meta_info": {"finish_reason": null}});
-        let (converted, is_terminal) = output(chunk.clone(), &mut None);
-        assert!(!is_terminal);
-        assert_eq!(
-            converted.engine_data,
-            Some(json!({"sglang_response": chunk}))
-        );
-        assert!(converted.finish_reason.is_none());
-        assert!(converted.disaggregated_params.is_none());
-
-        let terminal = json!({"meta_info": {"finish_reason": {"type": "length"}}});
-        let (converted, is_terminal) = output(terminal.clone(), &mut None);
-        assert!(is_terminal);
-        assert_eq!(
-            converted.engine_data,
-            Some(json!({"sglang_response": terminal}))
-        );
-        assert_eq!(converted.finish_reason, Some(FinishReason::Stop));
-        assert!(converted.disaggregated_params.is_none());
-
-        let failure = json!({"error": {"message": "rejected"}});
-        let (converted, is_terminal) = output(failure.clone(), &mut None);
-        assert!(is_terminal);
-        assert_eq!(
-            converted.finish_reason,
-            Some(FinishReason::Error("rejected".to_string()))
-        );
-        assert_eq!(
-            converted.engine_data,
-            Some(json!({"sglang_response": failure}))
-        );
-    }
-
-    #[test]
     fn native_http_discovery_checks_port_and_preserves_endpoint_host() {
         let grpc = GrpcEndpoint::parse("http://engine.example:30001", "test").unwrap();
         assert!(
-            NativeHttp::discover(&grpc, &discovery(json!({})), Duration::from_secs(1))
-                .unwrap()
-                .is_none()
+            NativeHttp::discover(
+                &grpc,
+                &discovery(json!({})),
+                Duration::from_secs(1),
+                MAX_EVENT_BYTES,
+            )
+            .unwrap()
+            .is_none()
         );
         for port in [json!(0), json!(65536), json!(-1), json!("bad"), json!(null)] {
             let error = NativeHttp::discover(
                 &grpc,
                 &discovery(json!({"port": port, "incremental_streaming_output": true})),
                 Duration::from_secs(1),
+                MAX_EVENT_BYTES,
             )
             .err()
             .unwrap();
@@ -837,6 +980,7 @@ mod tests {
             &grpc,
             &discovery(json!({"port": "30000", "incremental_streaming_output": true})),
             Duration::from_secs(1),
+            MAX_EVENT_BYTES,
         )
         .unwrap()
         .unwrap();
@@ -854,6 +998,7 @@ mod tests {
                 &grpc,
                 &discovery(json!({"port": 30000})),
                 Duration::from_secs(1),
+                MAX_EVENT_BYTES,
             )
             .unwrap()
             .is_none()
@@ -866,6 +1011,7 @@ mod tests {
                     "incremental_streaming_output": true
                 })),
                 Duration::from_secs(1),
+                MAX_EVENT_BYTES,
             )
             .unwrap()
             .is_some()
@@ -891,7 +1037,8 @@ mod tests {
             "event: message\n",
             "data:{\"output_ids\":[101],\"meta_info\":{\"finish_reason\":null}}\n\n",
             "retry: 1000\n",
-            "data: {\"output_ids\":[102],\"meta_info\":{\"finish_reason\":{\"type\":\"stop\"}}}\n\n"
+            "data: {\"output_ids\":[102],\"meta_info\":{\"finish_reason\":{\"type\":\"stop\",\"matched\":102},",
+            "\"prompt_tokens\":1,\"completion_tokens\":2}}\n\n"
         )
         .to_string();
         let (port, server) = serve_once(body, "200 OK").await;
@@ -902,8 +1049,10 @@ mod tests {
         );
         let mut stream = native_http(port).generate(
             NativeRequest {
+                rid: "rid".to_string(),
                 body: json!({"input_ids": [1], "stream": true}),
                 is_prefill: false,
+                is_decode: false,
                 prefill_handoff: None,
                 keep_prefill_output: false,
             },
@@ -911,9 +1060,96 @@ mod tests {
             CancellationToken::new(),
         );
 
-        assert!(stream.next().await.unwrap().is_ok());
+        assert_eq!(stream.next().await.unwrap().unwrap().token_ids, [101]);
         assert!(*first_token_seen.borrow());
-        assert!(stream.next().await.unwrap().is_ok());
+        let terminal = stream.next().await.unwrap().unwrap();
+        assert_eq!(terminal.token_ids, [102]);
+        assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
+        assert!(terminal.stop_reason.is_none());
+        assert_eq!(terminal.completion_usage.unwrap().total_tokens, 3);
+        assert!(stream.next().await.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stream_cut_mid_generation_can_migrate() {
+        let body = "data: {\"output_ids\":[101],\"meta_info\":{\"finish_reason\":null}}\n\n";
+        let (port, server) = serve_once(body.to_string(), "200 OK").await;
+        let mut stream = native_http(port).generate(
+            NativeRequest {
+                rid: "rid".to_string(),
+                body: json!({"input_ids": [1], "stream": true}),
+                is_prefill: false,
+                is_decode: false,
+                prefill_handoff: None,
+                keep_prefill_output: false,
+            },
+            GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+            CancellationToken::new(),
+        );
+        assert_eq!(stream.next().await.unwrap().unwrap().token_ids, [101]);
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::StreamIncomplete)
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_stream_rejects_invalid_output_ids() {
+        let body = "data: {\"output_ids\":[-1],\"meta_info\":{\"finish_reason\":null}}\n\n";
+        let (port, server) = serve_once(body.to_string(), "200 OK").await;
+        let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+        let mut stream = native_http(port).generate(
+            NativeRequest {
+                rid: "rid".to_string(),
+                body: json!({"input_ids": [1], "stream": true}),
+                is_prefill: false,
+                is_decode: false,
+                prefill_handoff: None,
+                keep_prefill_output: false,
+            },
+            ctx,
+            CancellationToken::new(),
+        );
+
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(
+            error.to_string().contains("invalid SGLang output_ids"),
+            "{error}"
+        );
+        assert!(stream.next().await.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_stream_rejects_events_over_configured_limit() {
+        let body = "data: {\"output_ids\":[101],\"meta_info\":{\"finish_reason\":null}}\n\n";
+        let (port, server) = serve_once(body.to_string(), "200 OK").await;
+        let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+        let native = NativeHttp {
+            max_event_bytes: 16,
+            ..native_http(port)
+        };
+        let mut stream = native.generate(
+            NativeRequest {
+                rid: "rid".to_string(),
+                body: json!({"input_ids": [1], "stream": true}),
+                is_prefill: false,
+                is_decode: false,
+                prefill_handoff: None,
+                keep_prefill_output: false,
+            },
+            ctx,
+            CancellationToken::new(),
+        );
+
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(
+            error.to_string().contains("--native-http-max-event-bytes"),
+            "unexpected error: {error}"
+        );
         assert!(stream.next().await.is_none());
         server.await.unwrap();
     }
@@ -924,8 +1160,10 @@ mod tests {
         let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
         let mut stream = native_http(port).generate(
             NativeRequest {
+                rid: "rid".to_string(),
                 body: json!({"input_ids": [1], "stream": true}),
                 is_prefill: true,
+                is_decode: false,
                 prefill_handoff: Some(json!({
                     "bootstrap_host": "prefill",
                     "bootstrap_port": 5000,
@@ -957,8 +1195,10 @@ mod tests {
             let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
             let mut stream = native_http(port).generate(
                 NativeRequest {
+                    rid: "rid".to_string(),
                     body: json!({"input_ids": [1], "stream": true}),
                     is_prefill: true,
+                    is_decode: false,
                     prefill_handoff: Some(json!({
                         "bootstrap_host": "prefill", "bootstrap_port": 1, "bootstrap_room": 7,
                     })),
@@ -1004,6 +1244,8 @@ mod tests {
             terminal.engine_data,
             Some(json!({"sglang_response": response}))
         );
+        assert!(terminal.token_ids.is_empty());
+        assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
         server.await.unwrap();
     }
 
@@ -1035,8 +1277,10 @@ mod tests {
         let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
         let mut stream = native_http(port).generate(
             NativeRequest {
+                rid: "rid".to_string(),
                 body: json!({"input_ids": [1], "stream": true}),
                 is_prefill: true,
+                is_decode: false,
                 prefill_handoff: Some(json!({
                     "bootstrap_host": "prefill",
                     "bootstrap_port": 5000,
@@ -1075,6 +1319,7 @@ mod tests {
         assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
         assert!(terminal.disaggregated_params.is_none());
         assert!(terminal.engine_data.is_none());
+        assert!(terminal.token_ids.is_empty());
         assert!(stream.next().await.is_none());
         server.await.unwrap();
     }
@@ -1086,8 +1331,10 @@ mod tests {
         let ctx = GenerateContext::new(context, None);
         let mut stream = native_http(30000).generate(
             NativeRequest {
+                rid: "rid".to_string(),
                 body: json!({"input_ids": [1], "stream": true}),
                 is_prefill: false,
+                is_decode: false,
                 prefill_handoff: None,
                 keep_prefill_output: false,
             },
@@ -1101,6 +1348,148 @@ mod tests {
             ErrorType::Backend(BackendError::Cancelled)
         );
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn dropped_decode_aborts_after_malformed_output_or_drain_deadline() {
+        for malformed in [None, Some(r#"{"output_ids":[-1]}"#), Some("{")] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                // Keep generation open after malformed output, or send no headers.
+                let (mut generate, _) = listener.accept().await.unwrap();
+                let _ = generate.read(&mut [0_u8; 4096]).await.unwrap();
+                if let Some(event) = malformed {
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: {event}\n\n"
+                    );
+                    generate.write_all(response.as_bytes()).await.unwrap();
+                }
+                request_seen_tx.send(()).unwrap();
+                let (mut abort, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 4096];
+                let read = abort.read(&mut request).await.unwrap();
+                abort
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                drop(generate);
+                String::from_utf8_lossy(&request[..read]).into_owned()
+            });
+
+            let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+            let native = NativeHttp {
+                decode_drain_timeout: Duration::from_millis(50),
+                ..native_http(port)
+            };
+            let mut stream = native.generate(
+                NativeRequest {
+                    body: json!({"input_ids": [1], "stream": true}),
+                    is_prefill: false,
+                    is_decode: true,
+                    rid: "rid".to_string(),
+                    prefill_handoff: None,
+                    keep_prefill_output: false,
+                },
+                ctx,
+                CancellationToken::new(),
+            );
+            tokio::select! {
+                biased;
+                result = request_seen_rx => result.unwrap(),
+                output = stream.next() => panic!("decode returned before the backend responded: {output:?}"),
+            }
+            drop(stream);
+
+            let abort = tokio::time::timeout(Duration::from_secs(1), server)
+                .await
+                .expect("abort was not sent after the drain deadline")
+                .unwrap();
+            assert!(abort.starts_with("POST /abort_request"), "{abort}");
+            assert!(abort.contains(r#""rid":"rid""#), "{abort}");
+        }
+    }
+
+    #[test]
+    fn repeated_public_ids_have_independent_abort_targets() {
+        use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
+        let native = native_http(1234);
+        let context =
+            || Context::with_id_and_metadata((), "same-id".into(), Default::default()).context();
+        let (first, second) = (context(), context());
+        let start = |ctx, rid: &str| {
+            native.clone().generate(
+                NativeRequest {
+                    rid: rid.into(),
+                    body: json!({}),
+                    is_prefill: false,
+                    is_decode: false,
+                    prefill_handoff: None,
+                    keep_prefill_output: false,
+                },
+                GenerateContext::new(ctx, None),
+                CancellationToken::new(),
+            )
+        };
+        let first_stream = start(first.clone(), "first-dispatch");
+        let second_stream = start(second.clone(), "second-dispatch");
+        assert_eq!(first.id(), second.id());
+        assert_eq!(native.request_id(&first).as_deref(), Some("first-dispatch"));
+        assert_eq!(
+            native.request_id(&second).as_deref(),
+            Some("second-dispatch")
+        );
+        drop(first_stream);
+        assert!(native.request_id(&first).is_none());
+        assert_eq!(
+            native.request_id(&second).as_deref(),
+            Some("second-dispatch")
+        );
+        drop(second_stream);
+        assert!(native.rids.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn each_dispatch_has_a_private_request_id() {
+        let mut canonical = canonical_request();
+        canonical.extra_args = Some(json!({"sglang_tito": {}}));
+        let dispatch = |request: &PreprocessedRequest| {
+            super::request(
+                request,
+                "public",
+                DisaggregationMode::Aggregated,
+                None,
+                None,
+            )
+            .unwrap()
+            .unwrap()
+            .rid
+        };
+        let first = dispatch(&canonical);
+        let second = dispatch(&canonical);
+        assert!(first.starts_with("public-") && second.starts_with("public-"));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn old_dispatch_cleanup_preserves_the_retry_abort_target() {
+        let native = native_http(1234);
+        let context = dynamo_backend_common::testing::mock_context();
+        let key = std::sync::Arc::as_ptr(&context).addr();
+        native.rids.lock().unwrap().insert(key, "retry".into());
+        drop(super::Dispatched {
+            rids: native.rids.clone(),
+            context: context.clone(),
+            rid: "first".into(),
+        });
+        assert_eq!(native.rids.lock().unwrap().get(&key).unwrap(), "retry");
+        drop(super::Dispatched {
+            rids: native.rids.clone(),
+            context: context.clone(),
+            rid: "retry".into(),
+        });
+        assert!(native.rids.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1118,12 +1507,5 @@ mod tests {
             response_error(StatusCode::BAD_REQUEST, "bad request".to_string()).error_type(),
             ErrorType::Backend(BackendError::InvalidArgument)
         );
-    }
-
-    #[test]
-    fn detects_native_output_fields() {
-        assert!(response_has_output(&json!({"output_ids": [1]})));
-        assert!(response_has_output(&json!({"text": "a"})));
-        assert!(!response_has_output(&json!({"output_ids": [], "text": ""})));
     }
 }

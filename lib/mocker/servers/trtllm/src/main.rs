@@ -20,7 +20,7 @@ use serde_json::{Map, Value};
 )]
 struct Args {
     /// Address on which to expose the OpenEngine gRPC services.
-    #[arg(long, default_value = "127.0.0.1:50051")]
+    #[arg(long, default_value = "127.0.0.1:30001")]
     listen: SocketAddr,
 
     /// Model identity reported by Control.GetModelInfo, which is the name the
