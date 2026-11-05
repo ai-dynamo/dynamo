@@ -869,11 +869,8 @@ fn make_sse_event(event_type: &str, event: &AnthropicStreamEvent) -> Result<Even
     Ok(Event::default().event(event_type).data(data))
 }
 
-/// Serialize the terminal `message_delta`, always sending `delta.stop_sequence`.
-///
-/// `dynamo-protocols` skips `stop_sequence` when it is `None`, but the Anthropic
-/// contract sends an explicit `null`. Remove this once the upstream type stops
-/// skipping it.
+/// Serialize `message_delta` with the `delta.stop_sequence: null` Anthropic sends but
+/// `dynamo-protocols` skips. Remove once the upstream type stops skipping it.
 fn make_message_delta_sse_event(event: &AnthropicStreamEvent) -> Result<Event, anyhow::Error> {
     let mut value = serde_json::to_value(event)?;
     if let Some(serde_json::Value::Object(delta)) = value.get_mut("delta") {
