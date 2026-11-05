@@ -201,7 +201,7 @@ jobs:
       BASE_ENV: ${{ inputs.base_env }}
     steps:
       - name: Checkout (for the local actions)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Log in to ECR
         uses: ./.github/actions/docker-login
@@ -313,7 +313,7 @@ jobs:
 
       - name: Upload the build log
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: build-sglang-k31-${{ matrix.arch }}-log
           path: build-${{ matrix.arch }}.log
@@ -332,7 +332,7 @@ jobs:
       ARCHS: ${{ needs.plan.outputs.archs }}
     steps:
       - name: Checkout (for the local actions)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Log in to ECR
         uses: ./.github/actions/docker-login
