@@ -45,6 +45,9 @@ _ROUTER_FIELDS: tuple[str, ...] = (
     "session_affinity_mode",
 )
 
+# Matches MAX_SESSION_AFFINITY_ENTRIES in lib/kv-router's affinity table.
+DEFAULT_SESSION_AFFINITY_MAX_ENTRIES = 65_536
+
 # TODO(v1.7): Remove --active-prefill-tokens-threshold.
 _ABSOLUTE_PREFILL_THRESHOLD_DEPRECATION = (
     "--active-prefill-tokens-threshold is deprecated and will be removed in v1.7; "
@@ -97,6 +100,7 @@ class RouterConfigBase(ConfigBase):
     enforce_disagg: bool
     session_affinity_ttl_secs: Optional[int]
     session_affinity_mode: str
+    session_affinity_max_entries: int
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
@@ -291,6 +295,28 @@ class RouterArgGroup(ArgGroup):
             dest="session_affinity_ttl_secs",
             env=self.env,
         )
+        if self.include_frontend_only:
+            # Sizes this frontend's affinity table, so it is not advertised on a
+            # worker's model card.
+            add_argument(
+                g,
+                flag_name="--router-session-affinity-max-entries",
+                env_var="DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES",
+                default=DEFAULT_SESSION_AFFINITY_MAX_ENTRIES,
+                help=(
+                    "Most sessions one frontend's session-affinity table holds at once. "
+                    "A request that would start a new session past this limit is "
+                    "rejected as resource exhausted (HTTP 529 by default) until an idle "
+                    "session expires. Replica sync copies bindings to every frontend, so the "
+                    "limit is effectively fleet-wide. Has no effect unless "
+                    "--router-session-affinity-ttl-secs is set. This is exported as "
+                    "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES, where every affinity table "
+                    "reads it."
+                ),
+                arg_type=int,
+                dest="session_affinity_max_entries",
+                env=self.env,
+            )
         add_argument(
             g,
             flag_name="--router-session-affinity-mode",
@@ -372,6 +398,7 @@ class WorkerRouterConfig(RouterConfigBase, KvRouterConfigBase):
     # leaving the attributes absent on a worker's config object.
     min_initial_workers: int = 0
     enforce_disagg: bool = False
+    session_affinity_max_entries: int = DEFAULT_SESSION_AFFINITY_MAX_ENTRIES
 
 
 def add_worker_router_arguments(
