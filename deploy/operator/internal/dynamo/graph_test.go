@@ -9845,9 +9845,8 @@ func TestGenerateComponentIngressResources_NormalizeBackendServiceName(t *testin
 	assert.Equal(t, "model-qwen3-0-6b", virtualService.Spec.Http[0].Route[0].Destination.Host)
 }
 
-// DCD and DGD names only need to be DNS-1123 subdomains, so a name such as
-// "70b-llama-production" is admitted, but a Service with that name is rejected
-// because a DNS-1035 label must start with a letter.
+// DCD and DGD names may start with a digit, but a Service name is a DNS-1035
+// label and must start with a letter.
 func TestGenerateComponentService_DNS1035Name(t *testing.T) {
 	digitLeadingLong := "7" + strings.Repeat("b", 60) // 61 chars; the prefix pushes it past 63
 
@@ -9894,9 +9893,8 @@ func TestGenerateComponentService_DNS1035Name(t *testing.T) {
 	})
 }
 
-// Every object that points at a component Service must use the name
-// GenerateComponentService gives it, while the referring objects keep their own
-// names.
+// References to a component Service must use the name GenerateComponentService
+// gives it; the referring objects keep their own names.
 func TestComponentServiceReferences_DigitLeadingName(t *testing.T) {
 	const name = "70b-llama-production"
 	svc, err := GenerateComponentService(ComponentServiceParams{

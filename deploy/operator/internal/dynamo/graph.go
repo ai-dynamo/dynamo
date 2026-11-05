@@ -812,13 +812,8 @@ func NormalizeKubeResourceName(name string) string {
 // start with a letter instead.
 const componentServiceNamePrefix = "svc-"
 
-// ComponentServiceName returns the name of the Service generated for a component,
-// and is what every reference to that Service must use. Service names must be
-// DNS-1035 labels, which, unlike the DNS-1123 names DCDs and DGDs accept, must
-// start with a letter. A name such as "70b-llama-production" therefore gets
-// componentServiceNamePrefix, shortened with a hash if that pushes it past
-// maxServiceNameLength. Every other name is returned as NormalizeKubeResourceName
-// returns it, so existing Services keep their names.
+// ComponentServiceName returns the DNS-1035 name of a component's Service; every
+// reference must use it. Only digit-leading names change, so existing Services keep theirs.
 func ComponentServiceName(name string) string {
 	normalized := NormalizeKubeResourceName(name)
 	if normalized == "" || ('a' <= normalized[0] && normalized[0] <= 'z') {
@@ -1044,9 +1039,8 @@ func ElasticEPLeaderServiceName(componentServiceName string) string {
 	return shortenServiceName(ComponentServiceName(componentServiceName) + "-ray")
 }
 
-// shortenServiceName truncates a name longer than maxServiceNameLength and appends
-// a deterministic hash of the full name, so callers that derive the name
-// independently agree on it.
+// shortenServiceName truncates a name past maxServiceNameLength with a deterministic
+// hash suffix, so callers that derive the name independently agree on it.
 func shortenServiceName(name string) string {
 	if len(name) <= maxServiceNameLength {
 		return name

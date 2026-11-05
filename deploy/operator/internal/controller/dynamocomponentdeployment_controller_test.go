@@ -733,9 +733,8 @@ func TestStandaloneDCDServiceRenderingCharacterization(t *testing.T) {
 	require.Equal(t, dynamo.GetDCDKubeAnnotations(dcd), service.Annotations)
 }
 
-// A DCD name may start with a digit, but a Service name must be a DNS-1035 label.
-// The frontend Service and the delete stub a non-frontend DCD renders must both use
-// the same valid name, so cleanup targets the Service that was created.
+// A digit-leading DCD name needs a prefixed Service name, and the delete stub for a
+// non-frontend DCD must use that same name so cleanup finds the Service.
 func TestStandaloneDCDService_DigitLeadingName(t *testing.T) {
 	const name = "70b-llama-production"
 	newDCD := func(componentType v1beta1.ComponentType) *v1beta1.DynamoComponentDeployment {
