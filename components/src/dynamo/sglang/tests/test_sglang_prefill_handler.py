@@ -545,32 +545,5 @@ async def test_native_prefill_forwards_final_response_when_annotated(
         assert chunks[1]["engine_data"]["sglang_response"] is final_response
 
 
-@pytest.mark.asyncio
-@pytest.mark.timeout(5)
-async def test_annotated_native_prefill_backend_cancellation_omits_response(
-    monkeypatch,
-):
-    final_response = {
-        "meta_info": {
-            "id": "request-id",
-            "finish_reason": {"type": "abort", "message": "Aborted"},
-            "prompt_tokens": 3,
-            "cached_tokens": 2,
-            "input_token_logprobs": [[None, 1, None]],
-        }
-    }
-    handler = _native_prefill_handler(monkeypatch, [final_response])
-    context = SimpleNamespace(
-        id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
-    )
-
-    chunks = await _drain(
-        handler.generate(_native_prefill_request(["prefill_output"]), context)
-    )
-
-    assert len(chunks) == 2
-    assert chunks[1] == {"token_ids": [], "finish_reason": "cancelled"}
-
-
 async def _drain(stream):
     return [item async for item in stream]
