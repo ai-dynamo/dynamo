@@ -386,6 +386,62 @@ fn image_routing_hints_require_capability_and_exact_frontend_metadata() {
 }
 
 #[test]
+fn encoder_handoff_preserves_media_uuids_across_worker_roles() {
+    let mut limits = image_limits(4096).unwrap();
+    limits.encoder_only = true;
+    limits.encoder_consumer = true;
+    limits.encoder_shared_safetensors = true;
+    limits.supports_image_routing = true;
+    for uuid in [
+        None,
+        Some("caller-owned"),
+        Some("dynamo-image-v1:0123456789abcdef"),
+    ] {
+        let mut req = request();
+        add_images(&mut req, ["https://example.com/first.png"]);
+        req.multi_modal_uuids = Some(HashMap::from([(
+            "image_url".into(),
+            vec![uuid.map(str::to_string)],
+        )]));
+        req.extra_args = Some(json!({"mm_hashes": ["0123456789abcdef"]}));
+        req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
+            routing_token_ids: vec![11, 22, 33],
+            expanded_prompt_len: 3,
+            ..Default::default()
+        });
+        let encoded = build_generate_request(
+            req.clone(),
+            "e",
+            "model",
+            Some(limits),
+            DisaggregationMode::Encode,
+        );
+        req.encoder_result =
+            Some(json!({"transfer_backend": ENCODER_BACKEND, "opaque_state": [1]}));
+        for mode in [AGG, PREFILL] {
+            let consumed =
+                build_generate_request(req.clone(), "consumer", "model", Some(limits), mode);
+            if uuid.is_some_and(|value| value.starts_with("dynamo-image-v1:")) {
+                assert!(
+                    encoded
+                        .as_ref()
+                        .unwrap_err()
+                        .to_string()
+                        .contains("reserved")
+                );
+                assert!(consumed.unwrap_err().to_string().contains("reserved"));
+            } else {
+                assert_eq!(encoded.as_ref().unwrap().media, consumed.unwrap().media);
+                assert_eq!(
+                    encoded.as_ref().unwrap().media[0].uuid,
+                    uuid.unwrap_or_default()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn caller_uuids_cannot_spoof_internal_image_routing_hints() {
     let mut req = request();
     add_images(
@@ -1179,7 +1235,7 @@ fn prefill_result_on_a_non_decode_worker_is_rejected() {
 }
 
 #[test]
-fn image_encoder_handoff_requires_negotiated_roles_and_e_pd() {
+fn image_encoder_handoff_requires_negotiated_roles() {
     let mut source = request();
     add_images(&mut source, ["https://example.com/image.png"]);
     let mut limits = image_limits(4096).unwrap();
@@ -1213,11 +1269,26 @@ fn image_encoder_handoff_requires_negotiated_roles_and_e_pd() {
     let options = consumed.encoder.unwrap();
     assert!(!options.encode_only);
     assert_eq!(options.cache.unwrap().opaque_state, [1, 2, 3]);
-    for mode in [
+    let prefill = build_generate_request(
+        source.clone(),
+        "p",
+        "model",
+        Some(limits),
         DisaggregationMode::Prefill,
-        DisaggregationMode::Decode,
-        DisaggregationMode::Encode,
-    ] {
+    )
+    .expect("prefill can consume encoder output");
+    assert_eq!(
+        prefill.encoder.unwrap().cache.unwrap().opaque_state,
+        [1, 2, 3]
+    );
+    assert!(prefill.kv.is_none());
+    assert_eq!(
+        prefill.extra.unwrap().fields[disagg::REQUEST_TYPE_KEY].kind,
+        Some(prost_types::value::Kind::StringValue(
+            disagg::CONTEXT_ONLY.into()
+        ))
+    );
+    for mode in [DisaggregationMode::Decode, DisaggregationMode::Encode] {
         assert!(build_generate_request(source.clone(), "p", "model", Some(limits), mode).is_err());
     }
     source.encoder_result = Some(json!({"transfer_backend": "future", "opaque_state": [1]}));
@@ -1253,6 +1324,40 @@ fn nixl_encoder_reference_is_forwarded_without_interpreting_engine_metadata() {
         "transfer_backend": "trtllm-nixl-encoder-v1", "opaque_state": vec![0_u8; 65537]
     }));
     assert!(build_generate_request(source, "pd", "model", Some(limits), AGG).is_err());
+}
+
+#[test]
+fn decode_with_a_prefill_handoff_does_not_replay_the_encoder_reference() {
+    let mut source = request();
+    add_images(&mut source, ["https://example.com/image.png"]);
+    source.encoder_result = Some(json!({
+        "transfer_backend": ENCODER_BACKEND, "opaque_state": [1, 2, 3]
+    }));
+    source.prefill_result = Some(dynamo_backend_common::PrefillResult {
+        disaggregated_params: crate::disagg::session_to_json(fake_session()).unwrap(),
+        prompt_tokens_details: None,
+    });
+    let wire = build_generate_request(
+        source.clone(),
+        "d",
+        "model",
+        image_limits(4096),
+        DisaggregationMode::Decode,
+    )
+    .expect("decode consumes staged KV without consuming the encoder reference again");
+    assert!(wire.encoder.is_none());
+    assert_eq!(wire.kv.unwrap().session, Some(fake_session()));
+
+    source.prefill_result.as_mut().unwrap().disaggregated_params = json!({});
+    let error = build_generate_request(
+        source,
+        "d",
+        "model",
+        image_limits(4096),
+        DisaggregationMode::Decode,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("is not a TensorRT-LLM handoff"));
 }
 
 #[test]

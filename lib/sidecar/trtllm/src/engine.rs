@@ -228,9 +228,14 @@ impl TrtllmSidecarEngine {
             })?;
         let allow_remote_media_urls = crate::args::allow_remote_media_urls(remote_urls.as_deref())?;
         let mode = args.sidecar.common.disaggregation_mode;
-        if args.sidecar.common.route_to_encoder && !matches!(mode, DisaggregationMode::Aggregated) {
+        if args.sidecar.common.route_to_encoder
+            && !matches!(
+                mode,
+                DisaggregationMode::Aggregated | DisaggregationMode::Prefill
+            )
+        {
             return Err(client::invalid_argument(
-                "TensorRT-LLM encoder routing currently supports E+PD only",
+                "TensorRT-LLM encoder routing requires an aggregated or prefill worker",
             ));
         }
 
@@ -333,7 +338,8 @@ impl TrtllmSidecarEngine {
                 "sidecar role must match the engine encoder-only role",
             ));
         }
-        if info.limits.encoder_consumer != self.route_to_encoder {
+        // Decode consumes staged KV, not the single-use encoder cache.
+        if !self.mode.is_decode() && info.limits.encoder_consumer != self.route_to_encoder {
             return Err(client::invalid_argument(
                 "encoder consumer engines require --route-to-encoder",
             ));

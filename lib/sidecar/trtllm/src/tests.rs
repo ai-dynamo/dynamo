@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use dynamo_backend_common::{
     DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, OutputOptions,
-    PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
+    PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
@@ -1414,4 +1414,101 @@ async fn image_encoder_and_consumer_exchange_opaque_handoff_over_grpc() {
     })
     .await
     .expect("encoder handoff timed out");
+}
+
+#[tokio::test]
+async fn prefill_consumes_encoder_reference_and_decode_uses_only_kv_over_grpc() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let encoder_service = FakeTrtllm::default();
+        *encoder_service.encoder_role.lock().await = Some("encode".into());
+        let encoder_server = FakeServer::start(encoder_service).await;
+        let encoder = engine_in_mode(&encoder_server.endpoint, 1, DisaggregationMode::Encode);
+        encoder.start(0).await.unwrap();
+
+        let mut input = request();
+        add_images(&mut input, ["https://example.com/image.png"]);
+        input.encoder_result = collect(&encoder, input.clone()).await[0]
+            .encoder_result
+            .clone();
+
+        let prefill_service = FakeTrtllm::default();
+        *prefill_service.encoder_role.lock().await = Some("consume".into());
+        let prefill_server = FakeServer::start(prefill_service).await;
+        let prefill = TrtllmSidecarEngine::from_args(vec![
+            "sidecar".into(),
+            "--grpc-endpoint".into(),
+            prefill_server.endpoint.clone(),
+            "--model-path".into(),
+            "model-source".into(),
+            "--disaggregation-mode".into(),
+            "prefill".into(),
+            "--route-to-encoder".into(),
+        ])
+        .expect("prefill encoder routing")
+        .0;
+        prefill.start(1).await.unwrap();
+        let outputs = collect(&prefill, input.clone()).await;
+        input.prefill_result = Some(PrefillResult {
+            disaggregated_params: outputs
+                .last()
+                .unwrap()
+                .disaggregated_params
+                .clone()
+                .expect("prefill KV handoff"),
+            prompt_tokens_details: None,
+        });
+
+        let decode_service = FakeTrtllm::default();
+        *decode_service.encoder_role.lock().await = Some("consume".into());
+        let decode_server = FakeServer::start(decode_service).await;
+        let decode = engine_in_mode(&decode_server.endpoint, 1, DisaggregationMode::Decode);
+        decode.start(2).await.unwrap();
+        let outputs = collect(&decode, input).await;
+        assert!(outputs.iter().any(|output| output.token_ids == [42]));
+        assert_eq!(
+            outputs.last().unwrap().finish_reason,
+            Some(FinishReason::Stop)
+        );
+
+        let encoder_requests = encoder_server.service.requests.lock().await;
+        assert_eq!(encoder_requests.len(), 1);
+        assert!(encoder_requests[0].encoder.as_ref().unwrap().encode_only);
+        let prefill_requests = prefill_server.service.requests.lock().await;
+        assert_eq!(prefill_requests.len(), 1);
+        assert_eq!(
+            prefill_requests[0]
+                .encoder
+                .as_ref()
+                .unwrap()
+                .cache
+                .as_ref()
+                .unwrap()
+                .opaque_state,
+            [1, 2, 3]
+        );
+        assert!(is_context_only(&prefill_requests[0]));
+        let decode_requests = decode_server.service.requests.lock().await;
+        assert_eq!(decode_requests.len(), 1);
+        assert!(decode_requests[0].encoder.is_none());
+        assert_eq!(
+            decode_requests[0]
+                .kv
+                .as_ref()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap(),
+            &fake_session()
+        );
+        assert_eq!(decode_requests[0].media, prefill_requests[0].media);
+        drop(decode_requests);
+        drop(prefill_requests);
+        drop(encoder_requests);
+
+        encoder.cleanup().await.unwrap();
+        prefill.cleanup().await.unwrap();
+        decode.cleanup().await.unwrap();
+    })
+    .await
+    .expect("three-role handoff timed out");
 }

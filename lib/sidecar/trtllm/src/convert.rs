@@ -10,7 +10,7 @@
 //! Disaggregation is driven by [`DisaggregationMode`]: a prefill worker marks
 //! its request `context_only` and returns the `PrefillReady` handoff as its
 //! terminal chunk, and a decode worker replays that handoff in `kv.session`.
-//! Image E+PD uses an encoder-only terminal followed by a cache-consuming request.
+//! Image encoder output is consumed by an aggregated or prefill worker.
 //! See [`crate::disagg`] for the codec.
 
 use std::collections::{BTreeSet, HashSet};
@@ -411,6 +411,8 @@ fn media(
         .map_or(0, Vec::len);
     if image_count > 0
         && matches!(mode, DisaggregationMode::Aggregated)
+        // Encoder references bind the media envelope, including caller UUIDs.
+        && request.encoder_result.is_none()
         && limits.is_some_and(|limits| limits.supports_image_routing)
         && request
             .mm_routing_info
@@ -1405,12 +1407,18 @@ fn encoder_options(
     let Some(result) = request.encoder_result.as_ref() else {
         return Ok(None);
     };
-    if !matches!(mode, DisaggregationMode::Aggregated)
-        || !limits.is_some_and(|limits| limits.encoder_consumer)
+    if mode.is_decode() && request.prefill_result.is_some() {
+        // The frontend retains the encoder result after prefill consumed it.
+        return Ok(None);
+    }
+    if !matches!(
+        mode,
+        DisaggregationMode::Aggregated | DisaggregationMode::Prefill
+    ) || !limits.is_some_and(|limits| limits.encoder_consumer)
         || !has_media(request)
     {
         return Err(client::invalid_argument(
-            "encoder_result requires E+PD image serving and a capable consumer",
+            "encoder_result requires an aggregated or prefill worker and a capable consumer",
         ));
     }
     if result
