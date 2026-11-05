@@ -40,7 +40,7 @@ Frames are decoded into device memory and copied to the host by
 ``_frame_to_rgb_hwc`` after a device synchronize. In host-memory mode,
 PyNvVideoCodec fills the returned host buffer from its own CUDA streams, and
 a CPU DLPack import carries no stream handshake, so nothing documented
-orders our read after the library's writes (suspected cause of DYN-5446).
+orders our read after the library's writes.
 """
 
 from __future__ import annotations
@@ -82,6 +82,7 @@ class NvdecVideoDecoder(VideoDecoderWrapper):  # type: ignore[misc,valid-type]
     """
 
     def __init__(self, data: bytes, gpu_id: int | None = None) -> None:
+        """Open video bytes on the selected GPU, keeping the backing file alive."""
         import PyNvVideoCodec as nvc
 
         if gpu_id is None:
