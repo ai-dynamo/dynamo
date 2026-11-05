@@ -944,6 +944,9 @@ fn route_topology(
     Ok(WorkerTopology {
         worker_id: router_worker_id,
         scheduler_ids,
+        // The placement ABI carries no router-hint capability, and the plugin
+        // builds its router with hints disabled (`KvRouterPlacement::new`).
+        router_hint: false,
     })
 }
 
