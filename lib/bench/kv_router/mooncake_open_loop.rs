@@ -68,7 +68,8 @@ struct QueryCorpus {
 #[derive(Debug)]
 pub(crate) enum MooncakeOperationPayload {
     Query,
-    Event(RouterEvent),
+    // Boxed: a RouterEvent is ~200 bytes and Query is empty.
+    Event(Box<RouterEvent>),
 }
 
 #[derive(Debug)]
@@ -276,7 +277,10 @@ pub(crate) fn prepare_mooncake_corpus(
                         } else {
                             RouterEvent::with_storage_tier(worker_id, event.clone(), *storage_tier)
                         };
-                        (MooncakeOperationPayload::Event(event), QuerySpec::default())
+                        (
+                            MooncakeOperationPayload::Event(Box::new(event)),
+                            QuerySpec::default(),
+                        )
                     }
                 };
                 operations.push((
@@ -369,7 +373,7 @@ pub(crate) fn prepare_open_loop_trial(
                     deadline_query_counts[deadline_group].saturating_add(1);
                 DispatchPayload::Query { lane }
             }
-            MooncakeOperationPayload::Event(event) => DispatchPayload::Event(event),
+            MooncakeOperationPayload::Event(event) => DispatchPayload::Event(*event),
         };
         dispatch.push(DispatchEntry {
             id: operation.id,

@@ -1536,21 +1536,30 @@ mod tests_startup_helpers {
             .expect("timed out waiting for gap recovery")
             .expect("listener channel closed")
             .into_events();
+        // The replayed payload carries the same three events: the tagged
+        // Mamba store, the attention store and the removal.
         let offset = usize::from(heartbeat_source);
-        assert_eq!(recovery.len(), 2 + offset);
+        assert_eq!(recovery.len(), 3 + offset);
         if heartbeat_source {
             assert!(matches!(recovery[0].event.data, KvCacheEventData::Cleared));
         }
+        assert!(recovery[offset].placement.kv_cache_group.is_some());
         assert!(matches!(
             recovery[offset].event.data,
             KvCacheEventData::Stored(_)
         ));
+        assert_eq!(recovery[offset + 1].placement.kv_cache_group, None);
         assert!(matches!(
             recovery[offset + 1].event.data,
+            KvCacheEventData::Stored(_)
+        ));
+        assert!(matches!(
+            recovery[offset + 2].event.data,
             KvCacheEventData::Removed(_)
         ));
+        let first_id = recovery[0].event.event_id;
         for (index, event) in recovery.iter().enumerate() {
-            assert_eq!(event.event.event_id, 2 + index as u64);
+            assert_eq!(event.event.event_id, first_id + index as u64);
             assert_eq!(event.event.dp_rank, 0);
         }
 

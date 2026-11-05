@@ -279,6 +279,16 @@ impl ZmqEventNormalizer {
             Some(reason) => return Err(reason),
             None => {}
         }
+        // A recurrent-group store with no block geometry is the placeholder
+        // payload of a publisher without self-describing offload events
+        // (vLLM before vllm-project/vllm#62613): it is dropped as before the
+        // tag existed. Its group is still learned above, so a later removal
+        // is tagged and lands in the presence table as a no-op.
+        if let RawKvEvent::BlockStored { block_size: 0, .. } = &raw
+            && self.kv_cache_group_tag(metadata, worker.dp_rank).is_some()
+        {
+            return Err(ZmqEventFilterReason::NonMainAttentionKind);
+        }
         // Only blocks that survived group filtering count toward a worker's
         // full-block history, so a filtered (non-main-attention) group cannot
         // suppress a size-mismatch warning for the routed group. A clear resets
@@ -317,7 +327,7 @@ impl ZmqEventNormalizer {
 
     pub fn normalize_preprocessed(
         &mut self,
-        mut raw: RawKvEvent,
+        raw: RawKvEvent,
         event_id: u64,
         worker: WorkerWithDpRank,
     ) -> Option<PlacementEvent> {

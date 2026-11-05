@@ -227,11 +227,9 @@ impl BatchingState {
         let _ = emit(
             local_indexer,
             worker_id,
-            tier,
-            domain,
+            &placement_event.placement,
             event,
             session_id,
-            kv_cache_group,
             output,
         )
         .await;

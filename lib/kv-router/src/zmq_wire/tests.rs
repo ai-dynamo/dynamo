@@ -1573,14 +1573,19 @@ fn filtered_group_does_not_prove_block_size_for_partial_tail_filter() {
     let mut normalizer = ZmqEventNormalizer::new(4);
     let worker = WorkerWithDpRank::new(7, 0);
 
+    // A sliding-window group is still filtered at ingress (recurrent groups
+    // are kept and tagged since the presence table), so it must not prove
+    // the worker's block size.
     let mut full_non_main = gpu_block_stored(&[1], &[10, 11, 12, 13], 4);
     if let RawKvEvent::BlockStored {
         kv_cache_spec_kind,
+        kv_cache_spec_sliding_window,
         group_idx,
         ..
     } = &mut full_non_main
     {
-        *kv_cache_spec_kind = Some(KvCacheSpecKind::Mamba);
+        *kv_cache_spec_kind = Some(KvCacheSpecKind::SlidingWindow);
+        *kv_cache_spec_sliding_window = Some(16);
         *group_idx = Some(1);
     }
     assert_eq!(

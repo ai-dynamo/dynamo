@@ -2188,12 +2188,25 @@ mod tests {
                 &mut ZmqEventNormalizer::new(4),
                 &mut ZmqEventNormalizer::new(4),
             );
-            assert_eq!(normalized.cache_owner_fault, None);
-            assert_eq!(normalized.events.len(), 1);
+            assert_eq!(normalized.cache_owner_fault, None, "{medium} {kind}");
             assert_eq!(
                 normalized.events[0].placement.residency_domain,
                 ResidencyDomain::CacheOwner
             );
+            assert_eq!(normalized.events[0].placement.kv_cache_group, None);
+            if kind == "mamba" {
+                // The placeholder store (no block geometry) is dropped, but
+                // its group is learned, so the removal is tagged for the
+                // presence table instead of reaching the attention index.
+                assert_eq!(normalized.events.len(), 2, "{medium} {kind}");
+                assert!(normalized.events[1].placement.kv_cache_group.is_some());
+                assert!(matches!(
+                    normalized.events[1].event.data,
+                    KvCacheEventData::Removed(_)
+                ));
+            } else {
+                assert_eq!(normalized.events.len(), 1, "{medium} {kind}");
+            }
         }
     }
 

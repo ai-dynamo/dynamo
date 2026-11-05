@@ -117,8 +117,12 @@ impl KvCacheGroupResidency {
     }
 
     /// Rightmost `p <= blocks` such that every recurrent group of `worker`
-    /// holds a state at `chain[p - 1]`. `None` means the worker has no
-    /// recurrent groups and the attention match stands.
+    /// holds a state at `chain[p - 1]`, the same rule the engine's Mamba
+    /// manager applies on lookup. A state resident on any tier counts: the
+    /// engine loads a lower-tier state back through the offload connector,
+    /// so it resumes from that boundary as if the state were on device.
+    /// `None` means the worker has no recurrent groups and the attention
+    /// match stands.
     pub fn reusable_blocks(
         &self,
         worker: WorkerWithDpRank,
@@ -382,6 +386,7 @@ mod tests {
         details.kv_transfer_candidates = Some(KvTransferCandidates {
             block_hashes: chain(chain_len),
             owner_prefix_blocks: vec![(worker.into(), blocks as usize)],
+            source_intervals: Vec::new(),
             routing_snapshot: None,
         });
         details

@@ -324,8 +324,12 @@ impl Indexer {
 
     /// Apply an event without tier dispatch — kept for callers that have
     /// already determined this is a device-tier event. Most callers should
-    /// use [`Self::apply_event_routed`].
+    /// use [`Self::apply_event_routed`]. A group-tagged event still goes to
+    /// the presence table, never to the attention tree.
     pub async fn apply_event(&self, event: RouterEvent) {
+        if self.apply_group_residency(&event) {
+            return;
+        }
         match self {
             Indexer::Single { primary, .. } => primary.apply_event(event).await,
             Indexer::Concurrent { primary, .. } => primary.apply_event(event).await,
