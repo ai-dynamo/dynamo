@@ -36,6 +36,7 @@ def _native_prefill_handler(monkeypatch, responses):
 
 
 def _native_prefill_request(annotations):
+    """Build a native request with the requested prefill annotations."""
     request = {
         "token_ids": [1, 2, 3],
         "routing": {},
@@ -64,6 +65,7 @@ def _native_prefill_request(annotations):
 async def test_native_prefill_forwards_final_response_when_annotated(
     monkeypatch, annotations, prompt_output
 ):
+    """Forward prompt outputs only when annotated, together with cache-hit data."""
     final_response = {
         "text": "",
         "output_ids": [4],
