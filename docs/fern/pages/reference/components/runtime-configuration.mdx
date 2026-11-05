@@ -260,7 +260,7 @@ address.
 </ParamField>
 
 <ParamField path="--connector" type="string" default="null">
-  KV-cache transfer connector. Accepts zero or more values. Deprecated for vLLM — use `--kv-transfer-config` instead. For TRT-LLM, valid options are `nixl`, `lmcache`, `kvbm`, `null`, and `none`.
+  KV-cache transfer connector. Accepts zero or more values. Deprecated for vLLM — use `--kv-transfer-config` instead. TensorRT-LLM supports only `none`.
 
   Environment variable: `DYN_CONNECTOR`
 </ParamField>
@@ -280,7 +280,7 @@ address.
 </ParamField>
 
 <ParamField path="--dyn-default-thinking-mode" type="string" default="null">
-  Thinking mode to apply when a request omits an explicit thinking control. Request-level `thinking`, `reasoning_effort`, and controls in `chat_template_args` or `chat_template_kwargs` take precedence. When unset, Dynamo preserves the model or chat template's native default. See [Deployment-Level Thinking Default](../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#deployment-level-thinking-default) for examples and precedence details.
+  Thinking mode to apply when a request omits an explicit thinking control. Request-level `thinking`, `reasoning_effort`, and controls in `chat_template_args` or `chat_template_kwargs` take precedence. When unset, Dynamo preserves the model or chat template's native default. See [Deployment-Level Thinking Default](../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#deployment-level-thinking-default) for examples and precedence details.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>enabled</Badge> <Badge intent="note" minimal>disabled</Badge></span>
 

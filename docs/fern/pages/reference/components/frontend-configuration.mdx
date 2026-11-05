@@ -126,11 +126,10 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 ### Routing and readiness
 
 <ParamField path="--router-mode" type="string" default="round-robin">
-  Routing strategy. `power-of-two` samples two workers and selects the worker with fewer in-flight
-  requests. In disaggregated prefill mode, `power-of-two` and `least-loaded` use the synchronous
-  prefill fallback path.
+  Routing strategy. In disaggregated prefill mode, `least-loaded` uses the synchronous prefill
+  fallback path.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>power-of-two</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
 
   Environment variable: `DYN_ROUTER_MODE`
 </ParamField>
@@ -756,6 +755,8 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
   Environment variable: `DYN_ENABLE_ANTHROPIC_API`
 </ParamField>
 
+The `dynamo` chat processor runs Rust parsing in the frontend; workers publish parser choices through `--dyn-tool-call-parser` and `--dyn-reasoning-parser`. See [Parser Generation Routing](../../use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md#parser-generation-routing) for `DYN_PARSER_VERSION`, aliases, fallback, and migration settings.
+
 <ParamField path="--dyn-chat-processor" type="string" default="dynamo">
   Chat processor. See [Chat Processors](../../use-cases/tool-calling-and-reasoning/chat-processors.mdx) for how this combines with the parser flags.
 
@@ -1036,6 +1037,28 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
   groups. Top-level cache salts remain active on chat completions, completions, classify, and
   pooling. On embeddings, classify, and pooling, the switch only drops legacy NvExt annotations;
   these endpoints do not use `x-tenant-id` or `x-dynamo-*` routing headers in either mode.
+</ParamField>
+
+### Media refusal for text-only models
+
+A frontend that serves text-only models can refuse media before routing. A refused request never reaches a worker, and a streaming client receives the HTTP status instead of a `200` followed by an error event. Readiness checks on the OpenAI endpoints still take precedence.
+
+<ParamField path="--reject-media" type="boolean" default="false">
+  Refuse media in any message, including earlier turns, before conversion or routing:
+
+  - `/v1/chat/completions`: image, video, and audio URL parts, plus inline `input_audio`.
+  - `/v1/responses`: `input_image` parts, including `file_id` references, system/developer messages, assistant history, and function-call outputs. Audio and video input parts are not accepted by the Responses request schema.
+  - `/v1/messages`: image blocks with base64 or URL sources, including images inside `tool_result` content.
+
+  Refusals are counted with `error_type="unsupported_modality"` on `dynamo_frontend_requests_total`, apart from validation and overload errors.
+
+  Environment variable: `DYN_REJECT_MEDIA`
+</ParamField>
+
+<ParamField path="--reject-media-status-code" type="integer" default="415">
+  HTTP status for a request refused by `--reject-media`. Only 4xx and 5xx values are accepted. Set it to a status an upstream gateway fails over on, for example `429`, to have that gateway send media requests to a multimodal model.
+
+  Environment variable: `DYN_REJECT_MEDIA_STATUS_CODE`
 </ParamField>
 
 ### Endpoint path customization

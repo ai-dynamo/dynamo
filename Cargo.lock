@@ -533,6 +533,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-dynamodb"
+version = "1.105.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82d2214c2ad3a175d3ece5a5af26916c29caa3e12e9e05b3cb8ed5e837b54b67"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.1",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-sso"
 version = "1.94.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -762,6 +786,7 @@ dependencies = [
  "base64-simd",
  "bytes",
  "bytes-utils",
+ "futures-core",
  "http 0.2.12",
  "http 1.4.1",
  "http-body 0.4.6",
@@ -774,6 +799,8 @@ dependencies = [
  "ryu",
  "serde",
  "time",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -2334,24 +2361,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-custom-policy-builtin"
-version = "1.7.0"
-dependencies = [
- "async-trait",
- "criterion",
- "dynamo-kv-router",
- "fastrand",
- "parking_lot",
- "rustc-hash 2.1.2",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "dynamo-custom-policy-example-catalog"
 version = "1.7.0"
 dependencies = [
@@ -2460,10 +2469,10 @@ dependencies = [
  "axum 0.8.4",
  "bytes",
  "dashmap",
- "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-protocols 9.1.0",
+ "dynamo-router-policies",
  "dynamo-runtime",
  "futures",
  "hyper-util",
@@ -2518,9 +2527,12 @@ name = "dynamo-global-common"
 version = "1.7.0"
 dependencies = [
  "blake3",
+ "prost 0.13.5",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
  "url",
 ]
 
@@ -2547,7 +2559,10 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "aws-config",
+ "aws-sdk-dynamodb",
  "axum 0.8.4",
+ "blake3",
  "clap",
  "dynamo-global-common",
  "dynamo-global-discovery-client",
@@ -2573,16 +2588,23 @@ dependencies = [
  "axum 0.8.4",
  "clap",
  "dynamo-global-common",
+ "dynamo-global-discovery-client",
  "dynamo-global-router",
+ "dynamo-global-view-broadcaster",
+ "dynamo-global-view-receiver",
  "dynamo-llm",
  "dynamo-runtime",
  "futures",
  "hyper-util",
+ "parking_lot",
  "prometheus",
+ "prost 0.13.5",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tonic 0.13.1",
  "tracing",
@@ -2733,9 +2755,10 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-bench",
- "dynamo-custom-policy-builtin",
  "dynamo-decisions",
+ "dynamo-global-common",
  "dynamo-global-discovery-client",
+ "dynamo-global-view-broadcaster",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -2744,6 +2767,7 @@ dependencies = [
  "dynamo-protocols 9.1.0",
  "dynamo-renderer",
  "dynamo-rl",
+ "dynamo-router-policies",
  "dynamo-runtime",
  "dynamo-tokenizers",
  "dynamo-tokens",
@@ -2884,8 +2908,8 @@ dependencies = [
  "blake3",
  "bytes",
  "dashmap",
- "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
+ "dynamo-router-policies",
  "dynamo-tokens",
  "futures",
  "ndarray 0.16.1",
@@ -3043,6 +3067,24 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "dynamo-router-policies"
+version = "1.7.0"
+dependencies = [
+ "async-trait",
+ "criterion",
+ "dynamo-kv-router",
+ "fastrand",
+ "parking_lot",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3262,6 +3304,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tonic 0.14.6",
+ "tonic-health 0.13.1",
  "tonic-health 0.14.6",
 ]
 
@@ -3350,6 +3393,7 @@ dependencies = [
  "async-trait",
  "clap",
  "dynamo-backend-common",
+ "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-runtime",
  "dynamo-sidecar-common",
@@ -3365,6 +3409,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tonic-build 0.13.1",
+ "tonic-health 0.13.1",
  "tracing",
 ]
 
