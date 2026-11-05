@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Router replicas from the EndpointSlices that MCS imports. The Global
-//! Discovery Service serves them to PoolRelays as `GET /routers`. Router
-//! replicas find each other through the Dynamo runtime, not through this.
+//! The replicas of a Service exported through MCS, from the EndpointSlices
+//! that MCS imports: the Global Router's, which the Global Discovery Service
+//! serves to PoolRelays as `GET /routers`, and the discovery service's own,
+//! whose instances share registrations (`crate::peers`). Router replicas find
+//! each other through the Dynamo runtime, not through this.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -101,11 +103,13 @@ impl ReplicaNaming {
             return None;
         };
         let Some(port) = tcp_port(slice, &self.port_name) else {
-            // The slice is the router Service's, so the name is misconfigured.
+            // The slice is the Service's, so the port name is misconfigured.
             tracing::warn!(
                 slice = slice.metadata.name.as_deref().unwrap_or_default(),
+                service = %self.service,
                 port_name = %self.port_name,
-                "router EndpointSlice has no TCP port of that name; its replicas are not listed"
+                "the Service's EndpointSlice has no TCP port of that name; its replicas are not \
+                 listed"
             );
             return None;
         };

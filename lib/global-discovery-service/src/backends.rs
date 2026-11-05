@@ -4,6 +4,7 @@
 //! Implementations of [`crate::pool_discovery`], one module per
 //! backend.
 
+pub mod http;
 pub mod kubernetes;
 pub mod memory;
 pub mod registered;

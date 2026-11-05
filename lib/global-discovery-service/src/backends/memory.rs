@@ -169,6 +169,40 @@ impl Pools {
         }
     }
 
+    /// Keeps `registration` until `expires_at`. A live, unchanged pool only
+    /// gets the new expiry. A new or changed one replaces the listing, with an
+    /// `Upserted` event, and so does one whose lease ran out before the sweep
+    /// removed it, since a `Resync` or a new watcher's first view may have
+    /// left it out meanwhile.
+    fn put(
+        &mut self,
+        events: &broadcast::Sender<PoolEvent>,
+        registration: PoolRegistration,
+        expires_at: Instant,
+        local: bool,
+        now: Instant,
+    ) {
+        if let Some(registered) = self.registrations.get_mut(&registration.key)
+            && registered.expires_at > now
+            && registered.registration == registration
+        {
+            registered.expires_at = expires_at;
+            registered.local = local;
+            return;
+        }
+        let added = listing(&registration);
+        self.registrations.insert(
+            registration.key.clone(),
+            Registered {
+                registration,
+                expires_at,
+                local,
+            },
+        );
+        // No subscribers is not an error.
+        let _ = events.send(WatchEvent::Upserted(added));
+    }
+
     /// Removes the pools whose leases have passed, and returns their keys.
     /// Notes when the latest of them may have lapsed everywhere.
     fn remove_lapsed(&mut self, lease: Lease, now: Instant) -> Vec<PoolKey> {
@@ -251,29 +285,14 @@ impl RegistrationExchange for MemoryPoolStore {
         let now = Instant::now();
         let expires_at = now + remaining.min(self.lease.duration());
         let mut pools = self.lock();
-        if let Some(registered) = pools.registrations.get_mut(&registration.key)
-            && registered.expires_at > now
+        if pools
+            .registrations
+            .get(&registration.key)
+            .is_some_and(|registered| registered.expires_at >= expires_at)
         {
-            if registered.expires_at >= expires_at {
-                return;
-            }
-            registered.local = false;
-            if registered.registration == registration {
-                registered.expires_at = expires_at;
-                return;
-            }
+            return;
         }
-        let added = listing(&registration);
-        pools.registrations.insert(
-            registration.key.clone(),
-            Registered {
-                registration,
-                expires_at,
-                local: false,
-            },
-        );
-        // No subscribers is not an error.
-        let _ = self.events.send(WatchEvent::Upserted(added));
+        pools.put(&self.events, registration, expires_at, false, now);
     }
 
     /// The live registrations PoolRelays made here, with the time each has
@@ -379,26 +398,8 @@ impl PoolRegistrar for MemoryPoolStore {
         self.ensure_sweeping();
         let now = Instant::now();
         let expires_at = now + self.lease.duration();
-        let mut pools = self.lock();
-        if let Some(registered) = pools.registrations.get_mut(&registration.key)
-            && registered.expires_at > now
-            && registered.registration == registration
-        {
-            registered.expires_at = expires_at;
-            registered.local = true;
-            return Ok(self.lease);
-        }
-        let added = listing(&registration);
-        pools.registrations.insert(
-            registration.key.clone(),
-            Registered {
-                registration,
-                expires_at,
-                local: true,
-            },
-        );
-        // No subscribers is not an error.
-        let _ = self.events.send(WatchEvent::Upserted(added));
+        self.lock()
+            .put(&self.events, registration, expires_at, true, now);
         Ok(self.lease)
     }
 }
@@ -425,9 +426,12 @@ impl Directory<PoolListing, PoolKey> for MemoryPoolStore {
         let (started, lease) = (self.started, self.lease);
         Ok(watch_stream(
             move || {
-                let pools = pools.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut pools = pools.lock().unwrap_or_else(PoisonError::into_inner);
                 let now = Instant::now();
-                let completeness = pools.completeness(started, lease, now);
+                // So that the new watcher hears of the next change, as the
+                // others do.
+                pools.announce(started, lease, now, &events);
+                let completeness = pools.announced;
                 (events.subscribe(), Some(pools.snapshot(now, completeness)))
             },
             cancel_token.unwrap_or_default(),
@@ -542,11 +546,19 @@ mod tests {
             .find(|listing| listing.key == key(dgd))
     }
 
-    /// The completeness of the next event, which must be a `Resync` within a
-    /// second.
-    async fn next_resync(watch: &mut WatchStream<PoolListing, PoolKey>) -> Completeness {
+    /// The next event, which must come within a second, so a missing one
+    /// fails the test rather than hanging it.
+    async fn next_event(watch: &mut WatchStream<PoolListing, PoolKey>) -> PoolEvent {
         let next = tokio::time::timeout(Duration::from_secs(1), watch.next()).await;
-        let Ok(Some(Ok(WatchEvent::Resync(snapshot)))) = next else {
+        let Ok(Some(Ok(event))) = next else {
+            panic!("expected an event within a second");
+        };
+        event
+    }
+
+    /// The completeness of the next event, which must be a `Resync`.
+    async fn next_resync(watch: &mut WatchStream<PoolListing, PoolKey>) -> Completeness {
+        let WatchEvent::Resync(snapshot) = next_event(watch).await else {
             panic!("expected a Resync");
         };
         snapshot.completeness
@@ -741,8 +753,8 @@ mod tests {
         let mut watch = store.list_and_watch(None).await.unwrap();
         for _ in 0..2 {
             assert!(matches!(
-                watch.next().await,
-                Some(Ok(WatchEvent::Upserted(_)))
+                next_event(&mut watch).await,
+                WatchEvent::Upserted(_)
             ));
         }
         assert_eq!(next_resync(&mut watch).await, Completeness::Exact);
@@ -757,7 +769,7 @@ mod tests {
         assert_eq!(listed.completeness, Completeness::Estimated);
         assert_eq!(next_resync(&mut watch).await, Completeness::Estimated);
         assert!(
-            matches!(watch.next().await, Some(Ok(WatchEvent::Removed(k))) if k == key("copied"))
+            matches!(next_event(&mut watch).await, WatchEvent::Removed(k) if k == key("copied"))
         );
 
         // Answers to requests sent before the lapse settle nothing, and nor
@@ -778,7 +790,7 @@ mod tests {
         store.adopt(registration("copied", "m1"), Duration::from_secs(15));
         store.end_round(round(Instant::now()));
         assert!(
-            matches!(watch.next().await, Some(Ok(WatchEvent::Upserted(listing))) if listing.key == key("copied"))
+            matches!(next_event(&mut watch).await, WatchEvent::Upserted(listing) if listing.key == key("copied"))
         );
         assert_eq!(next_resync(&mut watch).await, Completeness::Exact);
 
@@ -793,6 +805,34 @@ mod tests {
             store.list().await.unwrap().completeness,
             Completeness::Exact
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_watcher_hears_of_a_renewal_after_the_lease_ran_out() {
+        // A round vouches for every copy for an hour, from when the store
+        // started. The sweep looks every second, from then.
+        let store = MemoryPoolStore::new(lease());
+        let start = Instant::now();
+        store.end_round(ExchangeRound {
+            answered_since: Some(start),
+            complete_until: Some(start + Duration::from_secs(3600)),
+        });
+        tokio::time::sleep_until(start + Duration::from_millis(500)).await;
+        let _ = store.register(registration("mocker", "m1")).await.unwrap();
+        // The lease runs out at 15.5 s, and the next sweep is at 16 s. A
+        // watcher that starts meanwhile does not see the pool, and sees an
+        // incomplete list, since the pool may have been renewed with another
+        // instance.
+        tokio::time::sleep_until(start + Duration::from_millis(15_600)).await;
+        let mut watch = store.list_and_watch(None).await.unwrap();
+        assert_eq!(next_resync(&mut watch).await, Completeness::Estimated);
+        // The PoolRelay renews it late, here: the watcher hears of the pool
+        // again, and that the list is complete, at the next sweep.
+        let _ = store.register(registration("mocker", "m1")).await.unwrap();
+        assert!(
+            matches!(next_event(&mut watch).await, WatchEvent::Upserted(listing) if listing.key == key("mocker"))
+        );
+        assert_eq!(next_resync(&mut watch).await, Completeness::Exact);
     }
 
     #[tokio::test]

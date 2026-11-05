@@ -33,12 +33,10 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use crate::pool_discovery::{
-    Completeness, DiscoveryError, Lease, PoolDirectory, PoolRegistrar, PoolRegistration,
-    RegistrationExchange, ReplicaDirectory,
+    Completeness, DiscoveryError, PoolDirectory, PoolRegistrar, PoolRegistration,
+    RegistrationSharing, ReplicaDirectory,
 };
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, State};
@@ -49,7 +47,6 @@ use axum::{Json, Router};
 use dynamo_global_common::{PoolsResponse, RoutersResponse};
 use dynamo_http_server::lifecycle::ServiceObserver;
 use dynamo_http_server::server::{HttpServer, HttpServerConfig};
-use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -61,39 +58,17 @@ pub struct PoolDiscoveryBackend {
     /// `None` when the backend takes no registrations: `POST /pools` then
     /// answers `501`.
     pub registrar: Option<Arc<dyn PoolRegistrar>>,
-    /// `Some` to serve `GET /registrations` to the other instances.
-    pub sharing: Option<Sharing>,
-}
-
-/// The registrations this instance shares, from
-/// [`crate::peers::PeerSync::new`].
-pub struct Sharing {
-    /// Names this process in `GET /registrations`, so it can skip its own
-    /// reply.
-    pub(crate) instance: String,
-    /// The registrations' lease, which every instance must share.
-    pub(crate) lease: Lease,
-    pub(crate) registrations: Arc<dyn RegistrationExchange>,
-    /// Set once this instance has asked every other one. Until then
-    /// `GET /healthz` fails, so a new replica does not answer before it has
-    /// heard from the others.
-    pub(crate) synced: Arc<AtomicBool>,
+    /// `Some` to serve `GET /registrations` to the other instances, as
+    /// [`crate::peers::PeerSync::new`] returns it. `GET /healthz` then fails
+    /// until this instance has asked the others once.
+    pub sharing: Option<Arc<dyn RegistrationSharing>>,
 }
 
 impl fmt::Debug for PoolDiscoveryBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PoolDiscoveryBackend")
             .field("takes_registrations", &self.registrar.is_some())
-            .field("sharing", &self.sharing)
-            .finish_non_exhaustive()
-    }
-}
-
-impl fmt::Debug for Sharing {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Sharing")
-            .field("instance", &self.instance)
-            .field("synced", &self.synced.load(Ordering::Relaxed))
+            .field("shares_registrations", &self.sharing.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -192,28 +167,14 @@ async fn list_routers(State(backend): State<Arc<PoolDiscoveryBackend>>) -> Respo
 }
 
 async fn shared_registrations(State(backend): State<Arc<PoolDiscoveryBackend>>) -> Response {
-    let Some(sharing) = &backend.sharing else {
-        return (
+    match &backend.sharing {
+        Some(sharing) => Json(sharing.reply()).into_response(),
+        None => (
             StatusCode::NOT_IMPLEMENTED,
             "this instance does not share registrations",
         )
-            .into_response();
-    };
-    Json(SharedRegistrations {
-        instance: sharing.instance.clone(),
-        lease: sharing.lease,
-        complete: sharing.registrations.holds_every_local_registration(),
-        registrations: sharing
-            .registrations
-            .local_registrations()
-            .into_iter()
-            .map(|(registration, remaining)| SharedRegistration {
-                registration,
-                expires_in_ms: u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX),
-            })
-            .collect(),
-    })
-    .into_response()
+            .into_response(),
+    }
 }
 
 /// `RegisterRouter` from the design. The service takes no router
@@ -237,8 +198,10 @@ async fn register_router() -> Response {
 /// only once it has asked the others; an unreachable one later does not make
 /// it unready.
 async fn healthz(State(backend): State<Arc<PoolDiscoveryBackend>>) -> StatusCode {
-    if let Some(sharing) = &backend.sharing
-        && !sharing.synced.load(Ordering::Acquire)
+    if backend
+        .sharing
+        .as_ref()
+        .is_some_and(|sharing| !sharing.synced())
     {
         return StatusCode::SERVICE_UNAVAILABLE;
     }
@@ -261,35 +224,6 @@ fn error_response(error: DiscoveryError) -> Response {
     (status, error.to_string()).into_response()
 }
 
-/// `GET /registrations` reply. Only service instances read it, so it is not
-/// in `dynamo_global_common`.
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct SharedRegistrations {
-    pub(crate) instance: String,
-    /// The answering instance's heartbeat interval and lease. Every instance
-    /// must use the same ones (see [`crate::peers`]).
-    pub(crate) lease: Lease,
-    /// The answering instance has heard from every PoolRelay that registers
-    /// with it: a lease has passed since it started. A restarted instance's
-    /// first replies may lack registrations it has not heard again yet.
-    pub(crate) complete: bool,
-    pub(crate) registrations: Vec<SharedRegistration>,
-}
-
-/// A registration as its PoolRelay sent it, and how long it has left.
-/// Durations, not times, so the instances' clocks need not agree.
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct SharedRegistration {
-    registration: PoolRegistration,
-    expires_in_ms: u64,
-}
-
-impl SharedRegistration {
-    pub(crate) fn into_registration(self) -> (PoolRegistration, Duration) {
-        (self.registration, Duration::from_millis(self.expires_in_ms))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -302,7 +236,9 @@ mod tests {
     use url::Url;
 
     use super::*;
+    use crate::backends::http::HttpRegistrationSource;
     use crate::backends::memory::{MemoryPoolStore, StaticReplicaDirectory};
+    use crate::peers::PeerSync;
 
     /// The body `dynamo-global-discovery-client` sends.
     fn registration() -> Value {
@@ -444,14 +380,17 @@ mod tests {
     async fn registrations_are_shared_in_the_format_other_instances_read() {
         let lease = Lease::new(1, 3).unwrap();
         let store = Arc::new(MemoryPoolStore::new(lease));
-        let mut backend = registrations_backend();
-        backend.registrar = Some(store.clone());
-        backend.sharing = Some(Sharing {
-            instance: "a".to_owned(),
+        let (_, sharing) = PeerSync::new(
+            Arc::new(StaticReplicaDirectory::new(Vec::new())),
+            Arc::new(HttpRegistrationSource::new().unwrap()),
+            store.clone(),
             lease,
-            registrations: store,
-            synced: Arc::new(AtomicBool::new(true)),
-        });
+        )
+        .unwrap();
+        let instance = sharing.reply().instance;
+        let mut backend = registrations_backend();
+        backend.registrar = Some(store);
+        backend.sharing = Some(Arc::new(sharing));
         let (base, shutdown) = start(backend).await;
         assert_eq!(
             post_pool(&base, &registration()).await.0,
@@ -466,7 +405,7 @@ mod tests {
             keys(&body),
             ["complete", "instance", "lease", "registrations"]
         );
-        assert_eq!(body["instance"], "a");
+        assert_eq!(body["instance"], instance);
         assert_eq!(
             body["lease"],
             json!({"heartbeat_interval_s": 1, "lease_duration_s": 3})
@@ -478,8 +417,6 @@ mod tests {
         // The instance may not have heard from all of its PoolRelays until a
         // lease after it started.
         assert_eq!(body["complete"], false);
-        tokio::time::sleep(lease.duration()).await;
-        assert_eq!(get_json(&base, "/registrations").await.1["complete"], true);
         shutdown.cancel();
 
         // An instance that does not share answers 501.

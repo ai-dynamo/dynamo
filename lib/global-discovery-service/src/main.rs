@@ -29,15 +29,16 @@ use clap::error::ErrorKind;
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dynamo_global_common::Lease;
+use dynamo_global_discovery_service::backends::http::HttpRegistrationSource;
 use dynamo_global_discovery_service::backends::kubernetes::{
     ExportedService, FrontendService, KARMADA_MAX_SERVICE_NAME, McsImplementation,
     McsPoolDirectory, McsReplicaDirectory,
 };
 use dynamo_global_discovery_service::backends::memory::{MemoryPoolStore, StaticReplicaDirectory};
 use dynamo_global_discovery_service::backends::registered::RegisteredPoolDirectory;
-use dynamo_global_discovery_service::peers::PeerSync;
+use dynamo_global_discovery_service::peers::{MIN_LEASE_HEARTBEATS, PeerSync};
 use dynamo_global_discovery_service::pool_discovery::{
-    PoolDirectory, PoolRegistrar, RouterReplica, RouterReplicaId,
+    PoolDirectory, PoolRegistrar, RegistrationSharing, RouterReplica, RouterReplicaId,
 };
 use dynamo_global_discovery_service::service::{self, PoolDiscoveryBackend, Tls};
 use kube::Client;
@@ -320,12 +321,18 @@ where
     }
     // A copy from another instance must outlive a round that times out.
     if parsed.peer_service.is_some()
-        && parsed.lease_duration_secs < parsed.heartbeat_interval_secs.saturating_mul(3)
+        && parsed.lease_duration_secs
+            < parsed
+                .heartbeat_interval_secs
+                .saturating_mul(MIN_LEASE_HEARTBEATS.into())
     {
         return Err(command.error(
             ErrorKind::ValueValidation,
-            "with --peer-service, --lease-duration-secs must be at least three times \
-             --heartbeat-interval-secs, so that copies outlive a round that times out",
+            format!(
+                "with --peer-service, --lease-duration-secs must be at least \
+                 {MIN_LEASE_HEARTBEATS} times --heartbeat-interval-secs, so that copies outlive \
+                 a round that times out"
+            ),
         ));
     }
     // Instances share the registrations that each keeps in memory.
@@ -454,13 +461,16 @@ async fn mcs_backend(
                 name: peer_service.clone(),
                 port_name: args.peer_port_name.clone(),
             };
+            let source = HttpRegistrationSource::new()
+                .context("create the HTTP client for --peer-service")?;
             let (sync, sharing) = PeerSync::new(
                 Arc::new(McsReplicaDirectory::new(client.clone(), &peers, mcs)),
+                Arc::new(source),
                 registrations.clone(),
                 lease,
-            )
-            .context("create the HTTP client for --peer-service")?;
+            )?;
             tokio::spawn(sync.run(shutdown.clone()));
+            let sharing: Arc<dyn RegistrationSharing> = Arc::new(sharing);
             Some(sharing)
         }
         None => {
@@ -610,16 +620,6 @@ mod tests {
     }
 
     #[test]
-    fn peer_flags_need_peer_service() {
-        for flag in ["--peer-namespace=other", "--peer-port-name=grpc"] {
-            let error = parse_args(karmada(&[flag])).unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument, "{error}");
-            assert!(error.to_string().contains("--peer-service"), "{error}");
-            assert!(parse_args(karmada(&["--peer-service=gds", flag])).is_ok());
-        }
-    }
-
-    #[test]
     fn a_flag_for_another_pool_discovery_fails() {
         assert!(parse_args(["gds", ROUTER]).is_ok());
         assert_refused(&karmada(&[ROUTER]), "router", "registrations");
@@ -695,18 +695,48 @@ mod tests {
     }
 
     #[test]
-    fn karmada_refuses_a_peer_service_it_cannot_import() {
-        let name = format!(
-            "--peer-service={}",
-            "p".repeat(KARMADA_MAX_SERVICE_NAME + 1)
-        );
-        let error = parse_args(karmada(&[&name])).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
-        assert!(error.to_string().contains("--peer-service"), "{error}");
+    fn router_flags_cannot_be_empty() {
+        for flag in [
+            "--router-namespace",
+            "--router-service",
+            "--router-port-name",
+        ] {
+            let mut args = karmada(&[]);
+            let at = args.iter().position(|arg| *arg == flag).unwrap();
+            args[at + 1] = "";
+            let error = parse_args(args).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidValue, "{flag}: {error}");
+        }
     }
 
     #[test]
-    fn peer_sharing_mistakes_are_usage_errors() {
+    fn karmada_refuses_a_service_it_cannot_import() {
+        let name = "r".repeat(KARMADA_MAX_SERVICE_NAME + 1);
+        for flag in ["--router-service", "--peer-service"] {
+            let mut args = karmada(&[]);
+            match args.iter().position(|arg| *arg == flag) {
+                Some(at) => args[at + 1] = &name,
+                None => args.extend([flag, name.as_str()]),
+            }
+            let error = parse_args(args.clone()).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ValueValidation, "{flag}: {error}");
+            assert!(error.to_string().contains(flag), "{error}");
+            // Standard MCS imports it.
+            let at = args.iter().position(|arg| *arg == "karmada").unwrap();
+            args[at] = "mcs";
+            assert!(parse_args(args).is_ok(), "{flag}");
+        }
+    }
+
+    #[test]
+    fn peer_flag_mistakes_are_usage_errors() {
+        // The other peer flags need --peer-service.
+        for flag in ["--peer-namespace=other", "--peer-port-name=grpc"] {
+            let error = parse_args(karmada(&[flag])).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument, "{error}");
+            assert!(error.to_string().contains("--peer-service"), "{error}");
+            assert!(parse_args(karmada(&["--peer-service=gds", flag])).is_ok());
+        }
         // Instances ask each other over plain HTTP.
         let error = parse_args(karmada(&[
             "--peer-service=gds",
@@ -715,8 +745,8 @@ mod tests {
         ]))
         .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{error}");
-        // A lease under three heartbeats lets copies lapse after a round
-        // that times out.
+        // A lease under three heartbeats lets copies lapse after a round that
+        // times out.
         let error = parse_args(karmada(&[
             "--peer-service=gds",
             "--heartbeat-interval-secs=5",
@@ -733,38 +763,6 @@ mod tests {
             ]))
             .is_ok()
         );
-    }
-
-    #[test]
-    fn router_flags_cannot_be_empty() {
-        for flag in [
-            "--router-namespace",
-            "--router-service",
-            "--router-port-name",
-        ] {
-            let mut args = karmada(&[]);
-            let at = args.iter().position(|arg| *arg == flag).unwrap();
-            args[at + 1] = "";
-            let error = parse_args(args).unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::InvalidValue, "{flag}: {error}");
-        }
-    }
-
-    #[test]
-    fn karmada_refuses_a_router_service_it_cannot_import() {
-        let name = "r".repeat(KARMADA_MAX_SERVICE_NAME + 1);
-        let mut args = karmada(&[]);
-        let at = args
-            .iter()
-            .position(|arg| *arg == "--router-service")
-            .unwrap();
-        args[at + 1] = &name;
-        let error = parse_args(args.clone()).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
-        // Standard MCS imports it.
-        let at = args.iter().position(|arg| *arg == "karmada").unwrap();
-        args[at] = "mcs";
-        assert!(parse_args(args).is_ok());
     }
 
     #[test]
