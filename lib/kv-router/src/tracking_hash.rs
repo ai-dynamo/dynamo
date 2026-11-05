@@ -212,11 +212,7 @@ impl TrackingHashContext {
         assume_kv_reuse: bool,
         precomputed_public_block_hashes: Option<&[LocalBlockHash]>,
     ) -> Vec<SequenceHash> {
-        let num_blocks = complete_block_count(
-            tokens.len(),
-            scope.block_size,
-            options.is_eagle.unwrap_or(false),
-        );
+        let num_blocks = complete_block_count(tokens.len(), scope.block_size, options.lookahead());
         if num_blocks == 0 {
             return Vec::new();
         }
@@ -245,10 +241,12 @@ impl TrackingHashContext {
         frame_fixed(&mut hasher, 4, &scope.block_size.to_le_bytes());
         frame_optional_string(&mut hasher, 5, normalize_optional(options.cache_namespace));
         frame_optional_string(&mut hasher, 6, normalize_optional(options.lora_name));
+        // One byte per lookahead keeps the legacy Eagle flag encoding: plain is
+        // `[0]` and the one-token window is `[1]`.
         frame_fixed(
             &mut hasher,
             7,
-            &[u8::from(options.is_eagle.unwrap_or(false))],
+            &[u8::try_from(options.lookahead()).unwrap_or(u8::MAX)],
         );
 
         let digest = hasher.finalize();
@@ -441,7 +439,7 @@ mod tests {
                 scope("model-a", "group-a"),
                 &tokens,
                 BlockHashOptions {
-                    is_eagle: Some(true),
+                    lookahead_tokens: Some(1),
                     ..Default::default()
                 },
                 None,
@@ -483,7 +481,7 @@ mod tests {
             scope("model", "default"),
             &tokens,
             BlockHashOptions {
-                is_eagle: Some(true),
+                lookahead_tokens: Some(1),
                 ..Default::default()
             },
             None,

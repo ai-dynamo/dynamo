@@ -426,7 +426,7 @@ mod tests {
         let hash_options = BlockHashOptions {
             lora_name,
             cache_namespace: Some("tenant-ns"),
-            is_eagle: Some(hash_format.is_eagle()),
+            lookahead_tokens: Some(u32::from(hash_format.is_eagle())),
             ..Default::default()
         };
         let local_hashes = compute_block_hash_for_seq(&tokens, block_size, hash_options);

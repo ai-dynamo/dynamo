@@ -1581,11 +1581,7 @@ impl KvRouterConfig {
             return None;
         }
 
-        let num_blocks = complete_block_count(
-            tokens.len(),
-            block_size,
-            hash_options.is_eagle.unwrap_or(false),
-        );
+        let num_blocks = complete_block_count(tokens.len(), block_size, hash_options.lookahead());
         if num_blocks == 0 {
             return Some(Vec::new());
         }

@@ -11,8 +11,12 @@ from unittest.mock import Mock, call
 import pytest
 
 from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY
-from dynamo.llm import ModelInput, ModelType, WorkerType
-from dynamo.vllm.capacity import get_metrics_model_name, get_spec_decode_runtime_data
+from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, WorkerType
+from dynamo.vllm.capacity import (
+    get_metrics_model_name,
+    get_spec_decode_runtime_data,
+    publish_vllm_lookahead_block_hashing,
+)
 from dynamo.vllm.engine_generate import (
     VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY,
     VLLM_GENERATE_CAPABILITY,
@@ -60,6 +64,27 @@ def test_spec_decode_runtime_data_uses_vllm_speculative_config():
         "method": "eagle",
         "source": "backend_config",
     }
+
+
+@pytest.mark.parametrize(
+    ("vllm_config", "lookahead_tokens", "enable_eagle"),
+    [
+        (SimpleNamespace(num_hash_lookahead_tokens=1), 1, True),
+        (SimpleNamespace(num_hash_lookahead_tokens=3), 3, False),
+        (SimpleNamespace(num_hash_lookahead_tokens=0), 0, False),
+        (SimpleNamespace(), 0, False),  # vLLM without lookahead block hashes
+    ],
+)
+def test_lookahead_block_hashing_publishes_hash_lookahead(
+    vllm_config, lookahead_tokens, enable_eagle
+):
+    runtime_config = ModelRuntimeConfig()
+
+    publish_vllm_lookahead_block_hashing(runtime_config, vllm_config)
+
+    assert runtime_config.hash_lookahead_tokens == lookahead_tokens
+    # Older frontends only understand the one-token window.
+    assert runtime_config.enable_eagle is enable_eagle
 
 
 def test_metrics_model_name_prefers_served_model_name():

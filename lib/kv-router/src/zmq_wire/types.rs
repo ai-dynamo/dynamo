@@ -122,8 +122,9 @@ pub enum RawKvEvent {
         /// Multimodal extra info for each block (length should match block_hashes)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        /// Tokens after each block covered by its hash (`1` is the Eagle window).
         #[serde(skip_serializing_if = "Option::is_none")]
-        is_eagle: Option<bool>,
+        lookahead_tokens: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         group_idx: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]

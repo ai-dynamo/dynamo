@@ -124,7 +124,7 @@ impl SelectionPartition {
 struct SelectionEntry {
     key: RoutingPartitionId,
     block_size: u32,
-    is_eagle: bool,
+    lookahead_tokens: u32,
     indexer: Indexer,
     workers_tx: watch::Sender<HashMap<WorkerId, SelectionWorkerConfig>>,
     /// Whether a worker in `workers_tx` consumes router hints, set on publish.

@@ -2086,7 +2086,7 @@ mod tests {
             lora_name: None,
             cache_namespace: None,
             block_mm_infos: None,
-            is_eagle: Some(false),
+            lookahead_tokens: Some(0),
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,

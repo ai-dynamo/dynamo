@@ -119,7 +119,7 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
             block_size,
             lora_name,
             cache_namespace,
-            is_eagle,
+            lookahead_tokens,
             block_mm_infos,
             ..
         } => {
@@ -135,9 +135,9 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
             // miscount and either fail the chunk/hash count check or hash a misaligned
             // window, polluting the dedup map. Drop until we have a real Eagle-aware
             // path.
-            if matches!(is_eagle, Some(true)) {
+            if lookahead_tokens.unwrap_or(0) > 0 {
                 tracing::warn!(
-                    "Eagle BlockStored event not supported by consolidator yet; skipping ({} hashes)",
+                    "Lookahead BlockStored event not supported by consolidator yet; skipping ({} hashes)",
                     block_hashes.len()
                 );
                 return;
@@ -221,7 +221,7 @@ mod tests {
             lora_name: None,
             cache_namespace: None,
             block_mm_infos: None,
-            is_eagle: Some(false),
+            lookahead_tokens: Some(0),
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,

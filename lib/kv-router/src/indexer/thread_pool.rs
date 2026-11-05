@@ -1287,7 +1287,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         tokens: &[u32],
         lora_name: Option<&str>,
         cache_namespace: Option<&str>,
-        is_eagle: Option<bool>,
+        lookahead_tokens: Option<u32>,
     ) -> Result<OverlapScores, KvRouterError> {
         let sequence = compute_block_hash_for_seq(
             tokens,
@@ -1295,7 +1295,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             BlockHashOptions {
                 lora_name,
                 cache_namespace,
-                is_eagle,
+                lookahead_tokens,
                 ..Default::default()
             },
         );

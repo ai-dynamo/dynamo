@@ -421,7 +421,7 @@ impl RoutingHost {
                         routing_parts.token_ids.to_vec(),
                         chooser.block_size(),
                     )
-                    .with_is_eagle(chooser.is_eagle());
+                    .with_lookahead_tokens(chooser.lookahead_tokens());
                     if let Some(infos) = routing_parts.block_mm_infos {
                         tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.to_vec());
                     }

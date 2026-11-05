@@ -77,7 +77,7 @@ impl SelectionCore {
         let block_hashes = req
             .prompt
             .view()
-            .block_hashes_for_indexer(entry.block_size, entry.is_eagle)?;
+            .block_hashes_for_indexer(entry.block_size, entry.lookahead_tokens)?;
         let num_blocks = block_hashes.len();
         let tiered = entry
             .indexer

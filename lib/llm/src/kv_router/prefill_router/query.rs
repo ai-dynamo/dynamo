@@ -415,7 +415,7 @@ mod tests {
                 Some(WorkerType::Prefill),
                 "prefill",
                 Some(format!("prefill-reservation-{label}")),
-                false,
+                0,
                 None,
                 None,
             )

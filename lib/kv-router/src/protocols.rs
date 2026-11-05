@@ -37,7 +37,16 @@ pub struct BlockHashOptions<'a> {
     pub block_mm_infos: Option<&'a [Option<BlockExtraInfo>]>,
     pub lora_name: Option<&'a str>,
     pub cache_namespace: Option<&'a str>,
-    pub is_eagle: Option<bool>,
+    /// Tokens after each block that its hash also covers. `None` and `0` hash plain
+    /// blocks; `1` is the Eagle window.
+    pub lookahead_tokens: Option<u32>,
+}
+
+impl BlockHashOptions<'_> {
+    #[inline]
+    pub(crate) fn lookahead(&self) -> usize {
+        self.lookahead_tokens.unwrap_or(0) as usize
+    }
 }
 
 fn block_hash_seed(options: BlockHashOptions<'_>) -> u64 {
@@ -113,36 +122,28 @@ pub fn compute_block_hash_for_seq(
     compute_block_hash_for_seq_with_seed(tokens, kv_block_size, options, block_hash_seed(options))
 }
 
-/// Count complete canonical blocks for normal and Eagle token windows.
+/// Count complete canonical blocks when each hash also covers `lookahead` tokens.
 pub(crate) fn complete_block_count(
     token_count: usize,
     kv_block_size: u32,
-    is_eagle: bool,
+    lookahead: usize,
 ) -> usize {
     let stride = kv_block_size as usize;
     if stride == 0 {
         return 0;
     }
-    if is_eagle {
-        token_count.saturating_sub(1) / stride
-    } else {
-        token_count / stride
-    }
+    token_count.saturating_sub(lookahead) / stride
 }
 
 /// Compute local block hashes with an explicit XXH3 seed while preserving the
-/// canonical token, multimodal, and Eagle encodings used by the public hash path.
+/// canonical token, multimodal, and lookahead encodings used by the public hash path.
 pub(crate) fn compute_block_hash_for_seq_with_seed(
     tokens: &[u32],
     kv_block_size: u32,
     options: BlockHashOptions<'_>,
     seed: u64,
 ) -> Vec<LocalBlockHash> {
-    let estimated_blocks = complete_block_count(
-        tokens.len(),
-        kv_block_size,
-        options.is_eagle.unwrap_or(false),
-    );
+    let estimated_blocks = complete_block_count(tokens.len(), kv_block_size, options.lookahead());
     let mut hashes = Vec::with_capacity(estimated_blocks);
     for_each_block_hash_for_seq_with_seed(tokens, kv_block_size, options, seed, |hash| {
         hashes.push(hash);
@@ -161,9 +162,8 @@ fn for_each_block_hash_for_seq_with_seed(
         return;
     }
 
-    let is_eagle_flag = options.is_eagle.unwrap_or(false);
     let stride = kv_block_size as usize;
-    let window_size = if is_eagle_flag { stride + 1 } else { stride };
+    let window_size = stride + options.lookahead();
     let mut bytes = Vec::with_capacity(window_size * std::mem::size_of::<u32>());
     let mut mm_hashes = Vec::new();
     let mut block_idx = 0;
@@ -226,11 +226,7 @@ pub(crate) fn compute_seq_hash_for_tokens_with_seeds(
     block_seed: u64,
     chain_seed: u64,
 ) -> Vec<SequenceHash> {
-    let estimated_blocks = complete_block_count(
-        tokens.len(),
-        kv_block_size,
-        options.is_eagle.unwrap_or(false),
-    );
+    let estimated_blocks = complete_block_count(tokens.len(), kv_block_size, options.lookahead());
     let mut sequence_hashes = Vec::with_capacity(estimated_blocks);
     for_each_block_hash_for_seq_with_seed(
         tokens,
@@ -1839,7 +1835,7 @@ pub struct TokensWithHashes {
     cache_namespace: Option<String>,
     block_hashes: Option<Vec<LocalBlockHash>>,
     seq_hashes: Option<Vec<SequenceHash>>,
-    is_eagle: Option<bool>,
+    lookahead_tokens: Option<u32>,
 }
 
 impl TokensWithHashes {
@@ -1853,7 +1849,7 @@ impl TokensWithHashes {
             cache_namespace: None,
             block_hashes: None,
             seq_hashes: None,
-            is_eagle: None,
+            lookahead_tokens: None,
         }
     }
 
@@ -1878,20 +1874,20 @@ impl TokensWithHashes {
         self
     }
 
-    /// Sets Eagle hashing semantics for this token sequence.
-    pub fn with_is_eagle(mut self, is_eagle: bool) -> Self {
-        self.set_is_eagle(is_eagle);
+    /// Sets how many tokens past each block its hash covers (`1` is the Eagle window).
+    pub fn with_lookahead_tokens(mut self, lookahead_tokens: u32) -> Self {
+        self.set_lookahead_tokens(lookahead_tokens);
         self
     }
 
-    /// Updates Eagle hashing semantics and invalidates cached hashes when it changes.
-    pub fn set_is_eagle(&mut self, is_eagle: bool) {
-        let is_eagle = Some(is_eagle);
-        if self.is_eagle == is_eagle {
+    /// Updates the lookahead and invalidates cached hashes when it changes.
+    pub fn set_lookahead_tokens(&mut self, lookahead_tokens: u32) {
+        let lookahead_tokens = Some(lookahead_tokens);
+        if self.lookahead_tokens == lookahead_tokens {
             return;
         }
 
-        self.is_eagle = is_eagle;
+        self.lookahead_tokens = lookahead_tokens;
         self.invalidate_hashes();
     }
 
@@ -1935,7 +1931,7 @@ impl TokensWithHashes {
                     block_mm_infos: self.block_mm_infos.as_deref(),
                     lora_name: self.lora_name.as_deref(),
                     cache_namespace: self.cache_namespace.as_deref(),
-                    is_eagle: self.is_eagle,
+                    lookahead_tokens: self.lookahead_tokens,
                 },
             ));
         }
@@ -2467,7 +2463,7 @@ mod tests {
             &tokens,
             2,
             BlockHashOptions {
-                is_eagle: Some(true),
+                lookahead_tokens: Some(1),
                 ..Default::default()
             },
         );
@@ -2475,7 +2471,7 @@ mod tests {
             &[0, 1, 2],
             2,
             BlockHashOptions {
-                is_eagle: Some(true),
+                lookahead_tokens: Some(1),
                 ..Default::default()
             },
         );
@@ -2483,7 +2479,7 @@ mod tests {
             &[2, 3, 4],
             2,
             BlockHashOptions {
-                is_eagle: Some(true),
+                lookahead_tokens: Some(1),
                 ..Default::default()
             },
         );
@@ -2495,18 +2491,42 @@ mod tests {
     }
 
     #[test]
-    fn test_tokens_with_hashes_set_is_eagle_invalidates_cache() {
+    fn test_compute_block_hash_for_seq_lookahead_windows() {
+        let tokens: Vec<u32> = (0..9).collect();
+        let block_size = 2usize;
+        for lookahead in 0u32..=4 {
+            let options = BlockHashOptions {
+                lookahead_tokens: Some(lookahead),
+                ..Default::default()
+            };
+            let hashes = compute_block_hash_for_seq(&tokens, block_size as u32, options);
+
+            // Each block hashes its tokens plus the next `lookahead` tokens, so
+            // the last `lookahead` tokens never complete a block.
+            let blocks = (tokens.len() - lookahead as usize) / block_size;
+            assert_eq!(hashes.len(), blocks, "lookahead {lookahead}");
+            for (i, hash) in hashes.iter().enumerate() {
+                let start = i * block_size;
+                let window = &tokens[start..start + block_size + lookahead as usize];
+                let expected = compute_block_hash_for_seq(window, block_size as u32, options);
+                assert_eq!(expected[0], *hash, "lookahead {lookahead} block {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_tokens_with_hashes_set_lookahead_invalidates_cache() {
         let tokens: Vec<u32> = (0..6).collect();
         let mut with_hashes = TokensWithHashes::new(tokens, 2);
 
         let default_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
-        with_hashes.set_is_eagle(true);
+        with_hashes.set_lookahead_tokens(1);
         let eagle_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
         let expected_first = compute_block_hash_for_seq(
             &[0, 1, 2],
             2,
             BlockHashOptions {
-                is_eagle: Some(true),
+                lookahead_tokens: Some(1),
                 ..Default::default()
             },
         );
@@ -2514,7 +2534,7 @@ mod tests {
             &[2, 3, 4],
             2,
             BlockHashOptions {
-                is_eagle: Some(true),
+                lookahead_tokens: Some(1),
                 ..Default::default()
             },
         );

@@ -184,6 +184,11 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
+    fn set_hash_lookahead_tokens(&mut self, lookahead_tokens: u32) {
+        self.inner.set_hash_lookahead_tokens(lookahead_tokens);
+    }
+
+    #[setter]
     fn set_taints(&mut self, taints: HashSet<String>) {
         self.inner.taints = taints;
     }
@@ -353,6 +358,11 @@ impl ModelRuntimeConfig {
     #[getter]
     fn enable_eagle(&self) -> bool {
         self.inner.enable_eagle
+    }
+
+    #[getter]
+    fn hash_lookahead_tokens(&self) -> u32 {
+        self.inner.hash_lookahead_tokens()
     }
 
     #[getter]

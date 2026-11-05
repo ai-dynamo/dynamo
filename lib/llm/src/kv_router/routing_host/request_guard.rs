@@ -110,11 +110,16 @@ pub(crate) fn prompt_private_blocks(
     token_count: usize,
     complete_blocks: usize,
     block_size: usize,
-    is_eagle: bool,
+    lookahead_tokens: u32,
 ) -> usize {
     let tail_tokens = token_count.saturating_sub(complete_blocks.saturating_mul(block_size));
-    let retained_eagle_overlap = usize::from(is_eagle && complete_blocks > 0);
-    usize::from(tail_tokens > retained_eagle_overlap)
+    // The last complete block's hash already covers its lookahead tokens.
+    let retained_lookahead = if complete_blocks > 0 {
+        lookahead_tokens as usize
+    } else {
+        0
+    };
+    usize::from(tail_tokens > retained_lookahead)
 }
 
 /// Incrementally extends the same canonical hash chain used for prompt routing.
@@ -124,18 +129,18 @@ struct CanonicalOutputTracker {
     block_size: u32,
     lora_name: Option<String>,
     cache_namespace: Option<String>,
-    is_eagle: bool,
+    lookahead_tokens: u32,
     reported_private_blocks: usize,
 }
 
 impl CanonicalOutputTracker {
-    fn new(request: &PreprocessedRequest, block_size: u32, is_eagle: bool) -> Self {
+    fn new(request: &PreprocessedRequest, block_size: u32, lookahead_tokens: u32) -> Self {
         let (tokens, mm_infos) = request.block_mm_routing_info();
         Self::from_parts(
             tokens,
             mm_infos,
             block_size,
-            is_eagle,
+            lookahead_tokens,
             request
                 .routing
                 .as_ref()
@@ -151,18 +156,16 @@ impl CanonicalOutputTracker {
         tokens: &[u32],
         mm_infos: Option<&[Option<BlockExtraInfo>]>,
         block_size: u32,
-        is_eagle: bool,
+        lookahead_tokens: u32,
         lora_name: Option<String>,
         cache_namespace: Option<String>,
     ) -> Self {
         let stride = block_size as usize;
-        let complete_blocks = if stride == 0 {
-            0
-        } else if is_eagle {
-            tokens.len().saturating_sub(1) / stride
-        } else {
-            tokens.len() / stride
-        };
+        let complete_blocks = tokens
+            .len()
+            .saturating_sub(lookahead_tokens as usize)
+            .checked_div(stride)
+            .unwrap_or(0);
         let tail_start = complete_blocks.saturating_mul(stride).min(tokens.len());
         let template = OutputHashBranch {
             tail: tokens[tail_start..].to_vec(),
@@ -175,29 +178,36 @@ impl CanonicalOutputTracker {
             has_uncomputed_output: false,
         };
         let reported_private_blocks =
-            prompt_private_blocks(tokens.len(), complete_blocks, stride, is_eagle);
+            prompt_private_blocks(tokens.len(), complete_blocks, stride, lookahead_tokens);
         Self {
             template,
             branches: HashMap::new(),
             block_size,
             lora_name,
             cache_namespace,
-            is_eagle,
+            lookahead_tokens,
             reported_private_blocks,
         }
     }
 
     fn initial_private_blocks(&self) -> usize {
-        usize::from(Self::has_private_tail(&self.template, self.is_eagle))
+        usize::from(Self::has_private_tail(
+            &self.template,
+            self.lookahead_tokens,
+        ))
     }
 
-    fn has_private_tail(branch: &OutputHashBranch, is_eagle: bool) -> bool {
+    fn has_private_tail(branch: &OutputHashBranch, lookahead_tokens: u32) -> bool {
         let computed_tokens = branch
             .tail
             .len()
             .saturating_sub(usize::from(branch.has_uncomputed_output));
-        let retained_eagle_overlap = usize::from(is_eagle && branch.next_position > 0);
-        computed_tokens > retained_eagle_overlap
+        let retained_lookahead = if branch.next_position > 0 {
+            lookahead_tokens as usize
+        } else {
+            0
+        };
+        computed_tokens > retained_lookahead
     }
 
     fn set_prompt_parent(&mut self, parent_hash: Option<u64>) {
@@ -210,8 +220,8 @@ impl CanonicalOutputTracker {
         }
 
         let stride = self.block_size as usize;
-        let window_size = if self.is_eagle { stride + 1 } else { stride };
-        let materialization_size = window_size + usize::from(!self.is_eagle);
+        let window_size = stride + self.lookahead_tokens as usize;
+        let materialization_size = window_size + usize::from(self.lookahead_tokens == 0);
         let branch = self
             .branches
             .entry(index)
@@ -225,9 +235,9 @@ impl CanonicalOutputTracker {
         let start_position = branch.next_position;
         let mut blocks = Vec::new();
         let mut consumed = 0;
-        // Normal blocks need one token beyond the hash window because the newest
-        // sampled token has not entered KV yet. Eagle includes that token as the
-        // lookahead at the end of its overlapping hash window.
+        // Plain blocks need one token beyond the hash window because the newest
+        // sampled token has not entered KV yet. With lookahead, that token is
+        // already part of the hash window as one of its lookahead tokens.
         while branch.tail.len().saturating_sub(consumed) >= materialization_size {
             let mm_info = branch.first_mm_info.clone().map(Some);
             let mm_infos = mm_info.as_ref().map(std::slice::from_ref);
@@ -238,7 +248,7 @@ impl CanonicalOutputTracker {
                     block_mm_infos: mm_infos,
                     lora_name: self.lora_name.as_deref(),
                     cache_namespace: self.cache_namespace.as_deref(),
-                    is_eagle: Some(self.is_eagle),
+                    lookahead_tokens: Some(self.lookahead_tokens),
                 },
             )
             .into_iter()
@@ -263,7 +273,7 @@ impl CanonicalOutputTracker {
         let private_blocks = self
             .branches
             .values()
-            .filter(|branch| Self::has_private_tail(branch, self.is_eagle))
+            .filter(|branch| Self::has_private_tail(branch, self.lookahead_tokens))
             .count();
         if blocks.is_empty() && private_blocks == self.reported_private_blocks {
             return None;
@@ -660,9 +670,9 @@ impl RequestGuard {
             )),
         });
         let approximate_lru = cleanup.approximate_lru.clone();
-        let output_hashes = approximate_lru
-            .as_ref()
-            .map(|_| CanonicalOutputTracker::new(request, block_size as u32, chooser.is_eagle()));
+        let output_hashes = approximate_lru.as_ref().map(|_| {
+            CanonicalOutputTracker::new(request, block_size as u32, chooser.lookahead_tokens())
+        });
         Self {
             cleanup: RequestCleanup::Kv(cleanup),
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
@@ -1073,7 +1083,7 @@ mod output_hash_tests {
         mm_infos: Option<&[Option<BlockExtraInfo>]>,
         lora_name: Option<&str>,
         cache_namespace: Option<&str>,
-        is_eagle: bool,
+        lookahead_tokens: u32,
     ) -> Vec<ApproximateLruBlock> {
         let local_hashes = compute_block_hash_for_seq(
             tokens,
@@ -1082,7 +1092,7 @@ mod output_hash_tests {
                 block_mm_infos: mm_infos,
                 lora_name,
                 cache_namespace,
-                is_eagle: Some(is_eagle),
+                lookahead_tokens: Some(lookahead_tokens),
             },
         );
         let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
@@ -1099,7 +1109,7 @@ mod output_hash_tests {
     #[test]
     fn streamed_chunks_complete_prompt_tail_and_extend_canonical_chain() {
         let prompt = vec![1, 2, 3];
-        let mut tracker = CanonicalOutputTracker::from_parts(&prompt, None, 4, false, None, None);
+        let mut tracker = CanonicalOutputTracker::from_parts(&prompt, None, 4, 0, None, None);
         tracker.set_prompt_parent(None);
 
         let first = tracker.observe(0, &[4, 5]).unwrap();
@@ -1109,7 +1119,7 @@ mod output_hash_tests {
         assert_eq!(second.start_position, 1);
         assert_eq!(second.private_blocks, 0);
 
-        let expected = direct_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None, None, None, false);
+        let expected = direct_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None, None, None, 0);
         assert_eq!(
             first
                 .blocks
@@ -1122,7 +1132,7 @@ mod output_hash_tests {
 
     #[test]
     fn incomplete_output_tail_is_not_materialized() {
-        let mut tracker = CanonicalOutputTracker::from_parts(&[1], None, 4, false, None, None);
+        let mut tracker = CanonicalOutputTracker::from_parts(&[1], None, 4, 0, None, None);
         assert!(tracker.observe(0, &[2, 3]).is_none());
         assert_eq!(tracker.initial_private_blocks(), 1);
     }
@@ -1130,8 +1140,8 @@ mod output_hash_tests {
     #[test]
     fn aligned_prompt_reports_partial_output_as_private_occupancy() {
         let prompt = [1, 2, 3, 4];
-        let prompt_block = direct_blocks(&prompt, 4, None, None, None, false);
-        let mut tracker = CanonicalOutputTracker::from_parts(&prompt, None, 4, false, None, None);
+        let prompt_block = direct_blocks(&prompt, 4, None, None, None, 0);
+        let mut tracker = CanonicalOutputTracker::from_parts(&prompt, None, 4, 0, None, None);
         tracker.set_prompt_parent(Some(prompt_block[0].sequence_hash));
 
         assert!(tracker.observe(0, &[5]).is_none());
@@ -1147,8 +1157,8 @@ mod output_hash_tests {
     #[test]
     fn multiple_choice_streams_keep_independent_hash_tails() {
         let prompt = [1, 2, 3, 4];
-        let prompt_block = direct_blocks(&prompt, 4, None, None, None, false);
-        let mut tracker = CanonicalOutputTracker::from_parts(&prompt, None, 4, false, None, None);
+        let prompt_block = direct_blocks(&prompt, 4, None, None, None, 0);
+        let mut tracker = CanonicalOutputTracker::from_parts(&prompt, None, 4, 0, None, None);
         tracker.set_prompt_parent(Some(prompt_block[0].sequence_hash));
 
         let choice_zero = tracker.observe(0, &[5, 6, 7, 8, 13]).unwrap();
@@ -1157,11 +1167,11 @@ mod output_hash_tests {
         assert_eq!(choice_one.start_position, 1);
         assert_eq!(
             choice_zero.blocks[0],
-            direct_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None, None, None, false)[1]
+            direct_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None, None, None, 0)[1]
         );
         assert_eq!(
             choice_one.blocks[0],
-            direct_blocks(&[1, 2, 3, 4, 9, 10, 11, 12], 4, None, None, None, false)[1]
+            direct_blocks(&[1, 2, 3, 4, 9, 10, 11, 12], 4, None, None, None, 0)[1]
         );
     }
 
@@ -1178,7 +1188,7 @@ mod output_hash_tests {
             &prompt,
             Some(&mm_infos),
             4,
-            true,
+            1,
             Some("adapter-a".to_string()),
             Some("tenant-a".to_string()),
         );
@@ -1191,7 +1201,7 @@ mod output_hash_tests {
             Some(&[mm_infos[0].clone(), None]),
             Some("adapter-a"),
             Some("tenant-a"),
-            true,
+            1,
         );
         assert_eq!(
             first

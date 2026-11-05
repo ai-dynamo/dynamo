@@ -640,7 +640,7 @@ impl ModelWatcher {
                             card.worker_type,
                             WORKER_TYPE_DECODE, // This is the decode router
                             Some(card.display_name.clone()),
-                            card.runtime_config.enable_eagle,
+                            card.runtime_config.hash_lookahead_tokens(),
                             load_context
                                 .as_ref()
                                 .expect("routing load context must exist")

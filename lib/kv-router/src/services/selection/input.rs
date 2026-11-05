@@ -39,7 +39,12 @@ pub struct PromptRequest {
     pub lora_name: Option<String>,
     #[serde(default, rename = "cache_salt")]
     pub cache_namespace: Option<String>,
-    pub is_eagle: Option<bool>,
+    #[serde(
+        default,
+        alias = "is_eagle",
+        deserialize_with = "super::types::strict_lookahead_tokens"
+    )]
+    pub lookahead_tokens: Option<u32>,
 }
 
 impl PromptRequest {
@@ -55,7 +60,7 @@ impl PromptRequest {
             isl_tokens: self.isl_tokens,
             lora_name: self.lora_name.as_deref(),
             cache_namespace: self.cache_namespace.as_deref(),
-            is_eagle: self.is_eagle,
+            lookahead_tokens: self.lookahead_tokens,
         }
     }
 }
@@ -73,7 +78,7 @@ pub struct PromptView<'a> {
     pub isl_tokens: Option<usize>,
     pub lora_name: Option<&'a str>,
     pub cache_namespace: Option<&'a str>,
-    pub is_eagle: Option<bool>,
+    pub lookahead_tokens: Option<u32>,
 }
 
 impl PromptView<'_> {
@@ -82,7 +87,7 @@ impl PromptView<'_> {
     pub(super) fn normalize_for_selection(
         &self,
         block_size: u32,
-        default_is_eagle: bool,
+        default_lookahead_tokens: u32,
         tracking: Option<TrackingHashInput<'_>>,
     ) -> Result<NormalizedPrompt, SelectionError> {
         if let Some((token_ids, block_mm_infos)) = self.routing_tokens_and_mm_infos() {
@@ -92,7 +97,7 @@ impl PromptView<'_> {
                 self.lora_name,
                 self.cache_namespace,
                 block_mm_infos,
-                self.is_eagle.unwrap_or(default_is_eagle),
+                self.lookahead_tokens.unwrap_or(default_lookahead_tokens),
                 tracking,
             ));
         }
@@ -111,7 +116,7 @@ impl PromptView<'_> {
 
     pub(super) fn normalize_for_reservation(
         &self,
-        default_is_eagle: bool,
+        default_lookahead_tokens: u32,
         tracking: TrackingHashInput<'_>,
     ) -> Result<NormalizedReservation, SelectionError> {
         if let Some((token_ids, block_mm_infos)) = self.routing_tokens_and_mm_infos() {
@@ -120,7 +125,7 @@ impl PromptView<'_> {
                 self.lora_name,
                 self.cache_namespace,
                 block_mm_infos,
-                self.is_eagle.unwrap_or(default_is_eagle),
+                self.lookahead_tokens.unwrap_or(default_lookahead_tokens),
                 tracking,
             ));
         }
@@ -142,7 +147,7 @@ impl PromptView<'_> {
     pub(super) fn block_hashes_for_indexer(
         &self,
         block_size: u32,
-        default_is_eagle: bool,
+        default_lookahead_tokens: u32,
     ) -> Result<Vec<LocalBlockHash>, SelectionError> {
         if let Some((token_ids, block_mm_infos)) = self.routing_tokens_and_mm_infos() {
             return Ok(compute_block_hash_for_seq(
@@ -152,7 +157,9 @@ impl PromptView<'_> {
                     block_mm_infos,
                     lora_name: self.lora_name,
                     cache_namespace: self.cache_namespace,
-                    is_eagle: Some(self.is_eagle.unwrap_or(default_is_eagle)),
+                    lookahead_tokens: Some(
+                        self.lookahead_tokens.unwrap_or(default_lookahead_tokens),
+                    ),
                 },
             ));
         }
@@ -190,14 +197,14 @@ fn normalize_tokens_for_selection(
     lora_name: Option<&str>,
     cache_namespace: Option<&str>,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
-    is_eagle: bool,
+    lookahead_tokens: u32,
     tracking: Option<TrackingHashInput<'_>>,
 ) -> NormalizedPrompt {
     let hash_options = BlockHashOptions {
         block_mm_infos,
         lora_name,
         cache_namespace,
-        is_eagle: Some(is_eagle),
+        lookahead_tokens: Some(lookahead_tokens),
     };
     let started = Instant::now();
     let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
@@ -228,14 +235,14 @@ fn normalize_tokens_for_reservation(
     lora_name: Option<&str>,
     cache_namespace: Option<&str>,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
-    is_eagle: bool,
+    lookahead_tokens: u32,
     tracking: TrackingHashInput<'_>,
 ) -> NormalizedReservation {
     let hash_options = BlockHashOptions {
         block_mm_infos,
         lora_name,
         cache_namespace,
-        is_eagle: Some(is_eagle),
+        lookahead_tokens: Some(lookahead_tokens),
     };
     let sequence_hashes = tracking.context.compute_sequence_hashes_for_tracking(
         tracking.scope,

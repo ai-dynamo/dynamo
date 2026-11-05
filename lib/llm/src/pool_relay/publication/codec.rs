@@ -309,7 +309,7 @@ mod tests {
         let hash_options = BlockHashOptions {
             lora_name: canonical_lora,
             cache_namespace: Some("tenant-ns"),
-            is_eagle: Some(semantics.hash_format().is_eagle()),
+            lookahead_tokens: Some(u32::from(semantics.hash_format().is_eagle())),
             ..Default::default()
         };
         let initial_tokens = (0..13).collect::<Vec<u32>>();

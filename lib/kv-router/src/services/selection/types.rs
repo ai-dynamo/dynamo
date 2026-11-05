@@ -47,7 +47,7 @@ pub struct SelectionWorkerConfig {
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
     pub stable_routing_id: Option<String>,
-    pub is_eagle: Option<bool>,
+    pub lookahead_tokens: Option<u32>,
     #[serde(default)]
     pub taints: HashSet<String>,
     #[serde(default)]
@@ -155,7 +155,7 @@ pub struct WorkerCatalogRecord {
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
     pub stable_routing_id: Option<String>,
-    pub is_eagle: Option<bool>,
+    pub lookahead_tokens: Option<u32>,
     #[serde(default)]
     pub taints: HashSet<String>,
     #[serde(default)]
@@ -194,7 +194,7 @@ impl WorkerCatalogRecord {
             max_num_batched_tokens: req.max_num_batched_tokens,
             total_kv_blocks: req.total_kv_blocks,
             stable_routing_id: req.stable_routing_id,
-            is_eagle: req.is_eagle,
+            lookahead_tokens: req.lookahead_tokens,
             taints: req.taints,
             topology_domains: req.topology_domains,
             kv_transfer_domain: req.kv_transfer_domain,
@@ -234,7 +234,7 @@ impl WorkerCatalogRecord {
             max_num_batched_tokens: self.max_num_batched_tokens,
             total_kv_blocks: self.total_kv_blocks,
             stable_routing_id: self.stable_routing_id.clone(),
-            is_eagle: self.is_eagle,
+            lookahead_tokens: self.lookahead_tokens,
             taints: self.taints.clone(),
             topology_domains: self.topology_domains.clone(),
             kv_transfer_domain: self.kv_transfer_domain.clone(),
@@ -296,7 +296,7 @@ impl Default for WorkerRequest {
             max_num_batched_tokens: None,
             total_kv_blocks: None,
             stable_routing_id: None,
-            is_eagle: None,
+            lookahead_tokens: None,
             taints: HashSet::new(),
             topology_domains: HashMap::new(),
             kv_transfer_domain: None,
@@ -328,7 +328,12 @@ pub struct WorkerRequest {
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
     pub stable_routing_id: Option<String>,
-    pub is_eagle: Option<bool>,
+    #[serde(
+        default,
+        alias = "is_eagle",
+        deserialize_with = "strict_lookahead_tokens"
+    )]
+    pub lookahead_tokens: Option<u32>,
     #[serde(default)]
     pub taints: HashSet<String>,
     #[serde(default)]
@@ -363,7 +368,12 @@ pub struct WorkerPatchRequest {
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
     pub stable_routing_id: Option<String>,
-    pub is_eagle: Option<bool>,
+    #[serde(
+        default,
+        alias = "is_eagle",
+        deserialize_with = "strict_lookahead_tokens"
+    )]
+    pub lookahead_tokens: Option<u32>,
     pub taints: Option<HashSet<String>>,
     pub topology_domains: Option<HashMap<String, String>>,
     pub kv_transfer_domain: Option<String>,
@@ -414,8 +424,8 @@ impl WorkerCatalogRecord {
         if patch.stable_routing_id.is_some() {
             self.stable_routing_id = patch.stable_routing_id;
         }
-        if patch.is_eagle.is_some() {
-            self.is_eagle = patch.is_eagle;
+        if patch.lookahead_tokens.is_some() {
+            self.lookahead_tokens = patch.lookahead_tokens;
         }
         if let Some(taints) = patch.taints {
             self.taints = taints;
@@ -468,8 +478,8 @@ macro_rules! inline_prompt_wire {
             lora_name: Option<String>,
             #[serde(default, rename = "cache_salt")]
             cache_namespace: Option<String>,
-            #[serde(default, deserialize_with = "strict_bool")]
-            is_eagle: Option<bool>,
+            #[serde(default, alias = "is_eagle", deserialize_with = "strict_lookahead_tokens")]
+            lookahead_tokens: Option<u32>,
         }
 
         impl From<$wire> for $target {
@@ -485,7 +495,7 @@ macro_rules! inline_prompt_wire {
                         isl_tokens: wire.isl_tokens,
                         lora_name: wire.lora_name,
                         cache_namespace: wire.cache_namespace,
-                        is_eagle: wire.is_eagle,
+                        lookahead_tokens: wire.lookahead_tokens,
                     },
                 }
             }
@@ -493,20 +503,36 @@ macro_rules! inline_prompt_wire {
     };
 }
 
-/// A boolean or null, nothing else. A typed `bool` field would let pythonize coerce any
-/// truthy object, so `"is_eagle": "false"` would enable Eagle hashing.
-fn strict_bool<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
-    struct StrictBool;
+/// A boolean, a non-negative integer, or null; nothing else. A typed integer field
+/// would let pythonize coerce truthy objects, so `"is_eagle": "false"` would
+/// enable lookahead hashing. `true` is one lookahead token (the Eagle window) and
+/// `false` is none, which keeps the legacy `is_eagle` boolean working.
+pub(crate) fn strict_lookahead_tokens<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
+    struct StrictLookahead;
 
-    impl Visitor<'_> for StrictBool {
-        type Value = Option<bool>;
+    impl Visitor<'_> for StrictLookahead {
+        type Value = Option<u32>;
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a boolean or null")
+            formatter.write_str("a boolean, a non-negative integer, or null")
         }
 
         fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
-            Ok(Some(value))
+            Ok(Some(u32::from(value)))
+        }
+
+        fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+            u32::try_from(value)
+                .map(Some)
+                .map_err(|_| E::custom("lookahead_tokens is out of range"))
+        }
+
+        fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+            u32::try_from(value)
+                .map(Some)
+                .map_err(|_| E::custom("lookahead_tokens must be a non-negative integer"))
         }
 
         fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
@@ -518,7 +544,7 @@ fn strict_bool<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool
         }
     }
 
-    deserializer.deserialize_any(StrictBool)
+    deserializer.deserialize_any(StrictLookahead)
 }
 
 #[derive(Debug, Deserialize)]

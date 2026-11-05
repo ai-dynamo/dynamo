@@ -735,10 +735,10 @@ impl KvIndexerInterface for LocalKvIndexer {
         tokens: &[u32],
         lora_name: Option<&str>,
         cache_namespace: Option<&str>,
-        is_eagle: Option<bool>,
+        lookahead_tokens: Option<u32>,
     ) -> Result<OverlapScores, KvRouterError> {
         self.indexer
-            .find_matches_for_request(tokens, lora_name, cache_namespace, is_eagle)
+            .find_matches_for_request(tokens, lora_name, cache_namespace, lookahead_tokens)
             .await
     }
 

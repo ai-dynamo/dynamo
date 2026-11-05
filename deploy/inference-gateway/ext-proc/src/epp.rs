@@ -162,7 +162,7 @@ impl Router {
         let bootstrap = init_preprocessor(&drt, &namespace_filter, namespace_prefix_mode).await?;
         let block_size = bootstrap.card.kv_cache_block_size;
         let model_name = bootstrap.card.display_name.clone();
-        let enable_eagle = bootstrap.card.runtime_config.enable_eagle;
+        let lookahead_tokens = bootstrap.card.runtime_config.hash_lookahead_tokens();
         let actual_namespace = &bootstrap.actual_namespace;
 
         // TODO(epp-rolling-namespace): Rebind both routers when the active
@@ -187,7 +187,7 @@ impl Router {
                 bootstrap.card.worker_type,
                 WORKER_TYPE_DECODE,
                 Some(model_name.clone()),
-                enable_eagle,
+                lookahead_tokens,
             )
             .await?;
 
@@ -2941,7 +2941,7 @@ mod tests {
                 Some(role),
                 role.as_str(),
                 None,
-                false,
+                0,
                 None,
                 None,
             )

@@ -87,7 +87,7 @@ pub fn convert_event(
             cache_namespace,
             block_mm_infos,
             medium: _,
-            is_eagle,
+            lookahead_tokens,
             group_idx: _,
             kv_cache_spec_kind: _,
             kv_cache_spec_sliding_window: _,
@@ -137,7 +137,7 @@ pub fn convert_event(
                         cache_namespace.as_deref(),
                         warning_count,
                         block_mm_infos.as_deref(),
-                        is_eagle,
+                        lookahead_tokens,
                         image_token_id,
                         video_token_id,
                     ),
@@ -312,7 +312,7 @@ pub struct StoredBlockOptions<'a> {
     pub lora_name: Option<&'a str>,
     pub cache_namespace: Option<&'a str>,
     pub mm_extra_info: Option<BlockExtraInfo>,
-    pub is_eagle: Option<bool>,
+    pub lookahead_tokens: Option<u32>,
     pub image_token_id: Option<u32>,
     pub video_token_id: Option<u32>,
 }
@@ -344,7 +344,7 @@ fn create_stored_block_from_parts_with_video_context(
         lora_name,
         cache_namespace,
         mm_extra_info,
-        is_eagle,
+        lookahead_tokens,
         image_token_id,
         video_token_id,
     } = options;
@@ -397,7 +397,7 @@ fn create_stored_block_from_parts_with_video_context(
             block_mm_infos: fallback_mm_infos.as_deref(),
             lora_name,
             cache_namespace,
-            is_eagle,
+            lookahead_tokens,
         },
     )[0];
 
@@ -426,14 +426,14 @@ pub fn create_stored_blocks(
     cache_namespace: Option<&str>,
     warning_count: &Arc<AtomicU32>,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
-    is_eagle: Option<bool>,
+    lookahead_tokens: Option<u32>,
     image_token_id: Option<u32>,
     video_token_id: Option<u32>,
 ) -> Vec<KvCacheStoredBlockData> {
     let mut blocks: Vec<KvCacheStoredBlockData> = Vec::new();
 
     let mut token_offset: usize = 0;
-    let append = is_eagle.unwrap_or(false) as usize;
+    let append = lookahead_tokens.unwrap_or(0) as usize;
     let requires_exact_mm_mapping = video_token_id.is_some();
 
     for (block_idx, (num_tokens_it, block_hash_it)) in
@@ -475,7 +475,7 @@ pub fn create_stored_blocks(
                 lora_name,
                 cache_namespace,
                 mm_extra_info,
-                is_eagle,
+                lookahead_tokens,
                 image_token_id,
                 video_token_id,
             },

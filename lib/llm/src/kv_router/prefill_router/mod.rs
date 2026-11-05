@@ -1381,7 +1381,7 @@ mod tests {
             None,
             "decode",
             None,
-            false,
+            0,
             None,
             None,
         )
@@ -1546,7 +1546,7 @@ mod tests {
             None,
             "decode",
             None,
-            false,
+            0,
             None,
             None,
         )

@@ -718,7 +718,7 @@ impl SelectionCore {
     ) -> Result<PreparedSelectionInputs, SelectionError> {
         let normalized = prompt.normalize_for_selection(
             entry.block_size,
-            entry.is_eagle,
+            entry.lookahead_tokens,
             tracking_assume_kv_reuse.map(|assume_kv_reuse| TrackingHashInput {
                 context: &self.tracking_hash,
                 scope: tracking_scope(entry),
