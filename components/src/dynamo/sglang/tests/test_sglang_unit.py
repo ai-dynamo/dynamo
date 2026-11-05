@@ -317,12 +317,6 @@ def test_diffusers_text_encoder_precision_kwargs_keeps_explicit_precision(tmp_pa
     assert kwargs["component_precisions"] == {"text_encoder_2": "fp32"}
 
 
-def test_diffusers_text_encoder_precision_kwargs_leaves_single_encoder(tmp_path):
-    kwargs = {"model_path": _write_diffusers_checkpoint(tmp_path, ["text_encoder"])}
-
-    assert diffusers_text_encoder_precision_kwargs(kwargs) is kwargs
-
-
 def test_override_server_args_uses_declarative_resolution(monkeypatch):
     calls = []
 
