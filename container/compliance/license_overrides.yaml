@@ -24,6 +24,33 @@
 # the policy gate will reject it.
 
 overrides:
+  # Public SGLang runtime: the binary libevent packages contain libraries and
+  # notices, not the source tree's GPL m4/libtool.m4 and m4/acx_pthread.m4 build
+  # scripts. Preserve the permissive runtime-source licenses in their NOTICES.
+  - ecosystem: dpkg
+    name: libevent-2.1-7t64
+    license: BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT
+    source: "Ubuntu libevent 2.1.12-stable /usr/share/doc/libevent-2.1-7t64/copyright and dpkg-query -L; https://libevent.org/"
+  - ecosystem: dpkg
+    name: libevent-extra-2.1-7t64
+    license: BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT
+    source: "Ubuntu libevent 2.1.12-stable /usr/share/doc/libevent-extra-2.1-7t64/copyright and dpkg-query -L; https://libevent.org/"
+  - ecosystem: dpkg
+    name: libevent-openssl-2.1-7t64
+    license: BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT
+    source: "Ubuntu libevent 2.1.12-stable /usr/share/doc/libevent-openssl-2.1-7t64/copyright and dpkg-query -L; https://libevent.org/"
+  - ecosystem: dpkg
+    name: libpython3-dev
+    license: PSF-2.0
+    source: "Ubuntu python3-defaults /usr/share/doc/libpython3-dev/copyright includes the PSF license; https://docs.python.org/3/license.html"
+  - ecosystem: dpkg
+    name: nsight-systems-cli
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "Nsight Systems CLI metapackage; installed /opt/nvidia/nsight-systems-cli/2026.4.1/EULA.txt; https://docs.nvidia.com/nsight-systems/UserGuide/index.html#end-user-license-agreement"
+  - ecosystem: dpkg
+    name: nsight-systems-cli-2026.4.1
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "Installed /opt/nvidia/nsight-systems-cli/2026.4.1/EULA.txt; same Nsight EULA as the earlier versioned CLI entries; https://docs.nvidia.com/nsight-systems/UserGuide/index.html#end-user-license-agreement"
   # --- NVIDIA CUDA Python wheels ---
   # Most ship via pypi.nvidia.com; the wheel METADATA's License field is empty
   # or contains marketing prose. The actual EULA is bundled in the wheel

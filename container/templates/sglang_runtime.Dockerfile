@@ -263,20 +263,13 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
 # an empty IMAGEIO_FFMPEG_EXE -- worse than either leaving it alone or replacing
 # it properly. The XPU image is not published, so there is nothing to remove from
 # it in the first place; the codec gate skips it for the same reason. Matches the
-# equivalent purge in vllm_runtime.Dockerfile.
+# equivalent purge in vllm_runtime.Dockerfile. The helper also removes the
+# upstream image's packaging/debug/desktop tools while guarding the compiler,
+# Python headers, CUDA and RDMA dependencies against indirect apt removals.
 {% if device == "cuda" %}
-RUN set -eux; \
-    # The upstream runtime image installs Ubuntu's full GPL/LGPL ffmpeg
-    # dependency closure. Remove the packages (and their dpkg metadata) before
-    # copying Dynamo's separately built VP9-only ffmpeg below. File deletion
-    # alone is insufficient because the compliance generator inventories dpkg.
-    purge="$(dpkg-query -W -f='${Package}\n' \
-        ffmpeg \
-        libwayland-server0 \
-        2>/dev/null || true)"; \
-    if [ -n "$purge" ]; then \
-        apt-get purge -y --auto-remove $purge; \
-    fi; \
+RUN --mount=type=bind,source=./container/deps/sglang/prune_runtime_packages.sh,target=/tmp/prune_runtime_packages.sh,readonly \
+    set -eux; \
+    bash /tmp/prune_runtime_packages.sh; \
     rm -rf /var/lib/apt/lists/*; \
     python3 -m pip uninstall --yes \
         av \
