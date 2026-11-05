@@ -253,6 +253,24 @@ pub struct PromptReasoningPrefill {
     beam_channel: Option<dynamo_parsers_v2::UnifiedParserStartingState>,
 }
 
+/// Whether the Hy4 prompt's last think marker leaves reasoning open, as stock vLLM's
+/// `hy_v4` reasoner decides by scanning the prompt backwards. A `no_think` generation
+/// prompt and a retry that continues a closed assistant turn both end the block.
+fn hy_v4_prompt_reasoning_open(prompt: &str) -> Option<bool> {
+    const MARKER: &str = "think:opensource>";
+    let mut end = prompt.len();
+    while let Some(at) = prompt[..end].rfind(MARKER) {
+        if prompt[..at].ends_with("</") {
+            return Some(false);
+        }
+        if prompt[..at].ends_with('<') {
+            return Some(true);
+        }
+        end = at;
+    }
+    None
+}
+
 // Harmony suppresses generated body text if initialization restores a non-assistant role.
 fn gpt_oss_assistant_prefill(prompt: &str, header_search_end: Option<usize>) -> Option<&str> {
     const START: &str = "<|start|>";
@@ -2571,6 +2589,12 @@ impl OpenAIPreprocessor {
                 .and_then(|args| args.get("thinking_mode"))
                 .and_then(serde_json::Value::as_str)
                 .is_none_or(|mode| mode != "disabled"),
+
+            // Hy4's template thinks unless `reasoning_effort` is `no_think`.
+            Some("hy_v4") => chat_template_args
+                .and_then(|args| args.get("reasoning_effort"))
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|effort| effort != "no_think"),
 
             // Muse Spark always advertises the `self` recipient. Its public
             // template has no `disable_reasoning` switch; `reasoning_effort`
@@ -7402,6 +7426,7 @@ impl OpenAIPreprocessor {
                 beam_prompt_open_channel(prompt)
                     == Some(dynamo_parsers_v2::UnifiedParserStartingState::Reasoning)
             }
+            Some("hy_v4") => hy_v4_prompt_reasoning_open(prompt) == Some(true),
             _ => prompt.ends_with("<think>"),
         }
     }
@@ -7493,6 +7518,15 @@ impl OpenAIPreprocessor {
                     prompt.trim_end().ends_with("</think>").then_some(true)
                 }
             })
+        } else if family
+            == Some(
+                crate::protocols::openai::chat_completions::unified_parser::HY_V4_UNIFIED_FAMILY,
+            )
+        {
+            // Hy4 starts inside reasoning unless the prompt's last marker closed it.
+            formatted_prompt
+                .and_then(hy_v4_prompt_reasoning_open)
+                .map(|open| !open)
         } else {
             Self::is_minimax_m3_reasoning_parser(reasoning_parser)
                 .then(|| formatted_prompt.map(|prompt| prompt.trim_end().ends_with("</mm:think>")))
@@ -7514,9 +7548,14 @@ impl OpenAIPreprocessor {
             legacy,
             unified: unified || family == Some("gemma4") && prefix.is_some(),
             // A bare None state synthesizes an unfinished assistant header in ChoiceState.
-            unified_starting_state: (family == Some("gpt_oss")
+            unified_starting_state: ((family == Some("gpt_oss")
                 && prefix.is_none()
                 && formatted_prompt.is_some_and(|prompt| prompt.contains("<|start|>")))
+                || (family
+                    == Some(
+                        crate::protocols::openai::chat_completions::unified_parser::HY_V4_UNIFIED_FAMILY,
+                    )
+                    && reasoning_closed_by_prompt == Some(true)))
             .then_some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
             prefix,
             reasoning_closed_by_prompt,
@@ -7596,6 +7635,9 @@ impl OpenAIPreprocessor {
                 "gpt_oss" => false,
                 // Thinking controls govern generation; keep emitted GLM reasoning separate.
                 "glm47" => false,
+                // Hy4's template ignores generic thinking toggles; the rendered prompt's
+                // think markers decide where the output starts.
+                "hy_v4" => false,
                 "gemma4" => thinking != Some(true) && !Self::is_gemma4_tool_parser(tool_parser),
                 // Spark's template cannot disable reasoning, so keep generated
                 // reasoning separate instead of folding it into visible content.
@@ -9931,6 +9973,75 @@ mod tests {
                     assert_eq!(reasoning, "private thought", "args={args} split={split}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn hy_v4_prompt_last_think_marker_decides_the_parser_starting_state() {
+        use dynamo_parsers_v2::UnifiedParserStartingState;
+        const USER: &str = "<\u{ff5c}hy_start:opensource\u{ff5c}>user<\u{ff5c}hy_middle:opensource\u{ff5c}>hi<\u{ff5c}hy_end:opensource\u{ff5c}><\u{ff5c}hy_start:opensource\u{ff5c}>assistant<\u{ff5c}hy_middle:opensource\u{ff5c}>";
+        for (tail, reasoning, closed, starting_state) in [
+            ("<think:opensource>", true, Some(false), None),
+            (
+                "<think:opensource></think:opensource>",
+                false,
+                Some(true),
+                Some(UnifiedParserStartingState::Response),
+            ),
+            // `fallback_strategy: reasoning_toolcall_retry` continues the open assistant
+            // turn after its closed reasoning and tool calls.
+            (
+                "<think:opensource>Need a tool.</think:opensource><tool_calls:opensource><tool_call:opensource>f</tool_call:opensource></tool_calls:opensource>",
+                false,
+                Some(true),
+                Some(UnifiedParserStartingState::Response),
+            ),
+        ] {
+            let prompt = format!("{USER}{tail}");
+            let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+                Some("hy_v4"),
+                Some("hy_v4"),
+                Some(&prompt),
+            );
+            assert_eq!(prefill.unified, reasoning, "{tail}");
+            assert_eq!(prefill.reasoning_closed_by_prompt, closed, "{tail}");
+            assert_eq!(prefill.unified_starting_state, starting_state, "{tail}");
+        }
+        // Without a rendered prompt the family's forced reasoning start applies.
+        let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+            Some("hy_v4"),
+            Some("hy_v4"),
+            None,
+        );
+        assert_eq!(prefill.reasoning_closed_by_prompt, None);
+        assert_eq!(prefill.unified_starting_state, None);
+    }
+
+    #[test]
+    fn hy_v4_generic_thinking_toggles_do_not_disable_reasoning() {
+        for (args, default_mode) in [
+            (serde_json::json!({"enable_thinking": false}), None),
+            (serde_json::json!({"thinking": false}), None),
+            (serde_json::json!({}), Some("disabled")),
+        ] {
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+                "model": "hy4-preview",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],
+                "tool_choice": "required",
+                "chat_template_kwargs": args,
+            }))
+            .unwrap();
+            assert!(
+                !OpenAIPreprocessor::request_disables_reasoning_with_family(
+                    &request,
+                    Some("hy_v4"),
+                    Some("hy_v4"),
+                    default_mode,
+                    Some("hy_v4"),
+                ),
+                "{args} {default_mode:?}"
+            );
         }
     }
 
@@ -15702,6 +15813,17 @@ responses_tools: None,
                 true,
             ),
             ("deepseek_r1", serde_json::json!({}), true),
+            ("hy_v4", serde_json::json!({}), true),
+            (
+                "hy_v4",
+                serde_json::json!({"reasoning_effort": "high"}),
+                true,
+            ),
+            (
+                "hy_v4",
+                serde_json::json!({"reasoning_effort": "no_think"}),
+                false,
+            ),
             ("minimax_append_think", serde_json::json!({}), false),
             ("basic", serde_json::json!({}), false),
         ];

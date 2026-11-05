@@ -293,6 +293,18 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
     </AccordionGroup>
   </Accordion>
 
+  <Accordion title="Tencent Hy">
+    <AccordionGroup>
+      <Accordion title="Hy4 preview">
+        **Parser:** `hy_v4`
+
+        **Upstream name:** vLLM: `hy_v4`; SGLang: `hunyuan`
+
+        **Notes:** `<tool_calls:opensource>` wraps back-to-back `<tool_call:opensource>NAME<arg_key:opensource>…</arg_key:opensource><arg_value:opensource>…</arg_value:opensource></tool_call:opensource>` calls. Arguments are typed from the tool schema. Unified only: pair it with `--dyn-reasoning-parser hy_v4`.
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
   <Accordion title="Nemotron">
     <AccordionGroup>
       <Accordion title="Nemotron-Super / -Ultra / -Deci and Llama-Nemotron-Ultra / -Super">
