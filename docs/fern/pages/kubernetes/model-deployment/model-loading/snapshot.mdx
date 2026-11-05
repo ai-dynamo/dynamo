@@ -16,11 +16,6 @@ Experimental. Consult the
 using another backend or topology.
 </Warning>
 
-Snapshot capture temporarily forces `HF_HUB_OFFLINE=1`. Before runtime
-registration after restore, Dynamo applies the destination container's
-`HF_HUB_OFFLINE` value, or clears the capture override if the destination leaves
-it unset. Stage the model files before using an offline destination.
-
 ## Prerequisites
 
 - A Kubernetes cluster with [NVIDIA GPU support](../../installation/install-dynamo.md)
@@ -34,6 +29,11 @@ it unset. Stage the model files before using an offline destination.
 
 The examples select `runtimeClassName: nvidia`. Use your cluster's RuntimeClass
 name, or omit the field if the default runtime provides GPU support.
+
+Snapshot capture temporarily forces `HF_HUB_OFFLINE=1`. Before runtime
+registration after restore, Dynamo applies the destination container's
+`HF_HUB_OFFLINE` value, or clears the capture override if the destination leaves
+it unset. Stage the model files before using an offline destination.
 
 ## Choose an Example
 
