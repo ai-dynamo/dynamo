@@ -8,13 +8,16 @@
 //!   and [`PoolDiscoveryBackend`], the backend behind it.
 //! - [`pool_discovery`]: the traits that backend is built from.
 //!
-//! [`backends`] implements those traits: registrations kept in memory, and
-//! the EndpointSlices that SIG Multicluster (MCS) imports, joined with
-//! registrations. [`peers`] shares registrations between service instances.
+//! [`backends`] implements those traits: registrations kept in memory or in
+//! a DynamoDB table, and the EndpointSlices that SIG Multicluster (MCS)
+//! imports, joined with registrations. [`peers`] shares registrations kept in
+//! memory between service instances.
 
 pub mod backends;
 pub mod peers;
 pub mod pool_discovery;
 pub mod service;
 
+pub use backends::clock::{Clock, ManualClock, SystemClock};
+pub use backends::dynamodb::{ConnectError, DynamoDbConfig, DynamoDbPoolStore};
 pub use service::{PoolDiscoveryBackend, Tls, routes, serve};

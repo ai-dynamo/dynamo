@@ -3412,7 +3412,13 @@ mod tests {
                                     std::future::pending::<()>().await;
                                 })
                             }
-                        })).layer(axum::middleware::from_fn_with_state(state.clone(), track_inflight_inference));
+                        })).layer(axum::middleware::from_fn_with_state(
+                            Arc::new(InferenceReadinessState {
+                                state: state.clone(),
+                                mounted_protocols: HashMap::new(),
+                            }),
+                            track_inflight_inference,
+                        ));
                         let cancel = CancellationToken::new();
                         let server_cancel = cancel.clone();
                         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

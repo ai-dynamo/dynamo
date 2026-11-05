@@ -229,7 +229,10 @@ impl PeerSync {
         let sent = Instant::now();
         let reply = tokio::time::timeout(self.every, self.source.shared_registrations(peer)).await;
         let reply = match reply {
-            Ok(reply) => reply.map_err(|DiscoveryError::Unavailable(cause)| cause),
+            Ok(reply) => reply.map_err(|error| match error {
+                DiscoveryError::Unavailable(cause) => cause,
+                other => other.into(),
+            }),
             Err(_) => Err(anyhow::anyhow!("no answer within {:?}", self.every)),
         };
         (sent, reply)

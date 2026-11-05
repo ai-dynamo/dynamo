@@ -11,19 +11,26 @@
 //!   It answers `501` with the reason.
 //! - `GET /pools`: the pools a Global Router routes to. `complete` is false
 //!   while the list may be missing pools: for one lease after the service
-//!   starts, while PoolRelays may not have registered yet; and with MCS, also
-//!   while another discovery instance may hold registrations that this one has
-//!   not copied yet (see [`crate::peers`]), and while the MCS watch keeps
-//!   failing. A caller that keeps its own list replaces it with a complete
-//!   list, but merges a partial one: it adds new pools and updates changed
-//!   ones, keeps known pools that are missing, and waits for a complete list
-//!   to remove any. A caller that knows no pools yet still uses a partial list.
+//!   starts, while PoolRelays may not have registered yet; with MCS, also
+//!   while the MCS watch keeps failing, and while another discovery instance
+//!   may hold registrations that this one has not copied yet (see
+//!   [`crate::peers`]); and with DynamoDB, also while the table cannot be
+//!   reached and for one lease after, and while a pool from another region of
+//!   a Global Table is listed past its lease, in case replication is late. A
+//!   caller that keeps its own list replaces it with a complete list, but
+//!   merges a partial one: it adds new pools and updates changed ones, keeps
+//!   known pools that are missing, and waits for a complete list to remove
+//!   any. A caller that knows no pools yet still uses a partial list.
 //! - `GET /registrations`: the registrations this instance's PoolRelays
 //!   made, for the other instances ([`crate::peers`]). Like `POST /pools`, it
 //!   assumes a trusted network.
-//! - `GET /healthz`: OK while the service can answer from its backend. Use it
-//!   for readiness; liveness needs only the TCP port. Ready does not mean the
-//!   pool list is complete: `GET /pools` says that in `complete`.
+//! - `GET /healthz`: readiness. OK once the backend has answered, which with
+//!   DynamoDB follows the startup check of the table, and, for an instance
+//!   that shares registrations, once it has asked the others. A later failure
+//!   of the backend shows in the answers to requests, not here, so that an
+//!   outage of a store every replica shares does not take them all out of the
+//!   Service at once. Liveness needs only the TCP port. Ready does not mean
+//!   the pool list is complete: `GET /pools` says that in `complete`.
 //!
 //! The service reads and writes only through the [`crate::pool_discovery`]
 //! traits. It runs on `dynamo-http-server`, so it gets TLS the way the Dynamo
@@ -33,6 +40,7 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::pool_discovery::{
     Completeness, DiscoveryError, PoolDirectory, PoolRegistrar, PoolRegistration,
@@ -84,6 +92,13 @@ pub struct Tls {
 /// backend keeps each one for its lease. axum's default is 2 MiB.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
+/// What the handlers share.
+struct Shared {
+    backend: PoolDiscoveryBackend,
+    /// Both directories have answered `GET /healthz` once.
+    answered: AtomicBool,
+}
+
 /// The service's HTTP routes.
 pub fn routes(backend: PoolDiscoveryBackend) -> Router {
     Router::new()
@@ -92,7 +107,10 @@ pub fn routes(backend: PoolDiscoveryBackend) -> Router {
         .route("/registrations", get(shared_registrations))
         .route("/healthz", get(healthz))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .with_state(Arc::new(backend))
+        .with_state(Arc::new(Shared {
+            backend,
+            answered: AtomicBool::new(false),
+        }))
 }
 
 /// Serves until `shutdown` is cancelled. Then it stops taking connections and
@@ -125,10 +143,10 @@ pub async fn serve(
 /// The body is checked after the registrar, so that a backend without one
 /// answers `501` whatever the body is.
 async fn register_pool(
-    State(backend): State<Arc<PoolDiscoveryBackend>>,
+    State(shared): State<Arc<Shared>>,
     registration: Result<Json<PoolRegistration>, JsonRejection>,
 ) -> Response {
-    let Some(registrar) = &backend.registrar else {
+    let Some(registrar) = &shared.backend.registrar else {
         return (
             StatusCode::NOT_IMPLEMENTED,
             "this service takes no registrations",
@@ -145,8 +163,8 @@ async fn register_pool(
     }
 }
 
-async fn list_pools(State(backend): State<Arc<PoolDiscoveryBackend>>) -> Response {
-    match backend.pools.list().await {
+async fn list_pools(State(shared): State<Arc<Shared>>) -> Response {
+    match shared.backend.pools.list().await {
         Ok(snapshot) => Json(PoolsResponse {
             complete: snapshot.completeness == Completeness::Exact,
             pools: snapshot.items,
@@ -156,8 +174,8 @@ async fn list_pools(State(backend): State<Arc<PoolDiscoveryBackend>>) -> Respons
     }
 }
 
-async fn list_routers(State(backend): State<Arc<PoolDiscoveryBackend>>) -> Response {
-    match backend.routers.list().await {
+async fn list_routers(State(shared): State<Arc<Shared>>) -> Response {
+    match shared.backend.routers.list().await {
         Ok(snapshot) => Json(RoutersResponse {
             routers: snapshot.items,
         })
@@ -166,8 +184,8 @@ async fn list_routers(State(backend): State<Arc<PoolDiscoveryBackend>>) -> Respo
     }
 }
 
-async fn shared_registrations(State(backend): State<Arc<PoolDiscoveryBackend>>) -> Response {
-    match &backend.sharing {
+async fn shared_registrations(State(shared): State<Arc<Shared>>) -> Response {
+    match &shared.backend.sharing {
         Some(sharing) => Json(sharing.reply()).into_response(),
         None => (
             StatusCode::NOT_IMPLEMENTED,
@@ -191,13 +209,18 @@ async fn register_router() -> Response {
         .into_response()
 }
 
-/// Lists what `GET /pools` and `GET /routers` would serve. With pools from
-/// MCS, the backend answers from its cache once that has synced, so an API
-/// server outage does not turn every replica unready at once. The first probe
-/// also starts its watch. An instance that shares registrations is ready
-/// only once it has asked the others; an unreachable one later does not make
-/// it unready.
-async fn healthz(State(backend): State<Arc<PoolDiscoveryBackend>>) -> StatusCode {
+/// Until both directories have answered once, lists what `GET /pools` and
+/// `GET /routers` would serve, which also starts the MCS watches. After that
+/// it answers OK without calling the backend: a backend that fails later
+/// shows that in the answers to requests (503, or `complete: false`). With a
+/// store every replica shares, such as DynamoDB, readiness that followed the
+/// store would take every replica out of the Service at once during an
+/// outage, and PoolRelays could not register until all were ready again. The
+/// DynamoDB store checks at startup that it can read and write its table. An
+/// instance that shares registrations is ready only once it has asked the
+/// others; an unreachable one later does not make it unready.
+async fn healthz(State(shared): State<Arc<Shared>>) -> StatusCode {
+    let backend = &shared.backend;
     if backend
         .sharing
         .as_ref()
@@ -205,9 +228,15 @@ async fn healthz(State(backend): State<Arc<PoolDiscoveryBackend>>) -> StatusCode
     {
         return StatusCode::SERVICE_UNAVAILABLE;
     }
+    if shared.answered.load(Ordering::Acquire) {
+        return StatusCode::OK;
+    }
     let (pools, routers) = tokio::join!(backend.pools.list(), backend.routers.list());
     match pools.and(routers) {
-        Ok(_) => StatusCode::OK,
+        Ok(_) => {
+            shared.answered.store(true, Ordering::Release);
+            StatusCode::OK
+        }
         Err(error) => {
             tracing::warn!(?error, "discovery backend is unreachable");
             StatusCode::SERVICE_UNAVAILABLE
@@ -215,10 +244,12 @@ async fn healthz(State(backend): State<Arc<PoolDiscoveryBackend>>) -> StatusCode
     }
 }
 
-/// Maps a backend error to a status. The cause is logged, not returned.
+/// Maps a backend error to a status. An outage's cause is logged, not
+/// returned; a rejected registration says why.
 fn error_response(error: DiscoveryError) -> Response {
     let status = match &error {
         DiscoveryError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+        DiscoveryError::Rejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
     };
     tracing::warn!(?error, %status, "discovery request failed");
     (status, error.to_string()).into_response()
@@ -523,6 +554,37 @@ mod tests {
         shutdown.cancel();
     }
 
+    /// A registrar that cannot keep any registration.
+    struct Refuses;
+
+    #[async_trait]
+    impl PoolRegistrar for Refuses {
+        async fn register(&self, _registration: PoolRegistration) -> Result<Lease, DiscoveryError> {
+            Err(DiscoveryError::Rejected(
+                "the pool key is too long".to_owned(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rejected_registration_is_unprocessable_and_says_why() {
+        let mut backend = registrations_backend();
+        backend.registrar = Some(Arc::new(Refuses));
+        let (base, shutdown) = start(backend).await;
+        let response = reqwest::Client::new()
+            .post(format!("{base}/pools"))
+            .header("content-type", "application/json")
+            .body(registration().to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+        // Sending it again cannot help, so the PoolRelay is told why.
+        let reason = response.text().await.unwrap();
+        assert!(reason.contains("the pool key is too long"), "{reason}");
+        shutdown.cancel();
+    }
+
     /// A directory that is down.
     struct Down;
 
@@ -559,6 +621,49 @@ mod tests {
             // The cause stays in the log.
             assert!(!response.text().await.unwrap().contains("down"), "{path}");
         }
+        shutdown.cancel();
+    }
+
+    /// A directory that answers once, then is down.
+    struct DownAfterFirst(AtomicBool);
+
+    #[async_trait]
+    impl<T: Send + 'static, K: Send + Sync + 'static> Directory<T, K> for DownAfterFirst {
+        async fn list(&self) -> Result<Snapshot<T>, DiscoveryError> {
+            if self.0.swap(true, Ordering::SeqCst) {
+                return Err(DiscoveryError::Unavailable(anyhow::anyhow!("down")));
+            }
+            Ok(Snapshot {
+                items: Vec::new(),
+                completeness: Completeness::Exact,
+            })
+        }
+
+        async fn list_and_watch(
+            &self,
+            _cancel_token: Option<CancellationToken>,
+        ) -> Result<WatchStream<T, K>, DiscoveryError> {
+            Err(DiscoveryError::Unavailable(anyhow::anyhow!("down")))
+        }
+    }
+
+    /// Once the backend has answered, an outage of a store that every
+    /// replica shares shows in the answers to requests, and the replica stays
+    /// in the Service.
+    #[tokio::test]
+    async fn once_ready_an_outage_shows_in_requests_not_in_readiness() {
+        let mut backend = registrations_backend();
+        backend.pools = Arc::new(DownAfterFirst(AtomicBool::new(false)));
+        let (base, shutdown) = start(backend).await;
+        let healthz = format!("{base}/healthz");
+        let response = reqwest::get(&healthz).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        // The store is down from now on.
+        let (status, _) = get_json(&base, "/pools").await;
+        assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let response = reqwest::get(&healthz).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
         shutdown.cancel();
     }
 
