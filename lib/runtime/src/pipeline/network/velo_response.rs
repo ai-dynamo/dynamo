@@ -1015,12 +1015,12 @@ impl VeloResponseSender {
     pub async fn send_prologue(&mut self, error: Option<StreamPrologueError>) -> Result<()> {
         ensure!(!self.prologue_sent, "Velo response prologue already sent");
         let (error, typed_error) = error.map_or((None, None), |e| (Some(e.message), e.typed_error));
-        let mut item = self.new_item();
-        serde_json::to_writer(
-            item.buffer(),
-            &ResponseStreamPrologue { error, typed_error },
-        )?;
-        self.stream()?.send_frame(item.finish()?).await?;
+        self.stream()?
+            .send_bytes(serde_json::to_vec(&ResponseStreamPrologue {
+                error,
+                typed_error,
+            })?)
+            .await?;
         self.prologue_sent = true;
         Ok(())
     }

@@ -315,8 +315,8 @@ where
     Resp: PipelineIO,
     Adapter: Send + Sync + 'static,
 {
-    /// Encode one frame for `publisher`: straight into an item it sends as it
-    /// is, when it takes one and the adapter can write there, or else as bytes.
+    /// Encode one frame for `publisher`: into an item it sends as it is, when
+    /// it takes one, or else as bytes.
     async fn encode_frame<U>(
         &self,
         publisher: &impl ResponsePublisher,
@@ -328,28 +328,18 @@ where
         U: Data,
         Adapter: IngressResponseEncoder<U>,
     {
-        if <Adapter as IngressResponseEncoder<U>>::ENCODES_INTO_BUFFER
-            && let Some(mut item) = publisher.new_item()
-        {
+        if let Some(mut item) = publisher.new_item() {
             let frame = self
                 .payload_adapter
                 .encode_response_into(payload_codec, response, complete_final, item.buffer())
                 .await?;
-            return Ok(EncodedResponseFrame {
-                bytes: ResponsePayload::Item(item),
-                is_error: frame.is_error,
-                stop_stream: frame.stop_stream,
-            });
+            return Ok(frame.map(|()| ResponsePayload::Item(item)));
         }
         let frame = self
             .payload_adapter
             .encode_response(payload_codec, response, complete_final)
             .await?;
-        Ok(EncodedResponseFrame {
-            bytes: ResponsePayload::Bytes(frame.bytes),
-            is_error: frame.is_error,
-            stop_stream: frame.stop_stream,
-        })
+        Ok(frame.map(ResponsePayload::Bytes))
     }
 
     /// Pump every chunk from the engine's response stream out to the

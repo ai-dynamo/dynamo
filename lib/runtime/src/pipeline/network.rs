@@ -1228,6 +1228,17 @@ pub struct EncodedResponseFrame<B = Bytes> {
     pub stop_stream: bool,
 }
 
+impl<B> EncodedResponseFrame<B> {
+    /// The same frame, with `f` applied to its bytes.
+    pub fn map<C>(self, f: impl FnOnce(B) -> C) -> EncodedResponseFrame<C> {
+        EncodedResponseFrame {
+            bytes: f(self.bytes),
+            is_error: self.is_error,
+            stop_stream: self.stop_stream,
+        }
+    }
+}
+
 /// Converts request-plane bytes into the item consumed by an ingress engine.
 pub trait IngressRequestDecoder<T>: Send + Sync + 'static
 where
@@ -1252,17 +1263,13 @@ where
         complete_final: bool,
     ) -> impl std::future::Future<Output = std::result::Result<EncodedResponseFrame, PipelineError>> + Send;
 
-    /// Whether [`encode_response_into`](Self::encode_response_into) serializes
-    /// straight into the caller's buffer. Only then does a transport that sends
-    /// that buffer as it is (Velo) use it, saving a copy of every frame;
-    /// otherwise it takes [`encode_response`](Self::encode_response)'s bytes.
-    const ENCODES_INTO_BUFFER: bool = false;
-
     /// Encode a response like [`encode_response`](Self::encode_response), but
     /// append its bytes to `buffer`, after the frame header a transport may
     /// already have written there.
     ///
-    /// The default copies `encode_response`'s bytes in.
+    /// The default copies `encode_response`'s bytes in. That is the one copy a
+    /// transport would otherwise make to frame them; an adapter that serializes
+    /// straight into `buffer` saves it.
     fn encode_response_into(
         &self,
         payload_codec: RequestPlanePayloadCodec,
@@ -1277,11 +1284,7 @@ where
                 .encode_response(payload_codec, response, complete_final)
                 .await?;
             buffer.extend_from_slice(&frame.bytes);
-            Ok(EncodedResponseFrame {
-                bytes: (),
-                is_error: frame.is_error,
-                stop_stream: frame.stop_stream,
-            })
+            Ok(frame.map(drop))
         }
     }
 }
@@ -1371,16 +1374,9 @@ where
     {
         let mut bytes = Vec::with_capacity(RESPONSE_ENCODE_CAPACITY_HINT);
         let encoded = Self::serialize_response(payload_codec, response, complete_final, &mut bytes);
-        std::future::ready(encoded.map(|frame| EncodedResponseFrame {
-            bytes: bytes.into(),
-            is_error: frame.is_error,
-            stop_stream: frame.stop_stream,
-        }))
+        std::future::ready(encoded.map(|frame| frame.map(|()| bytes.into())))
     }
 
-    const ENCODES_INTO_BUFFER: bool = true;
-
-    #[inline]
     fn encode_response_into(
         &self,
         payload_codec: RequestPlanePayloadCodec,
