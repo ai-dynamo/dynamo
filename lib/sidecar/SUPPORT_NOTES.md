@@ -28,7 +28,7 @@ The sidecar does not register the engine's LoRA adapter list. Dynamo cannot load
 
 The optional native `/generate` passthrough can select a preloaded adapter with `lora_path`. You must enable this passthrough separately. This passthrough is separate from the standard generation path. Manually published adapter records are another integration option.
 
-Configure HiCache and speculative decoding in the native engine. The sidecar reports HiCache capacity for configurations that it recognizes. It also handles EAGLE-family routing metadata and draft-token reserves. Test each model, algorithm, routing, disaggregation, and telemetry combination separately.
+Configure HiCache and speculative decoding in the native engine. The sidecar reports HiCache capacity for configurations that it recognizes. It also handles EAGLE-family routing metadata and draft-token reserves; the reserves need [sgl-project/sglang#45859](https://github.com/sgl-project/sglang/pull/45859), and without it an EAGLE engine gets no token budget. Test each model, algorithm, routing, disaggregation, and telemetry combination separately.
 
 Request migration can retry a stream that closes early without an error. See the [shared operational limits](#operational-limits) for migration rules, observability, planning, cache offloading, and shutdown behavior.
 
