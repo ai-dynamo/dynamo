@@ -9,9 +9,16 @@ import pytest
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core import util
 from dynamo.planner.core.base import build_worker_capabilities
-from dynamo.planner.core.types import WorkerCounts
+from dynamo.planner.core.types import (
+    BatchDrainLimitDecision,
+    BatchSchedulingObservation,
+    WorkerCounts,
+)
 from dynamo.planner.environment import base as environment_base
-from dynamo.planner.environment.base import PlannerEnvironmentImpl
+from dynamo.planner.environment.base import (
+    NoopBatchSchedulingProvider,
+    PlannerEnvironmentImpl,
+)
 from dynamo.planner.errors import DeploymentValidationError, GPUShapeUnavailableError
 from dynamo.planner.monitoring.dgd_services import ComponentGPUShape
 from dynamo.planner.monitoring.worker_info import (
@@ -63,6 +70,24 @@ def _fpm_provider() -> MagicMock:
     provider.refresh = AsyncMock()
     provider.shutdown = AsyncMock()
     return provider
+
+
+def _batch_provider() -> MagicMock:
+    provider = MagicMock()
+    provider.initialize = AsyncMock()
+    provider.collect = AsyncMock(return_value=BatchSchedulingObservation())
+    provider.apply_drain_limits = AsyncMock()
+    provider.shutdown = AsyncMock()
+    return provider
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decisions", [[], [MagicMock()]])
+async def test_noop_batch_provider_rejects_every_actuation_call(decisions):
+    provider = NoopBatchSchedulingProvider()
+
+    with pytest.raises(RuntimeError, match="actuation is not configured"):
+        await provider.apply_drain_limits(decisions)
 
 
 @pytest.mark.asyncio
@@ -263,6 +288,72 @@ async def test_power_aware_startup_keeps_the_settled_wait():
 
     controller.wait_for_settled_graph_deployment.assert_awaited_once()
     controller.wait_for_deployment_ready.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_batch_provider_lifecycle_collection_and_actuation_are_delegated():
+    controller = _controller()
+    fpm_provider = _fpm_provider()
+    batch_provider = _batch_provider()
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+        fpm_provider=fpm_provider,
+        batch_provider=batch_provider,
+    )
+
+    await environment.initialize()
+    observation = await environment.collect_batch_scheduling()
+    decisions = [
+        BatchDrainLimitDecision(
+            pool_id="pool",
+            max_admission_rps=0.0,
+            valid_until_s=100.0,
+            decision_id="decision",
+        )
+    ]
+    await environment.apply_batch_drain_limits(decisions)
+    await environment.shutdown()
+
+    assert observation == BatchSchedulingObservation()
+    batch_provider.initialize.assert_awaited_once_with()
+    batch_provider.collect.assert_awaited_once_with()
+    batch_provider.apply_drain_limits.assert_awaited_once_with(decisions)
+    batch_provider.shutdown.assert_awaited_once_with()
+    fpm_provider.shutdown.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_cold_restart_bootstraps_batch_pause_before_deployment_settlement():
+    order: list[str] = []
+    controller = _controller()
+    controller.validate_deployment = AsyncMock(
+        side_effect=lambda **_kwargs: order.append("validate")
+    )
+    controller.wait_for_deployment_ready = AsyncMock(
+        side_effect=lambda **_kwargs: order.append("settled-dgdsa-zero")
+    )
+    batch_provider = _batch_provider()
+    batch_provider.initialize = AsyncMock(
+        side_effect=lambda: order.append("redis-zero-and-writer-fence")
+    )
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+        batch_provider=batch_provider,
+    )
+
+    await environment.initialize()
+
+    assert order[:3] == [
+        "redis-zero-and-writer-fence",
+        "validate",
+        "settled-dgdsa-zero",
+    ]
 
 
 @pytest.mark.asyncio

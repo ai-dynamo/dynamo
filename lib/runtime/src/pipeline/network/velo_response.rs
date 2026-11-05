@@ -114,7 +114,7 @@ fn response_heartbeat() -> Result<Duration> {
 fn response_mux_config() -> Result<MuxConfig> {
     let batch_ms: u64 = env_setting(
         crate::config::environment_names::response_plane::DYN_VELO_RESPONSE_BATCH_MS,
-        5,
+        2,
         "a non-negative integer in milliseconds",
         |value| value.parse().ok(),
     )?;
@@ -1040,7 +1040,7 @@ mod tests {
             return;
         }
         for (value, on_admission, max_linger) in [
-            (None, false, Some(Duration::from_millis(5))),
+            (None, false, Some(Duration::from_millis(2))),
             (Some("0"), true, None),
             (Some("12"), false, Some(Duration::from_millis(12))),
         ] {
