@@ -598,9 +598,8 @@ class HandlerBase(BaseGenerativeHandler):
                     aborted = await monitor_task
                 except asyncio.CancelledError:
                     pass
-                # The stop flag is set synchronously but the monitor's future
-                # resolves later, so stream teardown can cancel the monitor
-                # before it aborts. Recheck here; same target and finished guard.
+                # The stop flag is set before the monitor's future resolves, so stream
+                # teardown can cancel the monitor before it aborts; recheck here.
                 if not aborted and (context.is_stopped() or context.is_killed()):
                     logging.debug(
                         f"Cancellation observed on stream cleanup for Request ID: {context.id()}"
