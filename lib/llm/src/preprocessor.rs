@@ -3697,8 +3697,15 @@ impl OpenAIPreprocessor {
         // survives into output for the parser to consume. See PR #9778.
         let mut visible_tool_parser_end_token_ids = Vec::new();
         if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
-            visible_tool_parser_end_token_ids =
-                self.remove_tool_parser_end_tokens_from_hidden_stops(request, stop_tokens)?;
+            visible_tool_parser_end_token_ids = self
+                .remove_tool_parser_end_tokens_from_hidden_stops(
+                    request,
+                    stop_tokens,
+                    stop_conditions
+                        .stop_token_ids
+                        .as_deref()
+                        .unwrap_or_default(),
+                )?;
         }
         if !visible_tool_parser_end_token_ids.is_empty() {
             let visible_stops = stop_conditions
@@ -3845,6 +3852,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
         hidden_stop_token_ids: &mut Vec<TokenIdType>,
+        user_stop_token_ids: &[TokenIdType],
     ) -> Result<Vec<TokenIdType>> {
         let has_tools = Self::request_has_effective_tools(request);
         let tool_choice_none = request
@@ -3866,11 +3874,11 @@ impl OpenAIPreprocessor {
         };
 
         let mut end_tokens = tool_call_config.parser_config.tool_call_end_tokens();
-        if crate::protocols::openai::chat_completions::unified_parser::selected_family(
+        let gpt_oss_v2 = crate::protocols::openai::chat_completions::unified_parser::selected_family(
             self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
-        ) == Some("gpt_oss")
-        {
+        ) == Some("gpt_oss");
+        if gpt_oss_v2 {
             // GPT-OSS v2 also closes directed calls on <|return|>. The legacy
             // Harmony config only declares <|call|>; keep both visible to v2.
             end_tokens.push("<|return|>".to_string());
@@ -3886,6 +3894,15 @@ impl OpenAIPreprocessor {
                     "Failed to encode tool-call end token {end_token:?} for parser {tool_call_parser:?}"
                 )
             })?;
+            if gpt_oss_v2
+                && end_token == "<|return|>"
+                && encoded
+                    .token_ids()
+                    .iter()
+                    .any(|id| user_stop_token_ids.contains(id))
+            {
+                continue;
+            }
             let was_hidden_eos =
                 Self::remove_single_token_marker(hidden_stop_token_ids, encoded.token_ids());
             if !was_hidden_eos {
@@ -13150,14 +13167,14 @@ responses_tools: None,
         let preprocessor = hidden_stop_preprocessor();
         let mut dynamic_hidden = vec![HARMONY_CALL_TOKEN_ID, 7];
         let dynamic_visible = preprocessor
-            .remove_tool_parser_end_tokens_from_hidden_stops(&dynamic, &mut dynamic_hidden)
+            .remove_tool_parser_end_tokens_from_hidden_stops(&dynamic, &mut dynamic_hidden, &[])
             .unwrap();
         assert_eq!(dynamic_visible, [HARMONY_CALL_TOKEN_ID]);
         assert_eq!(dynamic_hidden, [7]);
 
         let mut none_hidden = vec![HARMONY_CALL_TOKEN_ID, 7];
         let none_visible = preprocessor
-            .remove_tool_parser_end_tokens_from_hidden_stops(&none, &mut none_hidden)
+            .remove_tool_parser_end_tokens_from_hidden_stops(&none, &mut none_hidden, &[])
             .unwrap();
         assert!(none_visible.is_empty());
         assert_eq!(none_hidden, [HARMONY_CALL_TOKEN_ID, 7]);
@@ -13183,22 +13200,32 @@ responses_tools: None,
             return;
         };
         let preprocessor = hidden_stop_preprocessor();
-        for tool_choice in ["auto", "none"] {
+        for (tool_choice, user_stops) in [
+            ("auto", None),
+            ("none", None),
+            ("auto", Some(vec![HARMONY_RETURN_TOKEN_ID])),
+        ] {
             let request: NvCreateChatCompletionRequest =
                 serde_json::from_value(serde_json::json!({
                     "model": "test", "messages": [{"role": "user", "content": "test"}],
                     "tools": [{"type": "function", "function": {"name": "lookup"}}],
-                    "tool_choice": tool_choice
+                    "tool_choice": tool_choice,
+                    "stop_token_ids": user_stops
                 }))
                 .unwrap();
             let mut hidden = vec![HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID, 7];
+            let user_stops = request
+                .extract_stop_conditions()
+                .unwrap()
+                .stop_token_ids
+                .unwrap_or_default();
             let visible = preprocessor
-                .remove_tool_parser_end_tokens_from_hidden_stops(&request, &mut hidden)
+                .remove_tool_parser_end_tokens_from_hidden_stops(&request, &mut hidden, &user_stops)
                 .unwrap();
             if tool_choice == "none" {
                 assert!(visible.is_empty());
                 assert_eq!(hidden, [HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID, 7]);
-            } else if version == "1" {
+            } else if version == "1" || !user_stops.is_empty() {
                 assert_eq!(visible, [HARMONY_CALL_TOKEN_ID]);
                 assert_eq!(hidden, [HARMONY_RETURN_TOKEN_ID, 7]);
             } else {
@@ -13233,18 +13260,23 @@ responses_tools: None,
             "tool_choice": "auto"
         }))
         .unwrap();
-        for ending in [
-            Some(HARMONY_CALL_TOKEN_ID),
-            Some(HARMONY_RETURN_TOKEN_ID),
-            None,
+        for (ending, user_stops) in [
+            (Some(HARMONY_CALL_TOKEN_ID), &[][..]),
+            (Some(HARMONY_RETURN_TOKEN_ID), &[][..]),
+            (
+                Some(HARMONY_RETURN_TOKEN_ID),
+                &[HARMONY_RETURN_TOKEN_ID][..],
+            ),
+            (None, &[][..]),
         ] {
             let mut hidden = vec![HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID];
             let visible = preprocessor
-                .remove_tool_parser_end_tokens_from_hidden_stops(&request, &mut hidden)
+                .remove_tool_parser_end_tokens_from_hidden_stops(&request, &mut hidden, user_stops)
                 .unwrap();
             let mut decoder = Decoder::new(
                 crate::tokenizers::DecodeStream::new(preprocessor.tokenizer.clone(), &[], false),
                 StopConditions {
+                    stop_token_ids: (!user_stops.is_empty()).then(|| user_stops.to_vec()),
                     stop_token_ids_hidden: Some(hidden),
                     stop_token_ids_visible: Some(visible),
                     ..Default::default()
@@ -13279,7 +13311,8 @@ responses_tools: None,
                 .unwrap()
                 .collect()
                 .await;
-            let expected_finish = if ending.is_some() {
+            let completed = ending.is_some() && user_stops.is_empty();
+            let expected_finish = if completed {
                 FinishReason::ToolCalls
             } else {
                 FinishReason::Length
@@ -13301,7 +13334,7 @@ responses_tools: None,
                 "ending={ending:?}"
             );
             let calls = choice.message.tool_calls.as_deref().unwrap_or_default();
-            if ending.is_some() {
+            if completed {
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0].function.name, "lookup");
                 assert_eq!(
