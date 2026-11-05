@@ -133,7 +133,7 @@ Disk space can reduce the job worker count to the smaller of `numWorkers` and `f
 
 ### Get completed results back sooner
 
-If inference has finished but your application is still waiting for results, check how it collects them. Keep every accepted job ID so you can return for its results. Download each completed job without waiting for unrelated jobs. Match results by `custom_id`, check failures and truncation, and save and verify each result before checkpointing it. When resuming, keep completed requests separate from unfinished ones and requests whose outcome is still unknown.
+If inference has finished but your application is still waiting for results, check how it collects them. Keep every accepted job ID so you can return for its results. Download each completed job without waiting for unrelated jobs. Match results by `custom_id`. Check each result's error and HTTP status, then inspect the endpoint's completion fields inside `response.body`. For `/v1/chat/completions`, check each choice's `finish_reason`; `"length"` means generation reached the token limit, so assess whether the output is usable before marking the request complete. Save and verify each result before checkpointing it. When resuming, keep completed requests separate from unfinished ones and requests whose outcome is still unknown.
 
 For slow decoding or file writes, process independent results in a bounded worker pool and cap the bytes held by pending downloads and output work. More inference requests or job workers won't speed up this work. Smaller jobs can make the first usable result available sooner, but add upload, validation and finalization work. Measure both the first-result time and full completion time before changing job size.
 
