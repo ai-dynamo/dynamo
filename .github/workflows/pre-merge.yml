@@ -487,15 +487,6 @@ jobs:
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
       run: cargo test --locked --features ais-forward-pass -- --nocapture
-    - name: Run NVTX feature tests
-      if: matrix.dir == '.'
-      working-directory: ${{ matrix.dir }}
-      # The nvtx feature is off in every other job here, so without this step the
-      # annotated code paths — the FFI declarations, the guard, the macro arms —
-      # are never compiled by CI. Scoped to dynamo-runtime rather than the
-      # workspace: a bare --features nvtx at the root also selects kvbm-engine's
-      # nvtx feature, whose markers have no runtime switch.
-      run: "cargo test --locked -p dynamo-runtime --features nvtx --lib nvtx::"
 
   rust-feature-builds:
     needs: changed-files
@@ -548,6 +539,11 @@ jobs:
 
         cargo test --locked -p dynamo-llm --no-default-features \
           --features kv-router-stress --bench kv_router_bench --no-run
+    - name: Run NVTX feature tests
+      # Every other Rust job here builds dynamo-runtime with the nvtx feature off.
+      # The image builds compile the feature but run no tests, so this step is
+      # the only one that runs the feature-on tests in lib/runtime/src/nvtx.rs.
+      run: "cargo test --locked -p dynamo-runtime --features nvtx --lib nvtx::"
 
   rust-clippy:
     needs: changed-files
@@ -589,9 +585,7 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # The default job builds this crate with the feature off, so the feature-on
       # half of every `#[cfg(feature = "nvtx")]` — including the tests gated the
-      # other way — is otherwise never linted under -D warnings. Scoped to
-      # dynamo-runtime: a bare --features nvtx at the root also selects
-      # kvbm-engine's, whose markers have no runtime switch.
+      # other way — is otherwise never linted under -D warnings.
       run: "cargo clippy --locked --no-deps -p dynamo-runtime --features nvtx --all-targets -- -D warnings"
     - name: Lint feature-gated benchmark entrypoints
       if: matrix.dir == '.'

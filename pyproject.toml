@@ -87,12 +87,14 @@ sglang = [
 ]
 
 # NVTX profiling. Opt-in only: dynamo.common.utils.nvtx_utils imports `nvtx`
-# solely when DYN_NVTX=1, and is pure-Python no-ops otherwise, so the marker
-# call sites throughout components/ carry no dependency on this extra. Install
-# it alongside DYN_NVTX=1 to record markers. Container images already install
-# the same pin from container/deps/requirements.common.txt.
+# only when DYN_NVTX is on (1/true/on/yes), and is pure-Python no-ops when it is
+# off or unset, so the marker call sites throughout components/ carry no
+# dependency on this extra. Install it alongside DYN_NVTX=1 to record markers.
+# A range, not a pin: vllm pins its own nvtx, and an exact pin that differs from
+# it makes ai-dynamo[vllm,profiling] unresolvable. The container pin is in
+# container/deps/requirements.common.txt.
 profiling = [
-    "nvtx==0.2.14",
+    "nvtx>=0.2.14,<0.3",
 ]
 
 [tool.uv]
