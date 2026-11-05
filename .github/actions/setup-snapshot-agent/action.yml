@@ -54,8 +54,13 @@ runs:
         AGENT_CPU_REQUEST: 500m
         PAGEBROKER_CPU_REQUEST: '1'
       run: |
+        # Share one installation deadline and leave room inside the callers'
+        # 20-minute timeout for failure diagnostics and process termination.
+        timeout --verbose --kill-after=10s 17m bash -euo pipefail /dev/fd/3 3<<'SNAPSHOT_SETUP'
+        # Defer shell termination while a foreground command handles TERM, so
+        # timeout can still kill the process group if that command does not exit.
+        trap 'exit 124' TERM
         echo "::group::Install snapshot-agent"
-        set -euo pipefail
         if [[ -z "${STORAGE_CLASS}" ]]; then
           echo "::error::storage_class input is required"
           exit 1
@@ -157,6 +162,7 @@ runs:
           -l app.kubernetes.io/name=snapshot \
           -o wide
         echo "::endgroup::"
+        SNAPSHOT_SETUP
 
     - name: Debug snapshot-agent failure
       if: failure()
@@ -164,17 +170,22 @@ runs:
       env:
         NAMESPACE: ${{ inputs.namespace }}
       run: |
+        timeout --verbose --kill-after=5s 2m bash /dev/fd/3 3<<'SNAPSHOT_DIAGNOSTICS' || echo "::warning::Snapshot-agent diagnostics failed or timed out"
+        trap 'exit 124' TERM
         set +e
         echo "::group::Snapshot-agent status"
-        kubectl get deployment,daemonset,pods,pvc -n "${NAMESPACE}" -o wide
-        kubectl get storageclass -o wide
-        kubectl get crd podsnapshots.nvidia.com podsnapshotcontents.nvidia.com snapshotjobs.nvidia.com
+        kubectl --request-timeout=10s get deployment,daemonset,pods,pvc -n "${NAMESPACE}" -o wide
+        kubectl --request-timeout=10s get events -n "${NAMESPACE}" --sort-by='.lastTimestamp'
+        kubectl --request-timeout=10s get storageclass -o wide
+        kubectl --request-timeout=10s get crd podsnapshots.nvidia.com podsnapshotcontents.nvidia.com snapshotjobs.nvidia.com
         echo "::endgroup::"
         echo "::group::Snapshot-agent describe"
-        kubectl describe deployment -n "${NAMESPACE}" -l app.kubernetes.io/name=snapshot
-        kubectl describe daemonset -n "${NAMESPACE}" -l app.kubernetes.io/name=snapshot
-        kubectl describe pods -n "${NAMESPACE}" -l app.kubernetes.io/name=snapshot
+        kubectl --request-timeout=10s describe deployment -n "${NAMESPACE}" -l app.kubernetes.io/name=snapshot
+        kubectl --request-timeout=10s describe daemonset -n "${NAMESPACE}" -l app.kubernetes.io/name=snapshot
+        kubectl --request-timeout=10s describe pods -n "${NAMESPACE}" -l app.kubernetes.io/name=snapshot
         echo "::endgroup::"
         echo "::group::Snapshot-agent logs"
-        kubectl logs -n "${NAMESPACE}" -l app.kubernetes.io/name=snapshot --all-containers --tail=100
+        kubectl --request-timeout=10s logs -n "${NAMESPACE}" -l app.kubernetes.io/name=snapshot --all-containers --tail=100 --pod-running-timeout=10s --ignore-errors=true
+        kubectl --request-timeout=10s logs -n "${NAMESPACE}" -l app.kubernetes.io/name=snapshot --all-containers --tail=100 --pod-running-timeout=10s --ignore-errors=true --previous
         echo "::endgroup::"
+        SNAPSHOT_DIAGNOSTICS

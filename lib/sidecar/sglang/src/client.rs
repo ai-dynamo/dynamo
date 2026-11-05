@@ -436,6 +436,35 @@ pub async fn health_check(client: &mut Client, deadline: Instant) -> Result<bool
     .map(|response| response.into_inner().healthy)
 }
 
+const SERVING_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const SERVING_POLL_TIMEOUT: Duration = Duration::from_secs(5);
+const SERVING_POLL_FAILURES: u32 = 3;
+
+/// api.v1 has no engine-state stream, so this polls GetModelInfo until
+/// [`SERVING_POLL_FAILURES`] polls in a row fail or time out, and returns why.
+/// SGLang answers GetModelInfo from static metadata. HealthCheck instead runs
+/// a probe generation, which also fails while the scheduler is paused.
+pub(crate) async fn watch_serving(mut client: Client, attempt_timeout: Duration) -> String {
+    let poll_timeout = attempt_timeout.min(SERVING_POLL_TIMEOUT);
+    let mut failures = 0;
+    loop {
+        tokio::time::sleep(SERVING_POLL_INTERVAL).await;
+        let request = client.get_model_info(pb::GetModelInfoRequest {});
+        let failure = match tokio::time::timeout(poll_timeout, request).await {
+            Ok(Ok(_)) => {
+                failures = 0;
+                continue;
+            }
+            Ok(Err(status)) => format!("GetModelInfo: {} ({:?})", status.message(), status.code()),
+            Err(_) => format!("GetModelInfo did not answer in {poll_timeout:?}"),
+        };
+        failures += 1;
+        if failures == SERVING_POLL_FAILURES {
+            return format!("{failure}; {failures} polls in a row failed");
+        }
+    }
+}
+
 /// Returns whether an active generation matched `rid`.
 pub async fn abort(client: &mut Client, rid: &str, timeout: Duration) -> Result<bool, DynamoError> {
     let request = pb::AbortRequest {
@@ -563,6 +592,10 @@ pub(crate) fn cancelled(message: impl Into<String>) -> DynamoError {
     backend(BackendError::Cancelled, message)
 }
 
+pub(crate) fn stream_incomplete(message: impl Into<String>) -> DynamoError {
+    backend(BackendError::StreamIncomplete, message)
+}
+
 pub fn protocol_error(message: impl Into<String>) -> DynamoError {
     backend(BackendError::Unknown, message)
 }
@@ -581,6 +614,16 @@ pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
         kind,
         format!("{rpc}: {} ({:?})", status.message(), status.code()),
     )
+}
+
+/// For a generate stream: a broken stream maps as in
+/// [`dynamo_sidecar_common::stream_status_to_dynamo`]; a status SGLang sent
+/// keeps this module's mapping.
+pub fn stream_status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
+    if dynamo_sidecar_common::is_broken_stream(&status) {
+        return dynamo_sidecar_common::stream_status_to_dynamo(rpc, status);
+    }
+    status_to_dynamo(rpc, status)
 }
 
 #[cfg(test)]

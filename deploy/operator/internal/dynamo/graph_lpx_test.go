@@ -380,6 +380,17 @@ func TestLPXInputRevision(t *testing.T) {
 		})
 	}
 
+	t.Log("An agent runtime sidecar serves the engine, so replicas scale it as they scale a conductor's")
+	agentServed := source.DeepCopy()
+	served := agentServed.GetComponentByName("decode")
+	served.Roles = []v1beta1.ComponentRoleSpec{*served.ComponentRole(v1beta1.ComponentRoleLPXAgent)}
+	served.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{
+		Name: commonconsts.RuntimeContainerName, Image: "sidecar:1.6.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+	}}
+	agentServedHash := mustComputeBetaDGDWorkersSpecHash(t, agentServed)
+	served.Replicas = new(int32(3))
+	require.Equal(t, agentServedHash, mustComputeBetaDGDWorkersSpecHash(t, agentServed))
+
 	t.Log("Both members independently contribute to the shared LPX revision")
 	pair := source.DeepCopy()
 	target := pair.GetComponentByName("decode")

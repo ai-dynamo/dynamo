@@ -36,8 +36,8 @@ more reliable since SGLang's internal layout doesn't always match the version st
 
 **When you bump SGLang**: the frontend joins native `/generate` responses (streamed
 chunks into one unary response, prefill's prompt-side outputs into decode's) with rules
-in `lib/llm/src/protocols/sglang/merge_rules.json`. Those rules copy SGLang code listed
-in the header of `lib/llm/src/protocols/sglang/merge.rs`. Re-check that code, and run
+in `lib/generate-formats/sglang/src/merge_rules.json`. Those rules copy SGLang code listed
+in the header of `lib/generate-formats/sglang/src/merge.rs`. Re-check that code, and run
 `tests/test_sglang_generate_merge_contract.py`, which fails on any unclassified response
 field or request flag.
 

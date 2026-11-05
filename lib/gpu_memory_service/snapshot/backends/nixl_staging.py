@@ -14,6 +14,7 @@ from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_co
 from dataclasses import dataclass
 from typing import Callable, List, Mapping, Optional, Sequence
 
+from blake3 import blake3
 from gpu_memory_service.common.vmm import get_vmm
 from gpu_memory_service.snapshot.backends.nixl_common import (
     DRAM_MEM_TYPE,
@@ -35,10 +36,13 @@ from gpu_memory_service.snapshot.backends.pinned_host import (
     make_pinned_copy_slots,
 )
 from gpu_memory_service.snapshot.transfer import (
+    FileIntegrity,
     FileTransferSource,
     GMSSnapshotConfig,
     GMSTransferTarget,
     TransferSession,
+    blake3_threads_per_shard,
+    validate_file_integrity_extents,
     validate_transfer_targets,
 )
 
@@ -108,7 +112,11 @@ class NixlPosixStagingTransferBackend:
             self._posix_backend_params,
         )
 
-    def start_restore(self, sources: Sequence[FileTransferSource]) -> TransferSession:
+    def start_restore(
+        self,
+        sources: Sequence[FileTransferSource],
+        integrity_by_path: Mapping[str, FileIntegrity] | None = None,
+    ) -> TransferSession:
         return _NixlPosixStagingTransferSession(
             backend_name=self._backend_name,
             device=self._device,
@@ -118,6 +126,7 @@ class NixlPosixStagingTransferBackend:
             warn_under_parallelized=self._warn_under_parallelized,
             posix_backend_params=self._posix_backend_params,
             sources=sources,
+            integrity_by_path=integrity_by_path,
             api_future=self._api_future,
         )
 
@@ -137,6 +146,7 @@ class _NixlPosixStagingTransferSession:
         warn_under_parallelized: bool,
         posix_backend_params: Mapping[str, str],
         sources: Sequence[FileTransferSource],
+        integrity_by_path: Mapping[str, FileIntegrity] | None = None,
         api_future: Optional[Future[object]] = None,
     ) -> None:
         self._backend_name = backend_name
@@ -145,6 +155,7 @@ class _NixlPosixStagingTransferSession:
         self._group_kind = group_kind
         self._posix_backend_params = dict(posix_backend_params)
         self._sources = list(sources)
+        self._integrity_by_path = dict(integrity_by_path or {})
         self._api_future = api_future
         self._agent_name_base = (
             f"gms_{backend_name.replace('-', '_')}_{device}_{os.getpid()}_{id(self):x}"
@@ -157,6 +168,7 @@ class _NixlPosixStagingTransferSession:
             (group_name, file_groups) for group_name, file_groups in grouped.items()
         ]
         self._worker_count = min(self._max_workers, self._logical_group_count)
+        self._blake3_threads = blake3_threads_per_shard(max(1, self._worker_count))
         if warn_under_parallelized and self._worker_count < self._logical_group_count:
             logger.warning(
                 "%s has %d active %s groups but only %d workers; "
@@ -344,9 +356,11 @@ class _NixlPosixStagingTransferSession:
                 agent=prepared.agent,
                 agent_name=prepared.agent_name,
                 file_groups=prepared.file_groups,
+                integrity_by_path=self._integrity_by_path,
                 targets=targets,
                 cancel_event=self._cancel_event,
                 slots=prepared.slots,
+                blake3_threads=self._blake3_threads,
             )
         finally:
             elapsed = time.monotonic() - group_t0
@@ -382,20 +396,34 @@ def restore_file_groups_with_nixl_staging(
     agent: object,
     agent_name: str,
     file_groups: Sequence[NixlFileGroup],
+    integrity_by_path: Mapping[str, FileIntegrity] | None = None,
     targets: Mapping[str, GMSTransferTarget],
     cancel_event: Optional[threading.Event] = None,
     buffers_per_worker: int = _PINNED_COPY_BUFFERS_PER_WORKER,
     slots: Optional[List[PinnedCopySlot]] = None,
+    blake3_threads: int = 1,
 ) -> int:
+    if blake3_threads <= 0:
+        raise ValueError("blake3_threads must be positive")
     owned_slots = slots is None
     if slots is None:
         slots = []
     total_bytes = 0
+    verified_bytes = 0
+    verified_files = 0
     next_slot = 0
     try:
         if owned_slots:
             slots = make_pinned_copy_slots(get_vmm(), buffers_per_worker)
+        records = integrity_by_path or {}
         for file_path, sources in file_groups:
+            integrity = records.get(file_path)
+            if integrity is not None:
+                validate_file_integrity_extents(sources, integrity)
+            expected_digest = integrity.blake3 if integrity is not None else None
+            digest = (
+                blake3(max_threads=blake3_threads) if integrity is not None else None
+            )
             fd = open_direct_read_fd(file_path, logger=logger, require_direct=True)
             try:
                 for source in sources:
@@ -422,14 +450,36 @@ def restore_file_groups_with_nixl_staging(
                             backend_name,
                         )
                         slot.copy_to_device_async(target.va + done, chunk_size)
+                        if digest is not None:
+                            chunk_view = slot.view[:chunk_size]
+                            try:
+                                digest_view = chunk_view.cast("B")
+                                try:
+                                    digest.update(digest_view)
+                                finally:
+                                    digest_view.release()
+                            finally:
+                                chunk_view.release()
                         done += chunk_size
                         total_bytes += chunk_size
                         next_slot = (next_slot + 1) % len(slots)
             finally:
                 os.close(fd)
+            if digest is not None:
+                if digest.hexdigest() != expected_digest:
+                    raise RuntimeError(f"GMS V1 shard BLAKE3 mismatch: {file_path}")
+                verified_files += 1
+                verified_bytes += integrity.byte_count
 
         for slot in slots:
             slot.wait()
+        if verified_files:
+            logger.info(
+                "%s inline integrity verification succeeded files=%d bytes=%d",
+                backend_name,
+                verified_files,
+                verified_bytes,
+            )
         return total_bytes
     finally:
         if owned_slots:

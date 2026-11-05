@@ -81,7 +81,7 @@ pub struct RuntimeConfig {
     pub request_plane: Option<String>,
     /// Response transport. Frontend and workers must use the same value.
     /// Maps to `DYN_RESPONSE_PLANE`.
-    #[arg(long, env = "DYN_RESPONSE_PLANE", value_parser = ["tcp", "quic"])]
+    #[arg(long, env = "DYN_RESPONSE_PLANE", value_parser = ["tcp", "quic", "velo"])]
     pub response_plane: Option<String>,
     /// Event-plane transport — `"nats"` or `"zmq"`. When `None` the runtime
     /// uses its default transport. Maps to `DYN_EVENT_PLANE`.
@@ -115,8 +115,9 @@ impl RuntimeConfig {
         config.response_plane = match self.response_plane.as_deref() {
             Some("tcp") => Some(ResponsePlaneMode::Tcp),
             Some("quic") => Some(ResponsePlaneMode::Quic),
+            Some("velo") => Some(ResponsePlaneMode::Velo),
             Some(value) => {
-                anyhow::bail!("invalid response plane '{value}'; expected 'tcp' or 'quic'")
+                anyhow::bail!("invalid response plane '{value}'; expected 'tcp', 'quic', or 'velo'")
             }
             None => None,
         };
@@ -154,6 +155,9 @@ impl RuntimeConfig {
 /// Per-worker runtime configuration.
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
+    /// Optional worker-group routing override advertised to the frontend.
+    /// None preserves inheritance from the frontend's routing defaults.
+    pub router_config: Option<dynamo_llm::entrypoint::RouterConfig>,
     /// Dynamo namespace for discovery routing.
     pub namespace: String,
     /// Component name within the namespace.
@@ -243,6 +247,7 @@ impl WorkerConfig {
 impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
+            router_config: None,
             namespace: "dynamo".to_string(),
             component: "backend".to_string(),
             endpoint: "generate".to_string(),
@@ -333,6 +338,14 @@ impl EngineKind {
         match self {
             EngineKind::Llm(e) => e.setup_metrics(ctx).await,
             EngineKind::Raw(e) => e.setup_metrics(ctx).await,
+        }
+    }
+
+    /// See [`LLMEngine::engine_lost`].
+    async fn engine_lost(&self) -> DynamoError {
+        match self {
+            EngineKind::Llm(e) => e.engine_lost().await,
+            EngineKind::Raw(_) => std::future::pending().await,
         }
     }
 
@@ -446,6 +459,8 @@ pub struct Worker {
     /// adapters that detach work (such as a separately scheduled language
     /// runtime task) remain responsible for cancelling that work themselves.
     engine_route_shutdown: CancellationToken,
+    /// Cancelled as `engine.cleanup()` starts; see `EngineAdapter::with_engine_cleanup`.
+    engine_cleanup: CancellationToken,
     /// KV-aware-routing publisher handles. Drained in `cleanup_once` while NATS is alive.
     publishers: Option<PublisherHandles>,
     /// Framework-owned lifecycle gauges. Set in `setup_publishing` after
@@ -481,6 +496,7 @@ impl Worker {
             )),
             engine_route_mutation: Arc::new(tokio::sync::Mutex::new(())),
             engine_route_shutdown: CancellationToken::new(),
+            engine_cleanup: CancellationToken::new(),
             publishers: None,
             lifecycle: None,
             admission_gate: WorkerAdmissionGate::default(),
@@ -598,14 +614,25 @@ impl Worker {
         // grace-period sleep, which is a fixed wait rather than a hang
         // risk), otherwise we exit(911). Healthy long-running workers
         // never hit this — the timer only starts after `shutdown_token`
-        // is cancelled.
+        // is cancelled. A lost engine starts the same shutdown.
+        let engine = self.engine.clone();
         let outcome = {
             let inner_fut = self.run_inner(runtime.clone(), drt, &shutdown_token);
             tokio::pin!(inner_fut);
 
-            tokio::select! {
-                result = &mut inner_fut => result,
-                _ = shutdown_token.cancelled() => {
+            let (finished, lost) = tokio::select! {
+                biased;
+                result = &mut inner_fut => (Some(result), None),
+                _ = shutdown_token.cancelled() => (None, None),
+                error = engine.engine_lost() => (None, Some(error)),
+            };
+            match finished {
+                Some(result) => result,
+                None => {
+                    if let Some(error) = &lost {
+                        tracing::error!(%error, "Engine lost; shutting down the worker");
+                        shutdown_token.cancel();
+                    }
                     runtime.mark_shutting_down();
                     let timeout = graceful_shutdown_timeout();
                     let grace = grace_period_secs();
@@ -616,7 +643,7 @@ impl Worker {
                         timeout.as_secs(),
                         grace,
                     );
-                    match tokio::time::timeout(deadline, &mut inner_fut).await {
+                    let result = match tokio::time::timeout(deadline, &mut inner_fut).await {
                         Ok(result) => result,
                         Err(_) => {
                             tracing::error!(
@@ -626,6 +653,15 @@ impl Worker {
                             );
                             std::process::exit(911);
                         }
+                    };
+                    match lost {
+                        Some(error) => {
+                            if let Err(stopped) = result {
+                                tracing::warn!(error = %stopped, "Worker shutdown failed");
+                            }
+                            Err(error)
+                        }
+                        None => result,
                     }
                 }
             }
@@ -987,6 +1023,7 @@ impl Worker {
             LifecycleState::Running | LifecycleState::StartFailed => {}
         }
         let cleanup_start = std::time::Instant::now();
+        self.engine_cleanup.cancel();
         match self.engine.cleanup().await {
             Ok(()) => tracing::info!("Engine cleanup complete"),
             Err(e) => tracing::error!(error = %e, "engine cleanup failed"),
@@ -1034,6 +1071,14 @@ impl Worker {
         let mut local_model =
             build_local_model(&self.config, engine_config, self.engine.is_raw()).await?;
         tracing::debug!("local model built");
+
+        // An LLM engine admits its network requests through this worker's
+        // gate. Create it before the engine receives its endpoint or the model
+        // is published, so an invalid admission configuration fails startup
+        // with nothing published; the ingress below gets the same gate.
+        if let EngineKind::Llm(_) = &self.engine {
+            self.admission_gate.get_or_create(endpoint.component())?;
+        }
 
         // Hand the engine its serving endpoint before registering the model
         // with discovery. on_endpoint_ready is a fatal handoff: doing it first
@@ -1088,7 +1133,8 @@ impl Worker {
         ) = match &self.engine {
             EngineKind::Llm(engine) => {
                 let mut engine_adapter =
-                    EngineAdapter::new(engine.clone(), self.config.disaggregation_mode);
+                    EngineAdapter::new(engine.clone(), self.config.disaggregation_mode)
+                        .with_engine_cleanup(self.engine_cleanup.clone());
                 if let Some(source) = self
                     .publishers
                     .as_ref()
@@ -1107,7 +1153,7 @@ impl Worker {
                 // before they reach the engine, sized by the model card it
                 // registered above; the local health-check probe below calls
                 // the adapter directly, outside admission.
-                let admission_gate = self.admission_gate.get_or_create(endpoint.component());
+                let admission_gate = self.admission_gate.get()?;
                 admission_gate.record_model_card(local_model.card());
                 let ingress = Ingress::for_engine_with_lifecycle_role(
                     AdmissionEngine::new(admission_gate, engine_adapter.clone()),
@@ -2235,6 +2281,7 @@ async fn build_local_model(
 
     let mut builder = LocalModelBuilder::default();
     builder
+        .router_config(config.router_config.clone())
         .model_name(served_name)
         .model_aliases(engine_config.model_aliases.clone())
         .kv_cache_block_size(llm.kv_cache_block_size)
@@ -2548,6 +2595,41 @@ mod tests {
             e.error_type(),
             ErrorType::Backend(BackendError::InvalidArgument)
         );
+    }
+
+    #[tokio::test]
+    async fn build_local_model_advertises_only_the_configured_worker_group_policy() {
+        use dynamo_llm::entrypoint::RouterConfig;
+        use dynamo_runtime::pipeline::RouterMode;
+
+        let mut routing = RouterConfig {
+            router_mode: RouterMode::KV,
+            session_affinity_ttl_secs: Some(3600),
+            ..Default::default()
+        };
+        routing.kv_router_config.router_replica_sync = true;
+        let prefill = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Prefill,
+            router_config: Some(routing.clone()),
+            ..Default::default()
+        };
+        let engine = EngineConfig {
+            model: "routing-test".into(),
+            ..Default::default()
+        };
+        let model = build_local_model(&prefill, &engine, false).await.unwrap();
+        // Assert the published card, not just the intermediate WorkerConfig.
+        assert_eq!(
+            serde_json::to_value(&model.card().router_config).unwrap(),
+            serde_json::to_value(Some(routing)).unwrap()
+        );
+
+        let decode = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Decode,
+            ..Default::default()
+        };
+        let model = build_local_model(&decode, &engine, false).await.unwrap();
+        assert!(model.card().router_config.is_none());
     }
 
     #[tokio::test]
@@ -4342,6 +4424,109 @@ mod handoff_and_lifecycle_tests {
         );
 
         worker.begin_engine_route_shutdown().await;
+    }
+
+    /// A lost engine withdraws the serving worker, runs cleanup, and makes the
+    /// worker return the engine's error.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn lost_engine_withdraws_the_worker_and_returns_its_error() {
+        struct LostEngine {
+            lost: CancellationToken,
+            cleanup_calls: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait]
+        impl LLMEngine for LostEngine {
+            async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+                Ok(EngineConfig {
+                    model: "lost-mock".to_string(),
+                    ..EngineConfig::default()
+                })
+            }
+
+            async fn generate(
+                &self,
+                _request: PreprocessedRequest,
+                _ctx: crate::engine::GenerateContext,
+            ) -> Result<
+                BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+                DynamoError,
+            > {
+                unreachable!("not used in engine-loss tests")
+            }
+
+            async fn cleanup(&self) -> Result<(), DynamoError> {
+                self.cleanup_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+
+            async fn engine_lost(&self) -> DynamoError {
+                self.lost.cancelled().await;
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                    .message("synthetic engine loss")
+                    .build()
+            }
+        }
+
+        let runtime = dynamo_runtime::Runtime::from_current().unwrap();
+        let config = dynamo_runtime::distributed::DistributedConfig::process_local();
+        let drt = DistributedRuntime::new(runtime, config).await.unwrap();
+        let engine = Arc::new(LostEngine {
+            lost: CancellationToken::new(),
+            cleanup_calls: Default::default(),
+        });
+        let config = WorkerConfig::default();
+        let query = DiscoveryQuery::Endpoint {
+            namespace: config.namespace.clone(),
+            component: config.component.clone(),
+            endpoint: config.endpoint.clone(),
+        };
+        let shutdown = CancellationToken::new();
+        let run = tokio::spawn(
+            Worker::new(engine.clone(), config).run_with_drt(drt.clone(), shutdown.clone()),
+        );
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while drt
+                .discovery()
+                .list(query.clone())
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("worker registers its endpoint");
+
+        engine.lost.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("a lost engine stops the worker")
+            .unwrap()
+            .expect_err("a lost engine fails the worker");
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::EngineShutdown)
+        );
+        assert!(
+            error.to_string().contains("synthetic engine loss"),
+            "{error}"
+        );
+        assert!(
+            drt.discovery().list(query).await.unwrap().is_empty(),
+            "a lost engine must leave no endpoint"
+        );
+        assert_eq!(
+            engine
+                .cleanup_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(shutdown.is_cancelled(), "engine loss uses the SIGTERM path");
     }
 
     /// Ensures a payload-free Rust backend publishes readiness while it is
