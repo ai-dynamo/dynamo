@@ -465,9 +465,9 @@ impl Instances {
             tracing::error!(
                 "this discovery instance has not found itself in the list of instances, so pool \
                  lists stay incomplete; check that its Service is exported through MCS and \
-                 imported in this cluster, that the import lists this cluster's own instances, \
-                 that --peer-service, --peer-namespace and --peer-port-name name it, and that \
-                 this instance answers at its listed address"
+                 imported into this cluster as well (with Karmada, that the ServiceImport is \
+                 placed on this cluster too), that --peer-service, --peer-namespace and \
+                 --peer-port-name name it, and that this instance answers at its listed address"
             );
         }
     }

@@ -44,6 +44,9 @@ the `global-discovery-service` binary. For choosing and setting up a registratio
 | `--router-namespace <ns>` | Required | Namespace of the Global Router Service. |
 | `--router-service <name>` | Required | The Global Router Service, exported through MCS. |
 | `--router-port-name <name>` | Required | The router Service's named port for state streams. |
+| `--peer-service <name>` | Unset | This service's own Service, exported through MCS. The instances then share the registrations they keep in memory. See [Sharing registrations between instances](#sharing-registrations-between-instances). |
+| `--peer-namespace <ns>` | The Pod's namespace | Namespace of `--peer-service`. |
+| `--peer-port-name <name>` | `http` | The named port `--peer-service` serves HTTP on. |
 
 These modes join EndpointSlices that MCS imports with registrations from `POST /pools`. A pool is
 listed while MCS imports a Ready Pool Relay endpoint for it and its registration lease lasts. While a
@@ -53,6 +56,26 @@ MCS supplies relay identities and frontend addresses; the registration supplies 
 capabilities, capacity, and location. Export each pool's frontend Service to supply its addresses.
 The service needs read access to `endpointslices`. `karmada` reads slices named the Karmada way, and `mcs`
 reads slices with the standard `multicluster.kubernetes.io` labels.
+
+#### Sharing registrations between instances
+
+With `--registration-storage memory`, each instance keeps only the registrations it receives. With
+`--peer-service`, the instances in every cluster share them. Each instance reads the others'
+`GET /registrations` twice per heartbeat interval and keeps a copy of each registration for the time it
+has left. This needs:
+
+- An import of the Service in every cluster that runs an instance, listing that cluster's own instances
+  too. The MCS standard imports an exported Service into the exporting clusters as well. With Karmada,
+  place the ServiceImport on each of those clusters, not only on the others.
+- `--registration-storage memory`, and no `--tls-cert-path`: instances read each other over plain HTTP,
+  on a trusted network.
+- A lease of at least three heartbeat intervals, and the same heartbeat interval and lease on every
+  instance.
+
+An instance becomes ready once it has asked the others. `GET /pools` reports `complete: false` while a
+registration made with another instance may be missing here. That holds until the instance has found
+itself in the import; for a lease after an instance leaves the import; while a listed instance does not
+answer completely; and after a registration lapses here, until every instance has answered again.
 
 ### With `--registration-storage dynamodb`
 
@@ -88,7 +111,8 @@ short plain-text reason, and `GET /healthz` answers with a status and an empty b
 | `POST /pools` | Register a pool and renew its lease. | 200 with a lease | 400 for malformed JSON, 413 for a body over 64 KiB, 415 without `Content-Type: application/json`, 422 for an invalid registration or one the store cannot keep, 503 when the store is unreachable |
 | `GET /pools` | List live pools. | 200 with a pool list | 503 when the backend is unreachable. With `dynamodb`, only before the first read of the table. |
 | `GET /routers` | List Global Router replicas. | 200 with a router list | 503 when the backend is unreachable |
-| `GET /healthz` | Readiness: the backend has answered once. With DynamoDB, that follows the startup check that the table can be read and written. Later backend failures show in the answers to requests, not here. | 200 | 503 until the backend has answered |
+| `GET /registrations` | With `--peer-service`, the registrations this instance's Pool Relays made, with the time each has left, for the other instances. | 200 with the registrations | 501 without `--peer-service` |
+| `GET /healthz` | Readiness: the backend has answered once, and with `--peer-service`, the instance has asked the others once. With DynamoDB, that follows the startup check that the table can be read and written. Later backend failures show in the answers to requests, not here. | 200 | 503 until then |
 
 ### `POST /pools`
 
@@ -143,7 +167,7 @@ In `karmada` and `mcs` modes, the listed frontend addresses come from MCS; the r
 | --- | --- |
 | `pools[].model` | `null` when the service does not know the pool's model. |
 | `pools[].relay_identities` | The identities of the Pool Relay allowed to stream the pool's state, such as `ip:10.43.66.175`. Empty in `registrations` mode. |
-| `complete` | `true` when the service believes it lists every live pool; `false` when the list may be missing some. It is not an authoritative inventory: with `dynamodb`, an item that cannot be decoded is logged and left out, and another region's writes arrive by replication. With either store it is `false` until one lease has passed after the service starts: a `memory` store has only the registrations it received, and while a rollout moves the service to a DynamoDB table, Pool Relays may still register with the old replicas. With `dynamodb` it is also `false` while the table cannot be reached, and for one lease after, since Pool Relays could not renew meanwhile; and with a Global Table, while a pool from another region is listed past its lease (see `--dynamodb-replication-grace-secs`). In `karmada` and `mcs` modes, both the imported and registered pool lists must be complete. |
+| `complete` | `true` when the service believes it lists every live pool; `false` when the list may be missing some. It is not an authoritative inventory: with `dynamodb`, an item that cannot be decoded is logged and left out, and another region's writes arrive by replication. With either store it is `false` until one lease has passed after the service starts: a `memory` store has only the registrations it received, and while a rollout moves the service to a DynamoDB table, Pool Relays may still register with the old replicas. With `dynamodb` it is also `false` while the table cannot be reached, and for one lease after, since Pool Relays could not renew meanwhile; and with a Global Table, while a pool from another region is listed past its lease (see `--dynamodb-replication-grace-secs`). With `--peer-service`, it is also `false` while a registration made with another instance may be missing (see [Sharing registrations between instances](#sharing-registrations-between-instances)). In `karmada` and `mcs` modes, both the imported and registered pool lists must be complete. |
 
 ### `GET /routers`
 

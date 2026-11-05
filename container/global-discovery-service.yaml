@@ -21,10 +21,13 @@
 #
 # With the default --registration-storage=memory, one instance keeps only the
 # registrations it receives. To run one in each cluster, export this Service,
-# import it in every cluster as the router Service is, and add
-# --peer-service=global-discovery-service, so the instances share their
-# registrations. The import must list this cluster's own instances too. An
-# instance that does not find itself in it keeps its pool lists incomplete.
+# import it into every cluster that runs an instance, this one included, and
+# add --peer-service=global-discovery-service, so the instances share their
+# registrations. With Karmada, place its ServiceImport on each of those
+# clusters, not only on the others, or read the control plane as above: an
+# instance that does not find itself in the import keeps its pool lists
+# incomplete. With --registration-storage=dynamodb, the instances share the
+# table instead.
 apiVersion: v1
 kind: Namespace
 metadata:

@@ -17,14 +17,16 @@ verify the service. For every flag and endpoint, see
 
 | | `memory` (default) | `dynamodb` |
 | --- | --- | --- |
-| Replicas | One. Each replica keeps only the registrations it receives. | Any number. Every replica reads the same table. |
+| Replicas | One, or any number with `--peer-service` (Karmada or MCS only), which shares registrations between instances. Without it, each replica keeps only the registrations it receives. | Any number. Every replica reads the same table. |
 | Restart | State is lost. | State survives. |
-| `complete` in `GET /pools` | `false` until one lease has passed after start. | The same, though a new replica lists every pool at once. |
-| Regions | One. | One, or several through a DynamoDB Global Table. |
+| `complete` in `GET /pools` | `false` until one lease has passed after start. With `--peer-service`, also while another instance's registrations may be missing. | The same, though a new replica lists every pool at once. |
+| Regions | One, or several with `--peer-service`. | One, or several through a DynamoDB Global Table. |
 | Extra setup | None. | A table, IAM permissions, and AWS credentials for the pods. |
 
-Use `memory` for a single-replica development or lab deployment. Use `dynamodb` when the service must
-survive restarts without a gap in the pool list, run more than one replica, or span AWS regions.
+Use `memory` for a single-replica development or lab deployment, or, with
+[`--peer-service`](../../reference/components/global-discovery-service-configuration.md#sharing-registrations-between-instances),
+for instances in several clusters without AWS. Use `dynamodb` when the service must survive restarts
+without a gap in the pool list, run more than one replica, or span AWS regions.
 
 ## Create the table
 

@@ -25,8 +25,10 @@ Router reads `GET /pools` for the pools it can route to and `GET /routers` for i
 
 `--registration-storage` chooses where registrations are kept, with every `--pool-discovery` value:
 
-- `memory` (default): in the process. Run one replica. A restart loses the registrations, and
-  `GET /pools` reports `complete: false` until one lease has passed.
+- `memory` (default): in the process. Run one replica, or, with `karmada` or `mcs`, run instances in
+  several clusters with `--peer-service`, which shares their registrations
+  ([`src/peers.rs`](src/peers.rs)). A restart loses the registrations, and `GET /pools` reports
+  `complete: false` until one lease has passed.
 - `dynamodb`: in a DynamoDB table, so any number of replicas serve the same pools, and a restart loses
   nothing. As with `memory`, `complete` is `false` for one lease after a replica starts. A Global
   Table extends it across regions.

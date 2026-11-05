@@ -9,9 +9,10 @@
 //!   EndpointSlices that MCS imports, named the Karmada way (`karmada`) or
 //!   the standard way (`mcs`), joined with registrations.
 //! - `--registration-storage`: where registrations are kept. Either in this
-//!   process (`memory`), so run one replica, or in a DynamoDB table that
-//!   every replica shares (`dynamodb`), in one region or, through a Global
-//!   Table, in several.
+//!   process (`memory`), so run one replica unless `--peer-service` shares
+//!   them between instances, or in a DynamoDB table that every replica
+//!   shares (`dynamodb`), in one region or, through a Global Table, in
+//!   several.
 //!
 //! ```bash
 //! cargo run -p dynamo-global-discovery-service -- \
@@ -233,17 +234,18 @@ struct Args {
     router_port_name: Option<String>,
     /// This service's own Service, exported through MCS. With it, the
     /// instances in every cluster share their registrations, over plain HTTP
-    /// on a trusted network, so not with `--tls-cert-path` yet. Each cluster's
-    /// import must list that cluster's own instances too. The lease must be at
-    /// least three heartbeat intervals, and every instance must use the same
-    /// heartbeat interval and lease. While registrations made with another
-    /// instance may be missing here, `GET /pools` says the list is not
-    /// complete, so Global Routers keep pools that may have left: until this
-    /// instance has asked the others and found itself in the list, for a
-    /// lease after an instance leaves, while one does not answer completely,
-    /// and after a registration lapses here, until every instance has
-    /// answered again, since its PoolRelay may have renewed it late with any
-    /// of them.
+    /// on a trusted network, so not with `--tls-cert-path` yet. Every cluster
+    /// that runs an instance must import it, so that the import lists its own
+    /// instances too: with Karmada, place the ServiceImport on each of those
+    /// clusters, not only on the others. The lease must be at least three
+    /// heartbeat intervals, and every instance must use the same heartbeat
+    /// interval and lease. While registrations made with another instance may
+    /// be missing here, `GET /pools` says the list is not complete, so Global
+    /// Routers keep pools that may have left: until this instance has asked
+    /// the others and found itself in the list, for a lease after an instance
+    /// leaves, while one does not answer completely, and after a registration
+    /// lapses here, until every instance has answered again, since its
+    /// PoolRelay may have renewed it late with any of them.
     #[arg(
         long,
         value_parser = NonEmptyStringValueParser::new(),
