@@ -23,13 +23,20 @@ from kvcr import KVCR, KVCRBindings, ZmqPeerControlChannel
 from kvcr.config import KVCRBackendConfigs, KVCRConfig, RemoteFWGPUOptions
 from kvcr.types import BlockKey, MemoryRef, RegionDescriptor, TransferError
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
+    OffloadingEventsTracker,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    generate_block_hash_extra_keys,
+    maybe_convert_block_hash,
+)
 from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingSpec,
@@ -634,8 +641,50 @@ class GPUOffloadingSpec(OffloadingSpec):
         return self._worker
 
 
+class _GPUOffloadingEventsTracker(OffloadingEventsTracker):
+    """Snapshot request namespaces before the upstream tracker loses them."""
+
+    @staticmethod
+    def _with_extra_keys(req, metadata, chunk_start):
+        if metadata.extra_keys is None:
+            extra_keys = []
+            mm_idx = 0
+            for block_idx in range(len(metadata.block_hashes)):
+                start = chunk_start + block_idx * metadata.block_size
+                keys, mm_idx = generate_block_hash_extra_keys(
+                    req, start, start + metadata.block_size, mm_idx
+                )
+                extra_keys.append(keys)
+            metadata.extra_keys = tuple(extra_keys)
+        return metadata
+
+    def _build_event_metadata(self, req, group_config, chunk_idx):
+        metadata = super()._build_event_metadata(req, group_config, chunk_idx)
+        return self._with_extra_keys(
+            req, metadata, chunk_idx * group_config.tokens_per_chunk
+        )
+
+    def _record_partial_tail(self, req, group_config, boundary_tokens, offload_key):
+        super()._record_partial_tail(req, group_config, boundary_tokens, offload_key)
+        metadata = self._pending_event_metadata.get(offload_key)
+        if metadata is not None:
+            self._with_extra_keys(
+                req, metadata, boundary_tokens - len(metadata.token_ids)
+            )
+
+
 class GPUOffloadingConnector(OffloadingConnector):
     """Publish retained-cache residency as GPU memory, never CPU inventory."""
+
+    def __init__(self, vllm_config, role, kv_cache_config):
+        super().__init__(vllm_config, role, kv_cache_config)
+        if self.connector_scheduler is not None:
+            tracker = self.connector_scheduler._events_tracker
+            if tracker._pending_event_metadata:
+                raise RuntimeError("GPU event tracker must precede request admission")
+            self.connector_scheduler._events_tracker = _GPUOffloadingEventsTracker(
+                tracker.config
+            )
 
     def reset_cache(self):
         assert self.connector_scheduler is not None
