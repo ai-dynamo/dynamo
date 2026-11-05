@@ -31,6 +31,10 @@ from unittest.mock import MagicMock, call
 import pytest
 import torch
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
+
+# Imported as a module: the provenance tests below define a stand-in named
+# MLAAttentionSpec, which would shadow vLLM's.
+import vllm.v1.kv_cache_interface as kv_cache_interface
 from vllm.config import CUDAGraphMode  # noqa: E402
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
@@ -5484,6 +5488,85 @@ def test_kvwarm_native_rejects_unsupported_spec_with_state():
     assert not stub._kvwarm_native
 
 
+def _kvwarm_layout_stub(specs, *, experts=8, ep=False, prefix=False):
+    """A gate stub whose KV cache groups carry the given vLLM group specs."""
+    stub = _kvwarm_gate_stub(experts=experts, ep=ep, prefix=prefix)
+    stub.kv_cache_manager.kv_cache_config.kv_cache_groups = [
+        SimpleNamespace(kv_cache_spec=spec) for spec in specs
+    ]
+    return stub
+
+
+def _full_attention_spec():
+    return FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
+    )
+
+
+def _circular_buffer_spec():
+    # GLM-5.3-Flash's indexer tail: a 4-slot ring holding [K, gate score].
+    return kv_cache_interface.CircularBufferSpec(
+        block_size=4,
+        num_kv_heads=2,
+        head_size=128,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+        dcp_sharded=False,
+    )
+
+
+def _mamba_spec():
+    return kv_cache_interface.MambaSpec(
+        block_size=16, shapes=(), dtypes=(), mamba_cache_mode="align"
+    )
+
+
+@pytest.mark.core
+def test_kvwarm_native_admits_glm_scheduler_groups_without_ep():
+    # GLM-5.3-Flash's cache groups as vLLM 0.32.0's scheduler sees them: MLA
+    # attention, the indexer tail's circular buffer and recurrent state.
+    mla = kv_cache_interface.MLAAttentionSpec(
+        block_size=64, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+    )
+    stub = _kvwarm_layout_stub(
+        [mla, _circular_buffer_spec(), _mamba_spec(), _mamba_spec()],
+        experts=8,
+        ep=False,
+    )
+
+    eligible = stub._kvwarm_warm_eligible()
+
+    assert stub._kvwarm_meta["skip_reason"] is None
+    assert eligible
+    assert stub._kvwarm_native
+    assert stub._kvwarm_meta["initialization_strategy"] == "native_exact_context"
+
+
+@pytest.mark.core
+def test_kvwarm_native_admits_plain_circular_buffer_groups():
+    stub = _kvwarm_layout_stub([_full_attention_spec(), _circular_buffer_spec()])
+
+    eligible = stub._kvwarm_warm_eligible()
+
+    assert stub._kvwarm_meta["skip_reason"] is None
+    assert eligible
+    assert stub._kvwarm_meta["initialization_strategy"] == "native_exact_context"
+
+
+@pytest.mark.core
+def test_kvwarm_dense_circular_buffer_stays_content_insensitive():
+    # The native path still needs experts or state layers: a dense model
+    # whose only bounded layout is a circular buffer keeps synthetic KV.
+    stub = _kvwarm_layout_stub(
+        [_full_attention_spec(), _circular_buffer_spec()], experts=0
+    )
+
+    assert not stub._kvwarm_warm_eligible()
+    assert not stub._kvwarm_native
+    assert stub._kvwarm_meta["skip_reason"] == "dense_model_content_insensitive"
+    assert "initialization_strategy" not in stub._kvwarm_meta
+
+
 @pytest.mark.core
 def test_kvwarm_native_stage_prefills_exact_heterogeneous_contexts():
     contexts = (513, 512)  # Admission lengths (ctx - 1) of contexts 514 and 513.
@@ -6042,6 +6125,56 @@ def test_kvwarm_native_capacity_counts_mamba_state_blocks(modes):
     state_blocks = 3 * len(modes)
     expected = (3 + state_blocks) + (1 + state_blocks) + modes.count("align")
     assert stub._kvwarm_native_required_blocks([31, 12]) == expected
+
+
+def _circular_buffer_capacity_stub():
+    """A full-attention group with 16-token blocks and a 4-slot ring group."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(
+            single_type_managers=[
+                SimpleNamespace(block_size=16, kv_cache_spec=_full_attention_spec()),
+                SimpleNamespace(block_size=4, kv_cache_spec=_circular_buffer_spec()),
+            ]
+        )
+    )
+    return stub
+
+
+@pytest.mark.core
+def test_bench_blocks_per_req_counts_one_block_for_circular_buffer_groups():
+    stub = _circular_buffer_capacity_stub()
+    cases = [
+        (num_tokens, apply_admission_cap)
+        for num_tokens in (1, 4, 8193)
+        for apply_admission_cap in (False, True)
+    ]
+
+    counts = {
+        (num_tokens, apply_admission_cap): stub._bench_blocks_per_req(
+            num_tokens, apply_admission_cap=apply_admission_cap
+        )
+        for num_tokens, apply_admission_cap in cases
+    }
+
+    # The full-attention group adds ceil(num_tokens / 16) blocks. vLLM's
+    # CircularBufferManager claims one ring block per request, whatever the
+    # request's length and the admission cap.
+    assert counts == {
+        (num_tokens, apply_admission_cap): -(-num_tokens // 16) + 1
+        for num_tokens, apply_admission_cap in cases
+    }
+
+
+@pytest.mark.core
+def test_kvwarm_native_capacity_counts_one_block_for_circular_buffer_groups():
+    stub = _circular_buffer_capacity_stub()
+    stub.max_model_len = 16384
+    stub.num_lookahead_tokens = 0
+
+    # 8192 prefilled tokens + admission + three steady writes: the full group
+    # holds ceil(8196 / 16) = 513 blocks, and the ring group one block.
+    assert stub._kvwarm_native_required_blocks([8192]) == 514
 
 
 @pytest.mark.core
