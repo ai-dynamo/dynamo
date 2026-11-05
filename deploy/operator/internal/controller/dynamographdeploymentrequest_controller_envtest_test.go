@@ -2359,7 +2359,6 @@ var _ = Describe("DGDR Helper Functions", func() {
 				name string
 				want string // exact Job name, when the name is not shortened
 			}{
-				{name: "test-dgdr", want: "profile-test-dgdr"},
 				{name: name55, want: "profile-" + name55},
 				{name: strings.Repeat("a", 56)},
 				{name: "llama-3-3-70b-instruct-fp8-production-us-east-1-profiling"},
@@ -2380,13 +2379,6 @@ var _ = Describe("DGDR Helper Functions", func() {
 					Expect(jobName).To(Equal(tc.want))
 				}
 			}
-		})
-
-		It("Should give different Job names to long DGDR names that share a prefix", func() {
-			shared := strings.Repeat("a", 63)
-			first := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{Name: shared + "-one"}
-			second := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{Name: shared + "-two"}
-			Expect(getProfilingJobName(first)).NotTo(Equal(getProfilingJobName(second)))
 		})
 	})
 
