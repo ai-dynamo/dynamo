@@ -47,6 +47,7 @@ def construct_connector(
             global_planner_namespace=config.global_planner_namespace,
             global_planner_component="GlobalPlanner",
             model_name=config.model_name,
+            managed_allocation=config.global_planner_managed_allocation,
         )
     if config.environment == "kubernetes":
         return KubernetesConnector(

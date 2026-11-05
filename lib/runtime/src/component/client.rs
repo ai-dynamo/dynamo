@@ -134,6 +134,8 @@ pub(crate) struct RoutingInstances {
     /// can tell one overload snapshot from another by pointer.
     overloaded_ids: Arc<HashSet<u64>>,
     free_ids: Vec<u64>,
+    /// Shared with readers, and kept across rebuilds that leave the routable IDs
+    /// unchanged, so they can tell one availability snapshot from another by pointer.
     routable_id_set: Arc<HashSet<u64>>,
     /// True after this client has observed at least one discovered instance.
     /// Once set, a later empty snapshot is authoritative rather than startup
@@ -220,11 +222,14 @@ impl RoutingInstances {
         Some(Arc::clone(&self.overloaded_ids))
     }
 
-    /// This rebuild of `previous`, sharing its overloaded set when the rebuild left
-    /// the set unchanged.
-    fn sharing_overloaded_ids(mut self, previous: &Self) -> Self {
+    /// This rebuild of `previous`, sharing its overloaded and routable sets when the
+    /// rebuild left them unchanged.
+    fn sharing_unchanged_sets(mut self, previous: &Self) -> Self {
         if self.overloaded_ids == previous.overloaded_ids {
             self.overloaded_ids = Arc::clone(&previous.overloaded_ids);
+        }
+        if self.routable_ids == previous.routable_ids {
+            self.routable_id_set = Arc::clone(&previous.routable_id_set);
         }
         self
     }
@@ -392,7 +397,7 @@ impl RoutingInstancesState {
         let next = Arc::new(
             current
                 .clear_expired_request_overloads(now)
-                .sharing_overloaded_ids(&current),
+                .sharing_unchanged_sets(&current),
         );
         self.snapshot.store(next);
     }
@@ -404,7 +409,7 @@ impl RoutingInstancesState {
     ) -> Arc<RoutingInstances> {
         let _guard = self.update_lock.lock().unwrap();
         let current = self.snapshot.load();
-        let next = Arc::new(update(&current).sharing_overloaded_ids(&current));
+        let next = Arc::new(update(&current).sharing_unchanged_sets(&current));
         self.snapshot.store(next.clone());
         if publish_routable_ids {
             self.publish_routable_ids(&next);
@@ -452,7 +457,7 @@ impl RoutingInstancesState {
         let next = Arc::new(
             current
                 .set_overloaded(overloaded_ids)
-                .sharing_overloaded_ids(&current),
+                .sharing_unchanged_sets(&current),
         );
         let effective_changed = current.overloaded_ids != next.overloaded_ids;
         let source_changed = current.monitor_overloaded_ids != next.monitor_overloaded_ids
@@ -475,7 +480,7 @@ impl RoutingInstancesState {
         let next = Arc::new(
             current
                 .mark_overloaded_until(instance_id, deadline)
-                .sharing_overloaded_ids(&current),
+                .sharing_unchanged_sets(&current),
         );
         self.snapshot.store(next);
     }
@@ -1663,6 +1668,19 @@ mod tests {
 
         state.report_instance_down(2);
         assert!(Arc::ptr_eq(&before, &state.overloaded_ids().unwrap()));
+    }
+
+    #[test]
+    fn overload_updates_keep_the_available_snapshot() {
+        let (state, _rx) = RoutingInstancesState::new(vec![1, 2, 3]);
+        let before = state.available_ids().unwrap();
+
+        assert!(state.set_overloaded_instances(&[1]));
+        state.mark_overloaded_until(2, Instant::now() + Duration::from_secs(60));
+        assert!(Arc::ptr_eq(&before, &state.available_ids().unwrap()));
+
+        state.report_instance_down(3);
+        assert_eq!(*state.available_ids().unwrap(), HashSet::from([1, 2]));
     }
 
     #[tokio::test(start_paused = true)]
