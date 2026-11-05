@@ -184,8 +184,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             # No decode worker consumes a probe's KV. SGLang picks fake transfer
             # by host alone, so the probe keeps its port and room.
             logging.debug(
-                f"Health probe bootstrap_host {bootstrap_host} replaced with "
-                f"{FAKE_BOOTSTRAP_HOST}"
+                "Health probe bootstrap_host %s replaced with %s",
+                bootstrap_host,
+                FAKE_BOOTSTRAP_HOST,
             )
             bootstrap_host = FAKE_BOOTSTRAP_HOST
 
