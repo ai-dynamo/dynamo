@@ -4,8 +4,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use arc_swap::ArcSwapOption;
 use dynamo_tokens::SequenceHash;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
@@ -37,6 +38,42 @@ pub type WorkerAvailabilityProvider =
     Arc<dyn Fn(&SchedulingRequest) -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
 
 pub use dynamo_worker_selection::WorkerSelectionPolicyError;
+
+/// Worker IDs hashed with Fx: eligibility probes the available set once per worker on
+/// every admission.
+pub type WorkerIdSet = FxHashSet<WorkerId>;
+
+/// A [`WorkerAvailabilityProvider`] whose sets are converted to [`WorkerIdSet`]s once per
+/// set. The frontend's provider returns the same `Arc` until membership changes; a set
+/// built per request (a LoRA filter) is converted per request.
+pub(crate) struct AvailableWorkerIds {
+    provider: WorkerAvailabilityProvider,
+    /// The last source set and its conversion. Holding the source keeps its address from
+    /// being reused, so a pointer match means the same set.
+    last: ArcSwapOption<(Arc<HashSet<WorkerId>>, Arc<WorkerIdSet>)>,
+}
+
+impl AvailableWorkerIds {
+    pub(crate) fn new(provider: WorkerAvailabilityProvider) -> Self {
+        Self {
+            provider,
+            last: ArcSwapOption::empty(),
+        }
+    }
+
+    pub(crate) fn get(&self, request: &SchedulingRequest) -> Option<Arc<WorkerIdSet>> {
+        let source = (self.provider)(request)?;
+        if let Some(last) = self.last.load().as_deref()
+            && Arc::ptr_eq(&last.0, &source)
+        {
+            return Some(Arc::clone(&last.1));
+        }
+        let converted = Arc::new(source.iter().copied().collect::<WorkerIdSet>());
+        self.last
+            .store(Some(Arc::new((source, Arc::clone(&converted)))));
+        Some(converted)
+    }
+}
 
 /// Builds a partition's worker-selection policy from the selection slice, the worker type
 /// this router serves, and the partition the policy is for. The composed router's plugin
@@ -384,10 +421,7 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
         self.request
     }
 
-    pub(crate) fn with_available_workers(
-        mut self,
-        available: Option<&'a HashSet<WorkerId>>,
-    ) -> Self {
+    pub(crate) fn with_available_workers(mut self, available: Option<&'a WorkerIdSet>) -> Self {
         self.eligibility = self.eligibility.with_available_workers(available);
         self
     }
@@ -659,5 +693,25 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn available_worker_ids_convert_each_set_once() {
+        let source = Arc::new(ArcSwapOption::from_pointee(HashSet::from([1, 2])));
+        let ids = AvailableWorkerIds::new({
+            let source = Arc::clone(&source);
+            Arc::new(move |_: &SchedulingRequest| source.load_full())
+        });
+        let request = request_with_decode_load(16, None, 0, 0, WorkerWithDpRank::from_worker_id(1));
+
+        let first = ids.get(&request).unwrap();
+        assert_eq!(*first, WorkerIdSet::from_iter([1, 2]));
+        assert!(Arc::ptr_eq(&first, &ids.get(&request).unwrap()));
+
+        source.store(Some(Arc::new(HashSet::from([3]))));
+        assert_eq!(*ids.get(&request).unwrap(), WorkerIdSet::from_iter([3]));
+
+        source.store(None);
+        assert!(ids.get(&request).is_none());
     }
 }

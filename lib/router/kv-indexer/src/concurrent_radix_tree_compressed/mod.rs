@@ -54,8 +54,8 @@ pub struct ConcurrentRadixTreeCompressed {
     sweep_schedule: SweepSchedule,
     /// Nodes that lost their last holder since the last stale-leaf sweep began.
     deaths_since_sweep: AtomicU64,
-    /// When the last stale-leaf sweep began.
-    last_sweep: parking_lot::Mutex<Instant>,
+    /// When the last stale-leaf sweep began, and how many nodes it visited.
+    last_sweep: parking_lot::Mutex<LastSweep>,
     #[cfg(any(test, feature = "bench"))]
     bench_metrics: CrtcBenchMetrics,
 }
@@ -66,6 +66,10 @@ const SWEEP_TICK: Duration = Duration::from_millis(50);
 const SWEEP_AFTER_DEATHS: u64 = 1024;
 /// ...or once this long has passed, for nodes no death was counted for.
 const SWEEP_MAX_INTERVAL: Duration = Duration::from_secs(30);
+/// A sweep walks the whole tree, so it also waits for one death per this many nodes the
+/// last sweep visited. That keeps the walk near this many visits per death, and the dead
+/// leaves the lanes miss to a small share of the tree.
+const SWEEP_VISITS_PER_DEATH: u64 = 8;
 
 /// Most queued dead leaves an idle event lane unlinks before it checks for new events.
 const IDLE_UNLINK_LIMIT: usize = 256;
@@ -78,6 +82,12 @@ struct SweepSchedule {
     tick: Option<Duration>,
     after_deaths: u64,
     max_interval: Duration,
+}
+
+struct LastSweep {
+    began: Instant,
+    /// Nodes the sweep's walk visited; zero before the first sweep.
+    nodes: u64,
 }
 
 #[cfg(any(test, feature = "bench"))]
@@ -152,7 +162,10 @@ impl ConcurrentRadixTreeCompressed {
                 max_interval: SWEEP_MAX_INTERVAL,
             },
             deaths_since_sweep: AtomicU64::new(0),
-            last_sweep: parking_lot::Mutex::new(Instant::now()),
+            last_sweep: parking_lot::Mutex::new(LastSweep {
+                began: Instant::now(),
+                nodes: 0,
+            }),
             #[cfg(any(test, feature = "bench"))]
             bench_metrics: CrtcBenchMetrics::new(),
         }
@@ -185,15 +198,26 @@ impl ConcurrentRadixTreeCompressed {
     /// schedule's longest interval has passed.
     fn sweep_if_due(&self) {
         let schedule = &self.sweep_schedule;
-        let due = self.deaths_since_sweep.load(Ordering::Relaxed) >= schedule.after_deaths
-            || self.last_sweep.lock().elapsed() >= schedule.max_interval;
+        let mut last = self.last_sweep.lock();
+        let after_deaths = schedule
+            .after_deaths
+            .max(last.nodes / SWEEP_VISITS_PER_DEATH);
+        let due = self.deaths_since_sweep.load(Ordering::Relaxed) >= after_deaths
+            || last.began.elapsed() >= schedule.max_interval;
         if !due {
             return;
         }
         // Deaths during the sweep count toward the next one.
         self.deaths_since_sweep.store(0, Ordering::Relaxed);
-        *self.last_sweep.lock() = Instant::now();
-        self.sweep_stale_children();
+        last.began = Instant::now();
+        // Only the maintenance thread sweeps on schedule, so holding the lock blocks no one.
+        let sweep = self.sweep_stale_children();
+        tracing::debug!(
+            visited = sweep.visited,
+            unlinked = sweep.unlinked,
+            "Swept stale index leaves"
+        );
+        last.nodes = sweep.visited;
     }
 
     #[cfg(test)]

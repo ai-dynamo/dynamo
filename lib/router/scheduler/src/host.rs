@@ -64,6 +64,7 @@ pub use crate::filter::{RoutingEligibility, WorkerEligibilityError};
 pub use crate::overlap::{CacheHitEstimates, cache_hit_estimates_from_tiered_matches};
 pub use crate::prefill_load::effective_prefill_tokens;
 pub use crate::queue::{BookingHandle, SchedulerBookingCleanup};
+pub use crate::types::WorkerIdSet;
 pub use crate::types::{
     AdvisoryWorkerLoad, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
     WorkerAvailabilityProvider,
