@@ -1,0 +1,394 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Mistral Large 4 on Vera Rubin (VR NVL72): disaggregated 1P1D, TP4 per role, DSpark3, NVFP4
+# KV cache, 1M context. One 4-GPU prefill worker and one 4-GPU decode worker; KV moves
+# prefill -> decode over NIXL (UCX, cuda_ipc over MNNVL). Both roles keep a CPU KV offload
+# tier behind the NIXL connector and GPU prefix caching. The frontend runs the Dynamo KV router
+# with hard session affinity.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: mistral-large-4-vllm-vr-disagg-agentic
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    runtimeVersionOverride: "1.6.0"
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-mistral-large-4-dev.1
+          imagePullPolicy: IfNotPresent
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+          - --http-port
+          - '8000'
+          - --router-kv-events
+          - --kv-cache-block-size
+          - '64'
+          - --router-session-affinity-mode
+          - hard
+          - --router-session-affinity-ttl-secs
+          - '7200'
+          # Rust BPE tokenizer for the 100K-token agentic prompts.
+          - --tokenizer
+          - fastokens
+          - --no-tokenizer-fallback
+          env:
+          - name: FASTOKENS_BPE_THREADS
+            value: '16'
+          - name: DYN_PARSER_VERSION
+            value: '2'
+          - name: DYN_ROUTER_MODE
+            value: kv
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: DYN_LOG
+            value: info
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /shared-model-cache
+            readOnly: true
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+  - name: PrefillWorker
+    type: prefill
+    runtimeVersionOverride: "1.6.0"
+    replicas: 1
+    sharedMemorySize: 640Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-mistral-large-4-dev.1
+          imagePullPolicy: IfNotPresent
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 30
+            failureThreshold: 540
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: system
+              scheme: HTTP
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 30
+            successThreshold: 1
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - $(MODEL_PATH)
+          - --served-model-name
+          - $(SERVED_MODEL_NAME)
+          - --enable-multimodal
+          - --config-format
+          - mistral
+          - --load-format
+          - mistral
+          - --tokenizer-mode
+          - mistral
+          - --tensor-parallel-size
+          - '4'
+          - --max-model-len
+          - '1048576'
+          - --gpu-memory-utilization
+          - '0.92'
+          - --kernel-config
+          - '{"enable_flashinfer_autotune":true,"ir_op_priority":{"rms_norm":["vllm_c","native"],"fused_add_rms_norm":["vllm_c","native"]}}'
+          - --compilation-config
+          - '{"pass_config":{"fuse_allreduce_rms":true}}'
+          - --dyn-reasoning-parser
+          - mistral
+          - --dyn-tool-call-parser
+          - mistral
+          - --disaggregation-mode
+          - prefill
+          - --enable-cumem-allocator
+          - --kv-transfer-config
+          - '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"],"num_threads":8,"kv_lease_duration":120}},{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":618475290624,"blocks_per_chunk":4,"offload_prompt_only":true,"self_describing_kv_events":true}}]}}'
+          - --max-num-seqs
+          - '64'
+          - --max-num-batched-tokens
+          - '16384'
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+          - --long-prefill-token-threshold
+          - '8832'
+          - --enable-prefix-caching
+          # For performance benchmarks only, replace the value below with
+          # '{"method":"dspark","num_speculative_tokens":3,"rejection_sample_method":"synthetic","synthetic_acceptance_length":2.67,"disable_eagle_block_drop":true}'
+          # on BOTH workers; use it for performance benchmarks, never for accuracy evaluation.
+          - --speculative-config
+          - '{"method":"dspark","num_speculative_tokens":3,"disable_eagle_block_drop":true}'
+          - --kv-cache-dtype
+          - nvfp4_ds_mla
+          # Hybrid KV cache manager off, dense prefix-cache retention, and the sm_107
+          # FlashInfer MoE and sparse-indexer kernels.
+          - --disable-hybrid-kv-cache-manager
+          - --prefix-cache-retention-interval
+          - 'None'
+          - --moe-backend
+          - flashinfer_prims_ts
+          - --sparse-indexer-logits-backend
+          - flashinfer
+          - --sparse-indexer-topk-backend
+          - flashinfer_gvr2
+          - --sparse-indexer-prefill-backend
+          - flashinfer
+          env:
+          - name: MODEL_PATH
+            value: /shared-model-cache/mistral-large-4-nvfp4
+          - name: SERVED_MODEL_NAME
+            value: mistral-large-4
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: DYN_LOG
+            value: info
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: 'false'
+          - name: NCCL_MNNVL_ENABLE
+            value: '0'
+          - name: VLLM_ALLREDUCE_USE_FLASHINFER
+            value: '1'
+          - name: VLLM_USE_BREAKABLE_CUDAGRAPH
+            value: '0'
+          - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+            value: '1'
+          - name: UCX_TLS
+            value: cuda_copy,cuda_ipc,tcp
+          - name: UCX_CUDA_IPC_ENABLE_MNNVL
+            value: 'y'
+          - name: UCX_MEMTYPE_CACHE
+            value: 'n'
+          - name: UCX_NET_DEVICES
+            value: all
+          - name: UCX_RCACHE_MAX_UNRELEASED
+            value: '1024'
+          - name: NIXL_TELEMETRY_ENABLE
+            value: 'y'
+          - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+            value: '0'
+          # Stable block hashes across the two workers, and the OffloadingConnector
+          # (not the simple CPU offload) behind the MultiConnector.
+          - name: PYTHONHASHSEED
+            value: '0'
+          - name: VLLM_USE_SIMPLE_KV_OFFLOAD
+            value: '0'
+          resources:
+            requests:
+              memory: 840Gi
+              nvidia.com/gpu: '4'
+            limits:
+              nvidia.com/gpu: '4'
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /shared-model-cache
+            readOnly: true
+          - name: jitcache
+            mountPath: /home/dynamo/.cache
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - name: jitcache
+          emptyDir: {}
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.machine: VR-NVL72
+  - name: DecodeWorker
+    type: decode
+    runtimeVersionOverride: "1.6.0"
+    replicas: 1
+    sharedMemorySize: 640Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-mistral-large-4-dev.1
+          imagePullPolicy: IfNotPresent
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 30
+            failureThreshold: 540
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: system
+              scheme: HTTP
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 30
+            successThreshold: 1
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - $(MODEL_PATH)
+          - --served-model-name
+          - $(SERVED_MODEL_NAME)
+          - --enable-multimodal
+          - --config-format
+          - mistral
+          - --load-format
+          - mistral
+          - --tokenizer-mode
+          - mistral
+          - --tensor-parallel-size
+          - '4'
+          - --max-model-len
+          - '1048576'
+          - --gpu-memory-utilization
+          - '0.95'
+          - --kernel-config
+          - '{"enable_flashinfer_autotune":true,"ir_op_priority":{"rms_norm":["vllm_c","native"],"fused_add_rms_norm":["vllm_c","native"]}}'
+          - --compilation-config
+          - '{"pass_config":{"fuse_allreduce_rms":true}}'
+          - --dyn-reasoning-parser
+          - mistral
+          - --dyn-tool-call-parser
+          - mistral
+          - --disaggregation-mode
+          - decode
+          - --enable-cumem-allocator
+          - --kv-transfer-config
+          - '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"],"num_threads":8,"kv_lease_duration":120}},{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":618475290624,"blocks_per_chunk":4,"offload_prompt_only":true,"self_describing_kv_events":true}}]}}'
+          - --max-num-seqs
+          - '64'
+          - --max-num-batched-tokens
+          - '8192'
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+          - --enable-prefix-caching
+          # For performance benchmarks only, replace the value below with
+          # '{"method":"dspark","num_speculative_tokens":3,"rejection_sample_method":"synthetic","synthetic_acceptance_length":2.67,"disable_eagle_block_drop":true}'
+          # on BOTH workers; use it for performance benchmarks, never for accuracy evaluation.
+          - --speculative-config
+          - '{"method":"dspark","num_speculative_tokens":3,"disable_eagle_block_drop":true}'
+          - --kv-cache-dtype
+          - nvfp4_ds_mla
+          # Hybrid KV cache manager off, dense prefix-cache retention, and the sm_107
+          # FlashInfer MoE and sparse-indexer kernels.
+          - --disable-hybrid-kv-cache-manager
+          - --prefix-cache-retention-interval
+          - 'None'
+          - --moe-backend
+          - flashinfer_prims_ts
+          - --sparse-indexer-logits-backend
+          - flashinfer
+          - --sparse-indexer-topk-backend
+          - flashinfer_gvr2
+          - --sparse-indexer-prefill-backend
+          - flashinfer
+          env:
+          - name: MODEL_PATH
+            value: /shared-model-cache/mistral-large-4-nvfp4
+          - name: SERVED_MODEL_NAME
+            value: mistral-large-4
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: DYN_LOG
+            value: info
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: 'false'
+          - name: NCCL_MNNVL_ENABLE
+            value: '0'
+          - name: VLLM_ALLREDUCE_USE_FLASHINFER
+            value: '1'
+          - name: VLLM_USE_BREAKABLE_CUDAGRAPH
+            value: '0'
+          - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+            value: '1'
+          - name: UCX_TLS
+            value: cuda_copy,cuda_ipc,tcp
+          - name: UCX_CUDA_IPC_ENABLE_MNNVL
+            value: 'y'
+          - name: UCX_MEMTYPE_CACHE
+            value: 'n'
+          - name: UCX_NET_DEVICES
+            value: all
+          - name: UCX_RCACHE_MAX_UNRELEASED
+            value: '1024'
+          - name: NIXL_TELEMETRY_ENABLE
+            value: 'y'
+          - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+            value: '0'
+          # Stable block hashes across the two workers, and the OffloadingConnector
+          # (not the simple CPU offload) behind the MultiConnector.
+          - name: PYTHONHASHSEED
+            value: '0'
+          - name: VLLM_USE_SIMPLE_KV_OFFLOAD
+            value: '0'
+          resources:
+            requests:
+              memory: 840Gi
+              nvidia.com/gpu: '4'
+            limits:
+              nvidia.com/gpu: '4'
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /shared-model-cache
+            readOnly: true
+          - name: jitcache
+            mountPath: /home/dynamo/.cache
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - name: jitcache
+          emptyDir: {}
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.machine: VR-NVL72

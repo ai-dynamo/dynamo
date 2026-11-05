@@ -67,6 +67,23 @@ global:
 
 # Dynamo operator configuration
 dynamo-operator:
+  grovePreflight:
+    # -- Validate externally managed Grove before installing/upgrading the operator. Disable only with a separate compatibility gate.
+    enabled: true
+    # -- Image containing Python 3 (standard library only). Override for an internal registry.
+    image: docker.io/library/python:3.12-slim
+    # -- Existing pull secrets for the Grove preflight image.
+    imagePullSecrets: []
+    # -- Maximum Job duration in seconds, including retries.
+    activeDeadlineSeconds: 120
+    # -- Independent preflight affinity. Does not inherit controllerManager.affinity.
+    affinity: {}
+    # -- Full replacement of the preflight pod security context. Null defaults to runAsNonRoot=true, runAsUser=65532 and seccompProfile.type=RuntimeDefault. On OpenShift, supply a context without runAsUser for admission to assign it.
+    podSecurityContext: null
+    # -- Namespace of external Grove. Empty discovers across all namespaces.
+    namespace: ""
+    # -- External Grove Deployment name. Requires namespace; empty discovers by container name.
+    deploymentName: ""
   # -- Whether to enable the Dynamo Kubernetes operator deployment
   enabled: true
 
@@ -76,12 +93,49 @@ dynamo-operator:
   # the cluster-wide operator.
   upgradeCRD: true
 
+  # Configure the read-only Jobs that validate the installed cluster state before an operator
+  # install or upgrade.
+  upgradePreflight:
+    job:
+      # -- Image containing Python 3 (standard library only). Override for an internal registry.
+      image: docker.io/library/python:3.12-slim
+      # -- Existing pull secrets shared by the upgrade preflight Jobs.
+      imagePullSecrets: []
+      # -- Maximum duration of each preflight Job in seconds, including retries.
+      activeDeadlineSeconds: 120
+      # -- Independent preflight affinity. Does not inherit controllerManager.affinity.
+      affinity: {}
+      # -- Full replacement of the preflight pod security context. Null uses runAsNonRoot: true,
+      # runAsUser: 65532, and seccompProfile.type: RuntimeDefault.
+      # Omit runAsUser on OpenShift for admission to assign the namespace UID.
+      podSecurityContext: null
+
+    checks:
+      # Reject Helm transitions that skip one or more Dynamo minor releases.
+      upgradePath:
+        # -- Per-check overrides of upgradePreflight.job. Unspecified fields inherit the shared
+        # defaults; affinity, podSecurityContext, and imagePullSecrets replace them as whole values.
+        job: {}
+        # -- Target minor (N.M) allowed for an otherwise unsupported forward upgrade.
+        # The value is ignored for other target minors and never bypasses other checks.
+        unsupportedUpgradeOverride: ""
+        # -- Target minor (N.M) allowed for an otherwise unsupported downgrade.
+        # The value is ignored for other target minors and never bypasses other checks.
+        unsupportedDowngradeOverride: ""
+
   dgdrV1Beta2:
-    # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Install the unfinished DGDR v1beta2
-    # API schemas. Run and Candidate objects are persisted in etcd; incompatible
-    # schema changes may make them unreadable or block future CRD upgrades. The
-    # operator does not reconcile v1beta2 resources.
+    # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2
+    # Request API with conversion and install the Run and Candidate APIs. Run and
+    # Candidate objects are persisted in etcd; incompatible schema changes may make
+    # them unreadable or block future CRD upgrades. When true, the operator
+    # reconciles v1beta2 Requests into Runs and executes each Run as an AISimulate
+    # planner Job with a publisher sidecar that persists deployment Candidates.
     enabled: false
+    # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: With dgdrV1Beta2.enabled, grant every
+    # Planner ServiceAccount what Planner live retune (retune.executor: dgdr) needs:
+    # create, read and delete DGDR v1beta2 Requests, read their Runs and Candidates,
+    # and read, create, update and delete any Lease in the namespace.
+    plannerLiveRetune: false
 
   # Environment variables to pass to operator Deployment.
   env: []
@@ -299,7 +353,7 @@ grove:
   affinity: {}
   crdInstaller:
     # -- Upgrade Grove CRDs before the bundled operator starts.
-    enabled: true
+    upgradeCRDs: true
   config:
     server:
       healthProbes:

@@ -92,6 +92,7 @@ spec:
         {{- with .Values.controllerManager.manager.dgdrDefaultImage }}
         - {{ printf "--dgdr-default-image=%s" . | quote }}
         {{- end }}
+        - --dgdr-v1beta2-enabled={{ .Values.dgdrV1Beta2.enabled }}
         command:
         - /manager
         env:

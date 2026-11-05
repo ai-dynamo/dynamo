@@ -1979,6 +1979,31 @@ mod reclamation_tests {
         assert_eq!(dead_node_count(&index), 0);
     }
 
+    #[test]
+    fn the_sweep_waits_for_deaths_in_proportion_to_the_tree_it_last_walked() {
+        // Fifteen root leaves; deaths are never drained, so only the sweep unlinks them.
+        let index = ConcurrentRadixTreeCompressed::new().with_sweep_schedule(None, 1, HOUR);
+        let mut lookup = direct_lookup();
+        for hash in 1..=15 {
+            apply(&index, &mut lookup, make_store_event(0, &[hash]));
+        }
+        let mut kill = |hash| apply(&index, &mut lookup, make_remove_event(0, &[hash]));
+
+        // Before any sweep, one death meets the threshold. The walk visits 16 nodes: the
+        // root and its 15 leaves.
+        kill(1);
+        index.sweep_if_due();
+        assert_eq!(dead_node_count(&index), 0);
+
+        // Now the sweep waits for 16 / SWEEP_VISITS_PER_DEATH = 2 deaths.
+        kill(2);
+        index.sweep_if_due();
+        assert_eq!(dead_node_count(&index), 1);
+        kill(3);
+        index.sweep_if_due();
+        assert_eq!(dead_node_count(&index), 0);
+    }
+
     #[tokio::test]
     async fn the_maintenance_thread_sweeps_a_leaf_the_lane_cannot_place() {
         // One death meets a threshold of one, so a tick sweeps it.

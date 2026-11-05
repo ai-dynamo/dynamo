@@ -28,7 +28,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -158,15 +157,13 @@ func generateHeadlessServiceForModel(
 	serviceAnnotations[commonconsts.KubeAnnotationDynamoBaseModel] = baseModelName
 
 	service := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      serviceName,
-			Namespace: namespace,
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoBaseModelHash: modelHash,
-				"nvidia.com/managed-by":                   "dynamo-operator",
-			},
-			Annotations: serviceAnnotations,
+		Name:      serviceName,
+		Namespace: namespace,
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoBaseModelHash: modelHash,
+			"nvidia.com/managed-by":                   "dynamo-operator",
 		},
+		Annotations: serviceAnnotations,
 		Spec: corev1.ServiceSpec{
 			// Headless service - no ClusterIP, no load balancing
 			ClusterIP: corev1.ClusterIPNone,

@@ -12,6 +12,7 @@ import zmq
 import dynamo.sglang._compat as sglang_compat
 import dynamo.sglang._disagg as disagg_mod
 import dynamo.sglang.publisher as publisher_mod
+from dynamo.sglang import shutdown
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.nixl_telemetry import _share_scheduler_metrics_ipc_name
 from dynamo.sglang.publisher import (
@@ -568,6 +569,66 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     assert [call["dp_rank"] for call in calls] == [4, 5, 6, 7]
     assert {call["worker_id"] for call in calls} == {1234}
     assert {call["kv_block_size"] for call in calls} == {32}
+
+
+@pytest.mark.parametrize("engine_owned", [False, True])
+def test_init_kv_event_publish_passes_engine_owned_mm_identity(
+    monkeypatch, engine_owned
+):
+    calls = []
+
+    class FakeKvEventPublisher:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(publisher_mod, "KvEventPublisher", FakeKvEventPublisher)
+    monkeypatch.setattr(
+        publisher_mod, "sglang_has_wide_mm_pad_values", lambda: engine_owned
+    )
+    monkeypatch.setattr(publisher_mod, "get_local_ip_auto", lambda: "127.0.0.1")
+    monkeypatch.setattr(
+        publisher_mod,
+        "ZmqEventPublisher",
+        SimpleNamespace(
+            offset_endpoint_port=staticmethod(
+                lambda base_ep, dp_rank: f"tcp://*:{5557 + dp_rank}"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        publisher_mod,
+        "format_zmq_endpoint",
+        lambda endpoint, ip_address: endpoint.replace("*", ip_address),
+    )
+    # A non-leader node skips the scheduler metrics sockets.
+    server_args = SimpleNamespace(
+        kv_events_config='{"endpoint": "tcp://*:5557"}',
+        page_size=16,
+        dp_size=4,
+        enable_dp_attention=True,
+        nnodes=2,
+        node_rank=1,
+    )
+    config = SimpleNamespace(
+        server_args=server_args,
+        dynamo_args=SimpleNamespace(
+            enable_local_indexer=True,
+            kv_state_endpoint=None,
+            use_kv_events=True,
+        ),
+    )
+    publisher = DynamoSglangPublisher(
+        engine=SimpleNamespace(),
+        config=config,
+        generate_endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+        kv_worker_id=1234,
+    )
+
+    publisher.init_kv_event_publish()
+
+    assert len(calls) == 2
+    assert [call["engine_owned_mm_identity"] for call in calls] == [engine_owned] * 2
 
 
 def test_init_kv_event_publish_subscribes_to_every_pure_dp_replica(monkeypatch):
@@ -1250,3 +1311,40 @@ async def test_finish_worker_teardown_continues_after_metrics_task_failure():
         await finish_worker_teardown(metrics_task, cleanup, run_deferred_handlers)
 
     assert steps == ["cleanup", "run_deferred_handlers"]
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_finish_worker_teardown_preserves_body_error(monkeypatch):
+    # Regression: the owned cleanup task loses sys.exc_info(), allowing runtime
+    # teardown failure to replace the serving error despite body_failed=True.
+    loop = asyncio.get_running_loop()
+    handlers = {}
+    started = asyncio.Event()
+    body_error = ValueError("serving failed")
+    engine_cleanup = Mock()
+
+    async def teardown(*args, **kwargs):
+        started.set()
+        raise RuntimeError("runtime teardown failed")
+
+    monkeypatch.setattr(shutdown, "graceful_shutdown_with_discovery", teardown)
+    monkeypatch.setattr(
+        shutdown.signal, "signal", lambda sig, cb: handlers.update({sig: cb})
+    )
+    monkeypatch.setattr(loop, "add_signal_handler", loop.add_signal_handler)
+    deferred = shutdown.install_graceful_shutdown(loop, Mock(), [], asyncio.Event())
+    loop.add_signal_handler(shutdown.signal.SIGTERM, engine_cleanup)
+    handlers[shutdown.signal.SIGTERM](shutdown.signal.SIGTERM, None)
+    await started.wait()
+    metrics_task = asyncio.create_task(asyncio.Event().wait())
+
+    with pytest.raises(ValueError) as caught:
+        try:
+            raise body_error
+        finally:
+            await finish_worker_teardown(
+                metrics_task, lambda: None, deferred, body_failed=True
+            )
+    assert caught.value is body_error
+    engine_cleanup.assert_called_once()

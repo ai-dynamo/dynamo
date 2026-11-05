@@ -29,7 +29,7 @@ CUDA_VISIBLE_DEVICES=1 \
   --model $MODEL \
   --disaggregation-mode prefill \
   --disable-hybrid-kv-cache-manager \
-  --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_producer"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
+  --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_producer"}]},"kv_connector_module_path":"dynamo.vllm.pd_connector"}' \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

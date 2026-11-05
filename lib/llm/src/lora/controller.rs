@@ -11,15 +11,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::kv_router::protocols::WorkerWithDpRank;
 use crate::lora::config::LoraAllocationConfig;
 use crate::lora::load_estimator::LoadEstimator;
+use crate::lora::metrics::ControllerMetrics;
 use crate::lora::routing::mcf_allocator::{
     LoraInput, McfPlacementSolver, McfSolveParams, WorkerInput,
 };
 use crate::lora::routing::table::{LoraReplicaConfig, LoraRoutingTable};
 use crate::lora::routing::{AllocationAlgorithmType, LoraAllocator, create_lora_allocator};
 use crate::lora::state_tracker::{LoraObservedSnapshot, LoraStateTracker};
+use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_runtime::protocols::EndpointId;
 
 #[derive(Debug, Clone)]
@@ -62,6 +63,7 @@ pub struct LoraController {
     observed_incarnation: u64,
     load_estimator: Arc<LoadEstimator>,
     metrics_endpoint: String,
+    metrics: ControllerMetrics,
     published_allocation_metric_loras: HashSet<String>,
     published_active_request_metric_loras: HashSet<String>,
     hysteresis: HashMap<String, HysteresisState>,
@@ -76,6 +78,7 @@ pub struct LoraController {
 }
 
 impl LoraController {
+    /// Construct a controller with isolated, unregistered metrics.
     pub fn new(
         config: LoraAllocationConfig,
         routing_table: LoraRoutingTable,
@@ -107,6 +110,7 @@ impl LoraController {
             observed_incarnation,
             load_estimator,
             metrics_endpoint: "unscoped".to_string(),
+            metrics: ControllerMetrics::default(),
             published_allocation_metric_loras: HashSet::new(),
             published_active_request_metric_loras: HashSet::new(),
             hysteresis: HashMap::new(),
@@ -122,8 +126,8 @@ impl LoraController {
 
     /// Start the controller background loop.
     ///
-    /// This legacy entrypoint retains the single unscoped-controller guard. New serving paths use
-    /// [`Self::start_for_endpoint`] so controller state and metrics remain endpoint-qualified.
+    /// Retains the single unscoped-controller guard with unregistered metrics.
+    /// Serving frontends inject their registry through [`Self::start_for_endpoint_with_metrics`].
     pub fn start(
         config: LoraAllocationConfig,
         routing_table: LoraRoutingTable,
@@ -138,9 +142,11 @@ impl LoraController {
             state_tracker,
             load_estimator,
             cancel_token,
+            None,
         )
     }
 
+    /// Start an endpoint controller with isolated, unregistered metrics.
     pub fn start_for_endpoint(
         endpoint_id: EndpointId,
         config: LoraAllocationConfig,
@@ -156,6 +162,28 @@ impl LoraController {
             state_tracker,
             load_estimator,
             cancel_token,
+            None,
+        )
+    }
+
+    /// Start an endpoint controller with registry-owned metrics.
+    pub fn start_for_endpoint_with_metrics(
+        endpoint_id: EndpointId,
+        config: LoraAllocationConfig,
+        routing_table: LoraRoutingTable,
+        state_tracker: LoraStateTracker,
+        load_estimator: Arc<LoadEstimator>,
+        cancel_token: tokio_util::sync::CancellationToken,
+        metrics: ControllerMetrics,
+    ) -> tokio::task::JoinHandle<()> {
+        Self::start_inner(
+            Some(endpoint_id),
+            config,
+            routing_table,
+            state_tracker,
+            load_estimator,
+            cancel_token,
+            Some(metrics),
         )
     }
 
@@ -166,6 +194,7 @@ impl LoraController {
         state_tracker: LoraStateTracker,
         load_estimator: Arc<LoadEstimator>,
         cancel_token: tokio_util::sync::CancellationToken,
+        metrics: Option<ControllerMetrics>,
     ) -> tokio::task::JoinHandle<()> {
         use std::sync::atomic::Ordering;
         // Process-global guard: the LoRA metrics gauges are unlabeled singletons, so only one
@@ -188,6 +217,9 @@ impl LoraController {
 
         let timestep = Duration::from_secs(config.timestep_secs);
         let mut controller = Self::new(config, routing_table, state_tracker, load_estimator);
+        if let Some(metrics) = metrics {
+            controller.metrics = metrics;
+        }
         if let Some(endpoint_id) = &endpoint_id {
             controller.metrics_endpoint = endpoint_id.to_string();
         }
@@ -1065,11 +1097,6 @@ impl LoraController {
         loads: &HashMap<String, usize>,
         raw_arrival_counts: &HashMap<String, u64>,
     ) {
-        use crate::http::service::metrics::{
-            LORA_ACTIVE_REQUESTS_GAUGE, LORA_ESTIMATED_LOAD_GAUGE, LORA_IS_ACTIVE_GAUGE,
-            LORA_RAW_ARRIVAL_COUNT_GAUGE, LORA_REPLICA_FACTOR_GAUGE,
-        };
-
         let inflight = self.load_estimator.get_inflight_counts();
         let current_allocation_loras = table_snapshot
             .iter()
@@ -1080,10 +1107,10 @@ impl LoraController {
             .difference(&current_allocation_loras)
         {
             let labels = [self.metrics_endpoint.as_str(), stale_lora.as_str()];
-            let _ = LORA_REPLICA_FACTOR_GAUGE.remove_label_values(&labels);
-            let _ = LORA_IS_ACTIVE_GAUGE.remove_label_values(&labels);
-            let _ = LORA_RAW_ARRIVAL_COUNT_GAUGE.remove_label_values(&labels);
-            let _ = LORA_ESTIMATED_LOAD_GAUGE.remove_label_values(&labels);
+            let _ = self.metrics.replica_factor.remove_label_values(&labels);
+            let _ = self.metrics.is_active.remove_label_values(&labels);
+            let _ = self.metrics.raw_arrival_count.remove_label_values(&labels);
+            let _ = self.metrics.estimated_load.remove_label_values(&labels);
         }
         let current_active_request_loras = current_allocation_loras
             .iter()
@@ -1095,29 +1122,34 @@ impl LoraController {
             .difference(&current_active_request_loras)
         {
             let labels = [self.metrics_endpoint.as_str(), stale_lora.as_str()];
-            let _ = LORA_ACTIVE_REQUESTS_GAUGE.remove_label_values(&labels);
+            let _ = self.metrics.active_requests.remove_label_values(&labels);
         }
 
         for (lora_name, config) in table_snapshot {
             let labels = [self.metrics_endpoint.as_str(), lora_name.as_str()];
-            LORA_REPLICA_FACTOR_GAUGE
+            self.metrics
+                .replica_factor
                 .with_label_values(&labels)
                 .set(config.replica_factor as i64);
-            LORA_IS_ACTIVE_GAUGE
+            self.metrics
+                .is_active
                 .with_label_values(&labels)
                 .set(if config.is_active { 1 } else { 0 });
             let raw_count = raw_arrival_counts.get(lora_name).copied().unwrap_or(0);
-            LORA_RAW_ARRIVAL_COUNT_GAUGE
+            self.metrics
+                .raw_arrival_count
                 .with_label_values(&labels)
                 .set(raw_count as i64);
             let load = loads.get(lora_name).copied().unwrap_or(0);
-            LORA_ESTIMATED_LOAD_GAUGE
+            self.metrics
+                .estimated_load
                 .with_label_values(&labels)
                 .set(load as i64);
         }
 
         for lora_name in &current_active_request_loras {
-            LORA_ACTIVE_REQUESTS_GAUGE
+            self.metrics
+                .active_requests
                 .with_label_values(&[self.metrics_endpoint.as_str(), lora_name.as_str()])
                 .set(inflight.get(lora_name).copied().unwrap_or_default() as i64);
         }
@@ -1126,18 +1158,17 @@ impl LoraController {
     }
 
     fn update_churn_metrics(&self, loads: i64, unloads: i64, overflow: i64) {
-        use crate::http::service::metrics::{
-            LORA_CHURN_LOADS_GAUGE, LORA_CHURN_UNLOADS_GAUGE, LORA_OVERFLOW_COUNT_GAUGE,
-        };
-
         let endpoint = [self.metrics_endpoint.as_str()];
-        LORA_CHURN_LOADS_GAUGE
+        self.metrics
+            .churn_loads
             .with_label_values(&endpoint)
             .set(loads);
-        LORA_CHURN_UNLOADS_GAUGE
+        self.metrics
+            .churn_unloads
             .with_label_values(&endpoint)
             .set(unloads);
-        LORA_OVERFLOW_COUNT_GAUGE
+        self.metrics
+            .overflow_count
             .with_label_values(&endpoint)
             .set(overflow);
     }
@@ -1266,11 +1297,10 @@ mod tests {
     use super::*;
     use prometheus::{IntGaugeVec, core::Collector};
 
-    use crate::http::service::metrics::{LORA_ACTIVE_REQUESTS_GAUGE, LORA_REPLICA_FACTOR_GAUGE};
+    use crate::lora::LoraInfo;
     use crate::lora::load_estimator::LoadEstimator;
     use crate::lora::routing::table::LoraRoutingTable;
     use crate::lora::state_tracker::LoraStateTracker;
-    use crate::model_card::LoraInfo;
 
     fn make_worker(id: u64) -> WorkerWithDpRank {
         WorkerWithDpRank::new(id, 0)
@@ -1371,12 +1401,12 @@ mod tests {
             &raw_arrivals,
         );
         assert!(has_lora_metric_series(
-            &LORA_REPLICA_FACTOR_GAUGE,
+            &controller.metrics.replica_factor,
             endpoint,
             lora
         ));
         assert!(has_lora_metric_series(
-            &LORA_ACTIVE_REQUESTS_GAUGE,
+            &controller.metrics.active_requests,
             endpoint,
             lora
         ));
@@ -1384,12 +1414,12 @@ mod tests {
         routing_table.remove_lora(lora);
         controller.update_prometheus_metrics(&[], &loads, &raw_arrivals);
         assert!(!has_lora_metric_series(
-            &LORA_REPLICA_FACTOR_GAUGE,
+            &controller.metrics.replica_factor,
             endpoint,
             lora
         ));
         assert!(has_lora_metric_series(
-            &LORA_ACTIVE_REQUESTS_GAUGE,
+            &controller.metrics.active_requests,
             endpoint,
             lora
         ));
@@ -1411,19 +1441,19 @@ mod tests {
             &raw_arrivals,
         );
         assert!(has_lora_metric_series(
-            &LORA_REPLICA_FACTOR_GAUGE,
+            &controller.metrics.replica_factor,
             endpoint,
             lora
         ));
         assert_eq!(
-            lora_metric_value(&LORA_ACTIVE_REQUESTS_GAUGE, endpoint, lora),
+            lora_metric_value(&controller.metrics.active_requests, endpoint, lora),
             Some(0.0)
         );
 
         routing_table.remove_lora(lora);
         controller.update_prometheus_metrics(&[], &HashMap::new(), &HashMap::new());
         assert!(!has_lora_metric_series(
-            &LORA_ACTIVE_REQUESTS_GAUGE,
+            &controller.metrics.active_requests,
             endpoint,
             lora
         ));

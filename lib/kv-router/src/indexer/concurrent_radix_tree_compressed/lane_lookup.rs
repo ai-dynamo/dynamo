@@ -19,17 +19,17 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use super::block_lookup::BlockLookup;
+use super::block_lookup::{BlockLookup, Slot};
 use super::node::CleanupEdge;
 use super::types::SharedNode;
 use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
 /// A lane-local name for a node the lane holds. Non-zero so a lookup slot holding a key
-/// and an id stays 16 bytes.
+/// and an id stays 12 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct NodeId(NonZeroU32);
 
-const _: () = assert!(size_of::<Option<(ExternalSequenceBlockHash, NodeId)>>() == 16);
+const _: () = assert!(size_of::<Option<Slot<NodeId>>>() == 12);
 
 impl NodeId {
     fn from_index(index: usize) -> Self {
@@ -314,7 +314,7 @@ impl LaneLookup {
             if !target(worker) {
                 return true;
             }
-            for (&hash, &id) in blocks.iter() {
+            for (hash, &id) in blocks.iter() {
                 nodes.drop_refs(id, 1);
                 on_removed(worker, hash);
             }

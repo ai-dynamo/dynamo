@@ -183,15 +183,17 @@ def test_install_benchmark_fpms_installs_regression_on_orchestrator_path():
     assert adapter._engine._orchestrator.get_regression("agg") is not None
 
 
-def test_summary_only_planner_details_preserve_tick_count():
+@pytest.mark.parametrize("advisory", [False, True])
+def test_summary_only_planner_details_preserve_tick_count(advisory):
     class _Recorder:
         def finalize(self):
             raise AssertionError("summary-only replay must not finalize diagnostics")
 
+    # Built without ``start()``: the class-level defaults keep it finalizable.
     adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
     adapter._capture_details = False
     adapter._recorder = _Recorder()
-    adapter._config = PlannerConfig(mode="agg")
+    adapter._config = PlannerConfig(mode="agg", advisory=advisory)
     adapter._benchmark_granularity = 8
     adapter._bootstrap_metadata = {"status": "not_required"}
     adapter._ticks = [{"large": "tick payload"}]
@@ -204,6 +206,8 @@ def test_summary_only_planner_details_preserve_tick_count():
     assert details.ticks == []
     assert details.lifecycle_operations == []
     assert details.metadata["details_captured"] is False
+    assert details.metadata["advisory"] is advisory
+    assert details.recommended_scaling_events == ([] if advisory else None)
 
 
 def test_planner_metadata_identifies_custom_plugins_without_secrets():

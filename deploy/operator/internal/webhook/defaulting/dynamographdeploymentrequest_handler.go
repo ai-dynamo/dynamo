@@ -21,33 +21,17 @@ import (
 	"context"
 	"fmt"
 
-	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
-	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-const (
-	dgdrDefaultingWebhookName = "dynamographdeploymentrequest-defaulting-webhook"
-	dgdrDefaultingWebhookPath = "/mutate-nvidia-com-v1beta1-dynamographdeploymentrequest"
-
-	// defaultImage is the default profiler image used when spec.image is not set.
-	// Default image derivation is only supported for public release versions (1.0.0+).
-	//
-	// Starting with Dynamo 1.1.0, the profiler's runtime dependencies
-	// (kubernetes_asyncio, pmdarima, prophet, aiconfigurator, ...) ship only in the
-	// dedicated dynamo-planner image, so we default to that image here. Users who
-	// pin an earlier version may continue to override spec.image explicitly with
-	// the frontend image they were using before.
-	defaultImage = "nvcr.io/nvidia/ai-dynamo/dynamo-planner"
-)
+const dgdrDefaultingWebhookPath = "/mutate-nvidia-com-v1beta1-dynamographdeploymentrequest"
 
 // DGDRDefaulter is a mutating webhook handler that fills in default values for
-// DynamoGraphDeploymentRequest resources on CREATE.
+// native v1beta1 DynamoGraphDeploymentRequest resources.
 //
 // If spec.image is not set, it is derived as:
 //
@@ -62,6 +46,9 @@ type DGDRDefaulter struct {
 	// dynamo-planner:<operatorVersion> tag does not exist (pre-release charts:
 	// rc, nightly); empty keeps the derived default.
 	DefaultImage string
+	// v1beta2 configures the defaults of Requests submitted as v1beta2, which reach this
+	// handler as a v1beta1 object carrying the spec.v1beta2 envelope.
+	v1beta2 DGDRV1beta2Options
 }
 
 // NewDGDRDefaulter creates a new DGDRDefaulter with the given operator version
@@ -70,13 +57,16 @@ func NewDGDRDefaulter(operatorVersion, defaultImage string) *DGDRDefaulter {
 	return &DGDRDefaulter{OperatorVersion: operatorVersion, DefaultImage: defaultImage}
 }
 
-// Default implements admission.CustomDefaulter.
-// If spec.image is not set, derives a default image from the backend and operator version.
-// UPDATE requests are admitted unchanged so an omitted image is not rewritten after
-// creation.
-func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
-	logger := log.FromContext(ctx).WithName(dgdrDefaultingWebhookName)
+// WithV1beta2 sets the defaults of v1beta2 Requests and returns the defaulter.
+func (d *DGDRDefaulter) WithV1beta2(options DGDRV1beta2Options) *DGDRDefaulter {
+	d.v1beta2 = options
+	return d
+}
 
+// Default implements admission.CustomDefaulter.
+// Native API defaults apply on CREATE and UPDATE. If spec.image is not set on
+// CREATE, derives a default image from the operator version.
+func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK); err != nil {
 		return err
 	}
@@ -88,36 +78,31 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
-		logger.Error(err, "failed to get admission request from context, skipping defaulting")
+		return fmt.Errorf("get admission request from context: %w", err)
+	}
+	requestVersion := internalwebhook.RequestedVersion(req)
+
+	// The original request version decides what spec.v1beta2 means. A native v1beta2 Request
+	// is defaulted from its carrier on CREATE and UPDATE; only CREATE
+	// and an UPDATE that changes spec.hardware read the cluster.
+	if requestVersion == internalwebhook.VersionV1Beta2 && dgdr.Spec.V1Beta2 != nil {
+		oldSpec, err := decodeOldSpecV1beta2(req.Operation, req.OldObject.Raw)
+		if err != nil {
+			return err
+		}
+		return defaultDynamoGraphDeploymentRequestV1beta2(ctx, dgdr, req.Operation, oldSpec, d.v1beta2)
+	}
+	// A foreign-version view (a carrier written or updated through the wrong API version, or
+	// a v1beta1 payload written through v1beta2) is read-only; validation enforces that.
+	if requestVersion == internalwebhook.VersionV1Beta2 || dgdr.Spec.V1Beta2 != nil {
 		return nil
 	}
 
-	if req.Operation == admissionv1.Create && dgdr.Spec.Image == "" {
-		if img := d.defaultImageFor(); img != "" {
-			dgdr.Spec.Image = img
-			logger.Info("defaulted spec.image from operator version",
-				"name", dgdr.Name,
-				"namespace", dgdr.Namespace,
-				"image", img,
-			)
-		}
-	}
-
+	defaultDynamoGraphDeploymentRequest(dgdr, dynamoGraphDeploymentRequestDefaultOptions{
+		operation: req.Operation,
+		image:     PlannerImageFor(d.OperatorVersion, d.DefaultImage),
+	})
 	return nil
-}
-
-// defaultImageFor returns the profiler image for spec.image: DefaultImage when
-// set, else the derived image with a canonical semver tag, or an empty string
-// when the operator version cannot be parsed.
-func (d *DGDRDefaulter) defaultImageFor() string {
-	if d.DefaultImage != "" {
-		return d.DefaultImage
-	}
-	version, err := semver.NewVersion(d.OperatorVersion)
-	if err != nil {
-		return ""
-	}
-	return fmt.Sprintf("%s:%s", defaultImage, version.String())
 }
 
 // RegisterWithManager registers the DGDR defaulting webhook with the manager.

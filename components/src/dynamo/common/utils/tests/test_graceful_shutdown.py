@@ -290,7 +290,9 @@ def test_cleanup_callback_timeout_does_not_block_shutdown(monkeypatch):
     mock_runtime.shutdown_and_wait.assert_awaited_once()
 
 
-def test_install_signal_handlers_returns_a_joinable_teardown():
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize("cancel_waiter", [False, True])
+def test_install_signal_handlers_returns_a_joinable_teardown(cancel_waiter):
     """Regression: the shutdown task was detached and nothing joined it.
 
     The sequence sets ``shutdown_event`` *before* awaiting the runtime
@@ -304,15 +306,17 @@ def test_install_signal_handlers_returns_a_joinable_teardown():
     _gs._shutdown_started.clear()
     teardown_finished = False
 
-    async def slow_teardown():
-        nonlocal teardown_finished
-        await asyncio.sleep(0.05)
-        teardown_finished = True
-
     runtime = MagicMock()
-    runtime.shutdown_and_wait = slow_teardown
 
     async def scenario():
+        release = asyncio.Event()
+
+        async def slow_teardown():
+            nonlocal teardown_finished
+            await release.wait()
+            teardown_finished = True
+
+        runtime.shutdown_and_wait = slow_teardown
         loop = asyncio.get_running_loop()
         shutdown_event = asyncio.Event()
         wait_for_shutdown = install_signal_handlers(
@@ -330,7 +334,22 @@ def test_install_signal_handlers_returns_a_joinable_teardown():
         await shutdown_event.wait()
         assert not teardown_finished, "precondition: teardown still in flight"
 
-        await wait_for_shutdown()
+        waiter = asyncio.create_task(wait_for_shutdown())
+        await asyncio.sleep(0)
+        try:
+            if cancel_waiter:
+                for _ in range(2):
+                    waiter.cancel()
+                    await asyncio.sleep(0)
+                    assert not waiter.done(), "cancellation escaped before teardown"
+        finally:
+            release.set()
+            await asyncio.gather(waiter, return_exceptions=True)
+        if cancel_waiter:
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+        else:
+            await waiter
         assert teardown_finished, (
             "wait_for_shutdown returned before the runtime teardown completed; "
             "the event loop would close on a pending teardown"

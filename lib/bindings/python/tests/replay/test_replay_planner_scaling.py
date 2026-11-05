@@ -199,10 +199,14 @@ def _assert_lifecycle_operations_are_consistent(operations):
             )
 
 
+@pytest.mark.parametrize("advisory", [False, True], ids=["active", "advisory"])
 @pytest.mark.parametrize(
     "trace_format", ["mooncake", "mooncake-delta", "agentic_mooncake"]
 )
-def test_actual_aggregated_planner_scales_up_then_down(tmp_path, trace_format):
+def test_actual_aggregated_planner_scales_up_then_down(
+    tmp_path, trace_format, advisory
+):
+    """The active planner scales 1 -> 3 -> 1; an advisory one only recommends."""
     trace_path = _write_burst_idle_trace(
         tmp_path,
         input_tokens=128,
@@ -220,11 +224,26 @@ def test_actual_aggregated_planner_scales_up_then_down(tmp_path, trace_format):
             }
         },
         num_workers=1,
-        planner_config=_planner_config("agg", tmp_path),
+        planner_config={**_planner_config("agg", tmp_path), "advisory": advisory},
         trace_format=trace_format,
         execution_model="target-model" if trace_format == "agentic_mooncake" else None,
     )
 
+    assert report.planner.metadata["advisory"] is advisory
+    if advisory:
+        # The deployment stays at one worker; the recommendation is recorded.
+        assert report.summary["completed_requests"] == 33
+        assert report.planner.scaling_events == []
+        assert report.planner.lifecycle_operations == []
+        assert [
+            (event.component, event.from_count, event.to_count)
+            for event in report.planner.recommended_scaling_events
+        ] == [("agg", 1, 2)]
+        assert report.summary["decode_worker_seconds"] == pytest.approx(
+            report.summary["duration_ms"] / 1000.0
+        )
+        return
+    assert report.planner.recommended_scaling_events is None
     assert report.per_request is None
     assert report.coverage["capture_per_request"] is False
     assert report.planner.total_ticks == len(report.planner.ticks)

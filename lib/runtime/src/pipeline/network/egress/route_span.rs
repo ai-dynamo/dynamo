@@ -199,7 +199,7 @@ pub fn error_type_name(error_type: ErrorType) -> &'static str {
         ErrorType::Cancelled => "cancelled",
         ErrorType::ResourceExhausted => "resource_exhausted",
         ErrorType::Unavailable => "unavailable",
-        ErrorType::WorkerOverloaded => "worker_overloaded",
+        ErrorType::WorkerOverloaded | ErrorType::WorkerRankOverloaded(_) => "worker_overloaded",
         ErrorType::WorkerUnavailable => "worker_unavailable",
         ErrorType::WorkerDraining => "worker_draining",
         ErrorType::Backend(BackendError::Unknown) => "backend_unknown",
@@ -254,6 +254,7 @@ fn error_outcome(error_type: ErrorType) -> &'static str {
         ErrorType::ResourceExhausted
         | ErrorType::WorkerOverloaded
         | ErrorType::WorkerDraining
+        | ErrorType::WorkerRankOverloaded(_)
         | ErrorType::Backend(BackendError::WorkerOverloaded) => "rejected",
         ErrorType::Unavailable | ErrorType::WorkerUnavailable => "unavailable",
         // Deadline expiry matches the HTTP metric classification, which labels
@@ -558,6 +559,7 @@ mod tests {
     async fn route_span_covers_attempt_lifecycle_and_retry_metadata() {
         let captured = Arc::new(Captured::default());
         // Do not install a global LogTracer: other tests initialize logging.
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _subscriber = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(CaptureLayer(captured.clone())),
         );

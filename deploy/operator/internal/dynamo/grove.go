@@ -11,7 +11,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -480,10 +479,10 @@ func observePodCliqueReadiness(ctx context.Context, reader client.Reader, resour
 		ComponentNames:  []string{resourceName},
 		Replicas:        podClique.Status.Replicas,
 		UpdatedReplicas: podClique.Status.UpdatedReplicas,
-		ReadyReplicas:   ptr.To(podClique.Status.ReadyReplicas),
+		ReadyReplicas:   new(podClique.Status.ReadyReplicas),
 	}
 	if componentReadiness.revision.generationObserved {
-		componentReadiness.status.ScheduledReplicas = ptr.To(podClique.Status.ScheduledReplicas)
+		componentReadiness.status.ScheduledReplicas = new(podClique.Status.ScheduledReplicas)
 	}
 
 	// The cache must observe the requested scale before readiness or namespace cutover.
