@@ -20,7 +20,8 @@
 //! worker chosen for dispatch.
 //!
 //! Refresh failures are non-fatal: an implementation can return `None` and the queue will
-//! dispatch with the (stale) original scores rather than dropping the request.
+//! dispatch with the (stale) original scores rather than dropping the request. A refresh that
+//! outlasts [`OVERLAP_REFRESH_TIMEOUT`] ends the same way; see [`OverlapScoresRefresh`].
 
 use std::time::Duration;
 
@@ -57,6 +58,14 @@ impl RefreshedOverlap {
 /// Implementations are expected to be cheap to clone (typically `Arc`-wrapped) and to never
 /// panic. Returning `None` indicates the refresh failed; the queue will then dispatch with
 /// the original scores.
+///
+/// The queue keeps the returned future running while it handles other scheduler work, for at
+/// most [`OVERLAP_REFRESH_TIMEOUT`] (250 ms) from the start of the refresh; that work never
+/// restarts the timeout. At the timeout the queue drops the future unfinished and dispatches
+/// the request with its original queued scores, as for `None`. It drops the future earlier when
+/// the waiting request's own due time passes, rejecting the request as overdue, when its caller
+/// goes away, dropping the request, or when the scheduler shuts down, dispatching the request
+/// with the original scores. A refresh must not depend on running to completion.
 #[async_trait]
 pub trait OverlapScoresRefresh: Send + Sync {
     async fn refresh(
@@ -122,6 +131,10 @@ impl<P: TieredMatchProvider> OverlapScoresRefresh for TieredOverlapRefresher<P> 
 /// Default wait threshold after which a dequeued request gets a fresh overlap-score lookup.
 /// Override with `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS`. A value of `0` disables refresh.
 pub const DEFAULT_OVERLAP_REFRESH_AFTER_SECS: u64 = 10;
+
+/// How long the scheduler queue waits for one overlap refresh before it dispatches the request
+/// with its queued scores.
+pub const OVERLAP_REFRESH_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub fn read_overlap_refresh_after() -> Option<Duration> {
     let raw = match std::env::var("DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS") {

@@ -23,13 +23,15 @@ SPEC.loader.exec_module(preflight)
 
 
 class GrovePreflightTest(unittest.TestCase):
-    def test_orders_alpha_versions_numerically_before_stable(self):
-        self.assertLess(
-            preflight.version("v1.2.3-alpha.9"), preflight.version("v1.2.3-alpha.10")
-        )
-        self.assertLess(
-            preflight.version("v1.2.3-alpha.10"), preflight.version("v1.2.3")
-        )
+    def test_orders_alpha_beta_and_stable_versions(self):
+        for earlier, later in (
+            ("v1.2.3-alpha.9", "v1.2.3-alpha.10"),
+            ("v1.2.3-alpha.10", "v1.2.3-beta1"),
+            ("v1.2.3-beta9", "v1.2.3-beta10"),
+            ("v1.2.3-beta10", "v1.2.3"),
+        ):
+            with self.subTest(earlier=earlier, later=later):
+                self.assertLess(preflight.version(earlier), preflight.version(later))
 
     def test_uses_the_supplied_minimum(self):
         higher = f"v{self.major + 1}.0.0"
@@ -37,7 +39,7 @@ class GrovePreflightTest(unittest.TestCase):
             preflight.check(self.get, higher)
 
     def setUp(self):
-        self.major, minor, patch, _ = preflight.version(MINIMUM)
+        self.major, minor, patch, *_ = preflight.version(MINIMUM)
         self.stable = f"v{self.major}.{minor}.{patch}"
         self.container = {
             "name": "grove-operator",
@@ -63,6 +65,8 @@ class GrovePreflightTest(unittest.TestCase):
                 self.container["image"] = "registry:5000/grove:" + tag
                 preflight.check(self.get, MINIMUM)
         for image in (
+            "grove:v0.1.0-alpha.15",
+            "grove:v0.2.0-alpha.17",
             "grove:v0.0.0-alpha.0",
             "grove:v0.0.0",
             "grove:latest",
