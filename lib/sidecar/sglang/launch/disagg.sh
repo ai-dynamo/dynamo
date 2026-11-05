@@ -112,7 +112,6 @@ CUDA_VISIBLE_DEVICES="$SGLANG_DECODE_GPU" \
     --grpc-port "$SGLANG_DECODE_GRPC_PORT" \
     --incremental-streaming-output \
     --disaggregation-mode decode \
-    --disaggregation-bootstrap-port "$SGLANG_PREFILL_HTTP_PORT" \
     --disaggregation-transfer-backend nixl \
     --context-length "$MAX_MODEL_LEN" \
     --max-running-requests "$MAX_CONCURRENT_SEQS" \

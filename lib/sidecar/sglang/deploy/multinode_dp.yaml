@@ -3,7 +3,7 @@
 #
 # Replace <tag> with a supported SGLang image tag before deploying.
 # EXPERIMENTAL: multinode SGLang attention data parallelism (attention-DP) with explicit leader and worker templates.
-# Multinode attention-DP requires SGLang v0.5.22 or later and a matching Dynamo sidecar.
+# The SGLang sidecar does not support DP>1 yet.
 # For a DGD created before operator 1.6.0, see docs/fern/pages/kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160.
 
 apiVersion: nvidia.com/v1beta1
@@ -34,7 +34,7 @@ spec:
         spec:
           initContainers:
           - name: runtime
-            image: <your-registry>/dynamo-sidecar:1.6.0
+            image: <your-registry>/dynamo-sidecar:<your-version>
             command:
             - dynamo-sglang-sidecar
             args:
@@ -120,7 +120,7 @@ spec:
         spec:
           initContainers:
           - name: runtime
-            image: <your-registry>/dynamo-sidecar:1.6.0
+            image: <your-registry>/dynamo-sidecar:<your-version>
             command:
             - dynamo-sglang-sidecar
             args:
