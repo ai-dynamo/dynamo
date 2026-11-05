@@ -310,6 +310,10 @@ pub enum ResponseOutputEvent {
     Boundary(MessageBoundary),
     Text(String),
     ToolCall(String),
+    /// The next `n` entries of choice 0's aggregated `logprobs.content` arrived at
+    /// this point of the stream, so a Responses projection can give each message
+    /// the scores generated while it was open.
+    Scores(usize),
 }
 
 /// A response structure for unary chat completion responses, embedding OpenAI's

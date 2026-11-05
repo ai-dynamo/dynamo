@@ -559,6 +559,13 @@ impl DeltaAggregator {
                                 aggregator.response_events.push(ResponseOutputEvent::ToolCall(id.clone()));
                             }
                         }
+                        // Record only the count: the entries themselves are appended to
+                        // the choice's aggregated logprobs below, in the same order.
+                        if let Some(content) = choice.logprobs.as_ref().and_then(|lp| lp.content.as_ref())
+                            && !content.is_empty()
+                        {
+                            aggregator.response_events.push(ResponseOutputEvent::Scores(content.len()));
+                        }
                     }
                     if let Some(prompt_logprobs) = delta.prompt_logprobs {
                         aggregator.prompt_logprobs = Some(prompt_logprobs);
@@ -1090,6 +1097,82 @@ mod tests {
     use super::*;
     use crate::protocols::openai::token_to_utf8_bytes;
     use futures::stream;
+
+    /// Score counts are recorded between the message boundaries in arrival order, so a
+    /// Responses projection can give each message the scores generated while it was open.
+    #[tokio::test]
+    async fn phase_boundaries_record_score_counts_in_order() {
+        use crate::protocols::openai::chat_completions::MessageBoundary;
+        use dynamo_protocols::types::responses::MessagePhase;
+
+        let boundary = |mut delta: Annotated<NvCreateChatCompletionStreamResponse>,
+                        boundary: MessageBoundary| {
+            delta.data.as_mut().unwrap().message_boundary = Some(boundary);
+            delta
+        };
+        let deltas = vec![
+            boundary(
+                create_test_delta(
+                    0,
+                    "Checking.",
+                    Some(dynamo_protocols::types::Role::Assistant),
+                    None,
+                    Some(-0.1),
+                    None,
+                ),
+                MessageBoundary::Start(MessagePhase::Commentary),
+            ),
+            boundary(
+                create_test_delta(0, "", None, None, None, None),
+                MessageBoundary::End,
+            ),
+            boundary(
+                create_test_delta(0, "Done.", None, None, Some(-0.2), None),
+                MessageBoundary::Start(MessagePhase::FinalAnswer),
+            ),
+            boundary(
+                create_test_delta(0, "", None, None, None, None),
+                MessageBoundary::End,
+            ),
+            create_test_delta(
+                0,
+                "",
+                None,
+                Some(dynamo_protocols::types::FinishReason::Stop),
+                Some(-0.3),
+                None,
+            ),
+        ];
+
+        let resp = DeltaAggregator::apply(stream::iter(deltas), ParsingOptions::default())
+            .await
+            .unwrap();
+        let events: Vec<_> = resp
+            .response_events
+            .into_iter()
+            .filter(|event| !matches!(event, ResponseOutputEvent::Text(text) if text.is_empty()))
+            .collect();
+        assert_eq!(
+            events,
+            vec![
+                ResponseOutputEvent::Boundary(MessageBoundary::Start(MessagePhase::Commentary)),
+                ResponseOutputEvent::Text("Checking.".into()),
+                ResponseOutputEvent::Scores(1),
+                ResponseOutputEvent::Boundary(MessageBoundary::End),
+                ResponseOutputEvent::Boundary(MessageBoundary::Start(MessagePhase::FinalAnswer)),
+                ResponseOutputEvent::Text("Done.".into()),
+                ResponseOutputEvent::Scores(1),
+                ResponseOutputEvent::Boundary(MessageBoundary::End),
+                ResponseOutputEvent::Scores(1),
+            ]
+        );
+        let scored = resp.inner.choices[0]
+            .logprobs
+            .as_ref()
+            .and_then(|lp| lp.content.as_ref())
+            .map(Vec::len);
+        assert_eq!(scored, Some(3));
+    }
 
     #[tokio::test]
     async fn v2_batch_parser_uses_request_tool_schema() {

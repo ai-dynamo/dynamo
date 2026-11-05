@@ -1719,11 +1719,18 @@ pub fn chat_completion_to_response(
             let mut phase = None;
             let mut text = String::new();
             let mut open = false;
+            // Scores are consumed from the aggregated record in event order, so each
+            // message carries the scores generated while it was open; scores from
+            // reasoning or tool calls between messages ride on the next message.
+            let mut scores = std::mem::take(&mut text_logprobs).into_iter();
+            let mut pending_scores: Vec<LogProb> = Vec::new();
+            let mut saw_scores = false;
             let flush = |output: &mut Vec<OutputItem>,
                          text: &mut String,
                          phase: Option<MessagePhase>,
                          status: OutputStatus,
-                         open: &mut bool| {
+                         open: &mut bool,
+                         pending_scores: &mut Vec<LogProb>| {
                 if *open || !text.is_empty() {
                     let OutputItem::Message(mut message) = make_text_message(
                         format!("msg_{}", Uuid::new_v4().simple()),
@@ -1733,6 +1740,11 @@ pub fn chat_completion_to_response(
                     };
                     message.phase = phase;
                     message.status = status;
+                    if let Some(OutputMessageContent::OutputText(part)) =
+                        message.content.first_mut()
+                    {
+                        part.logprobs = Some(std::mem::take(pending_scores));
+                    }
                     output.push(OutputItem::Message(message));
                     *open = false;
                 }
@@ -1740,6 +1752,10 @@ pub fn chat_completion_to_response(
             use super::chat_completions::{MessageBoundary, ResponseOutputEvent};
             for event in response_events {
                 match event {
+                    ResponseOutputEvent::Scores(count) => {
+                        saw_scores = true;
+                        pending_scores.extend(scores.by_ref().take(count));
+                    }
                     ResponseOutputEvent::Boundary(MessageBoundary::Start(next)) => {
                         flush(
                             &mut output,
@@ -1747,6 +1763,7 @@ pub fn chat_completion_to_response(
                             phase,
                             OutputStatus::Completed,
                             &mut open,
+                            &mut pending_scores,
                         );
                         phase = Some(next);
                         open = true;
@@ -1758,6 +1775,7 @@ pub fn chat_completion_to_response(
                             phase,
                             OutputStatus::Completed,
                             &mut open,
+                            &mut pending_scores,
                         );
                         phase = None;
                     }
@@ -1768,6 +1786,7 @@ pub fn chat_completion_to_response(
                             phase,
                             OutputStatus::Completed,
                             &mut open,
+                            &mut pending_scores,
                         );
                         if params.reasoning_summary_requested() && !reasoning.is_empty() {
                             output.push(OutputItem::Reasoning(ReasoningItem {
@@ -1789,6 +1808,7 @@ pub fn chat_completion_to_response(
                             phase,
                             OutputStatus::Completed,
                             &mut open,
+                            &mut pending_scores,
                         );
                         if let Some(call) = replay_calls.iter().find(|call| call.id == id) {
                             output.push(params.tool_output(
@@ -1812,7 +1832,31 @@ pub fn chat_completion_to_response(
                     OutputStatus::Completed
                 },
                 &mut open,
+                &mut pending_scores,
             );
+            // Scores after the last message (the hidden EOS) complete the record of
+            // the last text part. A record without score events (batch parsing)
+            // stays whole for the first text part below.
+            pending_scores.extend(scores);
+            if saw_scores
+                && let Some(part) = output.iter_mut().rev().find_map(|item| match item {
+                    OutputItem::Message(message) => {
+                        message
+                            .content
+                            .iter_mut()
+                            .find_map(|content| match content {
+                                OutputMessageContent::OutputText(part) => Some(part),
+                                _ => None,
+                            })
+                    }
+                    _ => None,
+                })
+            {
+                part.logprobs
+                    .get_or_insert_default()
+                    .extend(std::mem::take(&mut pending_scores));
+            }
+            text_logprobs = pending_scores;
             // Refusals have no parser boundary event. Retain them on the final
             // visible message rather than dropping them during reconstruction.
             if let Some(refusal) = refusal {
@@ -1847,14 +1891,19 @@ pub fn chat_completion_to_response(
         output.push(make_text_message(message_id, String::new()));
     }
 
-    // Apply `include` filtering: the chat scores go on the first output text
-    // part when the caller requested `message.output_text.logprobs`; every
-    // text part otherwise reports an empty array, which the schema requires.
+    // Scores not yet placed by the ordered events go on the first text part that
+    // has none; every other text part reports an empty array, which the schema
+    // requires. Without `include`, the record is empty and every part is `[]`.
     let mut text_logprobs = Some(text_logprobs);
     for item in &mut output {
         if let OutputItem::Message(msg) = item {
             for content in &mut msg.content {
-                if let OutputMessageContent::OutputText(text) = content {
+                if let OutputMessageContent::OutputText(text) = content
+                    && text
+                        .logprobs
+                        .as_ref()
+                        .is_none_or(|scored| scored.is_empty())
+                {
                     text.logprobs = Some(text_logprobs.take().unwrap_or_default());
                 }
             }
@@ -2194,6 +2243,66 @@ mod tests {
             panic!("expected text content");
         };
         assert_eq!(text.logprobs.as_deref(), Some(&[][..]));
+    }
+
+    /// With ordered response events, each message gets the scores generated while
+    /// it was open, and the trailing EOS score completes the last message.
+    #[test]
+    fn included_logprobs_follow_message_phases() {
+        use crate::protocols::openai::chat_completions::{MessageBoundary, ResponseOutputEvent};
+        use dynamo_protocols::types::responses::MessagePhase;
+
+        let mut chat_resp = make_chat_resp_with_text("Checking.Done.");
+        chat_resp.inner.choices[0].logprobs = Some(
+            serde_json::from_value(serde_json::json!({
+                "content": [
+                    {"token": "Checking.", "logprob": -0.25, "bytes": [67], "top_logprobs": []},
+                    {"token": "Done.", "logprob": -0.5, "bytes": [68], "top_logprobs": []},
+                    {"token": "", "logprob": -0.75, "bytes": null, "top_logprobs": []}
+                ],
+                "refusal": null
+            }))
+            .unwrap(),
+        );
+        chat_resp.response_events = vec![
+            ResponseOutputEvent::Boundary(MessageBoundary::Start(MessagePhase::Commentary)),
+            ResponseOutputEvent::Text("Checking.".into()),
+            ResponseOutputEvent::Scores(1),
+            ResponseOutputEvent::Boundary(MessageBoundary::End),
+            ResponseOutputEvent::Boundary(MessageBoundary::Start(MessagePhase::FinalAnswer)),
+            ResponseOutputEvent::Text("Done.".into()),
+            ResponseOutputEvent::Scores(1),
+            ResponseOutputEvent::Boundary(MessageBoundary::End),
+            ResponseOutputEvent::Scores(1),
+        ];
+        let params = ResponseParams {
+            include: Some(vec![IncludeEnum::MessageOutputTextLogprobs]),
+            top_logprobs: Some(0),
+            ..Default::default()
+        };
+
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        let scores: Vec<Vec<String>> = resp
+            .inner
+            .output
+            .iter()
+            .filter_map(|item| match item {
+                OutputItem::Message(message) => Some(
+                    message
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            OutputMessageContent::OutputText(text) => text.logprobs.as_ref(),
+                            _ => None,
+                        })
+                        .flatten()
+                        .map(|entry| entry.token.clone())
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(scores, [vec!["Checking."], vec!["Done.", ""]]);
     }
 
     #[test]
