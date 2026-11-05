@@ -755,3 +755,22 @@ fn a_subagent_group_id_is_namespaced_and_fixed_size() {
     assert_eq!(long.len(), a.len());
     assert!(long.len() <= MAX_SESSION_AFFINITY_ID_BYTES);
 }
+
+#[test]
+fn session_capacity_configuration() {
+    let config = |value: Option<&str>| {
+        super::config_from_lookup(Duration::from_secs(10), Hard, |_| {
+            value
+                .map(str::to_owned)
+                .ok_or(std::env::VarError::NotPresent)
+        })
+    };
+    assert_eq!(config(None).unwrap().max_entries, 65_536);
+    assert_eq!(config(Some("1")).unwrap().max_entries, 1);
+    for value in ["0", "abc"] {
+        assert_eq!(
+            config(Some(value)).unwrap_err().to_string(),
+            "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES must be a positive integer"
+        );
+    }
+}
