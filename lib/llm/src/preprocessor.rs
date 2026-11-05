@@ -3889,19 +3889,8 @@ impl OpenAIPreprocessor {
             return Ok(Vec::new());
         };
 
-        let mut end_tokens = tool_call_config.parser_config.tool_call_end_tokens();
-        let gpt_oss_v2 = crate::protocols::openai::chat_completions::unified_parser::selected_family(
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-        ) == Some("gpt_oss");
-        if gpt_oss_v2 {
-            // GPT-OSS v2 also closes directed calls on <|return|>. The legacy
-            // Harmony config only declares <|call|>; keep both visible to v2.
-            end_tokens.push("<|return|>".to_string());
-        }
-
         let mut visible_stop_token_ids = Vec::new();
-        for end_token in end_tokens {
+        for end_token in tool_call_config.parser_config.tool_call_end_tokens() {
             if end_token.is_empty() {
                 continue;
             }
@@ -3910,12 +3899,10 @@ impl OpenAIPreprocessor {
                     "Failed to encode tool-call end token {end_token:?} for parser {tool_call_parser:?}"
                 )
             })?;
-            if gpt_oss_v2
-                && end_token == "<|return|>"
-                && encoded
-                    .token_ids()
-                    .iter()
-                    .any(|id| user_stop_token_ids.contains(id))
+            if encoded
+                .token_ids()
+                .iter()
+                .any(|id| user_stop_token_ids.contains(id))
             {
                 continue;
             }
@@ -13206,7 +13193,7 @@ responses_tools: None,
     #[test]
     fn gpt_oss_return_stop_respects_parser_version_and_tool_choice() {
         const CHILD: &str = "DYNAMO_GPT_OSS_RETURN_STOP_CHILD";
-        let Ok(version) = std::env::var(CHILD) else {
+        let Ok(_version) = std::env::var(CHILD) else {
             let (_, test_name) = concat!(
                 module_path!(),
                 "::gpt_oss_return_stop_respects_parser_version_and_tool_choice"
@@ -13227,6 +13214,7 @@ responses_tools: None,
             ("auto", None),
             ("none", None),
             ("auto", Some(vec![HARMONY_RETURN_TOKEN_ID])),
+            ("auto", Some(vec![HARMONY_CALL_TOKEN_ID])),
         ] {
             let request: NvCreateChatCompletionRequest =
                 serde_json::from_value(serde_json::json!({
@@ -13248,9 +13236,12 @@ responses_tools: None,
             if tool_choice == "none" {
                 assert!(visible.is_empty());
                 assert_eq!(hidden, [HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID, 7]);
-            } else if version == "1" || !user_stops.is_empty() {
+            } else if user_stops.contains(&HARMONY_RETURN_TOKEN_ID) {
                 assert_eq!(visible, [HARMONY_CALL_TOKEN_ID]);
                 assert_eq!(hidden, [HARMONY_RETURN_TOKEN_ID, 7]);
+            } else if user_stops.contains(&HARMONY_CALL_TOKEN_ID) {
+                assert_eq!(visible, [HARMONY_RETURN_TOKEN_ID]);
+                assert_eq!(hidden, [HARMONY_CALL_TOKEN_ID, 7]);
             } else {
                 assert_eq!(visible, [HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID]);
                 assert_eq!(hidden, [7]);
@@ -13259,16 +13250,24 @@ responses_tools: None,
     }
 
     #[tokio::test]
-    async fn gpt_oss_v2_tool_endings_survive_stop_decoder_and_aggregation() {
-        if crate::test_utils::run_isolated(
-            concat!(
+    async fn gpt_oss_tool_endings_survive_stop_decoder_and_aggregation() {
+        const CHILD: &str = "DYNAMO_GPT_OSS_TOOL_ENDINGS_CHILD";
+        let Ok(version) = std::env::var(CHILD) else {
+            let (_, test_name) = concat!(
                 module_path!(),
-                "::gpt_oss_v2_tool_endings_survive_stop_decoder_and_aggregation"
-            ),
-            &[(env_llm::DYN_PARSER_VERSION, "2")],
-        ) {
+                "::gpt_oss_tool_endings_survive_stop_decoder_and_aggregation"
+            )
+            .split_once("::")
+            .unwrap();
+            for version in ["1", "2"] {
+                let mut command = crate::test_utils::isolated_command(test_name);
+                command
+                    .env(CHILD, version)
+                    .env(env_llm::DYN_PARSER_VERSION, version);
+                crate::test_utils::assert_isolated_success(&command.output().unwrap());
+            }
             return;
-        }
+        };
         use crate::backend::Decoder;
         use crate::protocols::common::StopConditions;
         use crate::protocols::openai::chat_completions::NvCreateChatCompletionResponse;
@@ -13286,6 +13285,7 @@ responses_tools: None,
         for (ending, user_stops) in [
             (Some(HARMONY_CALL_TOKEN_ID), &[][..]),
             (Some(HARMONY_RETURN_TOKEN_ID), &[][..]),
+            (Some(HARMONY_CALL_TOKEN_ID), &[HARMONY_CALL_TOKEN_ID][..]),
             (
                 Some(HARMONY_RETURN_TOKEN_ID),
                 &[HARMONY_RETURN_TOKEN_ID][..],
@@ -13337,6 +13337,8 @@ responses_tools: None,
             let completed = ending.is_some() && user_stops.is_empty();
             let expected_finish = if completed {
                 FinishReason::ToolCalls
+            } else if version == "1" && ending.is_some() {
+                FinishReason::Stop
             } else {
                 FinishReason::Length
             };
