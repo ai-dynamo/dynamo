@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::Instrument;
 use tracing::info_span;
+use velo::streaming::ByteItemBuilder;
 
 /// Metrics configuration for profiling work handlers
 #[derive(Clone, Debug)]
@@ -146,6 +147,17 @@ impl Drop for RequestMetricsGuard {
 
 trait ResponsePublisher {
     async fn send(&self, payload: Bytes) -> anyhow::Result<()>;
+
+    /// An empty item to encode the next frame into, when this publisher sends
+    /// one as it is ([`Self::send_item`]) rather than copying the bytes given
+    /// to [`Self::send`] into a frame of its own.
+    fn new_item(&self) -> Option<ByteItemBuilder> {
+        None
+    }
+    async fn send_item(&self, _item: ByteItemBuilder) -> anyhow::Result<()> {
+        anyhow::bail!("this response transport does not take prebuilt items")
+    }
+
     async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()>;
 
     /// Send a failure prologue keeping the worker's [`crate::error::ErrorType`]
@@ -171,9 +183,37 @@ trait ResponsePublisher {
     }
 }
 
+/// One encoded response frame, in the form its publisher sends.
+enum ResponsePayload {
+    Bytes(Bytes),
+    Item(ByteItemBuilder),
+}
+
+impl ResponsePayload {
+    fn len(&self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::Item(item) => item.payload().len(),
+        }
+    }
+
+    async fn publish(self, publisher: &impl ResponsePublisher) -> anyhow::Result<()> {
+        match self {
+            Self::Bytes(bytes) => publisher.send(bytes).await,
+            Self::Item(item) => publisher.send_item(item).await,
+        }
+    }
+}
+
 impl ResponsePublisher for velo_response::VeloResponseSender {
     async fn send(&self, payload: Bytes) -> anyhow::Result<()> {
         velo_response::VeloResponseSender::send(self, payload).await
+    }
+    fn new_item(&self) -> Option<ByteItemBuilder> {
+        Some(velo_response::VeloResponseSender::new_item(self))
+    }
+    async fn send_item(&self, item: ByteItemBuilder) -> anyhow::Result<()> {
+        velo_response::VeloResponseSender::send_item(self, item).await
     }
     async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
         velo_response::VeloResponseSender::send_prologue(
@@ -275,6 +315,47 @@ where
     Resp: PipelineIO,
     Adapter: Send + Sync + 'static,
 {
+    /// Encode one frame for `publisher`: into an item it sends as it is, when
+    /// it takes one, or else as bytes.
+    async fn encode_frame<U>(
+        &self,
+        publisher: &impl ResponsePublisher,
+        payload_codec: RequestPlanePayloadCodec,
+        response: Option<U>,
+        complete_final: bool,
+    ) -> Result<(EncodedResponseFrame<ResponsePayload>, ResponseFrameKind), PipelineError>
+    where
+        U: Data,
+        Adapter: IngressResponseEncoder<U>,
+    {
+        if let Some(mut item) = publisher.new_item() {
+            let (frame, kind) = if complete_final {
+                let frame = self
+                    .payload_adapter
+                    .encode_response_into(payload_codec, response, true, item.buffer())
+                    .await?;
+                (frame, ResponseFrameKind::Data)
+            } else {
+                self.payload_adapter
+                    .encode_response_into_classified(payload_codec, response, false, item.buffer())
+                    .await?
+            };
+            return Ok((frame.map(|()| ResponsePayload::Item(item)), kind));
+        }
+        let (frame, kind) = if complete_final {
+            let frame = self
+                .payload_adapter
+                .encode_response(payload_codec, response, true)
+                .await?;
+            (frame, ResponseFrameKind::Data)
+        } else {
+            self.payload_adapter
+                .encode_response_classified(payload_codec, response, false)
+                .await?
+        };
+        Ok((frame.map(ResponsePayload::Bytes), kind))
+    }
+
     /// Pump every chunk from the engine's response stream out to the
     /// upstream response transport, plus the terminal complete-final
     /// frame. Captures the per-frame metrics, the publish-failure error
@@ -308,8 +389,7 @@ where
             tracing::trace!("Sending response: {:?}", resp);
             let nvtx_encode = dynamo_nvtx_range!("worker.egress.encode");
             let encoded = match self
-                .payload_adapter
-                .encode_response_classified(payload_codec, Some(resp), false)
+                .encode_frame(publisher, payload_codec, Some(resp), false)
                 .await
             {
                 Ok(encoded) => encoded,
@@ -351,12 +431,12 @@ where
             if !is_error && let Some(notifier) = self.endpoint_health_check_notifier.get() {
                 notifier.notify_one();
             }
-            let resp_bytes = encoded.bytes;
+            let payload = encoded.bytes;
             if let Some(m) = self.metrics() {
-                m.response_bytes.inc_by(resp_bytes.len() as u64);
+                m.response_bytes.inc_by(payload.len() as u64);
             }
             let nvtx_publish = dynamo_nvtx_range!("worker.egress.publish");
-            let publish_result = publisher.send(resp_bytes).await;
+            let publish_result = payload.publish(publisher).await;
             drop(nvtx_publish);
             if let Err(send_err) = publish_result {
                 send_complete_final = false;
@@ -408,11 +488,10 @@ where
         }
         if send_complete_final {
             let encoded = match self
-                .payload_adapter
-                .encode_response(payload_codec, None, true)
+                .encode_frame(publisher, payload_codec, None, true)
                 .await
             {
-                Ok(encoded) => encoded,
+                Ok((encoded, _)) => encoded,
                 Err(err) => {
                     tracing::error!(%err, "failed to encode request-plane final response");
                     if let Some(m) = self.metrics() {
@@ -423,11 +502,11 @@ where
                     return;
                 }
             };
-            let resp_bytes = encoded.bytes;
+            let payload = encoded.bytes;
             if let Some(m) = self.metrics() {
-                m.response_bytes.inc_by(resp_bytes.len() as u64);
+                m.response_bytes.inc_by(payload.len() as u64);
             }
-            if (publisher.send(resp_bytes).await).is_err() {
+            if payload.publish(publisher).await.is_err() {
                 // `is_stopped()` is `state != Live`, so it is also true after
                 // `kill()` — which the response-stream reader does on a TCP read
                 // error. Excluding killed narrows this to `state == Stopped` so
@@ -1798,6 +1877,77 @@ mod tests {
                 .with_label_values(&[work_handler::error_types::ENGINE_STREAM])
                 .get(),
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_buffered_pump_preserves_error_classification() {
+        struct ItemPublisher(tokio::sync::mpsc::Sender<Bytes>);
+
+        impl ResponsePublisher for ItemPublisher {
+            async fn send(&self, _payload: Bytes) -> anyhow::Result<()> {
+                anyhow::bail!("buffered pump must publish prebuilt items")
+            }
+            fn new_item(&self) -> Option<ByteItemBuilder> {
+                Some(ByteItemBuilder::with_capacity(
+                    RESPONSE_ENCODE_CAPACITY_HINT,
+                ))
+            }
+            async fn send_item(&self, item: ByteItemBuilder) -> anyhow::Result<()> {
+                self.0.send(Bytes::copy_from_slice(item.payload())).await?;
+                Ok(())
+            }
+            async fn send_prologue(&mut self, _error: Option<String>) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn finish(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn abort(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        let ingress = TestIngress::new();
+        let metrics = Arc::new(test_metrics());
+        ingress.metrics.set(metrics.clone()).unwrap();
+        let shutdown = DynamoError::builder()
+            .error_type(ErrorType::WorkerUnavailable)
+            .message("worker shutting down")
+            .build();
+        let content = vec![
+            Annotated::from_data(serde_json::json!({"token": 0})),
+            Annotated::from_err(shutdown),
+            Annotated::from_error("engine failed"),
+            Annotated::from_error("engine failed again"),
+        ];
+        let (tx, mut rx) = tokio::sync::mpsc::channel(content.len() + 1);
+        let publisher = ItemPublisher(tx);
+        let ctx = Context::new(serde_json::json!({}));
+        let response_stream = ResponseStream::new(Box::pin(stream::iter(content)), ctx.context());
+        ingress
+            .pump_response_stream(response_stream, &publisher, RequestPlanePayloadCodec::Json)
+            .await;
+        drop(publisher);
+
+        let mut received_errors = 0;
+        while let Some(bytes) = rx.recv().await {
+            let frame: NetworkStreamWrapper<TestResponse> =
+                RequestPlanePayloadCodec::Json.decode(&bytes).unwrap();
+            if let Some(response) = frame.data {
+                received_errors += usize::from(response.is_error());
+            } else {
+                assert!(frame.complete_final);
+            }
+        }
+        assert_eq!(received_errors, 3, "all error frames must reach the caller");
+        assert_eq!(
+            metrics
+                .error_counter
+                .with_label_values(&[work_handler::error_types::ENGINE_STREAM])
+                .get(),
+            1,
+            "worker shutdown is excluded and repeated engine failures count once"
         );
     }
 

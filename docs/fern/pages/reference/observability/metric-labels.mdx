@@ -98,11 +98,11 @@ Added by an individual metric family. Each label appears only on the metrics not
 </ParamField>
 
 <ParamField path="policy_class" type="string">
-  `[Shared]` On `dynamo_frontend_router_queue_*` — the resolved physical scheduler queue. With policy-family or cache-bucket configuration, this can differ from the family requested by the client.
+  `[Shared]` On `dynamo_frontend_router_queue_*` — the resolved policy class. A request that names no class is counted under the default class. A request whose class, after any request-classifier override, is unknown fails before it is queued, so these queue metrics do not count it.
 </ParamField>
 
 <ParamField path="reason" type="string">
-  `[Shared]` On `dynamo_frontend_router_queue_backpressure_total` — the configured queue limit that rejected the request.
+  `[Shared]` On `dynamo_frontend_router_queue_backpressure_total` — the configured queue limit that rejected the request. On `dynamo_frontend_router_admission_rejected_total` — why admission rejected the attempt: `due_time_passed`, `queue_size_exceeded`, or the reserved `predicted_miss`.
 </ParamField>
 
 <ParamField path="migration_type" type="string">

@@ -97,7 +97,7 @@ func (o DGDRV1beta2Options) resolveDefaults(
 // never asks the cluster: a Request created while discovery had nothing to offer must not
 // pick hardware up once discovery recovers, which would change its spec and generation behind
 // the writer's back. oldSpec is the stored spec on UPDATE and nil otherwise. The decision reads
-// the typed hardware alone, never spec.aisimulate.inputOverrides.
+// the typed hardware alone, never spec.aisim.inputOverrides.
 //
 // After discovery, an omitted SKU becomes the cluster's AISimulate SKU, an omitted budget
 // becomes min(matching GPUs, cap), and an omitted node width becomes the selected node shape.
@@ -246,6 +246,8 @@ func (o DGDRV1beta2Options) hardwareDefaultsFromDiscoveryV1beta2(
 				"the cluster has several GPU types (%s); set spec.hardware.gpu.sku",
 				strings.Join(append([]string{found.Model}, found.OtherModels...), ", "))))
 		}
+
+		// Successful discovery guarantees a non-nil GPUInfo; KnownSKU relies on that contract.
 		sku = string(gpu.KnownSKU(found))
 		if sku == "" || !aisimulate.IsKnownHardwareSKU(sku) {
 			detail := "the cluster's GPUs map to no AISimulate SKU; set spec.hardware.gpu.sku"
