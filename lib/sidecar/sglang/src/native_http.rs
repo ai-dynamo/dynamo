@@ -1562,8 +1562,7 @@ mod tests {
             }
             drop(stream);
 
-            // SGLang serves no HTTP /abort_request; the Abort RPC stops the
-            // dispatch's request.
+            // The Abort RPC stops the dispatch's request.
             let rid = tokio::time::timeout(Duration::from_secs(5), aborted.recv())
                 .await
                 .expect("abort was not sent after the drain deadline")
