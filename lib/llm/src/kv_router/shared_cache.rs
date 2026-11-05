@@ -40,6 +40,8 @@ use dynamo_kv_router::{
 const SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY: &str = "sglang_hicache_mooncake";
 const MOONCAKE_EVENT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_MOONCAKE_INDEX_ENTRIES: usize = 1_000_000;
+/// SGLang's default HiCache `prefetch_threshold`, in tokens.
+const SGLANG_DEFAULT_PREFETCH_THRESHOLD: u32 = 256;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct SglangHicacheMooncakeConfig {
@@ -66,7 +68,7 @@ struct SglangHicacheMooncakeConfig {
     #[serde(default)]
     key_layout: Option<String>,
     /// Fewest tokens SGLang loads from Mooncake for one request; it skips shorter
-    /// hits. Absent from workers that predate it, which leaves hits unfiltered.
+    /// hits. Absent from workers that predate it.
     #[serde(default)]
     prefetch_threshold: Option<u32>,
 }
@@ -97,6 +99,21 @@ impl SglangHicacheMooncakeConfig {
 
     fn tenant_id(&self) -> &str {
         tenant_or_default(&self.tenant_id)
+    }
+
+    /// Tokens SGLang must find in Mooncake before it loads any, or `None` for the linker
+    /// layout, which publishes no threshold.
+    fn effective_prefetch_threshold(&self) -> Option<u32> {
+        match self.key_layout() {
+            // Compatibility with v1.5 and v1.6 workers, which omit the field: assume
+            // SGLang's default. TODO(v1.9): remove when v1.6 leaves the N-2 window.
+            MooncakeKeyLayout::Hicache => Some(
+                self.prefetch_threshold
+                    .unwrap_or(SGLANG_DEFAULT_PREFETCH_THRESHOLD)
+                    .max(self.page_size),
+            ),
+            MooncakeKeyLayout::Linker => self.prefetch_threshold,
+        }
     }
 
     /// Prefix used for both physical keys and group IDs. Older workers publish only the
@@ -389,7 +406,7 @@ impl HicacheSharedKvCache {
         let mut resolved = first.clone();
         resolved.prefetch_threshold = configs
             .iter()
-            .filter_map(|(_, config)| config.prefetch_threshold)
+            .filter_map(|(_, config)| config.effective_prefetch_threshold())
             .max();
 
         if let Some(endpoint) = &self.frontend_kv_events_endpoint {
@@ -1547,34 +1564,53 @@ mod tests {
         assert_eq!(hits.total_hits, 0);
     }
 
-    #[tokio::test]
-    async fn test_check_blocks_skips_runs_below_strictest_prefetch_threshold() {
-        let strict = SglangHicacheMooncakeConfig {
-            prefetch_threshold: Some(5),
+    #[test]
+    fn test_omitted_prefetch_threshold_assumes_sglang_default() {
+        assert_eq!(mooncake_config().effective_prefetch_threshold(), Some(256));
+        // SGLang never loads less than one page.
+        let tiny = SglangHicacheMooncakeConfig {
+            prefetch_threshold: Some(1),
             ..mooncake_config()
         };
-        let mut strict_runtime = ModelRuntimeConfig::new();
-        strict_runtime
-            .set_engine_specific(SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY, strict.clone())
-            .unwrap();
-        // A worker that predates the field publishes no threshold.
-        let mut legacy_runtime = ModelRuntimeConfig::new();
-        legacy_runtime
-            .set_engine_specific(SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY, mooncake_config())
-            .unwrap();
-        let (_tx, runtime_configs) =
-            watch::channel(HashMap::from([(1, strict_runtime), (2, legacy_runtime)]));
+        assert_eq!(tiny.effective_prefetch_threshold(), Some(4));
+        let linker = SglangHicacheMooncakeConfig {
+            key_layout: Some("linker".to_string()),
+            ..mooncake_config()
+        };
+        assert_eq!(linker.effective_prefetch_threshold(), None);
+    }
+
+    #[tokio::test]
+    async fn test_check_blocks_skips_runs_below_strictest_prefetch_threshold() {
+        let runtime = |prefetch_threshold| {
+            let mut runtime_config = ModelRuntimeConfig::new();
+            runtime_config
+                .set_engine_specific(
+                    SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY,
+                    SglangHicacheMooncakeConfig {
+                        prefetch_threshold,
+                        ..mooncake_config()
+                    },
+                )
+                .unwrap();
+            runtime_config
+        };
+        let (tx, runtime_configs) = watch::channel(HashMap::from([
+            (1, runtime(Some(5))),
+            (2, runtime(Some(4))),
+        ]));
         let cache = HicacheSharedKvCache::new(runtime_configs);
+        let config = mooncake_config();
         let tokens = [1, 2, 3, 4, 5, 6, 7, 8];
-        let hashes = logical_page_hashes(&tokens, strict.page_size, false);
+        let hashes = logical_page_hashes(&tokens, config.page_size, false);
         for (sequence, hash) in (1..).zip(&hashes) {
             cache.apply_batch(
                 &"default".into(),
                 MooncakeKeyLayout::Hicache,
                 sequence,
                 stored_events(
-                    &expand_actual_query_keys(hash, &strict),
-                    &sglang_group_id(hash, &strict),
+                    &expand_actual_query_keys(hash, &config),
+                    &sglang_group_id(hash, &config),
                 ),
             );
             let hits = cache.check_blocks(&tokens, 4, None).await.unwrap();
@@ -1583,6 +1619,13 @@ mod tests {
             let expected = if sequence == 1 { 0 } else { 2 };
             assert_eq!(hits.loadable_beyond(0), expected);
         }
+
+        // A worker from an earlier release omits the field and uses SGLang's 256 tokens.
+        tx.send(HashMap::from([(1, runtime(Some(5))), (2, runtime(None))]))
+            .unwrap();
+        let hits = cache.check_blocks(&tokens, 4, None).await.unwrap();
+        assert_eq!(hits.total_hits, 2);
+        assert_eq!(hits.loadable_beyond(0), 0);
     }
 
     fn stored_events(object_keys: &[String], group_id: &str) -> Vec<MooncakeObjectEvent> {

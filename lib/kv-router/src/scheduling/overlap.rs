@@ -175,6 +175,9 @@ pub struct WorkerOverlapScore {
     pub disk_blocks: usize,
     pub host_pinned_extension_blocks: usize,
     pub disk_extension_blocks: usize,
+    /// Shared-cache blocks this rank can load past its local prefix (`disk_blocks`):
+    /// the unbroken run starting there, or zero when it is shorter than the engine
+    /// loads. `None` when the shared cache was not queried.
     pub shared_beyond_device_blocks: Option<u32>,
 }
 
@@ -312,8 +315,9 @@ pub fn build_overlap_scores_response(
                     .unwrap_or(0);
             let host_pinned_blocks = device_blocks + host_pinned_extension_blocks;
             let disk_blocks = host_pinned_blocks + disk_extension_blocks;
-            let shared_beyond_device_blocks =
-                shared_cache_hits.map(|hits| hits.hits_beyond(device_blocks as u32));
+            // `disk_blocks` ends the worker's local prefix, where a shared-cache load starts.
+            let shared_beyond_device_blocks = shared_cache_hits
+                .map(|hits| hits.loadable_beyond(u32::try_from(disk_blocks).unwrap_or(u32::MAX)));
 
             WorkerOverlapScore {
                 worker_id: worker.worker_id,
@@ -465,8 +469,8 @@ mod tests {
                 (StorageTier::External, external),
             ]),
         };
-        #[allow(clippy::single_range_in_vec_init)]
-        let shared = SharedCacheHits::from_ranges(vec![0..4]);
+        // A gap at block 7: neither worker can load blocks 8-9.
+        let shared = SharedCacheHits::from_ranges(vec![0..7, 8..10]);
 
         let response =
             build_overlap_scores_response(&tiered, 16, 9, [warm, idle], true, Some(&shared), None);
@@ -474,12 +478,14 @@ mod tests {
         assert_eq!(response.num_blocks, 9);
         assert_eq!(response.workers[0].worker_id, idle.worker_id);
         assert_eq!(response.workers[1].worker_id, warm.worker_id);
+        assert_eq!(response.workers[0].shared_beyond_device_blocks, Some(7));
         let warm_score = &response.workers[1];
         assert_eq!(warm_score.host_pinned_blocks, 3);
         assert_eq!(warm_score.disk_blocks, 5);
+        // The shared run continues past the host and disk blocks, not the device prefix.
         assert_eq!(warm_score.shared_beyond_device_blocks, Some(2));
         assert!(response.shared_cache.enabled);
-        assert_eq!(response.shared_cache.total_hit_blocks, 4);
+        assert_eq!(response.shared_cache.total_hit_blocks, 9);
     }
 
     #[test]

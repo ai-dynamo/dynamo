@@ -125,9 +125,9 @@ adjusted_prefill_blocks = max(
 logit = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
 ```
 
-`loadable_beyond(n)` counts the shared-cache pages SGLang prefetches after the `n` pages a worker already holds on GPU, host, or disk: the unbroken run of pages that starts at position `n`. SGLang stops prefetching at the first missing page, so pages after a gap do not count, and it skips a run shorter than its `prefetch_threshold` (set in `--hicache-storage-backend-extra-config`, default 256 tokens), so such a run counts as zero. Pages the worker holds on host earn host credit only. Requests that use a LoRA adapter get no shared-cache credit, because SGLang stores adapter pages under different keys.
+`loadable_beyond(n)` counts the shared-cache pages SGLang prefetches after the `n` pages a worker already holds on GPU, host, or disk: the unbroken run of pages that starts at position `n`. SGLang stops prefetching at the first missing page, so pages after a gap do not count, and it skips a run shorter than its `prefetch_threshold` (set in `--hicache-storage-backend-extra-config`, default 256 tokens), so such a run counts as zero. Workers publish the threshold they use; for a worker from an earlier release that does not, the router assumes the 256-token default. Pages the worker holds on host earn host credit only. Requests that use a LoRA adapter get no shared-cache credit, because SGLang stores adapter pages under different keys.
 
-**Worked example.** Request is 4 blocks, `shared_cache_multiplier = 0.5`, `block_size = 1`, `overlap_score_credit = 1.0` (the maximum device-local overlap credit). Shared pool contains blocks 0–3, and neither worker holds blocks on host. Both runs clear `prefetch_threshold`.
+**Worked example.** Request is 4 blocks, `shared_cache_multiplier = 0.5`, `block_size = 1`, `overlap_score_credit = 1.0` (the maximum device-local overlap credit). Shared pool contains blocks 0–3, and neither worker holds blocks on host. The workers set `prefetch_threshold` to 1, so both runs clear it; the 256-token default would skip these 2- and 4-token runs.
 
 | Worker | Device overlap | `loadable_beyond` | Device credit | Shared credit | Adjusted prefill | Logit          |
 | ------ | -------------- | ----------------- | ------------- | ------------- | ---------------- | -------------- |
