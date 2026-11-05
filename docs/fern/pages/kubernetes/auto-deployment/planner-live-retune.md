@@ -358,9 +358,11 @@ retune Requests.
 - **Trace data.** See the privacy note in [Configure the frontend](#configure-the-frontend).
 
 For a DGD named `my-dgd`, this NetworkPolicy admits only its Planner pods to port 8002 of its
-frontend pods and leaves every other TCP port of the frontends as open as with no policy. With
-another `DYN_FRONTEND_ADMIN_PORT`, move the three port numbers. It takes effect only where the
-cluster's network plugin enforces NetworkPolicy, and needs Kubernetes 1.25 or later for `endPort`:
+frontend pods and leaves every other port of the frontends as open as with no policy: the other
+TCP ports, and every UDP port, which the QUIC response plane (`DYN_RESPONSE_PLANE=quic`) uses to
+receive worker responses. With another `DYN_FRONTEND_ADMIN_PORT`, move the three port numbers. It
+takes effect only where the cluster's network plugin enforces NetworkPolicy, and needs Kubernetes
+1.25 or later for `endPort`:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -379,6 +381,7 @@ spec:
   - ports:
     - {protocol: TCP, port: 1, endPort: 8001}
     - {protocol: TCP, port: 8003, endPort: 65535}
+    - {protocol: UDP}
   # The admin port, from the Planner only.
   - from:
     - podSelector:
