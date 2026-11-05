@@ -892,14 +892,6 @@ mod tests {
         );
     }
 
-    fn single_worker_topology() -> Vec<WorkerTopology> {
-        vec![WorkerTopology {
-            worker_id: 0,
-            scheduler_ids: vec![0],
-            router_hint: false,
-        }]
-    }
-
     /// `router_config`/`prefill_load_estimator` are consumed by `.take()` on
     /// the first placement call; a second call must fail loudly instead of
     /// silently falling back to default config.

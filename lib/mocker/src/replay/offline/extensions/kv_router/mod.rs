@@ -623,8 +623,6 @@ impl KvRouterPlacement {
                 }),
             reported_overlap_tokens: admission.overlap_blocks as usize
                 * self.router.block_size as usize,
-            // No consumer reads this yet for offline replay; revisit if one starts branching on it.
-            placement_replica_id: None,
             cache_sample: Some(PlacementCacheSample {
                 overlap_blocks: admission.overlap_blocks,
                 best_available_overlap_blocks: admission.best_available_overlap_blocks,
@@ -2508,6 +2506,7 @@ mod tests {
         let first = request(701, 7);
         let mut later = request(702, 8);
         later.replay_context = Some(ReplayRequestContext {
+            agentic: None,
             authored_id: "length-only".into(),
             session_id: None,
             turn_index: None,

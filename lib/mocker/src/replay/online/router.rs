@@ -181,9 +181,7 @@ impl KvCacheEventSink for ReplayKvEventSink {
             let mut routed =
                 RouterEvent::with_storage_tier(self.worker_id, event.event, event.storage_tier);
             routed.session_id = event.session_id;
-            self.event_tx
-                .send(routed)
-                .map_err(|_| anyhow!("replay router event channel closed"))?;
+            self.send(routed)?;
         }
         Ok(())
     }
