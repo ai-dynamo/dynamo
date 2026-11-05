@@ -87,6 +87,58 @@ Input files are limited to 200 MiB in this profile; for larger workloads, split 
 
 File transfers also have a 600-second maximum lifetime (`DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS`). The frontend closes the connection when a transfer expires, even if the client stops consuming an HTTP/2 response. This also interrupts other HTTP/2 streams sharing that connection. Reconnect before retrying reads; for interrupted uploads or job creation, check whether the operation succeeded before resubmitting. Size the limit for your file sizes and network speed. Stalled socket writes have a separate 120-second limit (`DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS`).
 
+## Tune concurrency and result delivery
+
+This example already dispatches requests concurrently. The profile's `asyncConcurrency` setting defaults to `64` per Async replica. The two-request demo checks that submission and retrieval work; its one-second status polling doesn't make inference run one request at a time.
+
+### Adjust inference concurrency
+
+Use `asyncConcurrency` to change how many requests each Async replica can dispatch. Include all replicas that share the same inference pool when choosing a limit. The model may run fewer requests because of its own limits, a dispatch gate or a lack of queued work.
+
+To compare `32` with the existing `64`, copy your storage-configured profile and render a new values file:
+
+```bash
+python3 - <<'PYTHON'
+from pathlib import Path
+import yaml
+
+profile = yaml.safe_load(Path("profile-external-storage.yaml").read_text())
+profile["asyncConcurrency"] = 32
+with Path("profile-concurrency-32.yaml").open("x") as output:
+    yaml.safe_dump(profile, output, sort_keys=False)
+PYTHON
+python3 render_values.py profile-concurrency-32.yaml \
+  --output-dir /tmp/dynamo-batch-values-32
+```
+
+Both commands refuse to overwrite existing output. Before installing, check the generated `async.ap.concurrency`, `async.ap.transportConfig.batch_size`, Processor settings, target DGD and storage references. Keep credentials in the existing Secret.
+
+Run a larger workload on dedicated offline capacity and change one setting at a time. Keep the model, input and output lengths, worker setup, caching and client processing the same. Compare usable outputs per second and the time to save and read back every result.
+
+Have enough work queued to exercise the limit, within storage, queue, memory and tenant budgets. Watch queue growth, latency, errors and CPU/GPU/storage use. A busy GPU sample or full HTTP pool alone doesn't show sustained capacity. Stop raising concurrency if completion time, latency, errors or resource pressure worsens.
+
+<details>
+<summary>Other limits that affect concurrency</summary>
+
+This profile uses Async dispatch. Benchmark it separately from synchronous Batch, which uses different dispatch controls. The renderer sets Async queue `batch_size` to `asyncConcurrency`. It also keeps the Processor's synchronous limit fields at least that large. These values don't multiply together.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `batch-gateway.processor.config.numWorkers` | `5` | Jobs each Processor replica can work on at once. Each job can contain many model requests. |
+| `batch-gateway.processor.config.concurrency.global` and `.perEndpoint` | `256` each | Synchronous dispatch limits. The pinned Processor doesn't create these semaphores in Async mode, so increasing them won't raise Async concurrency. |
+
+Disk space can reduce the job worker count to the smaller of `numWorkers` and `floor(input-file disk budget / maximum input-file size)`. The chart provides a 10 GiB work directory, reserves 10% for inputs and allows files up to 200 MiB. Leave space for outputs, checkpoints and other files before raising those limits. See the [Batch Gateway chart configuration](https://github.com/llm-d/llm-d-batch-gateway/blob/v0.6.0/charts/batch-gateway/values.yaml).
+
+</details>
+
+### Get completed results back sooner
+
+If inference has finished but your application is still waiting for results, check how it collects them. Keep every accepted job ID so you can return for its results. Download each completed job without waiting for unrelated jobs. Match results by `custom_id`, check failures and truncation, and save and verify each result before checkpointing it. When resuming, keep completed requests separate from unfinished ones and requests whose outcome is still unknown.
+
+For slow decoding or file writes, process independent results in a bounded worker pool and cap the bytes held by pending downloads and output work. More inference requests or job workers won't speed up this work. Smaller jobs can make the first usable result available sooner, but add upload, validation and finalization work. Measure both the first-result time and full completion time before changing job size.
+
+Use dedicated offline capacity unless you've configured and validated a separate admission policy. The readiness gate doesn't reserve capacity for online requests.
+
 ## Use an Existing DGD
 
 Set `targetDGD.name`, `targetDGD.namespace`, and `model` in the profile to match your deployment. Add `--batch-gateway-url http://<dgd>-batch-api.<namespace>.svc:8000` to every frontend replica, using a runtime image containing the proxy. The integration calls the standard `<dgd>-frontend` Service on port 8000. Regenerate the values into a new output directory, then install the chart in that namespace.
