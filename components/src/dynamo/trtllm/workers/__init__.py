@@ -23,6 +23,7 @@ import asyncio
 import logging
 from typing import Optional
 
+from dynamo.common.utils.worker_shutdown import WorkerShutdown
 from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.args import Config
 from dynamo.trtllm.constants import Modality
@@ -35,6 +36,7 @@ async def init_worker(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: Optional[list] = None,
     engine_holder: Optional[list] = None,
+    shutdown: WorkerShutdown | None = None,
 ) -> None:
     """Initialize the appropriate worker based on modality.
 
@@ -46,9 +48,8 @@ async def init_worker(
         config: Configuration parsed from command line.
         shutdown_event: Event to signal shutdown.
         shutdown_endpoints: Optional list to populate with endpoints for graceful shutdown.
-        engine_holder: Optional mutable list; when provided, init_llm_worker will
-            append the TensorRTLLMEngine instance so that the drain callback
-            (installed earlier by main.py) can access it at signal time.
+        engine_holder: Optional mutable list populated with the initialized engine.
+        shutdown: Coordinator for request admission and ordered engine teardown.
     """
     logging.info(f"Initializing worker with modality={config.modality}")
 
@@ -61,7 +62,7 @@ async def init_worker(
             )
 
             await init_video_diffusion_worker(
-                runtime, config, shutdown_event, shutdown_endpoints
+                runtime, config, shutdown_event, shutdown_endpoints, shutdown=shutdown
             )
             return
         elif modality == Modality.IMAGE_DIFFUSION:
@@ -70,7 +71,7 @@ async def init_worker(
             )
 
             await init_image_diffusion_worker(
-                runtime, config, shutdown_event, shutdown_endpoints
+                runtime, config, shutdown_event, shutdown_endpoints, shutdown=shutdown
             )
             return
         raise ValueError(f"Unsupported diffusion modality: {modality}")
@@ -82,6 +83,7 @@ async def init_worker(
         shutdown_event,
         shutdown_endpoints,
         engine_holder=engine_holder,
+        shutdown=shutdown,
     )
 
 
