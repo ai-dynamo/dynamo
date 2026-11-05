@@ -178,7 +178,7 @@ truncated input.
 
 Choose a model family, then expand the matching model option to see its parser name and configuration details.
 
-The **Upstream name** field shows where the vLLM or SGLang parser name differs from Dynamo’s — relevant when using `--dyn-chat-processor vllm` or `sglang` (see [Parser Engine Fallback](chat-processors.mdx)). A missing upstream name means the same name works everywhere. Upstream names are engine-version dependent. A `Dynamo-only` label describes this catalog's Dynamo entry; it is not a claim that no engine release can implement the format.
+The **Upstream name** field shows where the vLLM or SGLang parser name differs from Dynamo’s — relevant when using `--dyn-chat-processor vllm` or `sglang` (see [Parser Engine Fallback](chat-processors.mdx)). Upstream names are engine-version dependent. A `Dynamo-only` label describes this catalog's Dynamo entry; it is not a claim that no engine release can implement the format.
 
 <AccordionGroup>
   <Accordion title="Kimi">
@@ -186,7 +186,7 @@ The **Upstream name** field shows where the vLLM or SGLang parser name differs f
       <Accordion title="Kimi K3">
         **Parser:** `kimi_k3` (alias `kimi-k3`)
 
-        **Notes:** XTML tools and reasoning. Pair with `--dyn-reasoning-parser kimi_k3`. A named `tool_choice` forces `thinking=false` and `enable_thinking=false` before rendering, overriding an explicit request to enable thinking; `reasoning_effort` is retained. This override is specific to the K3 tool parser.
+        **Notes:** XTML tools and reasoning. Pair with `--dyn-reasoning-parser kimi_k3`. A named `tool_choice` forces `thinking=false` and `enable_thinking=false` before rendering, overriding an explicit request to enable thinking; `reasoning_effort` is retained. This override is specific to the K3 tool parser. See the [Kimi K3 recipe](../../recipes/model-recipes/kimi-k3.mdx).
       </Accordion>
 
       <Accordion title="Kimi K2 Instruct/Thinking and Kimi K2.5">
@@ -195,14 +195,6 @@ The **Upstream name** field shows where the vLLM or SGLang parser name differs f
         **Upstream name:** Same name across Dynamo, vLLM, and SGLang
 
         **Notes:** For the default Unified route, pair with `--dyn-reasoning-parser kimi_k25`. The legacy Unicode-delimiter reasoning parser `kimi` is a separate V1 format; pairing it with `kimi_k2` uses the split route under auto and is rejected by explicit V2. For Kimi K2.5 thinking models, use `kimi_k25` so `<think>` blocks and tool calls are parsed from the same response. See [Reasoning Parsing (Dynamo)](reasoning-parsing.mdx).
-      </Accordion>
-
-      <Accordion title="Kimi K3">
-        **Parser:** `kimi_k3`
-
-        **Upstream name:** Check your engine version's `--help`
-
-        **Notes:** Pair with `--dyn-reasoning-parser kimi_k3`, as the [Kimi K3 recipe](../../recipes/model-recipes/kimi-k3.mdx) does.
       </Accordion>
     </AccordionGroup>
   </Accordion>
@@ -232,7 +224,7 @@ The **Upstream name** field shows where the vLLM or SGLang parser name differs f
       <Accordion title="DeepSeek V4.1">
         **Parser:** `deepseek_v41`
 
-        **Notes:** Unified V4.1 reasoning and spaced DSML calls with JSON bodies or typed parameter tags. Use the same reasoning selector when setting both. V1 does not provide this selector.
+        **Notes:** Unified V4.1 reasoning and spaced DSML calls with JSON bodies or typed parameter tags. Use the same reasoning selector when setting both. V1 does not provide this selector. See the [DeepSeek V4.1 Flash recipe](../../recipes/model-recipes/deepseek-v4-1-flash.mdx).
       </Accordion>
 
       <Accordion title="DeepSeek V4 Pro / Flash">
@@ -241,14 +233,6 @@ The **Upstream name** field shows where the vLLM or SGLang parser name differs f
         **Upstream name:** vLLM: `deepseek_v4`; SGLang: `deepseekv4`
 
         **Notes:** DSML tags (`<｜DSML｜tool_calls>...`). Aliases: `deepseek-v4`, `deepseekv4`
-      </Accordion>
-
-      <Accordion title="DeepSeek V4.1 Flash">
-        **Parser:** `deepseek_v41`
-
-        **Upstream name:** Check your engine version's `--help`
-
-        **Notes:** Pair with `--dyn-reasoning-parser deepseek_v41`. See the [DeepSeek V4.1 Flash recipe](../../recipes/model-recipes/deepseek-v4-1-flash.mdx).
       </Accordion>
 
       <Accordion title="DeepSeek V3 and DeepSeek R1-0528+">
