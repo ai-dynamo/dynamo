@@ -5479,7 +5479,19 @@ async fn images_with_request(
 
     connection_handle.disarm();
     inflight.mark_ok();
-    Ok(Json(response).into_response())
+    // The body and header `Json(response)` would send, but each b64_json
+    // image is copied instead of checked for escapes byte by byte.
+    let body = response.to_json_vec().map_err(|e| {
+        ErrorMessage::internal_server_error_with_details("Failed to serialize images response", e)
+    })?;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        )],
+        body,
+    )
+        .into_response())
 }
 
 /// Accept ordered uploads or the JSON reference extension for image edits.
