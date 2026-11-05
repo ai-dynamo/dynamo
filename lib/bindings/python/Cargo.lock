@@ -2787,6 +2787,7 @@ dependencies = [
  "dynamo-runtime",
  "dynamo-sidecar-common",
  "futures",
+ "pep440_rs",
  "prost-types 0.14.4",
  "serde",
  "serde_json",

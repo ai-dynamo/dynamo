@@ -296,8 +296,8 @@ In aggregated mode (`mode: agg`), engines handle both prefill and decode via chu
 > [!WARNING]
 > **Experimental.** With `retune.executor: local`, the default, retune runs only in
 > planner-in-the-loop offline replay, and a live Planner rejects it at startup. With
-> `executor: dgdr`, a live Planner on Kubernetes retunes three KV router knobs with fixed replicas
-> through DGDR v1beta2 Requests; it is for development clusters only. See
+> `executor: dgdr`, a live Planner on Kubernetes retunes three KV router knobs, and with scaling
+> its own Planner fields, through DGDR v1beta2 Requests; it is for development clusters only. See
 > [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
 
 Retune periodically replays the last window of recorded traffic against a grid of router and
@@ -562,7 +562,12 @@ trace that ends at or before the first replayed request; without throughput scal
   `runtime_decision.router_parameters`.
 
 The AISimulate Planner adapter (`planner/simulation/provider.py`) passes `planner.retune` through to
-`PlannerConfig` and fills the scoring SLA from `evaluation.sla`. `dynamo.replay` (`run_trace_replay`,
+`PlannerConfig` and fills the scoring SLA from `evaluation.sla`. For live retune with scaling, it
+also reads `planner.retune_sweep` in `aisimulate recommend`: the live Planner's scaling fields
+(`base`), the Planner points to search (`points`) and the history warm-up by throughput interval
+(`warmup`). Each candidate replays `base` with its point applied, warmed with the rows of its own
+interval, which `DynamoReplayRunner` hands to `run_trace_replay`; its concrete config is the
+section narrowed to that point, which `aisimulate predict` replays again. `dynamo.replay` (`run_trace_replay`,
 and `prepare_planner_replay` for synthetic traffic) rejects traffic that is not an open-loop Dynamo
 request trace, and its error names the AISimulate setting.
 
