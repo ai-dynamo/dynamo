@@ -134,6 +134,10 @@ from dynamo.planner.plugins.types import (
 )
 from dynamo.planner.plugins.types import PoolTrafficDemand as PoolTrafficDemandData
 from dynamo.planner.plugins.types import TrafficMetrics, WorkerState
+from dynamo.planner.reconfiguration import (
+    SCALING_POLICY_FIELDS,
+    predictor_rebuild_required,
+)
 
 log = logging.getLogger(__name__)
 
@@ -849,12 +853,6 @@ class OrchestratorEngineAdapter:
         turning on, or a predictor field or the throughput interval
         changing). Everything is checked before anything changes.
         """
-        # Imported on use: reconfiguration imports the planner core.
-        from dynamo.planner.reconfiguration import (
-            SCALING_POLICY_FIELDS,
-            predictor_rebuild_required,
-        )
-
         fields = list(fields)
         if predictor is not None:
             if not isinstance(predictor, BuiltinLoadPredict):

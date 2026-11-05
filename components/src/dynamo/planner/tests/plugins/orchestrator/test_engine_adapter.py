@@ -57,6 +57,7 @@ from dynamo.planner.plugins.types import (
     OverrideType,
     ScalingProposal,
 )
+from dynamo.planner.reconfiguration import candidate_config, prepare_predictor
 from dynamo.planner.tests.retune_stubs import (
     install_stub_controller,
     retune_inputs,
@@ -2170,9 +2171,6 @@ def test_throughput_only_sla_still_pulls_fpm_for_live_regression():
 
 
 def test_load_scaling_turned_back_on_drops_a_stale_throughput_floor():
-    # Imported here: reconfiguration pulls in the planner core.
-    from dynamo.planner.reconfiguration import candidate_config
-
     cfg = PlannerConfig.model_validate(
         {
             "mode": "disagg",
@@ -2209,9 +2207,6 @@ def test_load_scaling_turned_back_on_drops_a_stale_throughput_floor():
 
 @pytest.mark.asyncio
 async def test_a_kept_throughput_loop_keeps_its_phase_on_a_load_interval_change():
-    # Imported here: reconfiguration pulls in the planner core.
-    from dynamo.planner.reconfiguration import candidate_config
-
     cfg = PlannerConfig.model_validate(
         {
             "mode": "agg",
@@ -2252,9 +2247,6 @@ async def test_a_kept_throughput_loop_keeps_its_phase_on_a_load_interval_change(
 
 @pytest.mark.asyncio
 async def test_runtime_scaling_policy_change_reregisters_builtins():
-    # Imported here: reconfiguration pulls in the planner core.
-    from dynamo.planner.reconfiguration import candidate_config, prepare_predictor
-
     cfg = PlannerConfig.model_validate(
         {
             "mode": "agg",
