@@ -109,10 +109,8 @@ class NvdecVideoDecoder(VideoDecoderWrapper):  # type: ignore[misc,valid-type]
         self._tc_kwargs: dict[str, Any] = {}
 
         try:
-            # Device memory, not host: _frame_to_rgb_hwc then synchronizes the
-            # device and copies each frame into fresh host storage, so the
-            # pixels do not depend on when the library's own streams finish
-            # writing a host buffer. See the module docstring.
+            # Device memory, not host: _frame_to_rgb_hwc syncs the device before
+            # copying to host, so reads cannot race the library's streams.
             self._decoder = nvc.SimpleDecoder(
                 tmp_path,
                 gpu_id=gpu_id,
