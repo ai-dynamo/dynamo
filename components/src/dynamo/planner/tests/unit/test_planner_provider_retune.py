@@ -108,6 +108,29 @@ def test_retune_reaches_the_replay_host_as_written() -> None:
     assert _hook_config(kept)["retune"] == explicit
 
 
+def test_predict_retune_searches_the_scaling_policy_not_user_constraints() -> None:
+    # Imported here: the domains module imports the adapter schemas on use.
+    from dynamo.planner.retune.domains import expand_planner_domain
+
+    provider = create_provider()
+    planner = {"scaling_policy": {"preset": ["load_180_5", "load_180_10"]}}
+    spec = provider.compile_prediction(
+        {"policy": "enabled", "retune": {**_RETUNE, "planner": planner}},
+        _context(sla=_SLA),
+    )
+
+    domain = expand_planner_domain(_host_config(spec))
+    assert domain.grid["load_adjustment_interval_seconds"] == [5, 10]
+    with pytest.raises(ValueError, match="user constraints, not tuning knobs"):
+        provider.compile_prediction(
+            {
+                "policy": "enabled",
+                "retune": {**_RETUNE, "planner": {"max_num_gpus": {"choices": [4, 8]}}},
+            },
+            _context(sla=_SLA),
+        )
+
+
 def _write_trace(path: Path, *, count: int, start_ms: int, prefix: str) -> None:
     rows = [
         {

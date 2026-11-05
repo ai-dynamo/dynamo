@@ -260,7 +260,7 @@ address.
 </ParamField>
 
 <ParamField path="--connector" type="string" default="null">
-  KV-cache transfer connector. Accepts zero or more values. Deprecated for vLLM — use `--kv-transfer-config` instead. For TRT-LLM, valid options are `nixl`, `lmcache`, `kvbm`, `null`, and `none`.
+  KV-cache transfer connector. Accepts zero or more values. Deprecated for vLLM — use `--kv-transfer-config` instead. TensorRT-LLM supports only `none`.
 
   Environment variable: `DYN_CONNECTOR`
 </ParamField>

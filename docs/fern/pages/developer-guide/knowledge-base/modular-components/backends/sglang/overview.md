@@ -157,7 +157,7 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 | **Request Cancellation** | 🚧<sup>3</sup> | ✅ | ✅ | 🚧 | 🚧 | ✅ | — | | | |
 | **LoRA** | 🚧<sup>4</sup> | 🚧<sup>4</sup> | — | 🚧 | 🚧 | 🚧 | 🚧 | — | | |
 | **Tool Calling** | ✅ | ✅ | ✅ | 🚧 | ✅ | ✅ | ✅ | 🚧 | — | |
-| **Speculative Decoding** | ✅ | ✅ | — | 🚧 | — | 🚧 | — | 🚧 | ✅ | — |
+| **Speculative Decoding** | ✅ | ✅ | — | 🚧 | — | ✅ | — | 🚧 | ✅ | — |
 
 > **Notes:**
 > 1. **Multimodal + KV-Aware Routing**: Media-aware routing requires compatible SGLang cache identities. Builds without hash-forwarding support and [wide-token SGLang builds](multimodal.md#wide-token-sglang-builds) use text-prefix routing. Requests still run with this routing fallback. See [SGLang Multimodal KV Routing](multimodal.md#multimodal-kv-routing) for build requirements and supported models.
