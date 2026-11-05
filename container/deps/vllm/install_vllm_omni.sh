@@ -55,9 +55,15 @@ export VLLM_OMNI_TARGET_DEVICE
 
 # Use --system flag only for CUDA (system Python), omit for CPU/XPU (venv)
 if [ "${VLLM_OMNI_TARGET_DEVICE}" = "cuda" ]; then
+  # TEST BRANCH (vLLM 0.33): vllm-omni (all tags, incl. main) requires transformers<5.20.0 but vLLM 0.33
+  # ships transformers 5.20.2, so the solve is unsatisfiable. Override omni's transformers requirement
+  # with the version already installed by the base image (omni itself is not used for DeepSeek-V4.1).
+  printf 'transformers\n' > /tmp/omni_override_list.txt
+  freeze_installed /tmp/omni_override_list.txt > "${PROTECTED_OVERRIDES}"
   uv pip install --system \
     --prerelease=allow \
     --constraints "${PROTECTED_CONSTRAINTS}" \
+    --overrides "${PROTECTED_OVERRIDES}" \
     "vllm-omni==${VLLM_OMNI_VERSION}"
 else
   uv pip install \
