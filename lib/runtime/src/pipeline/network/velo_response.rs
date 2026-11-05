@@ -26,8 +26,8 @@ use uuid::Uuid;
 use velo::{
     InstanceId, PeerInfo, Velo, WorkerAddress,
     streaming::{
-        AnchorConfig, AutoFlush, FlushPolicy, MuxConfig, StreamAnchor, StreamAnchorHandle,
-        StreamController, StreamFrame, StreamSender, control::StreamOpenTicket,
+        AnchorConfig, AutoFlush, ByteItemBuilder, FlushPolicy, MuxConfig, StreamAnchor,
+        StreamAnchorHandle, StreamController, StreamFrame, StreamSender, control::StreamOpenTicket,
     },
 };
 
@@ -461,6 +461,14 @@ impl VeloResponseService {
             SocketAddr::new(host.advertise_ip(), response_port()?),
         )
         .await
+    }
+
+    /// A TCP service on an ephemeral loopback port, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) async fn loopback() -> Arc<Self> {
+        Self::new(ResponseTransport::Tcp, "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap()
     }
 
     async fn new(transport: ResponseTransport, address: SocketAddr) -> Result<Arc<Self>> {
@@ -982,26 +990,37 @@ pub struct VeloResponseSender {
 }
 
 impl VeloResponseSender {
-    pub async fn send(&self, bytes: Bytes) -> Result<()> {
-        ensure!(self.prologue_sent, "Velo response prologue missing");
+    fn stream(&self) -> Result<&StreamSender<Bytes>> {
         self.sender
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Velo response closed"))?
-            .send_bytes(bytes)
-            .await?;
+            .ok_or_else(|| anyhow::anyhow!("Velo response closed"))
+    }
+    /// Send `bytes` as one item. This copies them into the item; encoding
+    /// into [`Self::new_item`] and sending with [`Self::send_item`] does not.
+    pub async fn send(&self, bytes: Bytes) -> Result<()> {
+        ensure!(self.prologue_sent, "Velo response prologue missing");
+        self.stream()?.send_bytes(bytes).await?;
+        Ok(())
+    }
+    /// An empty item to encode a response into, for [`Self::send_item`].
+    pub fn new_item(&self) -> ByteItemBuilder {
+        ByteItemBuilder::with_capacity(super::RESPONSE_ENCODE_CAPACITY_HINT)
+    }
+    /// Send an item from [`Self::new_item`] as it is.
+    pub async fn send_item(&self, item: ByteItemBuilder) -> Result<()> {
+        ensure!(self.prologue_sent, "Velo response prologue missing");
+        self.stream()?.send_frame(item.finish()?).await?;
         Ok(())
     }
     pub async fn send_prologue(&mut self, error: Option<StreamPrologueError>) -> Result<()> {
         ensure!(!self.prologue_sent, "Velo response prologue already sent");
         let (error, typed_error) = error.map_or((None, None), |e| (Some(e.message), e.typed_error));
-        self.sender
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Velo response closed"))?
-            .send_bytes(serde_json::to_vec(&ResponseStreamPrologue {
-                error,
-                typed_error,
-            })?)
-            .await?;
+        let mut item = self.new_item();
+        serde_json::to_writer(
+            item.buffer(),
+            &ResponseStreamPrologue { error, typed_error },
+        )?;
+        self.stream()?.send_frame(item.finish()?).await?;
         self.prologue_sent = true;
         Ok(())
     }

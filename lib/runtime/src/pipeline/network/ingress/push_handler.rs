@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::Instrument;
 use tracing::info_span;
+use velo::streaming::ByteItemBuilder;
 
 /// Metrics configuration for profiling work handlers
 #[derive(Clone, Debug)]
@@ -146,6 +147,17 @@ impl Drop for RequestMetricsGuard {
 
 trait ResponsePublisher {
     async fn send(&self, payload: Bytes) -> anyhow::Result<()>;
+
+    /// An empty item to encode the next frame into, when this publisher sends
+    /// one as it is ([`Self::send_item`]) rather than copying the bytes given
+    /// to [`Self::send`] into a frame of its own.
+    fn new_item(&self) -> Option<ByteItemBuilder> {
+        None
+    }
+    async fn send_item(&self, _item: ByteItemBuilder) -> anyhow::Result<()> {
+        anyhow::bail!("this response transport does not take prebuilt items")
+    }
+
     async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()>;
 
     /// Send a failure prologue keeping the worker's [`crate::error::ErrorType`]
@@ -171,9 +183,37 @@ trait ResponsePublisher {
     }
 }
 
+/// One encoded response frame, in the form its publisher sends.
+enum ResponsePayload {
+    Bytes(Bytes),
+    Item(ByteItemBuilder),
+}
+
+impl ResponsePayload {
+    fn len(&self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::Item(item) => item.payload().len(),
+        }
+    }
+
+    async fn publish(self, publisher: &impl ResponsePublisher) -> anyhow::Result<()> {
+        match self {
+            Self::Bytes(bytes) => publisher.send(bytes).await,
+            Self::Item(item) => publisher.send_item(item).await,
+        }
+    }
+}
+
 impl ResponsePublisher for velo_response::VeloResponseSender {
     async fn send(&self, payload: Bytes) -> anyhow::Result<()> {
         velo_response::VeloResponseSender::send(self, payload).await
+    }
+    fn new_item(&self) -> Option<ByteItemBuilder> {
+        Some(velo_response::VeloResponseSender::new_item(self))
+    }
+    async fn send_item(&self, item: ByteItemBuilder) -> anyhow::Result<()> {
+        velo_response::VeloResponseSender::send_item(self, item).await
     }
     async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
         velo_response::VeloResponseSender::send_prologue(
@@ -275,6 +315,43 @@ where
     Resp: PipelineIO,
     Adapter: Send + Sync + 'static,
 {
+    /// Encode one frame for `publisher`: straight into an item it sends as it
+    /// is, when it takes one and the adapter can write there, or else as bytes.
+    async fn encode_frame<U>(
+        &self,
+        publisher: &impl ResponsePublisher,
+        payload_codec: RequestPlanePayloadCodec,
+        response: Option<U>,
+        complete_final: bool,
+    ) -> Result<EncodedResponseFrame<ResponsePayload>, PipelineError>
+    where
+        U: Data,
+        Adapter: IngressResponseEncoder<U>,
+    {
+        if <Adapter as IngressResponseEncoder<U>>::ENCODES_INTO_BUFFER
+            && let Some(mut item) = publisher.new_item()
+        {
+            let frame = self
+                .payload_adapter
+                .encode_response_into(payload_codec, response, complete_final, item.buffer())
+                .await?;
+            return Ok(EncodedResponseFrame {
+                bytes: ResponsePayload::Item(item),
+                is_error: frame.is_error,
+                stop_stream: frame.stop_stream,
+            });
+        }
+        let frame = self
+            .payload_adapter
+            .encode_response(payload_codec, response, complete_final)
+            .await?;
+        Ok(EncodedResponseFrame {
+            bytes: ResponsePayload::Bytes(frame.bytes),
+            is_error: frame.is_error,
+            stop_stream: frame.stop_stream,
+        })
+    }
+
     /// Pump every chunk from the engine's response stream out to the
     /// upstream response transport, plus the terminal complete-final
     /// frame. Captures the per-frame metrics, the publish-failure error
@@ -305,8 +382,7 @@ where
             tracing::trace!("Sending response: {:?}", resp);
             let nvtx_encode = dynamo_nvtx_range!("worker.egress.encode");
             let encoded = match self
-                .payload_adapter
-                .encode_response(payload_codec, Some(resp), false)
+                .encode_frame(publisher, payload_codec, Some(resp), false)
                 .await
             {
                 Ok(encoded) => encoded,
@@ -330,12 +406,12 @@ where
             if !is_error && let Some(notifier) = self.endpoint_health_check_notifier.get() {
                 notifier.notify_one();
             }
-            let resp_bytes = encoded.bytes;
+            let payload = encoded.bytes;
             if let Some(m) = self.metrics() {
-                m.response_bytes.inc_by(resp_bytes.len() as u64);
+                m.response_bytes.inc_by(payload.len() as u64);
             }
             let nvtx_publish = dynamo_nvtx_range!("worker.egress.publish");
-            let publish_result = publisher.send(resp_bytes).await;
+            let publish_result = payload.publish(publisher).await;
             drop(nvtx_publish);
             if let Err(send_err) = publish_result {
                 send_complete_final = false;
@@ -387,8 +463,7 @@ where
         }
         if send_complete_final {
             let encoded = match self
-                .payload_adapter
-                .encode_response(payload_codec, None, true)
+                .encode_frame(publisher, payload_codec, None, true)
                 .await
             {
                 Ok(encoded) => encoded,
@@ -402,11 +477,11 @@ where
                     return;
                 }
             };
-            let resp_bytes = encoded.bytes;
+            let payload = encoded.bytes;
             if let Some(m) = self.metrics() {
-                m.response_bytes.inc_by(resp_bytes.len() as u64);
+                m.response_bytes.inc_by(payload.len() as u64);
             }
-            if (publisher.send(resp_bytes).await).is_err() {
+            if payload.publish(publisher).await.is_err() {
                 // `is_stopped()` is `state != Live`, so it is also true after
                 // `kill()` — which the response-stream reader does on a TCP read
                 // error. Excluding killed narrows this to `state == Stopped` so
@@ -1719,6 +1794,60 @@ mod tests {
                 .get(),
             0
         );
+    }
+
+    /// Over Velo the pump encodes each serde response straight into the item it
+    /// sends. The frontend must get exactly the bytes `encode_response` makes,
+    /// complete-final frame included, under both codecs, for a token-sized
+    /// item and for one over 64 KiB.
+    #[tokio::test]
+    async fn velo_items_encoded_in_place_carry_the_same_bytes() {
+        let consumer = velo_response::VeloResponseService::loopback().await;
+        let producer = velo_response::VeloResponseService::loopback().await;
+        let responses = vec![
+            TestResponse::from_data(serde_json::json!({ "token": 1 })),
+            TestResponse::from_data(serde_json::json!({ "image": "A".repeat(100_000) })),
+        ];
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let mut expected = Vec::new();
+            for response in responses.iter().cloned().map(Some).chain([None]) {
+                let complete_final = response.is_none();
+                let frame = SerdeIngressPayloadAdapter
+                    .encode_response(codec, response, complete_final)
+                    .await
+                    .unwrap();
+                expected.push(frame.bytes);
+            }
+
+            let registered = consumer
+                .register_response(Context::new(()).context(), false)
+                .unwrap();
+            let mut sender = producer
+                .sender(
+                    Context::new(()).context(),
+                    registered.connection_info.clone(),
+                    None,
+                )
+                .await
+                .unwrap();
+            sender.send_prologue(None).await.unwrap();
+            let (_, provider) = registered.into_parts();
+            let receiver = provider.await.unwrap().unwrap();
+
+            let ctx = Context::new(serde_json::json!({}));
+            let response_stream: ManyOut<TestResponse> =
+                ResponseStream::new(Box::pin(stream::iter(responses.clone())), ctx.context());
+            TestIngress::new()
+                .pump_response_stream(response_stream, &sender, codec)
+                .await;
+            sender.finish().await.unwrap();
+
+            let received: Vec<Bytes> = receiver.rx.map(Result::unwrap).collect().await;
+            assert_eq!(received, expected, "{}", codec.name());
+        }
     }
 
     /// Run the pump with a health-check notifier set and a publisher whose
