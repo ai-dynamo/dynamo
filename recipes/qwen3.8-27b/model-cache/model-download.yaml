@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: qwen38-27b-model-download
+spec:
+  backoffLimit: 3
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: qwen38-27b-model-download
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: model-download
+          image: python:3.10-slim
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          env:
+            - name: MODEL_NAME
+              value: Qwen/Qwen3.8-27B
+            - name: HF_HOME
+              value: /shared-model-cache
+          args:
+            - |
+              set -eux
+              pip install --no-cache-dir huggingface_hub==1.16.4
+              hf download $MODEL_NAME
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /shared-model-cache
+      volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
