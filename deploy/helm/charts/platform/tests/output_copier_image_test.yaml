@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: DGDR output-copier image configuration
+templates:
+  - charts/dynamo-operator/templates/operator-config.yaml
+tests:
+  - it: leaves an omitted image to the operator default
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: "outputCopierImage:"
+  - it: passes a digest reference unchanged to the operator configuration
+    set:
+      dynamo-operator.dgdr.outputCopierImage: registry.example/kubectl@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'dgdr:\n  outputCopierImage: "registry.example/kubectl@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"'

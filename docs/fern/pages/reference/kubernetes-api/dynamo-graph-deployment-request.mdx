@@ -472,6 +472,25 @@ service.
   </ParamField>
 </Indent>
 
+### Output-Copier Image
+
+The v1beta1 profiling Job uses a digest-pinned kubectl image for its `output-copier` sidecar.
+Configure the operator-wide image through the platform chart:
+
+```yaml
+dynamo-operator:
+  dgdr:
+    outputCopierImage: registry.example/kubectl@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+```
+
+Use a real image digest from your registry. The equivalent operator configuration field is
+`dgdr.outputCopierImage`. An omitted or empty value uses the operator's bundled digest-pinned
+image. A per-request `spec.overrides.profilingJob.template.spec.containers` entry named
+`output-copier` takes precedence. Custom images must provide `/bin/sh`, `kubectl`, and the shell
+utilities used by the copier (`date`, `grep`, `awk`, `tr`, `sed`, `cat`, and `sleep`). Choose a
+kubectl version compatible with your Kubernetes API server. New settings apply to newly created
+Jobs; existing Jobs retain their image. This setting does not affect v1beta2 Run publisher images.
+
 ## Planner
 
 `spec.features.planner` is a `PlannerConfig` object, passed through to the Planner service without field-level validation; the Planner validates it at startup. Setting it (non-null) enables the planner in the generated DGD. The same object is documented standalone at [Planner Configuration](../components/planner-configuration.mdx); its fields are reproduced here. Nested list-and-object types are expanded under [Additional Types](#additional-types). All fields are optional.

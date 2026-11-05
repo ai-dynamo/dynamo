@@ -84,9 +84,6 @@ const (
 	// Size limits
 	MaxAnnotationSize = 250000 // ~250KB, below K8s 256KB limit
 
-	// Sidecar image
-	SidecarImage = "bitnami/kubectl:latest"
-
 	// Volume names
 	VolumeNameProfilingOutput            = "profiling-output"
 	VolumeNameProfilingConfig            = "profiling-config"
@@ -1552,6 +1549,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 	}
 
+	// Image configuration applies only to new Jobs; existing Pod templates are immutable.
+	outputCopierImage := r.Config.DGDR.EffectiveOutputCopierImage()
+	for _, container := range existingJob.Spec.Template.Spec.Containers {
+		if container.Name == ContainerNameOutputCopier {
+			outputCopierImage = container.Image
+			break
+		}
+	}
+
 	// Use SyncResource to create/update the job
 	modified, job, err := commonController.SyncResource(ctx, r, dgdr, func(ctx context.Context) (*batchv1.Job, bool, error) {
 		jobName := getProfilingJobName(dgdr)
@@ -1674,7 +1680,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 
 		sidecarContainer := corev1.Container{
 			Name:    ContainerNameOutputCopier,
-			Image:   SidecarImage,
+			Image:   outputCopierImage,
 			Command: []string{"/bin/sh", "-c"},
 			Args:    []string{scriptBuf.String()},
 			VolumeMounts: []corev1.VolumeMount{{
