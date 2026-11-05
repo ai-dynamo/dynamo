@@ -319,9 +319,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             # rather than looking like a successful prefill handoff.
             yield {"token_ids": [], "finish_reason": "cancelled"}
             return
-        # Bootstrap happens before prefill runs, so the cache-hit report and
-        # any requested prompt-side output need their own trailing chunk. Both
-        # share one chunk: the prefill router keeps only the last engine_data.
+        # Prefill runs after bootstrap, so cache-hit and prompt outputs need a trailing
+        # chunk. Send one: the prefill router keeps only the last engine_data.
         engine_data: Dict[str, Any] = {}
         if keep_prefill_output and final_native_response is not None:
             engine_data["sglang_response"] = final_native_response
