@@ -16,6 +16,13 @@ Experimental. Consult the
 using another backend or topology.
 </Warning>
 
+On restore, Dynamo refreshes Pod identity and discovery settings from the
+destination container before creating its runtime. With Snapshot's PID-1 restore
+proxy, Dynamo reads the verified proxy's allowlisted environment into
+`restore-context.json` in the snapshot-control volume. Older standby entrypoints
+can still provide that file directly. A restore within the same Pod can retain
+its Pod UID.
+
 ## Prerequisites
 
 - A Kubernetes cluster with [NVIDIA GPU support](../../installation/install-dynamo.md)

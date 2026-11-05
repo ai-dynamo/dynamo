@@ -6,6 +6,7 @@
 import json
 import logging
 import os
+import tempfile
 from inspect import isawaitable
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping, TypeVar
@@ -17,11 +18,13 @@ from dynamo.common.snapshot.constants import (
     SNAPSHOT_CONTROL_DIR,
     SNAPSHOT_CONTROL_DIR_ENV,
     SNAPSHOT_RESTORE_CONTEXT_FILE,
+    SNAPSHOT_RESTORE_PROXY_BINARY,
     SNAPSHOT_RESTORE_STANDBY_ENV,
 )
 
 logger = logging.getLogger(__name__)
 ConfigT = TypeVar("ConfigT")
+_PID_ONE = Path("/proc/1")
 
 _RESTORE_RUNTIME_CONFIG_FIELDS = (
     "namespace",
@@ -44,10 +47,10 @@ async def refresh_snapshot_restore_config(
 ) -> ConfigT:
     """Apply restore env, then rebuild backend config through normal parsing.
 
-    The restore-context file is created by the restore standby process in the
-    new Pod before CRIU resumes the snapshotted process. Once resumed, apply
-    that env first and then re-run the runtime parser so fields derived from env
-    (namespace, discovery backend, request plane, event plane, etc.) follow the
+    The restore-context file comes from the destination's Snapshot proxy or
+    legacy restore standby process. Apply that env first and then re-run the
+    runtime parser so fields derived from env (namespace, discovery backend,
+    request plane, event plane, etc.) follow the
     same CLI/env precedence as a cold start. This avoids brittle ad hoc patches
     to an already-parsed config object.
 
@@ -116,10 +119,12 @@ def parse_snapshot_restore_runtime_config(argv: list[str] | None) -> object:
 def apply_snapshot_restore_env() -> dict[str, str | None]:
     """Load restore-context JSON and apply its runtime env to ``os.environ``."""
 
-    # Load the restore-context JSON captured by the restore standby process. It
-    # contains the target container's actual restore-time env after Kubernetes
-    # resolved literals, Downward API values, ConfigMaps, and Secrets.
     control_dir = os.environ.get(SNAPSHOT_CONTROL_DIR_ENV, SNAPSHOT_CONTROL_DIR)
+    proxy_env = _read_restore_proxy_env(Path(control_dir))
+    if proxy_env is not None:
+        # The proxy bypasses the legacy standby entrypoint. Always replace a
+        # context left by an earlier container with this incarnation's env.
+        write_snapshot_restore_context(control_dir, env=proxy_env)
     context_path = Path(control_dir) / SNAPSHOT_RESTORE_CONTEXT_FILE
     if not context_path.is_file():
         raise RuntimeError(f"snapshot restore context file not found: {context_path}")
@@ -140,41 +145,88 @@ def apply_snapshot_restore_env() -> dict[str, str | None]:
     return _apply_restore_env(env_config, source=source)
 
 
-def write_snapshot_restore_context(control_dir: str | None = None) -> None:
+def _read_restore_proxy_env(control_path: Path) -> dict[str, str] | None:
+    """Read destination env only from Snapshot's verified PID-1 proxy.
+
+    The command and binary name follow snapshot/api/podcontract. Older agents
+    run the standby entrypoint instead and supply a context file directly.
+    """
+    proxy_binary = control_path / SNAPSHOT_RESTORE_PROXY_BINARY
+    try:
+        command = (_PID_ONE / "cmdline").read_bytes()
+    except FileNotFoundError:
+        return None
+    if command != os.fsencode(proxy_binary) + b"\0":
+        return None
+    if not (_PID_ONE / "exe").samefile(proxy_binary):
+        raise RuntimeError(
+            "Snapshot restore proxy executable does not match its command"
+        )
+
+    supported = {name.encode("ascii"): name for name in _SUPPORTED_RESTORE_ENV_NAMES}
+    destination_env: dict[str, str] = {}
+    for entry in (_PID_ONE / "environ").read_bytes().split(b"\0"):
+        key, separator, raw_value = entry.partition(b"=")
+        if key not in supported:
+            continue
+        name = supported[key]
+        if not separator or name in destination_env:
+            raise RuntimeError(f"Invalid or duplicate Snapshot proxy env {name}")
+        try:
+            destination_env[name] = raw_value.decode("utf-8")
+        except UnicodeDecodeError:
+            raise RuntimeError(
+                f"Invalid encoding in Snapshot proxy env {name}"
+            ) from None
+    return destination_env
+
+
+def write_snapshot_restore_context(
+    control_dir: str | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> None:
     """Capture restore-time environment into the snapshot-control volume.
 
-    The restore standby process runs in the new Pod before CRIU restores the old
-    process image. Capturing here lets Kubernetes resolve all env sources
-    (literal env, Downward API, ConfigMap, and Secret refs) without teaching the
-    operator how to copy runtime env values.
+    Capture from the verified destination proxy after restore, or from the
+    legacy standby before CRIU resumes the old process image. Kubernetes has
+    already resolved literal env, Downward API, ConfigMap, and Secret refs.
 
     Args:
         control_dir: Optional snapshot-control directory override. Defaults to
             ``DYN_SNAPSHOT_CONTROL_DIR`` or ``/snapshot-control``.
+        env: Destination environment from a verified restore proxy. Defaults to
+            the current environment for the legacy standby entrypoint.
     """
 
     # Capture only the non-secret env names Dynamo needs after restore. Missing
     # values are written as null so stale snapshot-time env can be cleared.
+    destination_env = os.environ if env is None else env
     context = {
         "env": {
-            name: os.environ.get(name) if name in os.environ else None
+            name: destination_env.get(name)
             for name in sorted(_SUPPORTED_RESTORE_ENV_NAMES)
         },
     }
 
-    # Write atomically into the shared snapshot-control volume before exec'ing
-    # the inert standby process that snapshot-agent restores into.
+    # Readers see either the old complete context or the new complete context.
     control_path = Path(
         control_dir or os.environ.get(SNAPSHOT_CONTROL_DIR_ENV, SNAPSHOT_CONTROL_DIR)
     )
     control_path.mkdir(parents=True, exist_ok=True)
     context_file = control_path / SNAPSHOT_RESTORE_CONTEXT_FILE
-    tmp_path = context_file.with_name(f".{context_file.name}.tmp")
-    tmp_path.write_text(
-        json.dumps(context, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{context_file.name}.", dir=control_path
     )
-    tmp_path.replace(context_file)
+    tmp_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(
+                json.dumps(context, sort_keys=True, separators=(",", ":")) + "\n"
+            )
+        tmp_path.replace(context_file)
+    finally:
+        tmp_path.unlink(missing_ok=True)
     logger.info("Captured snapshot restore context at %s", context_file)
 
 

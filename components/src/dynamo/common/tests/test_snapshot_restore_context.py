@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from dynamo.common.snapshot import restore_context
 from dynamo.common.snapshot.constants import (
     KUBERNETES_OPTIONAL_ENV_NAMES,
     KUBERNETES_REQUIRED_ENV_NAMES,
@@ -18,13 +19,17 @@ from dynamo.common.snapshot.constants import (
 from dynamo.common.snapshot.restore_context import (
     apply_snapshot_restore_env,
     refresh_snapshot_restore_config,
+    write_snapshot_restore_context,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 
 @pytest.fixture(autouse=True)
-def clean_restore_env(monkeypatch):
+def clean_restore_env(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        restore_context, "_PID_ONE", tmp_path / "proc" / "1", raising=False
+    )
     restore_env_names = {
         *KUBERNETES_REQUIRED_ENV_NAMES,
         *KUBERNETES_OPTIONAL_ENV_NAMES,
@@ -44,6 +49,106 @@ def write_restore_context(monkeypatch, tmp_path, env):
     context_path.write_text(json.dumps({"env": env}), encoding="utf-8")
     monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
     return context_path
+
+
+@pytest.fixture
+def restore_proxy(monkeypatch, tmp_path):
+    control_path = tmp_path / "custom-control"
+    control_path.mkdir()
+    proxy_binary = control_path / "snapshot-restore-proxy"
+    proxy_binary.touch()
+    proxy = restore_context._PID_ONE
+    proxy.mkdir(parents=True)
+    (proxy / "cmdline").write_bytes(os.fsencode(proxy_binary) + b"\0")
+    (proxy / "exe").symlink_to(proxy_binary)
+    monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(control_path))
+    return proxy, control_path
+
+
+@pytest.mark.parametrize("existing_context", [False, True])
+@pytest.mark.parametrize("same_pod", [False, True])
+async def test_proxy_refresh_uses_destination_identity_before_parsing(
+    monkeypatch, restore_proxy, existing_context, same_pod
+):
+    proxy, control_path = restore_proxy
+    destination = {
+        name: f"destination-{name}" for name in KUBERNETES_REQUIRED_ENV_NAMES
+    }
+    destination["DYN_DISCOVERY_BACKEND"] = "kubernetes"
+    destination["DYN_REQUEST_PLANE"] = "tcp"
+    destination["DYN_EVENT_PLANE"] = "nats"
+    monkeypatch.setenv("POD_UID", destination["POD_UID"] if same_pod else "capture-uid")
+    monkeypatch.setenv("DYN_TCP_RPC_HOST", "capture-host")
+    context_path = control_path / SNAPSHOT_RESTORE_CONTEXT_FILE
+    if existing_context:
+        context_path.write_text('{"env":{"POD_UID":"stale-uid"}}', encoding="utf-8")
+    (proxy / "environ").write_bytes(
+        b"\0".join(f"{name}={value}".encode() for name, value in destination.items())
+        + b"\0HF_TOKEN=secret\xff\0UNRELATED=\xff\0"
+    )
+
+    def parse_config():
+        for name, value in destination.items():
+            assert os.environ[name] == value
+        assert "DYN_TCP_RPC_HOST" not in os.environ
+        return SimpleNamespace(
+            namespace=os.environ["DYN_NAMESPACE"],
+            discovery_backend=os.environ["DYN_DISCOVERY_BACKEND"],
+            request_plane=os.environ["DYN_REQUEST_PLANE"],
+            event_plane=os.environ["DYN_EVENT_PLANE"],
+        )
+
+    config = await refresh_snapshot_restore_config(SimpleNamespace(), parse_config)
+
+    assert config.namespace == destination["DYN_NAMESPACE"]
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    assert context["env"]["POD_UID"] == destination["POD_UID"]
+    assert context["env"]["DYN_TCP_RPC_HOST"] is None
+    assert "HF_TOKEN" not in context["env"]
+    assert "UNRELATED" not in context["env"]
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [b"POD_UID=one\0POD_UID=two\0", b"POD_UID\0", b"POD_UID=\xff\0"],
+)
+def test_proxy_rejects_invalid_supported_env_without_overwriting_context(
+    restore_proxy, environment
+):
+    proxy, control_path = restore_proxy
+    context_path = control_path / SNAPSHOT_RESTORE_CONTEXT_FILE
+    context_path.write_text("existing", encoding="utf-8")
+    (proxy / "environ").write_bytes(environment)
+
+    with pytest.raises(RuntimeError, match="Snapshot proxy env POD_UID"):
+        apply_snapshot_restore_env()
+
+    assert context_path.read_text(encoding="utf-8") == "existing"
+
+
+def test_proxy_rejects_spoofed_command(restore_proxy):
+    proxy, control_path = restore_proxy
+    other_binary = control_path / "other-binary"
+    other_binary.touch()
+    (proxy / "exe").unlink()
+    (proxy / "exe").symlink_to(other_binary)
+
+    with pytest.raises(RuntimeError, match="proxy executable does not match"):
+        apply_snapshot_restore_env()
+
+
+def test_legacy_standby_context_is_used_for_non_proxy_pid_one(
+    monkeypatch, restore_proxy
+):
+    proxy, _ = restore_proxy
+    (proxy / "cmdline").write_bytes(b"sleep\0infinity\0")
+    monkeypatch.setenv("POD_UID", "destination-uid")
+    write_snapshot_restore_context()
+    monkeypatch.setenv("POD_UID", "capture-uid")
+
+    apply_snapshot_restore_env()
+
+    assert os.environ["POD_UID"] == "destination-uid"
 
 
 def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_path):
