@@ -1,0 +1,39 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Use Cases
+subtitle: Find the guide for your workload
+sidebar-title: Overview
+---
+
+<CardGroup cols={2}>
+  <Card title="Reinforcement Learning" icon="brain" href="reinforcement-learning/overview.mdx">
+    Keeps rollout workers busy and healthy with KV-aware routing, fast policy refresh through ModelExpress, and recovery from worker loss.
+  </Card>
+
+  <Card title="Agents" icon="users" href="agents/overview.md">
+    Faster multi-turn sessions by keeping each session's KV cache on one worker and putting interactive turns ahead of background work.
+  </Card>
+
+  <Card title="Image Understanding" icon="eye" href="image-understanding/overview.md">
+    20-30% better throughput and 10-90% lower TTFT by processing images in parallel, avoiding redundant encoding and prefill, and disaggregating the encoder.
+  </Card>
+
+  <Card title="Speech" icon="microphone" href="speech/voice-pipelines.md">
+    Up to 40% lower TTFT by overlapping the ASR and LLM stages, and better resiliency by recovering realtime transcription after worker loss.
+  </Card>
+
+  <Card title="Video Understanding" icon="film" href="video-understanding/overview.md">
+    Faster video requests by decoding in the Rust frontend or on the GPU's hardware decoder, and routing repeated clips to the worker that already caches them.
+  </Card>
+
+  <Card title="Diffusion" icon="wand-magic-sparkles" href="diffusion/workflows/text-to-image.md">
+    8-17x faster generation with step-distilled models, and 5 seconds of 1080p video in about 4.5 seconds with FastVideo.
+  </Card>
+
+  <Card title="GPU Sharing" icon="layer-group" href="gpu-sharing/overview.mdx">
+    60-80% of a dedicated GPU's throughput by letting many lightly used models share a GPU.
+  </Card>
+</CardGroup>
+
+The performance improvements come from benchmarks on real production use cases and vary with the model, hardware, and workload. See the respective docs for details.
