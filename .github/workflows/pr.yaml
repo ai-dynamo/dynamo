@@ -855,8 +855,9 @@ jobs:
       test_suite_name: vllm
       framework: vllm  # matches the framework passed to vllm-build
       test_type: 2-GPU Test
-      amd_runner: prod-tester-amd-gpu-2-v2
-      amd_runner_labels: '["gpu-2","amd64","v2","us-east-1"]'
+      # The Kimi image's CUDA kernels fail on A10G. Use the existing 2x80 GiB
+      # H100 lane, also used by the nightly vLLM job, without dropping tests.
+      amd_runner: aws-dev-02-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available

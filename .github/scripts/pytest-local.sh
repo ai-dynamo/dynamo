@@ -13,7 +13,8 @@
 #             PLATFORM_ARCH, PARALLEL_MODE (auto | none | 0 | <workers>),
 #             JOB_CHECK_RUN_ID
 #   Optional: ENABLE_COVERAGE=true, GPU_TESTS=true, VERIFY_GPU=false (skips the
-#             MinIO and GPU checks), MAX_VRAM_GIB, PYTEST_DD_FLAKY_RETRY_ENABLED
+#             MinIO and GPU checks), MAX_VRAM_GIB, PYTEST_DD_FLAKY_RETRY_ENABLED,
+#             ALLOW_EMPTY_TEST_SELECTION=true (complement of a passing stage)
 #
 # The distroless planner test image ships only the tools listed in
 # container/Dockerfile.test, so stay on bash builtins and those tools.
@@ -185,6 +186,14 @@ cd "${CONTAINER_WORKSPACE}"
 TEST_EXIT_CODE=0
 python -m pytest "${pytest_args[@]}" || TEST_EXIT_CODE=$?
 echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+
+# A successful parallel stage may consume the entire GPU pool. Its sequential
+# complement then legitimately selects nothing (pytest exit 5). Other stages
+# and every actual test/collection failure must keep their original exit code.
+if [[ "${TEST_EXIT_CODE}" == "5" && "${ALLOW_EMPTY_TEST_SELECTION:-false}" == "true" && -f "${JUNIT_FILE}" ]]; then
+  echo "⏭️  No tests remain after the passing parallel stage; sequential stage is empty."
+  TEST_EXIT_CODE=0
+fi
 
 # Unique per-stage name so several stages can share one test-results/
 # directory and one upload.
