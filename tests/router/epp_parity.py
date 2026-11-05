@@ -3263,6 +3263,56 @@ def start_owned_loopback_kube_api(
     return owner
 
 
+# Child overlays may deliberately set FE admin listener env; they must not
+# rewrite stack-owned discovery identity or bind ports.
+_ROUTING_CONSUMER_OWNED_ENV = frozenset(
+    {
+        "KUBECONFIG",
+        "KUBERNETES_SERVICE_HOST",
+        "KUBERNETES_SERVICE_PORT",
+        "KUBERNETES_SERVICE_PORT_HTTPS",
+        "DYN_DISCOVERY_BACKEND",
+        "DYN_KUBE_DISCOVERY_MODE",
+        "CONTAINER_NAME",
+        "POD_NAME",
+        "POD_UID",
+        "POD_NAMESPACE",
+        "DYN_NAMESPACE",
+        "DYN_COMPONENT_NAME",
+        "DYN_SYSTEM_PORT",
+        "DYN_SYSTEM_HOST",
+        "DYN_EPP_METRICS_PORT",
+    }
+)
+
+
+def _apply_routing_consumer_env_overrides(
+    env: dict[str, str | None],
+    overrides: Mapping[str, str | None] | None,
+    *,
+    label: str,
+) -> None:
+    """Merge optional child overlays after baseline first-selection/session env."""
+    if overrides is None:
+        return
+    blocked = sorted(name for name in overrides if name in _ROUTING_CONSUMER_OWNED_ENV)
+    if blocked:
+        raise AssertionError(
+            f"{label} env overrides must not rewrite stack-owned identity/bind "
+            f"names: {', '.join(blocked)}"
+        )
+    env.update(dict(overrides))
+
+
+def _require_positive_timeout_s(timeout_s: float, *, label: str) -> float:
+    if not isinstance(timeout_s, (int, float)) or isinstance(timeout_s, bool):
+        raise AssertionError(f"{label} timeout_s={timeout_s!r} must be a number")
+    value = float(timeout_s)
+    if value <= 0:
+        raise AssertionError(f"{label} timeout_s={timeout_s!r} must be positive")
+    return value
+
+
 class EppFrontendRoutingParityStack:
     """Two mockers, one served remote index, and fresh FE/EPP consumers."""
 
@@ -3277,6 +3327,8 @@ class EppFrontendRoutingParityStack:
         session_affinity_ttl_secs: int | None = None,
         worker_block_size: int = WORKER_BLOCK_SIZE,
         frontend_cli_block_size: int | None = None,
+        provider_env_overrides: Mapping[str, str | None] | None = None,
+        provider_config_overrides: Mapping[str, Any] | None = None,
     ) -> None:
         if indexer_mode not in {INDEXER_MODE_EVENT, INDEXER_MODE_APPROXIMATE}:
             raise ValueError(f"unsupported indexer_mode {indexer_mode!r}")
@@ -3310,6 +3362,16 @@ class EppFrontendRoutingParityStack:
         self.session_affinity_ttl_secs = session_affinity_ttl_secs
         self.worker_block_size = worker_block_size
         self.frontend_cli_block_size = cli_block_size
+        self.provider_env_overrides = (
+            dict(provider_env_overrides)
+            if provider_env_overrides is not None
+            else None
+        )
+        self.provider_config_overrides = (
+            dict(provider_config_overrides)
+            if provider_config_overrides is not None
+            else None
+        )
         self.identity = resolve_pod_identity()
         self._stack = ExitStack()
         self._lock: FileLock | None = None
@@ -3336,6 +3398,7 @@ class EppFrontendRoutingParityStack:
         self._consumer_stack: ExitStack | None = None
         self._consumer_pair_seq = 0
         self.frontend_process: FrontendRouterProcess | None = None
+        self.epp_process: RuntimeEppProcess | None = None
         self.consumer_pair_label: str | None = None
 
     @property
@@ -3357,13 +3420,18 @@ class EppFrontendRoutingParityStack:
         path: str,
         request_id: str,
         headers: Mapping[str, str] | None = None,
+        timeout_s: float = FRONTEND_QUERY_TIMEOUT_S,
     ) -> RouteObservation:
+        timeout_s = _require_positive_timeout_s(
+            timeout_s, label="collect_frontend_route"
+        )
         return collect_frontend_query_route(
             self.frontend_url,
             payload,
             path=path,
             request_id=request_id,
             headers=headers,
+            timeout_s=timeout_s,
         )
 
     def collect_frontend_generation(
@@ -3373,13 +3441,18 @@ class EppFrontendRoutingParityStack:
         path: str,
         request_id: str,
         headers: Mapping[str, str] | None = None,
+        timeout_s: float = FRONTEND_QUERY_TIMEOUT_S,
     ) -> RouteObservation:
+        timeout_s = _require_positive_timeout_s(
+            timeout_s, label="collect_frontend_generation"
+        )
         return collect_frontend_generation_route(
             self.frontend_url,
             payload,
             path=path,
             request_id=request_id,
             headers=headers,
+            timeout_s=timeout_s,
         )
 
     def collect_epp_route(
@@ -3389,11 +3462,17 @@ class EppFrontendRoutingParityStack:
         path: str,
         request_id: str,
         headers: Mapping[str, str] | None = None,
+        timeout_s: float = EXT_PROC_TIMEOUT_S,
     ) -> RouteObservation:
         if self.driver is None:
             raise RuntimeError("routing parity stack has not started")
+        timeout_s = _require_positive_timeout_s(timeout_s, label="collect_epp_route")
         observation = self.driver.collect_route_observation(
-            payload, path=path, request_id=request_id, headers=headers
+            payload,
+            path=path,
+            request_id=request_id,
+            headers=headers,
+            timeout_s=timeout_s,
         )
         if self.pod_destination is None:
             raise AssertionError("fixture pod destination was not recorded")
@@ -3539,6 +3618,9 @@ class EppFrontendRoutingParityStack:
                 use_remote_indexer=False, use_kv_events=use_kv_events
             )
         )
+        if self.provider_env_overrides is not None:
+            provider_env.update(self.provider_env_overrides)
+        # Stack-owned bind port wins over any provider overlay.
         provider_env["DYN_SYSTEM_PORT"] = str(provider_metrics_port)
         self._loop = asyncio.new_event_loop()
         self._stack.callback(self._close_loop)
@@ -3557,26 +3639,29 @@ class EppFrontendRoutingParityStack:
             self._stack.callback(self._shutdown_provider)
             generate_path = f"{self.namespace}.{self.component_name}.generate"
             endpoint = self.provider_runtime.endpoint(generate_path)
-            self.provider_router_config = KvRouterConfig(
-                use_kv_events=use_kv_events,
-                serve_indexer=True,
-                use_remote_indexer=False,
-                router_temperature=0.0,
-                router_replica_sync=False,
-                router_track_prefill_tokens=True,
-                router_track_output_blocks=False,
-                overlap_score_credit=1.0,
-                overlap_score_credit_decay=0.0,
-                prefill_load_scale=1.0,
-                shared_cache_type="none",
-                conditional_disagg_enabled=False,
-                router_tracking_hash="public-xxh3-v1",
-                router_policy_config=None,
-                router_prefill_policy=None,
-                router_decode_policy=None,
-                router_queue_threshold=None,
-                router_prefill_load_model="none",
-            )
+            config_kwargs: dict[str, Any] = {
+                "use_kv_events": use_kv_events,
+                "serve_indexer": True,
+                "use_remote_indexer": False,
+                "router_temperature": 0.0,
+                "router_replica_sync": False,
+                "router_track_prefill_tokens": True,
+                "router_track_output_blocks": False,
+                "overlap_score_credit": 1.0,
+                "overlap_score_credit_decay": 0.0,
+                "prefill_load_scale": 1.0,
+                "shared_cache_type": "none",
+                "conditional_disagg_enabled": False,
+                "router_tracking_hash": "public-xxh3-v1",
+                "router_policy_config": None,
+                "router_prefill_policy": None,
+                "router_decode_policy": None,
+                "router_queue_threshold": None,
+                "router_prefill_load_model": "none",
+            }
+            if self.provider_config_overrides is not None:
+                config_kwargs.update(self.provider_config_overrides)
+            self.provider_router_config = KvRouterConfig(**config_kwargs)
             self.policy_parameters = self.provider_router_config.policy_parameters(
                 "aggregated"
             )
@@ -3771,7 +3856,14 @@ class EppFrontendRoutingParityStack:
             raise RuntimeError("routing parity stack has not started")
         return self._loop.run_until_complete(coro)
 
-    def open_consumer_pair(self, *, include_epp: bool = True) -> None:
+    def open_consumer_pair(
+        self,
+        *,
+        include_epp: bool = True,
+        frontend_env_overrides: Mapping[str, str | None] | None = None,
+        epp_env_overrides: Mapping[str, str | None] | None = None,
+        epp_require_readiness: bool = True,
+    ) -> None:
         if (
             self.kubeconfig is None
             or self.namespace is None
@@ -3786,6 +3878,7 @@ class EppFrontendRoutingParityStack:
         pair_label = f"pair-{self._consumer_pair_seq}"
         stack = ExitStack()
         self.frontend_process = None
+        self.epp_process = None
         self.consumer_pair_label = None
         try:
             use_kv_events = self.indexer_mode != INDEXER_MODE_APPROXIMATE
@@ -3806,6 +3899,11 @@ class EppFrontendRoutingParityStack:
                     "DYN_ROUTER_SESSION_AFFINITY_MODE": "hard",
                 }
                 frontend_env.update(session_env)
+            _apply_routing_consumer_env_overrides(
+                frontend_env,
+                frontend_env_overrides,
+                label="frontend",
+            )
             frontend = FrontendRouterProcess(
                 self.request,
                 self.frontend_cli_block_size,
@@ -3844,6 +3942,11 @@ class EppFrontendRoutingParityStack:
                 )
                 if session_env is not None:
                     epp_env.update(session_env)
+                _apply_routing_consumer_env_overrides(
+                    epp_env,
+                    epp_env_overrides,
+                    label="epp",
+                )
                 epp = RuntimeEppProcess(
                     self.request,
                     binary=epp_binary_path(),
@@ -3852,13 +3955,16 @@ class EppFrontendRoutingParityStack:
                     extra_env=epp_env,
                     timeout=PROCESS_TIMEOUT_S,
                     kubeconfig=self.kubeconfig,
+                    require_readiness=epp_require_readiness,
                 )
                 epp.display_name = f"dynamo-runtime-epp-{pair_label}"
                 epp.log_dir = f"{self.request.node.name}/{pair_label}-epp"
                 stack.enter_context(epp)
+                self.epp_process = epp
             wait_for_frontend_models(self.frontend_url)
         except Exception:
             self.frontend_process = None
+            self.epp_process = None
             self.consumer_pair_label = None
             stack.close()
             raise
@@ -3874,6 +3980,7 @@ class EppFrontendRoutingParityStack:
         stack = self._consumer_stack
         self._consumer_stack = None
         self.frontend_process = None
+        self.epp_process = None
         self.consumer_pair_label = None
         if stack is not None:
             stack.close()
@@ -3892,12 +3999,25 @@ class EppFrontendRoutingParityStack:
             provider_instance_id=self.provider_instance_id,
         )
 
-    def dump_provider_events(self) -> str:
+    def dump_provider_events(self, *, timeout_s: float | None = None) -> str:
         if self.provider_router is None:
             raise RuntimeError("routing parity stack has not started")
 
         async def _dump():
-            return await self.provider_router.dump_events()
+            if timeout_s is None:
+                return await self.provider_router.dump_events()
+            budget = _require_positive_timeout_s(
+                timeout_s, label="dump_provider_events"
+            )
+            try:
+                return await asyncio.wait_for(
+                    self.provider_router.dump_events(),
+                    timeout=budget,
+                )
+            except asyncio.TimeoutError as exc:
+                raise AssertionError(
+                    f"provider dump_events outlived the {budget}s budget"
+                ) from exc
 
         return self.run_until_complete(_dump())
 

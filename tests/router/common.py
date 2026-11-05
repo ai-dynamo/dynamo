@@ -6137,8 +6137,14 @@ def _router_event_sort_key(event: dict[str, Any]) -> tuple[Any, ...]:
         ) from exc
 
 
-def _provider_cache_snapshot(stack) -> list[dict[str, Any]]:
-    parsed = json.loads(stack.dump_provider_events())
+def _provider_cache_snapshot(
+    stack, *, timeout_s: float | None = None
+) -> list[dict[str, Any]]:
+    if timeout_s is None:
+        raw = stack.dump_provider_events()
+    else:
+        raw = stack.dump_provider_events(timeout_s=timeout_s)
+    parsed = json.loads(raw)
     if not isinstance(parsed, list):
         raise AssertionError("provider dump_events must be a JSON list of RouterEvent")
     events: list[dict[str, Any]] = []
@@ -8837,3 +8843,51 @@ def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
         except BaseException as exc:
             close_error = exc
     _raise_priority_cleanup(body_error, close_error)
+
+
+def run_native_consumer_profile(request, tmp_path, model_name, profile_name):
+    """Thin bridge: topology routing stack + native provider overlays + helper.
+
+    Scenario logic stays in ``epp_native_consumers``. Selected-test imports keep
+    ordinary ``common`` collection free of EPP/grpc_tools.
+    """
+    from tests.router.epp_native_consumers import (
+        native_provider_config_overrides,
+        native_provider_env_overrides,
+        run_native_consumer_profile as _run_native_consumer_profile,
+    )
+    from tests.router.epp_parity import EppFrontendRoutingParityStack
+
+    with EppFrontendRoutingParityStack(
+        request,
+        tmp_path,
+        model_name,
+        enable_worker_topology=True,
+        provider_env_overrides=native_provider_env_overrides(),
+        provider_config_overrides=native_provider_config_overrides(),
+    ) as stack:
+        return _run_native_consumer_profile(
+            stack, profile_name=profile_name, tmp_path=tmp_path
+        )
+
+
+def run_named_policy_catalog(request, tmp_path, model_name):
+    """Thin bridge: default provider, topology stack, named-policy catalog helper.
+
+    Scenario logic stays in ``epp_selector_catalog``. Selected-test imports keep
+    ordinary ``common`` collection free of EPP/grpc_tools.
+    """
+    from tests.router.epp_parity import EppFrontendRoutingParityStack
+    from tests.router.epp_selector_catalog import (
+        assert_named_policy_source_contract,
+        run_named_policy_catalog as _run_named_policy_catalog,
+    )
+
+    assert_named_policy_source_contract()
+    with EppFrontendRoutingParityStack(
+        request,
+        tmp_path,
+        model_name,
+        enable_worker_topology=True,
+    ) as stack:
+        return _run_named_policy_catalog(stack, tmp_path=tmp_path)

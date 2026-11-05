@@ -42,7 +42,10 @@ profile. ``min_initial_workers``, ``session_affinity_mode``, and
 ``router_prefill_load_model`` are source-backed ``unsupported_capability``
 (min-worker env parses, but stock EPP bypasses the N-worker gate). Prefill
 abs/frac also bind three ordinary FE admin ``/busy_threshold`` boundary
-Items. Policy selectors and remaining native consumers stay pending.
+Items. The four native active-sequence envs are ``supported_candidate``
+live consumer profiles. The three policy selectors are
+``unsupported_capability`` for the stock Runtime EPP named-provider
+catalog (default still works; FE named-default is measured).
 
 The EPP observer reads the post-parse INFO event from
 ``log_env_config``. It does not observe later Runtime EPP instance overrides
@@ -345,11 +348,96 @@ UNSUPPORTED_INPUT_ROWS = frozenset(
         PREFILL_FRAC_THRESHOLD_ROW,
     }
 )
+ROUTER_PREFILL_POLICY_ROW = "router_prefill_policy"
+ROUTER_DECODE_POLICY_ROW = "router_decode_policy"
+WORKER_SELECTION_POLICY_ROW = "worker_selection_policy"
+ACTIVE_REQUEST_EXPIRY_ROW = "active_request_expiry_secs"
+ACTIVE_SEQUENCE_DIRECT_ZMQ_ROW = "active_sequence_direct_zmq"
+ACTIVE_SEQUENCE_ZMQ_RCVHWM_ROW = "active_sequence_zmq_rcvhwm"
+ZMQ_ENDPOINTS_PER_SUB_ROW = "zmq_endpoints_per_sub"
+NATIVE_CONSUMER_TEST = "test_native_consumer_profile"
+NAMED_POLICY_CATALOG_TEST = "test_named_policy_catalog"
+NAMED_POLICY_CATALOG_ITEM = (
+    f"tests/router/test_epp_frontend_config_parity.py::{NAMED_POLICY_CATALOG_TEST}"
+)
+
+
+def _native_consumer_helper_surface():
+    """Collection-safe helper constants; avoid duplicating profile tables."""
+    from tests.router.epp_native_consumers import (
+        NATIVE_CONSUMER_OBSERVER,
+        NATIVE_CONSUMER_PROFILES,
+        NATIVE_CONSUMER_ROWS,
+    )
+
+    return NATIVE_CONSUMER_ROWS, NATIVE_CONSUMER_OBSERVER, NATIVE_CONSUMER_PROFILES
+
+
+def _named_policy_helper_surface():
+    from tests.router.epp_selector_catalog import (
+        NAMED_POLICY_CATALOG_OBSERVER,
+        NAMED_POLICY_CATALOG_ROWS,
+    )
+
+    return NAMED_POLICY_CATALOG_ROWS, NAMED_POLICY_CATALOG_OBSERVER
+
+
+(
+    NATIVE_CONSUMER_ROWS,
+    NATIVE_CONSUMER_OBSERVER,
+    _NATIVE_CONSUMER_PROFILES,
+) = _native_consumer_helper_surface()
+# Fixed independent wrapper/oracle profile set. Do not derive from helper
+# keys: a silent helper deletion would otherwise shrink Items and row
+# bindings together.
+NATIVE_CONSUMER_PROFILE_NAMES = (
+    "omitted",
+    "legacy_runtime",
+    "grouped",
+    "expiry",
+)
+NATIVE_CONSUMER_PROFILE_ITEMS = MappingProxyType(
+    {
+        name: (
+            "tests/router/test_epp_frontend_config_parity.py::"
+            f"{NATIVE_CONSUMER_TEST}[{name}]"
+        )
+        for name in NATIVE_CONSUMER_PROFILE_NAMES
+    }
+)
+# Exact profiles that actually consume each native field. Independent fixed
+# tuples (not helper-derived). legacy_runtime does not claim pool sizing or
+# direct-path HWM on the runtime subscriber sockets.
+_NATIVE_CONSUMER_ROW_PROFILES = MappingProxyType(
+    {
+        ACTIVE_REQUEST_EXPIRY_ROW: (
+            "omitted",
+            "legacy_runtime",
+            "grouped",
+            "expiry",
+        ),
+        ACTIVE_SEQUENCE_DIRECT_ZMQ_ROW: (
+            "omitted",
+            "legacy_runtime",
+            "grouped",
+            "expiry",
+        ),
+        ACTIVE_SEQUENCE_ZMQ_RCVHWM_ROW: ("omitted", "grouped", "expiry"),
+        ZMQ_ENDPOINTS_PER_SUB_ROW: ("omitted", "grouped", "expiry"),
+    }
+)
+(
+    NAMED_POLICY_CATALOG_ROWS,
+    NAMED_POLICY_CATALOG_OBSERVER,
+) = _named_policy_helper_surface()
 UNSUPPORTED_CAPABILITY_ROWS = frozenset(
     {
         MIN_INITIAL_WORKERS_ROW,
         SESSION_AFFINITY_MODE_ROW,
         PREFILL_LOAD_MODEL_ROW,
+        ROUTER_PREFILL_POLICY_ROW,
+        ROUTER_DECODE_POLICY_ROW,
+        WORKER_SELECTION_POLICY_ROW,
     }
 )
 RUST_EPP = REPO_ROOT / "deploy/inference-gateway/ext-proc/src/epp.rs"
@@ -1331,26 +1419,34 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         "nondefault LRU and the omitted-env default TTL control.",
     ),
     SettingDecision(
-        "router_prefill_policy",
+        ROUTER_PREFILL_POLICY_ROW,
         ("--router-prefill-policy",),
         ("DYN_ROUTER_PREFILL_POLICY",),
         ("router_prefill_policy",),
-        STATUS_PENDING,
-        None,
+        STATUS_UNSUPPORTED_CAPABILITY,
+        NAMED_POLICY_CATALOG_OBSERVER,
         (),
-        (),
-        "Process-local; skipped from to_json. No live observer in this increment.",
+        (ROUTER_PREFILL_POLICY_ROW,),
+        "Stock Runtime EPP supports default selection; configured named "
+        "instance selection is parsed but its provider is unavailable in "
+        "this catalog. FE global named-default factory/selection is "
+        "measured; prefill role resolution is source-backed and not "
+        "independently disagg-executed.",
     ),
     SettingDecision(
-        "router_decode_policy",
+        ROUTER_DECODE_POLICY_ROW,
         ("--router-decode-policy",),
         ("DYN_ROUTER_DECODE_POLICY",),
         ("router_decode_policy",),
-        STATUS_PENDING,
-        None,
+        STATUS_UNSUPPORTED_CAPABILITY,
+        NAMED_POLICY_CATALOG_OBSERVER,
         (),
-        (),
-        "Process-local; skipped from to_json. No live observer in this increment.",
+        (ROUTER_DECODE_POLICY_ROW,),
+        "Stock Runtime EPP supports default selection; configured named "
+        "instance selection is parsed but its provider is unavailable in "
+        "this catalog. FE global named-default factory/selection is "
+        "measured; decode role resolution is source-backed and not "
+        "independently disagg-executed.",
     ),
     SettingDecision(
         PREFILL_LOAD_MODEL_ROW,
@@ -1477,40 +1573,43 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         "a fresh increment, and worker/rank/token parity.",
     ),
     SettingDecision(
-        "active_request_expiry_secs",
+        ACTIVE_REQUEST_EXPIRY_ROW,
         (),
         ("DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS",),
         (),
-        STATUS_PENDING,
-        None,
-        (),
-        (),
-        "Rust env consumed by sequence expiry. No FE CLI dest. No live "
-        "observer in this increment.",
+        STATUS_SUPPORTED,
+        NATIVE_CONSUMER_OBSERVER,
+        _NATIVE_CONSUMER_ROW_PROFILES[ACTIVE_REQUEST_EXPIRY_ROW],
+        (ACTIVE_REQUEST_EXPIRY_ROW,),
+        "Unverified candidate until fixed-SHA Linux execution. Live FE/EPP "
+        "native consumer profiles observe peer booking CLOCK expiry versus "
+        "default hold, including the configured expiry=3 recover arm.",
     ),
     SettingDecision(
-        "active_sequence_direct_zmq",
+        ACTIVE_SEQUENCE_DIRECT_ZMQ_ROW,
         (),
         ("DYN_ROUTER_ACTIVE_SEQUENCE_DIRECT_ZMQ",),
         (),
-        STATUS_PENDING,
-        None,
-        (),
-        (),
-        "Rust env consumed by active-sequence transport. No FE CLI dest. No "
-        "live observer in this increment.",
+        STATUS_SUPPORTED,
+        NATIVE_CONSUMER_OBSERVER,
+        _NATIVE_CONSUMER_ROW_PROFILES[ACTIVE_SEQUENCE_DIRECT_ZMQ_ROW],
+        (ACTIVE_SEQUENCE_DIRECT_ZMQ_ROW,),
+        "Unverified candidate until fixed-SHA Linux execution. Live FE/EPP "
+        "native consumer profiles observe specialized direct ingress versus "
+        "the legacy runtime subscriber path.",
     ),
     SettingDecision(
-        "active_sequence_zmq_rcvhwm",
+        ACTIVE_SEQUENCE_ZMQ_RCVHWM_ROW,
         (),
         ("DYN_ROUTER_ACTIVE_SEQUENCE_ZMQ_RCVHWM",),
         (),
-        STATUS_PENDING,
-        None,
-        (),
-        (),
-        "Rust env consumed by active-sequence HWM. No FE CLI dest. No live "
-        "observer in this increment.",
+        STATUS_SUPPORTED,
+        NATIVE_CONSUMER_OBSERVER,
+        _NATIVE_CONSUMER_ROW_PROFILES[ACTIVE_SEQUENCE_ZMQ_RCVHWM_ROW],
+        (ACTIVE_SEQUENCE_ZMQ_RCVHWM_ROW,),
+        "Unverified candidate until fixed-SHA Linux execution. Live FE/EPP "
+        "native consumer profiles observe direct-path rcvhwm construction; "
+        "legacy_runtime does not claim HWM on runtime subscriber sockets.",
     ),
     SettingDecision(
         OVERLAP_REFRESH_ROW,
@@ -1539,28 +1638,32 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         "KvIndexer/RadixTree. Isolated FE full-JSON probe must stay unchanged.",
     ),
     SettingDecision(
-        "worker_selection_policy",
+        WORKER_SELECTION_POLICY_ROW,
         (),
         ("DYN_ROUTER_WORKER_SELECTION_POLICY",),
         (),
-        STATUS_PENDING,
-        None,
+        STATUS_UNSUPPORTED_CAPABILITY,
+        NAMED_POLICY_CATALOG_OBSERVER,
         (),
-        (),
-        "Rust env consumed by worker-selection instance choice. No FE CLI "
-        "dest. No live observer in this increment.",
+        (WORKER_SELECTION_POLICY_ROW,),
+        "Stock Runtime EPP supports default selection; configured named "
+        "instance selection is parsed but its provider is unavailable in "
+        "this catalog. FE global named-default factory/selection and exact "
+        "UnknownType rejection are measured on the ordinary catalog Item.",
     ),
     SettingDecision(
-        "zmq_endpoints_per_sub",
+        ZMQ_ENDPOINTS_PER_SUB_ROW,
         (),
         ("DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB",),
         (),
-        STATUS_PENDING,
-        None,
-        (),
-        (),
-        "Rust env consumed by subscriber pool sizing. No FE CLI dest. No live "
-        "observer in this increment.",
+        STATUS_SUPPORTED,
+        NATIVE_CONSUMER_OBSERVER,
+        _NATIVE_CONSUMER_ROW_PROFILES[ZMQ_ENDPOINTS_PER_SUB_ROW],
+        (ZMQ_ENDPOINTS_PER_SUB_ROW,),
+        "Unverified candidate until fixed-SHA Linux execution. Live FE/EPP "
+        "native consumer profiles observe Dedicated (omitted) and Grouped "
+        "pool construction with dual-publisher payload consumption; "
+        "legacy_runtime does not claim pool sizing.",
     ),
 )
 
@@ -1947,6 +2050,20 @@ def assert_decision_identifier_ownership() -> None:
             raise AssertionError(
                 f"{row.name} may not use {KV_CACHE_BLOCK_SIZE_OBSERVER}; only "
                 f"{KV_CACHE_BLOCK_SIZE_ROW} may"
+            )
+        if row.observer == NATIVE_CONSUMER_OBSERVER and row.name not in set(
+            NATIVE_CONSUMER_ROWS
+        ):
+            raise AssertionError(
+                f"{row.name} may not use {NATIVE_CONSUMER_OBSERVER}; only "
+                f"{list(NATIVE_CONSUMER_ROWS)} may"
+            )
+        if row.observer == NAMED_POLICY_CATALOG_OBSERVER and row.name not in set(
+            NAMED_POLICY_CATALOG_ROWS
+        ):
+            raise AssertionError(
+                f"{row.name} may not use {NAMED_POLICY_CATALOG_OBSERVER}; only "
+                f"{list(NAMED_POLICY_CATALOG_ROWS)} may"
             )
         if row.name in names:
             raise AssertionError(f"duplicate decision name {row.name!r}")
@@ -2509,6 +2626,181 @@ def _assert_shared_cache_type_binding(
     _assert_ordinary_collected_item(SHARED_CACHE_TYPE_ITEM, item)
 
 
+def _assert_native_consumer_surface_closed() -> None:
+    if NATIVE_CONSUMER_ROWS != (
+        ACTIVE_REQUEST_EXPIRY_ROW,
+        ACTIVE_SEQUENCE_DIRECT_ZMQ_ROW,
+        ACTIVE_SEQUENCE_ZMQ_RCVHWM_ROW,
+        ZMQ_ENDPOINTS_PER_SUB_ROW,
+    ):
+        raise AssertionError(
+            "NATIVE_CONSUMER_ROWS drifted from the four owned native setting ids"
+        )
+    if NATIVE_CONSUMER_PROFILE_NAMES != (
+        "omitted",
+        "legacy_runtime",
+        "grouped",
+        "expiry",
+    ):
+        raise AssertionError(
+            "NATIVE_CONSUMER_PROFILE_NAMES drifted from the fixed four-profile "
+            f"literal, got {NATIVE_CONSUMER_PROFILE_NAMES!r}"
+        )
+    helper_keys = set(_NATIVE_CONSUMER_PROFILES)
+    expected_keys = set(NATIVE_CONSUMER_PROFILE_NAMES)
+    if helper_keys != expected_keys:
+        raise AssertionError(
+            "helper NATIVE_CONSUMER_PROFILES keys "
+            f"{sorted(helper_keys)} != fixed contract set {sorted(expected_keys)}"
+        )
+    if set(_NATIVE_CONSUMER_ROW_PROFILES) != set(NATIVE_CONSUMER_ROWS):
+        raise AssertionError(
+            "_NATIVE_CONSUMER_ROW_PROFILES keys must equal NATIVE_CONSUMER_ROWS"
+        )
+    expected_row_profiles = {
+        ACTIVE_REQUEST_EXPIRY_ROW: (
+            "omitted",
+            "legacy_runtime",
+            "grouped",
+            "expiry",
+        ),
+        ACTIVE_SEQUENCE_DIRECT_ZMQ_ROW: (
+            "omitted",
+            "legacy_runtime",
+            "grouped",
+            "expiry",
+        ),
+        ACTIVE_SEQUENCE_ZMQ_RCVHWM_ROW: ("omitted", "grouped", "expiry"),
+        ZMQ_ENDPOINTS_PER_SUB_ROW: ("omitted", "grouped", "expiry"),
+    }
+    for name, profiles in _NATIVE_CONSUMER_ROW_PROFILES.items():
+        wanted = expected_row_profiles[name]
+        if profiles != wanted:
+            raise AssertionError(
+                f"{name} row profile oracle {profiles!r} != fixed {wanted!r}"
+            )
+        unknown = [
+            profile for profile in profiles if profile not in expected_keys
+        ]
+        if unknown:
+            raise AssertionError(
+                f"{name} binds unknown native profiles {unknown}; known "
+                f"{list(NATIVE_CONSUMER_PROFILE_NAMES)}"
+            )
+        if name == ZMQ_ENDPOINTS_PER_SUB_ROW and "legacy_runtime" in profiles:
+            raise AssertionError(
+                "zmq_endpoints_per_sub must not claim pool sizing on legacy_runtime"
+            )
+        if name == ACTIVE_SEQUENCE_ZMQ_RCVHWM_ROW and "legacy_runtime" in profiles:
+            raise AssertionError(
+                "active_sequence_zmq_rcvhwm must not claim HWM on legacy_runtime"
+            )
+
+
+def _assert_native_consumer_binding(row: SettingDecision, items: Iterable[Any]) -> None:
+    _assert_native_consumer_surface_closed()
+    if row.name not in _NATIVE_CONSUMER_ROW_PROFILES:
+        raise AssertionError(
+            f"{row.name} is not a closed native-consumer contract; "
+            f"expected one of {list(NATIVE_CONSUMER_ROWS)}"
+        )
+    if row.status != STATUS_SUPPORTED:
+        raise AssertionError(
+            f"{row.name} status {row.status!r} != {STATUS_SUPPORTED!r}"
+        )
+    if row.observer != NATIVE_CONSUMER_OBSERVER:
+        raise AssertionError(
+            f"{row.name} observer={row.observer!r} != {NATIVE_CONSUMER_OBSERVER!r}"
+        )
+    if row.flags != ():
+        raise AssertionError(f"{row.name} flags {row.flags} != ()")
+    wanted_env = {
+        ACTIVE_REQUEST_EXPIRY_ROW: ("DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS",),
+        ACTIVE_SEQUENCE_DIRECT_ZMQ_ROW: ("DYN_ROUTER_ACTIVE_SEQUENCE_DIRECT_ZMQ",),
+        ACTIVE_SEQUENCE_ZMQ_RCVHWM_ROW: ("DYN_ROUTER_ACTIVE_SEQUENCE_ZMQ_RCVHWM",),
+        ZMQ_ENDPOINTS_PER_SUB_ROW: ("DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB",),
+    }[row.name]
+    if row.env != wanted_env:
+        raise AssertionError(f"{row.name} env {row.env} != {wanted_env!r}")
+    if row.schema_fields != ():
+        raise AssertionError(f"{row.name} schema_fields {row.schema_fields} != ()")
+    if row.affected_fields != (row.name,):
+        raise AssertionError(
+            f"{row.name} affected_fields {row.affected_fields} != {(row.name,)!r}"
+        )
+    wanted_profiles = _NATIVE_CONSUMER_ROW_PROFILES[row.name]
+    if row.profiles != wanted_profiles:
+        raise AssertionError(
+            f"{row.name} profiles {row.profiles} != {wanted_profiles!r}"
+        )
+    for profile in wanted_profiles:
+        item_id = NATIVE_CONSUMER_PROFILE_ITEMS[profile]
+        item = _require_unique_nodeid_item(items, item_id)
+        _assert_ordinary_collected_item(item_id, item)
+
+
+def _assert_named_policy_catalog_surface_closed() -> None:
+    if NAMED_POLICY_CATALOG_ROWS != (
+        ROUTER_PREFILL_POLICY_ROW,
+        ROUTER_DECODE_POLICY_ROW,
+        WORKER_SELECTION_POLICY_ROW,
+    ):
+        raise AssertionError(
+            "NAMED_POLICY_CATALOG_ROWS drifted from the three owned selector ids"
+        )
+
+
+def _assert_named_policy_catalog_binding(
+    row: SettingDecision, items: Iterable[Any]
+) -> None:
+    _assert_named_policy_catalog_surface_closed()
+    if row.name not in set(NAMED_POLICY_CATALOG_ROWS):
+        raise AssertionError(
+            f"{row.name} is not a closed named-policy catalog contract; "
+            f"expected one of {list(NAMED_POLICY_CATALOG_ROWS)}"
+        )
+    if row.status != STATUS_UNSUPPORTED_CAPABILITY:
+        raise AssertionError(
+            f"{row.name} status {row.status!r} != {STATUS_UNSUPPORTED_CAPABILITY!r}"
+        )
+    if row.observer != NAMED_POLICY_CATALOG_OBSERVER:
+        raise AssertionError(
+            f"{row.name} observer={row.observer!r} != "
+            f"{NAMED_POLICY_CATALOG_OBSERVER!r}"
+        )
+    if row.profiles != ():
+        raise AssertionError(f"{row.name} profiles {row.profiles} != ()")
+    if row.affected_fields != (row.name,):
+        raise AssertionError(
+            f"{row.name} affected_fields {row.affected_fields} != {(row.name,)!r}"
+        )
+    wanted_flags = {
+        ROUTER_PREFILL_POLICY_ROW: ("--router-prefill-policy",),
+        ROUTER_DECODE_POLICY_ROW: ("--router-decode-policy",),
+        WORKER_SELECTION_POLICY_ROW: (),
+    }[row.name]
+    wanted_env = {
+        ROUTER_PREFILL_POLICY_ROW: ("DYN_ROUTER_PREFILL_POLICY",),
+        ROUTER_DECODE_POLICY_ROW: ("DYN_ROUTER_DECODE_POLICY",),
+        WORKER_SELECTION_POLICY_ROW: ("DYN_ROUTER_WORKER_SELECTION_POLICY",),
+    }[row.name]
+    wanted_schema = {
+        ROUTER_PREFILL_POLICY_ROW: ("router_prefill_policy",),
+        ROUTER_DECODE_POLICY_ROW: ("router_decode_policy",),
+        WORKER_SELECTION_POLICY_ROW: (),
+    }[row.name]
+    if row.flags != wanted_flags:
+        raise AssertionError(f"{row.name} flags {row.flags} != {wanted_flags!r}")
+    if row.env != wanted_env:
+        raise AssertionError(f"{row.name} env {row.env} != {wanted_env!r}")
+    if row.schema_fields != wanted_schema:
+        raise AssertionError(
+            f"{row.name} schema_fields {row.schema_fields} != {wanted_schema!r}"
+        )
+    item = _require_unique_nodeid_item(items, NAMED_POLICY_CATALOG_ITEM)
+    _assert_ordinary_collected_item(NAMED_POLICY_CATALOG_ITEM, item)
+
+
 # Closed seven-row binding oracle: status/observer/ids/items only.
 _SEVEN_ROW_BINDINGS: dict[str, dict[str, Any]] = {
     SERVE_INDEXER_ROW: {
@@ -2646,7 +2938,10 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
     session_affinity_mode additionally requires the existing SESSION_TTL_ITEM
     Hard/TTL300 strict marker. Prefill abs/frac unsupported_input rows bind
     that source Item plus the three ordinary
-    test_prefill_admission_input_boundaries profiles.
+    test_prefill_admission_input_boundaries profiles. The four native
+    active-sequence rows bind only their consuming
+    test_native_consumer_profile[<profile>] Items. The three named-policy
+    selector rows bind only the ordinary test_named_policy_catalog Item.
     """
     item_list = [_require_collected_item(item) for item in items]
     collected: dict[str, list[Any]] = {}
@@ -2737,6 +3032,12 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
             continue
         if row.name == SHARED_CACHE_TYPE_ROW:
             _assert_shared_cache_type_binding(row, item_list)
+            continue
+        if row.name in _NATIVE_CONSUMER_ROW_PROFILES:
+            _assert_native_consumer_binding(row, item_list)
+            continue
+        if row.name in set(NAMED_POLICY_CATALOG_ROWS):
+            _assert_named_policy_catalog_binding(row, item_list)
             continue
         if row.name in _SEVEN_ROW_BINDINGS:
             _assert_seven_row_binding(row, item_list)

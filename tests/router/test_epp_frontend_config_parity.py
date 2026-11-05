@@ -33,7 +33,9 @@ block-size cross-input cases bind kv_cache_block_size as not-FE-honored
 Dynamic worker-card geometry, not CLI support. Seven input/startup/capability
 rows use source-backed unsupported_input/unsupported_capability decisions
 with one ordinary source-capability Item; prefill abs/frac also bind three
-ordinary FE admin /busy_threshold boundary profiles.
+ordinary FE admin /busy_threshold boundary profiles. Four native
+active-sequence consumer profiles and one named-policy catalog Item are
+ordinary unverified-candidate wrappers, not xfail.
 """
 
 import pytest
@@ -45,6 +47,7 @@ from tests.router.epp_config_contract import (
     ENFORCE_DISAGG_CASE_IDS,
     KEYED_TRACKING_PROFILE,
     KEYED_TRACKING_SIZE_ARMS,
+    NATIVE_CONSUMER_PROFILE_NAMES,
     PREFILL_ADMISSION_PROFILES,
     PROFILE_NAMES,
     ActiveDecodeThresholdConfigMismatch,
@@ -367,3 +370,27 @@ def test_prefill_admission_input_boundaries(
         EppFrontendParityStack,
         profile_name,
     )
+
+
+@pytest.mark.parametrize("profile_name", list(NATIVE_CONSUMER_PROFILE_NAMES))
+def test_native_consumer_profile(
+    request, predownload_tokenizers, tmp_path, profile_name
+):
+    """Live FE/EPP native active-sequence consumer profiles (omitted..expiry)."""
+    from tests.router.common import run_native_consumer_profile
+
+    _ = predownload_tokenizers
+    run_native_consumer_profile(
+        request,
+        tmp_path,
+        ROUTER_MODEL_NAME,
+        profile_name,
+    )
+
+
+def test_named_policy_catalog(request, predownload_tokenizers, tmp_path):
+    """FE named-default catalog evidence plus stock Runtime EPP UnknownType."""
+    from tests.router.common import run_named_policy_catalog
+
+    _ = predownload_tokenizers
+    run_named_policy_catalog(request, tmp_path, ROUTER_MODEL_NAME)
