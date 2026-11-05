@@ -420,7 +420,7 @@ Planner search-space preparation and replay-spec materialization.
 from dynamo.planner.simulation import DynamoPlannerSweepConfigProvider
 ```
 
-[`components/src/dynamo/planner/simulation/provider.py#L657`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L657)
+[`components/src/dynamo/planner/simulation/provider.py#L826`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L826)
 
 **Public methods**
 
@@ -432,7 +432,7 @@ compile_prediction(config: Mapping[str, JSONValue], context: PredictionAdapterCo
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L667)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L836)
 
 <h4 id="api-dynamo-planner-simulation-provider-dynamoplannersweepconfigprovider-compile-recommendation">compile_recommendation</h4>
 
@@ -442,7 +442,7 @@ compile_recommendation(config: Mapping[str, JSONValue], context: RecommendationA
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L720)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L891)
 
 <h4 id="api-dynamo-planner-simulation-provider-dynamoplannersweepconfigprovider-materialize-candidate">materialize_candidate</h4>
 
@@ -452,7 +452,7 @@ materialize_candidate(plan: AdapterSearchPlan, selection: Mapping[str, JSONValue
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L807)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L1051)
 
 <h4 id="api-dynamo-planner-simulation-provider-dynamoplannersweepconfigprovider-generate-search-space">generate_search_space</h4>
 
@@ -462,7 +462,7 @@ generate_search_space(search_spec: Mapping[str, JSONValue], context: SweepContex
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L834)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L1082)
 
 <h4 id="api-dynamo-planner-simulation-provider-dynamoplannersweepconfigprovider-materialize-replay">materialize_replay</h4>
 
@@ -472,7 +472,7 @@ materialize_replay(plan: AdapterSearchPlan, selection: Mapping[str, JSONValue], 
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L953)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L1201)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-errors-emptytargetreplicaserror" title="EmptyTargetReplicasError (class)">
@@ -1365,7 +1365,7 @@ get_config() -> dict[str, Any]
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/reconfiguration.py#L420)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/reconfiguration.py#L421)
 
 <h4 id="api-dynamo-planner-reconfiguration-plannerreconfiguration-submit">submit</h4>
 
@@ -1375,7 +1375,23 @@ submit(request: ReconfigureRequest) -> dict[str, Any]
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/reconfiguration.py#L436)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/reconfiguration.py#L437)
+
+<h4 id="api-dynamo-planner-reconfiguration-plannerreconfiguration-apply-decision">apply_decision</h4>
+
+```python
+apply_decision(changes: Mapping[str, Any], observations: Sequence[TrafficObservation] | None) -> int
+```
+
+Activate a persisted live retune decision's Planner ``changes``; the new revision.
+
+The same two-phase path as a control API update: one update at a
+time, a new load predictor prepared off the event loop on the
+decision's ``observations`` and tracked past its deadline, and the
+decision dropped (``ConfigurationConflict``) when another update
+activates first. Raises on any failure; nothing changes then.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/reconfiguration.py#L526)
 
 <h4 id="api-dynamo-planner-reconfiguration-plannerreconfiguration-get-operation">get_operation</h4>
 
@@ -1385,7 +1401,7 @@ get_operation(operation_id: str) -> dict[str, Any] | None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/reconfiguration.py#L555)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/reconfiguration.py#L636)
 
 <h4 id="api-dynamo-planner-reconfiguration-plannerreconfiguration-handle-request">handle_request</h4>
 
@@ -1395,7 +1411,7 @@ handle_request(request: dict[str, Any]) -> dict[str, Any]
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/reconfiguration.py#L559)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/reconfiguration.py#L640)
 
 <h4 id="api-dynamo-planner-reconfiguration-plannerreconfiguration-register">register</h4>
 
@@ -1405,7 +1421,7 @@ register(runtime: DistributedRuntime) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/reconfiguration.py#L589)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/reconfiguration.py#L670)
 
 <h4 id="api-dynamo-planner-reconfiguration-plannerreconfiguration-close">close</h4>
 
@@ -1415,7 +1431,7 @@ close() -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/reconfiguration.py#L601)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/reconfiguration.py#L682)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-core-state-machine-plannerscalingstate" title="PlannerScalingState (class)">
@@ -2206,7 +2222,7 @@ from dynamo.planner.simulation import create_provider
 create_provider() -> DynamoPlannerSweepConfigProvider
 ```
 
-[`components/src/dynamo/planner/simulation/provider.py#L1247`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L1247)
+[`components/src/dynamo/planner/simulation/provider.py#L1495`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L1495)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-reconfiguration-live-retune-sla-errors" title="live_retune_sla_errors (function)">
