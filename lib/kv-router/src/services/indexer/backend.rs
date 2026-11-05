@@ -772,6 +772,13 @@ impl Indexer {
     /// Device-tier overlap scores, including side-indexer credit. Tier-aware
     /// callers should use [`Self::find_tiered_matches`].
     pub async fn find_matches(&self, hashes: Vec<LocalBlockHash>) -> Result<OverlapScores> {
+        if let Indexer::Single { lower_tier, .. } | Indexer::Concurrent { lower_tier, .. } = self
+            && lower_tier.group_residency().is_active()
+        {
+            // Hybrid workers are present: the pipeline cuts their scores to the
+            // last boundary with a recurrent state, after the side merge too.
+            return Ok(self.find_match_details(hashes).await?.overlap_scores);
+        }
         let Some(side) = self.approx() else {
             return self.find_primary_matches(hashes).await;
         };
@@ -1130,6 +1137,221 @@ mod tests {
         if let Indexer::Single { lower_tier, .. } = &indexer {
             assert!(!lower_tier.group_residency().is_active());
         }
+    }
+
+    /// A hybrid worker's attention chain matches 3 blocks but its recurrent
+    /// group only checkpointed block 1: the tiered match and the hint chain
+    /// must stop at block 1, while a dense worker keeps its full match.
+    #[tokio::test]
+    async fn recurrent_group_presence_cuts_tiered_match_and_hint_chain() {
+        use crate::indexer::LowerTierQueryOptions;
+        use crate::kv_hints::KvTransferCandidateSource;
+        use crate::protocols::{
+            ExternalSequenceBlockHash, KvCacheGroupKind, KvCacheGroupTag, KvCacheStoreData,
+            KvCacheStoredBlockData, compute_seq_hash_for_block,
+        };
+
+        let indexer = create_indexer(4, 1);
+        let hybrid = WorkerWithDpRank::new(7, 0);
+        let dense = WorkerWithDpRank::new(8, 0);
+        let local = [11_u64, 12, 13];
+        for (event_id, worker) in [(1, hybrid), (2, dense)] {
+            indexer
+                .apply_event_routed(store_event(
+                    worker.worker_id,
+                    worker.dp_rank,
+                    event_id,
+                    &[],
+                    &local,
+                    StorageTier::Device,
+                ))
+                .await
+                .unwrap();
+        }
+        let chain: Vec<u64> = compute_seq_hash_for_block(
+            &local
+                .iter()
+                .copied()
+                .map(LocalBlockHash)
+                .collect::<Vec<_>>(),
+        );
+        let mamba = RouterEvent::with_storage_tier(
+            hybrid.worker_id,
+            KvCacheEvent {
+                event_id: 3,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(chain[0]),
+                        tokens_hash: LocalBlockHash(local[0]),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: hybrid.dp_rank,
+            },
+            StorageTier::Device,
+        )
+        .with_kv_cache_group(KvCacheGroupTag {
+            group_idx: 1,
+            kind: KvCacheGroupKind::Mamba,
+        });
+        indexer.apply_event_routed(mamba).await.unwrap();
+        if let Indexer::Single { primary, .. } = &indexer {
+            let _ = primary.flush().await;
+        }
+
+        let sequence: Vec<LocalBlockHash> = local.iter().copied().map(LocalBlockHash).collect();
+        let tiered = indexer
+            .find_tiered_matches_with_options(
+                sequence.clone(),
+                LowerTierQueryOptions {
+                    retain_kv_transfer_chain: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            tiered.device.overlap_scores.scores.get(&hybrid).copied(),
+            Some(1)
+        );
+        assert_eq!(
+            tiered.device.overlap_scores.scores.get(&dense).copied(),
+            Some(3)
+        );
+        assert_eq!(
+            tiered.device.last_matched_hashes.get(&hybrid).copied(),
+            Some(ExternalSequenceBlockHash(chain[0]))
+        );
+        let candidates = tiered
+            .device
+            .kv_transfer_candidates
+            .as_ref()
+            .expect("chain retained");
+        assert_eq!(
+            candidates.block_hashes.len(),
+            3,
+            "dense worker keeps the chain"
+        );
+        assert!(
+            candidates
+                .owner_prefix_blocks
+                .contains(&(KvTransferCandidateSource::Worker(hybrid), 1))
+        );
+        assert!(
+            candidates
+                .owner_prefix_blocks
+                .contains(&(KvTransferCandidateSource::Worker(dense), 3))
+        );
+
+        // Plain overlap scores (no hint retention requested) are cut too, and
+        // the chain is not leaked to callers that did not ask for it.
+        let plain = indexer.find_tiered_matches(sequence.clone()).await.unwrap();
+        assert_eq!(
+            plain.device.overlap_scores.scores.get(&hybrid).copied(),
+            Some(1)
+        );
+        assert!(plain.device.kv_transfer_candidates.is_none());
+        let scores = indexer.find_matches(sequence).await.unwrap();
+        assert_eq!(scores.scores.get(&hybrid).copied(), Some(1));
+        assert_eq!(scores.scores.get(&dense).copied(), Some(3));
+    }
+
+    /// The same cut fed through the ZMQ ingress: `filter_reason` keeps the
+    /// Mamba store, the tag routes it to the presence table, and the lookup
+    /// cuts the hybrid worker. Qwen3.5 group order: GDN groups first,
+    /// attention last.
+    #[tokio::test]
+    async fn recurrent_group_presence_cuts_match_fed_through_ingress() {
+        use crate::indexer::LowerTierQueryOptions;
+        use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
+        use crate::zmq_wire::{BlockHashValue, KvCacheSpecKind, RawKvEvent, ZmqEventNormalizer};
+
+        async fn overlap_and_hint(with_checkpoint: bool) -> (Option<u32>, usize) {
+            let block_size = 2u32;
+            let tokens: Vec<u32> = (10..16).collect();
+            let worker = WorkerWithDpRank::new(3, 0);
+            let stored = |hashes: Vec<u64>, token_ids: Vec<u32>, group_idx: u32, kind| {
+                RawKvEvent::BlockStored {
+                    block_hashes: hashes.into_iter().map(BlockHashValue::Unsigned).collect(),
+                    parent_block_hash: None,
+                    token_ids,
+                    block_size: block_size as usize,
+                    medium: None,
+                    lora_name: None,
+                    cache_namespace: None,
+                    block_mm_infos: None,
+                    is_eagle: None,
+                    group_idx: Some(group_idx),
+                    kv_cache_spec_kind: Some(kind),
+                    kv_cache_spec_sliding_window: None,
+                    locality: None,
+                    ownership: None,
+                    session_id: None,
+                }
+            };
+            let mut raws = vec![stored(
+                vec![11, 12, 13],
+                tokens.clone(),
+                3,
+                KvCacheSpecKind::FullAttention,
+            )];
+            if with_checkpoint {
+                raws.push(stored(
+                    vec![11],
+                    tokens[..2].to_vec(),
+                    0,
+                    KvCacheSpecKind::Mamba,
+                ));
+            }
+            let indexer = create_indexer(block_size, 1);
+            let mut normalizer = ZmqEventNormalizer::new(block_size);
+            for (i, raw) in raws.into_iter().enumerate() {
+                let raw = normalizer
+                    .preprocess_with_reason(raw, worker)
+                    .expect("kept at ingress");
+                let event = normalizer
+                    .normalize_preprocessed(raw, i as u64 + 1, worker)
+                    .expect("converts")
+                    .into_router_event()
+                    .expect("router event");
+                indexer.apply_event_routed(event).await.unwrap();
+            }
+            if let Indexer::Single { primary, .. } = &indexer {
+                let _ = primary.flush().await;
+            }
+            let sequence =
+                compute_block_hash_for_seq(&tokens, block_size, BlockHashOptions::default());
+            let tiered = indexer
+                .find_tiered_matches_with_options(
+                    sequence,
+                    LowerTierQueryOptions {
+                        retain_kv_transfer_chain: true,
+                    },
+                )
+                .await
+                .unwrap();
+            let overlap = tiered.device.overlap_scores.scores.get(&worker).copied();
+            let hint = tiered
+                .device
+                .kv_transfer_candidates
+                .as_ref()
+                .and_then(|candidates| {
+                    candidates
+                        .owner_prefix_blocks
+                        .iter()
+                        .filter(|(source, _)| {
+                            *source == crate::kv_hints::KvTransferCandidateSource::Worker(worker)
+                        })
+                        .map(|(_, blocks)| *blocks)
+                        .max()
+                })
+                .unwrap_or(0);
+            (overlap, hint)
+        }
+
+        assert_eq!(overlap_and_hint(false).await, (Some(3), 3));
+        assert_eq!(overlap_and_hint(true).await, (Some(1), 1));
     }
 
     /// Dump every tier's events from a populated indexer, replay through a

@@ -24,7 +24,7 @@ use rustc_hash::FxHashMap;
 
 use super::lower_tier::{LowerTierContinuation, LowerTierMatchDetails};
 use super::types::MatchDetails;
-use crate::kv_hints::KvTransferCandidateSource;
+use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEventData, RouterEvent, StorageTier, WorkerId,
     WorkerWithDpRank,
@@ -150,9 +150,6 @@ impl KvCacheGroupResidency {
     /// Needs the retained root-aligned chain (`kv_transfer_candidates`); without
     /// it the scores are left as they are.
     pub fn cut_device(&self, details: &mut MatchDetails) {
-        if !self.is_active() {
-            return;
-        }
         let Some(chain) = details
             .kv_transfer_candidates
             .as_ref()
@@ -160,10 +157,25 @@ impl KvCacheGroupResidency {
         else {
             return;
         };
+        self.cut_device_with_chain(details, &chain);
+    }
+
+    /// [`Self::cut_device`] against a caller-supplied root-aligned chain. The
+    /// side merge can re-add a worker the first cut dropped, after that cut
+    /// truncated or discarded the retained chain, so the second cut is keyed
+    /// by the chain captured before the first.
+    pub fn cut_device_with_chain(
+        &self,
+        details: &mut MatchDetails,
+        chain: &[ExternalSequenceBlockHash],
+    ) {
+        if !self.is_active() || chain.is_empty() {
+            return;
+        }
         let mut cuts: Vec<(WorkerWithDpRank, usize)> = Vec::new();
         for (worker, score) in &details.overlap_scores.scores {
             let blocks = *score as usize;
-            if let Some(p) = self.reusable_blocks(*worker, &chain, blocks)
+            if let Some(p) = self.reusable_blocks(*worker, chain, blocks)
                 && p < blocks
             {
                 cuts.push((*worker, p));
@@ -181,36 +193,19 @@ impl KvCacheGroupResidency {
                 details.last_matched_hashes.insert(*worker, chain[*p - 1]);
             }
         }
-        let cut_sources: FxHashMap<KvTransferCandidateSource, usize> = cuts
-            .iter()
-            .map(|(worker, p)| (KvTransferCandidateSource::from(*worker), *p))
-            .collect();
-        if let Some(candidates) = details.kv_transfer_candidates.as_mut() {
-            candidates
-                .owner_prefix_blocks
-                .retain_mut(|(source, blocks)| match cut_sources.get(source) {
-                    Some(0) => false,
-                    Some(p) => {
-                        *blocks = *p;
-                        true
-                    }
-                    None => true,
-                });
-            let max_blocks = candidates
-                .owner_prefix_blocks
-                .iter()
-                .map(|(_, blocks)| *blocks)
-                .max()
-                .unwrap_or(0);
-            candidates.block_hashes.truncate(max_blocks);
-            if candidates.owner_prefix_blocks.is_empty() {
-                details.kv_transfer_candidates = None;
-            }
+        if let Some(candidates) = details.kv_transfer_candidates.as_mut()
+            && cut_candidates(candidates, &cuts)
+        {
+            details.kv_transfer_candidates = None;
         }
     }
 
     /// Cut one lower tier's hits the same way. `device_chain` is the retained
-    /// device chain, used when the tier did not retain its own.
+    /// device chain; the tier's own merged chain is preferred when it is at
+    /// least as long, and otherwise the device chain is extended with the
+    /// tier's retained extensions (`kv_transfer_extensions`), which every
+    /// tier records when the cut is active. A hit past what the chain can
+    /// verify is cut back to the verified boundary rather than skipped.
     pub fn cut_lower_tier(
         &self,
         details: &mut LowerTierMatchDetails,
@@ -219,12 +214,25 @@ impl KvCacheGroupResidency {
         if !self.is_active() {
             return;
         }
-        let chain: Vec<ExternalSequenceBlockHash> = match details.kv_transfer_candidates.as_ref() {
-            Some(candidates) if candidates.block_hashes.len() >= device_chain.len() => {
-                candidates.block_hashes.clone()
+        let mut chain: Vec<ExternalSequenceBlockHash> =
+            match details.kv_transfer_candidates.as_ref() {
+                Some(candidates) if candidates.block_hashes.len() >= device_chain.len() => {
+                    candidates.block_hashes.clone()
+                }
+                _ => device_chain.to_vec(),
+            };
+        if let Some(extensions) = details.kv_transfer_extensions.as_ref() {
+            // Same root-aligned splice as the HostPinned hint merge: extend
+            // contiguously, stop at the first gap or positional mismatch.
+            for (pos, hash) in &extensions.block_hashes {
+                if *pos > chain.len() || (*pos < chain.len() && chain[*pos] != *hash) {
+                    break;
+                }
+                if *pos == chain.len() {
+                    chain.push(*hash);
+                }
             }
-            _ => device_chain.to_vec(),
-        };
+        }
         if chain.is_empty() {
             return;
         }
@@ -240,13 +248,11 @@ impl KvCacheGroupResidency {
                 continue;
             };
             let start = end - *hits;
-            if end > chain.len() {
-                // The chain does not cover this tier's extension (device
-                // candidates were truncated below it): nothing to verify.
-                continue;
-            }
-            if let Some(p) = self.reusable_blocks(*worker, &chain, end)
-                && p < end
+            // Positions past the chain cannot be verified against the
+            // presence table; a hybrid worker's hits there are not credited.
+            let verifiable = end.min(chain.len());
+            if let Some(p) = self.reusable_blocks(*worker, &chain, verifiable)
+                && p.max(start) < end
             {
                 cuts.push((*worker, p.max(start)));
             }
@@ -265,31 +271,10 @@ impl KvCacheGroupResidency {
             };
             details.next_continuations.insert(*worker, continuation);
         }
-        let cut_sources: FxHashMap<KvTransferCandidateSource, usize> = cuts
-            .iter()
-            .map(|(worker, p)| (KvTransferCandidateSource::from(*worker), *p))
-            .collect();
-        if let Some(candidates) = details.kv_transfer_candidates.as_mut() {
-            candidates
-                .owner_prefix_blocks
-                .retain_mut(|(source, blocks)| match cut_sources.get(source) {
-                    Some(0) => false,
-                    Some(p) => {
-                        *blocks = *p;
-                        true
-                    }
-                    None => true,
-                });
-            let max_blocks = candidates
-                .owner_prefix_blocks
-                .iter()
-                .map(|(_, blocks)| *blocks)
-                .max()
-                .unwrap_or(0);
-            candidates.block_hashes.truncate(max_blocks);
-            if candidates.owner_prefix_blocks.is_empty() {
-                details.kv_transfer_candidates = None;
-            }
+        if let Some(candidates) = details.kv_transfer_candidates.as_mut()
+            && cut_candidates(candidates, &cuts)
+        {
+            details.kv_transfer_candidates = None;
         }
     }
 
@@ -304,10 +289,52 @@ impl KvCacheGroupResidency {
     }
 }
 
+/// Apply per-source cuts to a retained hint chain: owners cut to 0 are
+/// dropped, the rest are capped, suffix intervals past a source's cut are
+/// dropped, and the chain is truncated to the deepest surviving coverage.
+/// Returns true when nothing is left and the caller should drop the chain.
+fn cut_candidates(
+    candidates: &mut KvTransferCandidates,
+    cuts: &[(WorkerWithDpRank, usize)],
+) -> bool {
+    let cut_sources: FxHashMap<KvTransferCandidateSource, usize> = cuts
+        .iter()
+        .map(|(worker, p)| (KvTransferCandidateSource::from(*worker), *p))
+        .collect();
+    candidates
+        .owner_prefix_blocks
+        .retain_mut(|(source, blocks)| match cut_sources.get(source) {
+            Some(0) => false,
+            Some(p) => {
+                *blocks = *p;
+                true
+            }
+            None => true,
+        });
+    candidates.source_intervals.retain(|interval| {
+        cut_sources
+            .get(&interval.source)
+            .is_none_or(|p| interval.end <= *p)
+    });
+    let max_blocks = candidates
+        .owner_prefix_blocks
+        .iter()
+        .map(|(_, blocks)| *blocks)
+        .chain(
+            candidates
+                .source_intervals
+                .iter()
+                .map(|interval| interval.end),
+        )
+        .max()
+        .unwrap_or(0);
+    candidates.block_hashes.truncate(max_blocks);
+    candidates.owner_prefix_blocks.is_empty() && candidates.source_intervals.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv_hints::KvTransferCandidates;
     use crate::protocols::{
         KvCacheEvent, KvCacheGroupKind, KvCacheGroupTag, KvCacheRemoveData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash,
@@ -502,5 +529,70 @@ mod tests {
         residency.cut_lower_tier(&mut details, &chain(4));
         assert_eq!(details.hits[&worker], 1);
         assert_eq!(details.next_continuations[&worker].start_pos, 3);
+    }
+
+    /// A tier without a merged hint chain (Disk, External) is verified through
+    /// the device chain spliced with its own retained extensions; hits past
+    /// what the chain can verify are cut back, not skipped.
+    #[test]
+    fn lower_tier_hits_are_cut_with_retained_extensions() {
+        use crate::indexer::KvTransferExtensions;
+
+        let residency = KvCacheGroupResidency::new();
+        let worker = WorkerWithDpRank::new(1, 0);
+        residency.apply(&stored(worker, StorageTier::Device, 1, &[2]));
+
+        // Device chain covers blocks 1-2; the tier extended with 3-4 and
+        // recorded those positions. The only state is at block 2.
+        let mut details = LowerTierMatchDetails::default();
+        details.hits.insert(worker, 2);
+        details.next_continuations.insert(
+            worker,
+            LowerTierContinuation::new(4, ExternalSequenceBlockHash(4)),
+        );
+        details.kv_transfer_extensions = Some(KvTransferExtensions {
+            block_hashes: vec![
+                (2, ExternalSequenceBlockHash(3)),
+                (3, ExternalSequenceBlockHash(4)),
+            ],
+            owner_prefix_blocks: Default::default(),
+            source_intervals: Vec::new(),
+        });
+        residency.cut_lower_tier(&mut details, &chain(2));
+        assert_eq!(details.hits[&worker], 0);
+        assert_eq!(details.next_continuations[&worker].start_pos, 2);
+
+        // No extensions at all: the extension past the device chain cannot be
+        // verified, so it is cut back to the continuation start.
+        let mut details = LowerTierMatchDetails::default();
+        details.hits.insert(worker, 2);
+        details.next_continuations.insert(
+            worker,
+            LowerTierContinuation::new(4, ExternalSequenceBlockHash(4)),
+        );
+        residency.cut_lower_tier(&mut details, &chain(2));
+        assert_eq!(details.hits[&worker], 0);
+        assert_eq!(details.next_continuations[&worker].start_pos, 2);
+
+        // With a state at block 4 recorded through the extensions, the tier
+        // hits stand.
+        residency.apply(&stored(worker, StorageTier::Disk, 1, &[4]));
+        let mut details = LowerTierMatchDetails::default();
+        details.hits.insert(worker, 2);
+        details.next_continuations.insert(
+            worker,
+            LowerTierContinuation::new(4, ExternalSequenceBlockHash(4)),
+        );
+        details.kv_transfer_extensions = Some(KvTransferExtensions {
+            block_hashes: vec![
+                (2, ExternalSequenceBlockHash(3)),
+                (3, ExternalSequenceBlockHash(4)),
+            ],
+            owner_prefix_blocks: Default::default(),
+            source_intervals: Vec::new(),
+        });
+        residency.cut_lower_tier(&mut details, &chain(2));
+        assert_eq!(details.hits[&worker], 2);
+        assert_eq!(details.next_continuations[&worker].start_pos, 4);
     }
 }
