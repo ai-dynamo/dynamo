@@ -257,7 +257,7 @@ def wait_for_worker_registration(
 
     while time.time() - start_time < max_wait_seconds:
         try:
-            response = requests.get(f"{frontend_url}/health", timeout=5)
+            response = requests.get(f"{frontend_url}/health?instances=true", timeout=5)
             health_data = response.json()
             if health_data.get("instances"):
                 elapsed = time.time() - start_time

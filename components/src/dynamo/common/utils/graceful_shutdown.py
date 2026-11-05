@@ -209,18 +209,25 @@ def install_signal_handlers(
         task = shutdown_task
         if task is None:
             return
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.wait([task])
+            except asyncio.CancelledError:
+                # The event-loop runner must not exit with teardown pending.
+                cancelled = True
         try:
-            await asyncio.shield(task)
+            task.result()
         except asyncio.CancelledError:
-            # The joiner was cancelled, not the shutdown. `shield` keeps the
-            # teardown running; re-raise so the caller's own cancellation
-            # semantics are unchanged.
-            raise
+            if application_error is None:
+                raise
         except Exception:
             # Preserve an exception unwinding through the caller's finally,
             # but do not report success when only teardown failed.
-            if application_error is None:
+            if application_error is None and not cancelled:
                 raise
+        if cancelled and application_error is None:
+            raise asyncio.CancelledError
 
     def signal_handler() -> None:
         nonlocal shutdown_task

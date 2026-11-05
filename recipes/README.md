@@ -32,6 +32,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 
 | Model | Framework | Mode | GPUs | Deployment | Benchmark | Notes | GAIE |
 |-------|-----------|------|------|------------|-----------|-------|------|
+| **[Beam-1.0-501B-A23B](beam-1.0-501b/)** | SGLang / vLLM | Aggregated / Disaggregated | 8–16x H200; 8x B200/B300/GB200/GB300 | ✅ | ✅ | FP8 / NVFP4, FP8 KV cache, KV-aware routing, NIXL prefill/decode transfer, and DFlash2 block length 8 | ❌ |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 2x H100/H200/A100 | ✅ | ✅ | FP8 quantization | ❌ |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 8x H100/H200/A100 | ✅ | ✅ | Prefill + Decode separation | ❌ |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/vllm/disagg/)** | vLLM | Disagg (Single-Node) | 8x A100 | ✅ | ✅ | 2× TP2 prefill + 1× TP4 decode, NixlConnector KV transfer | ❌ |
@@ -64,6 +65,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[Kimi-K2.5](kimi-k2.5/trtllm/disagg-eagle-kv-router/)** | TensorRT-LLM | Disaggregated | 24x GB200 | ✅ | ✅ | DEP4 prefill + TEP4 decode, TRTLLM-native KV host offload | ❌ |
 | **[Kimi-K3](kimi-k3/vllm/)** | vLLM | Agg + Disagg | 16x GB200 / 16x GB300 | ✅ | ❌ | Multimodal MoE (1M ctx), MXFP4 experts + BF16 dense + FP8 KV, TP16 over MNNVL (GB200) / TP8 (GB300), KV-aware routing, FlashInfer MLA, reasoning + tool calling; plus disagg 1P1D (32x GB200) / 1P2D (24x GB300) | ❌ |
 | **[Kimi-K2.6](kimi-k2.6/vllm/)** | vLLM | Aggregated | 4x B200 / 8x H200 | ✅ | ✅ | MoE, NVFP4+FP8 KV (B200) / INT4 (H200), TP4/TP8, EAGLE3 MLA spec decode, LMCache CPU offload; text+image, chat + agentic profiles | ❌ |
+| **[Mistral Large 4](mistral-large-4/README.md)** | vLLM | Agg + Disagg | 8x / 16x GB300; 4x / 8x VR200 | ✅ | ❌ | 1051B-A54B MoE, NVFP4, 1M ctx, DSpark, native CPU KV offload, KV-aware routing with session affinity, Mistral tool-call and reasoning parsers; GB300 recipes run the hybrid KV cache manager off | ❌ |
 | **[Nemotron-3-Super](nemotron-3-super/vllm/)** | vLLM | Aggregated | 4x B200 / 4x H200 | ✅ | ✅ | ~120B hybrid Mamba/Attention/MoE (~12B active), NVFP4 (B200) / FP8 (H200) + FP8 KV, TP4+EP, MTP, KV-aware routing; chat + agentic profiles | ❌ |
 | **[Nemotron-3-Ultra](nemotron-3-ultra/vllm/)** | vLLM | Agg + Disagg | B200 / GB200 / H200 | ✅ | ✅ | Optimized agentic profiles for native 256K and opt-in 1M context; NVFP4 + FP8, MTP, and KV-aware routing |
 | **[Qwen3.8-Flash-Next](qwen3.8-flash-next/)** | vLLM | Agg + Disagg | 4x B200 / 8x B200 / 12x B200 | ✅ | ✅ | Multimodal (text+image+video) ultra-sparse MoE (125B / 6B active) with GDN+QSA hybrid attention, 51B N-gram embedding offload to host RAM, Inferact NVFP4 weights, TP4+EP, MTP3 spec decode, KV-aware routing, reasoning + tool calling (`qwen3_coder`); agentic profile | ❌ |
@@ -93,6 +95,7 @@ These recipes are under active development and may require additional setup step
 
 | Model | Framework | Mode | GPUs | Deployment | Notes |
 |-------|-----------|------|------|------------|-------|
+| **[Kimi-K3.1-Pro](kimi-k3.1-pro/)** | vLLM / SGLang | Aggregated / Disaggregated | 16x B200 / 8–24x GB300 / 16–24x VR200 | ✅ | vLLM text benchmarks; GB300 multimodal overlays; B200/VR200 DSpark with separate synthetic-acceptance benchmark variants. SGLang is GB300-only and functional-only. |
 | **[Motif-3 NVFP4](motif-3/)** | vLLM | Aggregated / Disaggregated 3P1D | 2x / 8x B200 | ✅ | TP2 per worker, expert parallelism, MTP2, FP8 KV cache; KV-aware routing and NIXL for disaggregation |
 | **[Gemma-4-31B](gemma4-31b/)** | TensorRT-LLM | Aggregated | 8x B200 / 8x GB200 / 8x H200 | ✅ | NVFP4 + FP8 KV on B200/GB200; BF16 + 16-bit KV and TP4 on H200; KV-aware routing; MTP on B200/GB200, not yet verified on H200; agentic profile |
 | **[GLM-5-NVFP4 (EFA)](glm-5-nvfp4/sglang/disagg/efa/)** | SGLang | Disagg Prefill/Decode over AWS EFA | 20x GB200 | ✅ | KV transfer over AWS EFA via NIXL LIBFABRIC instead of UCX. Patched libfabric baked into image. Requires [custom container build](glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa). |
@@ -107,6 +110,7 @@ These recipes are under active development and may require additional setup step
 | **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/sglang/agg/)** | SGLang | Aggregated | 8x B200 | ✅ | Text only — MoE model (1.6T / 49B active, 1M context), TP=8, MXFP4 MoE via FlashInfer, EAGLE MTP (3 steps / 4 draft tokens), reasoning + tool calling. Prebuilt image available (shared with [DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/sglang/agg/)). |
 | **[Solar-Open2-250B-NVFP4](solar-open2-250b/vllm/agg-b200-chat/)** | vLLM | Aggregated | 4x B200 | ✅ | Text only — NVFP4 checkpoint, 2 replicas × TP2, reasoning + tool calling. Prebuilt image available. |
 | **[Solar-Open2-250B-NVFP4](solar-open2-250b/vllm/disagg-b200-chat/)** | vLLM | Disaggregated | 8x B200 | ✅ | Text only — NVFP4 checkpoint, 1× prefill TP4 + EP and 2× decode TP2, NIXL/RDMA KV transfer, reasoning + tool calling. Prebuilt image available. |
+| **[MiniMax-M3.1-Flash](minimax-m3.1/)** | vLLM, SGLang, TensorRT-LLM | Aggregated | 4x B200 or 4x GB300 | ✅ | Day-0 profile for the MiniMax-M3.1-Flash checkpoint — TP4 + EP on one node, 1M context, up to 256 concurrent requests with prefix caching (plus FP8 KV cache and KV-aware routing on vLLM and SGLang), reasoning + tool calling; text + image input. |
 
 ## Recipe Structure
 

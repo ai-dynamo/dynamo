@@ -29,7 +29,8 @@ pub use dynamo_llm::protocols::common::llm_backend::{
 };
 pub use dynamo_llm::protocols::common::preprocessor::{
     BootstrapInfo, KV_HINT_TRANSFER_CAPABILITY_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
-    MultimodalData, MultimodalDataMap, PrefillResult, PreprocessedRequest, RoutingHints,
+    MultimodalData, MultimodalDataMap, MultimodalItemRef, PrefillResult, PreprocessedRequest,
+    RoutingHints,
 };
 pub use dynamo_llm::protocols::common::{
     FinishReason, GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
@@ -294,6 +295,19 @@ pub trait LLMEngine: Send + Sync + 'static {
         KvTransferFallback::Undeclared
     }
 
+    /// Resolves once the engine can no longer serve, with the error the
+    /// `Worker` returns. The `Worker` then shuts down as on SIGTERM, withdrawing
+    /// from discovery, draining and running `cleanup`, so the process exits
+    /// and its supervisor can restart it. Default: never resolves.
+    ///
+    /// The `Worker` may poll this before `start` completes, and drops the
+    /// future once it finishes or starts shutting down another way.
+    /// Implementations must allow polling during startup and must not use this
+    /// future to clean up.
+    async fn engine_lost(&self) -> DynamoError {
+        std::future::pending().await
+    }
+
     /// Release all engine resources. Called exactly once.
     ///
     /// **Must not block the executor.** The `Worker` bounds this call with
@@ -529,6 +543,8 @@ pub enum KvEventSource {
         dp_rank: u32,
         /// Model image-placeholder token used to normalize multimodal events.
         image_token_id: Option<u32>,
+        /// Opt-in idle heartbeat deadline; absent preserves legacy publishers.
+        heartbeat_timeout: Option<std::time::Duration>,
     },
     Push {
         on_ready: OnPublisherReady,

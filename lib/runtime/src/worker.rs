@@ -411,10 +411,10 @@ mod tests {
             let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let finished = revoked.clone();
             tokio::spawn(async move {
-                let _guard = guard;
                 token.cancelled().await;
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 finished.store(true, Ordering::SeqCst);
+                guard.send(Ok(())).unwrap();
             });
             if already_started {
                 runtime.shutdown();
@@ -440,10 +440,10 @@ mod tests {
         let completion = finished.clone();
         let guard = runtime.teardown_guard().unwrap();
         tokio::spawn(async move {
-            let _guard = guard;
             token.cancelled().await;
             released.await.unwrap();
             completion.store(true, Ordering::SeqCst);
+            guard.send(Ok(())).unwrap();
         });
         let started = tokio::time::Instant::now();
         assert!(

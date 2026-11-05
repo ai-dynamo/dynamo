@@ -13,7 +13,7 @@ use std::convert::Infallible;
 
 use anyhow::{Context, Result, anyhow, bail};
 use dynamo_kv_router::identity::{
-    CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+    CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
 };
 use dynamo_kv_router::indexer::cuckoo::{CkfConfig, PrefixSearchConfig};
 use dynamo_kv_router::indexer::cuckoo::{
@@ -183,7 +183,7 @@ impl DirectCkfParityIndexer {
         );
         let mut pools = [None; MAX_LANES];
         for (lane, pool) in pools.iter_mut().enumerate().take(configured_workers.len()) {
-            *pool = Some(PoolId::new(domain, DcId::new(lane as u64)));
+            *pool = Some(PoolId::new(domain, ClusterId::new(lane as u64)));
         }
         let manifest = GlobalCkfManifest::new(PARITY_CONSUMER, domain, format, pools)?;
         let indexer = GlobalCkfIndexer::new(manifest, PrefixSearchConfig::default())?;
@@ -192,7 +192,7 @@ impl DirectCkfParityIndexer {
         for (lane, (owner, mut state)) in configured_workers.iter().copied().zip(states).enumerate()
         {
             let identity = ProducerIdentity::new(
-                PoolId::new(domain, DcId::new(lane as u64)),
+                PoolId::new(domain, ClusterId::new(lane as u64)),
                 lane as u64 + 1,
                 PARITY_LAYOUT_GENERATION,
                 format,

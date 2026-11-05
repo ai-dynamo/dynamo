@@ -673,6 +673,7 @@ mod tests {
             agent_context: None,
             request: None,
             tool: None,
+            selection: None,
             payload: None,
         }
     }

@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::policy_config::FullRankCounts;
 use super::types::KvSchedulerError;
 use crate::protocols::{
     DpRank, RoutingConstraints, WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
@@ -34,6 +35,13 @@ pub enum WorkerEligibilityError {
     RoutingConstraintsUnsatisfied { worker_id: WorkerId },
 }
 
+/// The ranks the request's load projection found past the host's reject thresholds, counted
+/// per worker; present only while at least one worker has a full rank.
+#[derive(Clone, Copy)]
+struct RejectCheck<'a> {
+    full_ranks: &'a FullRankCounts,
+}
+
 #[derive(Clone, Copy)]
 pub struct RoutingEligibility<'a> {
     allowed_worker_ids: Option<&'a HashSet<WorkerId>>,
@@ -42,6 +50,7 @@ pub struct RoutingEligibility<'a> {
     pinned_worker: Option<WorkerWithDpRank>,
     affinity_target: Option<WorkerAffinityTarget>,
     routing_constraints: &'a RoutingConstraints,
+    reject: Option<RejectCheck<'a>>,
 }
 
 impl<'a> RoutingEligibility<'a> {
@@ -59,7 +68,30 @@ impl<'a> RoutingEligibility<'a> {
             pinned_worker,
             affinity_target: None,
             routing_constraints,
+            reject: None,
         }
+    }
+
+    /// Skip workers whose every rank the request's load projection found past the host's
+    /// reject thresholds, exactly like one in the host's overloaded set. The projection pass
+    /// counts full ranks per worker; selection only consults the count.
+    #[inline]
+    pub(crate) fn with_full_worker_ranks(mut self, full_ranks: &'a FullRankCounts) -> Self {
+        if !full_ranks.is_empty() {
+            self.reject = Some(RejectCheck { full_ranks });
+        }
+        self
+    }
+
+    // TODO: Look into rank granularity: the projection pass already judges every rank, so
+    // selection could skip a full rank instead of a worker whose every rank is full.
+    #[inline]
+    fn is_worker_full<C: WorkerConfigLike>(&self, worker_id: WorkerId, config: &C) -> bool {
+        self.reject.is_some_and(|check| {
+            check
+                .full_ranks
+                .worker_is_full(worker_id, config.data_parallel_size())
+        })
     }
 
     #[inline]
@@ -139,6 +171,7 @@ impl<'a> RoutingEligibility<'a> {
             && self
                 .routing_constraints
                 .is_compatible_with_worker_taints(config.taints())
+            && !self.is_worker_full(worker_id, config)
     }
 
     #[inline]
@@ -213,7 +246,9 @@ impl<'a> RoutingEligibility<'a> {
             });
         }
 
-        if self.is_worker_overloaded(worker.worker_id) {
+        if self.is_worker_overloaded(worker.worker_id)
+            || self.is_worker_full(worker.worker_id, config)
+        {
             return Err(WorkerEligibilityError::WorkerOverloaded {
                 worker_id: worker.worker_id,
             });
@@ -455,6 +490,62 @@ mod tests {
         assert_eq!(
             result.err(),
             Some(WorkerEligibilityError::WorkerNotAllowed { worker_id: 7 })
+        );
+    }
+
+    #[test]
+    fn full_rank_counts_skip_a_worker_only_when_every_rank_is_full() {
+        use super::super::policy_config::BusyThresholds;
+        use crate::plugins::worker_selection::WorkerCapacity;
+        use crate::sequences::WorkerLoadProjection;
+
+        let constraints = RoutingConstraints::default();
+        let config = TestWorkerConfig {
+            dp_size: 2,
+            ..Default::default()
+        };
+        let workers = HashMap::from([(7u64, config.clone())]);
+        let past_limit = WorkerLoadProjection {
+            active_prefill_tokens: 11,
+            ..Default::default()
+        };
+        let count_full = |ranks: &[WorkerWithDpRank]| {
+            let mut counts = FullRankCounts::default();
+            counts.reset(BusyThresholds {
+                prefill_busy_threshold: Some(10),
+                ..Default::default()
+            });
+            for &rank in ranks {
+                counts.record(rank, WorkerCapacity::default(), &past_limit);
+            }
+            counts
+        };
+        let empty = count_full(&[]);
+        let partial = count_full(&[WorkerWithDpRank::new(7, 0)]);
+        let full = count_full(&[WorkerWithDpRank::new(7, 0), WorkerWithDpRank::new(7, 1)]);
+
+        let eligibility = RoutingEligibility::new(None, None, None, &constraints);
+        assert!(
+            eligibility
+                .with_full_worker_ranks(&empty)
+                .allows_worker(7, &config)
+        );
+        assert!(
+            eligibility
+                .with_full_worker_ranks(&partial)
+                .allows_worker(7, &config)
+        );
+        assert!(
+            !eligibility
+                .with_full_worker_ranks(&full)
+                .allows_worker(7, &config)
+        );
+        assert_eq!(
+            eligibility
+                .with_full_worker_ranks(&full)
+                .validate_worker_rank(&workers, WorkerWithDpRank::new(7, 1))
+                .err(),
+            Some(WorkerEligibilityError::WorkerOverloaded { worker_id: 7 })
         );
     }
 

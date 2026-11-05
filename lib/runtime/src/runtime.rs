@@ -38,6 +38,7 @@ const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 15 * 60;
 const TEARDOWN_TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 type ShutdownCompletion = Option<Result<(), String>>;
+type TeardownTask = JoinHandle<anyhow::Result<()>>;
 
 pub(crate) fn graceful_shutdown_timeout() -> Duration {
     let timeout_secs = std::env::var(
@@ -50,9 +51,26 @@ pub(crate) fn graceful_shutdown_timeout() -> Duration {
     Duration::from_secs(timeout_secs)
 }
 
+/// How long the Velo response service stays open after the main token is
+/// cancelled: the HTTP service's drain, `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`
+/// (default 5, read by dynamo-llm). Requests it admits may still be queued or
+/// tokenizing, and register their responses later.
+fn velo_response_drain_window() -> Duration {
+    let timeout_secs =
+        std::env::var(config::environment_names::llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(5);
+
+    Duration::from_secs(timeout_secs)
+}
+
+/// How long Velo responses still open after that window get to finish.
+const VELO_RESPONSE_DRAIN_HEADROOM: Duration = Duration::from_secs(10);
+
 /// Types of Tokio runtimes that can be used to construct a Dynamo [Runtime].
 #[derive(Clone, Debug)]
-enum RuntimeType {
+pub(crate) enum RuntimeType {
     Shared(Arc<ManuallyDrop<tokio::runtime::Runtime>>),
     External(tokio::runtime::Handle),
 }
@@ -76,16 +94,18 @@ pub struct Runtime {
     /// on cancellation. Phase 3 only cancels; without joining these the process
     /// could exit with the lease still held, which is the stale-registration
     /// symptom this teardown exists to remove.
-    teardown_tasks: Arc<std::sync::Mutex<Option<Vec<JoinHandle<()>>>>>,
+    teardown_tasks: Arc<std::sync::Mutex<Option<Vec<TeardownTask>>>>,
     shutdown_completion: Arc<std::sync::OnceLock<tokio::sync::watch::Receiver<ShutdownCompletion>>>,
+    velo_response_service: Arc<crate::pipeline::network::velo_response::RuntimeService>,
     compute_pool: Option<Arc<compute::ComputePool>>,
     block_in_place_permits: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl Runtime {
     fn new(runtime: RuntimeType, secondary: Option<RuntimeType>) -> anyhow::Result<Runtime> {
-        // Initialise NVTX toggle once from environment (no-op when feature is off)
-        crate::nvtx::init();
+        // Initialise NVTX toggle once from environment (no-op when feature is off).
+        // A malformed DYN_NVTX fails startup rather than silently profiling nothing.
+        crate::nvtx::init()?;
 
         // worker id
         let id = Arc::new(uuid::Uuid::new_v4().to_string());
@@ -113,6 +133,8 @@ impl Runtime {
         let compute_pool = None;
         let block_in_place_permits = None;
 
+        let velo_response_service =
+            Arc::new(crate::pipeline::network::velo_response::RuntimeService::new(runtime.clone()));
         Ok(Runtime {
             id,
             primary: runtime,
@@ -125,6 +147,7 @@ impl Runtime {
             drain_deadline: tokio::sync::watch::channel(None).0,
             teardown_tasks: Arc::new(std::sync::Mutex::new(Some(Vec::new()))),
             shutdown_completion: Arc::new(std::sync::OnceLock::new()),
+            velo_response_service,
             compute_pool,
             block_in_place_permits,
         })
@@ -348,9 +371,12 @@ impl Runtime {
         self.endpoint_shutdown_token.child_token()
     }
 
-    /// Enroll cleanup before acquiring a resource. Dropping the returned guard
-    /// completes enrollment; Phase 3 closes enrollment and awaits existing guards.
-    pub(crate) fn teardown_guard(&self) -> anyhow::Result<tokio::sync::oneshot::Sender<()>> {
+    /// Enroll cleanup before acquiring a resource. Send its result when finished;
+    /// dropping the sender without a result reports incomplete cleanup.
+    /// Phase 3 closes enrollment and awaits existing guards.
+    pub(crate) fn teardown_guard(
+        &self,
+    ) -> anyhow::Result<tokio::sync::oneshot::Sender<anyhow::Result<()>>> {
         let mut tasks = self
             .teardown_tasks
             .lock()
@@ -360,7 +386,9 @@ impl Runtime {
             .ok_or_else(|| anyhow::anyhow!("runtime teardown has started"))?;
         let (guard, completed) = tokio::sync::oneshot::channel();
         tasks.push(tokio::spawn(async move {
-            let _ = completed.await;
+            completed.await.map_err(|_| {
+                anyhow::anyhow!("Runtime teardown task exited without reporting cleanup completion")
+            })?
         }));
         Ok(guard)
     }
@@ -376,6 +404,12 @@ impl Runtime {
 
     pub(crate) fn graceful_shutdown_tracker(&self) -> Arc<GracefulShutdownTracker> {
         self.graceful_shutdown_tracker.clone()
+    }
+
+    pub(crate) fn velo_response_service(
+        &self,
+    ) -> Arc<crate::pipeline::network::velo_response::RuntimeService> {
+        self.velo_response_service.clone()
     }
 
     /// Get access to the compute pool for CPU-intensive operations
@@ -518,6 +552,7 @@ impl Runtime {
         let endpoint_token = self.endpoint_shutdown_token.clone();
         let drain_deadline = self.drain_deadline.clone();
         let teardown_tasks = self.teardown_tasks.clone();
+        let velo_response_service = self.velo_response_service.clone();
 
         async move {
             let mut deadlines = drain_deadline.subscribe();
@@ -553,6 +588,7 @@ impl Runtime {
 
             // Phase 3: Now connections will be disconnected to backend services (e.g. NATS/ETCD) by cancelling the main token
             tracing::info!("Phase 3: Connections to backend services will now be disconnected");
+            velo_response_service.close();
             main_token.cancel();
 
             // Phase 3 only *signals* teardown. Join the tasks whose cleanup is
@@ -565,33 +601,46 @@ impl Runtime {
             // keep-alive task itself. That call only spawns this sequence, so
             // the task does finish — but a future caller who awaited from such
             // a task would otherwise hang here forever.
-            let pending: Vec<JoinHandle<()>> = teardown_tasks
+            let pending: Vec<TeardownTask> = teardown_tasks
                 .lock()
                 .ok()
                 .and_then(|mut tasks| tasks.take())
                 .unwrap_or_default();
-            if !pending.is_empty() {
-                tracing::debug!(count = pending.len(), "Joining teardown tasks");
-                let joined = futures::future::join_all(pending);
-                let results = tokio::time::timeout(TEARDOWN_TASK_JOIN_TIMEOUT, joined)
+            let join_teardown = async {
+                if !pending.is_empty() {
+                    tracing::debug!(count = pending.len(), "Joining teardown tasks");
+                    let joined = futures::future::join_all(pending);
+                    let results = tokio::time::timeout(TEARDOWN_TASK_JOIN_TIMEOUT, joined)
                     .await
                     .map_err(|_| {
                         anyhow::anyhow!(
                             "Timed out joining runtime teardown tasks; cleanup remains incomplete"
                         )
                     })?;
-                for result in results {
-                    result?;
+                    for result in results {
+                        result??;
+                    }
                 }
-            }
-            Ok(())
+                Ok::<(), anyhow::Error>(())
+            };
+            // HTTP draining starts with the main token. Preserve its response
+            // service until streams finish, alongside discovery cleanup, even
+            // when joining another teardown task fails.
+            let close_responses = async {
+                velo_response_service
+                    .drain(velo_response_drain_window(), VELO_RESPONSE_DRAIN_HEADROOM)
+                    .await;
+                velo_response_service.shutdown().await;
+            };
+            let (result, ()) = tokio::join!(join_teardown, close_responses);
+            result
         }
     }
 }
 
 impl RuntimeType {
     /// Get [`tokio::runtime::Handle`] to runtime
-    pub fn handle(&self) -> tokio::runtime::Handle {
+    pub(crate) fn handle(&self) -> tokio::runtime::Handle {
         match self {
             RuntimeType::External(rt) => rt.clone(),
             RuntimeType::Shared(rt) => rt.handle().clone(),
@@ -743,11 +792,11 @@ mod tests {
         let flag = revoked.clone();
         let guard = runtime.teardown_guard().unwrap();
         tokio::spawn(async move {
-            let _guard = guard;
             token.cancelled().await;
             revoking.send(()).unwrap();
             released.await.unwrap();
             flag.store(true, Ordering::SeqCst);
+            guard.send(Ok(())).unwrap();
         });
 
         runtime.shutdown();
@@ -775,12 +824,33 @@ mod tests {
         );
     }
 
-    /// The bound must be applied *inside* Phase 2, not wrapped around the
-    /// call. `tokio::time::timeout` cancels by dropping the future, so a
-    /// wrapping timeout would skip Phase 3 and leave the transports up —
-    /// reintroducing the bug this method exists to fix.
+    /// Cleanup failures, missing completion, and timeouts remain visible to
+    /// every shutdown waiter, including callers arriving after teardown ends.
     #[tokio::test(start_paused = true)]
     async fn shutdown_reports_incomplete_teardown_to_every_waiter() {
+        // Explicit cleanup failure and sender loss (including a panicking
+        // cleanup task) must never be cached as successful shutdown.
+        for explicit_failure in [false, true] {
+            let runtime = Runtime::from_current().unwrap();
+            let guard = runtime.teardown_guard().unwrap();
+            let expected = if explicit_failure {
+                guard
+                    .send(Err(anyhow::anyhow!("lease revoke failed")))
+                    .unwrap();
+                "lease revoke failed"
+            } else {
+                drop(guard);
+                "without reporting cleanup completion"
+            };
+            let first = runtime
+                .shutdown_and_wait(Some(Duration::ZERO))
+                .await
+                .unwrap_err();
+            assert!(first.to_string().contains(expected));
+            let subsequent = runtime.shutdown_and_wait(None).await.unwrap_err();
+            assert_eq!(first.to_string(), subsequent.to_string());
+        }
+
         let runtime = Runtime::from_current().unwrap();
         let guard = runtime.teardown_guard().unwrap();
         let first = runtime

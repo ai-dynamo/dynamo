@@ -74,8 +74,8 @@ func TestEnsureServerSidecarDoesNotAddCheckpointControl(t *testing.T) {
 func TestEnsureClientOverridesOperatorOwnedSocketFields(t *testing.T) {
 	podSpec := &corev1.PodSpec{
 		Volumes: []corev1.Volume{{
-			Name:         SharedVolumeName,
-			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/wrong"}},
+			Name:     SharedVolumeName,
+			HostPath: &corev1.HostPathVolumeSource{Path: "/wrong"},
 		}},
 		Containers: []corev1.Container{{
 			Name: "main",

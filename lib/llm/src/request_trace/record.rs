@@ -13,9 +13,11 @@ use crate::request_trace::RequestTracePayload;
 use super::RequestTraceEventType;
 use super::RequestTraceMetrics;
 use super::RequestTraceRecord;
+use super::RequestTraceRouterSelection;
 use super::RequestTraceSchema;
 use super::RequestTraceWorkerInfo;
 use super::publish;
+use dynamo_kv_router::protocols::SelectionTrace;
 
 fn unix_time_ms() -> u64 {
     SystemTime::now()
@@ -100,6 +102,7 @@ pub(crate) fn emit_request_end(
         agent_context: None,
         request: Some(request),
         tool: None,
+        selection: None,
         payload: None,
     });
 }
@@ -117,6 +120,7 @@ pub(crate) fn emit_agent_request_end(
         agent_context: Some(agent_context),
         request: Some(request),
         tool: None,
+        selection: None,
         payload: None,
     });
 }
@@ -130,7 +134,45 @@ pub(crate) fn emit_request_payload(payload: RequestTracePayload, event_time_unix
         agent_context: None,
         request: None,
         tool: None,
+        selection: None,
         payload: Some(payload),
+    });
+}
+
+/// Publish one `router_selection` row. Runs on the routing task, never on the
+/// scheduler actor; building the candidate list is O(retained rows).
+pub(crate) fn emit_router_selection(
+    request_id: &str,
+    worker_type: &'static str,
+    trace: SelectionTrace,
+) {
+    let SelectionTrace {
+        candidate_count,
+        pinned,
+        mut rows,
+    } = trace;
+    // Sort on the routing task; the scheduler actor hands the rows over unordered.
+    rows.sort_unstable_by(|a, b| a.cost.total_cmp(&b.cost));
+    let candidates = rows
+        .into_iter()
+        .map(|row| (row.worker.worker_id, row.worker.dp_rank, row.cost))
+        .collect();
+    publish(RequestTraceRecord {
+        schema: RequestTraceSchema::V1,
+        event_type: RequestTraceEventType::RouterSelection,
+        event_time_unix_ms: unix_time_ms(),
+        event_source: Some(RequestTraceEventSource::Dynamo),
+        agent_context: None,
+        request: None,
+        tool: None,
+        payload: None,
+        selection: Some(RequestTraceRouterSelection {
+            request_id: request_id.to_string(),
+            worker_type: worker_type.to_string(),
+            pinned,
+            candidate_count: candidate_count as u64,
+            candidates,
+        }),
     });
 }
 
@@ -272,6 +314,7 @@ mod tests {
                 error_type: None,
             }),
             payload: None,
+            selection: None,
         };
 
         let err = validate_tool_record(&record).expect_err("NaN duration should fail validation");

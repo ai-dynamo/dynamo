@@ -23,6 +23,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	grovev1beta1 "github.com/ai-dynamo/grove/operator/api/core/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -145,7 +146,10 @@ func (s *groveWatchSetup) resolveOwningPodCliqueSet(
 	podClique *grovev1alpha1.PodClique,
 ) (*grovev1alpha1.PodCliqueSet, bool) {
 	controllerRef := metav1.GetControllerOf(podClique)
-	if controllerRef == nil || controllerRef.APIVersion != grovev1alpha1.SchemeGroupVersion.String() {
+	// Conversion to our alpha client types preserves beta controller owner references.
+	if controllerRef == nil ||
+		(controllerRef.APIVersion != grovev1alpha1.SchemeGroupVersion.String() &&
+			controllerRef.APIVersion != grovev1beta1.SchemeGroupVersion.String()) {
 		return nil, false
 	}
 
@@ -171,8 +175,10 @@ func (s *groveWatchSetup) resolvePodCliqueSetOwner(
 	pcsg *grovev1alpha1.PodCliqueScalingGroup,
 ) (*grovev1alpha1.PodCliqueSet, bool) {
 	controllerRef := metav1.GetControllerOf(pcsg)
+	// Both served Grove versions identify the same owner hierarchy.
 	if controllerRef == nil ||
-		controllerRef.APIVersion != grovev1alpha1.SchemeGroupVersion.String() ||
+		(controllerRef.APIVersion != grovev1alpha1.SchemeGroupVersion.String() &&
+			controllerRef.APIVersion != grovev1beta1.SchemeGroupVersion.String()) ||
 		controllerRef.Kind != "PodCliqueSet" {
 		return nil, false
 	}
@@ -212,9 +218,7 @@ func mapPodCliqueSetToDGDRequest(pcs *grovev1alpha1.PodCliqueSet) []ctrl.Request
 	}
 
 	return []ctrl.Request{{
-		NamespacedName: types.NamespacedName{
-			Name:      pcsOwnerRef.Name,
-			Namespace: pcs.Namespace,
-		},
+		Name:      pcsOwnerRef.Name,
+		Namespace: pcs.Namespace,
 	}}
 }

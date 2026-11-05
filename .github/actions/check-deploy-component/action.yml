@@ -40,7 +40,7 @@ runs:
       if: ${{ inputs.component == 'operator' }}
       uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
       with:
-        go-version: '1.26.8'
+        go-version-file: deploy/operator/go.mod
 
     - name: Set up Python
       if: ${{ inputs.component == 'operator' }}
@@ -55,11 +55,13 @@ runs:
       run: |
         python -m pip install --upgrade pip
         python -m pip install \
-          "pydantic>=2,<3" \
+          "pydantic==2.13.5" \
           "black==23.1.0" \
           "pyyaml>=6.0" \
           "pytest==9.0.3" \
           "pytest-timeout==2.4.0"
+        # Schema extraction only imports the lightweight core models, not the simulator.
+        python -m pip install --no-deps -r ../../container/deps/requirements.aisimulate.txt
 
     - name: Check operator generated files
       if: ${{ inputs.component == 'operator' }}

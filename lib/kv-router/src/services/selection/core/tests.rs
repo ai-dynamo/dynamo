@@ -3,7 +3,7 @@
 
 use super::super::affinity::SessionAffinityMode;
 use super::super::input::PromptRequest;
-use super::hint::transfer_hint_for_selection;
+use super::hint::transfer_hint_payload;
 use super::reservations::{
     Reservation, ReservationClaim, ReservationIndexObserver, sweep_reservation_index,
 };
@@ -41,7 +41,10 @@ fn local_core_with(
         cancel_token,
         SelectionCacheConfig::default(),
         std::sync::Arc::new(|config, role, _| {
-            crate::WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
+            crate::plugins::worker_selection::WorkerSelectionPolicy::reference(
+                config.clone(),
+                role.default_selector_label(),
+            )
         }),
     )
     .expect("valid test config")
@@ -66,7 +69,7 @@ fn core_with(
         None,
         policy_factory.unwrap_or_else(|| {
             Arc::new(|config, role, _| {
-                crate::WorkerSelectionPolicy::reference(
+                crate::plugins::worker_selection::WorkerSelectionPolicy::reference(
                     config.clone(),
                     role.default_selector_label(),
                 )
@@ -138,6 +141,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         router_hint_worker_type: None,
         router_hint_source_control_endpoints: HashMap::new(),
         kv_event_source_mode: None,
+        engine_owned_mm_identity: None,
     }
 }
 
@@ -467,17 +471,26 @@ async fn unreachable_remote_indexer_is_reported_not_ready() {
 async fn hint_fixture(
     configure: impl Fn(&mut WorkerRequest),
 ) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
+    hint_fixture_with(test_config(true), 8, configure).await
+}
+
+/// Like [`hint_fixture`], with a `prompt_tokens`-token prompt and `config`.
+async fn hint_fixture_with(
+    config: crate::config::KvRouterConfig,
+    prompt_tokens: u32,
+    configure: impl Fn(&mut WorkerRequest),
+) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
     use crate::indexer::KvIndexerInterface;
     use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 
-    let core = local_core(test_config(true));
+    let core = local_core(config);
     for worker_id in [1, 2] {
         let mut request = worker_with_kv_events(worker_id);
         configure(&mut request);
         core.upsert_worker(request).await.expect("worker upsert");
     }
     let entry = core.entry(&default_key()).expect("entry");
-    let tokens: Vec<u32> = (1..=8).collect();
+    let tokens: Vec<u32> = (1..=prompt_tokens).collect();
     let hashes: Vec<u64> = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default())
         .into_iter()
         .map(|hash| hash.0)
@@ -544,6 +557,45 @@ async fn booked_selection_attaches_router_hint_from_a_better_source() {
     assert!(response.kv_hint.is_none());
 }
 
+/// Worker 1 holds the whole prompt but is busy; idle worker 2 can fetch it.
+/// Crediting fetchable blocks moves the booking to worker 2, and its hint
+/// fetches from worker 1, the source the credit assumed.
+#[tokio::test]
+async fn fetchable_prefix_credit_books_an_idle_worker_with_its_hint() {
+    for (multiplier, expected_worker) in [(0.0, 1), (0.5, 2)] {
+        let config = crate::config::KvRouterConfig {
+            shared_cache_multiplier: Some(multiplier),
+            overlap_score_credit_decay: 0.0,
+            ..test_config(true)
+        };
+        let (core, _entry, tokens) = hint_fixture_with(config, 32, hint_capable).await;
+        // Busy worker 1 (12 prefill tokens, 3 decode blocks) costs 3 + 11 = 14.
+        // Worker 2 costs 8 + 8 = 16, less 0.5 * 8 fetchable blocks = 12.
+        reserve_pinned(&core, "load", &(100..112).collect::<Vec<_>>(), 1).await;
+        let mut request = reserve_request("prompt");
+        request.prompt = PromptRequest {
+            token_ids: Some(tokens),
+            ..PromptRequest::default()
+        };
+        let response = core.select_and_reserve(request).await.expect("reserve");
+
+        assert_eq!(
+            response.worker_id, expected_worker,
+            "multiplier={multiplier}"
+        );
+        let source = response.kv_hint.map(|hint| {
+            let payload: KvSourceLocationsPayload =
+                serde_json::from_value(serde_json::to_value(&hint.actions[0].payload).unwrap())
+                    .unwrap();
+            (payload.source_control_endpoint, payload.block_hashes.len())
+        });
+        let expected_source =
+            (expected_worker == 2).then(|| ("tcp://worker-1:9000".to_string(), 8));
+        assert_eq!(source, expected_source, "multiplier={multiplier}");
+        core.shutdown();
+    }
+}
+
 #[tokio::test]
 async fn state_agent_workers_are_not_router_hint_sources() {
     let (core, _entry, tokens) = hint_fixture(|request| {
@@ -556,6 +608,129 @@ async fn state_agent_workers_are_not_router_hint_sources() {
     // Worker 1 holds the prefix but reports through a state agent.
     let response = reserve_pinned(&core, "to-worker-2", &tokens, 2).await;
     assert!(response.kv_hint.is_none());
+}
+
+#[tokio::test]
+async fn fetch_continuation_books_one_source_from_each_actual_local_frontier() {
+    use crate::identity::{
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
+    };
+    use crate::protocols::{
+        BlockHashOptions, ExternalSequenceBlockHash, ResidencyProjection, ResidencyRoutingSnapshot,
+        RouterEvent, RouterHintSourceMetadata, compute_block_hash_for_seq,
+        compute_seq_hash_for_block,
+    };
+
+    let owner = |id| {
+        CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                ClusterId::new(3),
+            ),
+            StableDpSlotId::new([id; 16], IdentitySource::Explicit),
+        )
+    };
+    let tokens: Vec<_> = (0..80).collect();
+    let local = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
+    let hashes: Vec<_> = local.iter().map(|hash| hash.0).collect();
+    let sequence: Vec<_> = compute_seq_hash_for_block(&local)
+        .into_iter()
+        .map(ExternalSequenceBlockHash)
+        .collect();
+    let core = local_core(test_config(true));
+    for id in [1, 2, 3, 4, 5, 7] {
+        let mut worker = worker_with_kv_events(id);
+        worker.router_hint_worker_type = Some("decode".to_string());
+        core.upsert_worker(worker).await.unwrap();
+    }
+    let entry = core.entry(&default_key()).unwrap();
+    for (id, blocks, tier) in [
+        (1, 10, StorageTier::Device),
+        (2, 15, StorageTier::Device),
+        (3, 10, StorageTier::HostPinned),
+        (5, 20, StorageTier::Device),
+        (7, 5, StorageTier::Device),
+    ] {
+        entry
+            .indexer
+            .apply_event_routed(store_event(id, 0, 1, &[], &hashes[..blocks], tier))
+            .await
+            .unwrap();
+    }
+    entry
+        .indexer
+        .apply_event_routed(store_event(
+            7,
+            0,
+            2,
+            &hashes[..5],
+            &hashes[5..10],
+            StorageTier::HostPinned,
+        ))
+        .await
+        .unwrap();
+    let mut sources = Vec::new();
+    for (id, start, end) in [(11, 10, 15), (12, 15, 20), (13, 0, 5)] {
+        let event = store_event(
+            id,
+            0,
+            1,
+            &hashes[..start],
+            &hashes[start..end],
+            StorageTier::HostPinned,
+        );
+        entry
+            .indexer
+            .apply_event_routed(RouterEvent::with_cache_owner(
+                id,
+                event.event,
+                StorageTier::HostPinned,
+                owner(id as u8),
+            ))
+            .await
+            .unwrap();
+        sources.push((
+            owner(id as u8),
+            RouterHintSourceMetadata {
+                source_control_endpoint: format!("tcp://source-{id}:9000"),
+                worker_type: "decode".to_string(),
+                topology_domains: HashMap::new(),
+            },
+            None,
+        ));
+    }
+    entry
+        .indexer
+        .set_residency_routing_snapshot(ResidencyRoutingSnapshot::new(
+            ResidencyProjection::default(),
+            sources,
+        ));
+    entry.indexer.dump_events().await.unwrap();
+    for (target, source, end) in [
+        (1, 11, 15),
+        (2, 12, 20),
+        (3, 11, 15),
+        (4, 13, 5),
+        (7, 11, 15),
+    ] {
+        let response = reserve_pinned(&core, &format!("target-{target}"), &tokens, target).await;
+        let hint = response.kv_hint.unwrap();
+        let payload: KvSourceLocationsPayload =
+            serde_json::from_value(serde_json::to_value(&hint.actions[0].payload).unwrap())
+                .unwrap();
+        assert_eq!(
+            payload.source_control_endpoint,
+            format!("tcp://source-{source}:9000")
+        );
+        assert_eq!(payload.block_hashes, sequence[..end]);
+    }
+    let fully_cached = reserve_pinned(&core, "fully-cached", &tokens, 5).await;
+    assert!(fully_cached.kv_hint.is_none());
+    core.shutdown();
 }
 
 #[tokio::test]
@@ -594,7 +769,7 @@ async fn hint_capability_tracks_catalog_membership() {
         hint_capable(&mut request);
         request
     };
-    let flag = || super::hint::hint_capable_partition(&entry.workers_tx.borrow());
+    let flag = || entry.hint_capable_workers.load(Ordering::Relaxed);
 
     assert!(!flag());
     let response = reserve_pinned(&core, "before", &tokens, 2).await;
@@ -686,15 +861,15 @@ struct SelectionObservation {
     shared_beyond_device_blocks: Vec<u32>,
 }
 
-impl crate::scheduling::selector::WorkerPicker for CapturingPicker {
-    fn required_worker_inputs(&self) -> crate::scheduling::selector::WorkerInputs {
-        crate::scheduling::selector::WorkerInputs::CACHE
+impl crate::plugins::worker_selection::WorkerPicker for CapturingPicker {
+    fn required_worker_inputs(&self) -> crate::plugins::worker_selection::WorkerInputs {
+        crate::plugins::worker_selection::WorkerInputs::CACHE
     }
 
     fn pick(
-        &mut self,
-        context: &crate::scheduling::selector::WorkerSelectionContext<'_>,
-        input: crate::scheduling::selector::WorkerInputView<'_>,
+        &self,
+        context: &crate::plugins::worker_selection::WorkerSelectionContext<'_>,
+        input: crate::plugins::worker_selection::WorkerInputView<'_>,
     ) -> Result<usize, crate::scheduling::WorkerSelectionPolicyError> {
         self.observed.lock().push(SelectionObservation {
             session_context: context.session_context().cloned(),
@@ -1062,7 +1237,7 @@ async fn injected_load_providers_restrict_selection() {
     let core = core_with_host(SelectionHost {
         load: HostLoad {
             available_workers: Some(Arc::new(move |_| provider_state.lock().clone())),
-            overloaded_workers: Some(Arc::new(|| Some(HashSet::from([1])))),
+            overloaded_workers: Some(Arc::new(|| Some(Arc::new(HashSet::from([1]))))),
             ..HostLoad::default()
         },
         ..SelectionHost::default()
@@ -1104,6 +1279,59 @@ async fn shutdown_cancels_listeners_but_keeps_parent_alive() {
     assert!(core.cancel_token.is_cancelled());
     assert!(!parent.is_cancelled());
     assert_eq!(core.indexer_registry.listener_cancelled(1, 0), Some(true));
+}
+
+#[tokio::test]
+async fn upsert_carries_engine_owned_mm_identity_to_the_listener() {
+    let core = local_core_with(test_config(true), 1, CancellationToken::new());
+    core.upsert_worker(WorkerRequest {
+        engine_owned_mm_identity: Some(true),
+        ..worker_with_kv_events(1)
+    })
+    .await
+    .expect("worker upsert");
+
+    let listed = serde_json::to_value(core.indexer_registry.list()).unwrap();
+    assert_eq!(
+        listed[0]["listeners"]["0"]["engine_owned_mm_identity"],
+        true
+    );
+    core.shutdown();
+}
+
+#[tokio::test]
+async fn equivalent_mm_identity_defaults_preserve_cached_overlap() {
+    let core = local_core_with(test_config(true), 1, CancellationToken::new());
+    core.upsert_worker(worker_with_kv_events(1)).await.unwrap();
+    let indexer = core
+        .indexer_registry
+        .get_indexer(&default_key())
+        .unwrap()
+        .indexer
+        .clone();
+    indexer
+        .apply_event_routed(store_event(1, 0, 1, &[], &[11], StorageTier::Device))
+        .await
+        .unwrap();
+    indexer.dump_events().await.expect("flush indexer");
+    for (capability, expected_overlap) in [(Some(false), 4), (None, 4), (Some(true), 0)] {
+        core.upsert_worker(WorkerRequest {
+            engine_owned_mm_identity: capability,
+            ..worker_with_kv_events(1)
+        })
+        .await
+        .unwrap();
+        let mut request = select_request();
+        request.prompt.token_ids = None;
+        request.prompt.block_hashes = Some(vec![11]);
+        request.prompt.sequence_hashes = Some(vec![101]);
+        request.prompt.isl_tokens = Some(4);
+        assert_eq!(
+            core.select(request).await.unwrap().overlap.gpu,
+            expected_overlap
+        );
+    }
+    core.shutdown();
 }
 
 #[rstest::rstest]
@@ -2599,6 +2827,8 @@ async fn queued_selection_returns_refreshed_overlap_snapshot() {
     // Freeze time only after async setup so background timers cannot expire the fixture.
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(11)).await;
+    // Let the real-thread indexer respond without paused-time auto-advance.
+    tokio::time::resume();
     core.free_reservation("occupy-2")
         .await
         .expect("release worker 2");
@@ -3126,6 +3356,42 @@ async fn soft_mode_follows_the_dispatch() {
 }
 
 #[tokio::test]
+async fn soft_mode_follows_custom_policy() {
+    // Bind to an eligible worker different from the custom policy's choice.
+    let (policy, _) = capturing_policy_factory();
+    let core = core_with(
+        test_config(false),
+        SelectionHost::default(),
+        Some(policy),
+        WorkerType::Aggregated,
+        Some(
+            SessionAffinityConfig::new(Duration::from_secs(10))
+                .with_mode(SessionAffinityMode::Soft),
+        ),
+    );
+    for id in [1, 2] {
+        core.upsert_worker(worker(id)).await.unwrap();
+    }
+    let preferred = core.select(select_request()).await.unwrap().worker_id;
+    let bound = if preferred == 1 { 2 } else { 1 };
+    core.dispatch_affinity_event(AffinityBindingEvent {
+        partition: default_key(),
+        session_id: "s".to_string(),
+        worker_id: bound,
+        dp_rank: Some(0),
+        sequence: 1,
+        writer_id: 99,
+    });
+    assert_eq!(bound_worker(&core, "s"), Some(bound));
+    let next = core
+        .select_and_reserve(session_reservation("next-turn", "s"))
+        .await
+        .unwrap();
+    assert_eq!(next.worker_id, preferred);
+    assert_eq!(bound_worker(&core, "s"), Some(preferred));
+}
+
+#[tokio::test]
 async fn replicated_binding_steers_a_new_session_and_frees_with_the_booking() {
     let core = core_with_session_affinity();
     core.upsert_worker(worker(1)).await.expect("worker upsert");
@@ -3431,6 +3697,26 @@ async fn affinity_configuration_rejects_invalid_or_conflicting_config() {
     ));
 }
 
+/// The hint a booking on `target` gets: selection's source choice, then the
+/// post-pick payload.
+fn transfer_hint_for_selection(
+    configs: &HashMap<WorkerId, SelectionWorkerConfig>,
+    target: WorkerWithDpRank,
+    target_cached_prefix_blocks: u32,
+    candidates: Option<&KvTransferCandidates>,
+) -> Option<KvSourceLocationsPayload> {
+    let candidates = candidates?;
+    let local = target_cached_prefix_blocks as usize;
+    let target_keys = configs
+        .get(&target.worker_id)?
+        .kv_transfer_keys()
+        .target()?;
+    let scope = crate::kv_hints::KvTransferScope::of([(target_keys, local)]);
+    let source = crate::kv_hints::KvTransferSourceSummary::new(candidates, configs, scope)
+        .source_for(target, target_keys, local)?;
+    transfer_hint_payload(configs, source, candidates)
+}
+
 fn hint_config(worker_type: &str, endpoints: &[(u32, &str)]) -> SelectionWorkerConfig {
     SelectionWorkerConfig {
         endpoint: "http://worker:8000".to_string(),
@@ -3451,6 +3737,7 @@ fn hint_config(worker_type: &str, endpoints: &[(u32, &str)]) -> SelectionWorkerC
             .map(|(rank, endpoint)| (*rank, endpoint.to_string()))
             .collect(),
         kv_event_source_mode: None,
+        kv_transfer_keys: Default::default(),
     }
 }
 
@@ -3464,6 +3751,7 @@ fn hint_candidates(
             .map(|h| crate::protocols::ExternalSequenceBlockHash(*h))
             .collect(),
         owner_prefix_blocks: owners,
+        source_intervals: Vec::new(),
         routing_snapshot: None,
     }
 }
@@ -3517,7 +3805,7 @@ fn hint_source_must_share_the_target_worker_type() {
 #[test]
 fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
     use crate::identity::{
-        CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
     use crate::protocols::{
@@ -3532,7 +3820,7 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
                 CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                 RoutingScopeId::new([2; 16], IdentitySource::Explicit),
             ),
-            DcId::new(3),
+            ClusterId::new(3),
         ),
         StableDpSlotId::new([4; 16], IdentitySource::Explicit),
     );
@@ -3558,6 +3846,7 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
             RouterHintSourceMetadata {
                 source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
                 worker_type: "prefill".to_string(),
+                topology_domains: Default::default(),
             },
             None,
         )],
@@ -3566,6 +3855,249 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
         transfer_hint_for_selection(&configs, WorkerWithDpRank::new(7, 0), 0, Some(&candidates))
             .expect("hint");
     assert_eq!(hint.source_control_endpoint, "tcp://persistent-owner:23280");
+}
+
+#[test]
+fn hint_is_dropped_when_the_selected_source_left() {
+    let source = crate::kv_hints::KvTransferSourceChoice {
+        source: WorkerWithDpRank::new(8, 0).into(),
+        prefix_blocks: 2,
+    };
+    let candidates = hint_candidates(&[101, 102, 103], vec![(source.source, 2)]);
+    let mut configs = HashMap::from([(7, hint_config("prefill", &[]))]);
+    assert_eq!(transfer_hint_payload(&configs, source, &candidates), None);
+
+    configs.insert(8, hint_config("prefill", &[(0, "tcp://source:23280")]));
+    let payload = transfer_hint_payload(&configs, source, &candidates).expect("hint");
+    assert_eq!(payload.source_control_endpoint, "tcp://source:23280");
+    assert_eq!(payload.block_hashes.len(), 2);
+}
+
+const ISLAND_DOMAIN: &str = "rdma-island";
+
+fn island_config(endpoint: &str, island: &str) -> SelectionWorkerConfig {
+    let mut config = hint_config("prefill", &[(0, endpoint)]);
+    config.topology_domains = HashMap::from([(ISLAND_DOMAIN.to_string(), island.to_string())]);
+    config.kv_transfer_domain = Some(ISLAND_DOMAIN.to_string());
+    config.kv_transfer_enforcement = Some(crate::protocols::KvTransferEnforcement::Required);
+    config
+}
+
+fn hint_endpoint(
+    configs: &HashMap<WorkerId, SelectionWorkerConfig>,
+    candidates: &KvTransferCandidates,
+) -> Option<String> {
+    transfer_hint_for_selection(configs, WorkerWithDpRank::new(7, 0), 0, Some(candidates))
+        .map(|hint| hint.source_control_endpoint)
+}
+
+#[test]
+fn hint_source_must_share_the_target_island() {
+    let mut configs = HashMap::from([
+        (7, island_config("tcp://target:23280", "a")),
+        (8, island_config("tcp://same-island:23280", "a")),
+        (9, island_config("tcp://other-island:23280", "b")),
+        (10, hint_config("prefill", &[(0, "tcp://unlabeled:23280")])),
+    ]);
+    let cross_island: Vec<(KvTransferCandidateSource, usize)> = vec![
+        (WorkerWithDpRank::new(9, 0).into(), 3),
+        (WorkerWithDpRank::new(10, 0).into(), 3),
+    ];
+    let mut all = cross_island.clone();
+    all.push((WorkerWithDpRank::new(8, 0).into(), 2));
+    let all = hint_candidates(&[101, 102, 103], all);
+    let cross_island = hint_candidates(&[101, 102, 103], cross_island);
+
+    // Longer prefixes in another island, or in none, are skipped.
+    assert_eq!(
+        hint_endpoint(&configs, &all).as_deref(),
+        Some("tcp://same-island:23280")
+    );
+    // Without a same-island source there is no hint, and the target recomputes.
+    assert_eq!(hint_endpoint(&configs, &cross_island), None);
+    // A target without a transfer domain is not filtered. Published configs
+    // are replaced, never edited, so their derived keys stay current.
+    let mut target = island_config("tcp://target:23280", "a");
+    target.kv_transfer_domain = None;
+    configs.insert(7, target);
+    assert_eq!(
+        hint_endpoint(&configs, &cross_island).as_deref(),
+        Some("tcp://other-island:23280")
+    );
+}
+
+#[test]
+fn preferred_island_falls_back_to_a_cross_island_source() {
+    let mut target = island_config("tcp://target:23280", "a");
+    target.kv_transfer_enforcement = Some(crate::protocols::KvTransferEnforcement::Preferred);
+    let configs = HashMap::from([
+        (7, target),
+        (8, island_config("tcp://same-island:23280", "a")),
+        (9, island_config("tcp://other-island:23280", "b")),
+    ]);
+    let both = hint_candidates(
+        &[101, 102, 103],
+        vec![
+            (WorkerWithDpRank::new(8, 0).into(), 2),
+            (WorkerWithDpRank::new(9, 0).into(), 3),
+        ],
+    );
+    let cross_island = hint_candidates(
+        &[101, 102, 103],
+        vec![(WorkerWithDpRank::new(9, 0).into(), 3)],
+    );
+
+    assert_eq!(
+        hint_endpoint(&configs, &both).as_deref(),
+        Some("tcp://same-island:23280")
+    );
+    assert_eq!(
+        hint_endpoint(&configs, &cross_island).as_deref(),
+        Some("tcp://other-island:23280")
+    );
+}
+
+#[test]
+fn continuation_island_preference_uses_only_sources_reachable_from_local_depth() {
+    use crate::kv_hints::KvTransferSourceInterval;
+
+    let mut candidates = hint_candidates(&[101, 102, 103, 104], Vec::new());
+    candidates.source_intervals = vec![
+        KvTransferSourceInterval {
+            source: WorkerWithDpRank::new(8, 0).into(),
+            start: 2,
+            end: 4,
+        },
+        KvTransferSourceInterval {
+            source: WorkerWithDpRank::new(9, 0).into(),
+            start: 1,
+            end: 3,
+        },
+    ];
+    for preferred in [false, true] {
+        let mut target = island_config("tcp://target:23280", "a");
+        if preferred {
+            target.kv_transfer_enforcement =
+                Some(crate::protocols::KvTransferEnforcement::Preferred);
+        }
+        let configs = HashMap::from([
+            (7, target),
+            (8, island_config("tcp://same:23280", "a")),
+            (9, island_config("tcp://cross:23280", "b")),
+        ]);
+        let hint = |local| {
+            transfer_hint_for_selection(
+                &configs,
+                WorkerWithDpRank::new(7, 0),
+                local,
+                Some(&candidates),
+            )
+            .map(|hint| (hint.source_control_endpoint, hint.block_hashes.len()))
+        };
+        assert_eq!(hint(0), None);
+        assert_eq!(
+            hint(1),
+            preferred.then(|| ("tcp://cross:23280".to_string(), 3))
+        );
+        assert_eq!(hint(2), Some(("tcp://same:23280".to_string(), 4)));
+    }
+}
+
+#[test]
+fn cache_owner_island_is_published_or_taken_from_its_attached_worker() {
+    use crate::identity::{
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
+    };
+    use crate::protocols::{
+        ResidencyOwner, ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+    };
+    let owner = |slot: u8| {
+        CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                ClusterId::new(3),
+            ),
+            StableDpSlotId::new([slot; 16], IdentitySource::Explicit),
+        )
+    };
+    let source = |owner| {
+        KvTransferCandidateSource::CacheOwner(ResidencyOwner::cache_owner(owner).compact_key())
+    };
+    let metadata = |endpoint: &str, island: Option<&str>| RouterHintSourceMetadata {
+        source_control_endpoint: endpoint.to_string(),
+        worker_type: "prefill".to_string(),
+        topology_domains: island
+            .map(|island| (ISLAND_DOMAIN.to_string(), island.to_string()))
+            .into_iter()
+            .collect(),
+    };
+    let configs = HashMap::from([
+        (7, island_config("tcp://target:23280", "a")),
+        (8, island_config("tcp://attached-worker:23280", "a")),
+    ]);
+    let (other_island, unlabeled, published, inherited, partial) =
+        (owner(4), owner(5), owner(6), owner(7), owner(8));
+    let mut partial_metadata = metadata("tcp://partial:23280", None);
+    partial_metadata
+        .topology_domains
+        .insert("zone".to_string(), "z1".to_string());
+    let snapshot = Arc::new(ResidencyRoutingSnapshot::new(
+        ResidencyProjection::default(),
+        [
+            (
+                other_island,
+                metadata("tcp://other-island:23280", Some("b")),
+                None,
+            ),
+            (unlabeled, metadata("tcp://unlabeled:23280", None), None),
+            (
+                published,
+                metadata("tcp://published:23280", Some("a")),
+                None,
+            ),
+            (
+                inherited,
+                metadata("tcp://inherited:23280", None),
+                Some(WorkerWithDpRank::new(8, 0)),
+            ),
+            (partial, partial_metadata, Some(WorkerWithDpRank::new(8, 0))),
+        ],
+    ));
+    let hint = |owners: &[(CacheOwnerId, usize)]| {
+        let mut candidates = hint_candidates(
+            &[101, 102, 103, 104],
+            owners
+                .iter()
+                .map(|(owner, blocks)| (source(*owner), *blocks))
+                .collect(),
+        );
+        candidates.routing_snapshot = Some(snapshot.clone());
+        hint_endpoint(&configs, &candidates)
+    };
+
+    // Owners in another island, or in none, are skipped despite longer prefixes.
+    // An owner that publishes topology without the domain is in none, even
+    // when attached to a same-island worker.
+    assert_eq!(
+        hint(&[
+            (other_island, 4),
+            (unlabeled, 4),
+            (partial, 4),
+            (published, 2),
+            (inherited, 3)
+        ])
+        .as_deref(),
+        Some("tcp://inherited:23280")
+    );
+    assert_eq!(
+        hint(&[(other_island, 4), (unlabeled, 4), (published, 2)]).as_deref(),
+        Some("tcp://published:23280")
+    );
+    assert_eq!(hint(&[(other_island, 4), (unlabeled, 4)]), None);
 }
 
 #[tokio::test]
@@ -3736,4 +4268,104 @@ async fn overflowing_worker_dp_range_patch_preserves_live_worker() {
     })
     .await
     .expect("invalid worker patch deadline");
+}
+
+fn core_with_binding_stream(
+    writer_id: u64,
+) -> (SelectionCore, mpsc::Receiver<AffinityBindingEvent>) {
+    core_with(
+        test_config(false),
+        SelectionHost::default(),
+        None,
+        WorkerType::Aggregated,
+        Some(
+            SessionAffinityConfig::new(Duration::from_secs(10))
+                .with_mode(SessionAffinityMode::Soft),
+        ),
+    )
+    .with_session_binding_publisher(writer_id)
+}
+
+#[tokio::test(start_paused = true)]
+async fn host_stream_publishes_bindings_and_refreshes() {
+    let (source, mut updates) = core_with_binding_stream(11);
+    let (peer, mut peer_updates) = core_with_binding_stream(22);
+    for core in [&source, &peer] {
+        core.upsert_worker(worker(1)).await.unwrap();
+    }
+    source
+        .select_and_reserve(session_reservation("turn", "s"))
+        .await
+        .unwrap();
+    let binding = updates.try_recv().expect("commit publishes synchronously");
+    assert_eq!(binding.partition, default_key());
+    assert_eq!(binding.writer_id, 11);
+    assert_eq!(binding.worker_id, 1);
+    peer.dispatch_affinity_event(binding.clone());
+    assert_eq!(bound_worker(&peer, "s"), Some(1));
+    assert!(peer_updates.try_recv().is_err(), "imports must not echo");
+    assert!(peer.reservation_index.read().is_empty());
+    assert_eq!(lease_count(&peer, "s"), Some(0));
+
+    // Shared frontend semantics: only the origin has an active lease. Release
+    // restores a peer that expired during a request longer than the idle TTL.
+    tokio::time::advance(Duration::from_secs(11)).await;
+    assert_eq!(bound_worker(&source, "s"), Some(1));
+    assert_eq!(bound_worker(&peer, "s"), None);
+    source.free_reservation("turn").await.unwrap();
+    let refresh = updates.try_recv().unwrap();
+    assert_eq!(refresh.version(), binding.version());
+    peer.dispatch_affinity_event(refresh);
+    tokio::time::advance(Duration::from_secs(9)).await;
+    assert_eq!(bound_worker(&source, "s"), Some(1));
+    assert_eq!(bound_worker(&peer, "s"), Some(1));
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(bound_worker(&source, "s"), None);
+    assert_eq!(bound_worker(&peer, "s"), None);
+    assert!(peer_updates.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn peer_bindings_converge_by_version() {
+    let (source, mut source_updates) = core_with_binding_stream(11);
+    let (peer, mut peer_updates) = core_with_binding_stream(22);
+    for core in [&source, &peer] {
+        for id in [1, 2, 3] {
+            core.upsert_worker(worker(id)).await.unwrap();
+        }
+    }
+    for (core, id) in [(&source, 1), (&peer, 2)] {
+        let mut request = session_reservation("first", "s");
+        request.allowed_worker_ids = Some(HashSet::from([id]));
+        core.select_and_reserve(request).await.unwrap();
+    }
+    let mut first = source_updates.try_recv().unwrap();
+    let mut concurrent = peer_updates.try_recv().unwrap();
+    let sequence = first.sequence.max(concurrent.sequence);
+    first.sequence = sequence;
+    concurrent.sequence = sequence;
+    for (core, events) in [
+        (&source, [&first, &concurrent]),
+        (&peer, [&concurrent, &first]),
+    ] {
+        for event in events {
+            core.dispatch_affinity_event(event.clone());
+        }
+        assert_eq!(
+            bound_worker(core, "s"),
+            Some(2),
+            "host writer id breaks sequence ties"
+        );
+    }
+    let mut request = session_reservation("rebind", "s");
+    request.allowed_worker_ids = Some(HashSet::from([3]));
+    source.select_and_reserve(request).await.unwrap();
+    let newer = source_updates.try_recv().unwrap();
+    assert!(newer.version() > concurrent.version());
+    peer.dispatch_affinity_event(newer);
+    peer.free_reservation("first").await.unwrap();
+    assert_eq!(bound_worker(&peer, "s"), Some(3));
+    // A stale version cannot displace the newer binding.
+    peer.dispatch_affinity_event(first);
+    assert_eq!(bound_worker(&peer, "s"), Some(3));
 }

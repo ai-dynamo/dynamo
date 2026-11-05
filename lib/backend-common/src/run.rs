@@ -61,7 +61,9 @@ fn run_worker(
     let secondary = runtime.secondary();
 
     secondary.block_on(async move {
-        let worker = build(config);
-        worker.run(runtime).await.map_err(anyhow::Error::from)
+        build(config)
+            .run(runtime)
+            .await
+            .map_err(anyhow::Error::from)
     })
 }
