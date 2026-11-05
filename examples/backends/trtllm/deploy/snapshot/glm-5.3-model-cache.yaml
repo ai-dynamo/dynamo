@@ -29,7 +29,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
       - name: download
-        image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.1
+        image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.2
         command:
         - python3
         - -c

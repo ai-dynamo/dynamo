@@ -26,7 +26,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.2
     worker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -40,7 +40,7 @@ spec:
             ephemeral-storage: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.2
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
