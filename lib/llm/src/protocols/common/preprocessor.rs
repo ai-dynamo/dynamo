@@ -10,8 +10,9 @@ pub use dynamo_kv_router::kv_hints::{
 };
 use dynamo_kv_router::{
     config::RouterConfigOverride,
+    plugins::request_classifier::AbortCause,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
-    scheduling::{AbortCause, RequestLifecycle},
+    scheduling::RequestLifecycle,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
 use serde::{Deserialize, Serialize};
@@ -384,6 +385,13 @@ pub type MultimodalDataMap = std::collections::HashMap<String, Vec<MultimodalDat
 /// Backend cache UUIDs aligned positionally with multimodal data slots.
 pub type MultimodalUuidMap = std::collections::HashMap<String, Vec<Option<String>>>;
 
+/// A reference into [`MultimodalDataMap`] preserving the media traversal order.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct MultimodalItemRef {
+    pub modality: String,
+    pub index: usize,
+}
+
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The `dynamo.llm-preprocessor`
 /// crate is responsible for converting request from the public APIs to this internal representation.
 #[derive(Serialize, Deserialize, Clone, Builder)]
@@ -442,6 +450,13 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_uuids: Option<MultimodalUuidMap>,
+
+    /// Media references in gather order: content parts, after the formatter's
+    /// message ordering. A chat template that regroups media by modality
+    /// renders a different placeholder order.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_modal_order: Option<Vec<MultimodalItemRef>>,
 
     /// Optional multimodal routing-only fields (separate from execution payload).
     #[builder(default)]
@@ -1065,6 +1080,34 @@ mod tests {
                     .unwrap();
                 assert_eq!(request.dp_rank(), expected, "{body}");
             }
+        }
+    }
+
+    #[test]
+    fn worker_extension_numbers_remain_native_for_independent_receivers() {
+        use dynamo_runtime::pipeline::network::RequestPlanePayloadCodec;
+        #[derive(Deserialize)]
+        struct BackendSettings {
+            temperature: f64,
+            ranks: Vec<u64>,
+        }
+        #[derive(Deserialize)]
+        struct BackendRequest {
+            extra_args: BackendSettings,
+        }
+        let request: PreprocessedRequest = serde_json::from_value(serde_json::json!({
+            "model": "m", "token_ids": [1, 2, 3], "stop_conditions": {},
+            "sampling_options": {}, "output_options": {},
+            "extra_args": {"temperature": 0.7, "ranks": [0, 5]}
+        }))
+        .unwrap();
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let received: BackendRequest = codec.decode(&codec.encode(&request).unwrap()).unwrap();
+            assert_eq!(received.extra_args.temperature, 0.7);
+            assert_eq!(received.extra_args.ranks, vec![0, 5]);
         }
     }
 

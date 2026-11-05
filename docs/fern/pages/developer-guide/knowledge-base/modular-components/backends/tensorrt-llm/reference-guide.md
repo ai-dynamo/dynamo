@@ -18,7 +18,7 @@ To set the thinking mode used when a request omits an explicit control, pass
 `--dyn-default-thinking-mode enabled|disabled` to the TensorRT-LLM worker or
 set `DYN_DEFAULT_THINKING_MODE`. Request-level thinking controls, including
 adaptive thinking, take precedence. See
-[Deployment-Level Thinking Default](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#deployment-level-thinking-default).
+[Deployment-Level Thinking Default](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#deployment-level-thinking-default).
 
 ## Building a Custom Container
 
