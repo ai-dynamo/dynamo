@@ -174,6 +174,7 @@ impl InferenceReadinessState {
     }
 }
 
+/// Track admitted inference requests through response completion or cancellation.
 async fn track_inflight_inference(
     axum::extract::State(readiness): axum::extract::State<Arc<InferenceReadinessState>>,
     request: axum::extract::Request,
@@ -202,7 +203,7 @@ async fn track_inflight_inference(
         parts,
         Body::new(InflightResponseBody {
             body,
-            _permit: permit,
+            permit: Some(permit),
         }),
     )
 }
@@ -210,18 +211,24 @@ async fn track_inflight_inference(
 // Preserve framing metadata and trailers while holding the response's admission.
 struct InflightResponseBody {
     body: Body,
-    _permit: InflightPermit,
+    permit: Option<InflightPermit>,
 }
 
 impl HttpBody for InflightResponseBody {
     type Data = Bytes;
     type Error = axum::Error;
 
+    /// Release admission when the consumer observes EOF.
     fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut TaskContext<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        Pin::new(&mut self.get_mut().body).poll_frame(cx)
+        let this = self.get_mut();
+        let frame = Pin::new(&mut this.body).poll_frame(cx);
+        if matches!(frame, Poll::Ready(None)) {
+            this.permit.take();
+        }
+        frame
     }
 
     fn is_end_stream(&self) -> bool {
@@ -3114,7 +3121,7 @@ mod tests {
         ]);
         let mut body = InflightResponseBody {
             body: Body::new(StreamBody::new(frames)),
-            _permit: observer.acquire_inflight(),
+            permit: Some(observer.acquire_inflight()),
         };
 
         assert_eq!(body.size_hint().exact(), None);
@@ -3126,6 +3133,7 @@ mod tests {
         let frame = body.frame().await.unwrap().unwrap();
         assert_eq!(frame.into_trailers().unwrap(), trailers);
         assert!(body.frame().await.is_none());
+        assert_eq!(observer.inflight_count(), 0);
         drop(body);
         assert_eq!(observer.inflight_count(), 0);
     }
@@ -3135,7 +3143,7 @@ mod tests {
         let observer = Arc::new(ServiceObserver::default());
         let body = InflightResponseBody {
             body: Body::from("unread"),
-            _permit: observer.acquire_inflight(),
+            permit: Some(observer.acquire_inflight()),
         };
         assert_eq!(body.size_hint().exact(), Some(6));
         assert!(!body.is_end_stream());
