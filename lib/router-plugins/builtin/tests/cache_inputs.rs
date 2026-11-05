@@ -3,10 +3,12 @@
 
 mod support;
 
+use dynamo_kv_router::plugins::worker_selection::{
+    WorkerCacheInput, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView,
+    WorkerInputs, WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
+};
 use dynamo_kv_router::{
-    KvRouterConfig, SharedCacheHits, WorkerCacheInput, WorkerCandidate, WorkerCandidates,
-    WorkerFilter, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelector,
+    KvRouterConfig, SharedCacheHits, WorkerSelectionPolicyError, WorkerSelector,
 };
 use std::sync::{
     Arc,
@@ -83,7 +85,7 @@ impl WorkerFilter for InputProbe {
     }
 
     fn keep(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -99,7 +101,7 @@ impl WorkerScorer for InputProbe {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -125,7 +127,7 @@ impl WorkerPicker for InputProbe {
     }
 
     fn pick(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {

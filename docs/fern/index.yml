@@ -171,6 +171,8 @@ navigation:
             path: pages/kubernetes/kv-aware-routing/dynamo-frontend.md
           - page: Deploy the Pool Relay (Experimental)
             path: pages/kubernetes/kv-aware-routing/pool-relay.md
+          - page: Global Discovery Service Storage (Experimental)
+            path: pages/kubernetes/kv-aware-routing/global-discovery-service-storage.md
           - page: Using GAIE with Dynamo
             path: pages/kubernetes/kv-aware-routing/gateway-api.mdx
           - page: Using GAIE with vanilla vLLM
@@ -224,6 +226,8 @@ navigation:
             path: pages/kubernetes/auto-deployment/dynamo-profiler.md
           - page: Dynamo Planner
             path: pages/kubernetes/auto-deployment/dynamo-planner.mdx
+          - page: Planner Live Retune
+            path: pages/kubernetes/auto-deployment/planner-live-retune.md
 
       - section: Operations
         icon: screwdriver-wrench
@@ -434,6 +438,22 @@ navigation:
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/python-route-extensions.md
                   - page: Tokenizer
                     path: pages/developer-guide/knowledge-base/modular-components/frontend/tokenizer.md
+                  - section: Tool Calling & Reasoning
+                    collapsed: true
+                    slug: tool-calling
+                    contents:
+                      - page: Overview
+                        path: pages/use-cases/tool-calling-and-reasoning/overview.mdx
+                      - page: Chat Processors
+                        path: pages/use-cases/tool-calling-and-reasoning/chat-processors.mdx
+                      - page: Tool Call Parsing
+                        path: pages/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx
+                      - page: Reasoning Parsing
+                        path: pages/use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx
+                      - page: Structural Tag
+                        path: pages/use-cases/tool-calling-and-reasoning/structural-tag.md
+                      - page: Troubleshooting Tool Calls
+                        path: pages/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md
               - section: Router
                 collapsed: true
                 contents:
@@ -680,30 +700,41 @@ navigation:
 
   - tab: use-cases
     layout:
-      # ==================== Features ====================
+      - page: Overview
+        slug: use-cases
+        icon: compass
+        path: pages/use-cases/overview.mdx
+
+      # ==================== Reinforcement Learning ====================
       - section: Reinforcement Learning
         collapsed: true
         icon: brain
         slug: reinforcement-learning
         contents:
           - page: Overview
-            path: pages/use-cases/reinforcement-learning/overview.md
+            path: pages/use-cases/reinforcement-learning/overview.mdx
           - page: KV-Aware Load Balancing
             path: pages/use-cases/reinforcement-learning/routing.md
           - page: Rollout Weight Updates
             path: pages/use-cases/reinforcement-learning/weight-updates.md
           - page: RL Profiling and Simulation
             path: pages/use-cases/reinforcement-learning/operations-and-simulation.md
-          - page: verl Integration
-            path: pages/use-cases/reinforcement-learning/verl.md
-          - page: NeMo RL Integration
-            path: pages/use-cases/reinforcement-learning/nemo-rl.md
-          - page: Slime Integration
-            path: pages/use-cases/reinforcement-learning/slime.md
-          - page: External Trainer Integration
-            path: pages/use-cases/reinforcement-learning/implementation-guide.md
-          - page: RL Integration Reference
-            path: pages/use-cases/reinforcement-learning/integration-reference.md
+          - section: RL Framework Integrations
+            skip-slug: true
+            collapsed: open-by-default
+            contents:
+              - page: verl Integration
+                path: pages/use-cases/reinforcement-learning/verl.md
+              - page: NeMo RL Integration
+                path: pages/use-cases/reinforcement-learning/nemo-rl.md
+              - page: Slime Integration
+                path: pages/use-cases/reinforcement-learning/slime.md
+              - page: External Trainer Integration
+                path: pages/use-cases/reinforcement-learning/implementation-guide.md
+              - page: RL Integration Reference
+                path: pages/use-cases/reinforcement-learning/integration-reference.md
+
+      # ==================== Agents ====================
       - section: Agents
         collapsed: true
         icon: users
@@ -711,47 +742,94 @@ navigation:
         contents:
           - page: Overview
             path: pages/use-cases/agents/overview.md
-          - page: Session IDs
-            path: pages/use-cases/agents/session-ids.mdx
-          - page: Agent Hints
-            path: pages/use-cases/agents/agent-hints.md
-          - page: Priority Scheduling
-            path: pages/use-cases/agents/priority-scheduling.md
-          - page: Agent Harnesses
+          - page: Run an Agent on Dynamo
+            path: pages/use-cases/agents/run-an-agent-on-dynamo.md
+          - page: Connect an Agent Harness
+            slug: agent-harnesses
             path: pages/use-cases/agents/agent-harnesses.mdx
-          - page: Agent Tracing
+          - page: Identify Agent Sessions
+            path: pages/use-cases/agents/session-ids.mdx
+          - page: Maintain Session Affinity
+            path: pages/use-cases/agents/session-affinity.md
+          - page: Prioritize Requests
+            path: pages/use-cases/agents/priority-scheduling.mdx
+          - page: Trace an Agent Run
+            slug: agent-tracing
             path: pages/use-cases/agents/agent-tracing.md
-          - page: Agent Simulation
+          - page: Simulate an Agent Run
+            slug: agent-simulation
             path: pages/use-cases/agents/agent-simulation.mdx
-          - page: ThunderAgent Program Scheduler
+          - section: Schedule Agents with ThunderAgent
+            collapsed: true
+            slug: thunder-agent-program-scheduler
             path: pages/use-cases/agents/thunderagent-program-scheduler.md
-      - section: Multimodal Serving
+            contents:
+              - page: Run the ThunderAgent Python Router
+                slug: thunder-agent-python-router
+                path: pages/use-cases/agents/thunderagent-python-router.md
+
+      # ==================== Image Understanding ====================
+      - section: Image Understanding
         collapsed: true
-        icon: photo-film
-        slug: multimodal
+        icon: eye
+        slug: image-understanding
         contents:
           - page: Overview
-            path: pages/use-cases/multimodal-serving/overview.md
-          - page: Voice Pipelines
-            path: pages/use-cases/multimodal-serving/voice.md
-          - page: Parallel Media Decoding
-            path: pages/use-cases/multimodal-serving/parallel-media-decoding.md
+            path: pages/use-cases/image-understanding/overview.md
+          - section: VLM Performance Optimization
+            collapsed: open-by-default
+            slug: vlm-performance-optimization
+            path: pages/use-cases/image-understanding/vlm-performance-optimization.md
+            contents:
+              - page: Multimodal KV Routing
+                path: pages/use-cases/image-understanding/vlm-performance-optimization/multimodal-kv-routing.md
+              - page: Frontend Media Decoding
+                path: pages/use-cases/image-understanding/vlm-performance-optimization/frontend-media-decoding.md
+              - page: Shared Image Cache
+                path: pages/use-cases/image-understanding/vlm-performance-optimization/shared-image-cache.md
+              - page: Embedding Cache
+                path: pages/use-cases/image-understanding/vlm-performance-optimization/embedding-cache.md
+              - page: Encoder Disaggregation
+                path: pages/use-cases/image-understanding/vlm-performance-optimization/encoder-disaggregation.md
           - page: Custom Vision Encoders
-            slug: custom-vision-encoders
-            path: pages/use-cases/multimodal-serving/custom-vision-encoders.md
-          - page: Embedding Cache
-            path: pages/use-cases/multimodal-serving/embedding-cache.md
-          - page: Multimodal KV Routing
-            slug: multimodal-kv-routing
-            path: pages/use-cases/multimodal-serving/multimodal-kv-routing.md
-          - page: Encoder Disaggregation
-            path: pages/use-cases/multimodal-serving/encoder-disaggregation.md
-          - page: Video Decode GPU Requirements
-            slug: video-decode-gpu-requirements
-            path: pages/use-cases/multimodal-serving/video-decode-gpu-requirements.md
+            path: pages/use-cases/image-understanding/custom-vision-encoders.md
           - page: Additional Media Decoders
             slug: additional-media-decoders
-            path: pages/use-cases/multimodal-serving/additional-media-decoders.md
+            path: pages/use-cases/image-understanding/additional-media-decoders.md
+
+      # ==================== Speech ====================
+      - section: Speech
+        collapsed: true
+        icon: microphone
+        slug: speech
+        contents:
+          - page: Voice Pipelines
+            path: pages/use-cases/speech/voice-pipelines.md
+          - page: Speech to Text (STT)
+            slug: speech-to-text
+            path: pages/use-cases/speech/speech-to-text.md
+          - page: Text to Speech (TTS)
+            slug: text-to-speech
+            path: pages/use-cases/speech/text-to-speech.md
+          - page: Speech to Speech
+            slug: speech-to-speech
+            path: pages/use-cases/speech/speech-to-speech.md
+
+      # ==================== Video Understanding ====================
+      - section: Video Understanding
+        collapsed: true
+        icon: film
+        slug: video-understanding
+        contents:
+          - page: Overview
+            path: pages/use-cases/video-understanding/overview.md
+          - page: Exact Video KV Routing
+            path: pages/use-cases/video-understanding/exact-video-kv-routing.md
+          - page: Video Decoding and GPU Requirements
+            slug: video-decoding
+            path: pages/use-cases/video-understanding/video-decoding.md
+
+      # ==================== Diffusion ====================
       - section: Diffusion
         collapsed: true
         icon: wand-magic-sparkles
@@ -760,7 +838,7 @@ navigation:
           - page: Overview
             path: pages/use-cases/diffusion/overview.md
           - section: Workflows
-            collapsed: true
+            collapsed: open-by-default
             skip-slug: true
             contents:
               - page: Text-to-Image
@@ -772,46 +850,16 @@ navigation:
               - page: Image-to-Video
                 slug: image-to-video
                 path: pages/use-cases/diffusion/workflows/image-to-video.md
-              - page: Text-to-Audio
-                slug: text-to-audio
-                path: pages/use-cases/diffusion/workflows/text-to-audio.md
               - page: Text-to-Text (LLM Diffusion)
                 slug: text-to-text
                 path: pages/use-cases/diffusion/workflows/text-to-text-llm-diffusion.md
-      - section: Tool Calling & Reasoning
-        collapsed: true
-        icon: screwdriver-wrench
-        slug: parsing
-        contents:
-          - page: Overview
-            path: pages/use-cases/tool-calling-and-reasoning/overview.mdx
-          - page: Chat Processors
-            path: pages/use-cases/tool-calling-and-reasoning/chat-processors.mdx
-          - page: Tool Call Parsing
-            path: pages/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx
-          - page: Structural Tag
-            path: pages/use-cases/tool-calling-and-reasoning/structural-tag.md
-          - page: Reasoning Parsing
-            path: pages/use-cases/tool-calling-and-reasoning/reasoning-parsing.md
-          - page: Troubleshooting Tool Calls
-            path: pages/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md
-      - section: Many-Model Serving
+
+      - section: GPU Sharing
         collapsed: true
         icon: layer-group
-        slug: many-model-serving
-        contents:
-          - page: Interpreting GPU Sharing Results
-            path: pages/use-cases/gpu-sharing/gpu-sharing-results.mdx
-          - page: Deploy the Baseline Experiment
-            path: pages/use-cases/gpu-sharing/deploy-baseline.md
-          - page: Deploy the KAI + HAMi Experiment
-            path: pages/use-cases/gpu-sharing/deploy-kai-hami.md
-          - page: Build the KAI-Scheduler and GPU Fractioning Forks
-            path: pages/use-cases/gpu-sharing/build-gpu-fractioning-forks.md
-          - page: Deploy the KAI + GPU Fractions Experiment
-            path: pages/use-cases/gpu-sharing/deploy-kai-gpu-fractions.md
-          - page: Per-GPU Compute and Memory Limits with MPS
-            path: pages/use-cases/gpu-sharing/mps-per-gpu-limits.md
+        slug: gpu-sharing
+        path: pages/use-cases/gpu-sharing/overview.mdx
+        contents: []
   - tab: recipes
     layout:
       # ==================== Model Recipes ====================
@@ -843,6 +891,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Kimi-K3.1-Pro
+                path: pages/recipes/model-recipes/kimi-k3-1-pro.mdx
+                slug: kimi-k3-1-pro
               - page: Kimi-K3
                 path: pages/recipes/model-recipes/kimi-k3.mdx
                 slug: kimi-k3
@@ -900,6 +951,9 @@ navigation:
               - page: Nemotron 3.5 Lightning
                 path: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
                 slug: nemotron-3-5-lightning
+              - page: Cosmos3 Nano Reasoner
+                path: pages/recipes/model-recipes/cosmos3-nano-reasoner.mdx
+                slug: cosmos3-nano-reasoner
               - page: Nemotron 3 Ultra
                 path: pages/recipes/model-recipes/nemotron-3-ultra.mdx
                 slug: nemotron-3-ultra
@@ -1260,6 +1314,9 @@ navigation:
           - page: Pool Relay Configuration
             path: pages/reference/components/pool-relay-configuration.md
             slug: pool-relay-configuration
+          - page: Global Discovery Service Configuration
+            path: pages/reference/components/global-discovery-service-configuration.md
+            slug: global-discovery-service-configuration
           - page: Planner Configuration
             path: pages/reference/components/planner-configuration.mdx
           - page: Profiler Configuration

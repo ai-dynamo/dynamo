@@ -6,6 +6,7 @@
 mod config;
 #[cfg(test)]
 mod conformance;
+mod global_view;
 mod identity;
 mod load;
 pub mod protocol;

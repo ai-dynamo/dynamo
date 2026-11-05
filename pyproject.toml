@@ -65,7 +65,7 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu13]==1.5.0",
-    "vllm[flashinfer,runai,otel]==0.32.0",
+    "vllm[flashinfer,runai,otel]==0.33.0",
     # vllm-omni is not part of ai-dynamo[vllm]: container builds inherit the
     # framework stack from vllm/vllm-openai, and pip/uv dependency resolution
     # for omni can override the vLLM torch stack.
@@ -78,7 +78,7 @@ vllm = [
 
 sglang = [
     "uvloop",
-    "sglang[diffusion]==0.5.22",
+    "sglang[diffusion]==0.5.23",
     # sglang[diffusion] dropped accelerate in 0.5.12; diffusers still needs it.
     "accelerate>=0.17.0",
     "blake3>=1.0.0,<2.0.0",

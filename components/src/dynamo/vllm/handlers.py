@@ -954,6 +954,8 @@ def build_sampling_params(
     # Dynamo detokenizes in the Rust backend, which reads skip_special_tokens
     # directly from the request output_options (lib/llm/src/backend.rs).
 
+    # Legacy completions use SamplingParams defaults; chat and Responses use
+    # the remaining context when the model has no generation limit.
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
     token_ids = request.get("token_ids", [])
     input_length = len(token_ids)
@@ -964,12 +966,21 @@ def build_sampling_params(
                 f"max_tokens={provided_max_tokens} cannot be greater than "
                 f"max_model_len={model_max_len}. Please request fewer output tokens."
             )
-        sampling_params.max_tokens = get_max_tokens(
-            max_model_len=model_max_len,
-            max_tokens=provided_max_tokens,
-            input_length=input_length,
-            default_sampling_params=default_sampling_params,
+        use_sampling_default = (
+            isinstance(extra_args, dict)
+            and extra_args.get("request_type") == "completions"
+            and not (enable_rl and _is_token_in_request(request))
         )
+        max_tokens = (
+            sampling_params.max_tokens if use_sampling_default else provided_max_tokens
+        )
+        if not use_sampling_default or max_tokens is not None:
+            sampling_params.max_tokens = get_max_tokens(
+                max_model_len=model_max_len,
+                max_tokens=max_tokens,
+                input_length=input_length,
+                default_sampling_params=default_sampling_params,
+            )
 
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
     # the SGLang integration and lets vLLM's stream_interval gate reduce backend
@@ -3278,7 +3289,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             torch.Tensor: Decoded prompt embeddings with dim == 2
 
         Raises:
-            ValueError: If decoding fails or format is invalid
+            ValueError: If the input is not a string
+            InvalidArgument: If the payload cannot be decoded as a PyTorch tensor
         """
         if not isinstance(prompt_embeds_base64, str):
             raise ValueError(
@@ -3300,8 +3312,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             raise
         except Exception as e:
             logger.error(f"Failed to decode prompt_embeds: {e}")
-            raise ValueError(
-                f"Failed to decode prompt_embeds as PyTorch tensor: {e}"
+            # Static message keeps library-internal decoder text (logged above)
+            # private; a plain ValueError would reach the client as "Invalid request".
+            raise InvalidArgument(
+                "Failed to decode prompt_embeds as PyTorch tensor"
             ) from e
 
     def _create_prompt_from_embeddings(
@@ -3319,7 +3333,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             - tensor: The decoded tensor (for logging shape/dtype)
 
         Raises:
-            ValueError: If decoding fails or tensor is invalid
+            InvalidArgument: If decoding fails
+            ValueError: If the input is not a string or the tensor is invalid
         """
         embeddings_tensor = self._decode_prompt_embeds(prompt_embeds_base64)
         if embeddings_tensor.dim() != 2:
@@ -3355,8 +3370,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             The vLLM prompt built from prompt embeddings or token IDs.
 
         Raises:
-            InvalidArgument: Prompt embeddings are disabled.
-            ValueError: Prompt embeddings cannot be decoded or validated.
+            InvalidArgument: Prompt embeddings are disabled or cannot be decoded.
+            ValueError: Prompt embeddings fail type or shape validation.
         """
         if "prompt_embeds" in request and request["prompt_embeds"]:
             if not self.config.engine_args.enable_prompt_embeds:

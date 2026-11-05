@@ -11,7 +11,7 @@ import re
 import sys
 import tomllib
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -36,6 +36,8 @@ from dynamo.sglang._compat import (
     publish_server_args,
     require_reasoning_kwargs,
     resolved_server_args,
+    sglang_has_wide_mm_pad_values,
+    sglang_uses_engine_owned_mm_identity,
     sglang_uses_mla_backend,
     supports_external_mm_hashes,
 )
@@ -628,6 +630,26 @@ async def test_parse_args_rejects_dcp_on_backend_without_dcp_support(
 
 
 @pytest.mark.asyncio
+async def test_parse_args_rejects_default_chat_template_kwargs(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(
+            default_chat_template_kwargs={"clear_thinking": False}
+        ),
+    )
+    mock_sglang_cli(model=str(tmp_path))
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert "has no effect on a Dynamo worker" in message
+    assert "python -m dynamo.frontend" in message
+
+
+@pytest.mark.asyncio
 async def test_parse_args_rejects_dcp_on_decode_only_unsupported_backend(
     monkeypatch, mock_sglang_cli, tmp_path
 ):
@@ -1090,8 +1112,18 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
 
 
 @pytest.mark.asyncio
-async def test_external_mm_hashes_rebuild_padding_after_hash_override():
-    item = SimpleNamespace(pad_value=91, offsets=[(1, 2)])
+async def test_external_mm_hashes_rebuild_padding_after_hash_override(monkeypatch):
+    # Deferred so marker-only collection does not require SGLang runtime modules.
+    from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+
+    # The repair applies to SGLang builds that still derive pad values from
+    # caller hashes.
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_uses_engine_owned_mm_identity",
+        lambda mm_processor=None: False,
+    )
+    item = MultimodalDataItem(modality=Modality.IMAGE, pad_value=91, offsets=[(1, 2)])
     mm_inputs = SimpleNamespace(mm_items=[item], padded_input_ids=[1, 7, 7, 4])
     tokenized = SimpleNamespace(input_ids=[1, 2, 3, 4], mm_inputs=mm_inputs)
 
@@ -1121,6 +1153,59 @@ def test_external_mm_hashes_are_disabled_when_engine_lacks_kwarg():
             return None
 
     assert not supports_external_mm_hashes(LegacyEngine())
+
+
+def test_external_mm_hashes_are_disabled_for_engine_owned_mm_identity(monkeypatch):
+    # sgl-project/sglang#43043 builds derive wide pad values from their own
+    # identity; caller hashes no longer match Dynamo's pads and Kimi rejects them.
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_uses_engine_owned_mm_identity",
+        lambda mm_processor=None: True,
+    )
+
+    class MmHashEngine:
+        async def async_generate(self, mm_hashes=None):
+            return None
+
+    assert not supports_external_mm_hashes(MmHashEngine())
+
+
+@pytest.mark.parametrize("wide_schema", [False, True])
+def test_mm_identity_and_pad_format_capabilities(monkeypatch, wide_schema):
+    fields = ("hash", "pad_value", "modality")
+    if wide_schema:
+        fields += ("pad_values",)
+    mod = ModuleType("sglang.srt.managers.schedule_batch")
+    mod.MultimodalDataItem = type(
+        "MultimodalDataItem", (), {"__struct_fields__": fields}
+    )
+    monkeypatch.setitem(sys.modules, "sglang.srt.managers.schedule_batch", mod)
+
+    class KimiProcessor:
+        uses_wide_image_identity = True
+
+    class CustomProcessor(KimiProcessor):
+        pass
+
+    class MmHashEngine:
+        def __init__(self, processor):
+            self.tokenizer_manager = SimpleNamespace(mm_processor=processor)
+
+        async def async_generate(self, mm_hashes=None):
+            return None
+
+    # The inherited capability survives external processor overrides.
+    custom = CustomProcessor()
+    assert sglang_uses_engine_owned_mm_identity(custom) is wide_schema
+    assert supports_external_mm_hashes(MmHashEngine(custom)) is not wide_schema
+    assert sglang_uses_engine_owned_mm_identity() is wide_schema
+
+    # Qwen accepts caller hashes, but its event tokens still use the wide format.
+    qwen = SimpleNamespace()
+    assert not sglang_uses_engine_owned_mm_identity(qwen)
+    assert supports_external_mm_hashes(MmHashEngine(qwen))
+    assert sglang_has_wide_mm_pad_values() is wide_schema
 
 
 @pytest.mark.parametrize(
@@ -2008,6 +2093,8 @@ def test_systemone_serial_capability_registration_gate(
         ("0.5.20", False),
         ("0.5.22", True),
         ("0.5.22+cu130", True),
+        ("0.5.23", True),
+        ("0.5.23+cu130", True),
         ("0.5.19+debug", False),
         ("0.5.22+debug", False),
         ("0.5.22+cu130.debug", False),
@@ -2073,8 +2160,15 @@ def test_systemone_serial_profile_covers_pinned_sglang_version(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("serial", [False, True])
-@pytest.mark.parametrize("installed", ["0.5.19", "0.5.22+cu130"])
+@pytest.mark.parametrize(
+    ("serial", "installed"),
+    [
+        (False, "0.5.19"),
+        (True, "0.5.19"),
+        (True, "0.5.22+cu130"),
+        (True, "0.5.23"),
+    ],
+)
 async def test_systemone_serial_capability_published_only_when_isolated(
     monkeypatch, caplog, serial, installed
 ):

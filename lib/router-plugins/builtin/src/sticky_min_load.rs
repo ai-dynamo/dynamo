@@ -30,6 +30,7 @@ use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::services::selection::affinity::{
     MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES,
 };
+use parking_lot::Mutex;
 
 /// Policy type selected by `worker_selection.instances[].type`.
 pub const POLICY_TYPE: &str = "dynamo-sticky-min-load";
@@ -153,13 +154,16 @@ fn least_loaded(rows: usize, active_requests: &impl Fn(usize) -> usize) -> usize
         .unwrap_or_default()
 }
 
-impl WorkerPicker for StickyMinLoadPicker {
+/// [`WorkerPicker::pick`] takes `&self`, so the session bindings sit behind a lock.
+struct SharedStickyMinLoadPicker(Mutex<StickyMinLoadPicker>);
+
+impl WorkerPicker for SharedStickyMinLoadPicker {
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::LOAD
     }
 
     fn pick(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -175,14 +179,16 @@ impl WorkerPicker for StickyMinLoadPicker {
         let session_id = context
             .session_context()
             .map(|session| session.session_id());
-        self.select(
-            session_id,
-            candidates.len(),
-            |row| candidates[row].worker(),
-            |row| load[row].active_requests(),
-            Instant::now(),
-        )
-        .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+        self.0
+            .lock()
+            .select(
+                session_id,
+                candidates.len(),
+                |row| candidates[row].worker(),
+                |row| load[row].active_requests(),
+                Instant::now(),
+            )
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
     }
 }
 
@@ -198,7 +204,9 @@ fn provider(
                 config.clone(),
                 worker_type.as_str(),
                 Vec::new(),
-                Box::new(StickyMinLoadPicker::new(parameters)),
+                Box::new(SharedStickyMinLoadPicker(Mutex::new(
+                    StickyMinLoadPicker::new(parameters),
+                ))),
             )
         },
     ))
