@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "ckf-diagnostics")]
 use std::sync::atomic::Ordering;
 
+use dynamo_global_common::PoolLocation;
 use dynamo_global_discovery_client::{
     Freshness, GlobalDiscoveryClient, RouterCache, RouterReplica,
 };
@@ -65,6 +66,7 @@ use super::publication::{
     RelayPublicationSource,
 };
 use super::resolution::stable_cluster_id;
+use super::routing_pool::RoutingPoolRegistration;
 use super::serving_load::ServingLoadAggregator;
 use super::topology::{TopologyPublisher, TopologySnapshot};
 use super::wan::grpc::{GrpcTransport, PoolRelayGrpcConfig};
@@ -162,7 +164,13 @@ pub struct PoolRelayConfig {
     /// replicas from. `None` reads none.
     pub global_discovery_url: Option<Url>,
     /// DGD coordinates published to the Global Routers. Requires global discovery and WAN transport.
+    /// The Relay also registers the pool with Global Discovery under the one model it serves.
     pub routing_pool: Option<dynamo_global_common::PoolKey>,
+    /// Region the routing pool is registered in. Required with `routing_pool`.
+    pub routing_pool_region: Option<String>,
+    /// Frontends the Global Routers send the routing pool's requests to. In MCS mode, Global
+    /// Discovery takes them from MCS instead.
+    pub routing_pool_frontends: Vec<Url>,
 }
 
 impl Default for PoolRelayConfig {
@@ -176,6 +184,8 @@ impl Default for PoolRelayConfig {
             transport: None,
             global_discovery_url: None,
             routing_pool: None,
+            routing_pool_region: None,
+            routing_pool_frontends: Vec::new(),
         }
     }
 }
@@ -329,6 +339,11 @@ pub struct PoolRelayHealth {
     /// last list and its router connections, so this does not affect
     /// `healthy` or readiness.
     pub global_routers_stale_reason: Option<String>,
+    /// Why the routing pool is not registered with Global Discovery: no
+    /// single model to register, or the last call failed. Global Routers send
+    /// an unregistered pool nothing, but the Relay keeps serving and retrying,
+    /// so this does not affect `healthy` or readiness.
+    pub routing_pool_unregistered_reason: Option<String>,
 }
 
 #[cfg(feature = "ckf-diagnostics")]
@@ -654,6 +669,7 @@ pub struct PoolRelay {
     /// Serving-load aggregator feeding the transport; runs only with it.
     serving_load_aggregator: Mutex<Option<JoinHandle<()>>>,
     global_routers: Option<RouterCache>,
+    routing_pool_registration: Option<RoutingPoolRegistration>,
 }
 
 impl PoolRelay {
@@ -687,16 +703,41 @@ impl PoolRelay {
             "Pool Relay recovery_attempt_timeout_ms must be positive"
         );
         let transport_config = config.transport.clone();
-        if let Some(pool) = &config.routing_pool {
+        let routing_pool_location = if let Some(pool) = &config.routing_pool {
             anyhow::ensure!(
                 pool.cluster_id() == cluster_id,
                 "routing pool cluster must match the Relay cluster"
             );
+            let region = config
+                .routing_pool_region
+                .clone()
+                .filter(|region| !region.is_empty() && region.trim() == region);
+            anyhow::ensure!(
+                region.is_some(),
+                "routing_pool requires a routing_pool_region without surrounding whitespace"
+            );
+            for frontend in &config.routing_pool_frontends {
+                anyhow::ensure!(
+                    matches!(frontend.scheme(), "http" | "https") && frontend.host_str().is_some(),
+                    "routing_pool_frontends must be HTTP(S) URLs: {frontend}"
+                );
+            }
             anyhow::ensure!(
                 config.global_discovery_url.is_some() && transport_config.is_some(),
                 "routing_pool requires global_discovery_url and WAN transport"
             );
-        }
+            region.map(|region| PoolLocation {
+                region,
+                availability_zone: None,
+                datacenter: None,
+            })
+        } else {
+            anyhow::ensure!(
+                config.routing_pool_region.is_none() && config.routing_pool_frontends.is_empty(),
+                "routing_pool_region and routing_pool_frontends require routing_pool"
+            );
+            None
+        };
         if let Some(transport) = transport_config.as_ref() {
             transport.validate()?;
         }
@@ -834,6 +875,22 @@ impl PoolRelay {
             topology.clone(),
             supervisor_complete.clone(),
         );
+        // Validation above makes all three present together.
+        let routing_pool_registration = match (
+            config.routing_pool.clone(),
+            routing_pool_location,
+            discovery_client.clone(),
+        ) {
+            (Some(pool), Some(location), Some(client)) => Some(RoutingPoolRegistration::spawn(
+                client,
+                pool,
+                location,
+                config.routing_pool_frontends,
+                topology.watch(),
+                cancel.child_token(),
+            )),
+            _ => None,
+        };
         let global_routers = discovery_client.map(|client| {
             RouterCache::spawn(
                 client,
@@ -864,6 +921,7 @@ impl PoolRelay {
             transport,
             serving_load_aggregator: Mutex::new(serving_load_aggregator),
             global_routers,
+            routing_pool_registration,
         })
     }
 
@@ -1037,6 +1095,10 @@ impl PoolRelay {
                     Freshness::Stale(reason) => Some(reason),
                 }
             }),
+            routing_pool_unregistered_reason: self
+                .routing_pool_registration
+                .as_ref()
+                .and_then(RoutingPoolRegistration::unregistered_reason),
         }
     }
 
@@ -3241,6 +3303,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn routing_pool_registration_settings_are_checked() {
+        let component = test_component("routing-pool-registration").await;
+        let pool = dynamo_global_common::PoolKey::new("test-dc", "dynamo", "blue").unwrap();
+        for (config, expected) in [
+            (
+                PoolRelayConfig {
+                    routing_pool: Some(pool.clone()),
+                    ..PoolRelayConfig::default()
+                },
+                "routing_pool requires a routing_pool_region",
+            ),
+            (
+                // `blue:8000` parses as a URL with scheme `blue`.
+                PoolRelayConfig {
+                    routing_pool: Some(pool),
+                    routing_pool_region: Some("us-east-1".to_owned()),
+                    routing_pool_frontends: vec!["blue:8000".parse().unwrap()],
+                    ..PoolRelayConfig::default()
+                },
+                "routing_pool_frontends must be HTTP(S) URLs: blue:8000",
+            ),
+            (
+                PoolRelayConfig {
+                    routing_pool_region: Some("us-east-1".to_owned()),
+                    ..PoolRelayConfig::default()
+                },
+                "routing_pool_region and routing_pool_frontends require routing_pool",
+            ),
+        ] {
+            let error = PoolRelay::start(component.clone(), "test-dc".to_string(), config)
+                .await
+                .err()
+                .expect("the configuration must fail start");
+            assert!(format!("{error:#}").contains(expected), "{error:#}");
+        }
+    }
+
+    #[tokio::test]
     async fn unexpected_host_return_cancels_relay_and_records_terminal_error() {
         let cancel = CancellationToken::new();
         let terminal = Arc::new(HostTerminalState::default());
@@ -3274,6 +3374,7 @@ mod tests {
             transport: None,
             serving_load_aggregator: Mutex::new(None),
             global_routers: None,
+            routing_pool_registration: None,
         };
         tokio::time::timeout(Duration::from_millis(100), relay.wait_for_shutdown())
             .await
@@ -3369,6 +3470,7 @@ mod tests {
             transport: None,
             serving_load_aggregator: Mutex::new(None),
             global_routers: None,
+            routing_pool_registration: None,
         };
 
         cancel.cancel();
@@ -3488,6 +3590,7 @@ mod tests {
             transport: None,
             serving_load_aggregator: Mutex::new(None),
             global_routers: None,
+            routing_pool_registration: None,
         };
 
         let health = relay.health().await;

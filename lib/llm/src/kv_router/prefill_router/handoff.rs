@@ -15,6 +15,7 @@ use tokio::task::JoinHandle;
 use tracing::Instrument;
 
 use super::PrefillError;
+use crate::kv_router::UnknownPolicyClassRefusal;
 use crate::protocols::{
     common::llm_backend::{FinishReason, LLMEngineOutput},
     response_merge::{PREFILL_OUTPUT_ANNOTATION, PrefillNeed},
@@ -132,7 +133,7 @@ impl PrefillTask {
             result = &mut decode => match result {
                 Ok(response) => response,
                 Err(error) => {
-                    cancel_prefill_on_decode_rejection(error.as_ref(), prefill_context.as_ref());
+                    cancel_prefill_on_decode_error(&error, prefill_context.as_ref());
                     return Err(error);
                 }
             },
@@ -259,6 +260,19 @@ impl PrefillTask {
             }
         };
         Ok(ResponseStream::new(Box::pin(stream), context))
+    }
+}
+
+/// Cancel prefill when decode dispatch fails with an admission refusal, or because the decode
+/// router refused the request's unknown policy class at class entry. Neither has a receiver
+/// waiting for staged KV.
+fn cancel_prefill_on_decode_error(error: &anyhow::Error, prefill_context: &dyn AsyncEngineContext) {
+    if error.downcast_ref::<UnknownPolicyClassRefusal>().is_some() {
+        tracing::debug!(request_id = %prefill_context.id(), %error,
+            "Cancelling remote prefill after decode refused an unknown policy class");
+        prefill_context.stop_generating();
+    } else {
+        cancel_prefill_on_decode_rejection(error.as_ref(), prefill_context);
     }
 }
 
@@ -788,17 +802,14 @@ mod tests {
             .unwrap();
     }
 
-    async fn assert_ambiguous_decode_error_preserves_prefill(output: PrefillNeed) {
+    async fn assert_decode_error_preserves_prefill(output: PrefillNeed, error: anyhow::Error) {
         let (tx, task) = pending_prefill();
         let prefill_context = Arc::new(Controller::default());
         let request_context = Arc::new(Controller::default());
-        let error = dynamo_runtime::error::DynamoError::builder()
-            .error_type(dynamo_runtime::error::ErrorType::Disconnected)
-            .message("decode connection lost after possible dispatch")
-            .build();
+        let case = format!("{output:?}: {error}");
         let result = task
             .forward_decode(
-                async { Err(error.into()) },
+                async { Err(error) },
                 request_context,
                 output,
                 prefill_context.clone(),
@@ -807,7 +818,7 @@ mod tests {
         assert!(result.is_err());
         assert!(
             !prefill_context.is_stopped(),
-            "ambiguous failure must preserve KV transfer: {output:?}"
+            "failure must preserve KV transfer: {case}"
         );
         tx.send(Ok(None)).unwrap();
     }
@@ -855,7 +866,57 @@ mod tests {
             PrefillNeed::BeforeLast,
             PrefillNeed::BeforeFirst,
         ] {
-            assert_ambiguous_decode_error_preserves_prefill(output).await;
+            let error = dynamo_runtime::error::DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::Disconnected)
+                .message("decode connection lost after possible dispatch")
+                .build();
+            assert_decode_error_preserves_prefill(output, error.into()).await;
+        }
+    }
+
+    /// Only the decode router's own unknown-class refusal stops prefill, not other
+    /// invalid-argument errors or a classifier failure that carries the refusal as a cause.
+    #[tokio::test]
+    async fn other_invalid_argument_decode_errors_preserve_prefill_transfer() {
+        use dynamo_kv_router::scheduling::KvSchedulerError;
+
+        let refusal = || {
+            crate::kv_router::map_scheduler_error(KvSchedulerError::UnknownPolicyClass(
+                "priority".to_string(),
+            ))
+        };
+        let refusal_error = refusal()
+            .downcast_ref::<dynamo_runtime::error::DynamoError>()
+            .unwrap()
+            .clone();
+        for output in [
+            PrefillNeed::None,
+            PrefillNeed::BeforeLast,
+            PrefillNeed::BeforeFirst,
+        ] {
+            let classifier_failure = dynamo_runtime::error::DynamoError::builder()
+                .error_type(ErrorType::Unknown)
+                .message("request classifier failed")
+                .cause(refusal_error.clone())
+                .build();
+            let worker_rejection = dynamo_runtime::error::DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("decode worker rejected the request")
+                .build();
+            for error in
+                [
+                    crate::session_affinity::invalid_argument(
+                        "nvext.decode_worker_id=7 does not identify a known worker",
+                    ),
+                    worker_rejection.into(),
+                    classifier_failure.into(),
+                    anyhow::Error::new(KvSchedulerError::RequestClassifierFailed(Arc::from(
+                        Box::<dyn std::error::Error + Send + Sync>::from(refusal()),
+                    ))),
+                ]
+            {
+                assert_decode_error_preserves_prefill(output, error).await;
+            }
         }
     }
 }

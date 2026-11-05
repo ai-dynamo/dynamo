@@ -492,7 +492,7 @@ vLLM, SGLang, and TensorRT-LLM workers report F4 on the final response chunk of 
 
 ### Router Queue Metrics
 
-These metrics have series once a KV router starts, whether or not queueing is enabled; the queue metrics stay at zero unless queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`, but not the `dynamo_namespace`, `dynamo_component`, and `worker_id` labels of the other router metrics. With policy-family or cache-bucket configuration, `policy_class` is the resolved physical queue.
+These metrics have series once a KV router starts, whether or not queueing is enabled; the queue metrics stay at zero unless queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`, but not the `dynamo_namespace`, `dynamo_component`, and `worker_id` labels of the other router metrics. `policy_class` is the resolved class: a request that names no class is reported as the default class, and a request whose class, after any request-classifier override, is unknown fails before it is queued, so these queue metrics do not count it.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
@@ -501,7 +501,9 @@ These metrics have series once a KV router starts, whether or not queueing is en
 | `dynamo_frontend_router_queue_pending_cached_tokens` | gauge | — | Cached-token estimate captured when each request enters the queue. | |
 | `dynamo_frontend_router_queue_backpressure_total` | counter | `reason` | Queue rejections, by the configured limit that caused them. | |
 | `dynamo_frontend_router_admission_received_total` | counter | — | Attempts received by router admission, including retries. | |
-| `dynamo_frontend_router_admission_rejected_total` | counter | `reason` | Attempts rejected because their deadline passed (`reason="due_time_passed"`). The `predicted_miss` reason is reserved and always 0. | |
+| `dynamo_frontend_router_admission_rejected_total` | counter | `reason` | Scheduling attempts rejected before admission, by `reason`: `due_time_passed` or `queue_size_exceeded`. The `predicted_miss` reason is reserved and stays zero. | |
+
+Each rejected attempt is counted once in `dynamo_frontend_router_admission_rejected_total`, labeled `due_time_passed` when the request's explicit deadline, or the budget of an `edf` class with `controlled_delay`, passes before admission, or `queue_size_exceeded` when a class queue request or token limit rejects it. An attempt whose response receiver is already closed when the router checks it, because the client went away, is not counted; a receiver that closes after that check can still be counted. A `queue_size_exceeded` rejection is also counted, by limit, in `dynamo_frontend_router_queue_backpressure_total` when the frontend's selection call returns that queue rejection; a cancellation can drop the call before it returns, so the two counts can differ. They describe the same rejections: do not add them together.
 
 ### KV Indexer Metrics
 
