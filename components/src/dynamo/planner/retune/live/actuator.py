@@ -359,7 +359,7 @@ class RouterActuator:
         self._rejected: dict[str, str] = {}
         # pod uid -> consecutive rounds without a reachable /router_policy: the
         # GET returned 404, or the pod has no admin port (counted as at the
-        # limit at once).
+        # limit at once). Dropped once the pod is terminating or finished.
         self._admin_missing_rounds: dict[str, int] = {}
         self._last_pods: Optional[tuple[PodInfo, ...]] = None
         self._startup_maps: dict[str, dict[str, float]] = {}
@@ -477,7 +477,7 @@ class RouterActuator:
 
         outcomes = list(await asyncio.gather(*(run(pod) for pod in targeted)))
 
-        self._track_admin_api(pods, outcomes)
+        self._track_admin_api(live, outcomes)
         converged = target_error is None and self._converged(
             state, ready, outcomes, max(1, int(expected_frontends))
         )
@@ -841,9 +841,11 @@ class RouterActuator:
                 del cache[router_id]
 
     def _track_admin_api(
-        self, pods: Sequence[PodInfo], outcomes: Sequence[_PodOutcome]
+        self, live: Sequence[PodInfo], outcomes: Sequence[_PodOutcome]
     ) -> None:
-        live_uids = {pod.uid for pod in pods}
+        # A terminating or finished pod gets no further outcome to clear its
+        # count, so it is dropped here even while it is still listed.
+        live_uids = {pod.uid for pod in live}
         for uid in [uid for uid in self._admin_missing_rounds if uid not in live_uids]:
             del self._admin_missing_rounds[uid]
         for outcome in outcomes:

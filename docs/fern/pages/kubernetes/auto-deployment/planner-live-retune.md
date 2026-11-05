@@ -358,9 +358,9 @@ retune Requests.
 - **Trace data.** See the privacy note in [Configure the frontend](#configure-the-frontend).
 
 For a DGD named `my-dgd`, this NetworkPolicy admits only its Planner pods to port 8002 of its
-frontend pods and keeps every other TCP port of the frontends open; with another
-`DYN_FRONTEND_ADMIN_PORT`, move the three port numbers. It takes effect only where the cluster's
-network plugin enforces NetworkPolicy, and needs Kubernetes 1.25 or later for `endPort`:
+frontend pods and leaves every other TCP port of the frontends as open as with no policy. With
+another `DYN_FRONTEND_ADMIN_PORT`, move the three port numbers. It takes effect only where the
+cluster's network plugin enforces NetworkPolicy, and needs Kubernetes 1.25 or later for `endPort`:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -374,7 +374,8 @@ spec:
       nvidia.com/dynamo-component-type: frontend
   policyTypes: [Ingress]
   ingress:
-  # Every port but the admin port, from anywhere, as without the policy.
+  # Every port but the admin port, from anywhere: only when no other policy
+  # selects these pods (see below).
   - ports:
     - {protocol: TCP, port: 1, endPort: 8001}
     - {protocol: TCP, port: 8003, endPort: 65535}
@@ -387,6 +388,12 @@ spec:
     ports:
     - {protocol: TCP, port: 8002}
 ```
+
+Keep the first rule only when no other NetworkPolicy selects the frontend pods. Kubernetes admits a
+connection that any policy selecting the pod allows, so next to a stricter policy the first rule
+would open every other port to every source. If a policy already restricts the frontends, leave
+the first rule out, and check that none of that policy's rules admits the admin port: a rule
+without `ports` admits every port, so list the frontend's other ports in it.
 
 ### RBAC
 

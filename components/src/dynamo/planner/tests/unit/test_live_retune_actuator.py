@@ -302,6 +302,22 @@ async def test_a_pod_without_an_admin_port_is_admin_disabled_at_once() -> None:
     assert report.admin_api_disabled
 
 
+async def test_a_terminating_pod_stops_counting_as_admin_disabled() -> None:
+    # A pod without an admin port that starts terminating gets no further
+    # outcome. While it is still listed, its count must not keep blocking P12
+    # once a replacement answers /router_policy.
+    old = replace(pod("fe-0"), admin_port=None)
+    actuator, kube, client, _ = make_actuator([old])
+    report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
+    assert report.admin_api_disabled
+
+    kube.pods = [replace(old, terminating=True), pod("fe-1", ip="10.0.0.2")]
+    client.frontend("fe-1").add(FakeRouter("r1", STARTUP))
+    report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
+    assert not report.admin_api_disabled
+    assert report.routers_present
+
+
 # ------------------------------------------------------------------- apply
 
 
