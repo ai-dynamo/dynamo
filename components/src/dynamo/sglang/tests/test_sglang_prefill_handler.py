@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +10,7 @@ from dynamo.llm import HttpError
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.request_handlers import cancellation
 from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
+from dynamo.sglang.tests.prefill_handler_stubs import drain, kv_hit_prefill_handler
 
 pytestmark = [
     pytest.mark.unit,
@@ -158,7 +158,7 @@ async def test_prefill_cancellation_waits_for_dispatch_and_drains(
         context,
     )
     await anext(stream)
-    consumer = asyncio.create_task(_drain(stream))
+    consumer = asyncio.create_task(drain(stream))
     await asyncio.wait_for(started.wait(), timeout=1)
     if phase != "before_registration":
         await asyncio.wait_for(registered.wait(), timeout=1)
@@ -245,51 +245,6 @@ async def test_native_batched_prefill_disables_ordered_cancellation(monkeypatch)
     assert captured_native_request.input_ids == [[1], [2]]
 
 
-def _kv_hit_prefill_handler(monkeypatch, responses, *, cancelled):
-    async def results():
-        for response in responses:
-            yield response
-
-    class _Engine:
-        async def async_generate(self, **kwargs):
-            return results()
-
-    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
-    handler.engine = _Engine()
-    handler.config = SimpleNamespace(server_args=SimpleNamespace())
-    handler.shutdown_event = None
-    handler.bootstrap_host = "127.0.0.1"
-    handler.bootstrap_port = 1234
-    handler.enable_trace = False
-    handler._consume_tasks = set()
-    handler._generate_bootstrap_room = lambda: 17
-    handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
-    handler._resolve_lora = lambda request: None
-    handler._priority_kwargs = lambda priority: {}
-
-    @asynccontextmanager
-    async def cancellation_monitor(*args, **kwargs):
-        async def fire_or_wait():
-            if not cancelled:
-                await asyncio.Future()
-
-        task = asyncio.create_task(fire_or_wait())
-        if cancelled:
-            await task
-        try:
-            yield task
-        finally:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-    handler._cancellation_monitor = cancellation_monitor
-    monkeypatch.setattr(
-        "dynamo.sglang.request_handlers.llm.prefill_handler.require_reasoning_kwargs",
-        lambda engine, request, **kwargs: {},
-    )
-    return handler
-
-
 @pytest.fixture
 def prefill_responses():
     return [
@@ -309,12 +264,12 @@ def prefill_responses():
 async def test_prefill_reports_kv_cache_hit_after_bootstrap(
     monkeypatch, prefill_responses
 ):
-    handler = _kv_hit_prefill_handler(monkeypatch, prefill_responses, cancelled=False)
+    handler = kv_hit_prefill_handler(monkeypatch, prefill_responses, cancelled=False)
     context = SimpleNamespace(
         id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
     )
 
-    chunks = await _drain(
+    chunks = await drain(
         handler.generate(
             {"request": {"token_ids": [1, 2, 3], "routing": {}}, "sampling_params": {}},
             context,
@@ -334,12 +289,12 @@ async def test_prefill_reports_kv_cache_hit_after_bootstrap(
 async def test_prefill_omits_kv_cache_hit_after_cancellation(
     monkeypatch, prefill_responses
 ):
-    handler = _kv_hit_prefill_handler(monkeypatch, prefill_responses, cancelled=True)
+    handler = kv_hit_prefill_handler(monkeypatch, prefill_responses, cancelled=True)
     context = SimpleNamespace(
         id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
     )
 
-    chunks = await _drain(
+    chunks = await drain(
         handler.generate(
             {"request": {"token_ids": [1, 2, 3], "routing": {}}, "sampling_params": {}},
             context,
@@ -378,7 +333,7 @@ async def test_prefill_propagates_backend_abort(
     response = {"meta_info": meta_info}
     if native_metadata:
         response = {"engine_data": {"sglang_response": response}}
-    handler = _kv_hit_prefill_handler(monkeypatch, [response], cancelled=False)
+    handler = kv_hit_prefill_handler(monkeypatch, [response], cancelled=False)
     context = SimpleNamespace(
         id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
     )
@@ -418,7 +373,7 @@ async def test_prefill_bootstrap_abort_after_router_cancellation(
     }
     if native_metadata:
         response = {"engine_data": {"sglang_response": response}}
-    handler = _kv_hit_prefill_handler(monkeypatch, [response], cancelled=cancelled)
+    handler = kv_hit_prefill_handler(monkeypatch, [response], cancelled=cancelled)
     context = SimpleNamespace(
         id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
     )
@@ -429,7 +384,7 @@ async def test_prefill_bootstrap_abort_after_router_cancellation(
 
     assert "disaggregated_params" in await anext(stream)
     if cancelled:
-        assert await _drain(stream) == []
+        assert await drain(stream) == []
     else:
         with pytest.raises(HttpError, match="Aborted by AbortReq"):
             await anext(stream)
@@ -440,7 +395,7 @@ async def test_prefill_bootstrap_abort_after_router_cancellation(
 async def test_prefill_reports_backend_cancellation_without_success_cache_stats(
     monkeypatch,
 ):
-    handler = _kv_hit_prefill_handler(
+    handler = kv_hit_prefill_handler(
         monkeypatch,
         [
             {
@@ -457,7 +412,7 @@ async def test_prefill_reports_backend_cancellation_without_success_cache_stats(
     context = SimpleNamespace(
         id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
     )
-    chunks = await _drain(
+    chunks = await drain(
         handler.generate(
             {"request": {"token_ids": [1, 2, 3], "routing": {}}, "sampling_params": {}},
             context,
@@ -465,85 +420,3 @@ async def test_prefill_reports_backend_cancellation_without_success_cache_stats(
     )
     assert len(chunks) == 2
     assert chunks[1] == {"token_ids": [], "finish_reason": "cancelled"}
-
-
-def _native_prefill_handler(monkeypatch, responses):
-    """Prefill handler whose native stream yields ``responses`` as SGLang does."""
-    handler = _kv_hit_prefill_handler(monkeypatch, [], cancelled=False)
-
-    async def native_results(_engine, _request):
-        for response in responses:
-            yield {
-                "token_ids": response.get("output_ids") or [],
-                "engine_data": {"sglang_response": response},
-            }
-
-    monkeypatch.setattr(
-        "dynamo.sglang.request_handlers.llm.prefill_handler.native_generate_stream",
-        native_results,
-    )
-    return handler
-
-
-def _native_prefill_request(annotations):
-    request = {
-        "token_ids": [1, 2, 3],
-        "routing": {},
-        "extra_args": {"sglang_tito": {}},
-    }
-    if annotations is not None:
-        request["annotations"] = annotations
-    return {"request": request, "sampling_params": {}}
-
-
-@pytest.mark.asyncio
-@pytest.mark.timeout(5)
-@pytest.mark.parametrize(
-    "annotations",
-    [None, ["prefill_output"], ["prefill_output", "prefill_output_first"]],
-)
-@pytest.mark.parametrize(
-    "prompt_output",
-    [
-        {"input_token_logprobs": [[None, 1, None], [-0.5, 2, None], [-1.5, 3, None]]},
-        {"routed_experts": "AAECAwQFBgc="},
-        {"indexer_topk": [[0, 1], [1, 2], [2, 0]]},
-    ],
-    ids=["prompt_logprobs", "routed_experts", "indexer_topk"],
-)
-async def test_native_prefill_forwards_final_response_when_annotated(
-    monkeypatch, annotations, prompt_output
-):
-    final_response = {
-        "text": "",
-        "output_ids": [4],
-        "meta_info": {
-            "id": "request-id",
-            "finish_reason": {"type": "length", "length": 1},
-            "prompt_tokens": 3,
-            "cached_tokens": 2,
-            **prompt_output,
-        },
-    }
-    handler = _native_prefill_handler(monkeypatch, [final_response])
-    context = SimpleNamespace(
-        id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
-    )
-
-    chunks = await _drain(
-        handler.generate(_native_prefill_request(annotations), context)
-    )
-
-    assert len(chunks) == 2
-    assert "disaggregated_params" in chunks[0]
-    engine_data = {"kv_cache_hit": {"prompt_tokens": 3, "reused_tokens": 2}}
-    if annotations:
-        # One chunk: the prefill router keeps only the last chunk's engine_data.
-        engine_data["sglang_response"] = final_response
-    assert chunks[1] == {"token_ids": [], "engine_data": engine_data}
-    if annotations:
-        assert chunks[1]["engine_data"]["sglang_response"] is final_response
-
-
-async def _drain(stream):
-    return [item async for item in stream]
