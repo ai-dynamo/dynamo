@@ -162,7 +162,7 @@ def _gpu_id() -> int:
         return 0
 
 
-def _frame_to_rgb_hwc(frame) -> np.ndarray:
+def _frame_to_rgb_hwc(frame, gpu_id: int | None = None) -> np.ndarray:
     """Return host ``(H, W, 3)`` uint8 pixels independent of decoder storage.
 
     With ``use_device_memory=False``, DLPack exposes host memory, so ``.cpu()``
@@ -176,13 +176,17 @@ def _frame_to_rgb_hwc(frame) -> np.ndarray:
     ``DecodedFrame.__dlpack__(stream=...)`` does not document that it orders the
     export on the consumer's stream, so a device-wide sync is the one guarantee
     that those writes have finished.
+
+    ``gpu_id`` is the decoder's GPU. The CUDA-array-interface fallback places
+    the tensor there; without it, the fallback uses ``DYN_NVDEC_GPU_ID``.
     """
     import torch
 
     try:
         tensor = torch.from_dlpack(frame)
     except Exception:  # noqa: BLE001 - fall back to the CUDA-array-interface path
-        tensor = torch.as_tensor(frame, device=f"cuda:{_gpu_id()}")
+        device_id = _gpu_id() if gpu_id is None else gpu_id
+        tensor = torch.as_tensor(frame, device=f"cuda:{device_id}")
     if tensor.device.type == "cuda":
         torch.cuda.synchronize(tensor.device)
     arr = tensor.cpu().numpy()

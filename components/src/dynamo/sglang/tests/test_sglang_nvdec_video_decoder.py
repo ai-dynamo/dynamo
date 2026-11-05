@@ -64,7 +64,7 @@ def fake_nvc(monkeypatch):
     nvc.OutputColorType.RGB = "RGB"
     monkeypatch.setitem(sys.modules, "PyNvVideoCodec", nvc)
     # The real converter expects a CUDA DecodedFrame; our fake yields numpy already.
-    monkeypatch.setattr(mod, "_frame_to_rgb_hwc", lambda frame: frame)
+    monkeypatch.setattr(mod, "_frame_to_rgb_hwc", lambda frame, gpu_id=None: frame)
     return nvc
 
 

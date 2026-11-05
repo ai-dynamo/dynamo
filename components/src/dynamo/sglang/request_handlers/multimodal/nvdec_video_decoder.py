@@ -86,6 +86,7 @@ class NvdecVideoDecoder(VideoDecoderWrapper):  # type: ignore[misc,valid-type]
 
         if gpu_id is None:
             gpu_id = _gpu_id()
+        self._gpu_id = gpu_id
 
         # SimpleDecoder takes a PATH and reads frames lazily, so the file must
         # outlive __init__. Mirrors what the parent's decord-bytes branch does.
@@ -170,7 +171,10 @@ class NvdecVideoDecoder(VideoDecoderWrapper):  # type: ignore[misc,valid-type]
 
         if not indices:
             raise ValueError("get_frames_as_tensor requires at least one index")
-        frames = [_frame_to_rgb_hwc(self._decoder[int(i)]) for i in indices]
+        frames = [
+            _frame_to_rgb_hwc(self._decoder[int(i)], gpu_id=self._gpu_id)
+            for i in indices
+        ]
         arr = np.ascontiguousarray(np.stack(frames)).astype(np.uint8, copy=False)
         if arr.ndim != 4 or arr.shape[-1] != 3:
             raise RuntimeError(
@@ -203,4 +207,4 @@ class NvdecVideoDecoder(VideoDecoderWrapper):  # type: ignore[misc,valid-type]
 
     def __getitem__(self, idx):
         """Single frame as numpy NHWC uint8, matching the parent's contract."""
-        return _frame_to_rgb_hwc(self._decoder[int(idx)])
+        return _frame_to_rgb_hwc(self._decoder[int(idx)], gpu_id=self._gpu_id)
