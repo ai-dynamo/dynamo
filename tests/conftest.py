@@ -1338,8 +1338,7 @@ def dynamo_dynamic_ports(
         engine_grpc_ports: list[int] = []
         engine_kv_replay_ports: list[int] = []
         if request.node.get_closest_marker("engine_ports"):
-            # One block each, so an engine with one listener per data-parallel
-            # rank (SGLang's Rust server) can bind the first port + rank.
+            # One block each, so a data-parallel engine can bind the first port + rank.
             engine_http_ports = allocate_contiguous_ports(
                 1, num_system_ports, DynamoPortRange.SERVE.value
             )

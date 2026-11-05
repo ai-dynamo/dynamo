@@ -30,7 +30,7 @@ for the architecture.
 | Kubernetes multinode tensor parallelism (TP) | Yes |
 | Attention DP (`--attn-dp-size N`) | Yes, one sidecar per node |
 | Replica DP (`--dp-size N`) | Aggregated and decode; SGLang rejects it for prefill |
-| Image, video, and audio input | No; the sidecar returns 400 |
+| Image, video, and audio input | No |
 
 SGLang's Rust server runs one listener per DP rank. One sidecar per node serves
 all of the node's listeners as one worker.
