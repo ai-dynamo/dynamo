@@ -319,6 +319,35 @@ pub fn query_lower_tiers_with_options_and_snapshot(
     options: LowerTierQueryOptions,
     snapshot: Arc<ResidencyRoutingSnapshot>,
 ) -> HashMap<StorageTier, LowerTierMatchDetails> {
+    query_lower_tiers_inner(indexers, sequence, device_matches, options, snapshot, false)
+}
+
+/// [`query_lower_tiers_with_options`] that also keeps every tier's retained
+/// extensions (`kv_transfer_extensions`), not only HostPinned's merged hint
+/// chain. The recurrent-group cut needs a root-aligned chain through each
+/// tier's hits to verify them; the extensions are internal and callers that
+/// did not ask for hints get them cleared again by the lookup pipeline.
+pub fn query_lower_tiers_retaining_extensions(
+    indexers: &LowerTierIndexers,
+    sequence: &[LocalBlockHash],
+    device_matches: &MatchDetails,
+    options: LowerTierQueryOptions,
+) -> HashMap<StorageTier, LowerTierMatchDetails> {
+    if indexers.is_empty() {
+        return HashMap::new();
+    }
+    let snapshot = indexers.routing_snapshot.load_full();
+    query_lower_tiers_inner(indexers, sequence, device_matches, options, snapshot, true)
+}
+
+fn query_lower_tiers_inner(
+    indexers: &LowerTierIndexers,
+    sequence: &[LocalBlockHash],
+    device_matches: &MatchDetails,
+    options: LowerTierQueryOptions,
+    snapshot: Arc<ResidencyRoutingSnapshot>,
+    retain_extensions_for_every_tier: bool,
+) -> HashMap<StorageTier, LowerTierMatchDetails> {
     let projection = snapshot.projection();
     let mut continuations = LowerTierMatchDetails::default().next_continuations;
     for (worker, matched_blocks) in &device_matches.overlap_scores.scores {
@@ -352,17 +381,19 @@ pub fn query_lower_tiers_with_options_and_snapshot(
             }
         }
 
-        let retain_kv_transfer_chain =
+        let merge_hint_chain =
             options.retain_kv_transfer_chain && storage_tier == StorageTier::HostPinned;
+        let retain_extensions = merge_hint_chain
+            || (retain_extensions_for_every_tier && options.retain_kv_transfer_chain);
         let mut tier_matches = indexer
             .backend()
             .query_match_details_with_options_and_snapshot(
                 sequence,
                 &continuations,
-                retain_kv_transfer_chain,
+                retain_extensions,
                 &snapshot,
             );
-        if retain_kv_transfer_chain {
+        if merge_hint_chain {
             tier_matches.kv_transfer_candidates = merge_kv_transfer_tier_candidates(
                 device_matches.kv_transfer_candidates.as_ref(),
                 &mut tier_matches,
