@@ -18,8 +18,9 @@ Global Discovery Service  <--------  DynamoPoolRelay (operator-managed)
 
 The relay reaches the service through the hub Service's ClusterIP. vCluster
 syncs every pod and Service to the host cluster, so an address from one
-vCluster is routable from a pod of the other. That is the routable network the
-Kubernetes discovery modes assume.
+vCluster is routable from a pod of the other, unless a NetworkPolicy separates
+their host namespaces. That is the routable network the Kubernetes discovery
+modes assume.
 
 The test checks that:
 
@@ -38,9 +39,9 @@ passes them as `DYN_RELAY_*` variables in the `DynamoPoolRelay` pod template.
 `post-merge-ci.yml` runs it after every merge to `main`:
 
 - `global-discovery-service-build` builds `container/Dockerfile.global-discovery-service`.
-- `deploy-test-global-discovery` creates a host namespace for the test and the
-  hub and member vClusters in it, each with the operator, and runs the test.
-- `deploy-cleanup-global-discovery` deletes both vClusters and the namespace.
+- `deploy-test-global-discovery` creates the hub and member vClusters, each with
+  the operator and in a host namespace of its own, and runs the test.
+- `deploy-cleanup-global-discovery` deletes both vClusters and their namespaces.
 
 The build and the test are non-blocking while the multi-cluster pieces land.
 They have `continue-on-error`, `deploy-status-check` does not wait for them,
@@ -49,16 +50,16 @@ and the Slack notice leaves out jobs whose names contain `Global Discovery`.
 ## Run it yourself
 
 You need two clusters whose pods can reach each other's ClusterIPs, the Dynamo
-operator in the member, and `kubectl`. Two vClusters on one host cluster work:
+operator in the member, and `kubectl`. Two vClusters on one host cluster work.
+vCluster allows one virtual cluster per host namespace, so each gets its own:
 
 ```bash
-NS=gd-e2e
-vcluster create gd-hub --namespace "$NS" --connect=false
-vcluster create gd-member --namespace "$NS" --connect=false
-kubectl port-forward -n "$NS" svc/gd-hub 8443:443 &
-kubectl port-forward -n "$NS" svc/gd-member 8444:443 &
-vcluster connect gd-hub --namespace "$NS" --server=https://127.0.0.1:8443 --print > hub.kubeconfig
-vcluster connect gd-member --namespace "$NS" --server=https://127.0.0.1:8444 --print > member.kubeconfig
+vcluster create gd-hub --namespace gd-hub --connect=false
+vcluster create gd-member --namespace gd-member --connect=false
+kubectl port-forward -n gd-hub svc/gd-hub 8443:443 &
+kubectl port-forward -n gd-member svc/gd-member 8444:443 &
+vcluster connect gd-hub --namespace gd-hub --server=https://127.0.0.1:8443 --print > hub.kubeconfig
+vcluster connect gd-member --namespace gd-member --server=https://127.0.0.1:8444 --print > member.kubeconfig
 ```
 
 Install the Dynamo platform Helm chart in the member, as
@@ -88,7 +89,7 @@ directory.
 
 | Case | Waits on |
 |------|----------|
-| `--registration-storage dynamodb`: two service replicas share one table (DynamoDB Local in the hub), and both list the pool | DynamoDB registration storage in the service |
+| `--registration-storage dynamodb`: two service replicas share one table (DynamoDB Local in the hub), and both list the pool | Nothing: the service has DynamoDB storage now, so this case is next |
 | Two memory-storage instances share registrations | Registration sharing between service instances |
 | `--pool-discovery mcs`: the operator exports the pool's Services, an MCS implementation imports them into the hub, and the pool is listed with its relay identities | The operator's ServiceExports for pools, and an MCS implementation that runs in a vCluster |
 | `--pool-discovery karmada` | A Karmada control plane in the hub |

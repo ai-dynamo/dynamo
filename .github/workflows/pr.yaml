@@ -1453,6 +1453,8 @@ jobs:
       needs.changed-files.outputs.deploy == 'true'
     runs-on: dynamo-cpu-4gi-amd64
     continue-on-error: true
+    permissions:
+      contents: read
     outputs:
       image_tag: ${{ steps.build.outputs.image_tag }}
     steps:
@@ -1505,8 +1507,10 @@ jobs:
     permissions:
       contents: read
     env:
-      HOST_NAMESPACE: gh-id-${{ github.run_id }}-global-discovery-dt
+      # vCluster runs one virtual cluster per host namespace.
+      HUB_NAMESPACE: gh-id-${{ github.run_id }}-gd-hub-dt
       HUB_VCLUSTER: ci-${{ github.run_id }}-gd-hub
+      MEMBER_NAMESPACE: gh-id-${{ github.run_id }}-gd-member-dt
       MEMBER_VCLUSTER: ci-${{ github.run_id }}-gd-member
     steps:
       - name: Checkout code
@@ -1519,7 +1523,7 @@ jobs:
           # Sole writer of this vCluster name; a rerun replaces it.
           reset_existing: 'true'
           vcluster_name: ${{ env.HUB_VCLUSTER }}
-          vcluster_namespace: ${{ env.HOST_NAMESPACE }}
+          vcluster_namespace: ${{ env.HUB_NAMESPACE }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           repository: ${{ vars.ACR_REPOSITORY }}
           operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
@@ -1540,7 +1544,7 @@ jobs:
             fi
           done
           # The watchdog may have restarted the forward before it stopped.
-          pkill -f "port-forward -n ${HOST_NAMESPACE} svc/${HUB_VCLUSTER} 8443:443" || true
+          pkill -f "port-forward -n ${HUB_NAMESPACE} svc/${HUB_VCLUSTER} 8443:443" || true
           for _ in $(seq 1 15); do
             if ! curl -fsk --connect-timeout 1 --max-time 2 https://127.0.0.1:8443/healthz >/dev/null; then
               exit 0
@@ -1554,7 +1558,7 @@ jobs:
         with:
           reset_existing: 'true'
           vcluster_name: ${{ env.MEMBER_VCLUSTER }}
-          vcluster_namespace: ${{ env.HOST_NAMESPACE }}
+          vcluster_namespace: ${{ env.MEMBER_NAMESPACE }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           repository: ${{ vars.ACR_REPOSITORY }}
           operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
@@ -1566,7 +1570,7 @@ jobs:
         uses: $/.github/actions/connect-vcluster
         with:
           vcluster_name: ${{ env.MEMBER_VCLUSTER }}
-          vcluster_namespace: ${{ env.HOST_NAMESPACE }}
+          vcluster_namespace: ${{ env.MEMBER_NAMESPACE }}
       - name: Connect to the hub vCluster on 8444
         id: connect-hub
         shell: bash
@@ -1590,7 +1594,7 @@ jobs:
               fi
               sleep 5
             done
-          ' _ "${HOST_NAMESPACE}" "${HUB_VCLUSTER}" \
+          ' _ "${HUB_NAMESPACE}" "${HUB_VCLUSTER}" \
             "${PWD}/test-output/gd-hub-port-forward.log" "${PWD}/.gd-hub-port-forward.pid" \
             >/dev/null 2>&1 &
           for _ in $(seq 1 30); do
@@ -1599,7 +1603,7 @@ jobs:
             fi
             sleep 2
           done
-          vcluster connect "${HUB_VCLUSTER}" --namespace "${HOST_NAMESPACE}" \
+          vcluster connect "${HUB_VCLUSTER}" --namespace "${HUB_NAMESPACE}" \
             --server=https://127.0.0.1:8444 --print > .kubeconfig-gd-hub
           kubectl --kubeconfig=.kubeconfig-gd-hub --request-timeout=15s get namespaces >/dev/null
           KUBECONFIG_B64=$(base64 < .kubeconfig-gd-hub | tr -d '\n')
@@ -1624,29 +1628,30 @@ jobs:
             --global-discovery-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.global-discovery-service-build.outputs.image_tag }}
 
   # Its own job: dynamo-deploy-test points KUBECONFIG at the hub vCluster for
-  # the rest of the test job. Deleting the namespace deletes both vClusters.
-  # Keep the names in step with deploy-test-global-discovery's env.
+  # the rest of the test job. Keep the names in step with
+  # deploy-test-global-discovery's env.
   deploy-cleanup-global-discovery:
     name: Global Discovery Cleanup
     if: always() && needs.changed-files.outputs.run_deploy_tests == 'true'
     needs: [changed-files, deploy-test-global-discovery]
     runs-on: prod-deploy-tester-v1
+    permissions:
+      contents: read
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       with:
         persist-credentials: false
-    - name: Install vCluster CLI
-      uses: $/.github/actions/install-vcluster-cli
-    - name: Delete the member vCluster
-      shell: bash
-      run: |
-        vcluster delete "ci-${{ github.run_id }}-gd-member" \
-          --namespace "gh-id-${{ github.run_id }}-global-discovery-dt" || true
-    - name: Delete the hub vCluster and the namespace
+    - name: Delete the member vCluster and its namespace
+      uses: $/.github/actions/teardown-dynamo-operator
+      with:
+        vcluster_name: ci-${{ github.run_id }}-gd-member
+        vcluster_namespace: gh-id-${{ github.run_id }}-gd-member-dt
+    - name: Delete the hub vCluster and its namespace
+      if: always()
       uses: $/.github/actions/teardown-dynamo-operator
       with:
         vcluster_name: ci-${{ github.run_id }}-gd-hub
-        vcluster_namespace: gh-id-${{ github.run_id }}-global-discovery-dt
+        vcluster_namespace: gh-id-${{ github.run_id }}-gd-hub-dt
 
   # Serialize checkpoint lifecycles through cleanup: each Snapshot install
   # reserves resources on the same GPU nodes until its namespace is deleted.
