@@ -118,6 +118,40 @@ def test_get_frames_as_tensor_returns_exactly_the_requested_frames(decoder) -> N
     assert [int(out[i, 0, 0, 0]) for i in range(len(indices))] == indices
 
 
+class _ReusedBufferDecoder(_FakeSimpleDecoder):
+    """Refills one host buffer per decode, as a host-memory ``SimpleDecoder`` can.
+
+    numpy exports CPU DLPack like a host ``DecodedFrame``, so the real
+    ``_frame_to_rgb_hwc`` sees the same aliasing it would see in production.
+    """
+
+    def __init__(self, path, **kwargs):
+        super().__init__(path, **kwargs)
+        self._buffer = np.zeros((_HEIGHT, _WIDTH, 3), dtype=np.uint8)
+
+    def __getitem__(self, idx):
+        self.requested.append(idx)
+        self._buffer[:] = idx % 256
+        return self._buffer
+
+
+def test_frames_survive_decoder_buffer_reuse(fake_nvc, monkeypatch) -> None:
+    """Each returned frame keeps its own pixels when the decoder reuses storage.
+
+    Uses the real ``_frame_to_rgb_hwc``. Without its per-frame copy, every
+    frame aliases the last decode, and the model sees one frame repeated.
+    """
+    from dynamo.common.multimodal.nvdec_decoder import _frame_to_rgb_hwc
+
+    monkeypatch.setattr(mod, "_frame_to_rgb_hwc", _frame_to_rgb_hwc)
+    fake_nvc.SimpleDecoder = _ReusedBufferDecoder
+    indices = [0, 3, 6, 9]  # what preprocess_video asks for on a 10-frame clip
+    with NvdecVideoDecoder(b"fake-mp4-bytes") as d:
+        out = d.get_frames_as_tensor(indices)
+    assert [int(out[i].min()) for i in range(len(indices))] == indices
+    assert [int(out[i].max()) for i in range(len(indices))] == indices
+
+
 def test_get_frames_as_tensor_rejects_empty_indices(decoder) -> None:
     with pytest.raises(ValueError):
         decoder.get_frames_as_tensor([])

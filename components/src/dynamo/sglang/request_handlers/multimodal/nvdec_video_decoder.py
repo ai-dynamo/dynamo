@@ -35,6 +35,13 @@ pass. Three properties of the upstream class make that safe (verified against
   inherited cleanup exactly right.
 * Only ``__len__``, ``avg_fps`` and ``get_frames_as_tensor`` are on the
   ``preprocess_video`` path.
+
+Frames are decoded into device memory and copied to the host by
+``_frame_to_rgb_hwc`` after a device synchronize. In host-memory mode,
+PyNvVideoCodec hands back a host buffer that its own CUDA streams fill, and a
+CPU DLPack import carries no stream handshake, so nothing orders our read after
+the library's writes. After each frame was copied on return, the H.265 E/PD
+serve test on an L4 sent the model frames it called "no video" (DYN-5446).
 """
 
 from __future__ import annotations
@@ -103,11 +110,15 @@ class NvdecVideoDecoder(VideoDecoderWrapper):  # type: ignore[misc,valid-type]
         self._tc_kwargs: dict[str, Any] = {}
 
         try:
+            # Device memory, not host: _frame_to_rgb_hwc then synchronizes the
+            # device and copies each frame into fresh host storage, so the
+            # pixels do not depend on when the library's own streams finish
+            # writing a host buffer. See the module docstring.
             self._decoder = nvc.SimpleDecoder(
                 tmp_path,
                 gpu_id=gpu_id,
                 output_color_type=nvc.OutputColorType.RGB,
-                use_device_memory=False,
+                use_device_memory=True,
             )
             if len(self._decoder) <= 0:
                 raise RuntimeError("NVDEC opened the video but reports no frames")
