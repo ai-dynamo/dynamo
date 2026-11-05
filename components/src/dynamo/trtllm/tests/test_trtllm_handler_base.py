@@ -37,6 +37,7 @@ from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.request_handlers.handler_base import (
     BYPASS_REMOTE_PREFILL_ANNOTATION,
     HandlerBase,
+    _DeferredAbort,
 )
 
 pytestmark = [
@@ -646,6 +647,7 @@ class TestDeferredAbortGuard:
         return context
 
     @pytest.mark.asyncio
+    @pytest.mark.fault_tolerance
     @pytest.mark.timeout(5)
     @pytest.mark.parametrize(
         ("stopped", "killed"), [(True, False), (False, True)], ids=["stopped", "killed"]
@@ -664,6 +666,7 @@ class TestDeferredAbortGuard:
         generation_result.abort.assert_called_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.fault_tolerance
     @pytest.mark.timeout(5)
     async def test_monitor_cleanup_skips_abort_when_not_cancelled(self):
         handler = self._make_handler()
@@ -677,6 +680,7 @@ class TestDeferredAbortGuard:
         generation_result.abort.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.fault_tolerance
     @pytest.mark.timeout(5)
     async def test_monitor_cleanup_respects_finished_guard(self):
         handler = self._make_handler()
@@ -690,10 +694,9 @@ class TestDeferredAbortGuard:
         generation_result.abort.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.fault_tolerance
     @pytest.mark.timeout(5)
-    async def test_monitor_cleanup_defers_abort_before_first_token(self):
-        from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
-
+    async def test_monitor_cleanup_defers_abort_before_first_token(self, monkeypatch):
         handler = self._make_handler()
         generation_result = MagicMock()
         generation_result.finished = False
@@ -704,6 +707,18 @@ class TestDeferredAbortGuard:
 
         generation_result.__aiter__ = MagicMock(return_value=generation_result)
         generation_result.__anext__ = lambda self: mock_anext(self)
+
+        original_create_task = asyncio.create_task
+        deferred_tasks = []
+
+        def track_deferred_task(coro, **kwargs):
+            task = original_create_task(coro, **kwargs)
+            if coro.__name__ == "_wait_and_abort":
+                deferred_tasks.append(task)
+            return task
+
+        monkeypatch.setattr(asyncio, "create_task", track_deferred_task)
+
         guard = _DeferredAbort(generation_result)
         context = self._make_pending_stop_context(stopped=True)
 
@@ -712,12 +727,14 @@ class TestDeferredAbortGuard:
 
         generation_result.abort.assert_not_called()
 
+        assert len(deferred_tasks) == 1
         await result_queue.put("first_token")
-        await asyncio.sleep(0.05)
+        await deferred_tasks[0]
 
         generation_result.abort.assert_called_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.fault_tolerance
     @pytest.mark.timeout(5)
     async def test_monitor_cleanup_does_not_double_abort(self):
         """Monitor aborts, then is cancelled while draining its shutdown waiter;

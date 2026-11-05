@@ -602,14 +602,16 @@ class HandlerBase(BaseGenerativeHandler):
                 # teardown can cancel the monitor before it aborts; recheck here.
                 if not aborted and (context.is_stopped() or context.is_killed()):
                     logging.debug(
-                        f"Cancellation observed on stream cleanup for Request ID: {context.id()}"
+                        "Cancellation observed on stream cleanup for Request ID: %s",
+                        context.id(),
                     )
                     # This finally may be propagating a typed exception; don't replace it.
                     try:
                         _abort_unless_finished(generation_result, context.id())
                     except Exception:
                         logging.warning(
-                            f"Abort on stream cleanup failed for Request ID: {context.id()}",
+                            "Abort on stream cleanup failed for Request ID: %s",
+                            context.id(),
                             exc_info=True,
                         )
             else:
