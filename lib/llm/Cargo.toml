@@ -71,8 +71,11 @@ harness = false
 required-features = ["media-ffmpeg"]
 
 [dependencies]
-dynamo-custom-policy-builtin = { workspace = true }
+dynamo-router-policies = { workspace = true }
 # repo
+dynamo-global-discovery-client = { workspace = true }
+dynamo-global-common = { workspace = true, features = ["grpc"] }
+dynamo-global-view-broadcaster = { path = "../global-view-broadcaster" }
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols", "standalone-selection"] }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true, features = ["zmq-events"] }
@@ -86,6 +89,7 @@ dynamo-tokens = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = "1.9.1"
 dynamo-protocols = { workspace = true, features = ["protocol-schema"] }
+dynamo-decisions = { workspace = true }
 dynamo-parsers = { workspace = true }
 dynamo-parsers-v2 = { workspace = true }
 async-stream = { workspace = true }
@@ -111,7 +115,7 @@ percent-encoding = "2.3.2"
 prometheus = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 sha2 = "0.10"
 strum = { workspace = true }
 tempfile = { workspace = true }
@@ -128,6 +132,7 @@ validator = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 xxhash-rust = { workspace = true }
+zmq = { workspace = true }
 modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }
 
@@ -172,7 +177,7 @@ hyper-util = { version = "0.1.17", features = ["server-auto", "service", "tokio"
 tokio-rustls = { workspace = true }
 tower-http = { workspace = true }
 tower = { workspace = true }
-utoipa = { version = "5.3", features = ["axum_extras", "rc_schema"] }
+utoipa = { version = "5.3", features = ["axum_extras", "rc_schema", "preserve_order"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 
 

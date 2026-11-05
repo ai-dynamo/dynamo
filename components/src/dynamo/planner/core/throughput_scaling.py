@@ -118,6 +118,12 @@ class ThroughputScalingMixin:
                 if model_not_ready
                 else _budget_reason or _ceiling_reason or "no_change"
             )
+            if self._config.global_planner_managed_allocation and not model_not_ready:
+                return (
+                    ScalingDecision(num_prefill=desired)
+                    if component == "prefill"
+                    else ScalingDecision(num_decode=desired)
+                )
             return None
         self._diag_throughput_reason = (
             unavailable_reason if model_not_ready else "scale"
@@ -217,6 +223,8 @@ class ThroughputScalingMixin:
             self._diag_throughput_reason = hold_reason
             self._diag_throughput_reason_prefill = hold_reason
             self._diag_throughput_reason_decode = hold_reason
+            if self._config.global_planner_managed_allocation:
+                return ScalingDecision(num_prefill=num_p, num_decode=num_d)
             return None
 
         self._diag_throughput_reason = (
@@ -337,6 +345,11 @@ class ThroughputScalingMixin:
                 if unavailable_reason
                 else _budget_reason or _ceiling_reason or "no_change"
             )
+            if (
+                self._config.global_planner_managed_allocation
+                and not unavailable_reason
+            ):
+                return ScalingDecision(num_decode=desired)
             return None
         self._diag_throughput_reason = unavailable_reason or "scale"
         return ScalingDecision(num_decode=desired)
