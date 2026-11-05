@@ -183,8 +183,18 @@ impl LaneLookup {
         worker: WorkerWithDpRank,
         hash: ExternalSequenceBlockHash,
     ) -> Option<SharedNode> {
+        self.held(worker, hash).map(|(_, node)| node.clone())
+    }
+
+    /// Like [`Self::node`], but borrows the lane's hold instead of cloning the `Arc`, and
+    /// also returns the id [`Self::upsert_all_held`] takes.
+    pub(super) fn held(
+        &self,
+        worker: WorkerWithDpRank,
+        hash: ExternalSequenceBlockHash,
+    ) -> Option<(NodeId, &SharedNode)> {
         let &id = self.workers.get(&worker)?.get(&hash)?;
-        Some(self.nodes.node(id).clone())
+        Some((id, self.nodes.node(id)))
     }
 
     pub(super) fn names(&self, node: &SharedNode) -> bool {
@@ -202,10 +212,7 @@ impl LaneLookup {
         let (Some(blocks), Some(id)) = (self.workers.get(&worker), self.nodes.id_of(node)) else {
             return 0;
         };
-        hashes
-            .iter()
-            .take_while(|hash| blocks.get(hash) == Some(&id))
-            .count()
+        blocks.leading_holding(hashes, id)
     }
 
     /// Points `worker`'s entries for `hashes` at `node`. Returns the number of entries
@@ -219,8 +226,22 @@ impl LaneLookup {
     where
         I: Iterator<Item = ExternalSequenceBlockHash> + Clone,
     {
+        let id = self.nodes.hold(node);
+        self.upsert_all_held(worker, hashes, id)
+    }
+
+    /// Like [`Self::upsert_all`], for the node the lane holds as `id`, which
+    /// [`Self::held`] returned with no lane change since.
+    pub(super) fn upsert_all_held<I>(
+        &mut self,
+        worker: WorkerWithDpRank,
+        hashes: I,
+        id: NodeId,
+    ) -> usize
+    where
+        I: Iterator<Item = ExternalSequenceBlockHash> + Clone,
+    {
         let Self { workers, nodes, .. } = self;
-        let id = nodes.hold(node);
         let changed = workers
             .entry(worker)
             .or_default()

@@ -289,6 +289,14 @@ impl<'a> MaterializedSelectionInput<'a> {
         }
     }
 
+    /// Count the best eligible cached prefix again over only `kept`, when tracked.
+    fn recount_kept_candidates(&self, kept: impl Iterator<Item = WorkerWithDpRank>) {
+        if self.max_raw_cached_tokens.get().is_some() {
+            self.max_raw_cached_tokens.set(Some(0));
+            kept.for_each(|worker| self.track_kept_candidate(worker));
+        }
+    }
+
     #[inline(always)]
     fn row(
         &self,
@@ -397,6 +405,7 @@ fn worker_input_row(
         load,
         transfer: None,
         preferred_taint_multiplier,
+        dp_size: 0,
     }
 }
 
@@ -646,7 +655,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
             let mut state = state.borrow_mut();
             let has_eligible_worker = match prepared.filter(|prepared| prepared.matches(&state)) {
                 Some(prepared) => {
-                    collect_prepared_candidates(&mut state, &input, workers, prepared)?
+                    collect_prepared_candidates(&mut state, &input, workers, eligibility, prepared)?
                 }
                 None => {
                     collect_policy_candidates(&mut state, &input, workers, request, eligibility)?

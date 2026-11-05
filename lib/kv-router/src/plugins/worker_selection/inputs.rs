@@ -18,6 +18,9 @@ pub(crate) struct CandidateData {
     pub(crate) load: WorkerLoadInput,
     pub(crate) transfer: Option<WorkerTransferInput>,
     pub(crate) preferred_taint_multiplier: Option<f64>,
+    /// The worker's data-parallel size, set only on prepared rows so the scheduler actor can
+    /// tell a fully full worker without a config lookup. Host-only.
+    pub(crate) dp_size: u32,
 }
 
 /// Static worker info by view row. Hosts look it up only when a component asks, so rows
@@ -551,6 +554,7 @@ impl CandidateData {
             preferred_taint_multiplier: self
                 .preferred_taint_multiplier
                 .or(additional.preferred_taint_multiplier),
+            dp_size: self.dp_size,
         }
     }
 }

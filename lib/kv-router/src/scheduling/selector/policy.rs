@@ -480,6 +480,7 @@ impl CandidatePreparer {
             };
             let mut row = input.row(worker, preferred_taint_multiplier, row_inputs);
             row.inputs = self.inputs;
+            row.dp_size = config.data_parallel_size();
             input.track_kept_candidate(worker);
             rows.push(row);
             if defer_transfer {
@@ -510,17 +511,46 @@ impl PreparedCandidates {
     }
 }
 
-/// Score prepared rows after filling the load inputs that depend on bookings.
+/// Drop the rows of workers whose every rank is full, keeping the rest in order, and recount
+/// the best eligible cached prefix if a dropped row held it.
+fn drop_full_worker_rows(
+    input: &MaterializedSelectionInput<'_>,
+    eligibility: RoutingEligibility<'_>,
+    rows: &mut Vec<CandidateData>,
+) {
+    let prepared_max = input.max_raw_cached_tokens().filter(|&max| max > 0);
+    let mut dropped_held_max = false;
+    rows.retain(|row| {
+        let full = eligibility.is_worker_full(row.worker.worker_id, row.dp_size);
+        if full && let Some(max) = prepared_max {
+            dropped_held_max |= input
+                .request
+                .raw_cached_tokens_for(row.worker, input.context.block_size)
+                == max;
+        }
+        !full
+    });
+    if dropped_held_max {
+        input.recount_kept_candidates(rows.iter().map(|row| row.worker));
+    }
+}
+
+/// Score prepared rows after filling the load inputs that depend on bookings. Returns
+/// whether any row is left once full workers' rows are dropped.
 pub(super) fn collect_prepared_candidates<C: WorkerConfigLike>(
     state: &mut ComposedPolicyState,
     input: &MaterializedSelectionInput<'_>,
     workers: &HashMap<WorkerId, C>,
+    eligibility: RoutingEligibility<'_>,
     mut prepared: PreparedCandidates,
 ) -> Result<bool, KvSchedulerError> {
     input.restore_prepared(
         prepared.max_raw_cached_tokens,
         prepared.kv_transfer_sources.take(),
     );
+    if eligibility.skips_full_workers() {
+        drop_full_worker_rows(input, eligibility, &mut prepared.rows);
+    }
     let ComposedPolicyState {
         scorers,
         scorer_picker_inputs,
@@ -553,12 +583,13 @@ pub(super) fn collect_prepared_candidates<C: WorkerConfigLike>(
             load_inputs,
         );
     }
+    let has_eligible_worker = !candidates.is_empty();
     if scorers.is_empty() {
         // Picker-only policies keep no scorer rows.
         unscored_candidates.clear();
     }
     state.score_candidates(&input.context, &input.cache_snapshot, workers)?;
-    Ok(true)
+    Ok(has_eligible_worker)
 }
 
 // Out of line so rows that need no fetch input keep the loop body small.
