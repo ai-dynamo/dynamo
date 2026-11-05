@@ -531,26 +531,17 @@ func buildFailoverEnginePair(podSpec *corev1.PodSpec, userEnvironmentCount int) 
 	mainContainer := podSpec.Containers[0]
 	sidecars := podSpec.Containers[1:]
 	engines := make([]corev1.Container, failoverEngineCount, failoverEngineCount+len(sidecars))
-	userEnvironmentStarts := make([]int, failoverEngineCount)
-	userEnvironmentEnds := make([]int, failoverEngineCount)
 	for i := range failoverEngineCount {
-		engines[i], userEnvironmentStarts[i], userEnvironmentEnds[i] = buildEngineContainer(mainContainer, i, commonconsts.DynamoSystemPort+i, userEnvironmentCount)
+		engine, userStart, userEnd := buildEngineContainer(mainContainer, i, commonconsts.DynamoSystemPort+i, userEnvironmentCount)
+		userEnvironmentCounts[i] = userEnd - userStart
+
+		// Place the cloned engine defaults ahead of each surviving user suffix.
+		if userStart < userEnd {
+			engine.Env = slices.Concat(engine.Env[:userStart], engine.Env[userEnd:], engine.Env[userStart:userEnd])
+		}
+		engines[i] = engine
 	}
 	podSpec.Containers = append(engines, sidecars...)
-
-	// Place the cloned engine defaults ahead of each surviving user suffix.
-	for i := range engines {
-		userEnvironmentCounts[i] = userEnvironmentEnds[i] - userEnvironmentStarts[i]
-		if userEnvironmentStarts[i] == userEnvironmentEnds[i] {
-			continue
-		}
-		engine := &podSpec.Containers[i]
-		engine.Env = slices.Concat(
-			engine.Env[:userEnvironmentStarts[i]],
-			engine.Env[userEnvironmentEnds[i]:],
-			engine.Env[userEnvironmentStarts[i]:userEnvironmentEnds[i]],
-		)
-	}
 
 	return userEnvironmentCounts, nil
 }

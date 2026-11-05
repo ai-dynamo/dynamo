@@ -538,7 +538,7 @@ The following spec assembles the steps above into one aggregated Qwen3-32B deplo
 
 ### Environment variable order
 
-For DGDs created by Dynamo Operator 1.6.0 or later, the operator preserves environment variable
+For DGDs created by Dynamo Operator 1.7.0 or later, the operator preserves environment variable
 order and duplicate names. The rendered list contains operator-provided defaults first, including
 component, infrastructure/transport, KV-transfer, and inference-backend variables. DGD-level
 `spec.env` follows, then component `podTemplate.spec.containers[*].env`.
@@ -555,10 +555,10 @@ conversion. When both lists define the same name, the extra container value repl
 service value at its original position. Put variables that need ordered expansion or duplicate
 names in one of these lists, or use `v1beta1` with `podTemplate.spec.containers[*].env`.
 
-DGDs created by an operator older than 1.6.0, or without the
+DGDs created by an operator older than 1.7.0, or without the
 `nvidia.com/dynamo-operator-origin-version` annotation, retain the legacy sorted and de-duplicated
 output after an operator upgrade. See the
-[Dynamo Platform v1.6.0 upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#environment-variable-order-in-newly-created-dgds)
+[Dynamo Platform v1.7.0 upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#environment-variable-order-in-newly-created-dgds)
 for migration guidance.
 
 <Tabs>
