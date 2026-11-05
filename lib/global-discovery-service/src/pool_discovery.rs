@@ -37,7 +37,7 @@ mod replicas;
 mod watch;
 
 pub use pools::{Capacity, PoolDirectory, PoolEvent, PoolListing};
-pub use registrar::{Lease, PoolRegistrar, PoolRegistration, RegistrationExchange};
+pub use registrar::{ExchangeRound, Lease, PoolRegistrar, PoolRegistration, RegistrationExchange};
 pub use replicas::{ReplicaDirectory, RouterReplica, RouterReplicaEvent, RouterReplicaId};
 pub use watch::{Completeness, Directory, Snapshot, WatchEvent, WatchStream};
 

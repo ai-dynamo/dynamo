@@ -23,8 +23,8 @@
 # registrations it receives. To run one in each cluster, export this Service,
 # import it in every cluster as the router Service is, and add
 # --peer-service=global-discovery-service, so the instances share their
-# registrations. Without the import, an instance finds no other and still
-# reports complete lists.
+# registrations. The import must list this cluster's own instances too. An
+# instance that does not find itself in it keeps its pool lists incomplete.
 apiVersion: v1
 kind: Namespace
 metadata:

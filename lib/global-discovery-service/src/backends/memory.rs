@@ -17,9 +17,9 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use crate::pool_discovery::{
-    Completeness, Directory, DiscoveryError, Lease, PoolEvent, PoolListing, PoolRegistrar,
-    PoolRegistration, RegistrationExchange, RouterReplica, RouterReplicaEvent, RouterReplicaId,
-    Snapshot, WatchEvent, WatchStream,
+    Completeness, Directory, DiscoveryError, ExchangeRound, Lease, PoolEvent, PoolListing,
+    PoolRegistrar, PoolRegistration, RegistrationExchange, RouterReplica, RouterReplicaEvent,
+    RouterReplicaId, Snapshot, WatchEvent, WatchStream,
 };
 use async_trait::async_trait;
 use dynamo_global_common::PoolKey;
@@ -53,12 +53,12 @@ pub struct MemoryPoolStore {
     stop: CancellationToken,
 }
 
-#[derive(Default)]
 struct Pools {
     registrations: HashMap<PoolKey, Registered>,
-    /// Registrations made with another service instance may be missing
-    /// (see [`RegistrationExchange::set_copies_missing`]).
-    copies_missing: bool,
+    /// `Some` once this instance shares registrations with the others.
+    exchange: Option<Exchange>,
+    /// The completeness watchers were last told.
+    announced: Completeness,
 }
 
 struct Registered {
@@ -70,7 +70,62 @@ struct Registered {
     local: bool,
 }
 
+impl Registered {
+    /// When the pool's registration may have lapsed everywhere: at once for
+    /// one made here, but a copy lapses up to half a heartbeat interval, the
+    /// longest the other instance had to answer, before its original.
+    fn lapsed_at(&self, lease: Lease) -> Instant {
+        if self.local {
+            self.expires_at
+        } else {
+            self.expires_at + lease.heartbeat_interval() / 2
+        }
+    }
+}
+
+/// What this instance knows about the registrations the other instances
+/// received.
+#[derive(Default)]
+struct Exchange {
+    round: ExchangeRound,
+    /// The latest time a registration lapsed here, of those the sweep removed.
+    lapsed: Option<Instant>,
+}
+
+impl Exchange {
+    /// No registration made with another instance can be missing: the last
+    /// round vouches for now, and every instance has been asked since the
+    /// latest lapse here, including the ones the sweep has not removed yet.
+    fn complete(
+        &self,
+        registrations: &HashMap<PoolKey, Registered>,
+        lease: Lease,
+        now: Instant,
+    ) -> bool {
+        let lapsed = registrations
+            .values()
+            .filter(|registered| registered.expires_at <= now)
+            .map(|registered| registered.lapsed_at(lease))
+            .max()
+            .max(self.lapsed);
+        self.round.complete_until.is_some_and(|until| now < until)
+            && lapsed.is_none_or(|lapsed| {
+                self.round
+                    .answered_since
+                    .is_some_and(|since| since >= lapsed)
+            })
+    }
+}
+
 impl Pools {
+    fn new() -> Self {
+        Self {
+            registrations: HashMap::new(),
+            exchange: None,
+            announced: Completeness::Estimated,
+        }
+    }
+
     fn snapshot(&self, now: Instant, completeness: Completeness) -> Snapshot<PoolListing> {
         Snapshot {
             items: self
@@ -82,6 +137,56 @@ impl Pools {
             completeness,
         }
     }
+
+    /// `Exact` once a lease has passed since the store started, unless
+    /// registrations made with another instance may be missing.
+    fn completeness(&self, started: Instant, lease: Lease, now: Instant) -> Completeness {
+        let copies_complete = self
+            .exchange
+            .as_ref()
+            .is_none_or(|exchange| exchange.complete(&self.registrations, lease, now));
+        if copies_complete && now.saturating_duration_since(started) >= lease.duration() {
+            Completeness::Exact
+        } else {
+            Completeness::Estimated
+        }
+    }
+
+    /// Sends watchers a `Resync` when the lists' completeness differs from
+    /// what they were last told.
+    fn announce(
+        &mut self,
+        started: Instant,
+        lease: Lease,
+        now: Instant,
+        events: &broadcast::Sender<PoolEvent>,
+    ) {
+        let completeness = self.completeness(started, lease, now);
+        if completeness != self.announced {
+            self.announced = completeness;
+            // No subscribers is not an error.
+            let _ = events.send(WatchEvent::Resync(self.snapshot(now, completeness)));
+        }
+    }
+
+    /// Removes the pools whose leases have passed, and returns their keys.
+    /// Notes when the latest of them may have lapsed everywhere.
+    fn remove_lapsed(&mut self, lease: Lease, now: Instant) -> Vec<PoolKey> {
+        let mut removed = Vec::new();
+        let mut lapsed = None;
+        self.registrations.retain(|key, registered| {
+            let live = registered.expires_at > now;
+            if !live {
+                lapsed = lapsed.max(Some(registered.lapsed_at(lease)));
+                removed.push(key.clone());
+            }
+            live
+        });
+        if let Some(exchange) = &mut self.exchange {
+            exchange.lapsed = exchange.lapsed.max(lapsed);
+        }
+        removed
+    }
 }
 
 impl MemoryPoolStore {
@@ -91,7 +196,7 @@ impl MemoryPoolStore {
         Self {
             lease,
             started: Instant::now(),
-            pools: Arc::default(),
+            pools: Arc::new(Mutex::new(Pools::new())),
             events: broadcast::channel(EVENT_BUFFER).0,
             sweeping: OnceLock::new(),
             stop: CancellationToken::new(),
@@ -109,7 +214,8 @@ impl MemoryPoolStore {
                 Arc::clone(&self.pools),
                 self.events.clone(),
                 self.lease.heartbeat_interval().min(SWEEP_EVERY),
-                self.started.checked_add(self.lease.duration()),
+                self.started,
+                self.lease,
                 self.stop.clone(),
             ));
         });
@@ -183,51 +289,34 @@ impl RegistrationExchange for MemoryPoolStore {
             .collect()
     }
 
+    /// Watchers get a `Resync` when this changes whether lists are `Exact`.
+    fn end_round(&self, round: ExchangeRound) {
+        self.ensure_sweeping();
+        let now = Instant::now();
+        let mut pools = self.lock();
+        pools.exchange.get_or_insert_default().round = round;
+        pools.announce(self.started, self.lease, now, &self.events);
+    }
+
     fn holds_every_local_registration(&self) -> bool {
         Instant::now().saturating_duration_since(self.started) >= self.lease.duration()
     }
-
-    /// Watchers get a `Resync` when this changes whether lists are `Exact`.
-    fn set_copies_missing(&self, missing: bool) {
-        let now = Instant::now();
-        let mut pools = self.lock();
-        let before = completeness(self.started, self.lease, now, pools.copies_missing);
-        pools.copies_missing = missing;
-        let after = completeness(self.started, self.lease, now, missing);
-        if after != before {
-            // No subscribers is not an error.
-            let _ = self
-                .events
-                .send(WatchEvent::Resync(pools.snapshot(now, after)));
-        }
-    }
 }
 
-/// `Exact` once a lease has passed since the store started, unless
-/// registrations made with another instance may be missing.
-fn completeness(
-    started: Instant,
-    lease: Lease,
-    now: Instant,
-    copies_missing: bool,
-) -> Completeness {
-    if !copies_missing && now.saturating_duration_since(started) >= lease.duration() {
-        Completeness::Exact
-    } else {
-        Completeness::Estimated
-    }
-}
-
-/// Removes expired pools and publishes `Removed` for each. At `complete_at`,
-/// once a lease has passed since the store started, publishes a `Resync`, so
-/// watchers learn that its lists are complete, unless copies may be missing.
+/// Removes expired pools and publishes `Removed` for each, after a `Resync`
+/// if the lists' completeness changed, so that watchers learn that a pool
+/// may have been renewed with another instance before it goes. A lease after
+/// `started`, publishes a `Resync`, so watchers learn that the lists are
+/// complete, unless copies may be missing.
 async fn sweep(
     pools: Arc<Mutex<Pools>>,
     events: broadcast::Sender<PoolEvent>,
     every: Duration,
-    mut complete_at: Option<Instant>,
+    started: Instant,
+    lease: Lease,
     stop: CancellationToken,
 ) {
+    let mut complete_at = started.checked_add(lease.duration());
     let mut ticks = tokio::time::interval(every);
     ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -236,28 +325,21 @@ async fn sweep(
             () = stop.cancelled() => return,
             () = wake_at(complete_at) => {
                 complete_at = None;
-                let pools = pools.lock().unwrap_or_else(PoisonError::into_inner);
-                // Otherwise the lists stay `Estimated`, and
-                // `set_copies_missing` announces the change.
-                if !pools.copies_missing {
-                    let complete = pools.snapshot(Instant::now(), Completeness::Exact);
-                    // No subscribers is not an error.
-                    let _ = events.send(WatchEvent::Resync(complete));
-                }
+                let mut pools = pools.lock().unwrap_or_else(PoisonError::into_inner);
+                pools.announce(started, lease, Instant::now(), &events);
                 continue;
             }
             _ = ticks.tick() => {}
         }
         let now = Instant::now();
         let mut pools = pools.lock().unwrap_or_else(PoisonError::into_inner);
-        pools.registrations.retain(|key, registered| {
-            let live = registered.expires_at > now;
-            if !live {
-                // No subscribers is not an error.
-                let _ = events.send(WatchEvent::Removed(key.clone()));
-            }
-            live
-        });
+        let removed = pools.remove_lapsed(lease, now);
+        // Also announces the end of the last round's `complete_until`.
+        pools.announce(started, lease, now, &events);
+        for key in removed {
+            // No subscribers is not an error.
+            let _ = events.send(WatchEvent::Removed(key));
+        }
     }
 }
 
@@ -326,12 +408,13 @@ impl Directory<PoolListing, PoolKey> for MemoryPoolStore {
     async fn list(&self) -> Result<Snapshot<PoolListing>, DiscoveryError> {
         let now = Instant::now();
         let pools = self.lock();
-        let completeness = completeness(self.started, self.lease, now, pools.copies_missing);
+        let completeness = pools.completeness(self.started, self.lease, now);
         Ok(pools.snapshot(now, completeness))
     }
 
     /// Starts from the view `list` returns, then follows registrations and
-    /// expired leases, and sends a `Resync` when the lists become `Exact`.
+    /// expired leases, and sends a `Resync` whenever the lists' completeness
+    /// changes.
     async fn list_and_watch(
         &self,
         cancel_token: Option<CancellationToken>,
@@ -344,7 +427,7 @@ impl Directory<PoolListing, PoolKey> for MemoryPoolStore {
             move || {
                 let pools = pools.lock().unwrap_or_else(PoisonError::into_inner);
                 let now = Instant::now();
-                let completeness = completeness(started, lease, now, pools.copies_missing);
+                let completeness = pools.completeness(started, lease, now);
                 (events.subscribe(), Some(pools.snapshot(now, completeness)))
             },
             cancel_token.unwrap_or_default(),
@@ -459,6 +542,16 @@ mod tests {
             .find(|listing| listing.key == key(dgd))
     }
 
+    /// The completeness of the next event, which must be a `Resync` within a
+    /// second.
+    async fn next_resync(watch: &mut WatchStream<PoolListing, PoolKey>) -> Completeness {
+        let next = tokio::time::timeout(Duration::from_secs(1), watch.next()).await;
+        let Ok(Some(Ok(WatchEvent::Resync(snapshot)))) = next else {
+            panic!("expected a Resync");
+        };
+        snapshot.completeness
+    }
+
     #[tokio::test(start_paused = true)]
     async fn registering_again_only_renews() {
         let store = MemoryPoolStore::new(lease());
@@ -551,11 +644,7 @@ mod tests {
         assert_eq!(completeness().await, Completeness::Exact);
         // Watchers learn it too. With no pools nothing else is published, so
         // the wait is bounded: a missing Resync fails the test, not hangs it.
-        let next = tokio::time::timeout(Duration::from_secs(1), watch.next()).await;
-        let Ok(Some(Ok(WatchEvent::Resync(complete)))) = next else {
-            panic!("expected a Resync");
-        };
-        assert_eq!(complete.completeness, Completeness::Exact);
+        assert_eq!(next_resync(&mut watch).await, Completeness::Exact);
     }
 
     #[tokio::test(start_paused = true)]
@@ -598,37 +687,112 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn lists_are_estimated_while_copies_may_be_missing() {
+    async fn lists_are_estimated_until_a_round_says_copies_are_complete_and_after_that() {
         let store = MemoryPoolStore::new(lease());
+        let completeness = || async { store.list().await.unwrap().completeness };
         let mut watch = store.list_and_watch(None).await.unwrap();
-        assert!(matches!(
-            watch.next().await,
-            Some(Ok(WatchEvent::Resync(_)))
-        ));
-        // Another instance has not answered, so the first lease passes
-        // without the lists turning `Exact`, and the sweep announces nothing.
-        store.set_copies_missing(true);
+        assert_eq!(next_resync(&mut watch).await, Completeness::Estimated);
+        // Before the first round ends, registrations made with another
+        // instance may be missing, so the first lease passes without the
+        // lists turning `Exact`, and the sweep announces nothing.
+        store.end_round(ExchangeRound::default());
         tokio::time::advance(lease().duration()).await;
         tokio::time::sleep(Duration::from_millis(1)).await;
         assert!(watch.next().now_or_never().is_none());
-        assert_eq!(
-            store.list().await.unwrap().completeness,
-            Completeness::Estimated
+        assert_eq!(completeness().await, Completeness::Estimated);
+
+        // A round vouches for the next 3 s, and watchers learn it.
+        let now = Instant::now();
+        store.end_round(ExchangeRound {
+            answered_since: Some(now),
+            complete_until: Some(now + Duration::from_secs(3)),
+        });
+        assert_eq!(next_resync(&mut watch).await, Completeness::Exact);
+        assert_eq!(completeness().await, Completeness::Exact);
+
+        // No other round ends, as when the task that asks the other instances
+        // has stopped: once that time passes, the lists are `Estimated`, and
+        // the sweep tells watchers.
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(completeness().await, Completeness::Estimated);
+        assert_eq!(next_resync(&mut watch).await, Completeness::Estimated);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_registration_that_lapses_keeps_lists_estimated_until_every_instance_is_asked_again()
+    {
+        let store = MemoryPoolStore::new(lease());
+        // Rounds in which every instance answered in full when asked at
+        // `answered_since`, vouching for an hour.
+        let round = |answered_since: Instant| ExchangeRound {
+            answered_since: Some(answered_since),
+            complete_until: Some(answered_since + Duration::from_secs(3600)),
+        };
+        store.end_round(ExchangeRound::default());
+        tokio::time::advance(lease().duration()).await;
+        // The sweep takes the end of the first lease now, not with the lapse.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        // A copy with 5 s left, and a registration made here, which lasts a
+        // lease.
+        store.adopt(registration("copied", "m1"), Duration::from_secs(5));
+        let _ = store.register(registration("local", "m1")).await.unwrap();
+        let asked = Instant::now();
+        store.end_round(round(asked));
+        let mut watch = store.list_and_watch(None).await.unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                watch.next().await,
+                Some(Ok(WatchEvent::Upserted(_)))
+            ));
+        }
+        assert_eq!(next_resync(&mut watch).await, Completeness::Exact);
+
+        // The copy lapses before the instances are asked again, but its
+        // PoolRelay may have renewed it late since, with any of them. The
+        // pool is not listed, and neither are the lists complete. Watchers
+        // learn that before the pool goes.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let listed = store.list().await.unwrap();
+        assert!(find(&store, "copied").await.is_none());
+        assert_eq!(listed.completeness, Completeness::Estimated);
+        assert_eq!(next_resync(&mut watch).await, Completeness::Estimated);
+        assert!(
+            matches!(watch.next().await, Some(Ok(WatchEvent::Removed(k))) if k == key("copied"))
         );
 
-        // Watchers learn when it answers, and when it stops again.
-        for (missing, expected) in [
-            (false, Completeness::Exact),
-            (true, Completeness::Estimated),
-        ] {
-            store.set_copies_missing(missing);
-            let next = tokio::time::timeout(Duration::from_secs(1), watch.next()).await;
-            let Ok(Some(Ok(WatchEvent::Resync(snapshot)))) = next else {
-                panic!("expected a Resync");
-            };
-            assert_eq!(snapshot.completeness, expected);
-            assert_eq!(store.list().await.unwrap().completeness, expected);
+        // Answers to requests sent before the lapse settle nothing, and nor
+        // do ones sent within half a heartbeat interval after it: a copy
+        // lapses up to that much before its original, the longest an
+        // instance takes to answer.
+        for sent in [asked + Duration::from_secs(4), Instant::now()] {
+            store.end_round(round(sent));
+            assert_eq!(
+                store.list().await.unwrap().completeness,
+                Completeness::Estimated
+            );
         }
+        // A later round brings the renewed pool back, and since every
+        // instance was asked after its original may have lapsed, the lists
+        // are complete again.
+        tokio::time::advance(lease().heartbeat_interval() / 2).await;
+        store.adopt(registration("copied", "m1"), Duration::from_secs(15));
+        store.end_round(round(Instant::now()));
+        assert!(
+            matches!(watch.next().await, Some(Ok(WatchEvent::Upserted(listing))) if listing.key == key("copied"))
+        );
+        assert_eq!(next_resync(&mut watch).await, Completeness::Exact);
+
+        // So does a registration made here: its PoolRelay may have renewed it
+        // late with another instance. Its lapse is known exactly, so the
+        // next round settles it.
+        tokio::time::advance(Duration::from_millis(7500)).await;
+        assert!(find(&store, "local").await.is_none());
+        assert_eq!(next_resync(&mut watch).await, Completeness::Estimated);
+        store.end_round(round(Instant::now()));
+        assert_eq!(
+            store.list().await.unwrap().completeness,
+            Completeness::Exact
+        );
     }
 
     #[tokio::test]

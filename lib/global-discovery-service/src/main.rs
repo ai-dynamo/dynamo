@@ -151,14 +151,18 @@ struct Args {
     )]
     router_port_name: Option<String>,
     /// This service's own Service, exported through MCS. With it, the
-    /// instances in every cluster share their registrations, over plain
-    /// HTTP, so not with `--tls-cert-path` yet. The lease must be at least
-    /// three heartbeat intervals, and every instance must use the same
-    /// heartbeat interval and lease. Other regions drop a pool whose PoolRelay
-    /// is more than the lease minus two heartbeat intervals late (5 s with the
-    /// defaults); its own region allows the lease minus one. While another
-    /// instance is listed but does not answer, `GET /pools` says the list is
-    /// not complete, so Global Routers keep pools that may have left.
+    /// instances in every cluster share their registrations, over plain HTTP
+    /// on a trusted network, so not with `--tls-cert-path` yet. Each cluster's
+    /// import must list that cluster's own instances too. The lease must be at
+    /// least three heartbeat intervals, and every instance must use the same
+    /// heartbeat interval and lease. While registrations made with another
+    /// instance may be missing here, `GET /pools` says the list is not
+    /// complete, so Global Routers keep pools that may have left: until this
+    /// instance has asked the others and found itself in the list, for a
+    /// lease after an instance leaves, while one does not answer completely,
+    /// and after a registration lapses here, until every instance has
+    /// answered again, since its PoolRelay may have renewed it late with any
+    /// of them.
     #[arg(
         long,
         value_parser = NonEmptyStringValueParser::new(),
@@ -354,7 +358,9 @@ fn frontend_service(args: &Args) -> FrontendService {
 async fn main() -> Result<()> {
     dynamo_runtime::logging::init();
     let args = parse_args(std::env::args_os()).unwrap_or_else(|error| error.exit());
+    // Before the backend starts tasks that stop with it.
     let shutdown = CancellationToken::new();
+    cancel_on_signal(shutdown.clone())?;
     let backend = match args.pool_discovery.mcs() {
         None => registrations_backend(&args)?,
         Some(mcs) => mcs_backend(&args, mcs, &shutdown).await?,
@@ -364,7 +370,6 @@ async fn main() -> Result<()> {
         .with_context(|| format!("bind the Global Discovery listener at {}", args.listen))?;
     tracing::info!(address = %args.listen, "Global Discovery Service listening");
 
-    cancel_on_signal(shutdown.clone())?;
     let tls = args
         .tls_cert_path
         .clone()

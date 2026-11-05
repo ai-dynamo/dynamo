@@ -14,13 +14,13 @@
 //!   starts, while PoolRelays may not have registered yet; and with MCS, also
 //!   while another discovery instance may hold registrations that this one has
 //!   not copied yet (see [`crate::peers`]), and while the MCS watch keeps
-//!   failing. A
-//!   caller that keeps its own list replaces it with a complete list, but
-//!   merges a partial one: it adds new pools and updates changed ones, keeps
-//!   known pools that are missing, and waits for a complete list to remove
-//!   any. A caller that knows no pools yet still uses a partial list.
+//!   failing. A caller that keeps its own list replaces it with a complete
+//!   list, but merges a partial one: it adds new pools and updates changed
+//!   ones, keeps known pools that are missing, and waits for a complete list
+//!   to remove any. A caller that knows no pools yet still uses a partial list.
 //! - `GET /registrations`: the registrations this instance's PoolRelays
-//!   made, for the other instances ([`crate::peers`]).
+//!   made, for the other instances ([`crate::peers`]). Like `POST /pools`, it
+//!   assumes a trusted network.
 //! - `GET /healthz`: OK while the service can answer from its backend. Use it
 //!   for readiness; liveness needs only the TCP port. Ready does not mean the
 //!   pool list is complete: `GET /pools` says that in `complete`.
