@@ -99,6 +99,8 @@ def embedding_processes():
     """
     imports = {
         "vllm": {},
+        "vllm.v1": {},
+        "vllm.v1.engine": {},
         "vllm.config": {"VllmConfig": object},
         "vllm.usage.usage_lib": {"UsageContext": object},
         "vllm.v1.engine.async_llm": {"AsyncLLM": object},
