@@ -3881,8 +3881,19 @@ impl OpenAIPreprocessor {
             return Ok(Vec::new());
         };
 
+        let mut end_tokens = tool_call_config.parser_config.tool_call_end_tokens();
+        if crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) == Some("gpt_oss")
+        {
+            // GPT-OSS v2 also closes directed calls on <|return|>. The legacy
+            // Harmony config only declares <|call|>; keep both visible to v2.
+            end_tokens.push("<|return|>".to_string());
+        }
+
         let mut visible_stop_token_ids = Vec::new();
-        for end_token in tool_call_config.parser_config.tool_call_end_tokens() {
+        for end_token in end_tokens {
             if end_token.is_empty() {
                 continue;
             }
@@ -13072,6 +13083,12 @@ responses_tools: None,
 
     const HARMONY_CALL_TOKEN_ID: TokenIdType = 42;
     const HARMONY_RETURN_TOKEN_ID: TokenIdType = 43;
+    const HARMONY_BODY_TOKEN_ID: TokenIdType = 44;
+    const HARMONY_TOOL_BODY: &str = concat!(
+        "<|channel|>analysis<|message|>Look up x.<|end|>",
+        "<|start|>assistant<|channel|>commentary to=functions.lookup<|message|>",
+        r#"{"query":"x"}"#,
+    );
 
     struct HiddenStopTokenizer;
 
@@ -13092,12 +13109,19 @@ responses_tools: None,
     impl crate::tokenizers::traits::Decoder for HiddenStopTokenizer {
         fn decode(
             &self,
-            _token_ids: &[TokenIdType],
+            token_ids: &[TokenIdType],
             _skip_special_tokens: bool,
         ) -> anyhow::Result<crate::tokenizers::traits::DecodeResult> {
-            Ok(crate::tokenizers::traits::DecodeResult::Complete(
-                String::new(),
-            ))
+            let mut text = String::new();
+            for id in token_ids {
+                text.push_str(match *id {
+                    HARMONY_CALL_TOKEN_ID => "<|call|>",
+                    HARMONY_RETURN_TOKEN_ID => "<|return|>",
+                    HARMONY_BODY_TOKEN_ID => HARMONY_TOOL_BODY,
+                    _ => anyhow::bail!("unexpected Harmony token {id}"),
+                });
+            }
+            Ok(crate::tokenizers::traits::DecodeResult::Complete(text))
         }
     }
 
@@ -13160,6 +13184,156 @@ responses_tools: None,
             none_hidden,
             [HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID, 7]
         );
+    }
+
+    #[test]
+    fn gpt_oss_return_stop_respects_parser_version_and_tool_choice() {
+        const CHILD: &str = "DYNAMO_GPT_OSS_RETURN_STOP_CHILD";
+        let Ok(version) = std::env::var(CHILD) else {
+            for version in ["auto", "1", "2"] {
+                let mut command = crate::test_utils::isolated_command(
+                    "preprocessor::extra_args_media_copy_tests::gpt_oss_return_stop_respects_parser_version_and_tool_choice",
+                );
+                command
+                    .env(CHILD, version)
+                    .env(env_llm::DYN_PARSER_VERSION, version);
+                crate::test_utils::assert_isolated_success(&command.output().unwrap());
+            }
+            return;
+        };
+        let preprocessor = hidden_stop_preprocessor();
+        for tool_choice in ["auto", "none"] {
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test", "messages": [{"role": "user", "content": "test"}],
+                    "tools": [{"type": "function", "function": {"name": "lookup"}}],
+                    "tool_choice": tool_choice
+                }))
+                .unwrap();
+            let mut hidden = vec![HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID, 7];
+            let visible = preprocessor
+                .remove_tool_parser_end_tokens_from_hidden_stops(&request, &mut hidden)
+                .unwrap();
+            if tool_choice == "none" {
+                assert!(visible.is_empty());
+                assert_eq!(hidden, [HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID, 7]);
+            } else if version == "1" {
+                assert_eq!(visible, [HARMONY_CALL_TOKEN_ID]);
+                assert_eq!(hidden, [HARMONY_RETURN_TOKEN_ID, 7]);
+            } else {
+                assert_eq!(visible, [HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID]);
+                assert_eq!(hidden, [7]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gpt_oss_v2_tool_endings_survive_stop_decoder_and_aggregation() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_v2_tool_endings_survive_stop_decoder_and_aggregation"
+            ),
+            &[(env_llm::DYN_PARSER_VERSION, "2")],
+        ) {
+            return;
+        }
+        use crate::backend::Decoder;
+        use crate::protocols::common::StopConditions;
+        use crate::protocols::openai::chat_completions::NvCreateChatCompletionResponse;
+
+        let mut preprocessor = hidden_stop_preprocessor();
+        preprocessor.runtime_config.reasoning_parser = Some("gpt_oss".into());
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test", "messages": [{"role": "user", "content": "Look up x"}],
+            "tools": [{"type": "function", "function": {"name": "lookup",
+                "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}}}],
+            "tool_choice": "auto"
+        }))
+        .unwrap();
+        for ending in [
+            Some(HARMONY_CALL_TOKEN_ID),
+            Some(HARMONY_RETURN_TOKEN_ID),
+            None,
+        ] {
+            let mut hidden = vec![HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID];
+            let visible = preprocessor
+                .remove_tool_parser_end_tokens_from_hidden_stops(&request, &mut hidden)
+                .unwrap();
+            let mut decoder = Decoder::new(
+                crate::tokenizers::DecodeStream::new(preprocessor.tokenizer.clone(), &[], false),
+                StopConditions {
+                    stop_token_ids_hidden: Some(hidden),
+                    stop_token_ids_visible: Some(visible),
+                    ..Default::default()
+                },
+                false,
+                false,
+                false,
+                None,
+                None,
+            );
+            let mut tokens = vec![HARMONY_BODY_TOKEN_ID];
+            tokens.extend(ending);
+            let decoded = decoder.process_token_ids(&tokens).unwrap();
+            assert_eq!(decoded.stop_trigger.is_some(), ending.is_some());
+            let mut chunk = chat_stream_chunk(0, Some(Role::Assistant));
+            chunk.data.as_mut().unwrap().inner.choices[0].delta.content =
+                decoded.text.map(ChatCompletionMessageContent::Text);
+            let mut terminal = terminal_chat_stream_chunk();
+            terminal.data.as_mut().unwrap().inner.choices[0].finish_reason =
+                Some(if ending.is_some() {
+                    FinishReason::Stop
+                } else {
+                    FinishReason::Length
+                });
+            let output: Vec<_> = preprocessor
+                .postprocessor_parsing_stream(
+                    stream::iter([chunk, terminal]),
+                    &request,
+                    false,
+                    false,
+                )
+                .unwrap()
+                .collect()
+                .await;
+            let expected_finish = if ending.is_some() {
+                FinishReason::ToolCalls
+            } else {
+                FinishReason::Length
+            };
+            assert!(
+                has_finish_reason(&output, expected_finish.clone()),
+                "ending={ending:?}"
+            );
+            let response = NvCreateChatCompletionResponse::from_annotated_stream(
+                stream::iter(output),
+                ParsingOptions::new(Some("harmony".into()), Some("gpt_oss".into())),
+            )
+            .await
+            .unwrap();
+            let choice = &response.inner.choices[0];
+            assert_eq!(
+                choice.finish_reason,
+                Some(expected_finish),
+                "ending={ending:?}"
+            );
+            let calls = choice.message.tool_calls.as_deref().unwrap_or_default();
+            if ending.is_some() {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].function.name, "lookup");
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments)
+                        .unwrap(),
+                    serde_json::json!({"query": "x"})
+                );
+            } else {
+                assert!(
+                    calls.is_empty(),
+                    "an unfinished envelope must remain truncated"
+                );
+            }
+        }
     }
 
     async fn apply_kimi_k3_no_tools(
