@@ -13,6 +13,7 @@ import tempfile
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import aclosing
+from contextvars import ContextVar
 from functools import wraps
 from typing import Any
 
@@ -23,7 +24,9 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CLEANUP_SECONDS = 5.0
 _MAX_SECONDS = 315_360_000.0
 _CHILD_TOTAL_ENV = "_DYN_WORKER_SHUTDOWN_CHILD_TOTAL_SECS"
-_CHILD_DEADLINE_FD_ENV = "_DYN_WORKER_SHUTDOWN_CHILD_DEADLINE_FD"
+_child_deadline_fd: ContextVar[int | None] = ContextVar(
+    "child_deadline_fd", default=None
+)
 _PARENT_DEADLINE_FD_ENV = "_DYN_WORKER_SHUTDOWN_PARENT_DEADLINE_FD"
 
 
@@ -56,17 +59,17 @@ def child_shutdown_environment() -> dict[str, str]:
         positive=True,
     )
     env = {**os.environ, _CHILD_TOTAL_ENV: str(max(0.0, total - cleanup))}
-    parent_fd = env.pop(_CHILD_DEADLINE_FD_ENV, None)
+    parent_fd = _child_deadline_fd.get()
     env.pop(_PARENT_DEADLINE_FD_ENV, None)
     if parent_fd is not None:
-        env[_PARENT_DEADLINE_FD_ENV] = parent_fd
+        env[_PARENT_DEADLINE_FD_ENV] = str(parent_fd)
     return env
 
 
 def child_shutdown_fds() -> tuple[int, ...]:
     """Keep the parent's deadline descriptor open across child exec."""
-    raw = os.environ.get(_CHILD_DEADLINE_FD_ENV)
-    return (int(raw),) if raw is not None else ()
+    parent_fd = _child_deadline_fd.get()
+    return (parent_fd,) if parent_fd is not None else ()
 
 
 class WorkerShutdown:
@@ -346,6 +349,10 @@ class WorkerShutdown:
         self._hard_deadline = min(
             self._deadline, time.monotonic() + self._caps["cleanup"]
         )
+        # Synchronous engine cleanup can block the event loop and hold the GIL.
+        # Bound this shared allowance natively too; leave the total watchdog
+        # armed so entering cleanup can never extend the original deadline.
+        cleanup_watchdog = ShutdownWatchdog(self.cleanup_remaining())
         if self.pre_shutdown is not None:
             await self._stage(
                 "withdraw",
@@ -372,6 +379,7 @@ class WorkerShutdown:
             )
         if self._worker.done() and runtime_clean:
             assert self._watchdog is not None
+            cleanup_watchdog.finish()
             self._watchdog.finish()
             if not self._worker.cancelled():
                 self._worker.result()
@@ -380,19 +388,17 @@ class WorkerShutdown:
 
     async def run(self, worker: Coroutine, *, install_signals: bool = True) -> None:
         """Run the engine owner and join the complete sequence before returning."""
-        previous_fd = os.environ.get(_CHILD_DEADLINE_FD_ENV)
         with tempfile.TemporaryFile(buffering=0) as deadline_file:
             self._child_deadline_fd = deadline_file.fileno()
             os.pwrite(self._child_deadline_fd, struct.pack("d", math.inf), 0)
-            os.environ[_CHILD_DEADLINE_FD_ENV] = str(self._child_deadline_fd)
+            # Child launch tasks inherit this context without mutating libc
+            # environ while native runtime threads may be reading it.
+            token = _child_deadline_fd.set(self._child_deadline_fd)
             try:
                 await self._run(worker, install_signals=install_signals)
             finally:
                 self._child_deadline_fd = None
-                if previous_fd is None:
-                    os.environ.pop(_CHILD_DEADLINE_FD_ENV, None)
-                else:
-                    os.environ[_CHILD_DEADLINE_FD_ENV] = previous_fd
+                _child_deadline_fd.reset(token)
 
     async def _run(self, worker: Coroutine, *, install_signals: bool) -> None:
         previous = {}

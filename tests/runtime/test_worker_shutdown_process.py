@@ -84,7 +84,9 @@ def test_python_shutdown_signal_to_exit(mode):
             "DYN_SYSTEM_PORT": "0",
             "DYN_TCP_RPC_PORT": "0",
             "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS": "0",
-            "DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS": "3",
+            "DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS": (
+                "10" if mode == "python-wedged" else "3"
+            ),
             "DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS": "1",
         },
         capture_output=True,
@@ -100,14 +102,16 @@ def test_python_shutdown_signal_to_exit(mode):
         assert "RUNTIME_FINISHED" in result.stdout
         return
     if mode == "python-wedged":
+        # Blocking cleanup must obey its one-second cap even while holding the
+        # GIL, rather than waiting for the ten-second total watchdog.
         origin = float(
             next(
                 line.split("=", 1)[1]
                 for line in result.stdout.splitlines()
-                if line.startswith("SIGTERM_AT=")
+                if line.startswith("CLEANUP_AT=")
             )
         )
-        assert time.monotonic() - origin < 4.0, result.stdout + result.stderr
+        assert time.monotonic() - origin < 3.0, result.stdout + result.stderr
     if expected_code == 0:
         assert "ADMISSION_CLOSED" in result.stdout
         assert "ENGINE_CLEANED" in result.stdout

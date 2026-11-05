@@ -36,7 +36,7 @@ def shutdown_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS", "0.5")
     watchdog = Mock()
-    monkeypatch.setattr(ws, "ShutdownWatchdog", Mock(return_value=watchdog))
+    monkeypatch.setattr(ws, "ShutdownWatchdog", Mock(side_effect=[watchdog, Mock()]))
     return watchdog
 
 
@@ -162,7 +162,13 @@ asyncio.run(main())
 
         await parent.run(worker(), install_signals=False)
 
-    asyncio.run(run())
+    # Runtime threads may read libc environ concurrently. Child configuration
+    # must not mutate that process-wide storage, including during cleanup.
+    with (
+        patch.object(ws.os, "putenv", side_effect=AssertionError("unsafe setenv")),
+        patch.object(ws.os, "unsetenv", side_effect=AssertionError("unsafe unsetenv")),
+    ):
+        asyncio.run(run())
 
 
 def test_snapshot_shutdown_before_restore_cleans_engine(shutdown_env):

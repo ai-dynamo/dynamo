@@ -153,6 +153,7 @@ async def python_probe(group=None):
             )
         finally:
             if sys.argv[1] == "python-wedged":
+                print(f"CLEANUP_AT={time.monotonic()}", flush=True)
                 ctypes.PyDLL(None).sleep(30)
             assert completed, "engine freed before its admitted request completed"
             if group is not None:
