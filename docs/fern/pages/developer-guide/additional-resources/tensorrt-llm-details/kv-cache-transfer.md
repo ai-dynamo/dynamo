@@ -94,7 +94,7 @@ volumes:
 > Use the pre-built `-efa` image instead. Removing the mount and relying on the EFA SDK shipped in that image makes an otherwise identical deployment serve inference on the same pair of nodes.
 
 > [!WARNING]
-> On the Dynamo 1.7.0 TRT-LLM EFA image (TensorRT-LLM 1.4.0rc2), the LIBFABRIC backend fails every disaggregated request with the default `PYTHON` transceiver and KV cache manager v2. The prefill worker logs `Failed to set CUDA context before posting descriptors`, and the frontend returns HTTP 500. To use LIBFABRIC on this image, set `transceiver_runtime: CPP` and `use_kv_cache_manager_v2: false` on both the prefill and decode workers. See [EFA Known Issues](../../../kubernetes/installation/rdma-setup/efa-on-aws.mdx#known-issues) for the cause and the models this workaround does not cover.
+> On the Dynamo 1.7.0 TRT-LLM EFA image (TensorRT-LLM 1.4.0rc2), the LIBFABRIC backend fails every disaggregated request with the default `PYTHON` transceiver and KV cache manager v2. The prefill worker logs `Failed to set CUDA context before posting descriptors`, and the frontend returns HTTP 500. To use LIBFABRIC on this image, set `transceiver_runtime: CPP` and `use_kv_cache_manager_v2: false` on both the prefill and decode workers. This workaround has been tested with NIXL over UCX but not yet with LIBFABRIC on EFA, so check that a disaggregated request succeeds on your EFA cluster before you rely on it. See [EFA Known Issues](../../../kubernetes/installation/rdma-setup/efa-on-aws.mdx#known-issues) for the cause and the models and settings this workaround does not cover.
 
 **EFA resource requests:**
 

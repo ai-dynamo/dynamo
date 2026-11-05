@@ -268,7 +268,7 @@ The 1.6.0 images use TensorRT-LLM `1.3.0rc29`, which defaults to KV cache manage
 
 **Upstream status:** The image stays affected until it ships NIXL `v1.5.1` or newer and a libfabric that contains [ofiwg/libfabric#12972](https://github.com/ofiwg/libfabric/pull/12972). No libfabric release tag contains that fix yet.
 
-**Workaround:** Select the `CPP` transceiver and KV cache manager v1. Set this identically on **both** the prefill and decode workers, in the TensorRT-LLM engine configuration file:
+**Workaround (not yet verified on EFA):** Select the `CPP` transceiver and KV cache manager v1. This setting was tested on TensorRT-LLM `1.4.0rc2` with NIXL over UCX, where it serves disaggregated requests; it has not yet been tested with LIBFABRIC on EFA. Check that a disaggregated request succeeds on your EFA cluster before you rely on it. Set this identically on **both** the prefill and decode workers, in the TensorRT-LLM engine configuration file:
 
 ```yaml
 cache_transceiver_config:
@@ -286,7 +286,16 @@ Or pass the same values on the worker command line:
 
 `--override-engine-args` merges these keys into the engine configuration and cannot be combined with `--trtllm.<group>.<key>` flags. A prefill and decode pair with different transceivers starts cleanly but fails every request. See [Transceiver Runtime](../../../developer-guide/additional-resources/tensorrt-llm-details/kv-cache-transfer.md#transceiver-runtime) for the pairing rules.
 
-This workaround does not apply to models that require the `PYTHON` transceiver and KV cache manager v2, such as hybrid Mamba models like Nemotron 3.5 Super VL. These models have no workaround on this image. Setting `NIXL_DISABLE_CUDA_ADDR_WA=1` skips the NIXL check but leaves the libfabric defect, so it is not a workaround either.
+This workaround does not apply to models that require the `PYTHON` transceiver and KV cache manager v2, such as hybrid Mamba models like Nemotron 3.5 Super VL. These models have no workaround on this image.
+
+Some TensorRT-LLM settings also require KV cache manager v2. With `use_kv_cache_manager_v2: false`, TensorRT-LLM rejects them at startup. Remove them before you apply the workaround:
+
+- a mixed-precision KV cache, `kv_cache_config.dtype: mixed_nvfp4_<fp8|float16|bfloat16>`
+- `kv_cache_config.block_reuse_config.swa_endpoint_rewind_tokens` greater than 0
+- `kv_cache_config.block_reuse_config.enable_branch_snapshot: true`
+- `kv_cache_config.mamba_state_config.enable_branch_snapshot: true`, or a non-empty `additional_snapshot_offsets_from_start` or `additional_snapshot_offsets_from_end` in `mamba_state_config`
+
+Setting `NIXL_DISABLE_CUDA_ADDR_WA=1` skips the NIXL check but leaves the libfabric defect, so it is not a workaround either.
 
 
 ## Verification
@@ -362,7 +371,7 @@ Do not use `rdma_write_bytes` or other `/sys/class/infiniband/*/counters/*` chec
 | TTFT ~10 s, throughput 1–5 GB/s                        | UCX host-staged (no GPU-Direct on kernel ≥ 6.8)                      | Switch to LIBFABRIC backend                                                   |
 | Pod fails at startup with `fi_mr_reg` EFAULT on GB200  | Issue 1 (libfabric CUDA dmabuf bug)                                  | Apply patch or use ofiwg/libfabric v2.5.1                                     |
 | Pod fails at startup with `fi_mr_reg` EFAULT on x86_64 | `privileged: true` missing OR `efa_nv_peermem` missing on old kernel | Verify Step 5 security context                                                |
-| TRT-LLM requests return HTTP 500; prefill logs `Failed to set CUDA context before posting descriptors` | Issue 2 (KV cache manager v2 memory on NIXL LIBFABRIC) | Set `transceiver_runtime: CPP` and `use_kv_cache_manager_v2: false` on both workers |
+| TRT-LLM requests return HTTP 500; prefill logs `Failed to set CUDA context before posting descriptors` | Issue 2 (KV cache manager v2 memory on NIXL LIBFABRIC) | Set `transceiver_runtime: CPP` and `use_kv_cache_manager_v2: false` on both workers (not yet verified on EFA) |
 | Bandwidth halves after image rebuild                   | libfabric / aws-ofi-nccl ABI mismatch                                | Rebuild aws-ofi-nccl from source against the libfabric used in the same image |
 | `rdma_write_bytes` shows 0                             | **Not a failure** — EFA SRD uses SEND, not WRITE                     | Use Prometheus `nixl_bytes_transferred` instead                               |
 
