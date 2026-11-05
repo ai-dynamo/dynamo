@@ -241,6 +241,20 @@ def load_frontend_route_extensions(extension_names: list[str]) -> list[FrontendR
     return routes
 
 
+def _fold_vllm_default_chat_template_kwargs(
+    config: FrontendConfig, vllm_flags: Namespace
+) -> None:
+    # vLLM's parser also takes the underscore and dotted spellings. Its value always comes
+    # from the command line, so it wins over DYN_DEFAULT_CHAT_TEMPLATE_KWARGS.
+    vllm_defaults = getattr(vllm_flags, "default_chat_template_kwargs", None) or {}
+    if vllm_defaults:
+        config.default_chat_template_kwargs = {
+            **(config.default_chat_template_kwargs or {}),
+            **vllm_defaults,
+        }
+        config.validate_default_chat_template_kwargs()
+
+
 def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]:
     """Parse command-line arguments for the Dynamo frontend.
 
@@ -318,6 +332,7 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
         vllm_parser = AsyncEngineArgs.add_cli_args(vllm_parser)
         # the result is returned as Namespace object rather than AsyncEngineArgs object to avoid import error for non-vllm users.
         vllm_flags = vllm_parser.parse_args(unknown)
+        _fold_vllm_default_chat_template_kwargs(config, vllm_flags)
     elif config.chat_processor == "sglang":
         sglang_parser = argparse.ArgumentParser(add_help=False)
         sglang_parser.add_argument("--tool-call-parser", default=None)
@@ -445,11 +460,14 @@ async def async_main():
         "enable_anthropic_api": config.enable_anthropic_api,
         "enable_systemone_api": config.enable_systemone_api,
         "strip_anthropic_preamble": config.strip_anthropic_preamble,
+        "reject_media": config.reject_media,
+        "reject_media_status_code": config.reject_media_status_code,
         "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
         "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
         "reasoning_field_name": config.reasoning_field_name,
         "tokenizer_backend": config.tokenizer_backend,
         "tokenizer_fallback": config.tokenizer_fallback,
+        "default_chat_template_kwargs": config.default_chat_template_kwargs,
     }
     if config.migration_max_seq_len is not None:
         kwargs["migration_max_seq_len"] = config.migration_max_seq_len

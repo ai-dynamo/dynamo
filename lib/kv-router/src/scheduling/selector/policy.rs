@@ -229,6 +229,11 @@ impl WorkerSelectionPolicy {
     /// it has no filters, no scorers and no runtime config, and its picker declares at
     /// most [`WorkerInputs::ACTIVE_REQUESTS`]. Any other policy comes back unchanged.
     ///
+    /// Passing this check doesn't make a policy run hosted: for now the hosts call it only
+    /// for the `--router-mode` types (random, round-robin, least-loaded), in
+    /// the routing host and as `PushRouter`'s instance selectors. A picker-only type named
+    /// in a policy file still runs on the KV path.
+    ///
     /// The picker then serves every request for its role, so each factory call must build
     /// a fresh one. Pins and session affinity are applied by the host before selection, so
     /// [`Self::with_exclusive_affinity`] has no effect there.
@@ -425,7 +430,7 @@ impl CandidatePreparer {
         &self,
         input: WorkerSelectionInput<'_, C>,
     ) -> Option<PreparedCandidates> {
-        let (workers, request, eligibility, block_size) = input.into_configured().ok()?;
+        let (workers, request, eligibility, block_size) = input.into_configured();
         let input = MaterializedSelectionInput::new(request, block_size);
         let row_inputs = self.inputs.without(WorkerInputs::LOAD);
         let materialize_preferred_taint = self.inputs.contains(WorkerInputs::PREFERRED_TAINT);
