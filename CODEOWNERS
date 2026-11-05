@@ -609,6 +609,8 @@ requirements.txt                                                                
 /recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json                                        @ai-dynamo/dynamo-operator-codeowners
 /docs/fern/pages/reference/components/pool-relay-configuration.md                                       @ai-dynamo/dynamo-global-router-codeowners
 /recipes/templates/kustomize/components/dynamo-openapi/dynamo-openapi.json                              @ai-dynamo/dynamo-operator-codeowners
+/docs/fern/pages/reference/components/global-discovery-service-configuration.md                         @ai-dynamo/dynamo-global-router-codeowners
+/docs/fern/pages/kubernetes/kv-aware-routing/global-discovery-service-storage.md                        @ai-dynamo/dynamo-global-router-codeowners
 /docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/                     @ai-dynamo/dynamo-backend-triton-codeowners
 /docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md        @ai-dynamo/dynamo-global-router-codeowners
 
@@ -650,6 +652,7 @@ requirements.txt                                                                
 /recipes/**/tokenspeed/**                                                                               @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-tokenspeed-codeowners
 /recipes/**/vllm/**/*xpu*                                                                               @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-xpu-codeowners
 /tests/serve/test_vllm.py                                                                               @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/.ai/metrics-guidelines.md                                                                              @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-observability-codeowners
 /deploy/operator/Dockerfile                                                                             @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-ops-codeowners
 /lib/llm/src/request_trace/                                                                             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-agents-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/mocker/servers/sglang/                                                                             @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-sidecar-codeowners

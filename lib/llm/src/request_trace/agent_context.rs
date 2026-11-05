@@ -239,6 +239,8 @@ pub(crate) struct AgentContextTraceState {
     pub request_tracker: Option<Arc<RequestTracker>>,
     pub x_request_id: Option<String>,
     pub finish_reason_metadata: SharedFinishReasonMetadata,
+    /// Set when the client receives other tool-call IDs than the backend's.
+    pub client_tool_call_ids: Option<super::ClientToolCallIds>,
 }
 
 pub(crate) fn build_agent_context_trace_state(
@@ -261,6 +263,10 @@ pub(crate) fn build_agent_context_trace_state(
         request_tracker: tracker.clone(),
         x_request_id,
         finish_reason_metadata: SharedFinishReasonMetadata::default(),
+        client_tool_call_ids: context
+            .get::<super::ClientToolCallIds>(super::CLIENT_TOOL_CALL_IDS_CONTEXT_KEY)
+            .ok()
+            .map(|ids| *ids),
     })
 }
 
@@ -364,6 +370,7 @@ pub(crate) fn request_metrics_from_agent_state(
         request_tracker,
         x_request_id,
         finish_reason_metadata,
+        client_tool_call_ids,
     } = trace_state;
 
     if request_tracker.is_none() {
@@ -379,6 +386,29 @@ pub(crate) fn request_metrics_from_agent_state(
         request_tracker.as_deref(),
     );
     metrics.finish_reason_metadata = snapshot_finish_reason_metadata(&finish_reason_metadata);
+    if let (Some(super::ClientToolCallIds(derive)), Some(metadata)) = (
+        client_tool_call_ids,
+        metrics.finish_reason_metadata.as_mut(),
+    ) {
+        // The same derivation as the endpoint: every observed call counts
+        // toward a repeated backend ID, whether or not the endpoint emitted it.
+        let chat_id = format!("chatcmpl-{}", metrics.request_id);
+        let backend_ids: Vec<Option<String>> = metadata
+            .tool_calls
+            .iter()
+            .map(|call| call.id.clone())
+            .collect();
+        for (index, call) in metadata.tool_calls.iter_mut().enumerate() {
+            let Some(id) = call.id.as_mut() else {
+                continue;
+            };
+            let occurrence = backend_ids[..index]
+                .iter()
+                .filter(|earlier| earlier.as_deref() == Some(id.as_str()))
+                .count() as u32;
+            *id = derive(&chat_id, id, occurrence);
+        }
+    }
     (agent_context, metrics)
 }
 
@@ -546,6 +576,52 @@ mod tests {
     use crate::protocols::common::extensions::AgentContext;
 
     #[test]
+    fn request_end_records_client_tool_call_ids() {
+        let finish_reason_metadata = SharedFinishReasonMetadata::default();
+        {
+            let mut metadata = finish_reason_metadata.lock();
+            metadata.record_tool_call_chunk(0, 0, Some("call_1"), Some("shell"));
+            // A parser that repeats backend IDs: the second call is a repeat.
+            metadata.record_tool_call_chunk(0, 1, Some("call_1"), Some("shell"));
+            metadata.record_tool_call_chunk(0, 2, Some("call_2"), Some("shell"));
+        }
+        let trace_state = AgentContextTraceState {
+            agent_context: AgentContext {
+                session_id: "client-ids".to_string(),
+                parent_session_id: None,
+                session_final: None,
+                agent_headers: Default::default(),
+                input_trigger: None,
+            },
+            request_model: "test-model".to_string(),
+            request_tracker: None,
+            x_request_id: None,
+            finish_reason_metadata,
+            client_tool_call_ids: Some(super::super::ClientToolCallIds(
+                |chat_id, backend_id, occurrence| {
+                    format!("client-{chat_id}-{backend_id}-{occurrence}")
+                },
+            )),
+        };
+
+        let (_, request) = request_metrics_from_agent_state(trace_state, "r1".to_string());
+
+        let metadata = request.finish_reason_metadata.expect("finish metadata");
+        let ids: Vec<_> = metadata
+            .tool_calls
+            .iter()
+            .map(|call| call.id.as_deref())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                Some("client-chatcmpl-r1-call_1-0"),
+                Some("client-chatcmpl-r1-call_1-1"),
+                Some("client-chatcmpl-r1-call_2-0"),
+            ]
+        );
+    }
+    #[test]
     fn test_request_metrics_from_tracker() {
         let tracker = RequestTracker::new();
         tracker.record_isl(128, Some(32));
@@ -642,6 +718,7 @@ mod tests {
             request_tracker: None,
             x_request_id: Some("llm-call-1".to_string()),
             finish_reason_metadata,
+            client_tool_call_ids: None,
         };
 
         let responses = vec![
@@ -682,6 +759,7 @@ mod tests {
                 prompt_logprobs: None,
                 llm_metrics: None,
                 tool_call_completion: Vec::new(),
+                model_eos: Vec::new(),
             }),
             Annotated::from_data(NvCreateChatCompletionStreamResponse {
                 message_boundary: None,
@@ -711,6 +789,7 @@ mod tests {
                 prompt_logprobs: None,
                 llm_metrics: None,
                 tool_call_completion: Vec::new(),
+                model_eos: Vec::new(),
             }),
         ];
         for response in &responses {
@@ -767,6 +846,7 @@ mod tests {
             request_tracker: None,
             x_request_id: Some("completion-call-1".to_string()),
             finish_reason_metadata,
+            client_tool_call_ids: None,
         };
 
         let responses = vec![Annotated::from_data(NvCreateCompletionResponse {

@@ -21,7 +21,7 @@ runs on the controller's single sweep thread and never raises:
 3. Cut the window file (a subprocess, ``context.cut_window``), then create
    one Request per remaining shard with Strict field validation and check
    that the API server kept every submitted field.
-4. Wait for each Request's Run, check that ``Run.status.aisimulate.input``
+4. Wait for each Request's Run, check that ``Run.status.aisim.input``
    is what the Request asked for, and read the Run's Candidates.
 5. Map each Candidate's router adapter parameters back to live names,
    require identical non-router parameters across the window, score each
@@ -417,7 +417,7 @@ def build_request(
             "sla": {"ttftMs": float(sla_ttft_ms), "itlMs": float(sla_itl_ms)},
         },
         "recommendation": {"maxCandidates": size},
-        "aisimulate": {
+        "aisim": {
             "inputOverrides": {
                 "engine": engine,
                 "router": _router_section(shard),
@@ -610,7 +610,7 @@ def _overlay(target: Any, patch: Any) -> Any:
 def input_mismatches(
     spec: Mapping[str, Any], effective: Mapping[str, Any]
 ) -> list[str]:
-    """How ``Run.status.aisimulate.input`` differs from what ``spec`` asks for.
+    """How ``Run.status.aisim.input`` differs from what ``spec`` asks for.
 
     The expected input is what the operator lowers ``spec``'s typed fields
     to (model, backends, GPU SKU and budget, objective, SLA, the trace file
@@ -659,7 +659,7 @@ def input_mismatches(
         },
         "dgdr_run": {"max_candidates": _get(spec, ("recommendation", "maxCandidates"))},
     }
-    overrides = _get(spec, ("aisimulate", "inputOverrides"), {}) or {}
+    overrides = _get(spec, ("aisim", "inputOverrides"), {}) or {}
     # Normalize like the API server (JSON numbers, no tuples).
     expected = json.loads(json.dumps(_overlay(typed, overrides)))
     actual = json.loads(json.dumps(effective))
@@ -1536,14 +1536,14 @@ class _DgdrSweep:
         if not terminal:
             self._track_pending(run, status)
         if run.checked_run_uid != run_uid:
-            effective = _get(status, ("aisimulate", "input"))
+            effective = _get(status, ("aisim", "input"))
             if not isinstance(effective, Mapping):
                 if not terminal:
                     return  # the input is recorded together with jobRef
                 if not succeeded:
                     self._run_failed(run, outcome)
                     return
-                self._input_mismatch(run, ["status.aisimulate.input is missing"])
+                self._input_mismatch(run, ["status.aisim.input is missing"])
                 return
             if not self._check_input(run, effective):
                 return
@@ -1557,7 +1557,7 @@ class _DgdrSweep:
     def _track_pending(self, run: _ShardRun, status: Mapping[str, Any]) -> None:
         """Flag a live Run that has had no Job for a long time (``run_pending``).
 
-        The operator writes ``status.aisimulate.input`` and ``jobRef`` in one
+        The operator writes ``status.aisim.input`` and ``jobRef`` in one
         status patch once the Job exists; until then the Run has no status,
         or only a ``Completed=False`` condition that says why it waits (such
         as ``TraceSourceMissing``), so this runs before the input is read
@@ -1710,7 +1710,7 @@ class _DgdrSweep:
                 candidates, key=lambda obj: (obj.get("metadata") or {}).get("name", "")
             ):
                 name = (candidate.get("metadata") or {}).get("name", "")
-                parameters = _get(candidate, ("spec", "parameters"))
+                parameters = _get(candidate, ("status", "parameters"))
                 try:
                     point, signature = _map_parameters(parameters, run.shard)
                 except _Unmapped as error:
@@ -1841,13 +1841,13 @@ def _map_parameters(parameters: Any, shard: Shard) -> tuple[dict[str, float], st
     """
 
     if not isinstance(parameters, Mapping):
-        raise _Unmapped("spec.parameters is not an object")
+        raise _Unmapped("status.parameters is not an object")
     adapters = parameters.get("adapters")
     if not isinstance(adapters, Mapping):
-        raise _Unmapped("spec.parameters.adapters is missing")
+        raise _Unmapped("status.parameters.adapters is missing")
     router = adapters.get(ROUTER_ADAPTER)
     if not isinstance(router, Mapping):
-        raise _Unmapped(f"spec.parameters.adapters[{ROUTER_ADAPTER!r}] is missing")
+        raise _Unmapped(f"status.parameters.adapters[{ROUTER_ADAPTER!r}] is missing")
     load_model = router.get("prefill_load_model")
     load_type = (
         load_model.get("type") if isinstance(load_model, Mapping) else load_model
