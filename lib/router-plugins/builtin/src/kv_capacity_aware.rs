@@ -311,11 +311,8 @@ pub fn register(
 }
 
 #[cfg(test)]
-mod vectors;
-
-#[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike};
     use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
@@ -323,7 +320,6 @@ mod tests {
         SchedulingRequest, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
     };
 
-    use super::vectors::VECTORS;
     use super::*;
 
     fn parameters(fraction: f64, count_priority: bool, weight: f64) -> Parameters {
@@ -335,13 +331,14 @@ mod tests {
         }
     }
 
-    fn ranks(d: &[u64], n: &[usize], cap: &[Option<u64>], taint: Option<&[f64]>) -> Vec<Rank> {
-        (0..d.len())
-            .map(|r| Rank {
-                decode_cost: d[r] as f64,
-                requests: n[r],
-                capacity: cap[r],
-                taint: taint.map(|t| t[r]),
+    /// Ranks given as `(D, N, capacity, taint)`.
+    fn ranks(rows: &[(u64, usize, Option<u64>, Option<f64>)]) -> Vec<Rank> {
+        rows.iter()
+            .map(|&(decode_cost, requests, capacity, taint)| Rank {
+                decode_cost: decode_cost as f64,
+                requests,
+                capacity,
+                taint,
             })
             .collect()
     }
@@ -358,42 +355,136 @@ mod tests {
         (ties, matches!(min, Key::Over { .. }))
     }
 
-    /// The rows a filtering selection warns about: those without a capacity.
-    fn unknown_rows(parameters: &Parameters, ranks: &[Rank]) -> Vec<usize> {
-        (0..ranks.len())
-            .filter(|&row| parameters.capacity_fraction.is_some() && ranks[row].capacity.is_none())
-            .collect()
+    fn ties(
+        parameters: &Parameters,
+        rows: &[(u64, usize, Option<u64>, Option<f64>)],
+    ) -> Vec<usize> {
+        tie_set(parameters, &ranks(rows)).0
     }
 
-    /// The table's tie sets, fallback flags and warned rows equal those of an independent
-    /// reference implementation of the rule.
+    const CAP: Option<u64> = Some(1_000);
+
+    /// A rank wins on the fit boundary only while the request still fits on it.
     #[test]
-    fn boundary_vectors_match_the_reference_tie_sets() {
-        for v in VECTORS.iter() {
-            let p = parameters(
-                v.capacity_fraction,
-                v.count_priority,
-                v.decode_active_request_weight,
-            );
-            let rs = ranks(v.decode_cost, v.requests, v.capacity, v.taint);
-            let (ties, fallback) = tie_set(&p, &rs);
-            assert_eq!(ties, v.expect_ties, "{} {}", v.inv, v.desc);
-            assert_eq!(fallback, v.expect_fallback, "{} {}", v.inv, v.desc);
-            assert_eq!(
-                unknown_rows(&p, &rs),
-                v.expect_warning_for,
-                "{} {}",
-                v.inv,
-                v.desc
-            );
-            assert!(
-                v.booked
-                    .iter()
-                    .zip(v.decode_cost)
-                    .all(|(a, d)| a + v.request_blocks == *d)
-            );
-        }
-        assert_eq!(VECTORS.len(), 37);
+    fn the_fit_test_decides_at_its_boundary() {
+        let p = Parameters::default();
+        // The fewest-request rank would overflow, so the next fitting one wins.
+        assert_eq!(
+            ties(
+                &p,
+                &[
+                    (1_100, 0, CAP, None),
+                    (500, 1, CAP, None),
+                    (500, 2, CAP, None)
+                ]
+            ),
+            [1]
+        );
+        // Exactly at capacity fits; one block more does not.
+        assert_eq!(ties(&p, &[(1_000, 0, CAP, None), (100, 1, CAP, None)]), [0]);
+        assert_eq!(ties(&p, &[(1_001, 0, CAP, None), (100, 1, CAP, None)]), [1]);
+        // 0.95 x 16,001 = 15,200.95: 15,200 fits, 15,201 does not.
+        let p = parameters(0.95, true, 0.0);
+        let cap = Some(16_001);
+        assert_eq!(
+            ties(&p, &[(15_200, 0, cap, None), (100, 1, cap, None)]),
+            [0]
+        );
+        assert_eq!(
+            ties(&p, &[(15_201, 0, cap, None), (100, 1, cap, None)]),
+            [1]
+        );
+        // 0.7 x 90 = 63 exactly, although the f64 product is 62.999...: 63 fits, 64 does not.
+        let p = parameters(0.7, true, 0.0);
+        let cap = Some(90);
+        assert_eq!(ties(&p, &[(63, 0, cap, None), (10, 1, cap, None)]), [0]);
+        assert_eq!(ties(&p, &[(64, 0, cap, None), (10, 1, cap, None)]), [1]);
+        // A rank without a capacity is not filtered.
+        assert_eq!(ties(&p, &[(5_000, 0, None, None), (10, 1, cap, None)]), [0]);
+    }
+
+    /// Among fitting ranks the request count comes first, then `D + W * N`.
+    #[test]
+    fn fitting_ranks_are_ordered_by_count_then_cost() {
+        let p = Parameters::default();
+        assert_eq!(
+            ties(
+                &p,
+                &[
+                    (600, 1, CAP, None),
+                    (500, 1, CAP, None),
+                    (100, 2, CAP, None)
+                ]
+            ),
+            [1]
+        );
+        assert_eq!(
+            ties(&p, &[(500, 1, CAP, None), (500, 1, CAP, None)]),
+            [0, 1]
+        );
+        // Without count priority, the default cost decides: 2,100 / 2,200 / 1,900.
+        let p = parameters(1.0, false, 1_000.0);
+        let cap = Some(10_000);
+        assert_eq!(
+            ties(
+                &p,
+                &[
+                    (100, 2, cap, None),
+                    (2_200, 0, cap, None),
+                    (900, 1, cap, None)
+                ]
+            ),
+            [2]
+        );
+        // A fractional W is compared as the default compares it: 11.5 / 11.0 / 11.0.
+        let p = parameters(f64::INFINITY, false, 0.5);
+        assert_eq!(
+            ties(
+                &p,
+                &[
+                    (10, 3, None, None),
+                    (11, 0, None, None),
+                    (10, 2, None, None)
+                ]
+            ),
+            [1, 2]
+        );
+    }
+
+    /// When nothing fits, the smallest footprint wins whatever its requests or taint, so a
+    /// preferred rank never receives a request it cannot hold.
+    #[test]
+    fn nothing_fitting_falls_back_to_the_smallest_footprint() {
+        let p = Parameters::default();
+        let rows = [
+            (1_500, 0, CAP, None),
+            (1_200, 9, CAP, None),
+            (1_300, 1, CAP, Some(0.4)),
+        ];
+        assert_eq!(tie_set(&p, &ranks(&rows)), (vec![1], true));
+        // A preferred rank that does not fit loses to one that does.
+        assert_eq!(
+            ties(&p, &[(1_100, 0, CAP, Some(0.4)), (900, 1, CAP, None)]),
+            [1]
+        );
+    }
+
+    /// The preferred-taint multiplier scales the cost after the count, never the count itself.
+    #[test]
+    fn taint_scales_the_cost_after_the_count() {
+        let p = Parameters::default();
+        // Keys: (1, 500), (1, 600 x 0.5 = 300), (2, 100 x 0.5 = 50).
+        assert_eq!(
+            ties(
+                &p,
+                &[
+                    (500, 1, CAP, None),
+                    (600, 1, CAP, Some(0.5)),
+                    (100, 2, CAP, Some(0.5))
+                ]
+            ),
+            [1]
+        );
     }
 
     /// With no capacity filter and no count priority, the tie set is that of the default
@@ -404,18 +495,14 @@ mod tests {
         for _ in 0..4000 {
             let n_ranks = rng.usize(1..40);
             let w = [0.0, 500.0, 1000.0, 2000.0][rng.usize(0..4)];
-            let d: Vec<u64> = (0..n_ranks)
-                .map(|_| rng.u64(0..4) * 1000 + rng.u64(0..3))
+            let rows: Vec<(u64, usize, Option<u64>, Option<f64>)> = (0..n_ranks)
+                .map(|_| {
+                    let d = rng.u64(0..4) * 1000 + rng.u64(0..3);
+                    (d, rng.usize(0..4), Some(16_000), None)
+                })
                 .collect();
-            let n: Vec<usize> = (0..n_ranks).map(|_| rng.usize(0..4)).collect();
-            let cap = vec![Some(16_000); n_ranks];
-            let (ties, fallback) = tie_set(
-                &parameters(f64::INFINITY, false, w),
-                &ranks(&d, &n, &cap, None),
-            );
-            let cost: Vec<f64> = (0..n_ranks)
-                .map(|r| d[r] as f64 + w * n[r] as f64)
-                .collect();
+            let (ties, fallback) = tie_set(&parameters(f64::INFINITY, false, w), &ranks(&rows));
+            let cost: Vec<f64> = rows.iter().map(|r| r.0 as f64 + w * r.1 as f64).collect();
             let min = cost.iter().cloned().fold(f64::INFINITY, f64::min);
             let expected: Vec<usize> = (0..n_ranks).filter(|&r| cost[r] == min).collect();
             assert_eq!(ties, expected);
@@ -423,58 +510,44 @@ mod tests {
         }
     }
 
-    /// On random states a non-empty list always yields a row from the tie set, a fitting rank
-    /// beats every rank that does not fit, and with none fitting the least booked wins.
+    /// On random states the tie set equals the one an integer oracle computes, and the picked row
+    /// is one of its members.
     #[test]
-    fn never_fails_and_prefers_fitting_ranks() {
+    fn random_states_match_an_integer_oracle() {
         let mut rng = fastrand::Rng::with_seed(7);
         for _ in 0..4000 {
             let n_ranks = rng.usize(1..33);
-            let fraction = [0.95, 1.0][rng.usize(0..2)];
-            let cap: Vec<Option<u64>> = (0..n_ranks)
-                .map(|_| Some(rng.u64(10_000..20_000)))
+            // The fraction as a ratio of integers: 95 / 100 or 1 / 1.
+            let (num, den, fraction) = [(95, 100, 0.95), (1, 1, 1.0)][rng.usize(0..2)];
+            let rows: Vec<(u64, usize, Option<u64>, Option<f64>)> = (0..n_ranks)
+                .map(|_| {
+                    let cap = rng.u64(10_000..20_000);
+                    (rng.u64(0..25_000), rng.usize(0..10), Some(cap), None)
+                })
                 .collect();
-            let d: Vec<u64> = (0..n_ranks).map(|_| rng.u64(0..25_000)).collect();
-            let n: Vec<usize> = (0..n_ranks).map(|_| rng.usize(0..10)).collect();
-            let p = parameters(fraction, true, 0.0);
-            let rs = ranks(&d, &n, &cap, None);
-            let (ties, fallback) = tie_set(&p, &rs);
-            let fits: Vec<usize> = (0..n_ranks).filter(|&r| p.fits(&rs[r])).collect();
-            assert_eq!(fallback, fits.is_empty());
-            if fits.is_empty() {
-                let min = *d.iter().min().unwrap();
-                assert!(ties.iter().all(|&r| d[r] == min));
+            let fits = |r: &(u64, usize, Option<u64>, Option<f64>)| r.0 * den <= num * r.2.unwrap();
+            let expected: Vec<usize> = if rows.iter().any(fits) {
+                let best = rows
+                    .iter()
+                    .filter(|r| fits(r))
+                    .map(|r| (r.1, r.0))
+                    .min()
+                    .unwrap();
+                (0..n_ranks)
+                    .filter(|&i| fits(&rows[i]) && (rows[i].1, rows[i].0) == best)
+                    .collect()
             } else {
-                assert!(ties.iter().all(|r| fits.contains(r)));
-                let key = |r: usize| (n[r], d[r]);
-                let best = fits.iter().map(|&r| key(r)).min().unwrap();
-                assert!(ties.iter().all(|&r| key(r) == best));
-            }
+                let best = rows.iter().map(|r| r.0).min().unwrap();
+                (0..n_ranks).filter(|&i| rows[i].0 == best).collect()
+            };
+            let p = parameters(fraction, true, 0.0);
+            let rs = ranks(&rows);
+            let (ties, fallback) = tie_set(&p, &rs);
+            assert_eq!(ties, expected);
+            assert_eq!(fallback, !rows.iter().any(fits));
             let picked = select_row(&p, rs.iter().copied().enumerate(), |k| rng.usize(0..k));
             assert!(ties.contains(&picked.expect("non-empty")));
         }
-    }
-
-    /// Raising a rank's capacity never takes it out of the fitting set.
-    #[test]
-    fn more_capacity_never_makes_a_rank_not_fit() {
-        let p = parameters(0.95, true, 0.0);
-        for (d, cap) in [
-            (15_200u64, 16_001u64),
-            (15_201, 16_001),
-            (17_000, 20_000),
-            (20_000, 12_000),
-        ] {
-            let fits = |c| p.fits(&ranks(&[d], &[0], &[Some(c)], None)[0]);
-            assert!(!fits(cap) || fits(cap + 1) && fits(cap * 2));
-        }
-        // 0.95 x 16,001 = 15,200.95: 15,200 fits, 15,201 does not.
-        assert!(p.fits(&ranks(&[15_200], &[0], &[Some(16_001)], None)[0]));
-        assert!(!p.fits(&ranks(&[15_201], &[0], &[Some(16_001)], None)[0]));
-        // 0.7 x 90 = 63 exactly, although the f64 product is 62.999...: 63 fits, 64 does not.
-        let p = parameters(0.7, true, 0.0);
-        assert!(p.fits(&ranks(&[63], &[0], &[Some(90)], None)[0]));
-        assert!(!p.fits(&ranks(&[64], &[0], &[Some(90)], None)[0]));
     }
 
     /// The same seeded generator reproduces the same picks.
@@ -491,8 +564,11 @@ mod tests {
         assert_ne!(picks(11), picks(12));
     }
 
-    /// A worker advertising `total_kv_blocks` (None: not reported).
-    struct TestWorker(Option<u64>);
+    /// A worker advertising `total_kv_blocks` (None: not reported) and taints.
+    struct TestWorker {
+        capacity: Option<u64>,
+        taints: HashSet<String>,
+    }
 
     impl WorkerConfigLike for TestWorker {
         fn data_parallel_start_rank(&self) -> u32 {
@@ -505,7 +581,10 @@ mod tests {
             None
         }
         fn total_kv_blocks(&self) -> Option<u64> {
-            self.0
+            self.capacity
+        }
+        fn taints(&self) -> &HashSet<String> {
+            &self.taints
         }
     }
 
@@ -527,6 +606,20 @@ mod tests {
         reported: Option<u64>,
         workers: &[(usize, usize, usize)],
     ) -> u64 {
+        host_select_with(policy, workers, RoutingConstraints::default(), |_| {
+            TestWorker {
+                capacity: reported,
+                taints: HashSet::new(),
+            }
+        })
+    }
+
+    fn host_select_with(
+        policy: &WorkerSelectionPolicy,
+        workers: &[(usize, usize, usize)],
+        routing_constraints: RoutingConstraints,
+        worker: impl Fn(u64) -> TestWorker,
+    ) -> u64 {
         let mut request = SchedulingRequest {
             mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
@@ -536,7 +629,7 @@ mod tests {
             affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
-            routing_constraints: RoutingConstraints::default(),
+            routing_constraints,
             router_config_override: None,
             track_prefill_tokens: false,
             priority_jump: 0.0,
@@ -562,7 +655,7 @@ mod tests {
             );
         }
         let configs: HashMap<u64, TestWorker> = (1..=workers.len() as u64)
-            .map(|id| (id, TestWorker(reported)))
+            .map(|id| (id, worker(id)))
             .collect();
         policy
             .select_worker(WorkerSelectionInput::configured(
@@ -590,6 +683,34 @@ mod tests {
         assert_eq!(
             pick(&[(1_500, 100, 0), (1_200, 100, 9), (1_300, 100, 1)]),
             2
+        );
+    }
+
+    /// Through the host, the request's preferred taints reach the picker: among workers with equal
+    /// request counts the preferred one wins at a higher cost.
+    #[test]
+    fn preferred_taints_reach_the_picker_through_the_host() {
+        let policy = host_policy(KvCapacityAwarePicker::new(Parameters::default(), None));
+        // D = 500 / 600 / 200 with 1 / 1 / 2 requests; workers 2 and 3 carry the "fast" taint.
+        let workers = [(400, 100, 1), (500, 100, 1), (100, 100, 2)];
+        let worker = |id: u64| TestWorker {
+            capacity: Some(10_000),
+            taints: if id == 1 {
+                HashSet::new()
+            } else {
+                HashSet::from(["fast".to_string()])
+            },
+        };
+        let preferred = RoutingConstraints {
+            preferred_taints: HashMap::from([("fast".to_string(), 1.0)]),
+            ..Default::default()
+        };
+        // exp(-tanh(1)) = 0.47 scales worker 2 to 280, below worker 1's 500; worker 3 has more
+        // requests, so its lower cost does not matter.
+        assert_eq!(host_select_with(&policy, &workers, preferred, worker), 2);
+        assert_eq!(
+            host_select_with(&policy, &workers, RoutingConstraints::default(), worker),
+            1
         );
     }
 
