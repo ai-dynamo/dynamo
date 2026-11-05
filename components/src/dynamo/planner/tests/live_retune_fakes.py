@@ -311,7 +311,7 @@ def engine_parameters(effective_input: Mapping[str, Any]) -> dict[str, Any]:
 def candidate_parameters(
     effective_input: Mapping[str, Any], point_public: Mapping[str, float]
 ) -> dict[str, Any]:
-    """``Candidate.spec.parameters`` of one evaluated router point."""
+    """``Candidate.status.parameters`` of one evaluated router point."""
 
     router = effective_input.get("router") or {}
     return {
@@ -929,6 +929,8 @@ class FakeRetuneKube:
         parameters: Mapping[str, Any],
         metrics: Mapping[str, Any],
     ) -> dict:
+        """Publish evaluation status separately from the Candidate's DGD spec."""
+
         with self._lock:
             run = self.runs[run_name]
             canonical = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
@@ -952,8 +954,21 @@ class FakeRetuneKube:
                         }
                     ],
                 },
-                "spec": {"parameters": json.loads(canonical)},
-                "status": {"metrics": json.loads(json.dumps(dict(metrics)))},
+                "spec": {"components": []},
+                "status": {
+                    "parameters": json.loads(canonical),
+                    "metrics": json.loads(json.dumps(dict(metrics))),
+                    "conditions": [
+                        {
+                            "type": "Valid",
+                            "status": "True",
+                            "reason": "ValidationSucceeded",
+                            "message": "Strict DGD dry-run succeeded",
+                            "observedGeneration": 1,
+                            "lastTransitionTime": rfc3339(self.now()),
+                        }
+                    ],
+                },
             }
             self._stamp(
                 candidate,

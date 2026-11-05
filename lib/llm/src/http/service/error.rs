@@ -145,7 +145,7 @@ fn context_length_details(error: &DynamoError) -> Option<ContextLengthDetails> {
 /// class-level fallback.
 pub(crate) fn context_length_public_message(error: &DynamoError) -> Option<String> {
     let details = context_length_details(error)?;
-    let actual = details.actual?;
+    let actual = details.actual.filter(|actual| *actual >= details.limit)?;
     Some(format!(
         "This model's maximum context length is {limit} tokens. However, your request \
          resulted in {actual} tokens. Please reduce the length of the messages or the \
@@ -674,5 +674,20 @@ mod tests {
                 ClientErrorAction::Respond { status, .. } if status == expected
             ));
         }
+    }
+
+    #[test]
+    fn context_length_messages_refuse_a_count_below_the_limit() {
+        let error = DynamoError::builder()
+            .error_type(DynamoErrorType::InvalidArgument)
+            .public_details(PublicDetails::ContextLength {
+                limit: 10,
+                actual: Some(5),
+                prompt_tokens: Some(5),
+            })
+            .build();
+
+        assert_eq!(context_length_public_message(&error), None);
+        assert_eq!(anthropic_context_length_public_message(&error), None);
     }
 }
