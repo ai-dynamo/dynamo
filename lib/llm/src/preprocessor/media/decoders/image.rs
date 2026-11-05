@@ -94,9 +94,7 @@ pub struct ImageDecoder {
     #[serde(skip, default = "default_enable_libjpeg")]
     #[schema(ignore)]
     pub(crate) enable_libjpeg: bool,
-    /// The media loader copies it from
-    /// [`super::MediaDecoder::apply_exif_orientation`]; it is never part of the
-    /// `image` configuration.
+    /// Copied from [`super::MediaDecoder::apply_exif_orientation`] by the media loader.
     #[serde(skip)]
     #[schema(ignore)]
     pub(crate) apply_exif_orientation: bool,
@@ -168,7 +166,7 @@ impl Decoder for ImageDecoder {
         };
 
         let image = if self.apply_exif_orientation {
-            oriented(image, exif_orientation(&bytes, format))?
+            oriented(image, &bytes, &self.limits)?
         } else {
             image
         };
@@ -176,16 +174,19 @@ impl Decoder for ImageDecoder {
     }
 }
 
-/// The EXIF orientation of an encoded image. Unreadable metadata counts as no
-/// rotation.
-fn exif_orientation(bytes: &[u8], format: ImageFormat) -> Orientation {
-    ImageReader::with_format(Cursor::new(bytes), format)
-        .into_decoder()
-        .and_then(|mut decoder| decoder.orientation())
-        .unwrap_or(Orientation::NoTransforms)
-}
-
-fn oriented(image: DecodedImage, orientation: Orientation) -> Result<DecodedImage> {
+fn oriented(
+    image: DecodedImage,
+    bytes: &[u8],
+    limits: &ImageDecoderLimits,
+) -> Result<DecodedImage> {
+    let orientation = match image.source_format {
+        ImageFormat::WebP => webp_exif(bytes).and_then(Orientation::from_exif_chunk),
+        format => ImageReader::with_format(Cursor::new(bytes), format)
+            .into_decoder()
+            .and_then(|mut decoder| decoder.orientation())
+            .ok(),
+    }
+    .unwrap_or(Orientation::NoTransforms);
     if orientation == Orientation::NoTransforms {
         return Ok(image);
     }
@@ -212,13 +213,36 @@ fn oriented(image: DecodedImage, orientation: Orientation) -> Result<DecodedImag
     }
     .context("decoded pixels do not fit their dimensions")?;
     image.apply_orientation(orientation);
-    Ok(DecodedImage {
+    DecodedImage::new(
         source_format,
-        width: image.width(),
-        height: image.height(),
+        image.width(),
+        image.height(),
         pixel_format,
-        pixels: image.into_bytes(),
-    })
+        image.into_bytes(),
+        limits,
+    )
+}
+
+// The EXIF chunk that image-webp records, read without its allocation of the declared size (up to
+// 4 GiB). The scan bound is image-webp's: the end of the VP8X chunk plus the RIFF size minus 12.
+fn webp_exif(bytes: &[u8]) -> Option<&[u8]> {
+    let le32 = |at: usize| {
+        let b = bytes.get(at..at + 4)?;
+        Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+    };
+    if bytes.get(12..16) != Some(b"VP8X".as_slice()) {
+        return None;
+    }
+    let mut offset = 20 + le32(16)?.next_multiple_of(2);
+    let end = offset + le32(4)?.saturating_sub(12);
+    while offset < end {
+        let size = le32(offset + 4)?;
+        if bytes.get(offset..offset + 4) == Some(b"EXIF".as_slice()) {
+            return bytes.get(offset + 8..offset + 8 + size);
+        }
+        offset += 8 + size.next_multiple_of(2);
+    }
+    None
 }
 
 fn ensure_fallback_allowed(
@@ -335,17 +359,12 @@ mod tests {
         bytes
     }
 
-    /// EXIF with orientation 6 (rotate 90 degrees clockwise), as a camera
-    /// stores a portrait photo.
-    fn exif_rotate_90() -> Vec<u8> {
-        let mut exif = b"II*\0\x08\0\0\0\x01\0".to_vec();
-        exif.extend_from_slice(&[0x12, 0x01, 0x03, 0, 0x01, 0, 0, 0, 0x06, 0, 0, 0]);
-        exif.extend_from_slice(&[0, 0, 0, 0]);
-        exif
-    }
+    /// EXIF with orientation 6 (rotate 90 degrees clockwise), as a camera stores a portrait photo.
+    const EXIF_ROTATE_90: &[u8] =
+        b"II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0";
 
     fn encode_with_exif<E: image::ImageEncoder>(mut encoder: E, image: &image::RgbImage) {
-        encoder.set_exif_metadata(exif_rotate_90()).unwrap();
+        encoder.set_exif_metadata(EXIF_ROTATE_90.to_vec()).unwrap();
         encoder
             .write_image(
                 image.as_raw(),
@@ -358,12 +377,11 @@ mod tests {
 
     #[rstest]
     fn test_exif_orientation_is_applied_only_when_enabled(
-        #[values(ImageFormat::Png, ImageFormat::Jpeg)] format: ImageFormat,
+        #[values(ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::WebP)] format: ImageFormat,
         #[values(false, true)] apply_exif_orientation: bool,
     ) {
         use dynamo_memory::actions::Slice as _;
 
-        // 3 wide, 2 tall; only the top-left pixel is red.
         let mut source = image::RgbImage::new(3, 2);
         source.put_pixel(0, 0, image::Rgb([255, 0, 0]));
         let mut bytes = Vec::new();
@@ -371,10 +389,11 @@ mod tests {
             ImageFormat::Png => {
                 encode_with_exif(image::codecs::png::PngEncoder::new(&mut bytes), &source)
             }
-            _ => encode_with_exif(
-                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 100),
+            ImageFormat::WebP => encode_with_exif(
+                image::codecs::webp::WebPEncoder::new_lossless(&mut bytes),
                 &source,
             ),
+            _ => encode_with_exif(image::codecs::jpeg::JpegEncoder::new(&mut bytes), &source),
         }
 
         let decoded = ImageDecoder {
@@ -391,11 +410,53 @@ mod tests {
             (vec![2, 3, 3], [255, 0, 0, 0, 0, 0])
         };
         assert_eq!(decoded.tensor_info.shape, shape);
-        if format == ImageFormat::Png {
+        if format != ImageFormat::Jpeg {
             // SAFETY: nothing else holds the storage.
             let pixels = unsafe { decoded.data.as_slice() }.unwrap();
             assert_eq!(&pixels[..6], &first_pixels);
         }
+    }
+
+    #[test]
+    fn test_webp_exif_is_read_where_image_webp_reads_it() {
+        let mut stored = Vec::new();
+        let source = image::RgbImage::new(3, 2);
+        encode_with_exif(
+            image::codecs::webp::WebPEncoder::new_lossless(&mut stored),
+            &source,
+        );
+        let exif = stored.windows(4).position(|w| w == b"EXIF").unwrap();
+        // The RIFF size ends image-webp's scan just before the EXIF chunk; VP8X no longer flags EXIF.
+        let mut past_riff = stored.clone();
+        past_riff[4..8].copy_from_slice(&(exif as u32 - 18).to_le_bytes());
+        past_riff[20] &= !0x08;
+        let mut oversized = stored.clone();
+        oversized[exif + 4..exif + 8].copy_from_slice(&(1u32 << 30).to_le_bytes());
+        assert_eq!(webp_exif(&stored), Some(EXIF_ROTATE_90));
+        assert_eq!(webp_exif(&past_riff), None);
+        assert_eq!(webp_exif(&oversized), None);
+    }
+
+    #[test]
+    fn test_exif_rotation_is_checked_against_limits() {
+        let mut bytes = Vec::new();
+        let source = image::RgbImage::new(3, 2);
+        encode_with_exif(image::codecs::png::PngEncoder::new(&mut bytes), &source);
+        let decoder = ImageDecoder {
+            limits: ImageDecoderLimits {
+                max_image_height: Some(2),
+                ..Default::default()
+            },
+            apply_exif_orientation: true,
+            ..Default::default()
+        };
+        let error = decoder
+            .decode(create_encoded_media_data(bytes))
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Image dimensions exceed configured limits: 2x3"
+        );
     }
 
     #[rstest]
@@ -552,6 +613,7 @@ mod tests {
         };
         let server_config = ImageDecoder {
             limits: server_limits.clone(),
+            apply_exif_orientation: true,
             ..Default::default()
         }
         .with_libjpeg_for_benchmark(false);
@@ -575,6 +637,7 @@ mod tests {
         assert_eq!(merged.limits.max_image_height, Some(100));
         assert_eq!(merged.limits.max_alloc, Some(1024));
         assert!(!merged.enable_libjpeg);
+        assert!(merged.apply_exif_orientation);
     }
 
     // parse_bool_opt owns the accepted spellings; this locks the default-on
