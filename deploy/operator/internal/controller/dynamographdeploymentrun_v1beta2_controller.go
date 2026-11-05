@@ -867,6 +867,11 @@ func dgdrRunPublisherRules(runName string) []rbacv1.PolicyRule {
 			Resources: []string{"pods"},
 			Verbs:     []string{"get", "list", "watch"},
 		},
+		{
+			APIGroups: []string{nvidiacomv1beta2.GroupVersion.Group},
+			Resources: []string{"dynamographdeployments"},
+			Verbs:     []string{"create"}, // Server-side dry-run uses the normal create authorization.
+		},
 	}
 }
 
@@ -888,6 +893,9 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 
 	if job != nil {
 		if r.APIReader != nil {
+			// Distinguish cache lag from deletion before declaring frozen input lost.
+			// Status and watches cannot prove whether the ConfigMap currently exists;
+			// rebuilding it from current operator settings would change this Run's input.
 			persisted := &corev1.ConfigMap{}
 			apiErr := r.APIReader.Get(ctx, key, persisted)
 			if apiErr == nil {
@@ -1642,7 +1650,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileRunStatus(
 			"update Run status: effective AISimulate input is missing")}
 	}
 	original := run.DeepCopy()
-	run.Status.AISimulate = &nvidiacomv1beta2.AISimulateRunStatus{Input: execution.Input.DeepCopy()}
+	run.Status.AISim = &nvidiacomv1beta2.AISimRunStatus{Input: execution.Input.DeepCopy()}
 	run.Status.JobRef = &nvidiacomv1beta2.ResourceReference{Name: job.Name, UID: job.UID}
 	run.Status.Phase = nvidiacomv1beta2.DGDRRunPhasePending
 	reason, message := dgdrRunReasonPending, dgdrRunMessagePending

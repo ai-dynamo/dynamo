@@ -194,7 +194,7 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 		fuzzBeta2DGDRNativeStatus,
 		fuzzBeta2DGDRSpec,
 		fuzzBeta2DGDRStatus,
-		fuzzAISimulateSpec,
+		fuzzAISimSpec,
 		fuzzBetaDGDROverrides,
 		// PlacementStatus (v1alpha1 + v1beta1): pick admissible values so the
 		// round-trip fuzzer exercises Placement without producing shapes the CRD
@@ -534,6 +534,18 @@ func fuzzBeta2DGDRNativeSpec(s *v1beta2.DynamoGraphDeploymentRequestNativeSpec, 
 	fuzzBeta2Workload(s.Workload, c)
 	fuzzBeta2Objective(s.Objective, c)
 
+	// Fuzz the typed partial DGD before encoding the opaque override payload.
+	if s.Overrides != nil && s.Overrides.DGD != nil {
+		var dgd v1beta1.DynamoGraphDeployment
+		c.Fill(&dgd.Spec)
+		dgd.SetGroupVersionKind(v1beta1.DynamoGraphDeploymentGVK)
+		raw, err := json.Marshal(dgd)
+		if err != nil {
+			panic(err)
+		}
+		s.Overrides.DGD = &runtime.RawExtension{Raw: raw}
+	}
+
 	// Keep the optional candidate bound inside its admitted range.
 	if s.Recommendation != nil {
 		s.Recommendation.MaxCandidates = int32(1 + c.Intn(100))
@@ -691,7 +703,7 @@ type fuzzAISimulateWorkload struct {
 	Custom       map[string]string `json:"custom,omitempty"`
 }
 
-func fuzzAISimulateSpec(s *v1beta2.AISimulateSpec, c randfill.Continue) {
+func fuzzAISimSpec(s *v1beta2.AISimSpec, c randfill.Continue) {
 	c.FillNoCustom(s)
 
 	// Exercise both absent and typed object input override payloads.

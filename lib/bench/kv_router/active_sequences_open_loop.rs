@@ -4,10 +4,12 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use dynamo_bench::kv_router_common::clock::BenchmarkClock;
+use dynamo_bench::kv_router_common::fixed_lane::{EMPTY_OPERATION_ID, FixedLane, LaneOverflow};
 use dynamo_bench::kv_router_common::issuer::pin_current_thread;
 use dynamo_bench::kv_router_common::replay::NoopSequencePublisher;
 use dynamo_bench::kv_router_common::trace_gen::WorkerTimelines;
@@ -18,12 +20,11 @@ use dynamo_kv_router::{
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
 use serde::Serialize;
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::oneshot;
 
 use super::active_sequences_shared::{SequenceTrace, SequenceTraceEntry};
 
 const RESULT_SCHEMA_VERSION: u32 = 2;
-const EMPTY_OPERATION_ID: u32 = u32::MAX;
 const START_LEAD_NS: u64 = 20_000_000;
 
 #[derive(Clone, Debug)]
@@ -562,53 +563,6 @@ pub(crate) fn prepare_active_sequences_trial(
     })
 }
 
-struct OperationLane {
-    slots: Box<[AtomicU32]>,
-    published: AtomicUsize,
-    consumed: AtomicUsize,
-    closed: AtomicBool,
-    notify: Notify,
-}
-
-impl OperationLane {
-    fn new(capacity: usize) -> Self {
-        Self {
-            slots: (0..capacity)
-                .map(|_| AtomicU32::new(EMPTY_OPERATION_ID))
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            published: AtomicUsize::new(0),
-            consumed: AtomicUsize::new(0),
-            closed: AtomicBool::new(false),
-            notify: Notify::new(),
-        }
-    }
-
-    fn write(&self, cursor: usize, id: u32) -> Result<(), IssuerFailure> {
-        let Some(slot) = self.slots.get(cursor) else {
-            return Err(IssuerFailure::LaneOverflow);
-        };
-        slot.store(id, Ordering::Relaxed);
-        Ok(())
-    }
-
-    fn publish(&self, count: usize) {
-        self.published.store(count, Ordering::Release);
-        self.notify.notify_one();
-    }
-
-    fn close(&self) {
-        self.closed.store(true, Ordering::Release);
-        self.notify.notify_one();
-    }
-
-    fn depth(&self) -> usize {
-        self.published
-            .load(Ordering::Acquire)
-            .saturating_sub(self.consumed.load(Ordering::Acquire))
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum CompletionFailure {
     #[default]
@@ -809,7 +763,7 @@ fn execute_payload(
 
 async fn operation_lane_worker(
     sequences: Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
-    lane: Arc<OperationLane>,
+    lane: Arc<FixedLane>,
     mut payloads: Box<[LanePayloadSlot]>,
     request_ids: Box<[String]>,
     clock: Arc<BenchmarkClock>,
@@ -821,9 +775,9 @@ async fn operation_lane_worker(
     let _ = ready.send(());
 
     loop {
-        let published = lane.published.load(Ordering::Acquire);
+        let published = lane.published();
         while consumed < published {
-            let id = lane.slots[consumed].load(Ordering::Relaxed);
+            let id = lane.id(consumed);
             if id == EMPTY_OPERATION_ID {
                 failure = LaneFailure::MissingPublishedId;
                 break;
@@ -848,22 +802,14 @@ async fn operation_lane_worker(
                 payload_slot.payload.take(),
             );
             consumed += 1;
-            lane.consumed.store(consumed, Ordering::Release);
+            lane.record_consumed(consumed);
         }
 
         if failure != LaneFailure::None {
             break;
         }
-        if lane.closed.load(Ordering::Acquire) && consumed == lane.published.load(Ordering::Acquire)
-        {
+        if !lane.wait_for_more(consumed).await {
             break;
-        }
-
-        let notified = lane.notify.notified();
-        if consumed == lane.published.load(Ordering::Acquire)
-            && !lane.closed.load(Ordering::Acquire)
-        {
-            notified.await;
         }
     }
 
@@ -892,6 +838,12 @@ enum IssuerFailure {
     DispatchMismatch,
 }
 
+impl From<LaneOverflow> for IssuerFailure {
+    fn from(_: LaneOverflow) -> Self {
+        IssuerFailure::LaneOverflow
+    }
+}
+
 struct IssuerOutput {
     records: Box<[IssueRecord]>,
     producer_stop_ns: u64,
@@ -901,7 +853,7 @@ struct IssuerOutput {
 
 fn issue_operations(
     dispatch: Vec<ScheduledOperation>,
-    lanes: Vec<Arc<OperationLane>>,
+    lanes: Vec<Arc<FixedLane>>,
     operation_count: usize,
     clock: Arc<BenchmarkClock>,
     start_signal: Arc<AtomicU64>,
@@ -954,7 +906,7 @@ fn issue_operations(
                 break;
             };
             if let Err(error) = lane.write(lane_cursors[operation.lane], operation.id) {
-                failure = Some(error);
+                failure = Some(error.into());
                 break;
             }
             lane_cursors[operation.lane] += 1;
@@ -1104,7 +1056,7 @@ pub(crate) async fn run_active_sequences_trial(
     let lanes = trial
         .lane_capacities
         .iter()
-        .map(|&capacity| Arc::new(OperationLane::new(capacity)))
+        .map(|&capacity| Arc::new(FixedLane::new(capacity)))
         .collect::<Vec<_>>();
 
     let mut ready_receivers = Vec::with_capacity(lanes.len());
@@ -1608,69 +1560,6 @@ fn nearest_rank(values: &[u64], numerator: usize, denominator: usize) -> u64 {
     values[rank.saturating_sub(1).min(values.len() - 1)]
 }
 
-struct BenchmarkClock {
-    epoch: Instant,
-    spin_ns: u64,
-    #[cfg(target_os = "linux")]
-    monotonic_epoch_ns: u64,
-}
-
-impl BenchmarkClock {
-    fn new(spin_ns: u64) -> anyhow::Result<Self> {
-        #[cfg(target_os = "linux")]
-        let monotonic_epoch_ns = monotonic_now_ns()?;
-        Ok(Self {
-            epoch: Instant::now(),
-            spin_ns,
-            #[cfg(target_os = "linux")]
-            monotonic_epoch_ns,
-        })
-    }
-
-    fn now_ns(&self) -> u64 {
-        self.epoch.elapsed().as_nanos().min(u64::MAX as u128) as u64
-    }
-
-    fn wait_until(&self, target_ns: u64) {
-        let sleep_target = target_ns.saturating_sub(self.spin_ns);
-        let now = self.now_ns();
-        #[cfg(target_os = "linux")]
-        if sleep_target > now {
-            sleep_until_monotonic(self.monotonic_epoch_ns.saturating_add(sleep_target));
-        }
-        #[cfg(not(target_os = "linux"))]
-        if sleep_target > now {
-            std::thread::sleep(Duration::from_nanos(sleep_target - now));
-        }
-        while self.now_ns() < target_ns {
-            std::hint::spin_loop();
-        }
-    }
-
-    fn timer_name(&self) -> &'static str {
-        if cfg!(target_os = "linux") {
-            "clock_nanosleep_monotonic_absolute"
-        } else {
-            "portable_sleep_spin_non_authoritative"
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn monotonic_now_ns() -> anyhow::Result<u64> {
-    let mut timestamp = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    let rc = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut timestamp) };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok((timestamp.tv_sec as u64)
-        .saturating_mul(1_000_000_000)
-        .saturating_add(timestamp.tv_nsec as u64))
-}
-
 fn process_cpu_time_ns() -> Option<u64> {
     cpu_time_ns(CpuClock::Process)
 }
@@ -1707,30 +1596,6 @@ fn cpu_time_ns(_clock: CpuClock) -> Option<u64> {
     None
 }
 
-#[cfg(target_os = "linux")]
-fn sleep_until_monotonic(target_ns: u64) {
-    let request = libc::timespec {
-        tv_sec: (target_ns / 1_000_000_000) as libc::time_t,
-        tv_nsec: (target_ns % 1_000_000_000) as libc::c_long,
-    };
-    loop {
-        let rc = unsafe {
-            libc::clock_nanosleep(
-                libc::CLOCK_MONOTONIC,
-                libc::TIMER_ABSTIME,
-                &request,
-                std::ptr::null_mut(),
-            )
-        };
-        if rc == 0 {
-            return;
-        }
-        if rc != libc::EINTR {
-            return;
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(dead_code, unused_imports)]
 mod tests {
@@ -1739,8 +1604,8 @@ mod tests {
 
     use super::{
         ActiveOperationKind, ActiveSequencesRunConfig, BenchmarkClock, CompletionFailure,
-        IssuerFailure, LanePayload, LanePayloadSlot, OperationLane,
-        prepare_active_sequences_corpus, run_active_sequences_benchmark,
+        FixedLane, LanePayload, LanePayloadSlot, prepare_active_sequences_corpus,
+        run_active_sequences_benchmark,
     };
     use crate::active_sequences_shared::{SequenceTrace, SequenceTraceEntry};
     use dynamo_bench::kv_router_common::replay::NoopSequencePublisher;
@@ -1892,16 +1757,9 @@ mod tests {
         assert!(error.contains("replay window must be positive"));
     }
 
-    #[test]
-    fn fixed_lane_reports_overflow() {
-        let lane = OperationLane::new(1);
-        assert!(lane.write(0, 1).is_ok());
-        assert_eq!(lane.write(1, 2), Err(IssuerFailure::LaneOverflow));
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn fixed_lane_does_not_lose_publish_before_wait() {
-        let lane = Arc::new(OperationLane::new(1));
+        let lane = Arc::new(FixedLane::new(1));
         lane.write(0, 7).unwrap();
         lane.publish(1);
         lane.close();
