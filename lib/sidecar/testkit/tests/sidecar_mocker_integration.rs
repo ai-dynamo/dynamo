@@ -1586,7 +1586,7 @@ async fn sglang_engine_lost_when_model_info_polls_fail() {
     let lost = engine.engine_lost();
     tokio::pin!(lost);
     fixture.set_health(Some(false));
-    tokio::time::timeout(std::time::Duration::from_millis(300), &mut lost)
+    tokio::time::timeout(std::time::Duration::from_millis(3_500), &mut lost)
         .await
         .expect_err("an unhealthy engine is not lost");
     fixture.shutdown().await;
