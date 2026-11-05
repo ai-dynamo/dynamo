@@ -33,6 +33,9 @@ from functools import lru_cache
 from types import ModuleType
 from typing import Any
 
+from huggingface_hub import snapshot_download
+from huggingface_hub.utils import HFValidationError, LocalEntryNotFoundError
+
 from dynamo.llm.exceptions import InvalidArgument
 
 try:
@@ -562,15 +565,13 @@ def _cached_model_index(
         if os.path.exists(root):
             return None
         try:
-            from huggingface_hub import snapshot_download
-
             root = snapshot_download(
                 repo_id=model_path,
                 revision=revision,
                 allow_patterns=["*model_index.json"],
                 local_files_only=True,
             )
-        except Exception:
+        except (LocalEntryNotFoundError, HFValidationError):
             return None
     if subfolder:
         root = os.path.join(root, subfolder)
@@ -623,12 +624,7 @@ def diffusers_text_encoder_precision_kwargs(kwargs: dict[str, Any]) -> dict[str,
         )
     except ImportError:
         return kwargs
-    try:
-        pipeline_config = PipelineConfig.from_kwargs(dict(kwargs))
-    except Exception as exc:
-        # DiffGenerator resolves the same config next and reports the error.
-        logger.debug("Could not resolve the SGLang diffusion pipeline config: %s", exc)
-        return kwargs
+    pipeline_config = PipelineConfig.from_kwargs(dict(kwargs))
     if not isinstance(pipeline_config, DiffusersGenericPipelineConfig):
         return kwargs
 

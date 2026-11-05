@@ -16,8 +16,11 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import torch
 import yaml
 from packaging.requirements import Requirement
+from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
+from sglang.multimodal_gen.runtime.utils.precision import resolve_component_precision
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.managers.io_struct import ProfileReq
 
@@ -255,11 +258,6 @@ def _write_diffusers_checkpoint(root: Path, encoders: list[str]) -> str:
 
 def _resolve_text_encoder_precisions(kwargs: dict, encoders: list[str]) -> dict:
     """Resolve each encoder's precision the way SGLang's memory sizing does."""
-    from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
-    from sglang.multimodal_gen.runtime.utils.precision import (
-        resolve_component_precision,
-    )
-
     server_args = SimpleNamespace(
         pipeline_config=PipelineConfig.from_kwargs(dict(kwargs)),
         component_precisions=kwargs.get("component_precisions", {}),
@@ -279,8 +277,6 @@ def _resolve_text_encoder_precisions(kwargs: dict, encoders: list[str]) -> dict:
 def test_diffusers_text_encoder_precision_kwargs_sizes_every_encoder(
     tmp_path, encoders
 ):
-    import torch
-
     kwargs = {
         "model_path": _write_diffusers_checkpoint(tmp_path, encoders),
         "num_gpus": 1,
