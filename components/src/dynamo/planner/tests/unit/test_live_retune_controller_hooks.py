@@ -627,6 +627,10 @@ async def test_a_scaling_planner_sweeps_from_the_ready_counts_at_window_start(
         80,
         90,
     }
+    # The planner axis the DGDR sweep shards: the grid's planner points.
+    assert sorted(
+        planner["load_scaling_down_sensitivity"] for planner in request.grid_planners
+    ) == [70, 80, 90]
 
 
 # ---------------------------------------------------------------------------

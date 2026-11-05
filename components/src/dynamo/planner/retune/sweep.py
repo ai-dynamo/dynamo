@@ -215,6 +215,10 @@ class SweepRequest:
     spec_replicas: dict[str, int] | None = None
     replicas_verified: bool = True
     generation: int = 0
+    # Live only: the grid's distinct planner points (searched fields), the
+    # planner axis a DGDR sweep shards; ``None`` derives it from every
+    # candidate.
+    grid_planners: tuple[dict[str, Any], ...] | None = None
 
     def __post_init__(self) -> None:
         keys = [candidate.key() for candidate in self.candidates]
@@ -376,7 +380,21 @@ def evaluated_params(
 
     if candidate == baseline:
         return candidate
-    planner = {**baseline.planner, **candidate.planner}
+    planner = evaluated_planner(candidate.planner, baseline, presweep, base_planner)
+    evaluated = RetuneParams(router=dict(candidate.router), planner=planner)
+    return candidate if evaluated == candidate else evaluated
+
+
+def evaluated_planner(
+    planner_point: Mapping[str, Any],
+    baseline: RetuneParams,
+    presweep: Mapping[str, Any] | None,
+    base_planner: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """The planner part ``evaluated_params`` gives any candidate other than
+    the baseline whose planner point is ``planner_point``."""
+
+    planner = {**baseline.planner, **planner_point}
     if planner and base_planner is not None:
         running = _running_planner(baseline, base_planner)
         planner = canonical_planner_point(planner, running)
@@ -395,8 +413,7 @@ def evaluated_params(
     elif presweep is not None:
         # No inner planner to read the interval from: one pre-sweep summary.
         planner.update(presweep.get("fields") or {})
-    evaluated = RetuneParams(router=dict(candidate.router), planner=planner)
-    return candidate if evaluated == candidate else evaluated
+    return planner
 
 
 def with_predictor_fields(

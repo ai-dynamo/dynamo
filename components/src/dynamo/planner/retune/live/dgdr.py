@@ -100,6 +100,7 @@ from dynamo.planner.retune.sweep import (
     SweepStatus,
     WorkerPool,
     evaluated_params,
+    evaluated_planner,
     predictor_swap_errors,
     predictor_swap_tasks,
     run_presweeps,
@@ -131,8 +132,6 @@ PLANNER_ADAPTER = "dynamo.planner"
 # (``simulation.provider.RETUNE_SWEEP``). A Candidate's planner parameters
 # are the section narrowed to its one point.
 RETUNE_SWEEP = "retune_sweep"
-# The shard axis of the planner points (sorts after every router knob).
-_PLANNER_AXIS = "~planner"
 _ROLES = ("aggregated", "prefill", "decode")
 _TEMPERATURE = DGDR_ROUTER_KNOBS["temperature"]
 # spec.objective.metric -> AISimulate optimization.target (operator lowering).
@@ -1265,17 +1264,21 @@ class _DgdrSweep:
 
         The controller's candidates are the grid plus the startup point and
         the baseline, so an off-grid candidate is one of those two. A
-        candidate is off the grid when its router point is; planner points
-        are the distinct points of every candidate, so they never are.
+        candidate is off the grid when its router point is, or when its
+        evaluated planner part is not on the planner axis.
         """
 
         baseline = self._evaluated(self.request.baseline)
+        axis = self.planner_points
         for candidate in self.request.candidates:
             router = candidate.router
             if candidate == self.request.baseline or set(router) != set(domain):
                 continue
-            if not all(float(router[key]) in domain[key] for key in domain):
-                return self._evaluated(candidate)
+            evaluated = self._evaluated(candidate)
+            if not all(float(router[key]) in domain[key] for key in domain) or (
+                axis and not any(_same_planner(evaluated.planner, p) for p in axis)
+            ):
+                return evaluated
         return baseline
 
     def _prepare_planner(self) -> None:
@@ -1365,11 +1368,22 @@ class _DgdrSweep:
                 )
             finally:
                 pool.close()
+        # The planner axis: the grid's planner points as evaluated (what
+        # P13 counts). The baseline, evaluated as is, and the startup point
+        # are off the grid when their planner part is not among them, and
+        # plan_shards gives each a single-point shard.
+        if request.grid_planners is None:
+            sources = [point.planner for point in self.evaluated.values()]
+        else:
+            sources = [
+                evaluated_planner(
+                    planner, request.baseline, presweep, request.base_planner
+                )
+                for planner in request.grid_planners
+            ]
         planners: dict[str, dict[str, Any]] = {}
-        for point in self.evaluated.values():
-            planners.setdefault(
-                RetuneParams(planner=point.planner).key(), point.planner
-            )
+        for planner in sources:
+            planners.setdefault(RetuneParams(planner=planner).key(), planner)
         self.planner_points = [planners[key] for key in sorted(planners)]
         self.planner_base = retune_sweep_base(request.base_planner or {})
         self.planner_warmup = {

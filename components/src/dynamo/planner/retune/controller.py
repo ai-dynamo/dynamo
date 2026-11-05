@@ -868,6 +868,16 @@ class RetuneController:
                 else dict(spec_replicas)
             ),
             "replicas_verified": verified,
+            # The planner axis a DGDR sweep shards: the grid's planner
+            # points, without the baseline's or the startup point's.
+            "grid_planners": tuple(
+                dict(planner)
+                for planner in {
+                    RetuneParams(planner=point.planner).key(): point.planner
+                    for point in sorted(self._grid, key=RetuneParams.key)
+                    if point.planner
+                }.values()
+            ),
         }
 
     def _submit(

@@ -898,12 +898,13 @@ class LiveRetuneSupervisor:
                 failure_reason="sweep_error",
             )
 
-    def on_effects(self, effects: PlannerEffects) -> None:
-        """Enqueue the tick's decisions; never raises into the tick."""
+    def on_effects(self, effects: PlannerEffects) -> list[RetuneDecision]:
+        """Enqueue the tick's decisions and return them, or ``[]`` when they
+        are dropped; never raises into the tick."""
 
         decisions = list(effects.retune_decisions or ())
         if not decisions:
-            return
+            return []
         if not (self.is_leader() and self._initialized):
             logger.warning(
                 "retune: dropping %d decision(s) %s: not an initialized leader",
@@ -911,7 +912,7 @@ class LiveRetuneSupervisor:
                 [decision.decision_id for decision in decisions],
             )
             self._rewind_now()
-            return
+            return []
         router_parameters = effects.router_parameters
         for decision in decisions:
             self._outbox.append(
@@ -929,6 +930,7 @@ class LiveRetuneSupervisor:
                 )
             )
         self._outbox_wake.set()
+        return decisions
 
     # ------------------------------------------------------------ lifecycle
 

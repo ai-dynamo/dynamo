@@ -894,6 +894,46 @@ async def test_live_retune_applies_planner_changes_through_runtime_reconfigurati
     await planner._shutdown_runtime()
 
 
+async def test_live_retune_drops_a_planner_change_overtaken_while_preparing(
+    monkeypatch,
+):
+    # A decision needs a new predictor for 360 s; while it is prepared, a
+    # control API update activates another revision. The decision is dropped
+    # instead of installing a predictor warmed for another configuration.
+    import dynamo.planner.core.base as base_module
+
+    planner = _planner("disagg", optimization_target="sla", load_predictor="constant")
+    engine = planner._ensure_engine()
+    discarded = []
+
+    class Controller:
+        def discard_planner_changes(self, changes):
+            discarded.append(dict(changes))
+
+    engine._retune = Controller()
+    real_prepare = base_module.prepare_predictor
+
+    def prepare(config, capabilities, observations):
+        predictor = real_prepare(config, capabilities, observations)
+        # The control API's activation, between the two locked sections.
+        planner._config_generation += 1
+        planner.config.load_scaling_down_sensitivity = 70
+        return predictor
+
+    monkeypatch.setattr(base_module, "prepare_predictor", prepare)
+    changes = {"throughput_adjustment_interval_seconds": 360}
+    warmup = tuple(TrafficObservation(360.0, 10.0, 100.0, 10.0) for _ in range(8))
+
+    await _apply_decisions(planner, [_applied(changes, warmup)])
+
+    assert planner.config.throughput_adjustment_interval_seconds == 180
+    assert planner.config.load_scaling_down_sensitivity == 70
+    assert planner._config_generation == 1
+    assert discarded == [changes]
+    engine._retune = None
+    await planner._shutdown_runtime()
+
+
 async def test_live_retune_keeps_the_config_when_a_planner_change_cannot_apply():
     planner = _planner(
         "disagg",

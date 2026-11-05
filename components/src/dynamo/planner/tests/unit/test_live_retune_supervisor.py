@@ -792,8 +792,9 @@ async def settle(processes: list[Process], world: World, rounds: int = 6) -> Non
                 await process.sup.control_round()
 
 
-def enqueue(process: Process, *decisions: RetuneDecision) -> None:
-    """Hand the supervisor a tick's decisions with the controller's routers."""
+def enqueue(process: Process, *decisions: RetuneDecision) -> list[RetuneDecision]:
+    """Hand the supervisor a tick's decisions with the controller's routers;
+    the ones it accepted."""
 
     controller = process.controller
     desired = (
@@ -801,7 +802,7 @@ def enqueue(process: Process, *decisions: RetuneDecision) -> None:
         if controller is not None
         else startup_flat("a")
     )
-    process.sup.on_effects(
+    return process.sup.on_effects(
         SimpleNamespace(
             retune_decisions=list(decisions),
             router_parameters=by_wt(process.host.variant, desired),
@@ -1203,7 +1204,8 @@ async def test_every_failed_state_write_counts_as_state_write() -> None:
     store = StateStore(world.kube, sup.dgd)
     snapshot = store.read()
     store.write(dataclasses.replace(snapshot.state, leader_term="9/x/1"), snapshot)
-    enqueue(process, make_decision(K0 + 1, "kept"))
+    decision = make_decision(K0 + 1, "kept")
+    assert enqueue(process, decision) == [decision]
     await sup.outbox_round()
     assert not sup.initialized and failures() == ["state_write"] * 3
 
@@ -1213,7 +1215,9 @@ async def test_decisions_are_dropped_and_rewound_without_leadership() -> None:
     process = await started(world)
     controller = process.controller
     controller._last_k = K0 + 1
-    enqueue(process, make_decision(K0 + 1, "kept"))
+    # Dropped decisions are not handed back: the planner applies none of
+    # their planner changes.
+    assert enqueue(process, make_decision(K0 + 1, "kept")) == []
     assert process.sup.outbox_size == 0
     assert controller._last_k == -1  # no state: every window is due again
 

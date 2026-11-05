@@ -120,7 +120,8 @@ class LiveRetuneHandle(Protocol):
     async def stop(self) -> None:
         ...
 
-    def on_effects(self, effects: PlannerEffects) -> None:
+    def on_effects(self, effects: PlannerEffects) -> Sequence[RetuneDecision]:
+        """Take the tick's decisions; return the ones it accepted."""
         ...
 
 
@@ -665,6 +666,10 @@ class NativePlannerBase:
                 candidate = candidate_config(self.config, changes)
                 self.validate_runtime_candidate(candidate)
                 rebuild = predictor_rebuild_required(self.config, candidate)
+                # Like the control API's expected_revision: a change made
+                # while the predictor is prepared (the control API or another
+                # decision) wins, and this one is dropped.
+                revision = self._config_generation
             predictor = None
             if rebuild:
                 predictor = await asyncio.wait_for(
@@ -678,13 +683,14 @@ class NativePlannerBase:
                 )
             async with self._effect_admission_lock:
                 async with self._config_lock:
-                    candidate = candidate_config(self.config, changes)
-                    self.validate_runtime_candidate(candidate)
-                    if predictor_rebuild_required(self.config, candidate) != rebuild:
+                    if self._config_generation != revision:
                         raise ValueError(
                             "the configuration changed while the predictor was "
-                            "prepared"
+                            f"prepared (revision {revision} -> "
+                            f"{self._config_generation})"
                         )
+                    candidate = candidate_config(self.config, changes)
+                    self.validate_runtime_candidate(candidate)
                     self.apply_runtime_candidate(candidate, changes.keys(), predictor)
             logger.info(
                 "Retune %s applied planner changes %s",
@@ -1376,11 +1382,14 @@ class NativePlannerBase:
             # Retune decisions go to the live supervisor's outbox, which
             # persists them before actuating routers; _apply_effects never
             # sees router parameters.
+            # Only a decision the supervisor accepted (persisted, then
+            # actuated) changes the planner: a dropped one is rewound.
+            accepted: Sequence[RetuneDecision] = ()
             try:
-                self._live_retune.on_effects(effects)
+                accepted = self._live_retune.on_effects(effects)
             except Exception:
                 logger.exception("Live retune failed to take the tick's effects")
-            self._schedule_retune_planner_changes(effects.retune_decisions)
+            self._schedule_retune_planner_changes(accepted)
         await self._submit_effects(effects, config_generation)
         emit_diagnostics = self._should_emit_tick_diagnostics(tick, effects)
         if emit_diagnostics:

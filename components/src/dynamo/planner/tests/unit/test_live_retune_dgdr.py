@@ -2329,6 +2329,69 @@ def test_scenario_2_throughput_planner_carries_its_history_warmup(tmp_path):
     assert result.predictor_warmup_errors == {}
 
 
+def test_scenario_2_off_grid_running_planner_gets_its_own_shard(tmp_path):
+    # Grid {70, 90}, running 80: the planner axis is the grid's two points,
+    # as P13 counts it, and the baseline replays in a single-point shard
+    # instead of adding 80 to the axis of every grid shard.
+    h = Harness(tmp_path)
+    request = dataclasses.replace(
+        scenario_2_request(_base_planner()),
+        grid_planners=({LSD: 70}, {LSD: 90}),
+    )
+
+    result = h.sweep(request, bucket_history=FakeHistory(), worker_pool=InlinePool)
+
+    assert result.status == "ok", (result.error, result.details)
+    assert result.details["planner"]["points"] == 2
+    assert "point-baseline" in result.details["shards"]
+    grid_points = {
+        point[LSD]
+        for body in h.created()
+        if body["metadata"]["labels"][LABEL_SHARD].startswith("grid-")
+        for point in body["spec"]["aisim"]["inputOverrides"]["planner"]["retune_sweep"][
+            "points"
+        ]
+    }
+    assert grid_points == {70, 90}
+    assert all(result.scores[c.key()] is not None for c in request.candidates)
+
+
+def test_scenario_2_presweep_winner_keeps_the_planner_axis(tmp_path, monkeypatch):
+    # The pre-sweep picks kalman while the planner runs arima: the grid's
+    # points carry kalman and the baseline keeps arima, so the baseline is
+    # off the grid instead of doubling the planner axis.
+    h = Harness(tmp_path)
+    base = _base_planner(
+        optimization_target="sla",
+        enable_throughput_scaling=True,
+        enable_load_scaling=True,
+        load_predictor="arima",
+    )
+    request = dataclasses.replace(
+        scenario_2_request(base),
+        grid_planners=({LSD: 70}, {LSD: 90}),
+        predictor_candidates=(("kalman_default", {"load_predictor": "kalman"}),),
+    )
+    interval = str(base[THROUGHPUT_INTERVAL])
+    monkeypatch.setattr(
+        dgdr,
+        "run_presweeps",
+        lambda *args: {
+            "by_interval": {interval: {"fields": {"load_predictor": "kalman"}}}
+        },
+    )
+    from dynamo.planner.retune import sweep as sweep_module
+
+    monkeypatch.setattr(sweep_module, "prepare_predictor", lambda *args: None)
+
+    result = h.sweep(request, bucket_history=FakeHistory(), worker_pool=InlinePool)
+
+    assert result.status == "ok", (result.error, result.details)
+    assert result.details["planner"]["points"] == 2
+    assert "point-baseline" in result.details["shards"]
+    assert all(result.scores[c.key()] is not None for c in request.candidates)
+
+
 def test_scenario_2_candidate_with_a_foreign_planner_point_is_unmapped(tmp_path):
     h = Harness(tmp_path)
 
