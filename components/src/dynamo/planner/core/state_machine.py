@@ -209,6 +209,15 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
         """Reset per-tick diagnostics before builtin plugins run."""
         self._reset_diag()
 
+    def reset_throughput_lower_bounds(self) -> None:
+        """Forget the last throughput targets that floor load scaling.
+
+        For a planner whose throughput scaling turns off at runtime: load
+        scaling would otherwise stay floored at a target nothing updates.
+        """
+        self._throughput_lower_bound_p = 1
+        self._throughput_lower_bound_d = 1
+
     def observe_worker_counts(self, counts: WorkerCounts) -> None:
         self._update_inventory(counts)
 
