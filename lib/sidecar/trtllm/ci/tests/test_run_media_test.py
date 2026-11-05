@@ -45,6 +45,46 @@ class MediaResponseTests(unittest.TestCase):
             ):
                 runner.validate_response("video", "A rotating triangle.", response, 21)
 
+    def test_audio_requires_expected_transcription_and_authoritative_usage(self):
+        response = {"prompt_tokens": 4, "completion_tokens": 17}
+        runner.validate_response("audio", "Thoughts affected Hester.", response, 0)
+        with self.assertRaisesRegex(AssertionError, "transcription"):
+            runner.validate_response("audio", "An unrelated sentence.", response, 0)
+        for usage in (
+            {"prompt_tokens": 0, "completion_tokens": 17},
+            {"prompt_tokens": 4, "completion_tokens": 0},
+        ):
+            with self.subTest(usage=usage), self.assertRaisesRegex(
+                AssertionError, "token usage"
+            ):
+                runner.validate_response("audio", "Thoughts affected Hester.", usage, 0)
+
+    def test_audio_selects_whisper_without_changing_image_identity(self):
+        config = {
+            "model": "vision",
+            "model_revision": "vision-revision",
+            "image": "official@sha256:digest",
+            "upstream_commit": "commit",
+            "audio": {"model": "whisper", "model_revision": "audio-revision"},
+        }
+        selected = runner.model_config(config, "audio")
+        self.assertEqual(selected["model"], "whisper")
+        self.assertEqual(selected["model_revision"], "audio-revision")
+        self.assertEqual(selected["image"], config["image"])
+        self.assertEqual(config["model"], "vision")
+
+    def test_changed_audio_fixture_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(runner.urllib.request, "urlopen") as fetch,
+                self.assertRaisesRegex(ValueError, "Audio fixture"),
+            ):
+                fetch.return_value.__enter__.return_value.read.return_value = (
+                    b"wrong audio"
+                )
+                runner.prepare_audio(Path(tmp))
+            self.assertFalse((Path(tmp) / "audio-data-uri.txt").exists())
+
     def test_video_data_uri_contains_the_checked_in_clip(self):
         uri = runner.video_data_uri()
         header, encoded = uri.split(",", 1)
@@ -90,33 +130,42 @@ class MediaResponseTests(unittest.TestCase):
                 ["binary", "--exact", "video-test", "--ignored"],
             )
 
-    def test_video_failures_are_recorded_as_failures_in_junit(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            argv = [
-                "run_image_test.py",
-                "--media",
-                "video",
-                "--binary",
-                "unused",
-                "--config",
-                "unused",
-                "--results",
-                tmp,
-            ]
-            with (
-                patch("sys.argv", argv),
-                patch.object(runner, "run", side_effect=RuntimeError("engine failed")),
-                contextlib.redirect_stderr(io.StringIO()),
-            ):
-                self.assertEqual(runner.main(), 1)
-            suite = ET.parse(Path(tmp) / "junit.xml").getroot()
-            self.assertEqual(suite.attrib["failures"], "1")
-            self.assertEqual(suite.attrib["skipped"], "0")
-            case = suite.find("testcase")
-            self.assertEqual(
-                case.attrib["name"], "tests::e2e::e2e_real_openengine_video"
-            )
-            self.assertIn("engine failed", case.find("failure").text)
+    def test_media_failures_keep_the_selected_scenario_in_junit(self):
+        for media in ("image", "video", "audio"):
+            for flag in ("--media", "--scenario"):
+                with self.subTest(
+                    media=media, flag=flag
+                ), tempfile.TemporaryDirectory() as tmp:
+                    argv = [
+                        "run_image_test.py",
+                        flag,
+                        media,
+                        "--binary",
+                        "unused",
+                        "--config",
+                        "unused",
+                        "--results",
+                        tmp,
+                    ]
+                    with (
+                        patch("sys.argv", argv),
+                        patch.object(
+                            runner, "run", side_effect=RuntimeError("engine failed")
+                        ) as run,
+                        contextlib.redirect_stderr(io.StringIO()),
+                    ):
+                        self.assertEqual(runner.main(), 1)
+                    selected = run.call_args.args[0]
+                    self.assertEqual(selected.media, media)
+                    self.assertEqual(selected.scenario, media)
+                    suite = ET.parse(Path(tmp) / "junit.xml").getroot()
+                    self.assertEqual(suite.attrib["failures"], "1")
+                    self.assertEqual(suite.attrib["skipped"], "0")
+                    case = suite.find("testcase")
+                    self.assertEqual(
+                        case.attrib["name"], f"tests::e2e::e2e_real_openengine_{media}"
+                    )
+                    self.assertIn("engine failed", case.find("failure").text)
 
 
 if __name__ == "__main__":

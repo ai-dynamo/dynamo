@@ -4,8 +4,8 @@
 //! SGLang `/generate` as a [`GenerateFormat`].
 //!
 //! With incremental streaming, each chunk holds only the new part of `text`,
-//! `output_ids` and the output-side lists; prompt-side values repeat in full
-//! on every chunk, and routed experts arrive on the final one. In P/D decode
+//! `output_ids` and the output-side lists; prompt-side values come in full on
+//! the first chunk, and routed experts arrive on the final one. In P/D decode
 //! never runs the prompt: input logprobs come from prefill, and prefill's
 //! `routed_experts` rows replace decode's stale prompt rows
 //! (sgl-project/sglang#44002).
@@ -25,6 +25,9 @@
 //! - `python/sglang/srt/managers/scheduler_components/batch_result_processor.py`
 //!   (`_maybe_collect_routed_experts`) and `disaggregation/prefill.py`: which
 //!   server reports which `routed_experts` rows (`sequence_final`).
+//! - `rust/sglang-server/src/api_server/core/frame.rs`: `CoreOutput::meta_info`
+//!   (which frames carry input logprobs) and `append_delta` (the Rust server's
+//!   own unary join keeps the last non-empty input logprobs).
 //!
 //! `components/src/dynamo/sglang/tests/test_sglang_generate_merge_contract.py`
 //! checks the file against the installed SGLang and fails on unclassified
@@ -388,9 +391,24 @@ mod tests {
         }
     }
 
+    /// `fixture` as SGLang's Rust server streams it: input logprobs on the
+    /// first chunk only, then an empty `input_token_logprobs`.
+    fn as_rust_server(mut fixture: Value) -> Value {
+        fixture["name"] = format!("{} (Rust server)", fixture["name"].as_str().unwrap()).into();
+        for chunk in fixture["stream"].as_array_mut().unwrap().iter_mut().skip(1) {
+            let meta = chunk["meta_info"].as_object_mut().unwrap();
+            if let Some(logprobs) = meta.get_mut("input_token_logprobs") {
+                *logprobs = json!([]);
+            }
+            meta.remove("input_top_logprobs");
+        }
+        fixture
+    }
+
     #[test]
     fn recorded_streams_join_into_sglangs_unary_response() {
-        for fixture in fixtures() {
+        let rust_server = fixtures().into_iter().map(as_rust_server);
+        for fixture in fixtures().into_iter().chain(rust_server) {
             let body = Value::Object(fixture["request"].as_object().unwrap().clone());
             let Opened { bind, .. } = SglangFormat::native()
                 .open(ClientRequest {

@@ -455,6 +455,8 @@ pub struct Worker {
     /// adapters that detach work (such as a separately scheduled language
     /// runtime task) remain responsible for cancelling that work themselves.
     engine_route_shutdown: CancellationToken,
+    /// Cancelled as `engine.cleanup()` starts; see `EngineAdapter::with_engine_cleanup`.
+    engine_cleanup: CancellationToken,
     /// KV-aware-routing publisher handles. Drained in `cleanup_once` while NATS is alive.
     publishers: Option<PublisherHandles>,
     /// Framework-owned lifecycle gauges. Set in `setup_publishing` after
@@ -490,6 +492,7 @@ impl Worker {
             )),
             engine_route_mutation: Arc::new(tokio::sync::Mutex::new(())),
             engine_route_shutdown: CancellationToken::new(),
+            engine_cleanup: CancellationToken::new(),
             publishers: None,
             lifecycle: None,
             admission_gate: WorkerAdmissionGate::default(),
@@ -1016,6 +1019,7 @@ impl Worker {
             LifecycleState::Running | LifecycleState::StartFailed => {}
         }
         let cleanup_start = std::time::Instant::now();
+        self.engine_cleanup.cancel();
         match self.engine.cleanup().await {
             Ok(()) => tracing::info!("Engine cleanup complete"),
             Err(e) => tracing::error!(error = %e, "engine cleanup failed"),
@@ -1125,7 +1129,8 @@ impl Worker {
         ) = match &self.engine {
             EngineKind::Llm(engine) => {
                 let mut engine_adapter =
-                    EngineAdapter::new(engine.clone(), self.config.disaggregation_mode);
+                    EngineAdapter::new(engine.clone(), self.config.disaggregation_mode)
+                        .with_engine_cleanup(self.engine_cleanup.clone());
                 if let Some(source) = self
                     .publishers
                     .as_ref()

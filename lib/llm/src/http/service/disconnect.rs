@@ -152,6 +152,7 @@ impl StreamErrorSignal {
             ErrorType::Cancelled => return,
             ErrorType::ResponseTimeout => ErrorClass::DeadlineExceeded,
             ErrorType::NotImplemented => ErrorClass::NotImplemented,
+            ErrorType::UnsupportedModality => ErrorClass::UnsupportedMedia,
             ErrorType::None | ErrorType::Internal => ErrorClass::Internal,
         };
         crate::http::service::metrics::record_failure(&DynamoError::builder().class(class).build());
