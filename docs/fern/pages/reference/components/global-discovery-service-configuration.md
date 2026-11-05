@@ -75,8 +75,10 @@ has left. This needs:
 An instance becomes ready once it has asked the others. `GET /pools` reports `complete: false` while a
 registration made with another instance may be missing here. That holds until the instance has found
 itself in the import; for a lease after an instance leaves the import; once a listed instance has not
-answered completely for the lease minus two heartbeat intervals; and after a registration lapses here,
-until every instance has answered again.
+answered completely for the lease minus two heartbeat intervals; while an instance that has not
+answered asks this one, and for a lease and a heartbeat interval after it last does, as when this
+cluster's import lags behind; and after a registration lapses here, until every instance has answered
+again.
 
 ### With `--registration-storage dynamodb`
 
@@ -112,7 +114,7 @@ short plain-text reason, and `GET /healthz` answers with a status and an empty b
 | `POST /pools` | Register a pool and renew its lease. | 200 with a lease | 400 for malformed JSON, 413 for a body over 64 KiB, 415 without `Content-Type: application/json`, 422 for an invalid registration or one the store cannot keep, 503 when the store is unreachable |
 | `GET /pools` | List live pools. | 200 with a pool list | 503 when the backend is unreachable. With `dynamodb`, only before the first read of the table. |
 | `GET /routers` | List Global Router replicas. | 200 with a router list | 503 when the backend is unreachable |
-| `GET /registrations` | With `--peer-service`, the registrations this instance's Pool Relays made, with the time each has left, for the other instances. | 200 with the registrations | 501 without `--peer-service` |
+| `GET /registrations` | With `--peer-service`, the registrations this instance's Pool Relays made, with the time each has left, for the other instances. Each names itself in the `asker` query parameter. | 200 with the registrations | 501 without `--peer-service` |
 | `GET /healthz` | Readiness: the backend has answered once, and with `--peer-service`, the instance has asked the others once. With DynamoDB, that follows the startup check that the table can be read and written. Later backend failures show in the answers to requests, not here. | 200 | 503 until then |
 
 ### `POST /pools`

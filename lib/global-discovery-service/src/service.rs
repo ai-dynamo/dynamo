@@ -22,8 +22,8 @@
 //!   known pools that are missing, and waits for a complete list to remove
 //!   any. A caller that knows no pools yet still uses a partial list.
 //! - `GET /registrations`: the registrations this instance's PoolRelays
-//!   made, for the other instances ([`crate::peers`]). Like `POST /pools`, it
-//!   assumes a trusted network.
+//!   made, for the other instances ([`crate::peers`]), which name themselves
+//!   in `asker`. Like `POST /pools`, it assumes a trusted network.
 //! - `GET /healthz`: readiness. OK once the backend has answered, which with
 //!   DynamoDB follows the startup check of the table, and, for an instance
 //!   that shares registrations, once it has asked the others. A later failure
@@ -44,10 +44,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::pool_discovery::{
     Completeness, DiscoveryError, PoolDirectory, PoolRegistrar, PoolRegistration,
-    RegistrationSharing, ReplicaDirectory,
+    RegistrationSharing, RegistrationsRequest, ReplicaDirectory,
 };
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -184,9 +184,17 @@ async fn list_routers(State(shared): State<Arc<Shared>>) -> Response {
     }
 }
 
-async fn shared_registrations(State(shared): State<Arc<Shared>>) -> Response {
+async fn shared_registrations(
+    State(shared): State<Arc<Shared>>,
+    Query(request): Query<RegistrationsRequest>,
+) -> Response {
     match &shared.backend.sharing {
-        Some(sharing) => Json(sharing.reply()).into_response(),
+        Some(sharing) => {
+            if let Some(asker) = request.asker {
+                sharing.asked_by(asker);
+            }
+            Json(sharing.reply()).into_response()
+        }
         None => (
             StatusCode::NOT_IMPLEMENTED,
             "this instance does not share registrations",
@@ -418,7 +426,7 @@ mod tests {
             lease,
         )
         .unwrap();
-        let instance = sharing.reply().instance;
+        let instance = sharing.reply().instance.to_string();
         let mut backend = registrations_backend();
         backend.registrar = Some(store);
         backend.sharing = Some(Arc::new(sharing));

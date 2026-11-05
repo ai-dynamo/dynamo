@@ -4,9 +4,10 @@
 //! The other service instances, read over HTTP: `GET /registrations`.
 
 use async_trait::async_trait;
+use uuid::Uuid;
 
 use crate::pool_discovery::{
-    DiscoveryError, RegistrationSource, RouterReplica, SharedRegistrations,
+    DiscoveryError, RegistrationSource, RegistrationsRequest, RouterReplica, SharedRegistrations,
 };
 
 /// Asks other instances over plain HTTP, never through a proxy, and without
@@ -31,6 +32,7 @@ impl RegistrationSource for HttpRegistrationSource {
     async fn shared_registrations(
         &self,
         instance: &RouterReplica,
+        asker: Uuid,
     ) -> Result<SharedRegistrations, DiscoveryError> {
         let unavailable = |error: reqwest::Error| DiscoveryError::Unavailable(error.into());
         let url = instance
@@ -39,6 +41,7 @@ impl RegistrationSource for HttpRegistrationSource {
             .map_err(|error| DiscoveryError::Unavailable(error.into()))?;
         self.client
             .get(url)
+            .query(&RegistrationsRequest { asker: Some(asker) })
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)

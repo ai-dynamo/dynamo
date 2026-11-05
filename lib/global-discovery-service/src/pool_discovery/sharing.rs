@@ -4,15 +4,16 @@
 //! How service instances share registrations (see `crate::peers`): each
 //! serves the ones its own PoolRelays made through [`RegistrationSharing`],
 //! as [`SharedRegistrations`] (`GET /registrations`), reads the others'
-//! through a [`RegistrationSource`], and keeps copies in a
-//! [`RegistrationExchange`]. Instances are named as the replicas of the
-//! service's own Service.
+//! through a [`RegistrationSource`], naming itself in each
+//! [`RegistrationsRequest`], and keeps copies in a [`RegistrationExchange`].
+//! Instances are named as the replicas of the service's own Service.
 
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
+use uuid::Uuid;
 
 use super::{DiscoveryError, Lease, PoolRegistration, RouterReplica};
 
@@ -44,6 +45,10 @@ pub trait RegistrationSharing: Send + Sync {
     /// PoolRelays made, with the time each has left.
     fn reply(&self) -> SharedRegistrations;
 
+    /// Notes that the instance named `asker` asked, as its request says. This
+    /// is how an instance learns of instances that read it.
+    fn asked_by(&self, asker: Uuid);
+
     /// Whether this instance has asked the others once. Until then it may
     /// know only its own PoolRelays, so it is not ready.
     fn synced(&self) -> bool;
@@ -52,10 +57,12 @@ pub trait RegistrationSharing: Send + Sync {
 /// The other instances, as this one reads them.
 #[async_trait]
 pub trait RegistrationSource: Send + Sync {
-    /// What `instance` shares. The caller bounds how long it waits.
+    /// What `instance` shares, asked by `asker`, the name that this
+    /// instance's own replies carry. The caller bounds how long it waits.
     async fn shared_registrations(
         &self,
         instance: &RouterReplica,
+        asker: Uuid,
     ) -> Result<SharedRegistrations, DiscoveryError>;
 }
 
@@ -84,12 +91,21 @@ pub struct ExchangeRound {
     pub complete_until: Option<Instant>,
 }
 
+/// `GET /registrations` query string.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RegistrationsRequest {
+    /// The asking instance, as its replies name it. Instances of earlier
+    /// versions do not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asker: Option<Uuid>,
+}
+
 /// `GET /registrations` reply. Only service instances read it, so it is not
 /// in `dynamo_global_common`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SharedRegistrations {
     /// Names the answering process, so an instance can tell its own reply.
-    pub instance: String,
+    pub instance: Uuid,
     /// The answering instance's heartbeat interval and lease. Every instance
     /// must use the same ones.
     pub lease: Lease,
