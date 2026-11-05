@@ -9,7 +9,7 @@
 //! `total_kv_blocks` it advertises, else the `capacity_blocks` parameter.
 //!
 //! - A rank fits when `D <= capacity_fraction * capacity`, compared exactly with the fraction in
-//!   parts per million. A rank without a capacity fits.
+//!   parts per million. A rank without a capacity fits, and is warned about once.
 //! - Among fitting ranks: fewest requests first (`count_priority`), then the lowest
 //!   `(D + W * N) * taint`, where `taint` is the preferred-taint multiplier, as in the default.
 //! - When no rank fits: the lowest `D`, ignoring taints.
@@ -19,7 +19,6 @@
 //! for decode pools; on other pools it logs a warning at startup. With `capacity_fraction: null`
 //! and `count_priority: false` it ties exactly like the default plain-decode cost.
 
-use std::cell::Cell;
 use std::sync::Arc;
 
 use dynamo_kv_router::plugins::worker_selection::{
@@ -117,12 +116,8 @@ impl Parameters {
         }
     }
 
-    fn key(&self, rank: &Rank) -> Key {
-        if !self.fits(rank) {
-            return Key::Over {
-                decode_cost: rank.decode_cost,
-            };
-        }
+    /// The key `rank` has if it fits.
+    fn fit_key(&self, rank: &Rank) -> Key {
         let count = if self.count_priority {
             rank.requests
         } else {
@@ -132,19 +127,52 @@ impl Parameters {
             * rank.taint.unwrap_or(1.0);
         Key::Fits { count, cost }
     }
+
+    /// The key of `rank`, given the key it has if it fits.
+    fn key_given(&self, rank: &Rank, fit_key: Key) -> Key {
+        if self.fits(rank) {
+            fit_key
+        } else {
+            Key::Over {
+                decode_cost: rank.decode_cost,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn key(&self, rank: &Rank) -> Key {
+        self.key_given(rank, self.fit_key(rank))
+    }
 }
 
 /// The row to place the request on, or `None` without rows. Ties are drawn uniformly in the order
 /// `rows` yields them; `draw(n)` returns an index below `n`.
+///
+/// `rank(row)` comes without a capacity, and `capacity(row)` is a lookup the filter needs only for a
+/// row that can still win: once a fitting row is found, a row whose fitting key is already worse
+/// loses whether it fits or not.
 fn select_row(
     parameters: &Parameters,
-    rows: impl Iterator<Item = (usize, Rank)>,
+    rows: impl Iterator<Item = usize>,
+    rank: impl Fn(usize) -> Rank,
+    capacity: impl Fn(usize) -> Option<u64>,
     mut draw: impl FnMut(usize) -> usize,
 ) -> Option<usize> {
+    let filter = parameters.capacity_fraction.is_some();
     let mut best: Option<(Key, usize)> = None;
     let mut ties = 0;
-    for (row, rank) in rows {
-        let key = parameters.key(&rank);
+    for row in rows {
+        let mut rank = rank(row);
+        let fit_key = parameters.fit_key(&rank);
+        if let Some((best_key @ Key::Fits { .. }, _)) = best
+            && fit_key > best_key
+        {
+            continue;
+        }
+        if filter {
+            rank.capacity = capacity(row);
+        }
+        let key = parameters.key_given(&rank, fit_key);
         match best {
             Some((best_key, _)) if key > best_key => {}
             Some((best_key, _)) if key == best_key => {
@@ -180,19 +208,20 @@ impl KvCapacityAwarePicker {
         }
     }
 
-    fn warn_unknown(&self, candidates: &[ScoredWorkerCandidate], unknown: impl Fn(usize) -> bool) {
+    /// Warn once about the rank at `row`, which reports no capacity that `capacity_blocks` could
+    /// replace.
+    fn warn_unknown(&self, candidates: &[ScoredWorkerCandidate], row: usize) {
+        let worker = candidates[row].worker();
         let mut warned = self.warned.lock();
-        for (row, candidate) in candidates.iter().enumerate() {
-            let worker = candidate.worker();
-            if unknown(row) && warned.insert(worker) {
-                tracing::warn!(
-                    policy = POLICY_TYPE,
-                    worker_id = worker.worker_id,
-                    dp_rank = worker.dp_rank,
-                    "no total_kv_blocks reported and no capacity_blocks set; the rank is not filtered"
-                );
-            }
+        if !warned.insert(worker) {
+            return;
         }
+        tracing::warn!(
+            policy = POLICY_TYPE,
+            worker_id = worker.worker_id,
+            dp_rank = worker.dp_rank,
+            "no total_kv_blocks reported and no capacity_blocks set; the rank is not filtered"
+        );
         if warned.len() > candidates.len() {
             warned.retain(|worker| {
                 candidates
@@ -228,33 +257,26 @@ impl WorkerPicker for KvCapacityAwarePicker {
                 "load input does not match candidates",
             ));
         }
-        // Capacity matters only to the filter, so without one no rank is looked up.
-        let filter = self.parameters.capacity_fraction.is_some();
-        let unknown = Cell::new(false);
-        let rank = |row: usize| {
-            let capacity = if filter {
-                let capacity = input
-                    .info(row)
-                    .and_then(|info| info.total_kv_blocks())
-                    .or(self.parameters.capacity_blocks);
-                unknown.set(unknown.get() || capacity.is_none());
-                capacity
-            } else {
-                None
-            };
-            Rank {
-                decode_cost: load[row].decode_cost_blocks(),
-                requests: load[row].active_requests(),
-                capacity,
-                taint: candidates[row].preferred_taint_multiplier(),
+        let rank = |row: usize| Rank {
+            decode_cost: load[row].decode_cost_blocks(),
+            requests: load[row].active_requests(),
+            capacity: None,
+            taint: candidates[row].preferred_taint_multiplier(),
+        };
+        let capacity = |row: usize| {
+            let capacity = input
+                .info(row)
+                .and_then(|info| info.total_kv_blocks())
+                .or(self.parameters.capacity_blocks);
+            if capacity.is_none() {
+                self.warn_unknown(candidates, row);
             }
+            capacity
         };
         let row = match &self.rng {
-            None => select_row(
-                &self.parameters,
-                (0..candidates.len()).map(|row| (row, rank(row))),
-                |n| fastrand::usize(0..n),
-            ),
+            None => select_row(&self.parameters, 0..candidates.len(), rank, capacity, |n| {
+                fastrand::usize(0..n)
+            }),
             Some(rng) => {
                 // Canonical order only for deterministic replay, as the default picker does.
                 let mut rows: Vec<usize> = (0..candidates.len()).collect();
@@ -263,17 +285,12 @@ impl WorkerPicker for KvCapacityAwarePicker {
                     (worker.worker_id, worker.dp_rank)
                 });
                 let mut rng = rng.lock();
-                select_row(
-                    &self.parameters,
-                    rows.iter().map(|&row| (row, rank(row))),
-                    |n| rng.usize(0..n),
-                )
+                select_row(&self.parameters, rows.into_iter(), rank, capacity, |n| {
+                    rng.usize(0..n)
+                })
             }
         }
         .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))?;
-        if unknown.get() {
-            self.warn_unknown(candidates, |row| rank(row).capacity.is_none());
-        }
         Ok(row)
     }
 }
@@ -545,7 +562,16 @@ mod tests {
             let (ties, fallback) = tie_set(&p, &rs);
             assert_eq!(ties, expected);
             assert_eq!(fallback, !rows.iter().any(fits));
-            let picked = select_row(&p, rs.iter().copied().enumerate(), |k| rng.usize(0..k));
+            let picked = select_row(
+                &p,
+                0..rs.len(),
+                |r| Rank {
+                    capacity: None,
+                    ..rs[r]
+                },
+                |r| rs[r].capacity,
+                |k| rng.usize(0..k),
+            );
             assert!(ties.contains(&picked.expect("non-empty")));
         }
     }
