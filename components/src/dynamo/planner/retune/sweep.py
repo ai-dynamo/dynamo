@@ -60,7 +60,7 @@ from dynamo.planner.core.types import (
     TrafficObservation,
     WorkerCapabilities,
 )
-from dynamo.planner.reconfiguration import PREDICTOR_FIELDS, prepare_predictor
+from dynamo.planner.reconfiguration import prepare_predictor
 from dynamo.planner.retune.domains import (
     ENABLE_THROUGHPUT,
     PREDICTOR_KEYS,
@@ -410,26 +410,7 @@ def evaluated_planner(
                     if key in planner and key in running
                 }
             planner.update(fields)
-    elif presweep is not None:
-        # No inner planner to read the interval from: one pre-sweep summary.
-        planner.update(presweep.get("fields") or {})
     return planner
-
-
-def with_predictor_fields(
-    candidate: RetuneParams,
-    baseline: RetuneParams,
-    fields: Mapping[str, Any] | None,
-) -> RetuneParams:
-    """``evaluated_params`` for one pre-sweep winner's ``fields``, without an
-    inner planner to fold against (kept for single-interval callers)."""
-
-    return evaluated_params(
-        candidate,
-        baseline,
-        None if fields is None else {"fields": dict(fields)},
-        None,
-    )
 
 
 def score_summary(
@@ -1103,7 +1084,7 @@ def _predictor_swaps(
         predictor = {
             key: value
             for key, value in candidate.planner.items()
-            if key in PREDICTOR_FIELDS
+            if key in PREDICTOR_KEYS
         }
         if interval == base_interval and not _changes_predictor(baseline, predictor):
             continue

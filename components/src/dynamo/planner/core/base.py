@@ -1415,9 +1415,16 @@ class NativePlannerBase:
     async def run(self) -> None:
         engine = self._ensure_engine()
         next_tick = engine.initial_tick(time.time())
+        tick_generation = self._config_generation
 
         try:
             while True:
+                if tick_generation != self._config_generation:
+                    # An activation since the pending tick was planned may
+                    # change which loops it runs and what it pulls.
+                    tick_generation = self._config_generation
+                    if isinstance(engine, ReconfigurableEngineProtocol):
+                        next_tick = engine.next_scheduled_tick()
                 # Read every iteration: a runtime reconfiguration may change
                 # the load interval.
                 poll_interval = self.config.load_adjustment_interval_seconds / 10
