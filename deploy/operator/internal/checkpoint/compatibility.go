@@ -42,9 +42,9 @@ func ValidateCheckpointCompatibility(experimental *nvidiacomv1beta1.Experimental
 
 // snapshotRestoreEnvironmentNames must match KUBERNETES_REQUIRED_ENV_NAMES,
 // KUBERNETES_OPTIONAL_ENV_NAMES, and RESTORE_RUNTIME_ENV_NAMES in
-// components/src/dynamo/common/snapshot/constants.py. Those values name the
-// destination Pod and runtime, so they are intentionally not part of a portable
-// snapshot's compatibility identity.
+// components/src/dynamo/common/snapshot/constants.py, except HF_HUB_OFFLINE.
+// That policy stays in the persisted v2 identity to preserve existing hashes.
+// Other destination Pod and runtime values are excluded from the identity.
 var snapshotRestoreEnvironmentNames = map[string]struct{}{
 	"CONTAINER_NAME":                        {},
 	"DYN_COMPONENT":                         {},
@@ -75,7 +75,6 @@ var snapshotRestoreEnvironmentNames = map[string]struct{}{
 	"ENGINE_ID":                             {},
 	"ETCD_ENDPOINTS":                        {},
 	"FAILOVER_LOCK_PATH":                    {},
-	"HF_HUB_OFFLINE":                        {},
 	"MODEL_EXPRESS_URL":                     {},
 	"NATS_SERVER":                           {},
 	"POD_NAME":                              {},

@@ -49,6 +49,7 @@ class SnapshotConfig:
         pause_controller: Any,
         *pause_args: object,
     ) -> bool:
+        """Pause for capture and report whether the process resumed from restore."""
         logger.info("Pausing model")
         await pause_controller.pause(*pause_args)
 

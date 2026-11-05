@@ -49,6 +49,7 @@ async def test_snapshot_lifecycle_returns_paused_after_restore_sentinel(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     controller = _PauseController()
     config = SnapshotConfig.from_env()
     assert config is not None
@@ -122,7 +123,9 @@ async def test_elect_and_wake_resumes_without_lock(monkeypatch):
 async def test_restore_applies_destination_offline_policy_before_runtime_parsing(
     monkeypatch, tmp_path, destination_policy
 ):
+    """Apply destination policy after capture without leaking environment changes."""
     monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("HF_HUB_OFFLINE", "")
     if destination_policy is None or destination_policy == "legacy":
         monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     else:
@@ -140,6 +143,8 @@ async def test_restore_applies_destination_offline_policy_before_runtime_parsing
         "TORCH_NCCL_ENABLE_MONITORING",
         "TORCH_NCCL_DUMP_ON_TIMEOUT",
     ):
+        # Record absence too: capture writes directly to os.environ.
+        monkeypatch.setenv(name, os.environ.get(name, ""))
         monkeypatch.delenv(name, raising=False)
     configure_snapshot_capture_env()
     assert os.environ["HF_HUB_OFFLINE"] == "1"
