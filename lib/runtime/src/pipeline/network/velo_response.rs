@@ -463,14 +463,6 @@ impl VeloResponseService {
         .await
     }
 
-    /// A TCP service on an ephemeral loopback port, for tests outside this module.
-    #[cfg(test)]
-    pub(crate) async fn loopback() -> Arc<Self> {
-        Self::new(ResponseTransport::Tcp, "127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap()
-    }
-
     async fn new(transport: ResponseTransport, address: SocketAddr) -> Result<Arc<Self>> {
         let heartbeat = response_heartbeat()?;
         let mut builder = Velo::builder()

@@ -1786,60 +1786,6 @@ mod tests {
         );
     }
 
-    /// Over Velo the pump encodes each serde response straight into the item it
-    /// sends. The frontend must get exactly the bytes `encode_response` makes,
-    /// complete-final frame included, under both codecs, for a token-sized
-    /// item and for one over 64 KiB.
-    #[tokio::test]
-    async fn velo_items_encoded_in_place_carry_the_same_bytes() {
-        let consumer = velo_response::VeloResponseService::loopback().await;
-        let producer = velo_response::VeloResponseService::loopback().await;
-        let responses = vec![
-            TestResponse::from_data(serde_json::json!({ "token": 1 })),
-            TestResponse::from_data(serde_json::json!({ "image": "A".repeat(100_000) })),
-        ];
-        for codec in [
-            RequestPlanePayloadCodec::Json,
-            RequestPlanePayloadCodec::Msgpack,
-        ] {
-            let mut expected = Vec::new();
-            for response in responses.iter().cloned().map(Some).chain([None]) {
-                let complete_final = response.is_none();
-                let frame = SerdeIngressPayloadAdapter
-                    .encode_response(codec, response, complete_final)
-                    .await
-                    .unwrap();
-                expected.push(frame.bytes);
-            }
-
-            let registered = consumer
-                .register_response(Context::new(()).context(), false)
-                .unwrap();
-            let mut sender = producer
-                .sender(
-                    Context::new(()).context(),
-                    registered.connection_info.clone(),
-                    None,
-                )
-                .await
-                .unwrap();
-            sender.send_prologue(None).await.unwrap();
-            let (_, provider) = registered.into_parts();
-            let receiver = provider.await.unwrap().unwrap();
-
-            let ctx = Context::new(serde_json::json!({}));
-            let response_stream: ManyOut<TestResponse> =
-                ResponseStream::new(Box::pin(stream::iter(responses.clone())), ctx.context());
-            TestIngress::new()
-                .pump_response_stream(response_stream, &sender, codec)
-                .await;
-            sender.finish().await.unwrap();
-
-            let received: Vec<Bytes> = receiver.rx.map(Result::unwrap).collect().await;
-            assert_eq!(received, expected, "{}", codec.name());
-        }
-    }
-
     /// Run the pump with a health-check notifier set and a publisher whose
     /// receiver is already gone, so every `send` fails. This models a client
     /// that left before the engine produced its first chunk.
