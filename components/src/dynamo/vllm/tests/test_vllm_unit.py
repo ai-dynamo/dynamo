@@ -743,6 +743,83 @@ def test_pinned_tekken_backend_serves_mixed_structured_outputs() -> None:
 
 
 @pytest.mark.parametrize(
+    "dyn_parser,engine_parser,registered,expected",
+    [
+        # Frontend-only parser: the engine learns where reasoning ends.
+        ("deepseek_r1", "", ["deepseek_r1", "qwen3"], "deepseek_r1"),
+        # An explicit engine-side parser always wins.
+        ("deepseek_r1", "qwen3", ["deepseek_r1", "qwen3"], "qwen3"),
+        # No vLLM parser of that name: leave the engine config unchanged.
+        ("dynamo_only", "", ["deepseek_r1"], ""),
+        # No reasoning parser at all: nothing to do.
+        (None, "", ["deepseek_r1"], ""),
+    ],
+)
+def test_engine_reasoning_parser_defaults_from_dyn_reasoning_parser(
+    monkeypatch, dyn_parser, engine_parser, registered, expected
+):
+    vllm_main = _load_vllm_main()
+    from vllm.reasoning import ReasoningParserManager
+
+    monkeypatch.setattr(
+        ReasoningParserManager, "list_registered", classmethod(lambda cls: registered)
+    )
+    config = SimpleNamespace(dyn_reasoning_parser=dyn_parser)
+    outputs = SimpleNamespace(reasoning_parser=engine_parser, enable_in_reasoning=False)
+    vllm_main.configure_engine_reasoning_parser_for_structured_outputs(
+        config, SimpleNamespace(structured_outputs_config=outputs)
+    )
+    assert outputs.reasoning_parser == expected
+    assert outputs.enable_in_reasoning is False
+
+
+@pytest.mark.parametrize(
+    "reasoning_boundary,expected_parser,expected_excludes_reasoning",
+    [
+        # The tag owns the boundary: keep the engine parser unset, so the
+        # published policy matches the frontend's tag and startup succeeds.
+        ("structural_tag", "", False),
+        # `auto` (the default) and `backend` let the engine own the boundary.
+        ("auto", "qwen3", True),
+        ("backend", "qwen3", True),
+        # No structural tag configured at all.
+        (None, "qwen3", True),
+    ],
+)
+def test_explicit_structural_tag_boundary_keeps_engine_parser_unset(
+    monkeypatch, reasoning_boundary, expected_parser, expected_excludes_reasoning
+):
+    vllm_main = _load_vllm_main()
+    from vllm.reasoning import ReasoningParserManager
+
+    monkeypatch.setattr(
+        ReasoningParserManager, "list_registered", classmethod(lambda cls: ["qwen3"])
+    )
+    structural_tag = (
+        None
+        if reasoning_boundary is None
+        else {"scope": "always", "reasoning_boundary": reasoning_boundary}
+    )
+    config = SimpleNamespace(
+        dyn_reasoning_parser="qwen3", structural_tag=structural_tag
+    )
+    outputs = SimpleNamespace(reasoning_parser="", enable_in_reasoning=False)
+    vllm_config = SimpleNamespace(structured_outputs_config=outputs)
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+
+    vllm_main.configure_engine_reasoning_parser_for_structured_outputs(
+        config, vllm_config
+    )
+    vllm_main.publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
+
+    assert outputs.reasoning_parser == expected_parser
+    runtime_config.set_engine_specific.assert_called_once_with(
+        vllm_main.TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+        json.dumps(expected_excludes_reasoning),
+    )
+
+
+@pytest.mark.parametrize(
     ("hf_config", "expected"),
     [
         (SimpleNamespace(video_token_id=101, video_token_index=202), 101),

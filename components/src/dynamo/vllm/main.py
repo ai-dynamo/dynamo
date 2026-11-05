@@ -21,6 +21,7 @@ from huggingface_hub.utils import HFValidationError
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
+from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.repo_utils import any_pattern_in_repo_files
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.gc_utils import freeze_gc_heap
@@ -231,6 +232,57 @@ def publish_vllm_llguidance_lark_grammar(
     runtime_config.set_engine_specific(
         LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY,
         json.dumps(backend == "guidance"),
+    )
+
+
+def configure_engine_reasoning_parser_for_structured_outputs(
+    config: Config, vllm_config: VllmConfig
+) -> None:
+    """Let vLLM's structured outputs wait for the end of reasoning.
+
+    With ``--dyn-reasoning-parser`` the reasoning block is parsed in the Dynamo
+    frontend, but vLLM's grammar backend only knows where reasoning ends through
+    ``structured_outputs_config.reasoning_parser``. Left empty, a
+    ``response_format`` / forced-tool grammar is applied from the first generated
+    token: the model is made to write the JSON inside the reasoning block, the
+    frontend returns it as ``reasoning_content`` and ``content`` is null.
+
+    When the engine-side parser is unset and vLLM has a reasoning parser with the
+    same name, use it. An explicit ``--structured-outputs-config`` (or
+    ``--reasoning-parser``) always wins; ``enable_in_reasoning`` is left alone.
+
+    An explicit ``--dyn-structural-tag`` ``reasoning_boundary`` of
+    ``structural_tag`` makes the frontend tag own the boundary, so the engine
+    parser stays unset and the published policy keeps matching that setting.
+    """
+    if not config.dyn_reasoning_parser:
+        return
+    structured_outputs_config = vllm_config.structured_outputs_config
+    if structured_outputs_config.reasoning_parser:
+        return
+    structural_tag = getattr(config, "structural_tag", None)
+    if (
+        isinstance(structural_tag, dict)
+        and structural_tag.get("reasoning_boundary") == "structural_tag"
+    ):
+        return
+    name = config.dyn_reasoning_parser
+    known = name in ReasoningParserManager.list_registered()
+    if not known:
+        logger.warning(
+            "--dyn-reasoning-parser=%s has no vLLM reasoning parser of the same "
+            "name: structured outputs (response_format, required/named tool_choice) "
+            "will be constrained from the first token, including the reasoning "
+            "block. Pass --structured-outputs-config "
+            '\'{"reasoning_parser": "<vllm parser>"}\' to fix it.',
+            name,
+        )
+        return
+    structured_outputs_config.reasoning_parser = name
+    logger.info(
+        "Structured outputs start after reasoning: engine reasoning_parser=%s "
+        "(from --dyn-reasoning-parser)",
+        name,
     )
 
 
@@ -801,6 +853,7 @@ def setup_vllm_engine(
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
     configure_muse_structural_tag_reasoning(config, vllm_config)
     pin_guidance_for_tekken_checkpoints(vllm_config)
+    configure_engine_reasoning_parser_for_structured_outputs(config, vllm_config)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
