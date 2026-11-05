@@ -9845,6 +9845,104 @@ func TestGenerateComponentIngressResources_NormalizeBackendServiceName(t *testin
 	assert.Equal(t, "model-qwen3-0-6b", virtualService.Spec.Http[0].Route[0].Destination.Host)
 }
 
+// DCD and DGD names only need to be DNS-1123 subdomains, so a name such as
+// "70b-llama-production" is admitted, but a Service with that name is rejected
+// because a DNS-1035 label must start with a letter.
+func TestGenerateComponentService_DNS1035Name(t *testing.T) {
+	digitLeadingLong := "7" + strings.Repeat("b", 60) // 61 chars; the prefix pushes it past 63
+
+	tests := []struct {
+		name      string
+		input     string
+		want      string
+		unchanged bool // the name is valid today and must not be renamed
+	}{
+		{name: "digit-leading", input: "70b-llama-production", want: "svc-70b-llama-production"},
+		{name: "digit-leading with dots and capitals", input: "70B.Llama-v1", want: "svc-70b-llama-v1"},
+		{name: "digit-leading, shortened after the prefix", input: digitLeadingLong},
+		{name: "dotted", input: "Qwen3-0.6B", want: "qwen3-0-6b", unchanged: true},
+		{name: "letter-leading", input: "my-dgd-frontend", want: "my-dgd-frontend", unchanged: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, err := GenerateComponentService(ComponentServiceParams{
+				ServiceName:     tt.input,
+				Namespace:       "default",
+				ComponentType:   commonconsts.ComponentTypeFrontend,
+				DynamoNamespace: "dynamo",
+				ComponentName:   "frontend",
+			})
+			require.NoError(t, err)
+
+			assert.Empty(t, validation.IsDNS1035Label(svc.Name), "Service name %q", svc.Name)
+			assert.Equal(t, ComponentServiceName(tt.input), svc.Name)
+			if tt.want != "" {
+				assert.Equal(t, tt.want, svc.Name)
+			}
+			if tt.unchanged {
+				assert.Equal(t, NormalizeKubeResourceName(tt.input), svc.Name)
+			}
+		})
+	}
+
+	t.Run("shortening is deterministic and keeps the prefix", func(t *testing.T) {
+		got := ComponentServiceName(digitLeadingLong)
+		assert.Len(t, got, maxServiceNameLength)
+		assert.True(t, strings.HasPrefix(got, "svc-7b"), got)
+		assert.Equal(t, got, ComponentServiceName(digitLeadingLong))
+	})
+}
+
+// Every object that points at a component Service must use the name
+// GenerateComponentService gives it, while the referring objects keep their own
+// names.
+func TestComponentServiceReferences_DigitLeadingName(t *testing.T) {
+	const name = "70b-llama-production"
+	svc, err := GenerateComponentService(ComponentServiceParams{
+		ServiceName:     name,
+		Namespace:       "default",
+		ComponentType:   commonconsts.ComponentTypeFrontend,
+		DynamoNamespace: "dynamo",
+		ComponentName:   "frontend",
+	})
+	require.NoError(t, err)
+	require.Empty(t, validation.IsDNS1035Label(svc.Name))
+
+	ingressSpec := IngressSpec{
+		Enabled:               true,
+		Host:                  "example",
+		UseVirtualService:     true,
+		VirtualServiceGateway: new("mesh/gateway"),
+	}
+	ingress := GenerateComponentIngress(context.Background(), name, "default", ingressSpec)
+	require.Len(t, ingress.Spec.Rules, 1)
+	require.NotNil(t, ingress.Spec.Rules[0].HTTP)
+	require.Len(t, ingress.Spec.Rules[0].HTTP.Paths, 1)
+	require.NotNil(t, ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service)
+	assert.Equal(t, name, ingress.Name)
+	assert.Equal(t, svc.Name, ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name)
+
+	virtualService := GenerateComponentVirtualService(context.Background(), name, "default", ingressSpec)
+	require.Len(t, virtualService.Spec.Http, 1)
+	require.Len(t, virtualService.Spec.Http[0].Route, 1)
+	require.NotNil(t, virtualService.Spec.Http[0].Route[0].Destination)
+	assert.Equal(t, name, virtualService.Name)
+	assert.Equal(t, svc.Name, virtualService.Spec.Http[0].Route[0].Destination.Host)
+
+	mesh := configv1alpha1.ServiceMeshConfiguration{
+		Provider: string(configv1alpha1.ServiceMeshProviderIstio),
+		Istio:    &configv1alpha1.IstioMeshConfiguration{},
+	}
+	dr := GenerateEPPDestinationRule(name, "default", mesh)
+	assert.Equal(t, name, dr.Name)
+	assert.Equal(t, svc.Name+".default.svc.cluster.local", dr.Spec.Host)
+
+	leader := ElasticEPLeaderServiceName(name)
+	assert.Empty(t, validation.IsDNS1035Label(leader), "leader Service name %q", leader)
+	assert.Equal(t, svc.Name+"-ray", leader)
+}
+
 func TestApplyDynDeploymentConfig_FallsBackToFrontendConfigKeyForRenamedFrontend(t *testing.T) {
 	dcd := &v1beta1.DynamoComponentDeployment{
 		Name: "router", Namespace: "default",

@@ -53,6 +53,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
@@ -730,6 +731,44 @@ func TestStandaloneDCDServiceRenderingCharacterization(t *testing.T) {
 	require.Equal(t, int32(commonconsts.DynamoServicePort), service.Spec.Ports[0].Port)
 	require.Equal(t, dynamo.GetDCDKubeLabels(dcd), service.Labels)
 	require.Equal(t, dynamo.GetDCDKubeAnnotations(dcd), service.Annotations)
+}
+
+// A DCD name may start with a digit, but a Service name must be a DNS-1035 label.
+// The frontend Service and the delete stub a non-frontend DCD renders must both use
+// the same valid name, so cleanup targets the Service that was created.
+func TestStandaloneDCDService_DigitLeadingName(t *testing.T) {
+	const name = "70b-llama-production"
+	newDCD := func(componentType v1beta1.ComponentType) *v1beta1.DynamoComponentDeployment {
+		return &v1beta1.DynamoComponentDeployment{
+			Name:      name,
+			Namespace: "default",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoNamespace: "dynamo-graph",
+			},
+			Spec: v1beta1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+					ComponentName: "frontend",
+					ComponentType: componentType,
+				},
+			},
+		}
+	}
+	r := &DynamoComponentDeploymentReconciler{Config: &configv1alpha1.OperatorConfiguration{}}
+
+	frontend, toDelete, err := r.generateService(context.Background(), generateResourceOption{
+		dynamoComponentDeployment: newDCD(v1beta1.ComponentTypeFrontend),
+	})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	require.Empty(t, validation.IsDNS1035Label(frontend.Name), "Service name %q", frontend.Name)
+	require.Equal(t, dynamo.ComponentServiceName(name), frontend.Name)
+
+	stub, toDelete, err := r.generateService(context.Background(), generateResourceOption{
+		dynamoComponentDeployment: newDCD(v1beta1.ComponentTypeWorker),
+	})
+	require.NoError(t, err)
+	require.True(t, toDelete)
+	require.Equal(t, frontend.Name, stub.Name)
 }
 
 func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentService(t *testing.T) {
