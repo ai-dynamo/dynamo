@@ -1550,13 +1550,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	}
 
 	// Image configuration applies only to new Jobs; existing Pod templates are immutable.
-	outputCopierImage := r.Config.DGDR.EffectiveOutputCopierImage()
-	for _, container := range existingJob.Spec.Template.Spec.Containers {
-		if container.Name == ContainerNameOutputCopier {
-			outputCopierImage = container.Image
-			break
-		}
-	}
+	outputCopierImage := profilingJobOutputCopierImage(existingJob, r.Config.DGDR.EffectiveOutputCopierImage())
 
 	// Use SyncResource to create/update the job
 	modified, job, err := commonController.SyncResource(ctx, r, dgdr, func(ctx context.Context) (*batchv1.Job, bool, error) {
@@ -1805,6 +1799,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	dgdr.Status.ProfilingJobName = job.Name
 
 	return modified, nil
+}
+
+// profilingJobOutputCopierImage preserves the image in a non-nil Job's immutable Pod template.
+func profilingJobOutputCopierImage(job *batchv1.Job, configuredImage string) string {
+	if index := findContainerIndex(job.Spec.Template.Spec.Containers, ContainerNameOutputCopier); index >= 0 {
+		return job.Spec.Template.Spec.Containers[index].Image
+	}
+	return configuredImage
 }
 
 // marshalDGDRSpec produces the JSON string passed to the profiler via --config.
