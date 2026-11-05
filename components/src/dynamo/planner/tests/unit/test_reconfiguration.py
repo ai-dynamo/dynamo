@@ -28,6 +28,9 @@ from dynamo.planner.core.types import (
     WorkerCapabilities,
     WorkerCounts,
 )
+from dynamo.planner.environment.metrics_provider.runtime_provider import (
+    RuntimeFpmProvider,
+)
 from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
 from dynamo.planner.plugins.clock import VirtualClock
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
@@ -789,10 +792,6 @@ async def test_scaling_policy_is_a_runtime_field(tmp_path):
 
 
 def test_runtime_fpm_provider_updates_both_subscribers_in_place():
-    from dynamo.planner.environment.metrics_provider.runtime_provider import (
-        RuntimeFpmProvider,
-    )
-
     class Subscriber:
         def __init__(self):
             self.ages = []

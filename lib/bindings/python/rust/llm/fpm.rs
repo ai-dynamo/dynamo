@@ -1093,7 +1093,8 @@ impl FpmEventSubscriber {
         ))
     }
 
-    /// Change the freshness and cleanup window, before or after `start_tracking`.
+    /// Change the freshness and cleanup window after `start_tracking`, which sets
+    /// it from its own `max_age_seconds` and so replaces a value set earlier.
     /// Tracked samples are kept; reads and the next cleanup use the new age.
     #[pyo3(signature = (max_age_seconds,))]
     fn set_max_age(&self, max_age_seconds: f64) -> PyResult<()> {

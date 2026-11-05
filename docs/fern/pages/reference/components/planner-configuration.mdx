@@ -487,8 +487,11 @@ bucket length of its history), or turns throughput scaling on. Other scaling-mod
 keep the running predictor and the live FPM samples:
 
 - Turning a mode on registers its builtin plugins as at startup, so they first run one
-  interval later; turning it off unregisters them. Turning throughput scaling off also
-  drops the last throughput targets, which would otherwise keep flooring load scaling.
+  interval later; turning it off unregisters them. Turning throughput scaling off, or
+  load scaling on, also drops the last throughput targets, which would otherwise floor
+  load scaling at a stale target.
+- A mode that stays on keeps its builtin plugins and their state. After an interval
+  change, it next runs one new interval after its last run.
 - A new load interval also sets the FPM freshness window to three load intervals.
 - A throughput-only SLA Planner keeps pulling FPM samples at the load interval to refit its
   performance model, so turning load scaling on later does not start that model cold.
@@ -524,7 +527,7 @@ that directory; absolute paths must also be inside it. Runtime warmup accepts at
 16 MiB of stored data and 16 MiB after decompression, and at most 4,096 aggregation
 intervals (including idle gaps). Directories and globs remain supported by the startup
 `load_predictor_warmup_trace` option but are rejected by runtime reconfiguration.
-Observations use the unchanged throughput adjustment interval. Warmup must provide enough
+Observations are bucketed at the candidate's `throughput_adjustment_interval_seconds`. Warmup must provide enough
 effective samples for request count, ISL, and OSL and complete a successful forecast.
 SLA/budget-only updates do not require warmup. Supplying a trace explicitly also allows rewarming an unchanged predictor.
 
@@ -533,9 +536,10 @@ has a 120-second deadline and only one preparation can run at a time. If a backg
 fit outlives its deadline, its result cannot activate and further preparations are
 rejected until that work exits; updates that do not replace the predictor remain available.
 Invalid data, failed fitting, or a changed revision leave the active settings unchanged.
-Successful activation occurs between decisions and increments the revision. Updates preserve
-the existing prediction and scaling cadence, including changes to SLA targets,
-`max_throughput_scaling_replicas`, and predictor settings. The next scheduled throughput
+Successful activation occurs between decisions and increments the revision. An update that
+leaves the scaling modes and intervals unchanged preserves the existing prediction and scaling
+cadence, including changes to SLA targets, `max_throughput_scaling_replicas`, and predictor
+settings. A scaling-mode or interval change sets the new cadence as described above. The next scheduled throughput
 decision uses the active settings and the full trailing traffic window; predictor replacement
 does not delay that decision. Performance models, worker state, and already-admitted
 scaling operations are retained. `applied` means the

@@ -674,9 +674,9 @@ class _SweepInputs(NamedTuple):
     window_path: str
     num_requests: int
     row_counts: dict[str, int]
-    observations: dict[int, tuple[TrafficObservation, ...]] = {}
-    observations_paths: dict[int, str] = {}
-    warmup_paths: dict[int, str] = {}
+    observations: dict[int, tuple[TrafficObservation, ...]]
+    observations_paths: dict[int, str]
+    warmup_paths: dict[int, str]
 
 
 @dataclass(frozen=True)
@@ -742,7 +742,7 @@ def _read_sweep_inputs(spec: _ReadSpec, work_dir: str) -> _SweepInputs:
     )
     row_counts = dict(window.row_counts)
     if window.num_requests == 0 or not spec.buckets:
-        return _SweepInputs(window.path, window.num_requests, row_counts)
+        return _SweepInputs(window.path, window.num_requests, row_counts, {}, {}, {})
 
     warmup_paths: dict[int, str] = {}
     if spec.history_start_ms < spec.window_start_ms:

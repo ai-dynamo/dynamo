@@ -764,6 +764,7 @@ def test_presweep_dispatch_does_not_wait_for_workers_that_are_not_reading(tmp_pa
         {},
         observations={60: tuple(observations)},
         observations_paths={60: path},
+        warmup_paths={},
     )
     presets = ("constant_last", "kalman_default_raw")
     request = sweep_request(

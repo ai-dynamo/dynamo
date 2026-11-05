@@ -1500,9 +1500,10 @@ class FpmEventSubscriber:
 
     def set_max_age(self, max_age_seconds: float) -> None:
         """
-        Change the freshness and cleanup window, before or after
-        ``start_tracking``. Tracked samples are kept; snapshot reads and the
-        next cleanup use the new age. It must be finite and positive.
+        Change the freshness and cleanup window after ``start_tracking``,
+        which sets it from its own ``max_age_seconds`` and so replaces a value
+        set earlier. Tracked samples are kept; snapshot reads and the next
+        cleanup use the new age. It must be finite and positive.
         """
         ...
 
@@ -1530,7 +1531,7 @@ class FpmEventSubscriber:
         """Return fresh samples, unjoined IDs, stale count, and missing rank count.
 
         Age is measured from local receive time, including idle heartbeats.
-        The age limit is set once by ``start_tracking()``.
+        The age limit is set by ``start_tracking()`` and changed by ``set_max_age()``.
         Missing ranks include discovered workers that have not published a sample.
         """
         ...
