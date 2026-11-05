@@ -10,14 +10,12 @@ images as PNG, JPEG, or WebP. The vLLM-Omni image handler has its own copy in
 """
 
 import io
-from typing import TYPE_CHECKING, Iterable, Literal, Optional, Union, cast
+from typing import Iterable, Literal, Optional, Union, cast
 
 import numpy as np
+from PIL import Image
 
 from dynamo.llm.exceptions import InvalidArgument
-
-if TYPE_CHECKING:
-    from PIL import Image
 
 # The values of `NvImagesResponse.output_format`.
 ImageOutputFormat = Literal["png", "jpeg", "webp"]
@@ -61,15 +59,13 @@ def normalize_image_output_options(
 
 
 def encode_image_bytes(
-    image: Union["Image.Image", np.ndarray],
+    image: Union[Image.Image, np.ndarray],
     output_format: ImageOutputFormat,
 ) -> bytes:
     """Encode a PIL image or a uint8 (H, W, C) array as `output_format`.
 
     JPEG has no alpha channel, so a transparent image is flattened onto white.
     """
-    from PIL import Image
-
     if isinstance(image, np.ndarray):
         image = Image.fromarray(image)
 

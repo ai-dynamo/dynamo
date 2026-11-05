@@ -10,6 +10,7 @@ These tests do NOT require visual_gen, torch, or GPU - they test logic only.
 """
 
 import asyncio
+import base64
 import logging
 import sys
 import threading
@@ -570,8 +571,6 @@ class TestImageHandlerResponseFormats:
         assert response["data"][0].get("url") is None
 
         # Verify valid base64
-        import base64
-
         decoded = base64.b64decode(response["data"][0]["b64_json"])
         assert decoded == b"fake_image_bytes"
 
@@ -828,8 +827,6 @@ class TestImageHandlerResponseFormats:
     ):
         """The real encoder writes the requested format, and the response
         reports it with the batch's size."""
-        import base64
-
         handler = self._make_handler(tmp_path)
         request = {
             "prompt": "a test image",
