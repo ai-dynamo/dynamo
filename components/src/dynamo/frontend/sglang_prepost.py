@@ -424,11 +424,150 @@ def _should_use_deepseek_v4_encoding(
     )
 
 
+_KIMI_K3_THINKING_EFFORTS = frozenset({"low", "high", "max"})
+
+
+def _normalize_kimi_k3_hint(value: Any) -> str:
+    return str(value or "").lower().replace("-", "").replace("_", "")
+
+
+def _should_use_kimi_k3_prompt_bridge(
+    request: dict[str, Any],
+    *,
+    tokenizer,
+    tool_call_parser_name: str | None,
+    reasoning_parser_name: str | None,
+) -> bool:
+    """Return whether to translate OpenAI controls for Kimi K3's encoder.
+
+    K3 ships no Jinja ``chat_template``; its tokenizer renders XTML directly and
+    consumes ``tool_choice``/``response_format``/``thinking_effort`` as template
+    kwargs. Limit the translation to K3 so unrelated templates keep receiving
+    exactly the caller's template arguments.
+    """
+    if getattr(tokenizer, "chat_template", None) is not None:
+        return False
+
+    return any(
+        "kimik3" in _normalize_kimi_k3_hint(hint)
+        for hint in (
+            request.get("model"),
+            tool_call_parser_name,
+            reasoning_parser_name,
+        )
+    )
+
+
+def _kimi_k3_tool_choice_kwargs(
+    request: dict[str, Any],
+    *,
+    has_tools: bool,
+) -> dict[str, Any]:
+    """Translate an OpenAI ``tool_choice`` into K3 encoder arguments.
+
+    Native SGLang and Dynamo's Rust renderer forward ``required`` and ``none``
+    only when the request declares tools; the K3 encoder then renders the
+    corresponding instruction itself. The named-function variant is carried as
+    a synthetic system message instead because the encoder implements only the
+    two string forms. ``auto`` and an omitted choice need no instruction; an
+    explicit ``null`` is equivalent to omission here.
+    """
+    if not has_tools:
+        return {}
+
+    tool_choice = request.get("tool_choice")
+    if tool_choice in ("required", "none"):
+        return {"tool_choice": tool_choice}
+    return {}
+
+
+def _kimi_k3_named_tool_choice_message(
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build the K3 forced-call instruction for a named ``tool_choice``."""
+    tool_choice = request.get("tool_choice")
+    if not _is_named_tool_choice(tool_choice):
+        return None
+
+    return {
+        "role": "system",
+        "content": (
+            "The system is invoked with `tool_choice=specified`.\n"
+            f"You MUST call the tool `{tool_choice['function']['name']}` "
+            "in the next message."
+        ),
+    }
+
+
+def _kimi_k3_thinking_effort_kwargs(
+    request: dict[str, Any],
+    chat_template_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Map OpenAI ``reasoning_effort`` to K3's ``thinking_effort``.
+
+    An explicit K3 template argument wins. ``"none"`` leaves the effort unset
+    and does not toggle thinking; upstream request normalization owns that
+    control. Like Dynamo's Rust renderer, reject an unsupported tier while
+    thinking is enabled instead of silently substituting the encoder default.
+    """
+    thinking_disabled = (
+        chat_template_kwargs.get("thinking") is False
+        or chat_template_kwargs.get("thinking_mode") == "disabled"
+    )
+
+    if "thinking_effort" in chat_template_kwargs:
+        effort = chat_template_kwargs["thinking_effort"]
+        if effort in _KIMI_K3_THINKING_EFFORTS or thinking_disabled:
+            return {}
+        raise PreprocessError(
+            f"Kimi K3 does not support thinking_effort={effort!r}; "
+            "supported values are 'low', 'high', and 'max'"
+        )
+
+    reasoning_effort = request.get("reasoning_effort")
+    if reasoning_effort is None:
+        reasoning_effort = chat_template_kwargs.get("reasoning_effort")
+    if reasoning_effort is None:
+        return {}
+    if reasoning_effort == "none":
+        return {}
+    if reasoning_effort in _KIMI_K3_THINKING_EFFORTS:
+        return {"thinking_effort": reasoning_effort}
+    if thinking_disabled:
+        return {}
+
+    raise PreprocessError(
+        f"Kimi K3 does not support reasoning_effort={reasoning_effort!r}; "
+        "supported values are 'low', 'high', and 'max'"
+    )
+
+
+def _kimi_k3_response_format_kwargs(request: dict[str, Any]) -> dict[str, Any]:
+    response_format = request.get("response_format")
+    if not isinstance(response_format, dict):
+        return {}
+    # The tokenizer may normalize the schema in place. Keep the caller's request
+    # object independent of prompt rendering.
+    return {"response_format": copy.deepcopy(response_format)}
+
+
+def _normalize_kimi_k3_messages(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Match SGLang's K3 encoder message normalization without mutating input."""
+    normalized = copy.deepcopy(messages)
+    for message in normalized:
+        if message.get("role") == "developer":
+            message["role"] = "system"
+    return normalized
+
+
 def _filter_template_tools(
     request: dict[str, Any],
     *,
     sglang_tools: list[SglangTool] | None,
     exclude_tools_when_tool_choice_none: bool,
+    filter_named_choice: bool = True,
 ) -> list[dict[str, Any]] | None:
     if not sglang_tools:
         return None
@@ -437,7 +576,7 @@ def _filter_template_tools(
     if exclude_tools_when_tool_choice_none and tool_choice == "none":
         return None
 
-    if _is_named_tool_choice(tool_choice):
+    if filter_named_choice and _is_named_tool_choice(tool_choice):
         chosen_name = tool_choice["function"]["name"]
         return [
             tool.model_dump()
@@ -891,6 +1030,30 @@ def preprocess_chat_request(
     legacy_guidance = legacy_guided_decoding(request)
     messages = _materialize_messages(request.get("messages", []))
 
+    kimi_k3_bridge = _should_use_kimi_k3_prompt_bridge(
+        request,
+        tokenizer=tokenizer,
+        tool_call_parser_name=tool_call_parser_name,
+        reasoning_parser_name=reasoning_parser_name,
+    )
+    if kimi_k3_bridge and _is_named_tool_choice(request.get("tool_choice")):
+        # K3's encoder cannot express a named choice. Its Rust formatter disables
+        # thinking and emits a typed ``tool-choice`` XTML system message; the
+        # SGLang tokenizer renders only plain system messages, so carry the same
+        # constraint as text.
+        chat_template_kwargs = dict(
+            request.get("chat_template_kwargs")
+            or request.get("chat_template_args")
+            or {}
+        )
+        chat_template_kwargs["thinking"] = False
+        chat_template_kwargs["enable_thinking"] = False
+        request["chat_template_kwargs"] = chat_template_kwargs
+        request.pop("chat_template_args", None)
+        named_tool_message = _kimi_k3_named_tool_choice_message(request)
+        assert named_tool_message is not None
+        messages.append(named_tool_message)
+
     # Generation mode is independent of whether the client wants reasoning
     # separated into reasoning_content or retained in content.
     force_reasoning = resolve_request_force_reasoning(
@@ -935,6 +1098,7 @@ def preprocess_chat_request(
         request,
         sglang_tools=sglang_tools,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
+        filter_named_choice=not kimi_k3_bridge,
     )
 
     if _should_use_deepseek_v4_encoding(
@@ -969,7 +1133,23 @@ def preprocess_chat_request(
         if (reasoning_effort := request.get("reasoning_effort")) is not None:
             template_kwargs["reasoning_effort"] = reasoning_effort
 
+        if kimi_k3_bridge:
+            kimi_k3_defaults = {
+                **_kimi_k3_tool_choice_kwargs(
+                    request,
+                    has_tools=bool(sglang_tools),
+                ),
+                **_kimi_k3_thinking_effort_kwargs(request, chat_template_kwargs),
+                **_kimi_k3_response_format_kwargs(request),
+            }
+            template_kwargs = {**kimi_k3_defaults, **template_kwargs}
+            template_kwargs.pop("reasoning_effort", None)
+            template_kwargs["tokenize"] = True
+            template_kwargs["return_dict"] = False
+
         template_messages = _normalize_messages_for_template(messages, tokenizer)
+        if kimi_k3_bridge:
+            template_messages = _normalize_kimi_k3_messages(template_messages)
 
         try:
             rendered = tokenizer.apply_chat_template(
