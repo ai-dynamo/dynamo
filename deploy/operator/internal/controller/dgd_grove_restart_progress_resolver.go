@@ -20,10 +20,12 @@ package controller
 import (
 	"context"
 
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -67,10 +69,7 @@ func (r *groveRestartProgressResolver) Resolve(
 	}
 
 	// Restart progress is only resolved while a restart ID is requested.
-	restartID := ""
-	if req.DGD.Spec.Restart != nil {
-		restartID = req.DGD.Spec.Restart.ID
-	}
+	restartID := ptr.Deref(req.DGD.Spec.Restart, nvidiacomv1beta1.Restart{}).ID
 
 	updatedInProgress := make([]string, 0, len(inProgress))
 	for _, componentName := range inProgress {

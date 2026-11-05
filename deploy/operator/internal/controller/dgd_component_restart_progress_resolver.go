@@ -27,6 +27,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -69,10 +70,8 @@ func (r *componentRestartProgressResolver) checkComponentFullyUpdated(
 	componentName string,
 ) (bool, string) {
 	// Restart progress is only resolved while a restart ID is requested.
-	restartID := ""
-	if dgd.Spec.Restart != nil {
-		restartID = dgd.Spec.Restart.ID
-	}
+	restartID := ptr.Deref(dgd.Spec.Restart, nvidiacomv1beta1.Restart{}).ID
+
 	if currentWorkerHashes(dgd).empty() {
 		resourceName := dynamo.GetDCDResourceName(dgd, componentName, "")
 		return checkDCDReady(ctx, r.reader, resourceName, dgd.Namespace, restartID)
