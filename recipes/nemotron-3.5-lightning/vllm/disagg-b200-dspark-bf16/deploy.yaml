@@ -146,6 +146,10 @@ spec:
           - nemotron_nano
           - --reasoning-parser
           - nemotron_v3
+          # vLLM 0.32.0 on B200 defaults to FlashInfer, whose KV block size differs from the
+          # TRITON_ATTN draft and breaks NIXL registration (vllm-project/vllm#63997).
+          - --attention-backend
+          - FLASH_ATTN
           - --speculative-config=$(SPECULATIVE_CONFIG)
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
@@ -283,6 +287,10 @@ spec:
           - nemotron_nano
           - --reasoning-parser
           - nemotron_v3
+          # vLLM 0.32.0 on B200 defaults to FlashInfer, whose KV block size differs from the
+          # TRITON_ATTN draft and breaks NIXL registration (vllm-project/vllm#63997).
+          - --attention-backend
+          - FLASH_ATTN
           - --speculative-config=$(SPECULATIVE_CONFIG)
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'

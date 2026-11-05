@@ -18,14 +18,15 @@ configuration, or the parser itself. This page shows the field to add and
 what the response will look like, so you can capture and share useful
 diagnostic info.
 
-> [!IMPORTANT]
-> Recipe applies to non-streaming requests against Dynamo's OpenAI `/v1/chat/completions` endpoint.
-> On the V2 parser route (see [Parser Generation Routing](#parser-generation-routing)),
-> `logprobs.content` lists every token entry the backend returns, in generation order, including
-> reasoning, tool-call, and control tokens that the parsed message does not show. Streamed responses
-> carry each backend chunk's entries once, on one chunk for that choice, so the entries need not line
-> up with the text in `reasoning_content`, `content`, and `tool_calls`. This note does not describe
-> the V1 route, where late entries can arrive in a final empty-`delta` chunk after `finish_reason`.
+<Info>
+Recipe applies to non-streaming requests against Dynamo's OpenAI `/v1/chat/completions` endpoint.
+On the V2 parser route (see [Parser Generation Routing](#parser-generation-routing)),
+`logprobs.content` lists every token entry the backend returns, in generation order, including
+reasoning, tool-call, and control tokens that the parsed message does not show. Streamed responses
+carry each backend chunk's entries once, on one chunk for that choice, so the entries need not line
+up with the text in `reasoning_content`, `content`, and `tool_calls`. This note does not describe
+the V1 route, where late entries can arrive in a final empty-`delta` chunk after `finish_reason`.
+</Info>
 
 ## The request
 
