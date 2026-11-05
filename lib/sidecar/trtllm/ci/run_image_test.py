@@ -19,6 +19,7 @@ import time
 import traceback
 import urllib.request
 import xml.etree.ElementTree as ET
+from io import BytesIO
 from pathlib import Path
 
 FIXTURES = {
@@ -118,12 +119,14 @@ def video_data_uri(path=VIDEO_PATH):
     return "data:video/mp4;base64," + base64.b64encode(data).decode("ascii")
 
 
-def validate_response(media, caption, response, input_token_count):
+def validate_response(
+    media, caption, response, input_token_count, expected_colors=("red", "blue")
+):
     words = re.findall(r"[a-z]+", caption.lower())
     if media == "image":
         colors = [word for word in words if word in ("red", "blue")]
-        if colors[:2] != ["red", "blue"]:
-            raise AssertionError(f"Expected red, then blue, got: {caption}")
+        if colors[:2] != list(expected_colors):
+            raise AssertionError(f"Expected {expected_colors}, got: {caption}")
     elif media == "audio":
         if "thoughts affected hester" not in " ".join(words):
             raise AssertionError(f"Unexpected speech transcription: {caption}")
@@ -169,38 +172,53 @@ def stop_engine(process):
 
 def run_rust_test(binary, env, test, results):
     completed = subprocess.run(
-        [
-            str(binary),
-            "--exact",
-            test,
-            "--ignored",
-            "--nocapture",
-            "--color",
-            "never",
-        ],
+        [str(binary), "--exact", test, "--ignored", "--nocapture", "--color", "never"],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         timeout=240,
     )
-    (results / "rust-test.log").write_text(completed.stdout)
+    log = results / (
+        "rust-events-test.log" if test.endswith("event_conversion") else "rust-test.log"
+    )
+    log.write_text(completed.stdout)
     print(completed.stdout, flush=True)
     completed.check_returncode()
     if "1 passed; 0 failed; 0 ignored;" not in completed.stdout:
         raise RuntimeError(f"{test} did not execute exactly once")
 
 
+def routing_fixture():
+    # Keep CPU harness tests importable without model-processing dependencies.
+    from PIL import Image, ImageOps, PngImagePlugin
+
+    encoded = "iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAIAAAD9b0jDAAAAK0lEQVR4nGP8z0AsYGQgVi0T0WaSAEYNHTV01NBRQ0cNHTV01NBRQwefoQBvcAI3xbX7+QAAAABJRU5ErkJggg=="
+    image = Image.open(BytesIO(base64.b64decode(encoded))).convert("RGB")
+    alias = BytesIO()
+    metadata = PngImagePlugin.PngInfo()
+    metadata.add_text("cache-alias", "same pixels, different URI")
+    image.save(alias, format="PNG", pnginfo=metadata)
+    changed = BytesIO()
+    ImageOps.mirror(image).save(changed, format="PNG")
+    return tuple(
+        "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+        for buffer in (alias, changed)
+    )
+
+
 def run(args, results):
-    # GPU-only dependencies stay out of the CPU harness tests.
+    # CPU harness tests import this module without the inference dependencies.
     from huggingface_hub import snapshot_download
     from transformers import AutoTokenizer
 
+    routing = args.scenario == "image-routing"
     fixture = FIXTURES[args.media]
     test = f"tests::e2e::e2e_real_openengine_{args.media}"
     config = model_config(json.loads(args.config.read_text()), args.media)
     identity = {
         **config,
+        "scenario": args.scenario,
         "media": args.media,
         "installed_version": importlib.metadata.version("tensorrt_llm"),
         "installed_commit": os.environ.get("TRT_LLM_GIT_COMMIT"),
@@ -268,7 +286,32 @@ def run(args, results):
         )
     result_path = results / "response.json"
     engine = None
+    context = subscriber = None
+    env_extra = {}
     try:
+        if routing:
+            import zmq
+
+            alias, changed = routing_fixture()
+            env_extra = {
+                "TRTLLM_E2E_IMAGE_ROUTING": "1",
+                "TRTLLM_E2E_ALIAS_IMAGE": alias,
+                "TRTLLM_E2E_MODEL_PATH": str(model_path),
+                "TRTLLM_E2E_CHANGED_IMAGE": changed,
+            }
+            context = zmq.Context()
+            subscriber = context.socket(zmq.SUB)
+            subscriber.setsockopt(zmq.SUBSCRIBE, b"")
+            event_port = subscriber.bind_to_random_port("tcp://127.0.0.1")
+            endpoint = f"tcp://127.0.0.1:{event_port}"
+            subscriber.unbind(endpoint)
+            subscriber.connect(endpoint)
+            with options.open("a") as stream:
+                stream.write(
+                    "  enable_block_reuse: true\n  use_kv_cache_manager_v2: true\n"
+                    "  kv_events_config:\n    enable_kv_cache_events: true\n"
+                    f"    publisher: zmq\n    endpoint: {endpoint}\n"
+                )
         with (results / "engine.log").open("w") as log:
             engine = subprocess.Popen(
                 [
@@ -299,26 +342,54 @@ def run(args, results):
                 TRTLLM_E2E_MODEL=config["model"],
                 TRTLLM_E2E_RESULT=str(result_path),
             )
+            env.update(env_extra)
             if video is not None:
                 env["TRTLLM_E2E_VIDEO_DATA_URI"] = video
             if audio_path is not None:
                 env["TRTLLM_E2E_AUDIO_DATA_URI_FILE"] = str(audio_path)
                 env["TRTLLM_E2E_AUDIO_PROMPT"] = fixture["prompt"]
             run_rust_test(binary, env, test, results)
+            if routing:
+                payloads = []
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    if subscriber.poll(500):
+                        payloads.append(list(subscriber.recv_multipart()[-1]))
+                if not payloads:
+                    raise AssertionError("No native KV events were published")
+                events_path = results / "routing-events.json"
+                events_path.write_text(json.dumps(payloads))
+                env["TRTLLM_E2E_ROUTING_EVENTS"] = str(events_path)
+                run_rust_test(
+                    binary,
+                    env,
+                    "tests::e2e::e2e_real_image_routing_event_conversion",
+                    results,
+                )
     finally:
         stop_engine(engine)
+        if subscriber is not None:
+            subscriber.close(linger=0)
+        if context is not None:
+            context.term()
 
     response = json.loads(result_path.read_text())
-    caption = tokenizer.decode(response["token_ids"], skip_special_tokens=True)
-    response["text"] = caption
+    cases = response["cases"] if routing else [response]
+    for index, case in enumerate(cases):
+        caption = tokenizer.decode(case["token_ids"], skip_special_tokens=True)
+        case["text"] = caption
+        colors = ("blue", "red") if routing and index == 3 else ("red", "blue")
+        validate_response(args.media, caption, case, len(expected_ids), colors)
+        print(f"{args.media} response {index}: {caption}", flush=True)
     result_path.write_text(json.dumps(response, indent=2) + "\n")
-    print(f"{args.media} response: {caption}", flush=True)
-    validate_response(args.media, caption, response, len(expected_ids))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--media", choices=FIXTURES, default="image")
+    parser.add_argument(
+        "--scenario", choices=["image", "video", "audio", "image-routing"]
+    )
+    parser.add_argument("--media", choices=FIXTURES)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument(
         "--config", type=Path, required=True, help="Resolved nightly image manifest"
@@ -328,8 +399,13 @@ def main():
         "--model-path", type=Path, help="Use an already downloaded model snapshot"
     )
     args = parser.parse_args()
+    args.scenario = args.scenario or args.media or "image"
+    media = "image" if args.scenario == "image-routing" else args.scenario
+    if args.media is not None and args.media != media:
+        parser.error("--media conflicts with --scenario")
+    args.media = media
     results = (
-        args.results or Path(f"test-results/trtllm-nightly-{args.media}")
+        args.results or Path(f"test-results/trtllm-nightly-{args.scenario}")
     ).resolve()
     results.mkdir(parents=True, exist_ok=True)
     start = time.monotonic()
@@ -342,7 +418,7 @@ def main():
     duration = str(time.monotonic() - start)
     suite = ET.Element(
         "testsuite",
-        name=f"trtllm-nightly-{args.media}",
+        name=f"trtllm-nightly-{args.scenario}",
         tests="1",
         failures=str(int(failure is not None)),
         skipped="0",
@@ -351,7 +427,10 @@ def main():
     case = ET.SubElement(
         suite,
         "testcase",
-        name=f"tests::e2e::e2e_real_openengine_{args.media}",
+        name=(
+            f"tests::e2e::e2e_real_openengine_{args.media}"
+            + ("[image-routing]" if args.scenario == "image-routing" else "")
+        ),
         classname="trtllm.sidecar",
         time=duration,
     )

@@ -2727,6 +2727,7 @@ dependencies = [
  "async-trait",
  "clap",
  "dynamo-backend-common",
+ "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-runtime",
  "dynamo-sidecar-common",
