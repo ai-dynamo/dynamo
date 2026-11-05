@@ -24,8 +24,6 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  annotations:
-    nvidia.com/kai-scheduler-queue: default-queue
   name: kimi-k3-1-pro-vllm-vr200-agg-agentic
 spec:
   backendFramework: vllm
@@ -70,17 +68,9 @@ spec:
             requests:
               cpu: "16"
               memory: 128Gi
-          volumeMounts:
-          - mountPath: /shared-model-cache
-            name: shared-model-cache
-            readOnly: true
         securityContext:
           runAsGroup: 0
           runAsUser: 0
-        volumes:
-        - name: shared-model-cache
-          persistentVolumeClaim:
-            claimName: shared-model-cache
     replicas: 1
     type: frontend
   - multinode:
@@ -93,60 +83,94 @@ spec:
       spec:
         containers:
         - args:
-          - |
-            set -euo pipefail
-            exec python3 -m dynamo.vllm \
-              --reasoning-parser kimi_k3 \
-              --model /shared-model-cache/moonshotai/Kimi-K3.1-Pro \
-              --served-model-name moonshotai/Kimi-K3.1-Pro \
-              --trust-remote-code \
-              --enable-multimodal \
-              --frontend-decoding \
-              --mm-encoder-tp-mode data \
-              --skip-mm-profiling \
-              --tensor-parallel-size 8 \
-              --pipeline-parallel-size 1 \
-              --nnodes 2 \
-              --distributed-executor-backend mp \
-              --distributed-timeout-seconds 7200 \
-              --cpu-distributed-timeout-seconds 7200 \
-              --disable-custom-all-reduce \
-              --no-numa-bind \
-              --compilation-config '{"cudagraph_capture_sizes":[7,8,14,16,28,32,56,64,112,128,168,192,224,256,384,512,640,768,896,1024,1280,1536,1792,2048,4096,8192]}' \
-              --stream-interval 20 \
-              --gpu-memory-utilization 0.94 \
-              --max-num-batched-tokens 8192 \
-              --max-num-seqs 32 \
-              --enable-prefix-caching \
-              --no-enable-flashinfer-autotune \
-              --kv-cache-dtype fp8 \
-              --scheduler-cls vllm.v1.core.sched.async_scheduler.AsyncScheduler \
-              --dyn-tool-call-parser kimi_k3 \
-              --dyn-reasoning-parser kimi_k3 \
-              --dyn-enable-structural-tag \
-              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' \
-              --load-format fastsafetensors \
-              --attention-backend FLASHINFER_MLA_SPARSE \
-              --attention-config '{"indexer_kv_dtype":"mxfp4"}' \
-              --prefix-match-unit 128 \
-              --mamba-ssm-cache-dtype bfloat16 \
-              --decode-context-parallel-size 8 \
-              --block-size 896 \
-              --cp-kv-cache-interleave-size 1 \
-              --enable-cumem-allocator \
-              --dcp-comm-backend a2a \
-              --moe-backend auto \
-              --quantization-config '{"moe":{"activation":"mxfp8"}}' \
-              --speculative-config "${SPECULATIVE_CONFIG}" \
-              --use-replayssm \
-              --max-cudagraph-capture-size 8192 \
-              --long-prefill-token-threshold 8192 \
-              --long-prefill-token-threshold-adaptive \
-              --enable-expert-parallel
+          - --reasoning-parser
+          - kimi_k3
+          - --model
+          - $(MODEL_NAME)
+          - --served-model-name
+          - moonshotai/Kimi-K3.1-Pro
+          - --trust-remote-code
+          - --enable-multimodal
+          - --frontend-decoding
+          - --mm-encoder-tp-mode
+          - data
+          - --skip-mm-profiling
+          - --tensor-parallel-size
+          - "8"
+          - --pipeline-parallel-size
+          - "1"
+          - --nnodes
+          - "2"
+          - --distributed-executor-backend
+          - mp
+          - --distributed-timeout-seconds
+          - "7200"
+          - --cpu-distributed-timeout-seconds
+          - "7200"
+          - --disable-custom-all-reduce
+          - --no-numa-bind
+          - --compilation-config
+          - '{"cudagraph_capture_sizes":[7,8,14,16,28,32,56,64,112,128,168,192,224,256,384,512,640,768,896,1024,1280,1536,1792,2048,4096,8192]}'
+          - --stream-interval
+          - "20"
+          - --gpu-memory-utilization
+          - "0.94"
+          - --max-num-batched-tokens
+          - "8192"
+          - --max-num-seqs
+          - "32"
+          - --enable-prefix-caching
+          - --no-enable-flashinfer-autotune
+          - --kv-cache-dtype
+          - fp8
+          - --scheduler-cls
+          - vllm.v1.core.sched.async_scheduler.AsyncScheduler
+          - --dyn-tool-call-parser
+          - kimi_k3
+          - --dyn-reasoning-parser
+          - kimi_k3
+          - --dyn-enable-structural-tag
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
+          - --load-format
+          - fastsafetensors
+          - --attention-backend
+          - FLASHINFER_MLA_SPARSE
+          - --attention-config
+          - '{"indexer_kv_dtype":"mxfp4"}'
+          - --prefix-match-unit
+          - "128"
+          - --mamba-ssm-cache-dtype
+          - bfloat16
+          - --decode-context-parallel-size
+          - "8"
+          - --block-size
+          - "896"
+          - --cp-kv-cache-interleave-size
+          - "1"
+          - --enable-cumem-allocator
+          - --dcp-comm-backend
+          - a2a
+          - --moe-backend
+          - auto
+          - --quantization-config
+          - '{"moe":{"activation":"mxfp8"}}'
+          - --speculative-config
+          - $(SPECULATIVE_CONFIG)
+          - --use-replayssm
+          - --max-cudagraph-capture-size
+          - "8192"
+          - --long-prefill-token-threshold
+          - "8192"
+          - --long-prefill-token-threshold-adaptive
+          - --enable-expert-parallel
           command:
-          - /bin/bash
-          - -lc
+          - python3
+          - -m
+          - dynamo.vllm
           env:
+          - name: HF_HOME
+            value: /shared-model-cache
           - name: HF_HUB_OFFLINE
             value: "1"
           - name: TRANSFORMERS_OFFLINE
@@ -185,8 +209,8 @@ spec:
             value: "1800"
           - name: NCCL_TIMEOUT
             value: "1800"
-          - name: MODEL_PATH
-            value: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
+          - name: MODEL_NAME
+            value: moonshotai/Kimi-K3.1-Pro
           - name: VLLM_USE_DIRECT_DCP_A2A
             value: "1"
           - name: VLLM_USE_DIRECT_DCP_Q_GATHER
@@ -197,8 +221,10 @@ spec:
             value: "1"
           - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
             value: "900"
+          - name: DRAFT_MODEL_NAME
+            value: Inferact/Kimi-K3-DSpark
           - name: SPECULATIVE_CONFIG
-            value: '{"method":"dspark","model":"/shared-model-cache/Inferact/Kimi-K3-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
+            value: '{"method":"dspark","model":"$(DRAFT_MODEL_NAME)","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
           imagePullPolicy: IfNotPresent
           name: main
@@ -210,7 +236,7 @@ spec:
             requests:
               cpu: "16"
               ephemeral-storage: 64Gi
-              memory: 700Gi
+              memory: 128Gi
               nvidia.com/gpu: "4"
           securityContext:
             allowPrivilegeEscalation: false
@@ -236,7 +262,7 @@ spec:
           persistentVolumeClaim:
             claimName: shared-model-cache
     replicas: 2
-    sharedMemorySize: 264Gi
+    sharedMemorySize: 64Gi
     type: worker
 ---
 apiVersion: resource.nvidia.com/v1beta1

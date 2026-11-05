@@ -68,15 +68,6 @@ spec:
             requests:
               cpu: "16"
               memory: 128Gi
-          volumeMounts:
-          - mountPath: /shared-model-cache
-            name: shared-model-cache
-            readOnly: true
-        volumes:
-        - name: shared-model-cache
-          persistentVolumeClaim:
-            claimName: shared-model-cache
-            readOnly: true
     replicas: 1
     type: frontend
   - multinode:
@@ -86,48 +77,23 @@ spec:
       spec:
         containers:
         - args:
-          - |
-            set -euo pipefail
-            ulimit -l unlimited
-            ulimit -n 1048576
-
-            # Model-card staging required by this image's registration shim (kimi_k31 -> kimi_k3 tokenizer mapping)
-            STAGE=/tmp/kimi-k3-1-model-card; mkdir -p "$STAGE"
-            for f in "$MODEL_PATH"/* "$MODEL_PATH"/.[!.]*; do n=$(basename "$f"); [ -f "$f" ] || continue
-              case "$n" in config.json|*.safetensors|*.safetensors.index.json) continue;; esac
-              ln -sfn "$f" "$STAGE/$n"; done
-            STAGE="$STAGE" python3 -c 'import json,os; c=json.load(open(os.environ["MODEL_PATH"]+"/config.json")); c["model_type"]="kimi_k3"; json.dump(c, open(os.environ["STAGE"]+"/config.json","w"))'
-            ls "$STAGE" | wc -l
-
-            exec python3 -m dynamo.sglang \
-              --reasoning-parser kimi_k3 \
-              --model-path "${MODEL_PATH}" \
-              --served-model-name moonshotai/Kimi-K3.1-Pro \
-              --tensor-parallel-size 8 \
-              --trust-remote-code \
-              --dyn-reasoning-parser kimi_k3 \
-              --dyn-structural-tag '{"reasoning_boundary":"backend"}' \
-              --dyn-tool-call-parser kimi_k3 \
-              --kv-cache-dtype fp8_e4m3 \
-              --mem-fraction-static 0.88 \
-              --chunked-prefill-size 16384 \
-              --page-size 64 \
-              --max-running-requests 32 \
-              --mamba-radix-cache-strategy extra_buffer \
-              --mamba-track-interval 256 \
-              --enable-cache-report \
-              --enable-metrics \
-              --watchdog-timeout 3600 \
-              --weight-loader-disable-mmap \
-              --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":4}'
+          - --config
+          - /etc/sglang/agg.yaml
+          - --dyn-reasoning-parser
+          - kimi_k3
+          - --dyn-structural-tag
+          - '{"reasoning_boundary":"backend"}'
+          - --dyn-tool-call-parser
+          - kimi_k3
           command:
-          - /bin/bash
-          - -lc
+          - python3
+          - -m
+          - dynamo.sglang
           env:
+          - name: HF_HOME
+            value: /shared-model-cache
           - name: DYN_SGL_FRONTEND_DECODING
             value: "true"
-          - name: HOME
-            value: /tmp/k31-home
           - name: SGLANG_CUSTOM_ALL_REDUCE_V2_MAX_SIZE_KB
             value: "32768"
           - name: SGLANG_UNBALANCED_MODEL_LOADING_TIMEOUT_S
@@ -150,8 +116,6 @@ spec:
             value: "1"
           - name: NCCL_P2P_LEVEL
             value: NVL
-          - name: MODEL_PATH
-            value: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
           image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:e7392b04e4b1e1142dbf0e4d31285a16728f430b6f9a331ac339682bb014d84d
           imagePullPolicy: IfNotPresent
           name: main
@@ -163,7 +127,7 @@ spec:
             requests:
               cpu: "16"
               ephemeral-storage: 64Gi
-              memory: 512Gi
+              memory: 128Gi
               nvidia.com/gpu: "4"
           securityContext:
             allowPrivilegeEscalation: false
@@ -177,6 +141,9 @@ spec:
           volumeMounts:
           - mountPath: /shared-model-cache
             name: shared-model-cache
+          - mountPath: /etc/sglang
+            name: sglang-config
+            readOnly: true
         resourceClaims:
         - name: compute-domain-channel
           resourceClaimTemplateName: kimi-k3-1-pro-sglang-gb300-agg-agentic-compute-domain-channel
@@ -185,6 +152,9 @@ spec:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
+        - configMap:
+            name: kimi-k3-1-pro-sglang-gb300-agg-agentic-sglang-config
+          name: sglang-config
     replicas: 1
     sharedMemorySize: 64Gi
     type: worker
@@ -199,3 +169,43 @@ spec:
     resourceClaimTemplate:
       name: kimi-k3-1-pro-sglang-gb300-agg-agentic-compute-domain-channel
   numNodes: 0
+---
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Kimi-K3.1-Pro Dynamo + SGLang aggregated recipe (GB300): EXPERIMENTAL, FUNCTIONAL-ONLY. Not tuned, no performance claim.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kimi-k3-1-pro-sglang-gb300-agg-agentic-sglang-config
+data:
+  agg.yaml: |
+    reasoning-parser: kimi_k3
+    model-path: moonshotai/Kimi-K3.1-Pro
+    served-model-name: moonshotai/Kimi-K3.1-Pro
+    tensor-parallel-size: 8
+    trust-remote-code: true
+    kv-cache-dtype: fp8_e4m3
+    mem-fraction-static: 0.88
+    chunked-prefill-size: 16384
+    page-size: 64
+    max-running-requests: 32
+    mamba-radix-cache-strategy: extra_buffer
+    mamba-track-interval: 256
+    enable-cache-report: true
+    enable-metrics: true
+    watchdog-timeout: 3600
+    weight-loader-disable-mmap: true
+    model-loader-extra-config:
+      enable_multithread_load: true
+      num_threads: 4

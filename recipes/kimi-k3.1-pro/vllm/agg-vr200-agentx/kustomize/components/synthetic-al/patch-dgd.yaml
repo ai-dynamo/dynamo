@@ -17,8 +17,8 @@
   path: /spec/components/1/name
   value: Worker
 - op: test
-  path: /spec/components/1/podTemplate/spec/containers/0/env/25/name
+  path: /spec/components/1/podTemplate/spec/containers/0/env/27/name
   value: SPECULATIVE_CONFIG
 - op: replace
-  path: /spec/components/1/podTemplate/spec/containers/0/env/25/value
-  value: '{"method":"dspark","model":"/shared-model-cache/Inferact/Kimi-K3-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.84}'
+  path: /spec/components/1/podTemplate/spec/containers/0/env/27/value
+  value: '{"method":"dspark","model":"$(DRAFT_MODEL_NAME)","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.84}'

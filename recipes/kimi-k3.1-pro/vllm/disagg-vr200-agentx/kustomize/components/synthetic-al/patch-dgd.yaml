@@ -17,17 +17,17 @@
   path: /spec/components/1/name
   value: PrefillWorker
 - op: test
-  path: /spec/components/1/podTemplate/spec/containers/0/env/28/name
+  path: /spec/components/1/podTemplate/spec/containers/0/env/30/name
   value: SPECULATIVE_CONFIG
 - op: replace
-  path: /spec/components/1/podTemplate/spec/containers/0/env/28/value
-  value: '{"method":"dspark","model":"/shared-model-cache/Inferact/Kimi-K3-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.84}'
+  path: /spec/components/1/podTemplate/spec/containers/0/env/30/value
+  value: '{"method":"dspark","model":"$(DRAFT_MODEL_NAME)","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.84}'
 - op: test
   path: /spec/components/2/name
   value: DecodeWorker
 - op: test
-  path: /spec/components/2/podTemplate/spec/containers/0/env/28/name
+  path: /spec/components/2/podTemplate/spec/containers/0/env/30/name
   value: SPECULATIVE_CONFIG
 - op: replace
-  path: /spec/components/2/podTemplate/spec/containers/0/env/28/value
-  value: '{"method":"dspark","model":"/shared-model-cache/Inferact/Kimi-K3-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.84}'
+  path: /spec/components/2/podTemplate/spec/containers/0/env/30/value
+  value: '{"method":"dspark","model":"$(DRAFT_MODEL_NAME)","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.84}'

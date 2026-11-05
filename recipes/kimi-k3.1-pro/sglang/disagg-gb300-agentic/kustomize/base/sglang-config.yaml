@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Kimi-K3.1-Pro Dynamo + SGLang disaggregated recipe (GB300): 1 prefill TP8 + 1 decode TP8, NIXL KV transfer over NVLink. EXPERIMENTAL, FUNCTIONAL-ONLY. Not tuned, no performance claim.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kimi-k3-1-pro-sglang-gb300-disagg-agentic-sglang-config
+data:
+  prefill.yaml: |
+    reasoning-parser: kimi_k3
+    model-path: moonshotai/Kimi-K3.1-Pro
+    served-model-name: moonshotai/Kimi-K3.1-Pro
+    tensor-parallel-size: 8
+    disaggregation-mode: prefill
+    disaggregation-transfer-backend: nixl
+    disaggregation-bootstrap-port: 30001
+    host: 0.0.0.0
+    trust-remote-code: true
+    kv-cache-dtype: fp8_e4m3
+    mem-fraction-static: 0.88
+    chunked-prefill-size: 16384
+    max-prefill-tokens: 16384
+    page-size: 64
+    max-running-requests: 32
+    mamba-radix-cache-strategy: extra_buffer
+    mamba-track-interval: 256
+    enable-cache-report: true
+    enable-metrics: true
+    watchdog-timeout: 3600
+    weight-loader-disable-mmap: true
+    model-loader-extra-config:
+      enable_multithread_load: true
+      num_threads: 4
+  decode.yaml: |
+    reasoning-parser: kimi_k3
+    model-path: moonshotai/Kimi-K3.1-Pro
+    served-model-name: moonshotai/Kimi-K3.1-Pro
+    tensor-parallel-size: 8
+    disaggregation-mode: decode
+    disaggregation-transfer-backend: nixl
+    disaggregation-bootstrap-port: 30001
+    host: 0.0.0.0
+    trust-remote-code: true
+    kv-cache-dtype: fp8_e4m3
+    mem-fraction-static: 0.88
+    chunked-prefill-size: 16384
+    page-size: 64
+    max-running-requests: 32
+    mamba-radix-cache-strategy: extra_buffer
+    mamba-track-interval: 256
+    enable-cache-report: true
+    enable-metrics: true
+    watchdog-timeout: 3600
+    weight-loader-disable-mmap: true
+    model-loader-extra-config:
+      enable_multithread_load: true
+      num_threads: 4

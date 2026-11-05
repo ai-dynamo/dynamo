@@ -181,19 +181,23 @@ kubectl apply -f recipes/kimi-k3.1-pro/model-cache/model-download.yaml -n ${NAME
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
 ```
 
-The weights are stored at `/shared-model-cache/moonshotai/Kimi-K3.1-Pro` on the PVC. The download Job downloads only the main model.
+Workers resolve `moonshotai/Kimi-K3.1-Pro` by Hugging Face ID with `HF_HOME=/shared-model-cache` and offline mode enabled. Populate the Hugging Face cache on that PVC before serving; an explicit `--local-dir` download is not a substitute for the cache layout.
+
+<Warning>
+The download Job currently stages only the main model in an explicit directory. Populate the Hugging Face cache for the model before deploying these offline workers.
+</Warning>
 
 </div>
 
 <div data-sku="b200">
 
-For B200, also stage the `Inferact/Kimi-K3-DSpark` draft checkpoint at the path in the worker's `SPECULATIVE_CONFIG` on the same PVC, or update that setting to your staged checkpoint path.
+For B200, also populate the same Hugging Face cache with `Inferact/Kimi-K3-DSpark`. The worker resolves the draft by Hugging Face ID.
 
 </div>
 
 <div data-sku="vr200">
 
-For VR200, also stage the `Inferact/Kimi-K3-DSpark` draft checkpoint at `/shared-model-cache/Inferact/Kimi-K3-DSpark` on the same PVC. Both topologies mount `shared-model-cache` for the frontend and all workers; no node-local weight staging is required.
+For VR200, also populate the same Hugging Face cache with `Inferact/Kimi-K3-DSpark`. Both topologies mount `shared-model-cache` only in the workers; frontends do not mount the PVC.
 
 </div>
 
