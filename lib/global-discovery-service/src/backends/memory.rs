@@ -3,11 +3,13 @@
 
 //! The memory backend: one process keeps every registration. It needs no
 //! Kubernetes, so it suits tests and a first deployment. The MCS backend keeps
-//! its registrations here too. A restarted process starts empty and fills as
-//! PoolRelays register again, so its lists are `Estimated` until one lease has
-//! passed: by then every live pool has registered again. Router replicas come
-//! from configuration until routers register too. Run one replica: each keeps
-//! only the registrations it receives.
+//! its registrations here too, with copies of the ones other service
+//! instances received (see `crate::peers`). A restarted process starts empty
+//! and fills as PoolRelays register again, so its lists are `Estimated` until
+//! one lease has passed: by then every live pool has registered again. They
+//! are `Estimated` too while copies from another instance may be missing. Router
+//! replicas come from configuration until routers register too. Used alone,
+//! run one replica: each keeps only the registrations it receives.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -16,8 +18,8 @@ use std::time::Duration;
 
 use crate::pool_discovery::{
     Completeness, Directory, DiscoveryError, Lease, PoolEvent, PoolListing, PoolRegistrar,
-    PoolRegistration, RouterReplica, RouterReplicaEvent, RouterReplicaId, Snapshot, WatchEvent,
-    WatchStream,
+    PoolRegistration, RegistrationExchange, RouterReplica, RouterReplicaEvent, RouterReplicaId,
+    Snapshot, WatchEvent, WatchStream,
 };
 use async_trait::async_trait;
 use dynamo_global_common::PoolKey;
@@ -54,12 +56,18 @@ pub struct MemoryPoolStore {
 #[derive(Default)]
 struct Pools {
     registrations: HashMap<PoolKey, Registered>,
+    /// Registrations made with another service instance may be missing
+    /// (see [`RegistrationExchange::set_copies_missing`]).
+    copies_missing: bool,
 }
 
 struct Registered {
     /// As the PoolRelay sent it, with its lists sorted.
     registration: PoolRegistration,
     expires_at: Instant,
+    /// The latest registration came from a PoolRelay, not from another
+    /// service instance. Only these are shared.
+    local: bool,
 }
 
 impl Pools {
@@ -122,9 +130,88 @@ impl Drop for MemoryPoolStore {
     }
 }
 
-/// `Exact` once a lease has passed since the store started.
-fn completeness(started: Instant, lease: Lease, now: Instant) -> Completeness {
-    if now.saturating_duration_since(started) >= lease.duration() {
+impl RegistrationExchange for MemoryPoolStore {
+    /// Keeps a registration copied from another service instance (see
+    /// `crate::peers`) for the `remaining` time it had there, capped at this
+    /// store's lease. The latest registration wins, wherever it was made. A
+    /// copy with no time left is ignored, so it cannot list a lapsed pool
+    /// again until the next sweep.
+    fn adopt(&self, registration: PoolRegistration, remaining: Duration) {
+        if remaining.is_zero() {
+            return;
+        }
+        let registration = sorted(registration);
+        self.ensure_sweeping();
+        let now = Instant::now();
+        let expires_at = now + remaining.min(self.lease.duration());
+        let mut pools = self.lock();
+        if let Some(registered) = pools.registrations.get_mut(&registration.key)
+            && registered.expires_at > now
+        {
+            if registered.expires_at >= expires_at {
+                return;
+            }
+            registered.local = false;
+            if registered.registration == registration {
+                registered.expires_at = expires_at;
+                return;
+            }
+        }
+        let added = listing(&registration);
+        pools.registrations.insert(
+            registration.key.clone(),
+            Registered {
+                registration,
+                expires_at,
+                local: false,
+            },
+        );
+        // No subscribers is not an error.
+        let _ = self.events.send(WatchEvent::Upserted(added));
+    }
+
+    /// The live registrations PoolRelays made here, with the time each has
+    /// left. Copies are left out, so each registration is shared only by the
+    /// instance that received it.
+    fn local_registrations(&self) -> Vec<(PoolRegistration, Duration)> {
+        let now = Instant::now();
+        self.lock()
+            .registrations
+            .values()
+            .filter(|registered| registered.local && registered.expires_at > now)
+            .map(|registered| (registered.registration.clone(), registered.expires_at - now))
+            .collect()
+    }
+
+    fn holds_every_local_registration(&self) -> bool {
+        Instant::now().saturating_duration_since(self.started) >= self.lease.duration()
+    }
+
+    /// Watchers get a `Resync` when this changes whether lists are `Exact`.
+    fn set_copies_missing(&self, missing: bool) {
+        let now = Instant::now();
+        let mut pools = self.lock();
+        let before = completeness(self.started, self.lease, now, pools.copies_missing);
+        pools.copies_missing = missing;
+        let after = completeness(self.started, self.lease, now, missing);
+        if after != before {
+            // No subscribers is not an error.
+            let _ = self
+                .events
+                .send(WatchEvent::Resync(pools.snapshot(now, after)));
+        }
+    }
+}
+
+/// `Exact` once a lease has passed since the store started, unless
+/// registrations made with another instance may be missing.
+fn completeness(
+    started: Instant,
+    lease: Lease,
+    now: Instant,
+    copies_missing: bool,
+) -> Completeness {
+    if !copies_missing && now.saturating_duration_since(started) >= lease.duration() {
         Completeness::Exact
     } else {
         Completeness::Estimated
@@ -133,7 +220,7 @@ fn completeness(started: Instant, lease: Lease, now: Instant) -> Completeness {
 
 /// Removes expired pools and publishes `Removed` for each. At `complete_at`,
 /// once a lease has passed since the store started, publishes a `Resync`, so
-/// watchers learn that its lists are complete.
+/// watchers learn that its lists are complete, unless copies may be missing.
 async fn sweep(
     pools: Arc<Mutex<Pools>>,
     events: broadcast::Sender<PoolEvent>,
@@ -150,9 +237,13 @@ async fn sweep(
             () = wake_at(complete_at) => {
                 complete_at = None;
                 let pools = pools.lock().unwrap_or_else(PoisonError::into_inner);
-                let complete = pools.snapshot(Instant::now(), Completeness::Exact);
-                // No subscribers is not an error.
-                let _ = events.send(WatchEvent::Resync(complete));
+                // Otherwise the lists stay `Estimated`, and
+                // `set_copies_missing` announces the change.
+                if !pools.copies_missing {
+                    let complete = pools.snapshot(Instant::now(), Completeness::Exact);
+                    // No subscribers is not an error.
+                    let _ = events.send(WatchEvent::Resync(complete));
+                }
                 continue;
             }
             _ = ticks.tick() => {}
@@ -212,6 +303,7 @@ impl PoolRegistrar for MemoryPoolStore {
             && registered.registration == registration
         {
             registered.expires_at = expires_at;
+            registered.local = true;
             return Ok(self.lease);
         }
         let added = listing(&registration);
@@ -220,6 +312,7 @@ impl PoolRegistrar for MemoryPoolStore {
             Registered {
                 registration,
                 expires_at,
+                local: true,
             },
         );
         // No subscribers is not an error.
@@ -232,8 +325,9 @@ impl PoolRegistrar for MemoryPoolStore {
 impl Directory<PoolListing, PoolKey> for MemoryPoolStore {
     async fn list(&self) -> Result<Snapshot<PoolListing>, DiscoveryError> {
         let now = Instant::now();
-        let completeness = completeness(self.started, self.lease, now);
-        Ok(self.lock().snapshot(now, completeness))
+        let pools = self.lock();
+        let completeness = completeness(self.started, self.lease, now, pools.copies_missing);
+        Ok(pools.snapshot(now, completeness))
     }
 
     /// Starts from the view `list` returns, then follows registrations and
@@ -250,7 +344,7 @@ impl Directory<PoolListing, PoolKey> for MemoryPoolStore {
             move || {
                 let pools = pools.lock().unwrap_or_else(PoisonError::into_inner);
                 let now = Instant::now();
-                let completeness = completeness(started, lease, now);
+                let completeness = completeness(started, lease, now, pools.copies_missing);
                 (events.subscribe(), Some(pools.snapshot(now, completeness)))
             },
             cancel_token.unwrap_or_default(),
@@ -319,7 +413,7 @@ impl Directory<RouterReplica, RouterReplicaId> for StaticReplicaDirectory {
 mod tests {
     use crate::pool_discovery::Capacity;
     use dynamo_global_common::PoolLocation;
-    use futures::StreamExt;
+    use futures::{FutureExt, StreamExt};
     use url::Url;
 
     use super::*;
@@ -462,6 +556,79 @@ mod tests {
             panic!("expected a Resync");
         };
         assert_eq!(complete.completeness, Completeness::Exact);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn copies_follow_the_latest_registration() {
+        let store = MemoryPoolStore::new(lease());
+        let model = |store: &MemoryPoolStore| {
+            store
+                .lock()
+                .registrations
+                .get(&key("mocker"))
+                .map(|registered| registered.registration.model.clone())
+        };
+        let _ = store.register(registration("mocker", "m1")).await.unwrap();
+
+        // A copy older than the local registration changes nothing.
+        store.adopt(registration("mocker", "m2"), Duration::from_secs(10));
+        assert_eq!(model(&store).as_deref(), Some("m1"));
+        assert_eq!(store.local_registrations().len(), 1);
+
+        // A newer copy takes over, so it is not shared again from here, until
+        // a PoolRelay registers here again.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        store.adopt(registration("mocker", "m1"), Duration::from_secs(14));
+        assert!(store.local_registrations().is_empty());
+        let _ = store.register(registration("mocker", "m1")).await.unwrap();
+        assert_eq!(store.local_registrations().len(), 1);
+
+        // A still newer copy with another model replaces it.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        store.adopt(registration("mocker", "m2"), Duration::from_secs(15));
+        assert_eq!(model(&store).as_deref(), Some("m2"));
+
+        // A copy never outlasts this store's lease, and one with no time left
+        // is ignored.
+        store.adopt(registration("mocker", "m2"), Duration::from_secs(3600));
+        tokio::time::advance(lease().duration() + Duration::from_secs(1)).await;
+        assert!(find(&store, "mocker").await.is_none());
+        store.adopt(registration("other", "m1"), Duration::ZERO);
+        assert!(!store.lock().registrations.contains_key(&key("other")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lists_are_estimated_while_copies_may_be_missing() {
+        let store = MemoryPoolStore::new(lease());
+        let mut watch = store.list_and_watch(None).await.unwrap();
+        assert!(matches!(
+            watch.next().await,
+            Some(Ok(WatchEvent::Resync(_)))
+        ));
+        // Another instance has not answered, so the first lease passes
+        // without the lists turning `Exact`, and the sweep announces nothing.
+        store.set_copies_missing(true);
+        tokio::time::advance(lease().duration()).await;
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert!(watch.next().now_or_never().is_none());
+        assert_eq!(
+            store.list().await.unwrap().completeness,
+            Completeness::Estimated
+        );
+
+        // Watchers learn when it answers, and when it stops again.
+        for (missing, expected) in [
+            (false, Completeness::Exact),
+            (true, Completeness::Estimated),
+        ] {
+            store.set_copies_missing(missing);
+            let next = tokio::time::timeout(Duration::from_secs(1), watch.next()).await;
+            let Ok(Some(Ok(WatchEvent::Resync(snapshot)))) = next else {
+                panic!("expected a Resync");
+            };
+            assert_eq!(snapshot.completeness, expected);
+            assert_eq!(store.list().await.unwrap().completeness, expected);
+        }
     }
 
     #[tokio::test]
