@@ -8156,7 +8156,7 @@ policy_classes:
             cfg_rx,
             PolicyProfile::synthetic(Some(0.0), RouterQueuePolicy::Fcfs),
             16,
-            counting_policy(&prepared_selections),
+            counting_policy(&prepared_selections, false),
             None,
             Some(Arc::clone(&refresher)),
             None,
