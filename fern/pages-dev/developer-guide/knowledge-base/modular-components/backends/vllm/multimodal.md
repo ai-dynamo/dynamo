@@ -29,7 +29,7 @@ Video codec support depends on where decoding runs:
 
 - **Backend decoding:** shipped CUDA images use NVDEC for H.264 and H.265.
   This requires a GPU with a video decode engine and the container's `video`
-  driver capability. See [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
+  driver capability. See [Video Decode GPU Requirements](../../../../../use-cases/video-understanding/video-decoding.md).
 - **Rust frontend decoding:** aggregated workers with `--frontend-decoding`
   can receive VP8/VP9 frames decoded on the CPU by the in-tree FFmpeg.
   The shipped FFmpeg build does not decode H.264, H.265, or AV1. Installing
@@ -38,7 +38,7 @@ Video codec support depends on where decoding runs:
 
 **Backend software decoding** can support additional codecs without rebuilding
 Dynamo. Explicitly install the backend's Python decoder packages using
-[Additional Media Decoders](../../../../../use-cases/multimodal-serving/additional-media-decoders.md).
+[Additional Media Decoders](../../../../../use-cases/image-understanding/additional-media-decoders.md).
 The installer extends backend decoding only, not Rust frontend decoding.
 These paths depend on the deployed image and configuration; an older pinned
 image may not provide the frontend decoder. Local `file://` reads additionally
@@ -86,7 +86,7 @@ The main multimodal vLLM launchers in this repo are:
 
 ### Custom Vision Encoders
 
-The aggregated vLLM worker can load an author-provided vision tower in process, batch images across concurrent requests, and adapt the ordered results into decoder-compatible prompt input. See [Custom Vision Encoders](../../../../../use-cases/multimodal-serving/custom-vision-encoders.md) for the backend contract, launch instructions, batch sizing guidance, and current limitations.
+The aggregated vLLM worker can load an author-provided vision tower in process, batch images across concurrent requests, and adapt the ordered results into decoder-compatible prompt input. See [Custom Vision Encoders](../../../../../use-cases/image-understanding/custom-vision-encoders.md) for the backend contract, launch instructions, batch sizing guidance, and current limitations.
 
 ## Multimodal KV Routing
 
@@ -124,7 +124,7 @@ The default path keeps multimodal processing on the worker:
 
 By default, the frontend hashes the exact full URI: the complete `data:` URI string or the HTTP URL including its query string. Set `--frontend-decoding` on the worker to register frontend media decoding and use decoded image content as the hash input. Content-addressed hashing lets different URLs for identical image bytes share a routing key.
 
-Exact video routing on this path requires `--frontend-decoding`. The frontend hashes sampled RGB frames and their model-visible metadata, then uses a model adapter to reproduce the worker's prompt expansion. Supported adapters cover Qwen3-VL, Qwen3.5, and Nemotron 3 Nano Omni. See [Multimodal KV Routing](../../../../../use-cases/multimodal-serving/multimodal-kv-routing.md#video-identity-and-token-layout) for setup, verification, and fallback behavior.
+Exact video routing on this path requires `--frontend-decoding`. The frontend hashes sampled RGB frames and their model-visible metadata, then uses a model adapter to reproduce the worker's prompt expansion. Supported adapters cover Qwen3-VL, Qwen3.5, and Nemotron 3 Nano Omni. See [Multimodal KV Routing](../../../../../use-cases/video-understanding/exact-video-kv-routing.md#video-identity-and-token-layout) for setup, verification, and fallback behavior.
 
 Launch the default path:
 
@@ -162,7 +162,7 @@ This launcher sets `--dyn-chat-processor vllm`. The frontend runs vLLM's Hugging
 
 If a client supplies opaque multimodal UUIDs, Dynamo cannot derive a matching content hash. Those requests use text-prefix routing.
 
-For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/multimodal-serving/multimodal-kv-routing.md).
+For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/image-understanding/vlm-performance-optimization/multimodal-kv-routing.md).
 
 ## Image/Video Serving
 

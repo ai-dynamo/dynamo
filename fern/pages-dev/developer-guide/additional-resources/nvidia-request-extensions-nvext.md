@@ -142,7 +142,7 @@ router also uses `X-Dynamo-Session-ID` for router-local affinity. See
 for routing behavior and TTL settings.
 
 For trace sink configuration and JSONL schema details, see
-[Agent Tracing](../../use-cases/agents/agent-tracing.md).
+[Trace an Agent Run](../../use-cases/agents/agent-tracing.md).
 
 ## Agent Hints
 
@@ -151,7 +151,7 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `priority` | `i32` | `None` | Unified soft request priority. Used for router policy scoring and backend scheduling/eviction. |
-| `strict_priority` | `u32` | `None` | Router pending-queue tier for `fcfs`, `lcfs` (synthetic fallback class only), and `wspt` classes. Higher values always precede lower values; see [Priority Scheduling](../../use-cases/agents/priority-scheduling.md) for due-time ordering within a tier. Unset is equivalent to `0`. The `edf` queue policy, the default for configured policy classes, ignores it. |
+| `strict_priority` | `u32` | `None` | Router pending-queue tier for `fcfs`, `lcfs` (synthetic fallback class only), and `wspt` classes. Higher values always precede lower values; see [Priority Scheduling](../../use-cases/agents/priority-scheduling.mdx) for due-time ordering within a tier. Unset is equivalent to `0`. The `edf` queue policy, the default for configured policy classes, ignores it. |
 | `osl` | `u32` | `None` | Expected output sequence length (tokens). Used for output block tracking and resource estimation. |
 | `speculative_prefill` | `bool` | `false` | When `true`, speculatively prefills the predicted next-turn prompt after the current turn completes to warm the KV cache. |
 
@@ -163,7 +163,7 @@ important" across Dynamo.
 When the router queue is active and the request's policy class uses `fcfs` or `wspt`, such as the synthetic class that `--router-queue-threshold` enables, higher-priority requests are shifted earlier in the router queue. An `edf` class, the default for configured policy classes, does not reorder by priority. Once dispatched, Dynamo forwards the same semantic priority to the backend engine for queue ordering, preemption, and KV cache eviction. Dynamo normalizes backend-specific polarity internally, including vLLM's lower-is-higher convention.
 
 For layer-by-layer behavior and backend requirements, see
-[Priority Scheduling](../../use-cases/agents/priority-scheduling.md).
+[Priority Scheduling](../../use-cases/agents/priority-scheduling.mdx).
 
 ```json
 {
@@ -181,7 +181,7 @@ For layer-by-layer behavior and backend requirements, see
 router scheduler queue whose class uses `fcfs`, `lcfs`, or `wspt`. That queue orders
 requests by `(strict_priority, due_at, configured_policy_key)`, so FCFS, LCFS, or WSPT
 still orders requests within the same tier; see
-[Priority Scheduling](../../use-cases/agents/priority-scheduling.md) for how due-time
+[Priority Scheduling](../../use-cases/agents/priority-scheduling.mdx) for how due-time
 ordering applies within a tier. An `edf` class, the default for configured policy
 classes, orders by due time and arrival alone and ignores `strict_priority`. Only the
 synthetic fallback class can use `lcfs`, through the router-wide queue policy;
@@ -397,9 +397,9 @@ when the model default applied: its engine output does not carry the count it ra
 | Document | Description |
 |----------|-------------|
 | [KServe gRPC Frontend](../knowledge-base/modular-components/frontend/frontend-guide.md) | KServe endpoints, backend registration, and flow-control tuning |
-| [Reinforcement Learning Integration](../../use-cases/reinforcement-learning/overview.md) | Token-level rollout data, worker discovery, direct engine routes, and SGLang metadata upload |
+| [Reinforcement Learning Integration](../../use-cases/reinforcement-learning/overview.mdx) | Token-level rollout data, worker discovery, direct engine routes, and SGLang metadata upload |
 | [Configuration and Tuning](../knowledge-base/modular-components/router/configuration-and-tuning.md) | Full router configuration and CLI arguments |
-| [Session IDs](../../use-cases/agents/session-ids.mdx) | Passive session identity |
-| [Agent Tracing](../../use-cases/agents/agent-tracing.md) | JSONL request traces, inferred tool-call metadata, and harness tool-event ingestion |
-| [Agent Hints](../../use-cases/agents/agent-hints.md) | Per-request serving hints for routing, scheduling, and cache behavior |
+| [Identify Agent Sessions](../../use-cases/agents/session-ids.mdx) | Passive session identity |
+| [Trace an Agent Run](../../use-cases/agents/agent-tracing.md) | JSONL request traces, inferred tool-call metadata, and harness tool-event ingestion |
+| [Prioritize Requests](../../use-cases/agents/priority-scheduling.mdx) | Per-request serving hints for routing, scheduling, and cache behavior |
 | [SGLang for Agentic Workloads](../knowledge-base/modular-components/backends/sglang/agents-on-sglang.md) | SGLang engine flags for priority scheduling and KV eviction policies |

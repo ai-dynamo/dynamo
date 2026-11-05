@@ -419,6 +419,22 @@ navigation:
                     path: ../pages-dev/developer-guide/knowledge-base/modular-components/frontend/python-route-extensions.md
                   - page: Tokenizer
                     path: ../pages-dev/developer-guide/knowledge-base/modular-components/frontend/tokenizer.md
+                  - section: Tool Calling & Reasoning
+                    collapsed: true
+                    slug: tool-calling
+                    contents:
+                      - page: Overview
+                        path: ../pages-dev/use-cases/tool-calling-and-reasoning/overview.mdx
+                      - page: Chat Processors
+                        path: ../pages-dev/use-cases/tool-calling-and-reasoning/chat-processors.mdx
+                      - page: Tool Call Parsing
+                        path: ../pages-dev/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx
+                      - page: Reasoning Parsing
+                        path: ../pages-dev/use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx
+                      - page: Structural Tag
+                        path: ../pages-dev/use-cases/tool-calling-and-reasoning/structural-tag.md
+                      - page: Troubleshooting Tool Calls
+                        path: ../pages-dev/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md
               - section: Router
                 collapsed: true
                 contents:
@@ -664,30 +680,39 @@ navigation:
                 path: ../pages-dev/developer-guide/additional-resources/speculative-decoding/speculative-decoding-with-sglang.md
   - tab: use-cases
     layout:
-      # ==================== Features ====================
+      - page: Overview
+        slug: use-cases
+        icon: compass
+        path: ../pages-dev/use-cases/overview.mdx
+      # ==================== Reinforcement Learning ====================
       - section: Reinforcement Learning
         collapsed: true
         icon: brain
         slug: reinforcement-learning
         contents:
           - page: Overview
-            path: ../pages-dev/use-cases/reinforcement-learning/overview.md
+            path: ../pages-dev/use-cases/reinforcement-learning/overview.mdx
           - page: KV-Aware Load Balancing
             path: ../pages-dev/use-cases/reinforcement-learning/routing.md
           - page: Rollout Weight Updates
             path: ../pages-dev/use-cases/reinforcement-learning/weight-updates.md
           - page: RL Profiling and Simulation
             path: ../pages-dev/use-cases/reinforcement-learning/operations-and-simulation.md
-          - page: verl Integration
-            path: ../pages-dev/use-cases/reinforcement-learning/verl.md
-          - page: NeMo RL Integration
-            path: ../pages-dev/use-cases/reinforcement-learning/nemo-rl.md
-          - page: Slime Integration
-            path: ../pages-dev/use-cases/reinforcement-learning/slime.md
-          - page: External Trainer Integration
-            path: ../pages-dev/use-cases/reinforcement-learning/implementation-guide.md
-          - page: RL Integration Reference
-            path: ../pages-dev/use-cases/reinforcement-learning/integration-reference.md
+          - section: RL Framework Integrations
+            skip-slug: true
+            collapsed: open-by-default
+            contents:
+              - page: verl Integration
+                path: ../pages-dev/use-cases/reinforcement-learning/verl.md
+              - page: NeMo RL Integration
+                path: ../pages-dev/use-cases/reinforcement-learning/nemo-rl.md
+              - page: Slime Integration
+                path: ../pages-dev/use-cases/reinforcement-learning/slime.md
+              - page: External Trainer Integration
+                path: ../pages-dev/use-cases/reinforcement-learning/implementation-guide.md
+              - page: RL Integration Reference
+                path: ../pages-dev/use-cases/reinforcement-learning/integration-reference.md
+      # ==================== Agents ====================
       - section: Agents
         collapsed: true
         icon: users
@@ -695,47 +720,90 @@ navigation:
         contents:
           - page: Overview
             path: ../pages-dev/use-cases/agents/overview.md
-          - page: Session IDs
-            path: ../pages-dev/use-cases/agents/session-ids.mdx
-          - page: Agent Hints
-            path: ../pages-dev/use-cases/agents/agent-hints.md
-          - page: Priority Scheduling
-            path: ../pages-dev/use-cases/agents/priority-scheduling.md
-          - page: Agent Harnesses
+          - page: Run an Agent on Dynamo
+            path: ../pages-dev/use-cases/agents/run-an-agent-on-dynamo.md
+          - page: Connect an Agent Harness
+            slug: agent-harnesses
             path: ../pages-dev/use-cases/agents/agent-harnesses.mdx
-          - page: Agent Tracing
+          - page: Identify Agent Sessions
+            path: ../pages-dev/use-cases/agents/session-ids.mdx
+          - page: Maintain Session Affinity
+            path: ../pages-dev/use-cases/agents/session-affinity.md
+          - page: Prioritize Requests
+            path: ../pages-dev/use-cases/agents/priority-scheduling.mdx
+          - page: Trace an Agent Run
+            slug: agent-tracing
             path: ../pages-dev/use-cases/agents/agent-tracing.md
-          - page: Agent Simulation
+          - page: Simulate an Agent Run
+            slug: agent-simulation
             path: ../pages-dev/use-cases/agents/agent-simulation.mdx
-          - page: ThunderAgent Program Scheduler
+          - section: Schedule Agents with ThunderAgent
+            collapsed: true
+            slug: thunder-agent-program-scheduler
             path: ../pages-dev/use-cases/agents/thunderagent-program-scheduler.md
-      - section: Multimodal Serving
+            contents:
+              - page: Run the ThunderAgent Python Router
+                slug: thunder-agent-python-router
+                path: ../pages-dev/use-cases/agents/thunderagent-python-router.md
+      # ==================== Image Understanding ====================
+      - section: Image Understanding
         collapsed: true
-        icon: photo-film
-        slug: multimodal
+        icon: eye
+        slug: image-understanding
         contents:
           - page: Overview
-            path: ../pages-dev/use-cases/multimodal-serving/overview.md
-          - page: Voice Pipelines
-            path: ../pages-dev/use-cases/multimodal-serving/voice.md
-          - page: Parallel Media Decoding
-            path: ../pages-dev/use-cases/multimodal-serving/parallel-media-decoding.md
+            path: ../pages-dev/use-cases/image-understanding/overview.md
+          - section: VLM Performance Optimization
+            collapsed: open-by-default
+            slug: vlm-performance-optimization
+            path: ../pages-dev/use-cases/image-understanding/vlm-performance-optimization.md
+            contents:
+              - page: Multimodal KV Routing
+                path: ../pages-dev/use-cases/image-understanding/vlm-performance-optimization/multimodal-kv-routing.md
+              - page: Frontend Media Decoding
+                path: ../pages-dev/use-cases/image-understanding/vlm-performance-optimization/frontend-media-decoding.md
+              - page: Shared Image Cache
+                path: ../pages-dev/use-cases/image-understanding/vlm-performance-optimization/shared-image-cache.md
+              - page: Embedding Cache
+                path: ../pages-dev/use-cases/image-understanding/vlm-performance-optimization/embedding-cache.md
+              - page: Encoder Disaggregation
+                path: ../pages-dev/use-cases/image-understanding/vlm-performance-optimization/encoder-disaggregation.md
           - page: Custom Vision Encoders
-            slug: custom-vision-encoders
-            path: ../pages-dev/use-cases/multimodal-serving/custom-vision-encoders.md
-          - page: Embedding Cache
-            path: ../pages-dev/use-cases/multimodal-serving/embedding-cache.md
-          - page: Multimodal KV Routing
-            slug: multimodal-kv-routing
-            path: ../pages-dev/use-cases/multimodal-serving/multimodal-kv-routing.md
-          - page: Encoder Disaggregation
-            path: ../pages-dev/use-cases/multimodal-serving/encoder-disaggregation.md
-          - page: Video Decode GPU Requirements
-            slug: video-decode-gpu-requirements
-            path: ../pages-dev/use-cases/multimodal-serving/video-decode-gpu-requirements.md
+            path: ../pages-dev/use-cases/image-understanding/custom-vision-encoders.md
           - page: Additional Media Decoders
             slug: additional-media-decoders
-            path: ../pages-dev/use-cases/multimodal-serving/additional-media-decoders.md
+            path: ../pages-dev/use-cases/image-understanding/additional-media-decoders.md
+      # ==================== Speech ====================
+      - section: Speech
+        collapsed: true
+        icon: microphone
+        slug: speech
+        contents:
+          - page: Voice Pipelines
+            path: ../pages-dev/use-cases/speech/voice-pipelines.md
+          - page: Speech to Text (STT)
+            slug: speech-to-text
+            path: ../pages-dev/use-cases/speech/speech-to-text.md
+          - page: Text to Speech (TTS)
+            slug: text-to-speech
+            path: ../pages-dev/use-cases/speech/text-to-speech.md
+          - page: Speech to Speech
+            slug: speech-to-speech
+            path: ../pages-dev/use-cases/speech/speech-to-speech.md
+      # ==================== Video Understanding ====================
+      - section: Video Understanding
+        collapsed: true
+        icon: film
+        slug: video-understanding
+        contents:
+          - page: Overview
+            path: ../pages-dev/use-cases/video-understanding/overview.md
+          - page: Exact Video KV Routing
+            path: ../pages-dev/use-cases/video-understanding/exact-video-kv-routing.md
+          - page: Video Decoding and GPU Requirements
+            slug: video-decoding
+            path: ../pages-dev/use-cases/video-understanding/video-decoding.md
+      # ==================== Diffusion ====================
       - section: Diffusion
         collapsed: true
         icon: wand-magic-sparkles
@@ -744,7 +812,7 @@ navigation:
           - page: Overview
             path: ../pages-dev/use-cases/diffusion/overview.md
           - section: Workflows
-            collapsed: true
+            collapsed: open-by-default
             skip-slug: true
             contents:
               - page: Text-to-Image
@@ -756,46 +824,15 @@ navigation:
               - page: Image-to-Video
                 slug: image-to-video
                 path: ../pages-dev/use-cases/diffusion/workflows/image-to-video.md
-              - page: Text-to-Audio
-                slug: text-to-audio
-                path: ../pages-dev/use-cases/diffusion/workflows/text-to-audio.md
               - page: Text-to-Text (LLM Diffusion)
                 slug: text-to-text
                 path: ../pages-dev/use-cases/diffusion/workflows/text-to-text-llm-diffusion.md
-      - section: Tool Calling & Reasoning
-        collapsed: true
-        icon: screwdriver-wrench
-        slug: parsing
-        contents:
-          - page: Overview
-            path: ../pages-dev/use-cases/tool-calling-and-reasoning/overview.mdx
-          - page: Chat Processors
-            path: ../pages-dev/use-cases/tool-calling-and-reasoning/chat-processors.mdx
-          - page: Tool Call Parsing
-            path: ../pages-dev/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx
-          - page: Structural Tag
-            path: ../pages-dev/use-cases/tool-calling-and-reasoning/structural-tag.md
-          - page: Reasoning Parsing
-            path: ../pages-dev/use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx
-          - page: Troubleshooting Tool Calls
-            path: ../pages-dev/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md
-      - section: Many-Model Serving
+      - section: GPU Sharing
         collapsed: true
         icon: layer-group
-        slug: many-model-serving
-        contents:
-          - page: Interpreting GPU Sharing Results
-            path: ../pages-dev/use-cases/gpu-sharing/gpu-sharing-results.mdx
-          - page: Deploy the Baseline Experiment
-            path: ../pages-dev/use-cases/gpu-sharing/deploy-baseline.md
-          - page: Deploy the KAI + HAMi Experiment
-            path: ../pages-dev/use-cases/gpu-sharing/deploy-kai-hami.md
-          - page: Build the KAI-Scheduler and GPU Fractioning Forks
-            path: ../pages-dev/use-cases/gpu-sharing/build-gpu-fractioning-forks.md
-          - page: Deploy the KAI + GPU Fractions Experiment
-            path: ../pages-dev/use-cases/gpu-sharing/deploy-kai-gpu-fractions.md
-          - page: Per-GPU Compute and Memory Limits with MPS
-            path: ../pages-dev/use-cases/gpu-sharing/mps-per-gpu-limits.md
+        slug: gpu-sharing
+        path: ../pages-dev/use-cases/gpu-sharing/overview.mdx
+        contents: []
   - tab: recipes
     layout:
       # ==================== Model Recipes ====================

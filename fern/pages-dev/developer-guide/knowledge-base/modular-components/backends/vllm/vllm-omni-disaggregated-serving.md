@@ -6,7 +6,7 @@ subtitle: Architecture of multi-stage vLLM-Omni pipelines (e.g. AR + Diffusion),
 sidebar-title: vLLM-Omni Disaggregated Serving
 ---
 
-Disaggregated serving is an advanced deployment mode of the vLLM-Omni backend (`dynamo.vllm.omni`), used for models whose pipeline has multiple stages (e.g., AR + Diffusion). Each stage runs as an independent process on its own GPU, enabling independent scaling, GPU isolation, and multi-worker replicas per stage. It uses the omni entrypoint with the `--stage-id` and `--omni-router` flags described below. See the [Diffusion Overview](../../../../../use-cases/diffusion/overview.md) for installation and shared configuration.
+Disaggregated serving is an advanced deployment mode of the vLLM-Omni backend (`dynamo.vllm.omni`), used for models whose pipeline has multiple stages (e.g., AR + Diffusion). Each stage runs as an independent process on its own GPU, enabling independent scaling, GPU isolation, and multi-worker replicas per stage. It uses the omni entrypoint with the `--stage-id` and `--omni-router` flags described below. See [Diffusion › Install the Backend](../../../../../use-cases/diffusion/overview.md#install-the-backend) for installation and shared configuration.
 
 ## Architecture
 
@@ -84,6 +84,6 @@ These flags are specific to disaggregated mode. For the full flag surface, see t
 
 ## See Also
 
-- [Diffusion Overview](../../../../../use-cases/diffusion/overview.md)
+- [Text to Image](../../../../../use-cases/diffusion/workflows/text-to-image.md)
 - [Text-to-Image with vLLM-Omni](../../../../../use-cases/diffusion/workflows/text-to-image.md#vllm-omni)
 - [vLLM-Omni Configuration reference](../../../../../reference/backends/vllm-omni-configuration.mdx)
