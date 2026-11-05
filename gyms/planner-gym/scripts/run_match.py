@@ -91,6 +91,13 @@ def main() -> int:
         )
     except ValueError as exc:
         p.error(f"invalid --trace: {exc}")
+    from autoscaling_arena.runners.sims import _paths_refer_to_same_file
+
+    # The driver only sees the staged copy, so check the original trace here.
+    if args.report_json is not None and _paths_refer_to_same_file(
+        Path(args.report_json).expanduser(), trace_path
+    ):
+        p.error(f"--report-json must not refer to the --trace input: {trace_path}")
     from autoscaling_arena.adapters import ReactiveAutoscaler, StaticAutoscaler
     from autoscaling_arena.runners import run_arena_replay
     from autoscaling_arena.workloads import Workload
