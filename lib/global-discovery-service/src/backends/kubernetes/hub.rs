@@ -5,7 +5,7 @@
 //! Global Discovery Service's MCS store.
 
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use crate::pool_discovery::watch::{Directory, Snapshot, WatchStream};
@@ -20,6 +20,9 @@ use dynamo_global_router_shared::PoolLocation;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{Api, Client};
 use tokio_util::sync::CancellationToken;
+use url::Url;
+
+use super::routing::{McsRoutingConfig, McsRoutingConfigError};
 
 use super::cache::{SliceDirectory, SliceIndex, SliceKey};
 use super::mcs;
@@ -95,6 +98,44 @@ impl McsPoolDirectory {
         bind_relay_address: bool,
         locations: HashMap<String, PoolLocation>,
     ) -> Self {
+        Self::create(
+            imports,
+            mcs,
+            pool_service_suffix,
+            bind_relay_address,
+            locations,
+            None,
+        )
+    }
+
+    /// Joins Relay liveness with configured models and ready frontend EndpointSlices.
+    pub fn with_routing(
+        imports: Client,
+        mcs: McsImplementation,
+        pool_service_suffix: String,
+        bind_relay_address: bool,
+        locations: HashMap<String, PoolLocation>,
+        routing: McsRoutingConfig,
+    ) -> Result<Self, McsRoutingConfigError> {
+        routing.validate_relay_suffix(&pool_service_suffix)?;
+        Ok(Self::create(
+            imports,
+            mcs,
+            pool_service_suffix,
+            bind_relay_address,
+            locations,
+            Some(routing),
+        ))
+    }
+
+    fn create(
+        imports: Client,
+        mcs: McsImplementation,
+        pool_service_suffix: String,
+        bind_relay_address: bool,
+        locations: HashMap<String, PoolLocation>,
+        routing: Option<McsRoutingConfig>,
+    ) -> Self {
         Self(SliceDirectory::new(
             Api::all(imports),
             mcs::imported_selector(mcs),
@@ -103,6 +144,7 @@ impl McsPoolDirectory {
                 pool_service_suffix,
                 bind_relay_address,
                 locations,
+                routing,
             },
         ))
     }
@@ -138,16 +180,17 @@ struct PoolNaming {
     /// [`TrustedNetworkAuthenticator`].
     bind_relay_address: bool,
     locations: HashMap<String, PoolLocation>,
+    routing: Option<McsRoutingConfig>,
 }
 
 impl PoolNaming {
     /// Source cluster from [`mcs::source_cluster`]; DGD name from the
     /// Service name without `pool_service_suffix`. `None` for imports that
     /// are not pools.
-    fn pool_key(&self, slice: &EndpointSlice) -> Option<PoolKey> {
+    fn pool_key(&self, slice: &EndpointSlice, suffix: &str) -> Option<PoolKey> {
         let service = mcs::service_name(self.mcs, slice)?;
         let dgd_name = service
-            .strip_suffix(self.pool_service_suffix.as_str())
+            .strip_suffix(suffix)
             .filter(|name| !name.is_empty())?;
         let cluster = mcs::source_cluster(self.mcs, slice)?;
         let namespace = slice.metadata.namespace.as_deref()?;
@@ -155,9 +198,31 @@ impl PoolNaming {
     }
 
     fn slice(&self, slice: &EndpointSlice) -> Option<SliceEntry> {
+        if let Some(pool) = self.pool_key(slice, &self.pool_service_suffix) {
+            return Some(SliceEntry {
+                pool,
+                ready: ready_addresses(slice),
+                frontend_port: None,
+            });
+        }
+        let routing = self.routing.as_ref()?;
+        let pool = self.pool_key(slice, &routing.frontend_service_suffix)?;
+        routing.get(&pool)?;
+        let port = slice
+            .ports
+            .as_ref()?
+            .iter()
+            .find(|port| {
+                port.name.as_deref() == Some(routing.frontend_port_name.as_str())
+                    && port.protocol.as_deref().is_none_or(|p| p == "TCP")
+            })?
+            .port
+            .and_then(|port| u16::try_from(port).ok())
+            .filter(|port| *port != 0)?;
         Some(SliceEntry {
-            pool: self.pool_key(slice)?,
+            pool,
             ready: ready_addresses(slice),
+            frontend_port: Some(port),
         })
     }
 
@@ -203,6 +268,8 @@ fn ready_addresses(slice: &EndpointSlice) -> Vec<IpAddr> {
 struct SliceEntry {
     pool: PoolKey,
     ready: Vec<IpAddr>,
+    /// None for the pool's Relay; Some for a routable frontend slice.
+    frontend_port: Option<u16>,
 }
 
 #[derive(Default)]
@@ -306,11 +373,26 @@ impl PoolIndex {
             .slices
             .iter()
             .filter_map(|slice| self.slices.get(slice))
+            .filter(|entry| entry.frontend_port.is_none())
             .flat_map(|entry| entry.ready.iter().copied())
             .collect();
         ready.sort_unstable();
         ready.dedup();
 
+        let mut frontends = state
+            .slices
+            .iter()
+            .filter_map(|slice| self.slices.get(slice))
+            .filter_map(|entry| entry.frontend_port.map(|port| (entry, port)))
+            .flat_map(|(entry, port)| {
+                entry.ready.iter().filter_map(move |address| {
+                    Url::parse(&format!("http://{}/", SocketAddr::new(*address, port))).ok()
+                })
+            })
+            .collect::<Vec<_>>();
+        frontends.sort_unstable();
+        frontends.dedup();
+        let metadata = naming.routing.as_ref().and_then(|config| config.get(key));
         let state = self.pools.get_mut(key)?;
         let Some(&lowest) = ready.first() else {
             state.bound = None;
@@ -328,12 +410,14 @@ impl PoolIndex {
         });
         let mut record = PoolRecord {
             key: key.clone(),
-            location: naming.location(key.site_id()),
+            location: metadata
+                .and_then(|metadata| metadata.location.clone())
+                .unwrap_or_else(|| naming.location(key.site_id())),
             runtime_namespace: None,
             frontend_endpoint: None,
-            model: None,
+            model: metadata.map(|metadata| metadata.model.clone()),
             capabilities: Vec::new(),
-            frontends: Vec::new(),
+            frontends,
             capacity: Vec::new(),
             relay_identity: bound.map(address_identity),
             revision: Revision::default(),
@@ -417,6 +501,7 @@ mod tests {
             mcs: McsImplementation::Karmada,
             pool_service_suffix: SUFFIX.to_owned(),
             bind_relay_address,
+            routing: None,
             locations: HashMap::from([(
                 "west".to_owned(),
                 PoolLocation {
@@ -487,6 +572,84 @@ mod tests {
             .pools
             .get(key)
             .and_then(|pool| pool.record.clone())
+    }
+
+    fn routing_cache() -> Arc<SliceCache<PoolIndex>> {
+        let mut rules = naming(true);
+        rules.routing = Some(McsRoutingConfig::from_json(br#"{"pools":[{"site_id":"west","namespace":"dynamo","dgd_name":"mocker","model":"qwen","location":{"region":"us-west-2"}}]}"#).unwrap());
+        Arc::new(SliceCache::new(rules))
+    }
+
+    fn frontend(address: &str, ready: bool) -> EndpointSlice {
+        let mut result = slice("west", "mocker", "frontend", &[(address, ready)]);
+        result.metadata.name = Some("imported-west-mocker-frontend-abcde".to_owned());
+        result.metadata.labels.as_mut().unwrap().insert(
+            KUBERNETES_SERVICE_NAME_LABEL.to_owned(),
+            "derived-mocker-frontend".to_owned(),
+        );
+        result.ports = Some(vec![k8s_openapi::api::discovery::v1::EndpointPort {
+            name: Some("http".to_owned()),
+            port: Some(8000),
+            protocol: Some("TCP".to_owned()),
+            ..Default::default()
+        }]);
+        result
+    }
+
+    #[test]
+    fn joins_model_and_live_frontends_without_admitting_frontend_only_pools() {
+        let cache = routing_cache();
+        let pool = key("west", "mocker");
+        sync(&cache, vec![frontend("10.43.0.2", true)]);
+        assert!(record(&cache, &pool).is_none());
+        let relay = slice("west", "mocker", "relay", &[("10.43.0.1", true)]);
+        cache.apply(watcher::Event::Apply(relay.clone()));
+        let first = record(&cache, &pool).unwrap();
+        assert_eq!(first.model.as_deref(), Some("qwen"));
+        assert_eq!(first.location.region, "us-west-2");
+        assert_eq!(
+            first.frontends,
+            vec![Url::parse("http://10.43.0.2:8000/").unwrap()]
+        );
+        cache.apply(watcher::Event::Apply(frontend("10.43.0.3", true)));
+        let second = record(&cache, &pool).unwrap();
+        assert!(second.revision > first.revision);
+        assert_eq!(
+            second.frontends,
+            vec![Url::parse("http://10.43.0.3:8000/").unwrap()]
+        );
+        cache.apply(watcher::Event::Apply(frontend("10.43.0.3", false)));
+        assert!(record(&cache, &pool).unwrap().frontends.is_empty());
+        cache.apply(watcher::Event::Delete(relay));
+        assert!(record(&cache, &pool).is_none());
+    }
+
+    #[test]
+    fn frontend_ports_identity_and_ipv6_are_respected() {
+        let cache = routing_cache();
+        let relay = slice("west", "mocker", "relay", &[("10.43.0.1", true)]);
+        let mut wrong_port = frontend("10.43.0.2", true);
+        wrong_port.ports.as_mut().unwrap()[0].name = Some("grpc".to_owned());
+        let mut wrong_cluster = frontend("10.42.0.2", true);
+        wrong_cluster.metadata.name = Some("imported-ohio-mocker-frontend-abcde".to_owned());
+        let mut wrong_namespace = frontend("10.43.0.9", true);
+        wrong_namespace.metadata.namespace = Some("other".to_owned());
+        sync(
+            &cache,
+            vec![relay, wrong_port, wrong_cluster, wrong_namespace],
+        );
+        assert_eq!(cache.snapshot().unwrap().items.len(), 1);
+        assert!(
+            record(&cache, &key("west", "mocker"))
+                .unwrap()
+                .frontends
+                .is_empty()
+        );
+        cache.apply(watcher::Event::Apply(frontend("fd00::2", true)));
+        assert_eq!(
+            record(&cache, &key("west", "mocker")).unwrap().frontends[0].as_str(),
+            "http://[fd00::2]:8000/"
+        );
     }
 
     #[test]
