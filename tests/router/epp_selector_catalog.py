@@ -36,6 +36,8 @@ NAMED_POLICY_CATALOG_OBSERVER = (
 CACHE_OFF_INSTANCE = "cache_off"
 DEFAULT_COST_FN_TYPE = "dynamo-default-cost-fn"
 PREFERRED_TAINT_INPUT_WEIGHT = 0.85
+# Consumer-only designed scale; provider stays at credit1/scale1 (readiness).
+CONSUMER_PREFILL_LOAD_SCALE = 4.0
 ARM_DEADLINE_S = 45.0
 NAMED_POLICY_YAML = """\
 worker_selection:
@@ -108,6 +110,28 @@ NAMED_POLICY_SCOPE_SPECS: tuple[NamedPolicyScopeSpec, ...] = (
         r"->\s*Option<f64>\s*\{",
         "RoutingConstraints::preferred_taint_multiplier",
     ),
+    NamedPolicyScopeSpec(
+        "default_aggregated_score",
+        "lib/router-plugins/builtin/src/default/scorer.rs",
+        r"fn\s+score_worker\s*\([^;{]*?\)\s*->\s*"
+        r"Result<f64,\s*WorkerSelectionPolicyError>\s*\{",
+        "default::scorer::score_worker",
+    ),
+    NamedPolicyScopeSpec(
+        "scheduler_get_potential_loads",
+        "lib/kv-router/src/scheduling/local.rs",
+        r"pub\s+fn\s+get_potential_loads\s*\([^;{]*?\)\s*"
+        r"->\s*Vec<PotentialLoad>\s*\{",
+        "LocalScheduler::get_potential_loads",
+    ),
+    NamedPolicyScopeSpec(
+        "incoming_footprint_projection",
+        "lib/kv-router/src/sequences/prompt_registry.rs",
+        r"fn\s+project_loads_from_membership\s*<const\s+"
+        r"INCLUDE_ACTIVE_REQUESTS\s*:\s*bool>\s*\([^;{]*?\)\s*"
+        r"->\s*PotentialLoadMaps\s*\{",
+        "PromptRegistry::project_loads_from_membership",
+    ),
 )
 
 NAMED_POLICY_SCOPE_DIGESTS: dict[str, str] = {
@@ -126,6 +150,15 @@ NAMED_POLICY_SCOPE_DIGESTS: dict[str, str] = {
     ),
     "preferred_taint_multiplier": (
         "dff08a0e830e1f0dfa4d4e3e9127de26927bb85d5caec4e559ffd749079e21fe"
+    ),
+    "default_aggregated_score": (
+        "7abd5902f204151aac4b276d4521389445cc3c4596456e13359e2a9780312954"
+    ),
+    "scheduler_get_potential_loads": (
+        "53bb389284eca17cf7575431d5ab7249abd3bbd17b936d8d47908071c539cc5f"
+    ),
+    "incoming_footprint_projection": (
+        "379a71b281ccfb8006ad866f3d47affd4f4dc3281c9617ccc3cce865640ef2b1"
     ),
 }
 
@@ -311,6 +344,117 @@ def assert_named_policy_source_contract() -> None:
             "through f64::from"
         )
 
+    scorer_body = _fn_decl_and_body(
+        file_text[REPO_ROOT / NAMED_POLICY_SCOPE_SPECS[6].rel_path],
+        re.compile(NAMED_POLICY_SCOPE_SPECS[6].declaration_regex),
+        NAMED_POLICY_SCOPE_SPECS[6].label,
+    )
+    if "isl_tokens().saturating_sub(cached_tokens)" not in scorer_body:
+        raise AssertionError(
+            "default score_worker no longer reconstructs uncached tokens as "
+            "ISL saturating_sub cached_tokens"
+        )
+    collapsed_scorer = re.sub(r"\s+", "", scorer_body)
+    if (
+        "(load.active_prefill_tokens()+uncached).saturating_add(cached_tokens)"
+        not in collapsed_scorer
+    ):
+        raise AssertionError(
+            "default score_worker no longer rebuilds raw tokens as "
+            "active_prefill + uncached + cached_tokens"
+        )
+    if (
+        "self.prefill_load_scale*prefill+load.decode_cost_blocks()+request_cost"
+        not in collapsed_scorer
+    ):
+        raise AssertionError(
+            "default score_worker no longer scales post-credit prefill and adds "
+            "decode_cost_blocks plus request_cost"
+        )
+    if (
+        "logit*candidate.preferred_taint_multiplier().unwrap_or(1.0)"
+        not in collapsed_scorer
+    ):
+        raise AssertionError(
+            "default score_worker no longer multiplies logit by the preferred "
+            "taint multiplier"
+        )
+
+    loads_body = _fn_decl_and_body(
+        file_text[REPO_ROOT / NAMED_POLICY_SCOPE_SPECS[7].rel_path],
+        re.compile(NAMED_POLICY_SCOPE_SPECS[7].declaration_regex),
+        NAMED_POLICY_SCOPE_SPECS[7].label,
+    )
+    if "effective_prefill_tokens" not in loads_body:
+        raise AssertionError(
+            "get_potential_loads no longer builds deltas via "
+            "effective_prefill_tokens"
+        )
+    if "potential_prefill_tokens" not in loads_body:
+        raise AssertionError(
+            "get_potential_loads no longer returns potential_prefill_tokens"
+        )
+    if "potential_decode_blocks" not in loads_body:
+        raise AssertionError(
+            "get_potential_loads no longer returns potential_decode_blocks"
+        )
+
+    footprint_body = _fn_decl_and_body(
+        file_text[REPO_ROOT / NAMED_POLICY_SCOPE_SPECS[8].rel_path],
+        re.compile(NAMED_POLICY_SCOPE_SPECS[8].declaration_regex),
+        NAMED_POLICY_SCOPE_SPECS[8].label,
+    )
+    collapsed_footprint = re.sub(r"\s+", "", footprint_body)
+    if "query_len.saturating_sub(overlap_depth)" not in collapsed_footprint:
+        raise AssertionError(
+            "project_loads_from_membership no longer computes new_blocks as "
+            "query_len.saturating_sub(overlap_depth)"
+        )
+    if "load.active_blocks+new_blocks" not in collapsed_footprint:
+        raise AssertionError(
+            "project_loads_from_membership no longer projects decode as "
+            "active_blocks + new_blocks"
+        )
+    if "active_tokens+added_tokens" not in collapsed_footprint:
+        raise AssertionError(
+            "project_loads_from_membership no longer projects prefill as "
+            "active_tokens + added_tokens"
+        )
+
+    inputs_path = REPO_ROOT / "lib/kv-router/src/plugins/worker_selection/inputs.rs"
+    inputs_text = _strip_rust_comments(inputs_path.read_text(encoding="utf-8"))
+    from_projection_body = _fn_decl_and_body(
+        inputs_text,
+        re.compile(
+            r"pub\(crate\)\s+fn\s+from_projection\s*\(\s*load\s*:\s*"
+            r"WorkerLoadProjection\s*\)\s*->\s*Self\s*\{"
+        ),
+        "WorkerLoadInput::from_projection",
+    )
+    collapsed_from = re.sub(r"\s+", "", from_projection_body)
+    if "decode_cost_blocks:load.potential_decode_blocks()asf64" not in collapsed_from:
+        raise AssertionError(
+            "WorkerLoadInput::from_projection no longer assigns "
+            "decode_cost_blocks from load.potential_decode_blocks()"
+        )
+    projection_helper = _fn_decl_and_body(
+        file_text[REPO_ROOT / NAMED_POLICY_SCOPE_SPECS[8].rel_path],
+        re.compile(
+            r"pub\s+fn\s+potential_decode_blocks\s*\(\s*self\s*\)\s*"
+            r"->\s*usize\s*\{"
+        ),
+        "WorkerLoadProjection::potential_decode_blocks",
+    )
+    collapsed_decode = re.sub(r"\s+", "", projection_helper)
+    if (
+        "self.active_decode_blocks+self.additional_active_blocks"
+        not in collapsed_decode
+    ):
+        raise AssertionError(
+            "potential_decode_blocks no longer returns "
+            "active_decode_blocks + additional_active_blocks"
+        )
+
     # FE Python registrar + custom-policy feature / shipped types (finite paths).
     cargo = (REPO_ROOT / "lib/bindings/python/Cargo.toml").read_text(encoding="utf-8")
     if (
@@ -420,6 +564,19 @@ def run_named_policy_catalog(stack, *, tmp_path) -> dict[str, Any]:
         raise AssertionError("named-policy catalog requires an owned stack namespace")
 
     policy = _require_cache_sensitive_policy(stack)
+    # Provider stays credit1/scale1/temp0; consumer scoring uses designed scale4.
+    consumer_policy = dict(policy)
+    consumer_policy["prefill_load_scale"] = CONSUMER_PREFILL_LOAD_SCALE
+    if float(policy["prefill_load_scale"]) != 1.0:
+        raise AssertionError(
+            "provider policy prefill_load_scale must remain 1.0; "
+            f"got {policy['prefill_load_scale']!r}"
+        )
+    if float(consumer_policy["prefill_load_scale"]) != CONSUMER_PREFILL_LOAD_SCALE:
+        raise AssertionError(
+            "consumer_policy prefill_load_scale must equal "
+            f"{CONSUMER_PREFILL_LOAD_SCALE}: {consumer_policy['prefill_load_scale']!r}"
+        )
     cases = frontend_epp_first_selection_cases(stack.model_name)
     if len(cases) != 2 or {case.label for case in cases} != {"A", "B"}:
         raise AssertionError("named-policy catalog requires opposite A/B cases")
@@ -498,7 +655,7 @@ def run_named_policy_catalog(stack, *, tmp_path) -> dict[str, Any]:
         tokens,
         worker_a=worker_a,
         worker_b=worker_b,
-        policy=policy,
+        consumer_policy=consumer_policy,
         multiplier_a=multiplier_a,
         multiplier_b=multiplier_b,
         deadline=margin_deadline,
@@ -514,6 +671,8 @@ def run_named_policy_catalog(stack, *, tmp_path) -> dict[str, Any]:
         "cost_margin": margin,
         "preferred_taint_input_weight": PREFERRED_TAINT_INPUT_WEIGHT,
         "preferred_taint_multiplier_b": multiplier_b,
+        "consumer_prefill_load_scale": CONSUMER_PREFILL_LOAD_SCALE,
+        "provider_prefill_load_scale": float(policy["prefill_load_scale"]),
         "observer": NAMED_POLICY_CATALOG_OBSERVER,
         "rows": list(NAMED_POLICY_CATALOG_ROWS),
     }
@@ -627,7 +786,7 @@ def run_named_policy_catalog(stack, *, tmp_path) -> dict[str, Any]:
         tokens,
         worker_a=worker_a,
         worker_b=worker_b,
-        policy=policy,
+        consumer_policy=consumer_policy,
         multiplier_a=multiplier_a,
         multiplier_b=multiplier_b,
         deadline=remargin_deadline,
@@ -669,6 +828,7 @@ def run_named_policy_catalog(stack, *, tmp_path) -> dict[str, Any]:
                 endpoint="generate",
                 expected_credit=0.0,
                 expected_temperature=0.0,
+                expected_prefill_load_scale=CONSUMER_PREFILL_LOAD_SCALE,
                 deadline=named_deadline,
             )
             named_fe = stack.collect_frontend_route(
@@ -909,12 +1069,17 @@ class _RouteView:
 def _consumer_policy_env(
     policy_path: Path, *, selection: str | None
 ) -> dict[str, str | None]:
-    """Child-only overlay: YAML path plus global selector; stages stay cleared."""
+    """Child-only overlay: YAML path, global selector, designed scale4.
+
+    Stages stay cleared. Provider constructor/env remain credit1/scale1; every
+    consumer arm (default/named/unset/EPP reject) uses the same explicit scale.
+    """
     return {
         "DYN_ROUTER_POLICY_CONFIG": str(policy_path.resolve()),
         "DYN_ROUTER_WORKER_SELECTION_POLICY": selection,
         "DYN_ROUTER_PREFILL_POLICY": None,
         "DYN_ROUTER_DECODE_POLICY": None,
+        "DYN_ROUTER_PREFILL_LOAD_SCALE": str(int(CONSUMER_PREFILL_LOAD_SCALE)),
     }
 
 
@@ -995,7 +1160,7 @@ def _gate_strict_default_cost_margin(
     *,
     worker_a: int,
     worker_b: int,
-    policy: Mapping[str, float],
+    consumer_policy: Mapping[str, float],
     multiplier_a: float,
     multiplier_b: float,
     deadline: float,
@@ -1009,6 +1174,20 @@ def _gate_strict_default_cost_margin(
         or block_size <= 0
     ):
         raise AssertionError(f"worker_block_size {block_size!r} is invalid")
+    if float(consumer_policy["prefill_load_scale"]) != CONSUMER_PREFILL_LOAD_SCALE:
+        raise AssertionError(
+            "consumer_policy prefill_load_scale must be "
+            f"{CONSUMER_PREFILL_LOAD_SCALE}, got "
+            f"{consumer_policy['prefill_load_scale']!r}"
+        )
+    if float(consumer_policy["overlap_score_credit"]) != 1.0:
+        raise AssertionError(
+            "consumer default credit must inherit provider credit1, got "
+            f"{consumer_policy['overlap_score_credit']!r}"
+        )
+    isl_tokens = len(tokens)
+    if isl_tokens <= 0:
+        raise AssertionError("named-cost-margin requires a positive ISL token count")
     last: dict[str, Any] = {}
     while time.monotonic() < deadline:
         remaining = _remaining(deadline, label="named-cost-margin-poll")
@@ -1033,61 +1212,79 @@ def _gate_strict_default_cost_margin(
         if load_a["active_requests"] != 0 or load_b["active_requests"] != 0:
             _poll_sleep(deadline)
             continue
-        prefill_a = load_a["potential_prefill_tokens"]
-        prefill_b = load_b["potential_prefill_tokens"]
+        prefill_a = int(load_a["potential_prefill_tokens"])
+        prefill_b = int(load_b["potential_prefill_tokens"])
+        decode_a = float(load_a["potential_decode_blocks"])
+        decode_b = float(load_b["potential_decode_blocks"])
         # Scorer raw workload is the shared positive ISL when active_prefill is 0.
-        if len(tokens) <= 0 or prefill_b <= 0:
+        if prefill_b <= 0:
             _poll_sleep(deadline)
             continue
+        _assert_margin_quiescent_accounting(
+            scores=scores,
+            isl_tokens=isl_tokens,
+            block_size=block_size,
+            worker_a=worker_a,
+            worker_b=worker_b,
+            blocks_a=blocks_a,
+            blocks_b=blocks_b,
+            prefill_a=prefill_a,
+            prefill_b=prefill_b,
+            decode_a=decode_a,
+            decode_b=decode_b,
+        )
+        # Default uses inherited credit1; named uses credit0. Both use consumer
+        # scale4. Reconstruct from raw ISL — never subtract device credit from
+        # the provider getter's already-discounted potential_prefill_tokens.
         cost_a = _projected_default_cost(
-            isl_tokens=len(tokens),
+            isl_tokens=isl_tokens,
             block_size=block_size,
             device_blocks=blocks_a,
-            potential_decode_blocks=float(load_a["potential_decode_blocks"]),
-            active_requests=int(load_a["active_requests"]),
-            overlap_score_credit=float(policy["overlap_score_credit"]),
-            prefill_load_scale=float(policy["prefill_load_scale"]),
+            potential_decode_blocks=decode_a,
+            active_requests=0,
+            overlap_score_credit=float(consumer_policy["overlap_score_credit"]),
+            prefill_load_scale=float(consumer_policy["prefill_load_scale"]),
             decode_active_request_weight=float(
-                policy.get("decode_active_request_weight", 0.0)
+                consumer_policy.get("decode_active_request_weight", 0.0)
             ),
             preferred_taint_multiplier=multiplier_a,
         )
         cost_b = _projected_default_cost(
-            isl_tokens=len(tokens),
+            isl_tokens=isl_tokens,
             block_size=block_size,
             device_blocks=blocks_b,
-            potential_decode_blocks=float(load_b["potential_decode_blocks"]),
-            active_requests=int(load_b["active_requests"]),
-            overlap_score_credit=float(policy["overlap_score_credit"]),
-            prefill_load_scale=float(policy["prefill_load_scale"]),
+            potential_decode_blocks=decode_b,
+            active_requests=0,
+            overlap_score_credit=float(consumer_policy["overlap_score_credit"]),
+            prefill_load_scale=float(consumer_policy["prefill_load_scale"]),
             decode_active_request_weight=float(
-                policy.get("decode_active_request_weight", 0.0)
+                consumer_policy.get("decode_active_request_weight", 0.0)
             ),
             preferred_taint_multiplier=multiplier_b,
         )
         named_a = _projected_default_cost(
-            isl_tokens=len(tokens),
+            isl_tokens=isl_tokens,
             block_size=block_size,
             device_blocks=blocks_a,
-            potential_decode_blocks=float(load_a["potential_decode_blocks"]),
-            active_requests=int(load_a["active_requests"]),
+            potential_decode_blocks=decode_a,
+            active_requests=0,
             overlap_score_credit=0.0,
-            prefill_load_scale=float(policy["prefill_load_scale"]),
+            prefill_load_scale=float(consumer_policy["prefill_load_scale"]),
             decode_active_request_weight=float(
-                policy.get("decode_active_request_weight", 0.0)
+                consumer_policy.get("decode_active_request_weight", 0.0)
             ),
             preferred_taint_multiplier=multiplier_a,
         )
         named_b = _projected_default_cost(
-            isl_tokens=len(tokens),
+            isl_tokens=isl_tokens,
             block_size=block_size,
             device_blocks=blocks_b,
-            potential_decode_blocks=float(load_b["potential_decode_blocks"]),
-            active_requests=int(load_b["active_requests"]),
+            potential_decode_blocks=decode_b,
+            active_requests=0,
             overlap_score_credit=0.0,
-            prefill_load_scale=float(policy["prefill_load_scale"]),
+            prefill_load_scale=float(consumer_policy["prefill_load_scale"]),
             decode_active_request_weight=float(
-                policy.get("decode_active_request_weight", 0.0)
+                consumer_policy.get("decode_active_request_weight", 0.0)
             ),
             preferred_taint_multiplier=multiplier_b,
         )
@@ -1096,6 +1293,9 @@ def _gate_strict_default_cost_margin(
         last["named_a"] = named_a
         last["named_b"] = named_b
         last["multiplier_b"] = multiplier_b
+        last["consumer_prefill_load_scale"] = float(
+            consumer_policy["prefill_load_scale"]
+        )
         if not (cost_a < cost_b):
             _poll_sleep(deadline)
             continue
@@ -1107,13 +1307,16 @@ def _gate_strict_default_cost_margin(
             )
         logger.info(
             "named-policy cost margin default A < native_mult_B×B "
-            "input_weight=%s multiplier_b=%s blocks=%s prefill=%s/%s "
-            "costs=%s/%s named=%s/%s",
+            "input_weight=%s multiplier_b=%s consumer_scale=%s blocks=%s "
+            "prefill=%s/%s decode=%s/%s costs=%s/%s named=%s/%s",
             PREFERRED_TAINT_INPUT_WEIGHT,
             multiplier_b,
+            CONSUMER_PREFILL_LOAD_SCALE,
             (blocks_a, blocks_b),
             prefill_a,
             prefill_b,
+            decode_a,
+            decode_b,
             cost_a,
             cost_b,
             named_a,
@@ -1128,6 +1331,7 @@ def _gate_strict_default_cost_margin(
             "named_a": named_a,
             "named_b": named_b,
             "multiplier_b": multiplier_b,
+            "consumer_prefill_load_scale": CONSUMER_PREFILL_LOAD_SCALE,
             "budget_s": ARM_DEADLINE_S,
         }
     raise AssertionError(
@@ -1135,6 +1339,108 @@ def _gate_strict_default_cost_margin(
         f"from the actual prepared provider state before the readiness budget: "
         f"{last}"
     )
+
+
+def _assert_margin_quiescent_accounting(
+    *,
+    scores: Mapping[str, Any],
+    isl_tokens: int,
+    block_size: int,
+    worker_a: int,
+    worker_b: int,
+    blocks_a: float,
+    blocks_b: float,
+    prefill_a: int,
+    prefill_b: int,
+    decode_a: float,
+    decode_b: float,
+) -> None:
+    """Fail closed on unexplained quiescent load/cache accounting drift."""
+    score_block_size = scores.get("block_size")
+    if score_block_size != block_size:
+        raise AssertionError(
+            f"overlap scores block_size {score_block_size!r} != "
+            f"worker_block_size {block_size}"
+        )
+    expected_num_blocks = isl_tokens // block_size
+    num_blocks = scores.get("num_blocks")
+    if num_blocks != expected_num_blocks:
+        raise AssertionError(
+            f"overlap scores num_blocks {num_blocks!r} != "
+            f"isl_tokens//block_size {expected_num_blocks} "
+            f"(isl={isl_tokens} block_size={block_size})"
+        )
+    shared = scores.get("shared_cache")
+    if not isinstance(shared, Mapping) or shared.get("enabled") is not False:
+        raise AssertionError(
+            f"named-cost-margin requires shared_cache.enabled=False: {shared!r}"
+        )
+    shared_hits = shared.get("total_hit_blocks", 0)
+    if shared_hits not in (0, None):
+        raise AssertionError(
+            f"named-cost-margin requires zero shared-cache hits: {shared!r}"
+        )
+    workers = scores.get("workers")
+    if not isinstance(workers, list):
+        raise AssertionError(f"overlap scores missing workers list: {scores!r}")
+    by_key = {(row["worker_id"], row["dp_rank"]): row for row in workers}
+    for key, label, device in (
+        ((worker_a, 0), "A", blocks_a),
+        ((worker_b, 0), "B", blocks_b),
+    ):
+        if key not in by_key:
+            raise AssertionError(
+                f"named-cost-margin missing exact DP0 overlap row for {label} "
+                f"{key}: {by_key!r}"
+            )
+        row = by_key[key]
+        if float(row["device_blocks"]) != float(device):
+            raise AssertionError(
+                f"named-cost-margin {label} device_blocks drift: "
+                f"row={row['device_blocks']!r} map={device!r}"
+            )
+        if int(row.get("host_pinned_extension_blocks", -1)) != 0:
+            raise AssertionError(
+                f"named-cost-margin {label} host_pinned_extension_blocks must "
+                f"be 0 for device-only projection: {row!r}"
+            )
+        if int(row.get("disk_extension_blocks", -1)) != 0:
+            raise AssertionError(
+                f"named-cost-margin {label} disk_extension_blocks must be 0 "
+                f"for device-only projection: {row!r}"
+            )
+        if row.get("shared_beyond_device_blocks") not in (None, 0):
+            raise AssertionError(
+                f"named-cost-margin {label} shared_beyond_device_blocks must "
+                f"be None/0: {row!r}"
+            )
+    # Idle membership: incoming decode footprint equals complete query blocks.
+    if decode_a != decode_b:
+        raise AssertionError(
+            "named-cost-margin requires equal incoming decode footprints on "
+            f"idle A/B: decode_a={decode_a} decode_b={decode_b}"
+        )
+    if decode_a != float(expected_num_blocks):
+        raise AssertionError(
+            "named-cost-margin idle incoming decode footprint must equal "
+            f"complete query block count {expected_num_blocks}: decode={decode_a}"
+        )
+    expected_prefill_a = max(isl_tokens - int(blocks_a) * block_size, 0)
+    expected_prefill_b = max(isl_tokens - int(blocks_b) * block_size, 0)
+    if prefill_a != expected_prefill_a:
+        raise AssertionError(
+            "provider potential_prefill_tokens A does not match "
+            f"max(ISL - device_blocks*S, 0): got={prefill_a} "
+            f"expected={expected_prefill_a} isl={isl_tokens} "
+            f"device_blocks={blocks_a} block_size={block_size}"
+        )
+    if prefill_b != expected_prefill_b:
+        raise AssertionError(
+            "provider potential_prefill_tokens B does not match "
+            f"max(ISL - device_blocks*S, 0): got={prefill_b} "
+            f"expected={expected_prefill_b} isl={isl_tokens} "
+            f"device_blocks={blocks_b} block_size={block_size}"
+        )
 
 
 def _require_quiescent_loads(
@@ -1177,6 +1483,7 @@ def _read_owned_router_policy(
     endpoint: str,
     expected_credit: float,
     expected_temperature: float,
+    expected_prefill_load_scale: float,
     deadline: float,
 ) -> dict[str, Any]:
     import requests
@@ -1245,7 +1552,8 @@ def _read_owned_router_policy(
         ("disk_cache_hit_weight", 0.0),
         ("shared_cache_multiplier", 0.0),
         ("overlap_score_credit_decay", 0.0),
-        ("prefill_load_scale", 1.0),
+        ("decode_active_request_weight", 0.0),
+        ("prefill_load_scale", expected_prefill_load_scale),
     ):
         if name not in parameters:
             raise AssertionError(
@@ -1272,4 +1580,5 @@ def _read_owned_router_policy(
         "revision": 0,
         "overlap_score_credit": float(parameters["overlap_score_credit"]),
         "router_temperature": float(parameters["router_temperature"]),
+        "prefill_load_scale": float(parameters["prefill_load_scale"]),
     }

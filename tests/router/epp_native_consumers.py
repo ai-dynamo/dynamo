@@ -46,6 +46,7 @@ BACKLOG_TOKENS = 8192
 PEER_BACKLOG_TOKENS = 16384
 PREFERRED_WEIGHT = 0.85
 CREDIT_ZERO = 0.0
+CREDIT_FULL = 1.0
 CLOCK_OBSERVE_S = 6.5
 POLL_S = 0.05
 READY_BUDGET_S = 45.0
@@ -53,6 +54,14 @@ HTTP_CALL_CAP_S = 2.0
 ROUTE_CALL_CAP_S = 8.0
 ACTIVE_SEQUENCES_TOPIC = "active_sequences_events"
 GENERATE_ENDPOINT = "generate"
+# Booking synthetics use base 1_000_000 + salt*10_000 for salt 0..1019.
+# Accounting probe starts at 100_000_000 so ranges never cross (warm salt 600
+# would otherwise land at 7_000_000).
+ACCOUNTING_TOKEN_BASE = 100_000_000
+SYNTHETIC_TOKEN_BASE = 1_000_000
+SYNTHETIC_SALT_STRIDE = 10_000
+SYNTHETIC_SALT_MAX = 1019
+U32_EXCLUSIVE_END = 1 << 32
 
 DEDICATED_EVENT = "ZMQ single-consumer stream connected"
 GROUPED_EVENT = "Dynamic ZMQ SUB socket connected"
@@ -116,7 +125,42 @@ NATIVE_CONSUMER_PROFILES: Mapping[str, NativeConsumerProfile] = MappingProxyType
 
 
 def native_provider_env_overrides() -> dict[str, str | None]:
-    """Parent/provider construction overlay for the shared sender (expiry 300)."""
+    """Hosting provider overlay: credit 1 (CACHE inputs) + expiry 300 + replica sync.
+
+    Distinct from load-only peer/FE/EPP overlays (credit 0). serve_indexer stays
+    true on the parity stack constructor; credit 1 declares WorkerInputs::CACHE.
+    """
+    overlay = _cleared_native_transport_env()
+    overlay[EXPIRY_ENV] = str(PROVIDER_EXPIRY_SECS)
+    overlay[SERVING_LOAD_ENV] = "false"
+    overlay["DYN_ROUTER_REPLICA_SYNC"] = "true"
+    overlay["DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT"] = "1"
+    overlay["DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY"] = "0"
+    overlay["DYN_ROUTER_TEMPERATURE"] = "0"
+    overlay["DYN_ROUTER_PREFILL_LOAD_SCALE"] = "1"
+    overlay["DYN_ROUTER_TRACK_PREFILL_TOKENS"] = "true"
+    overlay["DYN_ROUTER_TRACK_OUTPUT_BLOCKS"] = "false"
+    overlay["DYN_ROUTER_PREFILL_LOAD_MODEL"] = "none"
+    overlay["DYN_EVENT_PLANE"] = "zmq"
+    return overlay
+
+
+def native_provider_config_overrides() -> dict[str, Any]:
+    """KvRouterConfig kwargs for the hosting provider only (credit 1 / CACHE)."""
+    return {
+        "router_replica_sync": True,
+        "router_prefill_load_model": "none",
+        "router_track_prefill_tokens": True,
+        "router_track_output_blocks": False,
+        "overlap_score_credit": CREDIT_FULL,
+        "overlap_score_credit_decay": 0.0,
+        "router_temperature": 0.0,
+        "prefill_load_scale": 1.0,
+    }
+
+
+def native_peer_env_overrides() -> dict[str, str | None]:
+    """Load-only peer sender overlay: credit 0, serve false via config, expiry 300."""
     overlay = _cleared_native_transport_env()
     overlay[EXPIRY_ENV] = str(PROVIDER_EXPIRY_SECS)
     overlay[SERVING_LOAD_ENV] = "false"
@@ -132,8 +176,8 @@ def native_provider_env_overrides() -> dict[str, str | None]:
     return overlay
 
 
-def native_provider_config_overrides() -> dict[str, Any]:
-    """KvRouterConfig kwargs applied only to the owned parent/provider."""
+def native_peer_config_overrides() -> dict[str, Any]:
+    """KvRouterConfig kwargs for the load-only peer (credit 0; not hosting)."""
     return {
         "router_replica_sync": True,
         "router_prefill_load_model": "none",
@@ -169,7 +213,7 @@ def run_native_consumer_profile(
     from tests.router.epp_parity import ZONE_A_TAINT, ZONE_B_TAINT
 
     profile = _require_profile(profile_name)
-    _require_replica_sync_native_policy(stack)
+    _require_hosting_provider_native_policy(stack)
     worker_a, worker_b = _require_zone_workers(stack)
     block_size = _require_positive_block_size(stack)
     cold = _cold_case(stack.model_name)
@@ -216,10 +260,18 @@ def run_native_consumer_profile(
         "block_size": block_size,
         "native_preferred_weight": native_weight_f32,
         "preferred_multiplier": preferred_multiplier,
+        "hosting_provider_credit": CREDIT_FULL,
+        "load_only_receiver_peer_credit": CREDIT_ZERO,
         "query_vs_generation": (
             "FE query + EPP query for readiness/poll/hold; "
             "FE generation only at decisive baseline/loaded/restored states; "
             "EPP route is query-only (not backend generation)"
+        ),
+        "accounting_note": (
+            "Owner-local/primary-mirror PotentialLoad reads use a synthetic "
+            "cold accounting probe of equal length to the FE tokenizer probe; "
+            "FE/EPP route payloads keep the real tokenizer vector. Provider "
+            "hosting credit1 is not the receiver load-only scoring policy."
         ),
     }
 
@@ -343,10 +395,21 @@ def _run_stable_default_profile(
     deadline = time.monotonic() + READY_BUDGET_S
     probe_tokens = _tokenize(stack, cold, profile.name, deadline)
     out["probe_token_count"] = len(probe_tokens)
+    accounting_tokens = _accounting_probe_tokens(len(probe_tokens))
+    out["accounting_probe_n"] = len(accounting_tokens)
+    out["accounting_cold_proof"] = _prove_accounting_probe_cold(
+        stack,
+        accounting_tokens,
+        worker_a=worker_a,
+        worker_b=worker_b,
+        case_name=f"{profile.name}-accounting-cold",
+        deadline=deadline,
+    )
     out["warm"] = _warm_handshake(
         stack,
         cold=cold,
         probe_tokens=probe_tokens,
+        accounting_tokens=accounting_tokens,
         worker_a=worker_a,
         worker_b=worker_b,
         block_size=block_size,
@@ -382,7 +445,7 @@ def _run_stable_default_profile(
     out["admit"] = admit
     loads = _require_sender_booking_loads(
         stack,
-        probe_tokens,
+        accounting_tokens,
         owner="provider",
         worker_a=worker_a,
         worker_b=worker_b,
@@ -393,9 +456,9 @@ def _run_stable_default_profile(
     )
     out["sender_loads_after_booking"] = loads
     _assert_strict_preferred_margin(
-        probe_isl=len(probe_tokens),
-        active_prefill_a=_active_backlog_from_loads(loads, worker_a, worker_b),
-        active_prefill_b=0,
+        load_a=loads["booked"],
+        load_b=loads["idle"],
+        accounting_isl=len(accounting_tokens),
         block_size=block_size,
         preferred_multiplier=preferred_multiplier,
         expect_b_wins=True,
@@ -599,11 +662,22 @@ def _run_expiry_clock_on_fresh_pair(
     deadline = time.monotonic() + READY_BUDGET_S
     probe_tokens = _tokenize(stack, cold, profile.name, deadline)
     out["probe_token_count"] = len(probe_tokens)
+    accounting_tokens = _accounting_probe_tokens(len(probe_tokens))
+    out["accounting_probe_n"] = len(accounting_tokens)
+    out["accounting_cold_proof"] = _prove_accounting_probe_cold(
+        stack,
+        accounting_tokens,
+        worker_a=worker_a,
+        worker_b=worker_b,
+        case_name=f"{profile.name}-fresh-accounting-cold",
+        deadline=deadline,
+    )
     # Warm must Free before the configured 3s local CLOCK can fake restore.
     out["warm"] = _warm_handshake(
         stack,
         cold=cold,
         probe_tokens=probe_tokens,
+        accounting_tokens=accounting_tokens,
         worker_a=worker_a,
         worker_b=worker_b,
         block_size=block_size,
@@ -640,7 +714,7 @@ def _run_expiry_clock_on_fresh_pair(
     clock_deadline = admit["end_monotonic"] + CLOCK_OBSERVE_S
     loads = _require_sender_booking_loads(
         stack,
-        probe_tokens,
+        accounting_tokens,
         owner="provider",
         worker_a=worker_a,
         worker_b=worker_b,
@@ -688,7 +762,7 @@ def _run_expiry_clock_on_fresh_pair(
         )
     still = _require_sender_booking_loads(
         stack,
-        probe_tokens,
+        accounting_tokens,
         owner="provider",
         worker_a=worker_a,
         worker_b=worker_b,
@@ -756,10 +830,21 @@ def _dual_publisher_sequence(
     out: dict[str, Any] = {}
     probe_tokens = _tokenize(stack, cold, case_prefix, deadline)
     out["probe_token_count"] = len(probe_tokens)
+    accounting_tokens = _accounting_probe_tokens(len(probe_tokens))
+    out["accounting_probe_n"] = len(accounting_tokens)
+    out["accounting_cold_proof"] = _prove_accounting_probe_cold(
+        stack,
+        accounting_tokens,
+        worker_a=worker_a,
+        worker_b=worker_b,
+        case_name=f"{case_prefix}-accounting-cold",
+        deadline=deadline,
+    )
     out["warm_primary"] = _warm_handshake(
         stack,
         cold=cold,
         probe_tokens=probe_tokens,
+        accounting_tokens=accounting_tokens,
         worker_a=worker_a,
         worker_b=worker_b,
         block_size=block_size,
@@ -786,6 +871,7 @@ def _dual_publisher_sequence(
         stack,
         cold=cold,
         probe_tokens=probe_tokens,
+        accounting_tokens=accounting_tokens,
         worker_a=worker_a,
         worker_b=worker_b,
         block_size=block_size,
@@ -866,7 +952,7 @@ def _dual_publisher_sequence(
     # Dual peer-local: primary A + peer B both active (not single-booking idle/delta).
     peer_local = _require_dual_peer_local_loads(
         stack,
-        probe_tokens,
+        accounting_tokens,
         owner=peer_holder,
         worker_a=worker_a,
         worker_b=worker_b,
@@ -896,7 +982,9 @@ def _dual_publisher_sequence(
         timeout_s = deadline - time.monotonic()
         if timeout_s <= 0:
             break
-        both_loads = stack.provider_potential_loads(probe_tokens, timeout_s=timeout_s)
+        both_loads = stack.provider_potential_loads(
+            accounting_tokens, timeout_s=timeout_s
+        )
         last_both = both_loads
         rows = _dp0_rows(
             both_loads, worker_a, worker_b, f"{case_prefix}-provider-mirror"
@@ -921,19 +1009,29 @@ def _dual_publisher_sequence(
         "B": dict(both_rows[(worker_b, 0)]),
         "observation": "provider_mirror_not_peer_sender",
     }
-    # potential_prefill includes the probe's hypothetical work on each worker;
-    # subtract shared probe ISL so margin uses the live active backlog only.
-    live_a = both_rows[(worker_a, 0)]["potential_prefill_tokens"] - len(probe_tokens)
-    live_b = both_rows[(worker_b, 0)]["potential_prefill_tokens"] - len(probe_tokens)
+    # Cold accounting ISL already subtracted inside potential_prefill by getter
+    # only for cache hits; with proven cold probe, subtract accounting N.
+    live_a = _live_backlog_from_potential(
+        both_rows[(worker_a, 0)],
+        accounting_isl=len(accounting_tokens),
+        case_name=f"{case_prefix}-mirror",
+        label="A",
+    )
+    live_b = _live_backlog_from_potential(
+        both_rows[(worker_b, 0)],
+        accounting_isl=len(accounting_tokens),
+        case_name=f"{case_prefix}-mirror",
+        label="B",
+    )
     if live_a < BACKLOG_TOKENS or live_b < PEER_BACKLOG_TOKENS:
         raise AssertionError(
             f"{case_prefix}: live backlogs A={live_a} B={live_b} below booked "
             f"{BACKLOG_TOKENS}/{PEER_BACKLOG_TOKENS}; mirror={last_both}"
         )
     _assert_strict_preferred_margin(
-        probe_isl=len(probe_tokens),
-        active_prefill_a=live_a,
-        active_prefill_b=live_b,
+        load_a=both_rows[(worker_a, 0)],
+        load_b=both_rows[(worker_b, 0)],
+        accounting_isl=len(accounting_tokens),
         block_size=block_size,
         preferred_multiplier=preferred_multiplier,
         expect_b_wins=False,
@@ -953,7 +1051,7 @@ def _dual_publisher_sequence(
     )
     _wait_for_zero_active(
         stack,
-        probe_tokens,
+        accounting_tokens,
         owner="provider",
         worker_a=worker_a,
         worker_b=worker_b,
@@ -962,7 +1060,7 @@ def _dual_publisher_sequence(
     )
     _wait_for_zero_active(
         stack,
-        probe_tokens,
+        accounting_tokens,
         owner=peer_holder,
         worker_a=worker_a,
         worker_b=worker_b,
@@ -1081,8 +1179,12 @@ def _remaining(deadline: float, step: str) -> float:
     return left
 
 
-def _require_replica_sync_native_policy(stack) -> dict[str, float]:
-    """Strict credit-0 / replica-sync-true gate; do not reuse credit-1 helpers."""
+def _require_hosting_provider_native_policy(stack) -> dict[str, float]:
+    """Hosting provider gate: credit 1 / replica true / model none / expiry 300 env.
+
+    stack.policy_parameters is the hosting provider policy, not FE/EPP/peer
+    load-only credit-0 scoring. Do not treat these values as receiver policy.
+    """
     parameters = stack.policy_parameters
     required = (
         "overlap_score_credit",
@@ -1093,26 +1195,28 @@ def _require_replica_sync_native_policy(stack) -> dict[str, float]:
     missing = [name for name in required if name not in parameters]
     if missing:
         raise AssertionError(
-            f"native consumer policy_parameters missing {missing}: {parameters}"
+            f"native hosting provider policy_parameters missing {missing}: "
+            f"{parameters}"
         )
-    if parameters["overlap_score_credit"] != CREDIT_ZERO:
+    if parameters["overlap_score_credit"] != CREDIT_FULL:
         raise AssertionError(
-            "native consumer overlap_score_credit must be 0.0, "
-            f"got {parameters['overlap_score_credit']}"
+            "native hosting provider overlap_score_credit must be 1.0 "
+            f"(CACHE inputs for serve_indexer), got "
+            f"{parameters['overlap_score_credit']}"
         )
     if parameters["overlap_score_credit_decay"] != 0.0:
         raise AssertionError(
-            "native consumer overlap_score_credit_decay must be 0.0, "
+            "native hosting provider overlap_score_credit_decay must be 0.0, "
             f"got {parameters['overlap_score_credit_decay']}"
         )
     if parameters["prefill_load_scale"] != 1.0:
         raise AssertionError(
-            "native consumer prefill_load_scale must be 1.0, "
+            "native hosting provider prefill_load_scale must be 1.0, "
             f"got {parameters['prefill_load_scale']}"
         )
     if parameters["router_temperature"] != 0.0:
         raise AssertionError(
-            "native consumer router_temperature must be 0.0, "
+            "native hosting provider router_temperature must be 0.0, "
             f"got {parameters['router_temperature']}"
         )
     config = stack.provider_router_config
@@ -1142,9 +1246,9 @@ def _require_replica_sync_native_policy(stack) -> dict[str, float]:
             "(pass provider_config_overrides=native_provider_config_overrides()); "
             f"got {raw.get('router_replica_sync')!r}"
         )
-    if raw.get("overlap_score_credit") != CREDIT_ZERO:
+    if raw.get("overlap_score_credit") != CREDIT_FULL:
         raise AssertionError(
-            "native provider overlap_score_credit must be 0.0, "
+            "native hosting provider overlap_score_credit must be 1.0, "
             f"got {raw.get('overlap_score_credit')!r}"
         )
     return parameters
@@ -1214,10 +1318,46 @@ def _preferred_payload(cold: Mapping[str, Any], *, salt: str) -> dict[str, Any]:
 
 
 def _synthetic_tokens(count: int, *, salt: int) -> list[int]:
-    if count <= 0:
-        raise AssertionError(f"token count must be positive, got {count}")
-    base = 1_000_000 + salt * 10_000
+    """Booking-only synthetic tokens; salt domain 0..1019 stays below accounting base."""
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        raise AssertionError(
+            f"synthetic token count must be a positive int (bool excluded), "
+            f"got {count!r}"
+        )
+    if (
+        not isinstance(salt, int)
+        or isinstance(salt, bool)
+        or salt < 0
+        or salt > SYNTHETIC_SALT_MAX
+    ):
+        raise AssertionError(
+            f"synthetic salt must be int in 0..{SYNTHETIC_SALT_MAX} "
+            f"(bool excluded), got {salt!r}"
+        )
+    base = SYNTHETIC_TOKEN_BASE + salt * SYNTHETIC_SALT_STRIDE
+    end = base + count
+    if end > ACCOUNTING_TOKEN_BASE:
+        raise AssertionError(
+            f"synthetic range [{base}, {end}) crosses accounting base "
+            f"{ACCOUNTING_TOKEN_BASE} (count={count}, salt={salt})"
+        )
     return [base + index for index in range(count)]
+
+
+def _accounting_probe_tokens(count: int) -> list[int]:
+    """Synthetic load-accounting probe: same N as FE tokenizer, never backend/booking."""
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        raise AssertionError(
+            f"accounting probe length must be a positive int (bool excluded), "
+            f"got {count!r}"
+        )
+    end = ACCOUNTING_TOKEN_BASE + count
+    if end > U32_EXCLUSIVE_END:
+        raise AssertionError(
+            f"accounting range [{ACCOUNTING_TOKEN_BASE}, {end}) exceeds u32 "
+            f"exclusive end {U32_EXCLUSIVE_END}"
+        )
+    return [ACCOUNTING_TOKEN_BASE + index for index in range(count)]
 
 
 def _tokenize(stack, cold: Mapping[str, Any], label: str, deadline: float) -> list[int]:
@@ -1234,6 +1374,112 @@ def _tokenize(stack, cold: Mapping[str, Any], label: str, deadline: float) -> li
     if not tokens:
         raise AssertionError(f"{label}: cold tokenization returned no tokens")
     return tokens
+
+
+def _prove_accounting_probe_cold(
+    stack,
+    accounting_tokens: list[int],
+    *,
+    worker_a: int,
+    worker_b: int,
+    case_name: str,
+    deadline: float,
+) -> dict[str, Any]:
+    """Prove provider overlap for the accounting probe is fully cold before admit."""
+    timeout_s = _remaining(deadline, f"{case_name}-cold-overlap")
+    scores = stack.provider_overlap_scores(accounting_tokens, timeout_s=timeout_s)
+    if time.monotonic() > deadline:
+        raise AssertionError(f"{case_name}: cold overlap returned after deadline")
+    if not isinstance(scores, Mapping):
+        raise AssertionError(
+            f"{case_name}: provider_overlap_scores is not a Mapping: {type(scores)}"
+        )
+    shared = scores.get("shared_cache")
+    if not isinstance(shared, Mapping):
+        raise AssertionError(
+            f"{case_name}: shared_cache missing/malformed: {scores.get('shared_cache')!r}"
+        )
+    if shared.get("enabled") is not False:
+        raise AssertionError(
+            f"{case_name}: shared_cache.enabled must be False for native none: "
+            f"{shared}"
+        )
+    workers = scores.get("workers")
+    if not isinstance(workers, list):
+        raise AssertionError(
+            f"{case_name}: overlap workers missing/malformed: {workers!r}"
+        )
+    by_key: dict[tuple[int, int], Mapping[str, Any]] = {}
+    for row in workers:
+        if not isinstance(row, Mapping):
+            raise AssertionError(f"{case_name}: overlap worker row not Mapping: {row!r}")
+        worker_id = row.get("worker_id")
+        dp_rank = row.get("dp_rank")
+        if (
+            not isinstance(worker_id, int)
+            or isinstance(worker_id, bool)
+            or not isinstance(dp_rank, int)
+            or isinstance(dp_rank, bool)
+        ):
+            raise AssertionError(
+                f"{case_name}: overlap worker_id/dp_rank malformed: {row}"
+            )
+        key = (worker_id, dp_rank)
+        if key in by_key:
+            raise AssertionError(f"{case_name}: duplicate overlap row {key}")
+        by_key[key] = row
+    allowed = {(worker_a, 0), (worker_b, 0)}
+    if set(by_key) != allowed:
+        raise AssertionError(
+            f"{case_name}: overlap workers must be exactly {sorted(allowed)}, "
+            f"got {sorted(by_key)}"
+        )
+    cold_rows: dict[str, dict[str, Any]] = {}
+    for label, worker_id in (("A", worker_a), ("B", worker_b)):
+        row = by_key[(worker_id, 0)]
+        for field in (
+            "device_blocks",
+            "host_pinned_blocks",
+            "disk_blocks",
+            "host_pinned_extension_blocks",
+            "disk_extension_blocks",
+        ):
+            if field not in row:
+                raise AssertionError(
+                    f"{case_name}: overlap row missing {field} on {label}: {row}"
+                )
+            value = row[field]
+            if not isinstance(value, int) or isinstance(value, bool) or value != 0:
+                raise AssertionError(
+                    f"{case_name}: {label} {field} must be exact 0 for cold proof, "
+                    f"got {value!r}; row={row}"
+                )
+        if "shared_beyond_device_blocks" not in row:
+            raise AssertionError(
+                f"{case_name}: overlap row missing shared_beyond_device_blocks on "
+                f"{label}: {row}"
+            )
+        if row["shared_beyond_device_blocks"] is not None:
+            raise AssertionError(
+                f"{case_name}: {label} shared_beyond_device_blocks must be None "
+                f"with shared disabled, got {row['shared_beyond_device_blocks']!r}"
+            )
+        cold_rows[label] = {
+            "worker_id": worker_id,
+            "dp_rank": 0,
+            "device_blocks": row["device_blocks"],
+            "host_pinned_blocks": row["host_pinned_blocks"],
+            "disk_blocks": row["disk_blocks"],
+            "host_pinned_extension_blocks": row["host_pinned_extension_blocks"],
+            "disk_extension_blocks": row["disk_extension_blocks"],
+            "shared_beyond_device_blocks": row["shared_beyond_device_blocks"],
+        }
+    return {
+        "accounting_probe_n": len(accounting_tokens),
+        "shared_cache_enabled": False,
+        "workers": cold_rows,
+        "observation": "provider_overlap_cold_before_admit",
+    }
 
 
 def _dp0_rows(
@@ -1463,17 +1709,27 @@ def _require_dual_peer_local_loads(
                 f"{case_name}: peer-local A active_requests={active_a} not in "
                 f"{{0,1}} wait path; loads={loads}"
             )
-        live_a = row_a["potential_prefill_tokens"] - len(tokens)
-        live_b = row_b["potential_prefill_tokens"] - len(tokens)
+        live_a = _live_backlog_from_potential(
+            row_a,
+            accounting_isl=len(tokens),
+            case_name=case_name,
+            label="A",
+        )
+        live_b = _live_backlog_from_potential(
+            row_b,
+            accounting_isl=len(tokens),
+            case_name=case_name,
+            label="B",
+        )
         if live_a < backlog_a or live_b < backlog_b:
             raise AssertionError(
                 f"{case_name}: peer-local live backlogs A={live_a} B={live_b} "
                 f"below booked {backlog_a}/{backlog_b}; loads={loads}"
             )
         _assert_strict_preferred_margin(
-            probe_isl=len(tokens),
-            active_prefill_a=live_a,
-            active_prefill_b=live_b,
+            load_a=row_a,
+            load_b=row_b,
+            accounting_isl=len(tokens),
             block_size=block_size,
             preferred_multiplier=preferred_multiplier,
             expect_b_wins=False,
@@ -1494,40 +1750,94 @@ def _require_dual_peer_local_loads(
     )
 
 
-def _active_backlog_from_loads(
-    loads: Mapping[str, Any], worker_a: int, worker_b: int
+def _live_backlog_from_potential(
+    row: Mapping[str, Any], *, accounting_isl: int, case_name: str, label: str
 ) -> int:
-    delta = loads["prefill_delta"]
-    if not isinstance(delta, int) or delta <= 0:
-        raise AssertionError(f"invalid prefill_delta in loads evidence: {loads}")
-    return delta
+    """Active backlog from a cold-proven PotentialLoad: prefill - accounting ISL."""
+    if accounting_isl <= 0:
+        raise AssertionError(f"{case_name}: accounting_isl must be positive")
+    if "potential_prefill_tokens" not in row:
+        raise AssertionError(
+            f"{case_name}: {label} missing potential_prefill_tokens: {row}"
+        )
+    prefill = row["potential_prefill_tokens"]
+    if not isinstance(prefill, int) or isinstance(prefill, bool) or prefill < 0:
+        raise AssertionError(
+            f"{case_name}: {label} potential_prefill_tokens malformed: {prefill!r}"
+        )
+    live = prefill - accounting_isl
+    if live < 0:
+        raise AssertionError(
+            f"{case_name}: {label} live backlog {live} negative after subtracting "
+            f"cold accounting ISL {accounting_isl}; row={row}"
+        )
+    return live
 
 
 def _assert_strict_preferred_margin(
     *,
-    probe_isl: int,
-    active_prefill_a: int,
-    active_prefill_b: int,
+    load_a: Mapping[str, Any],
+    load_b: Mapping[str, Any],
+    accounting_isl: int,
     block_size: int,
     preferred_multiplier: float,
     expect_b_wins: bool,
     case_name: str,
 ) -> None:
-    if probe_isl <= 0:
-        raise AssertionError(f"{case_name}: probe_isl must be positive")
-    cost_a = ((active_prefill_a + probe_isl) / float(block_size)) * preferred_multiplier
-    cost_b = (active_prefill_b + probe_isl) / float(block_size)
+    """Receiver load-only relative cost using actual PotentialLoad rows.
+
+    Builtin default scorer always adds ``potential_decode_blocks`` (decode_cost),
+    even with track_output_blocks=false. Prefill uses cold-proven potential_prefill
+    (active backlog + accounting ISL). Preferred taint multiplies the full logit.
+    Provider hosting credit1 is not applied here (receiver policy is credit0).
+    """
+    if accounting_isl <= 0:
+        raise AssertionError(f"{case_name}: accounting_isl must be positive")
+    if (
+        not isinstance(block_size, int)
+        or isinstance(block_size, bool)
+        or block_size <= 0
+    ):
+        raise AssertionError(f"{case_name}: block_size {block_size!r} invalid")
+    for label, row in (("A", load_a), ("B", load_b)):
+        if "potential_prefill_tokens" not in row or "potential_decode_blocks" not in row:
+            raise AssertionError(
+                f"{case_name}: {label} PotentialLoad missing prefill/decode: {row}"
+            )
+        prefill = row["potential_prefill_tokens"]
+        decode = row["potential_decode_blocks"]
+        if not isinstance(prefill, int) or isinstance(prefill, bool) or prefill < 0:
+            raise AssertionError(
+                f"{case_name}: {label} potential_prefill_tokens malformed: {prefill!r}"
+            )
+        if not isinstance(decode, int) or isinstance(decode, bool) or decode < 0:
+            raise AssertionError(
+                f"{case_name}: {label} potential_decode_blocks malformed: {decode!r}"
+            )
+    # scale=1.0; request_cost weight 0 under native overlays.
+    logit_a = (float(load_a["potential_prefill_tokens"]) / float(block_size)) + float(
+        load_a["potential_decode_blocks"]
+    )
+    logit_b = (float(load_b["potential_prefill_tokens"]) / float(block_size)) + float(
+        load_b["potential_decode_blocks"]
+    )
+    cost_a = logit_a * preferred_multiplier
+    cost_b = logit_b * 1.0
     if expect_b_wins:
         if not (cost_a > cost_b):
             raise AssertionError(
                 f"{case_name}: expected B to win under preferred multiplier "
-                f"{preferred_multiplier}, but cost_a={cost_a} cost_b={cost_b}"
+                f"{preferred_multiplier}, but cost_a={cost_a} cost_b={cost_b} "
+                f"load_a={dict(load_a)} load_b={dict(load_b)} "
+                f"accounting_isl={accounting_isl}"
             )
     else:
         if not (cost_a < cost_b):
             raise AssertionError(
                 f"{case_name}: expected A to win under preferred multiplier "
-                f"{preferred_multiplier}, but cost_a={cost_a} cost_b={cost_b}"
+                f"{preferred_multiplier}, but cost_a={cost_a} cost_b={cost_b} "
+                f"load_a={dict(load_a)} load_b={dict(load_b)} "
+                f"accounting_isl={accounting_isl}"
             )
 
 
@@ -1869,6 +2179,7 @@ def _warm_handshake(
     *,
     cold: Mapping[str, Any],
     probe_tokens: list[int],
+    accounting_tokens: list[int],
     worker_a: int,
     worker_b: int,
     block_size: int,
@@ -1899,7 +2210,7 @@ def _warm_handshake(
     )
     loads = _require_sender_booking_loads(
         stack,
-        probe_tokens,
+        accounting_tokens,
         owner=owner,
         worker_a=worker_a,
         worker_b=worker_b,
@@ -1910,9 +2221,9 @@ def _warm_handshake(
     )
     if book_worker == worker_a:
         _assert_strict_preferred_margin(
-            probe_isl=len(probe_tokens),
-            active_prefill_a=_active_backlog_from_loads(loads, worker_a, worker_b),
-            active_prefill_b=0,
+            load_a=loads["booked"],
+            load_b=loads["idle"],
+            accounting_isl=len(accounting_tokens),
             block_size=block_size,
             preferred_multiplier=preferred_multiplier,
             expect_b_wins=True,
@@ -1934,7 +2245,7 @@ def _warm_handshake(
     )
     _wait_for_zero_active(
         stack,
-        probe_tokens,
+        accounting_tokens,
         owner=owner,
         worker_a=worker_a,
         worker_b=worker_b,
@@ -2342,7 +2653,8 @@ def _open_owned_peer_publisher(
     peer_env = loopback_process_env(
         stack.kubeconfig, stack.identity, PEER_CONTAINER_NAME
     )
-    peer_env.update(native_provider_env_overrides())
+    # Load-only peer: credit 0 / serve false — do not spread hosting provider credit1.
+    peer_env.update(native_peer_env_overrides())
     peer_env["DYN_SYSTEM_PORT"] = str(peer_metrics_port)
 
     holder: dict[str, Any] = {
@@ -2381,7 +2693,7 @@ def _open_owned_peer_publisher(
             "use_kv_events": stack.indexer_mode != "approximate",
             "serve_indexer": False,
             "use_remote_indexer": True,
-            **native_provider_config_overrides(),
+            **native_peer_config_overrides(),
             "shared_cache_type": "none",
             "conditional_disagg_enabled": False,
             "router_tracking_hash": "public-xxh3-v1",
@@ -2399,6 +2711,16 @@ def _open_owned_peer_publisher(
         if resolved.get("router_prefill_load_model") != "none":
             raise AssertionError(
                 "peer publisher router_prefill_load_model must be exactly 'none'"
+            )
+        if resolved.get("overlap_score_credit") != CREDIT_ZERO:
+            raise AssertionError(
+                "peer publisher overlap_score_credit must stay 0.0 (load-only), "
+                f"got {resolved.get('overlap_score_credit')!r}"
+            )
+        if resolved.get("serve_indexer", False) is not False:
+            raise AssertionError(
+                "peer publisher serve_indexer must be false, "
+                f"got {resolved.get('serve_indexer')!r}"
             )
         construct_budget = max(1, int(_remaining(deadline, "peer-kvrouter")))
         router = _create_kv_router_with_timeout(
