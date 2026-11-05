@@ -2081,9 +2081,8 @@ class WorkerFactory:
                 stat_logger_factory,
                 fpm_worker_id=fpm_worker_id,
             )
-        # Owned only after the snapshot sync, which shuts the engine down itself
-        # on failure; from here on any exit shuts it down through the lifecycle,
-        # then removes the metrics directory.
+        # Owned after the snapshot sync, which shuts the engine down on failure;
+        # any later exit shuts it down via the lifecycle, then removes the metrics dir.
         try:
             with _WorkerLifecycle(
                 engine_client=engine_client,
