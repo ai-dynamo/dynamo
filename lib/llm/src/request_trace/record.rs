@@ -54,6 +54,8 @@ fn event_time_unix_ms_from_request(request: &RequestTraceMetrics) -> u64 {
 
 pub(crate) fn emit_request_end(
     request_id: String,
+    x_request_id: Option<String>,
+    model: String,
     tracker: &RequestTracker,
     replay: RequestReplayMetrics,
 ) {
@@ -74,11 +76,12 @@ pub(crate) fn emit_request_end(
 
     let mut request = RequestTraceMetrics {
         request_id,
-        x_request_id: None,
-        model: None,
+        x_request_id,
+        model: Some(model),
         input_tokens: tracker.isl_tokens().map(|v| v as u64),
         output_tokens: Some(tracker.osl_tokens()),
         cached_tokens: tracker.cached_tokens().map(|v| v as u64),
+        engine_reused_tokens: tracker.engine_reused_tokens(),
         request_received_ms: Some(timing.request_received_ms),
         prefill_wait_time_ms: timing.prefill_wait_time_ms,
         prefill_time_ms: timing.prefill_time_ms,
@@ -242,6 +245,8 @@ mod tests {
 
         emit_request_end(
             "req-1".to_string(),
+            Some("client-1".to_string()),
+            "test-model".to_string(),
             &tracker,
             RequestReplayMetrics {
                 trace_block_size: 2,
@@ -284,6 +289,63 @@ mod tests {
                 .input_length,
             3
         );
+    }
+
+    fn emit_and_receive(request_id: &str, tracker: &RequestTracker) -> RequestTraceMetrics {
+        BUS.init(16);
+        let mut rx = BUS.subscribe();
+        emit_request_end(
+            request_id.to_string(),
+            None,
+            "test-model".to_string(),
+            tracker,
+            RequestReplayMetrics {
+                trace_block_size: 2,
+                input_length: 2,
+                input_sequence_hashes: vec![11],
+            },
+        );
+        loop {
+            match rx.try_recv() {
+                Ok(record)
+                    if record
+                        .request
+                        .as_ref()
+                        .is_some_and(|request| request.request_id == request_id) =>
+                {
+                    return record.request.unwrap();
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+                Err(error) => panic!("no request_end for {request_id}: {error}"),
+            }
+        }
+    }
+
+    /// `cached_tokens` is the router's estimate; the engine's report is a
+    /// separate field so a reader can compare the two.
+    #[test]
+    fn records_router_estimate_and_engine_report_separately() {
+        let tracker = RequestTracker::new();
+        tracker.record_isl(100, Some(32));
+        tracker.record_engine_reused_tokens(64);
+        tracker.record_finish();
+
+        let request = emit_and_receive("req-engine-reuse", &tracker);
+        assert_eq!(request.cached_tokens, Some(32));
+        assert_eq!(request.engine_reused_tokens, Some(64));
+    }
+
+    #[test]
+    fn engine_reused_tokens_is_absent_without_a_report() {
+        let tracker = RequestTracker::new();
+        tracker.record_isl(100, Some(32));
+        tracker.record_finish();
+
+        let request = emit_and_receive("req-no-engine-report", &tracker);
+        assert_eq!(request.engine_reused_tokens, None);
+        let value = serde_json::to_value(&request).unwrap();
+        assert!(value.get("engine_reused_tokens").is_none());
+        assert_eq!(value["cached_tokens"], 32);
     }
 
     #[test]

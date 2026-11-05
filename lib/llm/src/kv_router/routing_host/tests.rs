@@ -48,6 +48,7 @@ use crate::{
         timing::RequestTracker,
     },
 };
+use dynamo_protocols::types::CompletionUsage;
 
 fn request() -> PreprocessedRequest {
     PreprocessedRequest::builder()
@@ -975,9 +976,11 @@ struct KvHitSnapshot {
     reused: u64,
 }
 
-fn kv_hit_snapshot(metrics: &crate::kv_router::metrics::RouterRequestMetrics) -> KvHitSnapshot {
-    // The fixture request carries no tracker, so the guard labels it `aggregated`.
-    let phase = RequestPhase::Aggregated.as_str();
+fn kv_hit_snapshot(
+    metrics: &crate::kv_router::metrics::RouterRequestMetrics,
+    phase: RequestPhase,
+) -> KvHitSnapshot {
+    let phase = phase.as_str();
     let model = "test";
     let counter = |h: &prometheus::IntCounterVec| h.with_label_values(&[phase, model]).get();
     KvHitSnapshot {
@@ -989,17 +992,45 @@ fn kv_hit_snapshot(metrics: &crate::kv_router::metrics::RouterRequestMetrics) ->
 
 /// Drive one tracked attempt through the real guard and return the metric deltas.
 async fn run_kv_hit_attempt(final_frame: LLMEngineOutput) -> (KvHitSnapshot, KvHitSnapshot) {
+    let (before, after, _) = run_kv_hit_stream(
+        RequestPhase::Aggregated,
+        vec![
+            LLMEngineOutput {
+                token_ids: vec![7],
+                ..Default::default()
+            },
+            final_frame,
+        ],
+    )
+    .await;
+    (before, after)
+}
+
+/// Drive `frames` through the real guard of one tracked attempt in `phase`. Returns the
+/// metric snapshots for `phase` and the engine reuse kept for the request trace.
+async fn run_kv_hit_stream(
+    phase: RequestPhase,
+    frames: Vec<LLMEngineOutput>,
+) -> (KvHitSnapshot, KvHitSnapshot, Option<u64>) {
+    run_kv_hit_stream_for(request(), phase, frames).await
+}
+
+async fn run_kv_hit_stream_for(
+    mut req: PreprocessedRequest,
+    phase: RequestPhase,
+    frames: Vec<LLMEngineOutput>,
+) -> (KvHitSnapshot, KvHitSnapshot, Option<u64>) {
     let (router, runtime) = router(None).await;
     let metrics = Arc::clone(&router.request_metrics);
-    let before = kv_hit_snapshot(&metrics);
+    let before = kv_hit_snapshot(&metrics, phase);
+    let tracker = Arc::new(RequestTracker::new());
+    req.tracker = Some(Arc::clone(&tracker));
     let context = Context::new(()).context();
     let source = ResponseStream::new(
         Box::pin(async_stream::stream! {
-            yield Annotated::from_data(LLMEngineOutput {
-                token_ids: vec![7],
-                ..Default::default()
-            });
-            yield Annotated::from_data(final_frame);
+            for frame in frames {
+                yield Annotated::from_data(frame);
+            }
         }),
         Arc::clone(&context),
     );
@@ -1011,8 +1042,8 @@ async fn run_kv_hit_attempt(final_frame: LLMEngineOutput) -> (KvHitSnapshot, KvH
             WorkerWithDpRank::from_worker_id(0),
             None,
         ),
-        &request(),
-        RequestPhase::Aggregated,
+        &req,
+        phase,
         Some(RouteObservation {
             prompt_tokens: 100,
             best_router_tokens: 75,
@@ -1023,10 +1054,267 @@ async fn run_kv_hit_attempt(final_frame: LLMEngineOutput) -> (KvHitSnapshot, KvH
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
     while monitored.next().await.is_some() {}
-    let after = kv_hit_snapshot(&metrics);
+    let after = kv_hit_snapshot(&metrics, phase);
     drop(router);
     runtime.shutdown();
-    (before, after)
+    (before, after, tracker.engine_reused_tokens())
+}
+
+/// Usage as an engine reports it: `prompt_tokens` and, when given, the prefix-cache hit.
+fn usage(prompt_tokens: u64, cached_tokens: Option<u64>) -> CompletionUsage {
+    let mut usage = serde_json::json!({
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": 1,
+        "total_tokens": prompt_tokens + 1,
+    });
+    if let Some(cached_tokens) = cached_tokens {
+        usage["prompt_tokens_details"] = serde_json::json!({"cached_tokens": cached_tokens});
+    }
+    serde_json::from_value(usage).unwrap()
+}
+
+fn final_frame(usage: Option<CompletionUsage>, kv_cache_hit: Option<u64>) -> LLMEngineOutput {
+    LLMEngineOutput {
+        finish_reason: Some(FinishReason::Stop),
+        completion_usage: usage,
+        engine_data: kv_cache_hit.map(|reused| {
+            serde_json::json!({
+                "kv_cache_hit": {"prompt_tokens": 100, "reused_tokens": reused}
+            })
+        }),
+        ..Default::default()
+    }
+}
+
+fn token_frame(usage: Option<CompletionUsage>) -> LLMEngineOutput {
+    LLMEngineOutput {
+        token_ids: vec![7],
+        completion_usage: usage,
+        ..Default::default()
+    }
+}
+
+/// An engine that reports reuse only in usage (the native vLLM sidecar) still gives the
+/// request trace and F4 its count.
+#[tokio::test]
+#[serial_test::serial]
+async fn usage_cached_tokens_stand_in_for_a_missing_kv_cache_hit() {
+    let (before, after, engine_reused) = run_kv_hit_stream(
+        RequestPhase::Aggregated,
+        vec![
+            token_frame(None),
+            final_frame(Some(usage(100, Some(48))), None),
+        ],
+    )
+    .await;
+    assert_eq!(engine_reused, Some(48));
+    assert_eq!(after.reused - before.reused, 48);
+}
+
+/// `kv_cache_hit` wins over usage, on the same chunk and over usage sent earlier.
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_cache_hit_wins_over_usage_cached_tokens() {
+    let (before, after, engine_reused) = run_kv_hit_stream(
+        RequestPhase::Aggregated,
+        vec![
+            token_frame(Some(usage(100, Some(48)))),
+            final_frame(Some(usage(100, Some(48))), Some(85)),
+        ],
+    )
+    .await;
+    assert_eq!(engine_reused, Some(85));
+    assert_eq!(after.reused - before.reused, 85);
+}
+
+#[rstest::rstest]
+#[case::neither(vec![token_frame(None), final_frame(None, None)])]
+#[case::usage_without_cached_tokens(vec![token_frame(None), final_frame(Some(usage(100, None)), None)])]
+#[case::usage_for_another_prompt(vec![token_frame(None), final_frame(Some(usage(99, Some(48))), None)])]
+#[case::usage_before_the_final_chunk(vec![token_frame(Some(usage(100, Some(48)))), final_frame(None, None)])]
+#[tokio::test]
+#[serial_test::serial]
+async fn no_engine_reuse_without_a_report(#[case] frames: Vec<LLMEngineOutput>) {
+    let (before, after, engine_reused) = run_kv_hit_stream(RequestPhase::Aggregated, frames).await;
+    assert_eq!(engine_reused, None);
+    assert_eq!(after.reused - before.reused, 0);
+}
+
+/// SGLang's native sidecar reports prefill reuse only in terminal usage. Its prefill
+/// request already carries bootstrap_info when the router creates the guard.
+#[tokio::test]
+#[serial_test::serial]
+async fn bootstrap_prefill_usage_records_engine_reuse() {
+    let mut req = request();
+    req.token_ids = Arc::new(vec![1; 100]);
+    req.bootstrap_info = Some(crate::protocols::common::preprocessor::BootstrapInfo {
+        bootstrap_host: "127.0.0.1".to_string(),
+        bootstrap_port: 8998,
+        bootstrap_room: 1,
+        ..Default::default()
+    });
+    let mut prefill_usage = usage(100, Some(48));
+    prefill_usage.completion_tokens = 0;
+    prefill_usage.total_tokens = 100;
+    let (before, after, engine_reused) = run_kv_hit_stream_for(
+        req,
+        RequestPhase::Prefill,
+        vec![
+            LLMEngineOutput {
+                disaggregated_params: Some(serde_json::json!({
+                    "bootstrap_host": "127.0.0.1",
+                    "bootstrap_port": 8998,
+                    "bootstrap_room": 1,
+                })),
+                ..Default::default()
+            },
+            final_frame(Some(prefill_usage), None),
+        ],
+    )
+    .await;
+    assert_eq!(after.reused - before.reused, 48);
+    assert_eq!(engine_reused, Some(48));
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn conditional_decode_local_prefill_usage_records_engine_reuse() {
+    let mut req = request();
+    req.token_ids = Arc::new(vec![1; 100]);
+    req.annotations
+        .push(crate::kv_router::prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
+    let (before, after, engine_reused) = run_kv_hit_stream_for(
+        req,
+        RequestPhase::Decode,
+        vec![
+            token_frame(None),
+            final_frame(Some(usage(100, Some(48))), None),
+        ],
+    )
+    .await;
+    assert_eq!(
+        after.reused - before.reused,
+        48,
+        "local prefill on a decode worker must count the engine's measured reuse"
+    );
+    assert_eq!(engine_reused, Some(48));
+}
+
+/// The decode leg of a remote prefill reports the prefill leg's count in its usage, which
+/// the prefill attempt already reported, so it does not count again. A completed prefill's
+/// result marks the leg even when the phase reads `aggregated`; bootstrap info marks it
+/// only in the decode phase, because the prefill leg carries it too.
+#[rstest::rstest]
+#[case::prefill_result(RequestPhase::Decode, true, false)]
+#[case::prefill_result_without_phase(RequestPhase::Aggregated, true, false)]
+#[case::bootstrap(RequestPhase::Decode, false, true)]
+#[tokio::test]
+#[serial_test::serial]
+async fn decode_leg_usage_is_not_engine_reuse(
+    #[case] phase: RequestPhase,
+    #[case] prefill_result: bool,
+    #[case] bootstrap: bool,
+) {
+    let mut req = request();
+    if prefill_result {
+        req.prefill_result = Some(crate::protocols::common::preprocessor::PrefillResult {
+            disaggregated_params: serde_json::json!({}),
+            prompt_tokens_details: usage(100, Some(48)).prompt_tokens_details,
+        });
+    }
+    if bootstrap {
+        req.bootstrap_info = Some(crate::protocols::common::preprocessor::BootstrapInfo {
+            bootstrap_host: "127.0.0.1".to_string(),
+            bootstrap_port: 8998,
+            bootstrap_room: 1,
+            ..Default::default()
+        });
+    }
+    let (before, after, engine_reused) = run_kv_hit_stream_for(
+        req,
+        phase,
+        vec![
+            token_frame(None),
+            final_frame(Some(usage(100, Some(48))), None),
+        ],
+    )
+    .await;
+    assert_eq!(engine_reused, None);
+    assert_eq!(after.reused - before.reused, 0);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn standalone_decode_usage_does_not_count_prefill_reuse_again() {
+    let (router, runtime) = router(None).await;
+    let metrics = Arc::clone(&router.request_metrics);
+    let upstream_tracker = Arc::new(RequestTracker::new());
+    drop(upstream_tracker.set_phase(RequestPhase::Decode).await);
+    let mut req = request();
+    req.token_ids = Arc::new(vec![1; 100]);
+    req.tracker = Some(upstream_tracker);
+    req.prefill_result = Some(crate::protocols::common::preprocessor::PrefillResult {
+        disaggregated_params: serde_json::json!({
+            "remote_engine_id": "prefill-0",
+            "remote_host": "127.0.0.1",
+            "remote_port": 20097,
+            "remote_block_ids": [0, 1, 2],
+        }),
+        prompt_tokens_details: usage(100, Some(48)).prompt_tokens_details,
+    });
+
+    // Standalone routers recreate the tracker after deserializing the handoff.
+    let mut req: PreprocessedRequest =
+        serde_json::from_value(serde_json::to_value(req).unwrap()).unwrap();
+    assert!(req.tracker.is_none());
+    let tracker = Arc::new(RequestTracker::new());
+    req.tracker = Some(Arc::clone(&tracker));
+    assert_eq!(req.phase(), RequestPhase::Aggregated);
+
+    let before = kv_hit_snapshot(&metrics, req.phase());
+    let terminal_usage = CompletionUsage {
+        prompt_tokens_details: req
+            .prefill_result
+            .as_ref()
+            .unwrap()
+            .prompt_tokens_details
+            .clone(),
+        ..usage(100, None)
+    };
+    let context = Context::new(()).context();
+    let source = ResponseStream::new(
+        Box::pin(futures::stream::iter([
+            Annotated::from_data(token_frame(None)),
+            Annotated::from_data(final_frame(Some(terminal_usage), None)),
+        ])),
+        Arc::clone(&context),
+    );
+    let guard = RequestGuard::new_kv_with_cleanup(
+        Arc::clone(&metrics),
+        KvRequestCleanup::new(
+            Arc::clone(router.kv_router()),
+            "standalone-decode-reuse".to_string(),
+            WorkerWithDpRank::from_worker_id(7),
+            None,
+        ),
+        &req,
+        req.phase(),
+        Some(RouteObservation {
+            prompt_tokens: 100,
+            best_router_tokens: 0,
+            selected_router_tokens: 0,
+        }),
+        None,
+    );
+    let monitored = monitor_response_stream(source, context, guard);
+    tokio::pin!(monitored);
+    while monitored.next().await.is_some() {}
+    let after = kv_hit_snapshot(&metrics, req.phase());
+    drop(router);
+    runtime.shutdown();
+
+    assert_eq!(after.reused - before.reused, 0);
+    assert_eq!(tracker.engine_reused_tokens(), None);
 }
 
 #[tokio::test]
