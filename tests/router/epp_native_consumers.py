@@ -1412,7 +1412,9 @@ def _prove_accounting_probe_cold(
     by_key: dict[tuple[int, int], Mapping[str, Any]] = {}
     for row in workers:
         if not isinstance(row, Mapping):
-            raise AssertionError(f"{case_name}: overlap worker row not Mapping: {row!r}")
+            raise AssertionError(
+                f"{case_name}: overlap worker row not Mapping: {row!r}"
+            )
         worker_id = row.get("worker_id")
         dp_rank = row.get("dp_rank")
         if (
@@ -1800,7 +1802,10 @@ def _assert_strict_preferred_margin(
     ):
         raise AssertionError(f"{case_name}: block_size {block_size!r} invalid")
     for label, row in (("A", load_a), ("B", load_b)):
-        if "potential_prefill_tokens" not in row or "potential_decode_blocks" not in row:
+        if (
+            "potential_prefill_tokens" not in row
+            or "potential_decode_blocks" not in row
+        ):
             raise AssertionError(
                 f"{case_name}: {label} PotentialLoad missing prefill/decode: {row}"
             )

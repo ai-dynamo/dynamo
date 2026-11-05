@@ -440,8 +440,7 @@ def assert_named_policy_source_contract() -> None:
     projection_helper = _fn_decl_and_body(
         file_text[REPO_ROOT / NAMED_POLICY_SCOPE_SPECS[8].rel_path],
         re.compile(
-            r"pub\s+fn\s+potential_decode_blocks\s*\(\s*self\s*\)\s*"
-            r"->\s*usize\s*\{"
+            r"pub\s+fn\s+potential_decode_blocks\s*\(\s*self\s*\)\s*" r"->\s*usize\s*\{"
         ),
         "WorkerLoadProjection::potential_decode_blocks",
     )
