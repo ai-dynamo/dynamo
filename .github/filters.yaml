@@ -8,6 +8,7 @@
 #   power_agent -> power-agent image build
 #   deploy   -> deploy tests
 #   dgdr     -> DGDR deploy tests
+#   gaie     -> GAIE deploy test
 #   planner  -> dynamo build-test
 #   planner_gym -> Planner Gym CPU tests and packaging
 #   vllm     -> vllm build and test
@@ -358,6 +359,39 @@ dgdr:
   - 'tests/deploy/test_dgdr_utils.py'
   - 'tests/deploy/dgd_utils.py'
 
+# The GAIE deploy test, which `deploy` and `operator` also run. Every worker
+# in it is a mocker, so engine changes do not run it.
+gaie:
+  - 'deploy/inference-gateway/ext-proc/**'
+  - 'deploy/inference-gateway/scripts/**'
+  # The workspace files and the crates the EPP links
+  # (cargo tree -p dynamo-ext-proc -e normal,build).
+  - '.cargo/config.toml'
+  - 'Cargo.toml'
+  - 'Cargo.lock'
+  - 'lib/global-common/**'
+  - 'lib/global-discovery-client/**'
+  - 'lib/global-view-broadcaster/**'
+  - 'lib/kv-hashing/**'
+  - 'lib/kv-router/**'
+  - 'lib/llm/**'
+  - 'lib/memory/**'
+  - 'lib/mocker/**'
+  - 'lib/rl/**'
+  - 'lib/router-plugins/builtin/**'
+  - 'lib/runtime/**'
+  - 'lib/tokens/**'
+  - 'lib/truthy/**'
+  # The frontend sidecars and mocker workers behind the EPP, the image they run
+  # from, and the examples the test deploys.
+  - 'components/src/dynamo/frontend/**'
+  - 'components/src/dynamo/mocker/**'
+  - 'container/templates/frontend.Dockerfile'
+  - 'examples/backends/*/deploy/gaie/**'
+  # Engine gRPC APIs served by the mocker, which the EPP does not link.
+  - '!lib/mocker/servers/**'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 planner_gym:
   - 'gyms/planner-gym/**'

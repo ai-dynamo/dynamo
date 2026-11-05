@@ -36,6 +36,7 @@ jobs:
       sidecar_trtllm_image: ${{ steps.changes.outputs.sidecar_trtllm_image }}
       deploy: ${{ steps.changes.outputs.deploy }}
       dgdr: ${{ steps.changes.outputs.dgdr }}
+      gaie: ${{ steps.changes.outputs.gaie }}
       vllm: ${{ steps.changes.outputs.vllm }}
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
@@ -225,6 +226,7 @@ jobs:
       needs.changed-files.outputs.trtllm == 'true' ||
       needs.changed-files.outputs.deploy == 'true' ||
       needs.changed-files.outputs.dgdr == 'true' ||
+      needs.changed-files.outputs.gaie == 'true' ||
       needs.changed-files.outputs.snapshot == 'true' ||
       needs.changed-files.outputs.snapshot_vllm == 'true' ||
       needs.changed-files.outputs.snapshot_sglang == 'true' ||
@@ -789,7 +791,8 @@ jobs:
       needs.changed-files.outputs.snapshot_vllm == 'true' ||
       needs.changed-files.outputs.snapshot_sglang == 'true' ||
       needs.changed-files.outputs.snapshot_trtllm == 'true' ||
-      needs.changed-files.outputs.deploy == 'true'
+      needs.changed-files.outputs.deploy == 'true' ||
+      needs.changed-files.outputs.gaie == 'true'
     uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -1238,7 +1241,8 @@ jobs:
        needs.changed-files.outputs.snapshot == 'true' ||
       needs.changed-files.outputs.snapshot_vllm == 'true' ||
       needs.changed-files.outputs.snapshot_sglang == 'true' ||
-      needs.changed-files.outputs.snapshot_trtllm == 'true') &&
+      needs.changed-files.outputs.snapshot_trtllm == 'true' ||
+      needs.changed-files.outputs.gaie == 'true') &&
       needs.frontend-build.result == 'success'
     uses: $/.github/workflows/shared-copy.yml
     with:
@@ -1321,7 +1325,8 @@ jobs:
        needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
-       needs.changed-files.outputs.dgdr == 'true') &&
+       needs.changed-files.outputs.dgdr == 'true' ||
+       needs.changed-files.outputs.gaie == 'true') &&
       needs.operator.result == 'success'
     needs: [changed-files, operator]
     runs-on: prod-deploy-tester-v1
@@ -1444,7 +1449,7 @@ jobs:
   # GAIE DEPLOY TEST
   # The backends' GAIE examples behind agentgateway and the EPP, with mocker
   # workers: the EPP, the frontend sidecars, and the mockers all run from the
-  # frontend image, and the backend filters cover the examples.
+  # frontend image, so the `gaie` filter leaves out engine changes.
   # ============================================================================
   deploy-test-gaie:
     name: GAIE Deploy Test
@@ -1455,12 +1460,9 @@ jobs:
       !cancelled() && !failure() &&
       needs.deploy-operator.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success' &&
-      (needs.changed-files.outputs.frontend == 'true' ||
+      (needs.changed-files.outputs.gaie == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
-       needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.vllm == 'true' ||
-       needs.changed-files.outputs.sglang == 'true' ||
-       needs.changed-files.outputs.trtllm == 'true')
+       needs.changed-files.outputs.operator == 'true')
     timeout-minutes: 30
     permissions:
       contents: read
@@ -1496,11 +1498,12 @@ jobs:
         env:
           KUBECONFIG_B64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
         run: |
-          echo "${KUBECONFIG_B64}" | base64 -d > ${{ github.workspace }}/.kubeconfig_gaie
-          export KUBECONFIG=${{ github.workspace }}/.kubeconfig_gaie
+          kubeconfig_file="${GITHUB_WORKSPACE}/.kubeconfig_gaie"
+          trap 'rm -f "${kubeconfig_file}"' EXIT
+          (umask 077 && echo "${KUBECONFIG_B64}" | base64 -d > "${kubeconfig_file}")
+          export KUBECONFIG="${kubeconfig_file}"
           export NAMESPACE=default
           bash deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
-          rm -f ${{ github.workspace }}/.kubeconfig_gaie
       - name: Run GAIE Deploy Test
         id: deploy-test
         uses: $/.github/actions/dynamo-deploy-test

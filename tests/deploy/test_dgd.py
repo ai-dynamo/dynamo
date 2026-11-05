@@ -450,7 +450,7 @@ async def test_gaie_deployment(
     httproute_yaml = yaml.safe_dump(httproute_spec)
 
     def delete_httproute() -> None:
-        # Deleting the DGD leaves the route on the Gateway.
+        """Delete the HTTPRoute, which deleting the DGD leaves on the Gateway."""
         result = kubectl(
             "delete",
             "--ignore-not-found",
