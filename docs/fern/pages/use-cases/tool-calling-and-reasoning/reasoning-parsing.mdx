@@ -248,7 +248,7 @@ Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. 
 
         **Force-reasoning:** <Badge intent="note" minimal>No</Badge>
 
-        **Notes:** `<mm:think>...</mm:think>`. Explicit V2 supports prompt-prefilled reasoning; auto uses V1, with an explicit-guided decoding exception described in [routing exceptions](troubleshooting-tool-calls.md#parser-generation-routing). Alias: `minimax-m3`
+        **Notes:** `<mm:think>...</mm:think>`. Auto uses Unified for compatible M3 selectors; `1` selects legacy parsing. Both routes support prompt-prefilled reasoning. See [guided-decoding configuration](troubleshooting-tool-calls.md#parser-generation-routing) for the required Dynamo and engine reasoning parsers. Alias: `minimax-m3`
       </Accordion>
 
       <Accordion title="MiniMax M2 / M2.1 (legacy)">

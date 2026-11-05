@@ -867,6 +867,11 @@ func dgdrRunPublisherRules(runName string) []rbacv1.PolicyRule {
 			Resources: []string{"pods"},
 			Verbs:     []string{"get", "list", "watch"},
 		},
+		{
+			APIGroups: []string{nvidiacomv1beta2.GroupVersion.Group},
+			Resources: []string{"dynamographdeployments"},
+			Verbs:     []string{"create"}, // Server-side dry-run uses the normal create authorization.
+		},
 	}
 }
 

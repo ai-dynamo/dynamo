@@ -72,11 +72,14 @@ from dynamo.planner.plugins.clock import Clock, VirtualClock
 from dynamo.planner.reconfiguration import (
     PREDICTOR_FIELDS,
     candidate_config,
+    predictor_rebuild_required,
     runtime_candidate_errors,
 )
 from dynamo.planner.retune.domains import (
     LOAD_SCALING_DOWN_SENSITIVITY,
     OVERLAP_SCORE_CREDIT,
+    SCALING_POLICY_KEYS,
+    PlannerDomain,
     PredictorCandidate,
     expand_planner_domain,
     expand_router_domain,
@@ -92,9 +95,9 @@ from dynamo.planner.retune.live.contracts import (
 from dynamo.planner.retune.sweep import (
     SweepRequest,
     SweepResult,
+    evaluated_params,
     objective_maximized,
     run_sweep,
-    with_predictor_fields,
 )
 from dynamo.planner.simulation.load_predictor import predictor_fields
 
@@ -227,11 +230,7 @@ class RetuneController:
         # the minimum the current and candidate predictors need.
         history_s = retune.history_seconds
         if history_s is None:
-            history_s = (
-                required_history_seconds(config, planner_domain)
-                if config.enable_throughput_scaling
-                else 0.0
-            )
+            history_s = required_history_seconds(config, planner_domain)
         self._history_s = history_s
         planner_keys = set(planner_domain.grid)
         if self._predictor_candidates:
@@ -244,7 +243,7 @@ class RetuneController:
                     "set it explicitly in the planner config"
                 )
 
-        self._grid = self._feasible_grid(router_domain, planner_domain.grid)
+        self._grid = self._feasible_grid(router_domain, planner_domain)
 
         self._desired_router: dict[str, float] = self._startup_router_values()
         self._pending_planner: dict[str, Any] = {}
@@ -484,17 +483,19 @@ class RetuneController:
     def _feasible_grid(
         self,
         router_domain: Mapping[str, Sequence[float]],
-        planner_grid: Mapping[str, Sequence[Any]],
+        planner_domain: PlannerDomain,
     ) -> list[RetuneParams]:
         """The grid without the planner points that cannot run here.
 
         Grid points and predictor candidates are checked apart, each on the
         startup config: no ``PlannerConfig`` validator relates a predictor
         field to another field, and ``_decide`` checks the combination it
-        applies. A point that fails validation or does not fit the
-        deployment is dropped, as recommend drops an infeasible candidate.
-        An invalid predictor candidate, or a grid value that no point keeps
-        (so also a grid without a valid point), raises.
+        applies. A point that fails the full ``PlannerConfig`` validation
+        (for instance a throughput-scaling point the configuration cannot
+        run) or does not fit the deployment is dropped, as recommend drops an
+        infeasible candidate. An invalid predictor candidate, or a value of a
+        written knob that no point keeps (so also a grid without a valid
+        point), raises; a scaling-policy value may be dropped entirely.
         """
 
         # The retune checks never depend on a candidate; skip them.
@@ -507,7 +508,7 @@ class RetuneController:
             error = _candidate_error(base, updates, self._capabilities)
             if error is not None:
                 raise ValueError(f"retune.planner candidate {updates} {error}")
-        points = grid_points({}, planner_grid)
+        points = grid_points({}, planner_domain.points)
         rejected: dict[str, str] = {}
         for point in points:
             if point.planner:
@@ -515,18 +516,30 @@ class RetuneController:
                 if error is not None:
                     rejected[point.key()] = error
         if not rejected:
-            return grid_points(router_domain, planner_grid)
+            return grid_points(router_domain, planner_domain.points)
 
         kept = [point for point in points if point.key() not in rejected]
-        for key, values in planner_grid.items():
+        if not kept:
+            first = points[0]
+            raise ValueError(
+                f"no retune.planner candidate fits; candidate {first.planner} "
+                f"{rejected[first.key()]}"
+            )
+        for key, values in planner_domain.grid.items():
+            if key in SCALING_POLICY_KEYS:
+                continue
             for value in values:
                 if not any(_same_value(p.planner[key], value) for p in kept):
-                    point = next(
-                        p for p in points if _same_value(p.planner[key], value)
+                    holder = next(
+                        (p for p in points if _same_value(p.planner[key], value)),
+                        None,
                     )
+                    if holder is None:
+                        # Folded away in every point (an inactive mode).
+                        continue
                     raise ValueError(
                         f"no retune.planner candidate with {key}={value!r} fits; "
-                        f"candidate {point.planner} {rejected[point.key()]}"
+                        f"candidate {holder.planner} {rejected[holder.key()]}"
                     )
         first = next(p for p in points if p.key() in rejected)
         logger.warning(
@@ -539,7 +552,7 @@ class RetuneController:
         )
         return [
             point
-            for point in grid_points(router_domain, planner_grid)
+            for point in grid_points(router_domain, planner_domain.points)
             if RetuneParams(planner=point.planner).key() not in rejected
         ]
 
@@ -876,11 +889,7 @@ class RetuneController:
     ) -> RetuneDecision:
         request = pending.request
         baseline = request.baseline
-        presweep_fields = (
-            None
-            if result.predictor_presweep is None
-            else result.predictor_presweep.get("fields")
-        )
+        presweep = result.predictor_presweep
 
         def record(outcome: RetuneOutcome, **overrides: Any) -> RetuneDecision:
             values: dict[str, Any] = {
@@ -943,7 +952,9 @@ class RetuneController:
         top: list[tuple[str, float]] = []
         for score, candidate in ranked:
             # Equivalent candidates share one evaluation; list it once.
-            key = with_predictor_fields(candidate, baseline, presweep_fields).key()
+            key = evaluated_params(
+                candidate, baseline, presweep, request.base_planner
+            ).key()
             if len(top) < _TOP_SCORES and all(key != seen for seen, _ in top):
                 top.append((key, score))
         best_score, best = ranked[0]
@@ -955,7 +966,7 @@ class RetuneController:
         if best == baseline or not self._improves(best_score, baseline_score):
             return record("kept", **scores)
 
-        chosen = with_predictor_fields(best, baseline, presweep_fields)
+        chosen = evaluated_params(best, baseline, presweep, request.base_planner)
         current = self.current_point()
         planner_changes = {
             key: value
@@ -973,6 +984,7 @@ class RetuneController:
             )
 
         predictor_warmup = None
+        rebuild_interval: int | None = None
         if planner_changes:
             # _feasible_grid checked grid points and predictors apart; check the
             # combination the host will apply, so it never raises.
@@ -982,21 +994,31 @@ class RetuneController:
                 return record(
                     "failed", reason=f"planner candidate {updates} {error}", **scores
                 )
-        if planner_changes.keys() & PREDICTOR_FIELDS:
+            applied = candidate_config(self._config, updates)
+            current_config = (
+                candidate_config(self._config, dict(self._pending_planner))
+                if self._pending_planner
+                else self._config
+            )
+            if predictor_rebuild_required(current_config, applied):
+                rebuild_interval = applied.throughput_adjustment_interval_seconds
+        if rebuild_interval is not None:
             # Hosts swap a predictor in only warmed; the sweep prepared the
-            # winner on the same warmup.
-            if not result.warmup_observations:
+            # candidate's predictor on the same warmup, bucketed at its
+            # throughput interval.
+            observations = result.observations_at(rebuild_interval)
+            if not observations:
                 return record(
                     "failed",
                     reason="predictor change without warmup observations",
                     **scores,
                 )
-            error = result.predictor_warmup_error
+            error = result.warmup_error_at(rebuild_interval)
             if error is not None:
                 return record(
                     "failed", reason=f"predictor warmup rejected: {error}", **scores
                 )
-            predictor_warmup = result.warmup_observations
+            predictor_warmup = observations
         if self._config.advisory:
             # The decision an active planner would apply, after the same
             # feasibility checks; nothing is applied, so the desired router
@@ -1192,7 +1214,7 @@ def startup_router_domain(
     # The schema admits only PolicyParameters names, with the bounds
     # KvRouterConfig checks; resolving every candidate also guards against
     # the two drifting apart.
-    for point in grid_points(domain, {}):
+    for point in grid_points(domain):
         try:
             maps = router_maps(point.router)
         except ValueError as error:
