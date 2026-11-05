@@ -8854,6 +8854,8 @@ def run_native_consumer_profile(request, tmp_path, model_name, profile_name):
     from tests.router.epp_native_consumers import (
         native_provider_config_overrides,
         native_provider_env_overrides,
+    )
+    from tests.router.epp_native_consumers import (
         run_native_consumer_profile as _run_native_consumer_profile,
     )
     from tests.router.epp_parity import EppFrontendRoutingParityStack
@@ -8878,8 +8880,8 @@ def run_named_policy_catalog(request, tmp_path, model_name):
     ordinary ``common`` collection free of EPP/grpc_tools.
     """
     from tests.router.epp_parity import EppFrontendRoutingParityStack
+    from tests.router.epp_selector_catalog import assert_named_policy_source_contract
     from tests.router.epp_selector_catalog import (
-        assert_named_policy_source_contract,
         run_named_policy_catalog as _run_named_policy_catalog,
     )
 

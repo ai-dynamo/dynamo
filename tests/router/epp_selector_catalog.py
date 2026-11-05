@@ -114,9 +114,7 @@ NAMED_POLICY_SCOPE_DIGESTS: dict[str, str] = {
     "ext_proc_bin_main": (
         "00907d269c362a5389b8108d4df466181db0f6af21e0994be44870aa4a3e91c3"
     ),
-    "runner_run": (
-        "6d22a6da9425aa16130484abb1df00d07a93fe5e863e5502590ddce3d9bc047f"
-    ),
+    "runner_run": ("6d22a6da9425aa16130484abb1df00d07a93fe5e863e5502590ddce3d9bc047f"),
     "router_plugin_registry_fallback": (
         "2c37fe0b1868665985b240f764fbae503b37ceb4db76c282b1d7ce810d1177f5"
     ),
@@ -165,9 +163,7 @@ def assert_named_policy_source_contract() -> None:
     for spec in NAMED_POLICY_SCOPE_SPECS:
         path = REPO_ROOT / spec.rel_path
         if not path.is_file():
-            raise AssertionError(
-                f"missing fingerprint source {spec.label}: {path}"
-            )
+            raise AssertionError(f"missing fingerprint source {spec.label}: {path}")
         if path not in file_text:
             file_text[path] = _strip_rust_comments(path.read_text(encoding="utf-8"))
         blob = _fn_decl_and_body(
@@ -206,14 +202,15 @@ def assert_named_policy_source_contract() -> None:
         re.compile(NAMED_POLICY_SCOPE_SPECS[1].declaration_regex),
         NAMED_POLICY_SCOPE_SPECS[1].label,
     )
-    if "linked worker-selection policies require DYN_EPP_MODE=standalone" not in run_body:
+    if (
+        "linked worker-selection policies require DYN_EPP_MODE=standalone"
+        not in run_body
+    ):
         raise AssertionError(
             "runner::run no longer rejects a nonempty linked registry outside "
             "standalone mode"
         )
-    if not re.search(
-        r"policy_registry\s*\.\s*unwrap_or_default\s*\(\s*\)", run_body
-    ):
+    if not re.search(r"policy_registry\s*\.\s*unwrap_or_default\s*\(\s*\)", run_body):
         raise AssertionError(
             "runner::run no longer falls back to an empty Default registry "
             "when the binary supplies None"
@@ -316,7 +313,10 @@ def assert_named_policy_source_contract() -> None:
 
     # FE Python registrar + custom-policy feature / shipped types (finite paths).
     cargo = (REPO_ROOT / "lib/bindings/python/Cargo.toml").read_text(encoding="utf-8")
-    if 'default = ["custom-policy"]' not in cargo and "default = ['custom-policy']" not in cargo:
+    if (
+        'default = ["custom-policy"]' not in cargo
+        and "default = ['custom-policy']" not in cargo
+    ):
         raise AssertionError(
             "Python bindings Cargo.toml default features no longer enable "
             "custom-policy"
@@ -395,11 +395,7 @@ def run_named_policy_catalog(stack, *, tmp_path) -> dict[str, Any]:
         assert_route_observations_differ,
         frontend_epp_first_selection_cases,
     )
-    from tests.router.epp_parity import (
-        READINESS_DEADLINE_S,
-        ZONE_A_TAINT,
-        ZONE_B_TAINT,
-    )
+    from tests.router.epp_parity import READINESS_DEADLINE_S, ZONE_A_TAINT, ZONE_B_TAINT
     from tests.router.helper import unique_request_id
     from tests.router.router_process import observe_owned_initialization_diagnostic
     from tests.utils.constants import DynamoPortRange
@@ -814,9 +810,7 @@ def run_named_policy_catalog(stack, *, tmp_path) -> dict[str, Any]:
                 payload,
                 path=path,
                 request_id=unique_request_id("fe-named-cache-off-gen"),
-                timeout_s=_remaining(
-                    named_gen_deadline, label="named-fe-generation"
-                ),
+                timeout_s=_remaining(named_gen_deadline, label="named-fe-generation"),
             )
             _require_deadline_alive(named_gen_deadline, label="named-fe-generation")
             if named_gen.worker_id != worker_b or named_gen.dp_rank != 0:
@@ -1009,7 +1003,11 @@ def _gate_strict_default_cost_margin(
     from tests.router.common import _dp0_worker_load_rows, _overlap_blocks
 
     block_size = stack.worker_block_size
-    if not isinstance(block_size, int) or isinstance(block_size, bool) or block_size <= 0:
+    if (
+        not isinstance(block_size, int)
+        or isinstance(block_size, bool)
+        or block_size <= 0
+    ):
         raise AssertionError(f"worker_block_size {block_size!r} is invalid")
     last: dict[str, Any] = {}
     while time.monotonic() < deadline:
@@ -1263,9 +1261,7 @@ def _read_owned_router_policy(
                 f"owned /router_policy parameter {name} is not finite: {got!r}"
             )
         if abs(float(got) - float(expected)) > 1e-9:
-            raise AssertionError(
-                f"owned /router_policy {name}={got!r} != {expected!r}"
-            )
+            raise AssertionError(f"owned /router_policy {name}={got!r} != {expected!r}")
     return {
         "router_id": str(router_id),
         "model": model,

@@ -316,9 +316,7 @@ def run_native_consumer_profile(
                 raise cleanup_error from body_error
             if len(cleanup_errors) == 1:
                 raise cleanup_errors[0]
-            raise BaseExceptionGroup(
-                "native consumer cleanup failures", cleanup_errors
-            )
+            raise BaseExceptionGroup("native consumer cleanup failures", cleanup_errors)
 
 
 def _run_stable_default_profile(
@@ -898,9 +896,7 @@ def _dual_publisher_sequence(
         timeout_s = deadline - time.monotonic()
         if timeout_s <= 0:
             break
-        both_loads = stack.provider_potential_loads(
-            probe_tokens, timeout_s=timeout_s
-        )
+        both_loads = stack.provider_potential_loads(probe_tokens, timeout_s=timeout_s)
         last_both = both_loads
         rows = _dp0_rows(
             both_loads, worker_a, worker_b, f"{case_prefix}-provider-mirror"
@@ -1191,8 +1187,7 @@ def _cold_case(model_name: str) -> dict[str, Any]:
         "payload": {
             "model": model_name,
             "prompt": (
-                "native consumer cold routing stem " * 8
-                + ("unique cold branch " * 12)
+                "native consumer cold routing stem " * 8 + ("unique cold branch " * 12)
             ),
             "stream": True,
             "max_tokens": 1,
@@ -1291,7 +1286,9 @@ def _owner_potential_loads(
         return stack.provider_potential_loads(tokens, timeout_s=timeout_s)
     router = owner["router"]
     if router is None:
-        raise AssertionError("peer router reference was cleared before get_potential_loads")
+        raise AssertionError(
+            "peer router reference was cleared before get_potential_loads"
+        )
 
     async def _loads():
         try:
@@ -1363,7 +1360,11 @@ def _require_sender_booking_loads(
             f"{case_name}: idle worker {other} active_requests="
             f"{idle['active_requests']} != 0; loads={loads}"
         )
-    for key in ("potential_prefill_tokens", "potential_decode_blocks", "active_requests"):
+    for key in (
+        "potential_prefill_tokens",
+        "potential_decode_blocks",
+        "active_requests",
+    ):
         if key not in booked or key not in idle:
             raise AssertionError(
                 f"{case_name}: PotentialLoad missing {key}: loads={loads}"
@@ -1441,11 +1442,7 @@ def _require_dual_peer_local_loads(
                     f"loads={loads}"
                 )
             prefill = row["potential_prefill_tokens"]
-            if (
-                not isinstance(prefill, int)
-                or isinstance(prefill, bool)
-                or prefill < 0
-            ):
+            if not isinstance(prefill, int) or isinstance(prefill, bool) or prefill < 0:
                 raise AssertionError(
                     f"{case_name}: {label} potential_prefill_tokens malformed: "
                     f"{prefill!r}; loads={loads}"
@@ -1518,9 +1515,7 @@ def _assert_strict_preferred_margin(
 ) -> None:
     if probe_isl <= 0:
         raise AssertionError(f"{case_name}: probe_isl must be positive")
-    cost_a = (
-        (active_prefill_a + probe_isl) / float(block_size)
-    ) * preferred_multiplier
+    cost_a = ((active_prefill_a + probe_isl) / float(block_size)) * preferred_multiplier
     cost_b = (active_prefill_b + probe_isl) / float(block_size)
     if expect_b_wins:
         if not (cost_a > cost_b):
@@ -1973,7 +1968,9 @@ def _peer_cr_name(stack) -> str:
     return f"{stack.identity.pod_name}-{PEER_CONTAINER_NAME}"
 
 
-def _parse_event_channel(channel: Mapping[str, Any], *, case_name: str) -> dict[str, Any]:
+def _parse_event_channel(
+    channel: Mapping[str, Any], *, case_name: str
+) -> dict[str, Any]:
     if channel.get("type") != "EventChannel":
         raise AssertionError(
             f"{case_name}: expected type=EventChannel, got {channel.get('type')!r}"
@@ -1990,7 +1987,9 @@ def _parse_event_channel(channel: Mapping[str, Any], *, case_name: str) -> dict[
         )
     scope = channel.get("scope")
     if not isinstance(scope, dict) or scope.get("kind") != "endpoint":
-        raise AssertionError(f"{case_name}: EventChannel scope is not endpoint: {scope!r}")
+        raise AssertionError(
+            f"{case_name}: EventChannel scope is not endpoint: {scope!r}"
+        )
     endpoint = scope.get("endpoint")
     if not isinstance(endpoint, dict):
         raise AssertionError(f"{case_name}: EventChannel scope.endpoint missing")
@@ -2092,18 +2091,14 @@ def _wait_owned_event_channels(
             continue
         ids = [row["instance_id"] for row in found.values()]
         if len(set(ids)) != len(ids):
-            raise AssertionError(
-                f"{case_name}: duplicate owned instance_ids: {found}"
-            )
+            raise AssertionError(f"{case_name}: duplicate owned instance_ids: {found}")
         return found
     raise AssertionError(
         f"{case_name}: owned EventChannels not ready before deadline: last={last}"
     )
 
 
-def _catalog_scope_event_channel_endpoints(
-    stack, *, case_name: str
-) -> set[str]:
+def _catalog_scope_event_channel_endpoints(stack, *, case_name: str) -> set[str]:
     """All in-scope active_sequences_events PUB endpoints (provider/peer/mocker/FE/EPP)."""
     if stack.kube_api is None or stack.namespace is None:
         raise AssertionError("routing parity stack has not started")
@@ -2223,7 +2218,9 @@ def _observe_construction_events(
     epp_text = _owned_process_log_text(epp, label="epp", node_name=node)
 
     expected_hwm = 1024 if profile.rcvhwm is None else profile.rcvhwm
-    expected_pool = 1 if profile.endpoints_per_sub is None else profile.endpoints_per_sub
+    expected_pool = (
+        1 if profile.endpoints_per_sub is None else profile.endpoints_per_sub
+    )
     direct_default = True if profile.direct_zmq is None else profile.direct_zmq
 
     if not direct_default:
@@ -2479,8 +2476,6 @@ def _peer_free(
         try:
             await asyncio.wait_for(router.free(request_id), timeout=timeout_s)
         except asyncio.TimeoutError as exc:
-            raise AssertionError(
-                f"peer free outlived the {timeout_s}s budget"
-            ) from exc
+            raise AssertionError(f"peer free outlived the {timeout_s}s budget") from exc
 
     stack.run_until_complete(_free())

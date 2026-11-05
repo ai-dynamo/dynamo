@@ -2679,9 +2679,7 @@ def _assert_native_consumer_surface_closed() -> None:
             raise AssertionError(
                 f"{name} row profile oracle {profiles!r} != fixed {wanted!r}"
             )
-        unknown = [
-            profile for profile in profiles if profile not in expected_keys
-        ]
+        unknown = [profile for profile in profiles if profile not in expected_keys]
         if unknown:
             raise AssertionError(
                 f"{name} binds unknown native profiles {unknown}; known "

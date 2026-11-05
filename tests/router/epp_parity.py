@@ -3363,9 +3363,7 @@ class EppFrontendRoutingParityStack:
         self.worker_block_size = worker_block_size
         self.frontend_cli_block_size = cli_block_size
         self.provider_env_overrides = (
-            dict(provider_env_overrides)
-            if provider_env_overrides is not None
-            else None
+            dict(provider_env_overrides) if provider_env_overrides is not None else None
         )
         self.provider_config_overrides = (
             dict(provider_config_overrides)
