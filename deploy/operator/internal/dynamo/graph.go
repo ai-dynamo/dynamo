@@ -1602,15 +1602,16 @@ func usesMultinodeTopologyAliases(annotations map[string]string) bool {
 
 // addMultinodeTopologyEnvVars injects backend-independent aliases for the
 // current pod's rank and leader address into newly created multinode DGDs.
+// It returns the number of authored entries replaced during ordered composition.
 func addMultinodeTopologyEnvVars(
 	container *corev1.Container,
 	numberOfNodes int32,
 	serviceName string,
 	multinodeDeployer MultinodeDeployer,
 	annotations map[string]string,
-) {
+) int {
 	if numberOfNodes <= 1 || !usesMultinodeTopologyAliases(annotations) {
-		return
+		return 0
 	}
 
 	// The aliases are operator-owned so their topology-derived values override
@@ -1619,7 +1620,23 @@ func addMultinodeTopologyEnvVars(
 		{Name: commonconsts.DynamoLeaderAddressEnvVar, Value: multinodeDeployer.GetLeaderHostname(serviceName)},
 		{Name: commonconsts.DynamoRankEnvVar, Value: multinodeDeployer.GetPodRank()},
 	}
-	container.Env = mergeEnvsLegacy(container.Env, topologyEnvVars)
+	if !compatibility.OrderedEnvironmentVariables.Enabled(annotations) {
+		container.Env = mergeEnvsLegacy(container.Env, topologyEnvVars)
+		return 0
+	}
+
+	// Preserve the remaining environment while keeping topology bindings operator-owned.
+	remaining := make([]corev1.EnvVar, 0, len(container.Env))
+	replaced := 0
+	for _, env := range container.Env {
+		if env.Name == commonconsts.DynamoLeaderAddressEnvVar || env.Name == commonconsts.DynamoRankEnvVar {
+			replaced++
+			continue
+		}
+		remaining = append(remaining, env)
+	}
+	container.Env = slices.Concat(topologyEnvVars, remaining)
+	return replaced
 }
 
 // applyDefaultSecurityContext sets secure defaults for pod security context.
@@ -1867,7 +1884,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	}
 
 	// Main receives topology bindings in both combined-runtime and native-sidecar modes.
-	addMultinodeTopologyEnvVars(&container, numberOfNodes, serviceName, multinodeDeployer, annotations)
+	userEnvironmentCount -= addMultinodeTopologyEnvVars(&container, numberOfNodes, serviceName, multinodeDeployer, annotations)
 
 	backend := BackendFactory(backendFramework, operatorConfig, parentGraphDeploymentName, roleLaunchOwnership)
 	if backend == nil {
@@ -2027,7 +2044,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		if snapshotEnabled {
 			err = buildSnapshotFailoverPod(&podSpec, numberOfNodes, backendFramework, userEnvironmentCount)
 		} else {
-			err = buildColdStartFailoverPod(&podSpec, numberOfNodes, backendFramework)
+			err = buildColdStartFailoverPod(&podSpec, numberOfNodes, backendFramework, userEnvironmentCount)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to build failover pod: %w", err)

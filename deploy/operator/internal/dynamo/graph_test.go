@@ -1685,13 +1685,13 @@ func TestMergeEnvsForOrigin(t *testing.T) {
 		{Name: "SHARED", Value: "user"},
 	}
 
-	t.Run("origin 1.6 preserves system then user order and duplicate names", func(t *testing.T) {
-		annotations := map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}
+	t.Run("origin 1.7 preserves system then user order and duplicate names", func(t *testing.T) {
+		annotations := map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0"}
 		require.Equal(t, append(slices.Clone(system), user...), MergeEnvsForOrigin(annotations, system, user))
 	})
 
 	t.Run("older origin preserves legacy sorted and de-duplicated output", func(t *testing.T) {
-		annotations := map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0"}
+		annotations := map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}
 		require.Equal(t, []corev1.EnvVar{
 			{Name: "A_DERIVED", Value: "$(Z_BASE)"},
 			{Name: "SHARED", Value: "user"},
@@ -1891,7 +1891,7 @@ func TestGenerateBasePodSpecEnvironmentOrderByOrigin(t *testing.T) {
 		},
 	}
 
-	render := func(t *testing.T, origin string) []corev1.EnvVar {
+	render := func(t *testing.T, origin string, numberOfNodes int32) []corev1.EnvVar {
 		t.Helper()
 		component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 			ComponentName: "worker",
@@ -1902,7 +1902,7 @@ func TestGenerateBasePodSpecEnvironmentOrderByOrigin(t *testing.T) {
 				}},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{
 					Name:  commonconsts.MainContainerName,
-					Image: "example/engine:1.6.0",
+					Image: "example/engine:1.7.0",
 					Env:   slices.Clone(userEnv),
 				}}},
 			},
@@ -1914,7 +1914,7 @@ func TestGenerateBasePodSpecEnvironmentOrderByOrigin(t *testing.T) {
 			"test-deployment",
 			"default",
 			RoleMain,
-			1,
+			numberOfNodes,
 			operatorConfig,
 			commonconsts.MultinodeDeploymentTypeGrove,
 			"worker",
@@ -1926,15 +1926,23 @@ func TestGenerateBasePodSpecEnvironmentOrderByOrigin(t *testing.T) {
 		return podSpec.Containers[0].Env
 	}
 
-	t.Run("origin 1.6 keeps injected env before user env in declared order", func(t *testing.T) {
-		env := render(t, "1.6.0")
+	t.Run("origin 1.7 keeps injected env before user env in declared order", func(t *testing.T) {
+		env := render(t, "1.7.0", 1)
 		require.GreaterOrEqual(t, len(env), len(userEnv)+1)
 		require.Equal(t, userEnv, env[len(env)-len(userEnv):])
 		require.Equal(t, corev1.EnvVar{Name: "NATS_SERVER", Value: "nats://system:4222"}, env[0])
 	})
 
-	t.Run("origin 1.5 retains legacy sorted and de-duplicated output", func(t *testing.T) {
-		env := render(t, "1.5.0")
+	t.Run("origin 1.7 keeps multinode topology aliases ahead of the user suffix", func(t *testing.T) {
+		t.Log("Render topology aliases without sorting the authored environment")
+		env := render(t, "1.7.0", 2)
+		require.Equal(t, userEnv, env[len(env)-len(userEnv):])
+		require.Equal(t, commonconsts.DynamoLeaderAddressEnvVar, env[0].Name)
+		require.Equal(t, commonconsts.DynamoRankEnvVar, env[1].Name)
+	})
+
+	t.Run("origin 1.6 retains legacy sorted and de-duplicated output", func(t *testing.T) {
+		env := render(t, "1.6.0", 1)
 		require.True(t, sort.SliceIsSorted(env, func(i, j int) bool { return env[i].Name < env[j].Name }))
 		var nats []corev1.EnvVar
 		for _, item := range env {
@@ -1965,7 +1973,7 @@ func TestGenerateBasePodSpecBackendEnvironmentOrderByOrigin(t *testing.T) {
 				}},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{
 					Name:  commonconsts.MainContainerName,
-					Image: "example/engine:1.6.0",
+					Image: "example/engine:1.7.0",
 					Env:   slices.Clone(userEnvironment),
 				}}},
 			},
@@ -1989,14 +1997,14 @@ func TestGenerateBasePodSpecBackendEnvironmentOrderByOrigin(t *testing.T) {
 		return podSpec.Containers[0].Env
 	}
 
-	t.Run("origin 1.6 moves backend env before the ordered user suffix", func(t *testing.T) {
-		environment := render(t, "1.6.0")
+	t.Run("origin 1.7 moves backend env before the ordered user suffix", func(t *testing.T) {
+		environment := render(t, "1.7.0")
 		wantSuffix := append([]corev1.EnvVar{backendEnvironment}, userEnvironment...)
 		require.Equal(t, wantSuffix, environment[len(environment)-len(wantSuffix):])
 	})
 
-	t.Run("origin 1.5 retains the legacy backend env suffix", func(t *testing.T) {
-		environment := render(t, "1.5.0")
+	t.Run("origin 1.6 retains the legacy backend env suffix", func(t *testing.T) {
+		environment := render(t, "1.6.0")
 		require.Equal(t, backendEnvironment, environment[len(environment)-1])
 
 		var duplicateValues []string
@@ -2020,8 +2028,8 @@ func TestGeneratePodSpecForComponentUsesOnlyDGDOriginForEnvironmentOrder(t *test
 	}{
 		{
 			name:            "newer DGD origin overrides older component origin",
-			dgdOrigin:       "1.6.0",
-			componentOrigin: "1.5.0",
+			dgdOrigin:       "1.7.0",
+			componentOrigin: "1.6.0",
 			want:            []corev1.EnvVar{dgdEnvironment, componentEnvironment},
 		},
 	}
@@ -2051,7 +2059,7 @@ func TestGeneratePodSpecForComponentUsesOnlyDGDOriginForEnvironmentOrder(t *test
 					}},
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{
 						Name:  commonconsts.MainContainerName,
-						Image: "example/engine:1.6.0",
+						Image: "example/engine:1.7.0",
 						Env:   []corev1.EnvVar{componentEnvironment},
 					}}},
 				},

@@ -153,11 +153,11 @@ func TestNativeSidecarCompilationCacheBackendDetection(t *testing.T) {
 	}
 }
 
-func TestNativeSidecarEnvironmentIgnoresOrigin(t *testing.T) {
-	const currentOrigin = "1.6.0"
-	const legacyOrigin = "1.5.0"
+func TestNativeSidecarEnvironmentByOrigin(t *testing.T) {
+	const currentOrigin = "1.7.0"
+	const legacyOrigin = "1.6.0"
 
-	for _, origin := range []string{currentOrigin, legacyOrigin, ""} {
+	for _, origin := range []string{currentOrigin, legacyOrigin, "1.5.0", ""} {
 		t.Run("origin="+origin, func(t *testing.T) {
 			t.Log("Configure graph, engine, runtime, and frontend dependencies with duplicate overrides")
 			graphEnv := []corev1.EnvVar{{Name: "Z_GRAPH", Value: "graph"}, {Name: "A_GRAPH", Value: "$(Z_GRAPH)"}}
@@ -226,7 +226,7 @@ func TestNativeSidecarEnvironmentIgnoresOrigin(t *testing.T) {
 			}
 			require.Equal(t, original, dgd)
 
-			t.Log("Verify legacy environment merging, overrides, and cache isolation")
+			t.Log("Verify origin-selected environment merging, overrides, and cache isolation")
 			for _, rendered := range pods {
 				engine, runtime, frontend := rendered.Containers[0], rendered.InitContainers[0], rendered.Containers[1]
 				require.Contains(t, engine.VolumeMounts, corev1.VolumeMount{Name: "cache", MountPath: "/cache"})
@@ -235,6 +235,13 @@ func TestNativeSidecarEnvironmentIgnoresOrigin(t *testing.T) {
 				require.Equal(t, "required", envVarsToMap(runtime.Env)[commonconsts.EnvKvTransferEnforcement])
 				require.Equal(t, "nats://user:4222", envVarsToMap(runtime.Env)["NATS_SERVER"])
 				require.Equal(t, "nats://frontend:4222", envVarsToMap(frontend.Env)["NATS_SERVER"])
+				if origin == currentOrigin {
+					require.Equal(t, slices.Concat([]corev1.EnvVar{{Name: "VLLM_CACHE_ROOT", Value: "/cache"}}, graphEnv, engineEnv), engine.Env)
+					runtimeSuffix := slices.Concat(graphEnv, runtimeEnv[:len(runtimeEnv)-1])
+					require.Equal(t, runtimeSuffix, runtime.Env[len(runtime.Env)-len(runtimeSuffix):])
+					require.Equal(t, frontendEnv, frontend.Env[len(frontend.Env)-len(frontendEnv):])
+					continue
+				}
 				require.Equal(t, []corev1.EnvVar{
 					{Name: "A_CACHE", Value: "$(VLLM_CACHE_ROOT)"},
 					{Name: "A_GRAPH", Value: "$(Z_GRAPH)"},
@@ -468,9 +475,9 @@ func (r *nativeSidecarSecretsRetriever) GetSecrets(namespace, image string) ([]s
 }
 
 func TestCombinedWorkerCompilationCacheEnvironmentOrder(t *testing.T) {
-	const currentOrigin = "1.6.0"
+	const currentOrigin = "1.7.0"
 
-	for _, origin := range []string{currentOrigin, "1.5.0", ""} {
+	for _, origin := range []string{currentOrigin, "1.6.0", "1.5.0", ""} {
 		t.Run("origin="+origin, func(t *testing.T) {
 			t.Log("Configure a combined worker that references and overrides the cache default")
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -498,13 +505,17 @@ func TestCombinedWorkerCompilationCacheEnvironmentOrder(t *testing.T) {
 					cacheEnv = append(cacheEnv, env)
 				}
 			}
-			require.Equal(t, []corev1.EnvVar{
+			want := []corev1.EnvVar{
 				{Name: "A_CACHE", Value: "$(VLLM_CACHE_ROOT)"},
 				{Name: "VLLM_CACHE_ROOT", Value: "$(VLLM_CACHE_ROOT)/custom"},
 				{Name: "VLLM_USE_V1", Value: "1"},
 				{Name: "VLLM_CACHE_ROOT", Value: "/cache"},
-			}, cacheEnv)
-			require.Equal(t, corev1.EnvVar{Name: "VLLM_CACHE_ROOT", Value: "/cache"}, pod.Containers[0].Env[len(pod.Containers[0].Env)-1])
+			}
+			if origin == currentOrigin {
+				want = slices.Concat(want[3:], want[:3])
+			}
+			require.Equal(t, want, cacheEnv)
+			require.Equal(t, want[len(want)-1], pod.Containers[0].Env[len(pod.Containers[0].Env)-1])
 		})
 	}
 }

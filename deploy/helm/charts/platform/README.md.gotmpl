@@ -158,7 +158,7 @@ plan for frontend replacement, including a possible single-replica Grove Service
 
 ##### Environment variable order in newly created DGDs
 
-**Change:** For DGDs whose `nvidia.com/dynamo-operator-origin-version` annotation is 1.6.0 or later,
+**Change:** For DGDs whose `nvidia.com/dynamo-operator-origin-version` annotation is 1.7.0 or later,
 the operator preserves environment variable order and duplicate names. The rendered order is
 operator-provided defaults, then DGD-level `spec.env`, then component
 `podTemplate.spec.containers[*].env`. Operator-provided variables, including component,
@@ -198,10 +198,10 @@ spec:
                   value: $(MODEL_ROOT)/model
 ```
 
-**Existing deployments:** DGDs created by an operator older than 1.6.0, or without the origin
+**Existing deployments:** DGDs created by an operator older than 1.7.0, or without the origin
 annotation, retain the legacy sorted and de-duplicated output. An operator-only upgrade does not
 reorder their rendered environment lists or roll their workloads for this change. Deleting and
-recreating a DGD under 1.6.0 or later opts it into the new behavior and causes workload downtime.
+recreating a DGD under 1.7.0 or later opts it into the new behavior and causes workload downtime.
 To preserve availability, create a new DGD under a different name and migrate traffic before
 deleting the old DGD.
 
