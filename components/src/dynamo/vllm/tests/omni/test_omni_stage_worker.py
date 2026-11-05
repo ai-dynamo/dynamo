@@ -32,6 +32,7 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
@@ -707,6 +708,34 @@ def test_build_sampling_params_llm_rejects_out_of_range_greedy_values():
         _build_sampling_params(
             _llm_stage_with_sampling_defaults(), {"temperature": 0.0, "top_p": 0.0}
         )
+
+
+@pytest.mark.asyncio
+async def test_invalid_sampling_override_yields_error_chunk():
+    engine = _MockEngine()
+    in_connector = MagicMock()
+    in_connector.get.return_value = {"engine_inputs": {"prompt": "hi"}}
+    stage_config = _llm_stage_with_sampling_defaults()
+    stage_config.engine_input_source = [0]
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=stage_config,
+        connectors={("0", "1"): in_connector},
+        stage_id=1,
+    )
+    request = {
+        "request_id": "req-invalid-top-p",
+        "original_prompt": {"prompt": "hi"},
+        "stage_connector_refs": {"0": {"name": "ref0"}},
+        "sampling_params_list": {"temperature": 0.0, "top_p": 0.0},
+    }
+
+    chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert len(chunks) == 1
+    assert chunks[0]["finished"] is True
+    assert "top_p" in chunks[0]["error"]
+    assert engine.received_prompt is None
 
 
 def test_build_sampling_params_no_defaults_returns_none():
