@@ -79,7 +79,6 @@ from __future__ import annotations
 
 import enum
 import hashlib
-import inspect
 import json
 import logging
 import math
@@ -329,12 +328,7 @@ def _bench_engine_kv_cache(cache_config: Any, kv_cache_config: Any) -> dict[str,
         ),
         "groups": groups,
     }
-    # vLLM 0.29.0 resolves the layout in the engine-core process and records
-    # it on both configs; 0.28.0 keeps it in a worker-process global and the
-    # key is simply absent there.
-    layout = getattr(kv_cache_config, "kv_cache_layout", None) or getattr(
-        cache_config, "kv_cache_layout", None
-    )
+    layout = getattr(kv_cache_config, "kv_cache_layout", None)
     if layout is not None:
         block["kv_cache_layout"] = _json_safe(layout)
     return block
@@ -2211,11 +2205,6 @@ class _FpmPublisherThread:
 # ---------------------------------------------------------------------------
 
 
-_BASE_SCHEDULE_TAKES_THROTTLE = (
-    "throttle_prefills" in inspect.signature(AsyncScheduler.schedule).parameters
-)
-
-
 class InstrumentedScheduler(AsyncScheduler):
     def __init__(
         self,
@@ -2376,13 +2365,7 @@ class InstrumentedScheduler(AsyncScheduler):
     def _schedule_and_record_time(
         self, throttle_prefills: bool = False
     ) -> SchedulerOutput:
-        # vLLM added `throttle_prefills` to Scheduler.schedule() after some of
-        # the runtime images were built; pass it only when the base accepts it
-        # so one overlay works across both.
-        if _BASE_SCHEDULE_TAKES_THROTTLE:
-            output = super().schedule(throttle_prefills)
-        else:
-            output = super().schedule()
+        output = super().schedule(throttle_prefills)
         if output.total_num_scheduled_tokens > 0:
             if self._bench_active:
                 try:
@@ -2656,13 +2639,7 @@ class InstrumentedScheduler(AsyncScheduler):
         """Classify requests across vLLM's waiting queues by their next work."""
         prefill = WelfordAccumulator()
         decode_kv = WelfordAccumulator()
-        # vLLM 0.31 splits waiting queues by whether requests hold KV blocks.
-        if hasattr(self, "kv_holding_waiting"):
-            other_waiting = self.kv_holding_waiting
-        else:
-            other_waiting = self.skipped_waiting
-
-        for request in chain(self.waiting, other_waiting):
+        for request in chain(self.waiting, self.kv_holding_waiting):
             if request.status in (
                 RequestStatus.PREEMPTED,
                 RequestStatus.WAITING_FOR_REMOTE_KVS,
@@ -4672,11 +4649,11 @@ class InstrumentedScheduler(AsyncScheduler):
                     block_ids=block_ids,
                     num_computed_tokens=ctx_len,
                     lora_request=None,
-                    # vLLM >=0.22's v2 GPU model runner requires `prefill_token_ids`
+                    # vLLM's v2 GPU model runner requires `prefill_token_ids`
                     # (asserted non-None in gpu/model_runner.add_requests, used as the
                     # request's `all_token_ids`). vLLM's own scheduler passes
                     # `req._all_token_ids` for new requests; mirror that here for the
-                    # synthetic decode requests we build directly. Older runners ignore it.
+                    # synthetic decode requests we build directly.
                     prefill_token_ids=req._all_token_ids,
                 )
             )
@@ -6264,10 +6241,7 @@ class InstrumentedScheduler(AsyncScheduler):
 
     @staticmethod
     def _kvwarm_admission_cap(manager) -> int | None:
-        if hasattr(manager, "max_admission_blocks_per_request"):
-            cap = manager.max_admission_blocks_per_request
-        else:
-            cap = getattr(manager, "_max_admission_blocks_per_request", None)
+        cap = getattr(manager, "max_admission_blocks_per_request", None)
         return cap if isinstance(cap, int) and cap > 0 else None
 
     def _kvwarm_circular_table_manager(self, manager) -> bool:

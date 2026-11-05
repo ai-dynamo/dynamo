@@ -300,52 +300,6 @@ class TestReasoningParserForwarding:
             {"chat_template_kwargs": {"reasoning_effort": "high"}},
         )
 
-    def test_generate_signature_support_is_cached(self, monkeypatch):
-        class EngineClient:
-            def generate(
-                self,
-                prompt,
-                sampling_params,
-                request_id,
-                *,
-                reasoning_ended=None,
-                reasoning_parser_kwargs=None,
-            ):
-                pass
-
-        engine_client = EngineClient()
-        signature_calls = 0
-        original_signature = mod.inspect.signature
-
-        def counting_signature(obj):
-            nonlocal signature_calls
-            signature_calls += 1
-            return original_signature(obj)
-
-        monkeypatch.setattr(mod.inspect, "signature", counting_signature)
-
-        assert mod._engine_generate_reasoning_kwargs(
-            engine_client,
-            False,
-            {"chat_template_kwargs": {"reasoning_effort": "high"}},
-        ) == {
-            "reasoning_ended": False,
-            "reasoning_parser_kwargs": {
-                "chat_template_kwargs": {"reasoning_effort": "high"}
-            },
-        }
-        assert mod._engine_generate_reasoning_kwargs(
-            engine_client,
-            True,
-            {"chat_template_kwargs": {"reasoning_effort": "low"}},
-        ) == {
-            "reasoning_ended": True,
-            "reasoning_parser_kwargs": {
-                "chat_template_kwargs": {"reasoning_effort": "low"}
-            },
-        }
-        assert signature_calls == 1
-
     @pytest.mark.asyncio
     async def test_generate_tokens_forwards_reasoning_parser_metadata(self):
         from vllm.sampling_params import SamplingParams
@@ -393,46 +347,6 @@ class TestReasoningParserForwarding:
                 "chat_template_kwargs": {"reasoning_effort": "high"}
             },
         }
-
-    @pytest.mark.asyncio
-    async def test_generate_tokens_drops_reasoning_metadata_for_old_vllm(self):
-        from vllm.sampling_params import SamplingParams
-
-        handler = _make_handler()
-        calls = {}
-
-        async def fake_generate(
-            prompt,
-            sampling_params,
-            request_id,
-            *,
-            lora_request=None,
-            data_parallel_rank=None,
-            trace_headers=None,
-            priority=0,
-            session_id=None,
-        ):
-            calls["called"] = True
-            if False:
-                yield None
-
-        handler.engine_client = MagicMock()
-        handler.engine_client.generate = fake_generate
-
-        chunks = []
-        async for chunk in handler.generate_tokens(
-            PatchedTokensPrompt(prompt_token_ids=[1]),
-            SamplingParams(max_tokens=1),
-            "req-1",
-            reasoning_ended=True,
-            reasoning_parser_kwargs={
-                "chat_template_kwargs": {"reasoning_effort": "low"}
-            },
-        ):
-            chunks.append(chunk)
-
-        assert chunks == []
-        assert calls == {"called": True}
 
     @pytest.mark.asyncio
     async def test_generate_tokens_emits_routed_experts_on_final_chunk(self):
