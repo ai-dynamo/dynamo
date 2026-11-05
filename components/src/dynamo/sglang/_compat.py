@@ -25,6 +25,8 @@ import importlib
 import inspect
 import json
 import logging
+import os
+import re
 import uuid
 from collections.abc import Mapping
 from functools import lru_cache
@@ -548,10 +550,114 @@ def supports_require_reasoning(engine: Any) -> bool:
     )
 
 
+_TEXT_ENCODER_COMPONENT = re.compile(r"text_encoder(?:_(\d+))?")
+
+
+def _cached_model_index(
+    model_path: str, *, subfolder: str | None, revision: str | None
+) -> dict[str, Any] | None:
+    """Read a Diffusers ``model_index.json`` without downloading anything."""
+    root = os.path.expanduser(model_path)
+    if not os.path.isdir(root):
+        if os.path.exists(root):
+            return None
+        try:
+            from huggingface_hub import snapshot_download
+
+            root = snapshot_download(
+                repo_id=model_path,
+                revision=revision,
+                allow_patterns=["*model_index.json"],
+                local_files_only=True,
+            )
+        except Exception:
+            return None
+    if subfolder:
+        root = os.path.join(root, subfolder)
+    try:
+        with open(os.path.join(root, "model_index.json")) as f:
+            index = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return index if isinstance(index, dict) else None
+
+
+def diffusers_text_encoder_precision_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Give every text encoder of a Diffusers-fallback checkpoint a precision.
+
+    SGLang 0.5.23 (sgl-project/sglang#45978) sizes every weighted component of
+    a locally cached checkpoint when ``performance_mode`` is ``auto``, and
+    looks up ``text_encoder_N`` at index ``N-1`` of
+    ``pipeline_config.text_encoder_precisions``. The generic Diffusers fallback
+    config lists one entry, so a checkpoint with a second encoder, such as
+    SDXL, fails in ``DiffGenerator.from_pretrained`` with "No configured
+    precision for 'text_encoder_2'".
+
+    The fallback loads the whole Diffusers pipeline at ``dit_precision`` and
+    uses these entries only for that memory estimate. Fill each missing
+    encoder with ``dit_precision`` in ``component_precisions``, never
+    replacing a value the caller set. Native SGLang configs are returned
+    unchanged. Remove once SGLang sizes encoders that have no configured
+    precision.
+    """
+    index = _cached_model_index(
+        kwargs["model_path"],
+        subfolder=kwargs.get("model_subfolder"),
+        revision=kwargs.get("revision"),
+    )
+    if index is None:
+        # Not cached locally: SGLang's sizing skips it too.
+        return kwargs
+    encoder_positions: dict[str, int] = {}
+    for name, spec in index.items():
+        match = _TEXT_ENCODER_COMPONENT.fullmatch(name)
+        if match and isinstance(spec, list) and spec and spec[0] is not None:
+            encoder_positions[name] = int(match.group(1) or 1) - 1
+    if not encoder_positions:
+        return kwargs
+
+    try:
+        from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
+        from sglang.multimodal_gen.configs.pipeline_configs.diffusers_generic import (
+            DiffusersGenericPipelineConfig,
+        )
+    except ImportError:
+        return kwargs
+    try:
+        pipeline_config = PipelineConfig.from_kwargs(dict(kwargs))
+    except Exception as exc:
+        # DiffGenerator resolves the same config next and reports the error.
+        logger.debug("Could not resolve the SGLang diffusion pipeline config: %s", exc)
+        return kwargs
+    if not isinstance(pipeline_config, DiffusersGenericPipelineConfig):
+        return kwargs
+
+    configured = len(pipeline_config.text_encoder_precisions or ())
+    component_precisions = dict(kwargs.get("component_precisions") or {})
+    filled = sorted(
+        name
+        for name, position in encoder_positions.items()
+        if position >= configured and name not in component_precisions
+    )
+    if not filled:
+        return kwargs
+    for name in filled:
+        component_precisions[name] = pipeline_config.dit_precision
+    logger.info(
+        "Setting %s precision to %s, the Diffusers pipeline load dtype: SGLang's "
+        "Diffusers fallback configures %d text encoder precision(s)",
+        ", ".join(filled),
+        pipeline_config.dit_precision,
+        configured,
+    )
+    return {**kwargs, "component_precisions": component_precisions}
+
+
 __all__ = [
     "ConfigArgumentMerger",
     "add_sglang_cli_compat",
     "cache_salt_kwargs",
+    "diffusers_text_encoder_precision_kwargs",
     "filter_supported_async_generate_kwargs",
     "get_encoder_preprocessor_modules",
     "get_mm_encoder_class",

@@ -5,6 +5,7 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import re
@@ -30,6 +31,7 @@ from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang._compat import (
     add_sglang_cli_compat,
     cache_salt_kwargs,
+    diffusers_text_encoder_precision_kwargs,
     filter_supported_async_generate_kwargs,
     get_sglang_model_config,
     override_server_args,
@@ -226,6 +228,99 @@ def test_diffusion_generator_kwargs_omits_unset_master_port():
 
     assert kwargs["num_gpus"] == 1
     assert "master_port" not in kwargs
+
+
+def _write_diffusers_checkpoint(root: Path, encoders: list[str]) -> str:
+    # Only model_index.json and the component folders it names are needed to
+    # resolve the pipeline config; the bug is in sizing, not loading.
+    components = {name: ["transformers", "CLIPTextModel"] for name in encoders}
+    components |= {
+        "tokenizer": ["transformers", "CLIPTokenizer"],
+        "unet": ["diffusers", "UNet2DConditionModel"],
+        "vae": ["diffusers", "AutoencoderKL"],
+        "scheduler": ["diffusers", "EulerDiscreteScheduler"],
+    }
+    for name in components:
+        (root / name).mkdir()
+    index = {
+        # No native SGLang pipeline, so SGLang falls back to Diffusers.
+        "_class_name": "StableDiffusionXLPipeline",
+        "_diffusers_version": "0.24.0",
+        "feature_extractor": [None, None],
+        **components,
+    }
+    (root / "model_index.json").write_text(json.dumps(index))
+    return str(root)
+
+
+def _resolve_text_encoder_precisions(kwargs: dict, encoders: list[str]) -> dict:
+    """Resolve each encoder's precision the way SGLang's memory sizing does."""
+    from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
+    from sglang.multimodal_gen.runtime.utils.precision import (
+        resolve_component_precision,
+    )
+
+    server_args = SimpleNamespace(
+        pipeline_config=PipelineConfig.from_kwargs(dict(kwargs)),
+        component_precisions=kwargs.get("component_precisions", {}),
+    )
+    return {name: resolve_component_precision(server_args, name) for name in encoders}
+
+
+@pytest.mark.parametrize(
+    "encoders",
+    [
+        pytest.param(["text_encoder", "text_encoder_2"], id="sdxl"),
+        pytest.param(
+            ["text_encoder", "text_encoder_2", "text_encoder_3"], id="three-encoders"
+        ),
+    ],
+)
+def test_diffusers_text_encoder_precision_kwargs_sizes_every_encoder(
+    tmp_path, encoders
+):
+    import torch
+
+    kwargs = {
+        "model_path": _write_diffusers_checkpoint(tmp_path, encoders),
+        "num_gpus": 1,
+    }
+    with pytest.raises(
+        ValueError, match="No configured precision for 'text_encoder_2'"
+    ):
+        _resolve_text_encoder_precisions(kwargs, encoders)
+
+    patched = diffusers_text_encoder_precision_kwargs(kwargs)
+
+    assert "component_precisions" not in kwargs
+    # The fallback loads every component at dit_precision (bf16).
+    assert _resolve_text_encoder_precisions(patched, encoders) == {
+        "text_encoder": torch.float16,
+        **{name: torch.bfloat16 for name in encoders[1:]},
+    }
+
+
+def test_diffusers_text_encoder_precision_kwargs_keeps_explicit_precision(tmp_path):
+    kwargs = {
+        "model_path": _write_diffusers_checkpoint(
+            tmp_path, ["text_encoder", "text_encoder_2", "text_encoder_3"]
+        ),
+        "component_precisions": {"text_encoder_2": "fp32"},
+    }
+
+    patched = diffusers_text_encoder_precision_kwargs(kwargs)
+
+    assert patched["component_precisions"] == {
+        "text_encoder_2": "fp32",
+        "text_encoder_3": "bf16",
+    }
+    assert kwargs["component_precisions"] == {"text_encoder_2": "fp32"}
+
+
+def test_diffusers_text_encoder_precision_kwargs_leaves_single_encoder(tmp_path):
+    kwargs = {"model_path": _write_diffusers_checkpoint(tmp_path, ["text_encoder"])}
+
+    assert diffusers_text_encoder_precision_kwargs(kwargs) is kwargs
 
 
 def test_override_server_args_uses_declarative_resolution(monkeypatch):
