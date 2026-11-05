@@ -184,7 +184,7 @@ trtllm:
     runtime_image_tag: 1.4.0rc2
     # Per-arch baseline stem (re-captured against tensorrt-llm/release, both arches).
     baseline_sbom: release@93a3eaf1
-  nixl_ref: v1.5.0
+  nixl_ref: v1.5.2
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
 
