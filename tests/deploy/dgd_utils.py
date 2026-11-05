@@ -66,6 +66,7 @@ MIN_RESPONSE_CONTENT_LENGTH = 100
 PORT_FORWARD_REQUEST_RETRY_LIMIT = 1
 DISCOVERY_SNAPSHOT_TIMEOUT = 15
 DISCOVERY_RESOURCE_TIMEOUT = 3
+RESTART_REPORT_TIMEOUT = 15
 _KR8S_VCLUSTER_CONNECTION_ERRORS = (httpx.TransportError, kr8s.APITimeoutError)
 
 
@@ -1265,7 +1266,7 @@ class ManagedDeployment:
         self, prev_log_tail_lines: int = 80
     ) -> List[str]:
         """Surface the previous-instance log tail for any DGD container that
-        has restarted *while we are still waiting for Ready*.
+        has restarted, while waiting for Ready or during failure cleanup.
 
         This is the diagnostic that converts a "deployment timed out, no idea
         why" CI failure into a self-diagnosing one when a worker is in
@@ -1308,7 +1309,7 @@ class ManagedDeployment:
 
                     warning = (
                         f"{key}: in-flight restart count {after} "
-                        f"(last seen {already}) while waiting for Ready"
+                        f"(last seen {already})"
                     )
                     if last_reason:
                         warning += f" lastReason={last_reason}"
@@ -1981,6 +1982,28 @@ class ManagedDeployment:
                     # existing setup or test failure.
                     self._logger.warning(
                         "Discovery snapshot failed; continuing cleanup: %s", error
+                    )
+                # A worker that crashes after Ready makes the frontend answer
+                # 503 "model not ready"; put its restart and previous log in
+                # the job log, since failure files may not be uploaded.
+                try:
+                    async with asyncio.timeout(RESTART_REPORT_TIMEOUT):
+                        restarts = await self._dump_in_flight_restart_logs()
+                    if restarts:
+                        self._logger.warning(
+                            "Detected container restarts at test failure:"
+                        )
+                        for line in restarts:
+                            self._logger.warning(f"  {line}")
+                except asyncio.CancelledError as error:
+                    pending_cancellation = pending_cancellation or error
+                    self._logger.warning(
+                        "Restart report cancelled; finishing cleanup before "
+                        "propagating cancellation"
+                    )
+                except Exception as error:
+                    self._logger.warning(
+                        "Restart report failed; continuing cleanup: %s", error
                     )
             # Collect logs/metrics first; any PFs opened here will be tracked and stopped below.
             self._get_service_logs()

@@ -4,6 +4,7 @@
 """Unit tests for schema-aware DynamoGraphDeployment helpers."""
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
@@ -346,3 +347,73 @@ async def test_discovery_capture_and_cleanup(
             pass
 
     assert events == expected_events
+
+
+def restarted_worker_deployment(tmp_path, list_pods: AsyncMock) -> ManagedDeployment:
+    deployment = managed_deployment(tmp_path)
+    deployment._core_api = SimpleNamespace(
+        list_namespaced_pod=list_pods,
+        read_namespaced_pod_log=AsyncMock(return_value="loading\nworker crashed\n"),
+    )
+    deployment._capture_discovery_state = AsyncMock()
+    deployment._get_service_logs = MagicMock()
+    deployment._get_pod_events = AsyncMock(return_value=[])
+    deployment._delete_deployment = AsyncMock()
+    return deployment
+
+
+def restarted_worker_pods() -> SimpleNamespace:
+    terminated = SimpleNamespace(reason="Error", exit_code=139)
+    container_status = SimpleNamespace(
+        name="main",
+        restart_count=1,
+        last_state=SimpleNamespace(terminated=terminated),
+    )
+    pod = SimpleNamespace(
+        metadata=SimpleNamespace(name="sglang-agg-0-decode-0"),
+        status=SimpleNamespace(container_statuses=[container_status]),
+    )
+    return SimpleNamespace(items=[pod])
+
+
+async def test_failed_cleanup_logs_worker_restart_after_ready(tmp_path, caplog) -> None:
+    """A worker restart after Ready reaches the job log on test failure."""
+    deployment = restarted_worker_deployment(
+        tmp_path, AsyncMock(return_value=restarted_worker_pods())
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await deployment._cleanup(failed=True)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    report = "\n".join(warnings)
+    assert "sglang-agg-0-decode-0/main: in-flight restart count 1" in report
+    assert "lastReason=Error lastExitCode=139" in report
+    assert "worker crashed" in report
+    deployment._delete_deployment.assert_awaited_once_with(fail_on_timeout=False)
+
+
+async def test_successful_cleanup_skips_restart_report(tmp_path) -> None:
+    list_pods = AsyncMock(return_value=restarted_worker_pods())
+    deployment = restarted_worker_deployment(tmp_path, list_pods)
+
+    await deployment._cleanup(failed=False)
+
+    list_pods.assert_not_awaited()
+    deployment._delete_deployment.assert_awaited_once_with(fail_on_timeout=False)
+
+
+async def test_failed_cleanup_deletes_deployment_when_restart_report_fails(
+    tmp_path, caplog
+) -> None:
+    list_pods = AsyncMock(
+        side_effect=aiohttp.ClientConnectionError("vCluster tunnel closed")
+    )
+    deployment = restarted_worker_deployment(tmp_path, list_pods)
+
+    with caplog.at_level(logging.WARNING):
+        await deployment._cleanup(failed=True)
+
+    list_pods.assert_awaited_once()
+    assert "Restart report failed; continuing cleanup" in caplog.text
+    deployment._delete_deployment.assert_awaited_once_with(fail_on_timeout=False)
