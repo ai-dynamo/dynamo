@@ -123,11 +123,15 @@ spec:
   part after `$(DYN_POD_NAME)/` must not contain `/`. `<mount_path>` is where the frontend mounts
   `retune.dgdr.claim_name`. The operator injects `DYN_PARENT_DGD_K8S_NAME`.
 - `DYN_ENABLE_FRONTEND_ADMIN_API` and `DYN_FRONTEND_ADMIN_HOST` start the frontend admin
-  listener on every pod address, on port 8002 unless `DYN_FRONTEND_ADMIN_PORT` sets another. The
-  Planner reads the port from each frontend pod and sets the router policies there; the inference
-  port does not serve `/router_policy`. The host may also be the pod IP, through
-  `valueFrom: {fieldRef: {fieldPath: status.podIP}}`; the other two values must be literal. The
-  listener has no authentication; see [Security](#security).
+  listener on the pod's addresses, on port 8002 unless `DYN_FRONTEND_ADMIN_PORT` sets another.
+  The Planner reads the port from each frontend pod and sets the router policies there; the
+  inference port does not serve `/router_policy`. The listener has no authentication; see
+  [Security](#security).
+  - The host is `0.0.0.0` (IPv4), `::` (IPv6 and dual-stack pods), or the pod IP through
+    `valueFrom: {fieldRef: {fieldPath: status.podIP}}`.
+  - The other values must be literal, without `$(VAR)` references: the Planner reads them from
+    the pod spec, where Kubernetes has not expanded them. Set `DYN_FRONTEND_ADMIN_PORT` in `env`
+    when an `envFrom` source could set it; otherwise the Planner assumes port 8002 and warns.
 - Records are dropped without a count for `prompt_embeds`, multimodal, `n > 1` and `best_of > 1`
   requests, and when the writer lags or a batch write fails.
 - The trace holds unkeyed xxh3 hash chains of the prompts. Anyone who can create pods in the
@@ -282,7 +286,7 @@ retries:
 | P7 | The DGD serves one model; the frontend is not an EPP, not a `frontendSidecar`, and has no TLS |
 | P8 | One frontend replica, or `--router-replica-sync` |
 | P9 | No `scalingAdapter` on worker components; one Planner replica |
-| P10 | The frontend trace environment, claim mount and admin listener match [Configure the frontend](#configure-the-frontend): the trace file prefix is directly under `$(DYN_POD_NAME)/`, and the admin API is on, bound to an address other than loopback, with a port from 1 to 65535 |
+| P10 | The frontend trace environment, claim mount and admin listener match [Configure the frontend](#configure-the-frontend): the trace file prefix is directly under `$(DYN_POD_NAME)/`, and the admin API is on, bound to `0.0.0.0`, `::` or the pod IP, with literal values and a port from 1 to 65535 |
 | P14 | Every router's startup parameters equal the ones the Planner parsed from the frontend |
 
 **Health**, checked every round. While one fails, windows do not launch; nothing is reset:

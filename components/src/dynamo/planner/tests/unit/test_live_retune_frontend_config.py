@@ -2006,6 +2006,9 @@ def test_worker_env_from_is_warned_once():
     assert report.p4_ok and report.spec_ok, report.reasons
     env_from = sorted(w for w in report.warnings if "envFrom" in w)
     assert env_from == [
+        "P10: the frontend uses envFrom, which the planner cannot read; it "
+        "assumes envFrom sets no DYN_FRONTEND_ADMIN_PORT and calls port 8002. "
+        "Set DYN_FRONTEND_ADMIN_PORT in the container's env to be sure",
         "P4: the frontend container uses envFrom secretRef 'hf-token-secret'; "
         "the planner cannot read it and assumes it sets no router env (P14 "
         "still checks the routers' policy parameters)",
@@ -2350,11 +2353,15 @@ P10_CASES = [
         None,
         "its admin listener binds 127.0.0.1 by default",
     ),
-    ({"DYN_FRONTEND_ADMIN_HOST": "127.0.0.2"}, None, "is a loopback address"),
-    ({"DYN_FRONTEND_ADMIN_HOST": "[::1]"}, None, "is a loopback address"),
-    ({"DYN_FRONTEND_ADMIN_HOST": "localhost"}, None, "is not an IP address"),
+    ({"DYN_FRONTEND_ADMIN_HOST": "127.0.0.2"}, None, "must be 0.0.0.0, :: or"),
+    ({"DYN_FRONTEND_ADMIN_HOST": "[::1]"}, None, "must be 0.0.0.0, :: or"),
+    ({"DYN_FRONTEND_ADMIN_HOST": "localhost"}, None, "must be 0.0.0.0, :: or"),
+    ({"DYN_FRONTEND_ADMIN_HOST": "::ffff:127.0.0.1"}, None, "must be 0.0.0.0, :: or"),
+    ({"DYN_FRONTEND_ADMIN_HOST": "fe80::1%eth0"}, None, "must be 0.0.0.0, :: or"),
+    # A literal pod IP in a pod template matches one pod at most.
+    ({"DYN_FRONTEND_ADMIN_HOST": "10.1.2.3"}, None, "must be 0.0.0.0, :: or"),
     ({"DYN_FRONTEND_ADMIN_HOST": "[::]"}, None, None),
-    ({"DYN_FRONTEND_ADMIN_HOST": "10.1.2.3"}, None, None),
+    ({"DYN_FRONTEND_ADMIN_HOST": "::"}, None, None),
     (
         {
             "DYN_FRONTEND_ADMIN_HOST": {
@@ -2377,6 +2384,20 @@ P10_CASES = [
     ({"DYN_FRONTEND_ADMIN_PORT": "0"}, None, "a port number from 1 to 65535"),
     ({"DYN_FRONTEND_ADMIN_PORT": " 9100"}, None, "a port number from 1 to 65535"),
     ({"DYN_FRONTEND_ADMIN_PORT": "65536"}, None, "a port number from 1 to 65535"),
+    # Far past int()'s digit limit: rejected, not raised.
+    ({"DYN_FRONTEND_ADMIN_PORT": "0" * 5000 + "8003"}, None, None),
+    ({"DYN_FRONTEND_ADMIN_PORT": "9" * 5000}, None, "a port number from 1 to 65535"),
+    # The planner reads the pod spec, where $(VAR) is not expanded yet.
+    (
+        {"DYN_FRONTEND_ADMIN_PORT": "$(DYN_POD_NAME)"},
+        None,
+        "DYN_FRONTEND_ADMIN_PORT must be a literal value",
+    ),
+    (
+        {"DYN_ENABLE_FRONTEND_ADMIN_API": "$(DYN_REQUEST_TRACE)"},
+        None,
+        "must set DYN_ENABLE_FRONTEND_ADMIN_API=1 as a literal value",
+    ),
     (
         {
             "DYN_FRONTEND_ADMIN_PORT": {
@@ -2403,6 +2424,27 @@ def test_p10_trace_recipe(env, frontend_kwargs, match):
     else:
         assert any(match in r for r in p10), p10
         assert not report.spec_ok
+
+
+def test_p10_warns_when_env_from_could_set_the_admin_port():
+    def with_env_from(env: list[dict[str, Any]], source: dict[str, Any]) -> dict:
+        component = frontend(env=env)
+        component["podTemplate"]["spec"]["containers"][0]["envFrom"] = [source]
+        return dgd(component, worker(), planner())
+
+    def port_warnings(report: Any) -> list[str]:
+        return [w for w in report.warnings if "DYN_FRONTEND_ADMIN_PORT" in w]
+
+    source = {"configMapRef": {"name": "frontend-env"}}
+    report = evaluate(with_env_from(trace_env(), source))
+    assert report.spec_ok, report.reasons
+    assert port_warnings(report), report.warnings
+    # An explicit env entry wins over envFrom.
+    report = evaluate(with_env_from(trace_env(DYN_FRONTEND_ADMIN_PORT="8002"), source))
+    assert report.spec_ok and not port_warnings(report)
+    # A prefixed source cannot define the name.
+    report = evaluate(with_env_from(trace_env(), {**source, "prefix": "APP_"}))
+    assert report.spec_ok and not port_warnings(report)
 
 
 def test_p10_custom_segments_dir_and_graph_env():

@@ -1043,6 +1043,7 @@ async def test_not_ready_and_p12_say_why(caplog) -> None:
         # P12 names the admin listener.
         world.frontend.down = False
         world.frontend.no_policy_api = True
+        caplog.clear()
         for _ in range(3):
             await sup.control_round()
         assert not sup.ready()
@@ -1050,6 +1051,8 @@ async def test_not_ready_and_p12_say_why(caplog) -> None:
             "DYN_ENABLE_FRONTEND_ADMIN_API" in reason
             for reason in sup.not_ready_reasons()
         )
+        # P12 stayed false, but its cause changed: logged again.
+        assert "admin listener is off" in caplog.text
         caplog.clear()
         world.frontend.no_policy_api = False
         await sup.control_round()

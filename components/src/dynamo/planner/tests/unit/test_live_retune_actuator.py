@@ -293,6 +293,15 @@ async def test_observe_latches_initials_and_never_writes() -> None:
     assert report.converged
 
 
+async def test_a_pod_without_an_admin_port_is_admin_disabled_at_once() -> None:
+    # Its env starts no admin listener the planner can read: P12 names the
+    # admin listener in the first round instead of after 404 rounds.
+    actuator, _, client, _ = make_actuator([replace(pod("fe-0"), admin_port=None)])
+    client.frontend("fe-0").add(FakeRouter("r1", STARTUP))
+    report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
+    assert report.admin_api_disabled
+
+
 # ------------------------------------------------------------------- apply
 
 

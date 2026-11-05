@@ -846,7 +846,11 @@ class RouterActuator:
             del self._get_404_rounds[uid]
         for outcome in outcomes:
             uid = outcome.pod.uid
-            if outcome.get_status == 404:
+            if outcome.pod.ip and outcome.pod.admin_port is None:
+                # The pod's env starts no admin listener the planner can read:
+                # no call was made, and none will answer until it changes.
+                self._get_404_rounds[uid] = self._admin_disabled_rounds
+            elif outcome.get_status == 404:
                 self._get_404_rounds[uid] = self._get_404_rounds.get(uid, 0) + 1
             elif outcome.get_status is not None:
                 self._get_404_rounds.pop(uid, None)

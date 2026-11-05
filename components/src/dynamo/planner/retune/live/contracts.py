@@ -49,14 +49,27 @@ ENV_FRONTEND_ADMIN_PORT = "DYN_FRONTEND_ADMIN_PORT"
 DEFAULT_FRONTEND_ADMIN_PORT = 8002
 # lib/truthy is_truthy.
 TRUTHY = frozenset({"1", "true", "on", "yes"})
-# What Rust's ``str::parse::<u16>`` accepts.
-_U16 = re.compile(r"\+?[0-9]+")
+_DIGITS = re.compile(r"[0-9]+")
 
 
 def is_truthy(value: Optional[str]) -> bool:
     """``lib/truthy`` ``is_truthy``: 1/true/on/yes, any case, trimmed."""
 
     return value is not None and value.strip().lower() in TRUTHY
+
+
+def parse_u16(value: str) -> Optional[int]:
+    """Rust's ``str::parse::<u16>``: an optional ``+`` and ASCII digits
+    (leading zeros allowed), at most 65535; ``None`` otherwise."""
+
+    digits = value[1:] if value.startswith("+") else value
+    if _DIGITS.fullmatch(digits) is None:
+        return None
+    # Strip leading zeros before int(): no digit-count limit, no overflow.
+    significant = digits.lstrip("0") or "0"
+    if len(significant) > 5 or int(significant) > 65535:
+        return None
+    return int(significant)
 
 
 def frontend_admin_port(value: Optional[str]) -> Optional[int]:
@@ -68,9 +81,11 @@ def frontend_admin_port(value: Optional[str]) -> Optional[int]:
     so it maps to ``None``.
     """
 
-    if value is None or _U16.fullmatch(value) is None or int(value) > 65535:
+    if value is None:
         return DEFAULT_FRONTEND_ADMIN_PORT
-    port = int(value)
+    port = parse_u16(value)
+    if port is None:
+        return DEFAULT_FRONTEND_ADMIN_PORT
     return port or None
 
 

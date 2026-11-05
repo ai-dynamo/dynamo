@@ -48,7 +48,6 @@ never reads the planner's own environment.
 from __future__ import annotations
 
 import argparse
-import ipaddress
 import json
 import logging
 import posixpath
@@ -79,6 +78,7 @@ from dynamo.planner.retune.live.contracts import (
     FrontendStartup,
     PremiseReport,
     is_truthy,
+    parse_u16,
 )
 
 if TYPE_CHECKING:
@@ -497,7 +497,7 @@ def evaluate_premises(
                 warnings=warnings,
             )
         )
-        others.extend(_admin_listener_errors(analysis.env))
+        others.extend(_admin_listener_errors(analysis.env, warnings))
 
     # P6 (warn only): AISimulate resolves the model by its HF id.
     warning = _model_warning(dgdr.model)
@@ -2196,7 +2196,7 @@ def _trace_recipe_errors(
     return errors
 
 
-def _admin_listener_errors(env: _Env) -> list[str]:
+def _admin_listener_errors(env: _Env, warnings: list[str]) -> list[str]:
     """P10: the frontend serves /router_policy where the planner reaches it.
 
     The frontend serves the router policy API only on its admin listener
@@ -2204,19 +2204,27 @@ def _admin_listener_errors(env: _Env) -> list[str]:
     ``DYN_ENABLE_FRONTEND_ADMIN_API`` is truthy and binds
     ``DYN_FRONTEND_ADMIN_HOST`` (default ``127.0.0.1``, unreachable from the
     planner pod) on ``DYN_FRONTEND_ADMIN_PORT`` (default 8002). The planner
-    reads the port from each frontend pod's env, so the three values must be
-    literal; the host may also be the pod IP through ``fieldRef``.
+    reads the port from each frontend pod's spec, where Kubernetes has not
+    expanded ``$(VAR)`` references yet, so the values must be literal. The
+    host must be a wildcard address or the pod IP through ``fieldRef``: a
+    literal pod IP in a pod template cannot match every pod.
     """
 
     entries = env.entries
     errors: list[str] = []
 
-    def unreadable(name: str) -> bool:
-        return name in entries and name not in env.values
+    def literal(name: str) -> tuple[bool, Optional[str]]:
+        """(readable, value); an unset name is readable with value None."""
+        entry = entries.get(name)
+        if entry is None:
+            return True, None
+        value = entry.get("value")
+        if entry.get("valueFrom") is not None or "$(" in str(value or ""):
+            return False, None
+        return True, str(value or "")
 
-    if unreadable(ENV_FRONTEND_ADMIN_API) or not is_truthy(
-        env.values.get(ENV_FRONTEND_ADMIN_API)
-    ):
+    readable, enabled = literal(ENV_FRONTEND_ADMIN_API)
+    if not readable or not is_truthy(enabled):
         errors.append(
             f"P10: the frontend must set {ENV_FRONTEND_ADMIN_API}=1 as a literal "
             "value: the planner sets the router policies through /router_policy, "
@@ -2224,28 +2232,23 @@ def _admin_listener_errors(env: _Env) -> list[str]:
         )
 
     host_entry = entries.get(ENV_FRONTEND_ADMIN_HOST)
+    readable, host = literal(ENV_FRONTEND_ADMIN_HOST)
     if host_entry is None:
         errors.append(
             f"P10: the frontend must set {ENV_FRONTEND_ADMIN_HOST} to an address "
             "the planner can reach, such as 0.0.0.0: its admin listener binds "
             "127.0.0.1 by default"
         )
-    elif ENV_FRONTEND_ADMIN_HOST in env.values:
-        host = env.values[ENV_FRONTEND_ADMIN_HOST].strip()
-        literal = host[1:-1] if host.startswith("[") and host.endswith("]") else host
-        try:
-            address = ipaddress.ip_address(literal)
-        except ValueError:
+    elif readable:
+        stripped = (host or "").strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            stripped = stripped[1:-1]
+        if stripped not in ("0.0.0.0", "::"):
             errors.append(
-                f"P10: {ENV_FRONTEND_ADMIN_HOST}={host!r} is not an IP address; "
-                "the frontend would not start its admin listener"
+                f"P10: {ENV_FRONTEND_ADMIN_HOST}={host!r} must be 0.0.0.0, :: or "
+                "the pod IP (fieldRef status.podIP): the planner calls each "
+                "frontend pod at its pod IP"
             )
-        else:
-            if address.is_loopback:
-                errors.append(
-                    f"P10: {ENV_FRONTEND_ADMIN_HOST}={host!r} is a loopback "
-                    "address the planner cannot reach; use 0.0.0.0 or the pod IP"
-                )
     else:
         field_ref = (host_entry.get("valueFrom") or {}).get("fieldRef") or {}
         if field_ref.get("fieldPath") != "status.podIP":
@@ -2254,20 +2257,27 @@ def _admin_listener_errors(env: _Env) -> list[str]:
                 "fieldRef status.podIP"
             )
 
-    if unreadable(ENV_FRONTEND_ADMIN_PORT):
+    readable, port = literal(ENV_FRONTEND_ADMIN_PORT)
+    if not readable:
         errors.append(
             f"P10: {ENV_FRONTEND_ADMIN_PORT} must be a literal value: the planner "
             "reads it from each frontend pod"
         )
-    elif ENV_FRONTEND_ADMIN_PORT in env.values:
+    elif port is not None:
         # Exactly digits: the frontend falls back to 8002 for anything its
         # u16 parse rejects (whitespace included), and 0 picks a random port.
-        port = env.values[ENV_FRONTEND_ADMIN_PORT]
-        if re.fullmatch(r"[0-9]+", port) is None or not 1 <= int(port) <= 65535:
+        number = parse_u16(port) if re.fullmatch(r"[0-9]+", port) else None
+        if not number:
             errors.append(
                 f"P10: {ENV_FRONTEND_ADMIN_PORT}={port!r} must be a port number "
                 "from 1 to 65535"
             )
+    elif _env_from_may_define(ENV_FRONTEND_ADMIN_PORT, env.env_from_prefixes):
+        warnings.append(
+            f"P10: the frontend uses envFrom, which the planner cannot read; it "
+            f"assumes envFrom sets no {ENV_FRONTEND_ADMIN_PORT} and calls port "
+            f"8002. Set {ENV_FRONTEND_ADMIN_PORT} in the container's env to be sure"
+        )
     return errors
 
 

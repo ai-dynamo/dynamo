@@ -676,8 +676,8 @@ class LiveRetuneSupervisor:
         self._canary_ok: Optional[bool] = None
         self._canary_at: Optional[float] = None
         self._last_report: Optional[ActuationReport] = None
-        # P12 as last logged; a change is logged once.
-        self._p12_logged: Optional[bool] = None
+        # (P12, admin API disabled) as last logged; a change is logged once.
+        self._p12_logged: Optional[tuple[bool, bool]] = None
         # (deploy_seq, monotonic since) of a converged rollback.
         self._rollback_since: Optional[tuple[int, float]] = None
 
@@ -1650,9 +1650,9 @@ class LiveRetuneSupervisor:
         if epoch != self._epoch:
             return None
         self._last_report = report
-        p12 = self._p12_ok()
+        p12 = (self._p12_ok(), bool(report.admin_api_disabled))
         if p12 != self._p12_logged:
-            if p12:
+            if p12[0]:
                 logger.info("retune: P12 ok (every frontend's routers answer)")
             else:
                 logger.warning("retune: P12 fails: %s", self._p12_detail())
@@ -2043,10 +2043,10 @@ class LiveRetuneSupervisor:
             return "P12: no router round yet"
         if report.admin_api_disabled:
             return (
-                "P12: a frontend answers 404 on /router_policy; the router policy "
-                "API is served only on the frontend admin listener "
-                "(DYN_ENABLE_FRONTEND_ADMIN_API, DYN_FRONTEND_ADMIN_HOST, "
-                "DYN_FRONTEND_ADMIN_PORT)"
+                "P12: a frontend serves no /router_policy the planner can reach: "
+                "its admin listener is off, unreadable from the pod spec, or "
+                "answers 404 (DYN_ENABLE_FRONTEND_ADMIN_API, "
+                "DYN_FRONTEND_ADMIN_HOST, DYN_FRONTEND_ADMIN_PORT)"
             )
         errors = ", ".join(
             f"{kind} x{count}"
