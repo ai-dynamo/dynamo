@@ -16,7 +16,7 @@ import stat
 import uuid
 import weakref
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -412,7 +412,8 @@ class PlannerReconfiguration:
         self.planner = planner
         self.instance_id = str(uuid.uuid4())
         self._operations: OrderedDict[str, dict[str, Any]] = OrderedDict()
-        self._task: asyncio.Task[None] | None = None
+        # The update preparing or activating: a control API one or a decision's.
+        self._task: asyncio.Task[Any] | None = None
         self._preparation: asyncio.Task[BuiltinLoadPredict] | None = None
         self._closed = False
         self._registered_runtime: DistributedRuntime | None = None
@@ -508,27 +509,107 @@ class PlannerReconfiguration:
             operation["state"] = (
                 "warming" if request.warmup_trace is not None else "preparing"
             )
-            capabilities = self.planner._build_worker_capabilities()
-            self._preparation = asyncio.create_task(
-                asyncio.to_thread(
-                    _prepare_predictor, candidate, capabilities, request.warmup_trace
+            predictor = await self._prepare(
+                _prepare_predictor,
+                candidate,
+                self.planner._build_worker_capabilities(),
+                request.warmup_trace,
+            )
+        operation["applied_revision"] = await self._activate(
+            candidate,
+            request.config.keys(),
+            predictor,
+            lambda: self._check_revision(request),
+        )
+        operation["state"] = "applied"
+
+    async def apply_decision(
+        self,
+        changes: Mapping[str, Any],
+        observations: Sequence[TrafficObservation] | None,
+    ) -> int:
+        """Activate a persisted live retune decision's Planner ``changes``;
+        the new revision.
+
+        The same two-phase path as a control API update: one update at a
+        time, a new load predictor prepared off the event loop on the
+        decision's ``observations`` and tracked past its deadline, and the
+        decision dropped (``ConfigurationConflict``) when another update
+        activates first. Raises on any failure; nothing changes then.
+        """
+
+        async with self.planner._bounded_config_lock():
+            if self._closed:
+                raise _MinimumEndpointUnavailableError("planner is shutting down")
+            if self._task is not None and not self._task.done():
+                raise ConfigurationConflict(
+                    "another configuration update is still preparing"
                 )
-            )
-            # A timed-out thread cannot be killed. Keep tracking it and reject a
-            # second preparation until it exits; it never owns active state.
-            self._preparation.add_done_callback(_consume_preparation_result)
-            predictor = await asyncio.wait_for(
-                asyncio.shield(self._preparation), PREPARATION_TIMEOUT_SECONDS
-            )
+            candidate = candidate_config(self.planner.config, dict(changes))
+            self.planner.validate_runtime_candidate(candidate)
+            rebuild = predictor_rebuild_required(self.planner.config, candidate)
+            if (
+                rebuild
+                and self._preparation is not None
+                and not self._preparation.done()
+            ):
+                raise ConfigurationConflict("another predictor is still preparing")
+            revision = self.planner._config_generation
+
+            def unchanged() -> None:
+                if self.planner._config_generation != revision:
+                    raise ConfigurationConflict(
+                        "the configuration changed while the predictor was "
+                        f"prepared (revision {revision} -> "
+                        f"{self.planner._config_generation})"
+                    )
+
+            async def apply() -> int:
+                predictor = None
+                if rebuild:
+                    predictor = await self._prepare(
+                        prepare_predictor,
+                        candidate,
+                        self.planner._build_worker_capabilities(),
+                        observations,
+                    )
+                return await self._activate(
+                    candidate, list(changes), predictor, unchanged
+                )
+
+            task = asyncio.create_task(apply())
+            self._task = task
+        return await task
+
+    async def _prepare(
+        self, prepare: Callable[..., BuiltinLoadPredict], *args: Any
+    ) -> BuiltinLoadPredict:
+        """Run ``prepare(*args)`` off the event loop within the deadline."""
+
+        self._preparation = asyncio.create_task(asyncio.to_thread(prepare, *args))
+        # A timed-out thread cannot be killed. Keep tracking it and reject a
+        # second preparation until it exits; it never owns active state.
+        self._preparation.add_done_callback(_consume_preparation_result)
+        return await asyncio.wait_for(
+            asyncio.shield(self._preparation), PREPARATION_TIMEOUT_SECONDS
+        )
+
+    async def _activate(
+        self,
+        candidate: PlannerConfig,
+        fields: Iterable[str],
+        predictor: BuiltinLoadPredict | None,
+        check: Callable[[], None],
+    ) -> int:
+        """Activate ``candidate`` between decisions if ``check()`` passes;
+        the new revision."""
+
         async with self.planner._effect_admission_lock:
             async with self.planner._bounded_config_lock():
-                self._check_revision(request)
+                check()
                 self.planner.validate_runtime_candidate(candidate)
-                self.planner.apply_runtime_candidate(
-                    candidate, request.config.keys(), predictor
-                )
-                operation["state"] = "applied"
-                operation["applied_revision"] = self.planner._config_generation
+                self.planner.apply_runtime_candidate(candidate, fields, predictor)
+                return self.planner._config_generation
 
     @staticmethod
     def _finish(task: asyncio.Task[None], operation: dict[str, Any]) -> None:
