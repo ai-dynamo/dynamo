@@ -47,7 +47,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "1.6.1"
+version = "1.6.2"
 edition = "2024"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -57,23 +57,23 @@ repository = "https://github.com/ai-dynamo/dynamo.git"
 keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
-dynamo-custom-policy-builtin = { path = "lib/router-plugins/builtin", version = "1.6.1" }
+dynamo-custom-policy-builtin = { path = "lib/router-plugins/builtin", version = "1.6.2" }
 # Published separately by https://github.com/ai-dynamo/aisimulate.
 aisimulate-core = { version = "=0.13.0" }
 
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "1.6.1" }
-dynamo-llm = { path = "lib/llm", version = "1.6.1" }
-dynamo-rl = { path = "lib/rl", version = "1.6.1" }
+dynamo-runtime = { path = "lib/runtime", version = "1.6.2" }
+dynamo-llm = { path = "lib/llm", version = "1.6.2" }
+dynamo-rl = { path = "lib/rl", version = "1.6.2" }
 dynamo-tokenizers = { version = "=3.1.1" }
 dynamo-renderer = { version = "=8.0.3" }
-dynamo-tokens = { path = "lib/tokens", version = "1.6.1" }
-dynamo-truthy = { path = "lib/truthy", version = "1.6.1" }
-dynamo-data-gen = { path = "lib/data-gen", version = "1.6.1" }
-dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.6.1" }
-dynamo-memory = { path = "lib/memory", version = "1.6.1" }
-dynamo-mocker = { path = "lib/mocker", version = "1.6.1" }
-dynamo-kv-router = { path = "lib/kv-router", version = "1.6.1" }
+dynamo-tokens = { path = "lib/tokens", version = "1.6.2" }
+dynamo-truthy = { path = "lib/truthy", version = "1.6.2" }
+dynamo-data-gen = { path = "lib/data-gen", version = "1.6.2" }
+dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.6.2" }
+dynamo-memory = { path = "lib/memory", version = "1.6.2" }
+dynamo-mocker = { path = "lib/mocker", version = "1.6.2" }
+dynamo-kv-router = { path = "lib/kv-router", version = "1.6.2" }
 dynamo-protocols = { version = "=8.2.0" }
 dynamo-parsers = { version = "=10.0.7" }
 
@@ -82,18 +82,18 @@ dynamo-parsers = { version = "=10.0.7" }
 #   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
 # Native count-before-string early streaming still needs a frontend-crates fix.
 dynamo-parsers-v2 = { version = "=0.7.24" }
-dynamo-backend-common = { path = "lib/backend-common", version = "1.6.1" }
-dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.6.1" }
+dynamo-backend-common = { path = "lib/backend-common", version = "1.6.2" }
+dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.6.2" }
 
 
 # kvbm
-kvbm-common = { path = "lib/kvbm-common", version = "1.6.1" }
-kvbm-config = { path = "lib/kvbm-config", version = "1.6.1" }
-kvbm-consolidator = { path = "lib/kvbm-consolidator", version = "1.6.1" }
-kvbm-engine = { path = "lib/kvbm-engine", version = "1.6.1" }
-kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.6.1" }
-kvbm-logical = { path = "lib/kvbm-logical", version = "1.6.1" }
-kvbm-physical = { path = "lib/kvbm-physical", version = "1.6.1" }
+kvbm-common = { path = "lib/kvbm-common", version = "1.6.2" }
+kvbm-config = { path = "lib/kvbm-config", version = "1.6.2" }
+kvbm-consolidator = { path = "lib/kvbm-consolidator", version = "1.6.2" }
+kvbm-engine = { path = "lib/kvbm-engine", version = "1.6.2" }
+kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.6.2" }
+kvbm-logical = { path = "lib/kvbm-logical", version = "1.6.2" }
+kvbm-physical = { path = "lib/kvbm-physical", version = "1.6.2" }
 
 # velo
 velo = { version = "0.12.0" }
