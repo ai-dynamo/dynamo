@@ -191,8 +191,13 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 	oldDGD *nvidiacomv1beta1.DynamoGraphDeployment,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
+	var oldObjectMeta *metav1.ObjectMeta
+	if oldDGD != nil {
+		oldObjectMeta = &oldDGD.ObjectMeta
+	}
 	allErrs = append(allErrs, v.validateObjectMeta(
 		&dgd.ObjectMeta,
+		oldObjectMeta,
 		field.NewPath("metadata"),
 		hasIntraPodFailover(&dgd.Spec),
 		dgd.HasLPXComponent(),
@@ -247,8 +252,10 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 }
 
 // validateObjectMeta validates DGD objectMeta. objectMeta and fldPath must not be nil.
+// oldObjectMeta is nil on create.
 func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 	objectMeta *metav1.ObjectMeta,
+	oldObjectMeta *metav1.ObjectMeta,
 	fldPath *field.Path,
 	hasIntraPodFailover bool,
 	hasLPXComponent bool,
@@ -256,6 +263,14 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 	allErrs := field.ErrorList{}
 	annotationsPath := fldPath.Child("annotations")
 	allErrs = append(allErrs, v.sharedValidation.validateObjectMeta(objectMeta, nil, fldPath)...)
+
+	// The nvidia.com/dynamo-graph-deployment-name label carries the DGD name unchanged
+	// because controllers read it back to find the DGD, so the name must fit in a label
+	// value. Names are immutable; ratchet an existing object so it can still be updated.
+	if len(objectMeta.Name) > k8svalidation.LabelValueMaxLength &&
+		(oldObjectMeta == nil || oldObjectMeta.Name != objectMeta.Name) {
+		allErrs = append(allErrs, field.TooLong(fldPath.Child("name"), objectMeta.Name, k8svalidation.LabelValueMaxLength))
+	}
 	if value, invalid := invalidVLLMDistributedExecutorBackendAnnotation(objectMeta.Annotations); invalid {
 		allErrs = append(allErrs, field.Invalid(
 			annotationsPath.Key(consts.KubeAnnotationVLLMDistributedExecutorBackend),

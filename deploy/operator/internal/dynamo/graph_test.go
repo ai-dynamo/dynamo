@@ -9821,6 +9821,78 @@ func TestGetDCDResourceName(t *testing.T) {
 	assert.Equal(t, "my-dgd-prefill", GetDCDResourceName(beta, "prefill", ""))
 }
 
+// An admitted 58-character DGD name must still yield Service names and label values
+// that fit Kubernetes' 63-character limits on both workload paths.
+func TestGetDCDResourceName_LongDGDNameFitsKubernetesLimits(t *testing.T) {
+	const longName = "dsv41-flash-vllm-gb200-disagg-agentic-production-us-east-1"
+	const workerHash = "abc12345"
+	newLongDGD := func(name string) *v1beta1.DynamoGraphDeployment {
+		return &v1beta1.DynamoGraphDeployment{
+			Name: name, Namespace: "default",
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "Frontend", ComponentType: commonconsts.ComponentTypeFrontend, Replicas: new(int32(1))},
+					{ComponentName: "VllmDecodeWorker", ComponentType: commonconsts.ComponentTypeDecode, Replicas: new(int32(1))},
+				},
+			},
+		}
+	}
+	dgd := newLongDGD(longName)
+	require.Len(t, dgd.Name, 58)
+
+	t.Log("Derived names fit a label value and a Service name, and keep distinct identities")
+	frontendName := GetDCDResourceName(dgd, "Frontend", "")
+	workerName := GetDCDResourceName(dgd, "VllmDecodeWorker", workerHash)
+	for _, name := range []string{frontendName, workerName, GetDCDResourceName(dgd, "VllmDecodeWorker", "")} {
+		assert.Empty(t, validation.IsValidLabelValue(name), name)
+		assert.Empty(t, validation.IsDNS1035Label(NormalizeKubeResourceName(name)), name)
+		assert.True(t, strings.HasPrefix(name, longName[:40]), name)
+	}
+	assert.Equal(t, frontendName, GetDCDResourceName(dgd, "Frontend", ""))
+	assert.NotEqual(t, workerName, GetDCDResourceName(dgd, "VllmDecodeWorker", "def67890"))
+	assert.NotEqual(t, frontendName, GetDCDResourceName(newLongDGD(longName[:57]+"2"), "Frontend", ""))
+
+	t.Log("Grove pod selector labels are valid and equal the generated component Service name")
+	pcs, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, &mockSecretsRetriever{}, nil, nil, true, nil)
+	require.NoError(t, err)
+	for key, value := range pcs.Labels {
+		assert.Empty(t, validation.IsValidLabelValue(value), "PodCliqueSet label %s=%s", key, value)
+	}
+	selectors := map[string]bool{}
+	for _, clique := range pcs.Spec.Template.Cliques {
+		for key, value := range clique.Labels {
+			assert.Empty(t, validation.IsValidLabelValue(value), "clique %s label %s=%s", clique.Name, key, value)
+		}
+		selectors[clique.Labels[commonconsts.KubeLabelDynamoSelector]] = true
+	}
+	for _, component := range dgd.Spec.Components {
+		service, err := GenerateComponentService(ComponentServiceParams{
+			ServiceName:     GetDCDResourceName(dgd, component.ComponentName, ""),
+			Namespace:       dgd.Namespace,
+			ComponentType:   string(component.ComponentType),
+			DynamoNamespace: dgd.GetDynamoNamespaceForComponent(&component),
+			ComponentName:   component.ComponentName,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, validation.IsDNS1035Label(service.Name), service.Name)
+		assert.True(t, selectors[service.Name], "no clique selects Service %s", service.Name)
+	}
+
+	t.Log("Component-path DCD names and labels fit the same limits")
+	children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{NewWorkerHash: workerHash})
+	require.NoError(t, err)
+	require.Len(t, children, 2)
+	assert.Equal(t, frontendName, children["Frontend"].Name)
+	assert.Equal(t, workerName, children["VllmDecodeWorker"].Name)
+	for _, dcd := range children {
+		assert.Empty(t, validation.IsDNS1035Label(NormalizeKubeResourceName(dcd.Name)), dcd.Name)
+		for key, value := range dcd.Labels {
+			assert.Empty(t, validation.IsValidLabelValue(value), "DCD %s label %s=%s", dcd.Name, key, value)
+		}
+	}
+}
+
 func TestGenerateComponentIngressResources_NormalizeBackendServiceName(t *testing.T) {
 	ingressSpec := IngressSpec{
 		Enabled:               true,

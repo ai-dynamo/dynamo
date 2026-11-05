@@ -48,6 +48,12 @@ spec:
               image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
 ```
 
+## Resource names
+
+`metadata.name` can have at most 63 characters, because the operator copies it unchanged into the `nvidia.com/dynamo-graph-deployment-name` label. Admission rejects a longer name when the DGD is created. An existing DGD with a longer name can still be updated and deleted.
+
+Each component's DCD, Service, and `nvidia.com/selector` label value is named `<dgd-name>-<component-name>`. Worker DCDs also end with a worker hash. When this name is longer than 63 characters, the operator keeps its first 46 characters and appends `-` and 16 hexadecimal characters of a SHA-256 hash of the full name. Names of 63 characters or fewer are not changed.
+
 ## Grove update strategy
 
 Set `metadata.annotations["nvidia.com/grove-update-strategy"]` on the DGD to select the generated Grove `PodCliqueSet` update strategy. Accepted values are `Coherent`, `RollingRecreate`, and `OnDelete`. DGDs with LPX components accept only `Coherent` and `RollingRecreate`. Under `OnDelete`, running LPX Pods keep their old templates after an update; the LPX scheduler treats that drift as a lost dependency and releases the pipeline, which cannot recover until Grove replaces the Pods. Admission rejects other updates to an existing LPX DGD that still uses `OnDelete`, so remove the annotation first. Removing it changes only the strategy and does not replace Pods that already run an old template; then set a new `spec.restart.id` with `restart.strategy.type: Parallel`, or delete those Pods. This annotation belongs to the DGD's metadata; `spec.annotations` propagates annotations to child resources instead.

@@ -19,6 +19,8 @@ package dynamo
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -793,12 +795,29 @@ func MergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 // GetDCDResourceName returns the Kubernetes resource name for a DynamoComponentDeployment.
 // If using for a non DCD resource (i.e. Ingress or VirtualService), use the empty string for the workerSuffix.
 // For DCD Resources, Worker components include the workerSuffix; for non-workers, workerSuffix is ignored
+//
+// The result is also the Service name and the nvidia.com/selector label value, so
+// names over 63 characters are shortened with a stable hash (see shortenNameWithHash).
 func GetDCDResourceName(dgd *v1beta1.DynamoGraphDeployment, componentName string, workerSuffix string) string {
 	baseName := fmt.Sprintf("%s-%s", dgd.Name, strings.ToLower(componentName))
 	if spec := dgd.GetComponentByName(componentName); spec != nil && IsWorkerComponent(string(spec.ComponentType)) && workerSuffix != "" {
-		return baseName + "-" + workerSuffix
+		baseName += "-" + workerSuffix
 	}
-	return baseName
+	return shortenNameWithHash(baseName, maxServiceNameLength)
+}
+
+// shortenNameWithHash returns name unchanged when it fits in maxLength. Otherwise it
+// keeps a readable prefix and appends 16 hex characters of SHA-256 over the full name,
+// following v1beta1.ComputeDynamoNamespace. The hash must be deterministic because
+// every producer and selector recomputes the name instead of reading it back.
+func shortenNameWithHash(name string, maxLength int) string {
+	if len(name) <= maxLength {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	suffix := hex.EncodeToString(sum[:8])
+	prefix := strings.TrimRight(name[:maxLength-len(suffix)-1], "-.")
+	return prefix + "-" + suffix
 }
 
 // NormalizeKubeResourceName preserves the existing Dynamo resource naming
