@@ -803,13 +803,6 @@ The built-in configuration suits a long-running server:
 | `muzzy_decay_ms` | `0` | Pages skip the intermediate "muzzy" state. |
 | `narenas` | `16` | Caps the number of arenas; the jemalloc default is four per CPU. |
 
-<ParamField path="DYN_DISABLE_JEMALLOC" type="boolean" default="false">
-  Set to `1`, `true`, or `yes` to use the system allocator for Rust allocations instead of
-  jemalloc. The process reads this variable once, when it first allocates in Rust (on
-  `import dynamo._core`), so set it in the process environment before startup. With jemalloc
-  disabled, no background thread runs and `_RJEM_MALLOC_CONF` has no effect.
-</ParamField>
-
 <ParamField path="_RJEM_MALLOC_CONF" type="string" default="the built-in configuration above">
   Override individual jemalloc options for the built-in allocator. Options not listed keep their
   built-in value. For example, to return freed pages sooner:
@@ -825,9 +818,7 @@ The built-in configuration suits a long-running server:
 
 <Note>
 `MALLOC_CONF` and a jemalloc `LD_PRELOAD` do not configure the built-in allocator. A preloaded
-jemalloc only serves allocations from CPython and other C code, as a separate instance. With
-`DYN_DISABLE_JEMALLOC=1`, Rust allocations go through `malloc`, so a preloaded allocator, such as a
-profiling build of jemalloc, serves them as well.
+jemalloc only serves allocations from CPython and other C code, as a separate instance.
 </Note>
 
 ## HTTP endpoints

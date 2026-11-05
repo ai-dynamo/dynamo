@@ -2484,7 +2484,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tikv-jemalloc-ctl",
- "tikv-jemalloc-sys",
  "tikv-jemallocator",
  "tokio",
  "tokio-stream",
