@@ -40,7 +40,7 @@ from dynamo.sglang.init_multimodal import (
     init_multimodal_worker,
 )
 from dynamo.sglang.init_rerank import init_rerank
-from dynamo.sglang.nixl_telemetry import install_per_rank_nixl_prometheus_ports
+from dynamo.sglang.nixl_telemetry import install_scheduler_process_wrapper
 from dynamo.sglang.shutdown import install_graceful_shutdown
 from dynamo.sglang.snapshot import prepare_snapshot_engine
 
@@ -55,8 +55,9 @@ async def worker(argv: list[str] | None = None):
     dump_config(config.dynamo_args.dump_config_to, config)
 
     # Must run before any sgl.Engine is constructed: it changes how the engine
-    # launches its scheduler processes, each of which needs its own exporter port.
-    install_per_rank_nixl_prometheus_ports()
+    # launches its scheduler processes, each of which needs its own exporter port
+    # and, under pure data parallelism, the publisher's KV metrics address.
+    install_scheduler_process_wrapper()
 
     if (
         config.server_args.load_format == "gms"
@@ -72,14 +73,6 @@ async def worker(argv: list[str] | None = None):
 
     gateway_count = effective_gateway_workers(config.server_args, config.dynamo_args)
     validate_gateway_mode(config.server_args, config.dynamo_args, gateway_count)
-    if gateway_count > 1 and config.server_args.tokenizer_worker_num != gateway_count:
-        # SGLang launches its MultiTokenizerRouter (the shared-memory handoff the
-        # gateway children join) with exactly tokenizer_worker_num workers.
-        override_server_args(
-            config.server_args,
-            "dynamo.gateway",
-            tokenizer_worker_num=gateway_count,
-        )
     if gateway_worker_count(config.server_args, config.dynamo_args) > 1:
         reserve_system_port_for_children()
 

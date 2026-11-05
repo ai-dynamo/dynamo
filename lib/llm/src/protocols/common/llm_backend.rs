@@ -83,6 +83,12 @@ pub enum OutputType {
     Audio,
 }
 
+impl OutputType {
+    fn is_text(&self) -> bool {
+        matches!(self, Self::Text)
+    }
+}
+
 /// Image URL data for responses
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ImageUrlData {
@@ -216,13 +222,15 @@ pub struct LLMEngineOutput {
 
     /// If the LLM Engine performs the detokenization, then this will have a Some of the detokenized
     /// text/tokens. If this value is None, then the Backend is responsible for detokenization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Vec<TokenType>>,
 
     // decoded text -
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
 
     /// Output type discriminator (text, image, video, audio)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "OutputType::is_text")]
     pub output_type: OutputType,
 
     /// Multimodal content parts (for non-text outputs)
@@ -230,15 +238,19 @@ pub struct LLMEngineOutput {
     pub content_parts: Option<Vec<ContentPart>>,
 
     /// cumulative log probabilities
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cum_log_probs: Option<f64>,
 
     /// Optional log probabilities
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_probs: Option<LogProbs>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_logprobs: Option<TopLogprobs>,
 
     // TODO: Enrich this with more information as can apply our first-level postprocessing
     // logic and return more detailed information
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<FinishReason>,
 
     /// The stop string or token that triggered the stop condition.
@@ -247,6 +259,7 @@ pub struct LLMEngineOutput {
     pub stop_reason: Option<StopReason>,
 
     // Index field for batch requests to match OpenAI format
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<u32>,
 
     /// Disaggregated execution parameters (for prefill/decode separation)
@@ -454,6 +467,22 @@ impl MaybeError for LLMEngineOutput {
     }
 }
 
+/// What an engine output carries for the worker's backend admission gate, by
+/// the native backend contract: its `token_ids` are the tokens it generated,
+/// and a `finish_reason` marks the one terminal output that completes the
+/// request — a prefill or encode handoff's included, which may carry no token.
+/// A token-less output without one, such as a disaggregation bootstrap
+/// announcement, is interim. Usage is not a completion marker: an engine may
+/// report it early.
+impl crate::admission_gate::AdmissionResponse for LLMEngineOutput {
+    fn admission_output(&self) -> crate::admission_gate::ResponseOutput {
+        crate::admission_gate::ResponseOutput {
+            generated_token: !self.token_ids.is_empty(),
+            completion: self.finish_reason.is_some(),
+        }
+    }
+}
+
 /// Raw output from embedding engines containing base64-encoded float32 vectors.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct EmbeddingsEngineOutput {
@@ -526,6 +555,60 @@ mod tests {
         );
     }
 
+    /// A token, a terminal and a token-less handoff announcement each carry
+    /// what they say, independently; early usage completes nothing.
+    #[test]
+    fn engine_outputs_classify_their_tokens_and_completion_independently() {
+        use crate::admission_gate::{AdmissionResponse, ResponseOutput};
+        use dynamo_runtime::protocols::annotated::Annotated;
+
+        let output =
+            |token_ids: Vec<TokenIdType>, finish_reason: Option<FinishReason>| LLMEngineOutput {
+                token_ids,
+                finish_reason,
+                ..LLMEngineOutput::stop()
+            };
+        let classified = |generated_token, completion| ResponseOutput {
+            generated_token,
+            completion,
+        };
+
+        let bootstrap = LLMEngineOutput {
+            disaggregated_params: Some(serde_json::json!({"bootstrap_room": 7})),
+            ..output(vec![], None)
+        };
+        assert_eq!(bootstrap.admission_output(), ResponseOutput::INTERIM);
+        let early_usage = LLMEngineOutput {
+            completion_usage: Some(CompletionUsage {
+                prompt_tokens: 3,
+                completion_tokens: 1,
+                total_tokens: 4,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            }),
+            disaggregated_params: Some(serde_json::json!("dummy")),
+            ..output(vec![42], None)
+        };
+        assert_eq!(early_usage.admission_output(), classified(true, false));
+        assert_eq!(
+            output(vec![], Some(FinishReason::Length)).admission_output(),
+            classified(false, true),
+            "a token-less terminal handoff completes the request"
+        );
+        assert_eq!(
+            output(vec![42], Some(FinishReason::Stop)).admission_output(),
+            classified(true, true)
+        );
+        assert_eq!(
+            Annotated::from_data(output(vec![42], None)).admission_output(),
+            classified(true, false)
+        );
+        assert_eq!(
+            Annotated::<LLMEngineOutput>::from_error("engine failed").admission_output(),
+            ResponseOutput::INTERIM
+        );
+    }
+
     #[test]
     fn test_maybe_error() {
         let output = LLMEngineOutput::stop();
@@ -564,5 +647,21 @@ mod tests {
         assert!(chunk.disaggregated_params.is_none());
         assert!(chunk.worker_trace_link.is_none());
         assert!(chunk.completion_usage.is_none());
+    }
+
+    /// A token-only chunk goes on the wire as just its token IDs.
+    #[test]
+    fn token_chunk_omits_defaults_on_the_wire() {
+        let chunk = LLMEngineOutput {
+            token_ids: vec![42],
+            ..Default::default()
+        };
+        let bytes = rmp_serde::to_vec_named(&chunk).unwrap();
+        let wire: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(wire, serde_json::json!({"token_ids": [42]}));
+        assert_eq!(
+            rmp_serde::from_slice::<LLMEngineOutput>(&bytes).unwrap(),
+            chunk
+        );
     }
 }

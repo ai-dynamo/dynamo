@@ -15,7 +15,7 @@ use modelexpress_common::providers::{HuggingFaceProvider, ModelProviderTrait as 
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
-use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
+use crate::frontend_config::{ChatTemplateDefaults, FrontendApiConfig, MetricsConfig};
 use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
@@ -65,6 +65,7 @@ pub struct LocalModelBuilder {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    batch_gateway_url: Option<String>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
@@ -91,6 +92,7 @@ impl Default for LocalModelBuilder {
             http_host: Default::default(),
             http_port: DEFAULT_HTTP_PORT,
             http_metrics_port: None,
+            batch_gateway_url: None,
             metrics_config: Default::default(),
             frontend_api_config: Default::default(),
             tls_cert_path: Default::default(),
@@ -170,6 +172,11 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn batch_gateway_url(&mut self, url: Option<String>) -> &mut Self {
+        self.batch_gateway_url = url;
+        self
+    }
+
     pub fn metrics_prefix(&mut self, prefix: Option<String>) -> &mut Self {
         self.metrics_config.set_prefix(prefix);
         self
@@ -210,6 +217,15 @@ impl LocalModelBuilder {
         self.frontend_api_config
             .streaming_dispatch_mut()
             .set_reasoning_dispatch(enabled);
+        self
+    }
+
+    pub fn chat_template_defaults(
+        &mut self,
+        chat_template_defaults: ChatTemplateDefaults,
+    ) -> &mut Self {
+        self.frontend_api_config
+            .set_chat_template_defaults(chat_template_defaults);
         self
     }
 
@@ -368,6 +384,7 @@ impl LocalModelBuilder {
                 http_host: self.http_host.take(),
                 http_port: self.http_port,
                 http_metrics_port: self.http_metrics_port,
+                batch_gateway_url: self.batch_gateway_url.take(),
                 metrics_config: self.metrics_config.clone(),
                 frontend_api_config: self.frontend_api_config.clone(),
                 tls_cert_path: self.tls_cert_path.take(),
@@ -431,6 +448,7 @@ impl LocalModelBuilder {
             http_host: self.http_host.take(),
             http_port: self.http_port,
             http_metrics_port: self.http_metrics_port,
+            batch_gateway_url: self.batch_gateway_url.take(),
             metrics_config: self.metrics_config.clone(),
             frontend_api_config: self.frontend_api_config.clone(),
             tls_cert_path: self.tls_cert_path.take(),
@@ -456,6 +474,7 @@ pub struct LocalModel {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    batch_gateway_url: Option<String>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
@@ -495,15 +514,6 @@ pub async fn register_model_card(
         model_suffix,
     )?;
     let _instance = discovery.register(spec).await?;
-
-    // Size the process-global admission gate from this card, after registration
-    // succeeds. LoRA adapters carry no capacity of their own.
-    if lora_name.is_none() {
-        dynamo_runtime::admission_gate::record_engine_capacity(
-            card.runtime_config.max_num_seqs,
-            Some(card.runtime_config.data_parallel_size),
-        );
-    }
     Ok(())
 }
 
@@ -572,6 +582,10 @@ impl LocalModel {
 
     pub fn http_metrics_port(&self) -> Option<u16> {
         self.http_metrics_port
+    }
+
+    pub fn batch_gateway_url(&self) -> Option<&str> {
+        self.batch_gateway_url.as_deref()
     }
 
     pub fn metrics_prefix(&self) -> Option<String> {

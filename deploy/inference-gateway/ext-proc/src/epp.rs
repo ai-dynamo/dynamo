@@ -24,10 +24,12 @@ use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_constraints_to_kv};
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
+use dynamo_llm::worker_type::WorkerType;
 use dynamo_protocols::types::Prompt;
 use dynamo_runtime::discovery::{
     DiscoveryInstance, DiscoveryQuery, hash_container_name, hash_pod_name,
 };
+use dynamo_runtime::error::{DynamoError, ErrorType};
 use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
@@ -502,7 +504,7 @@ impl Router {
                 routing_constraints,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Prefill reservation failed: {e}"))
+            .map_err(prefill_reservation_error)
     }
 
     /// Route a decode request. Returns (WorkerWithDpRank, overlap_blocks).
@@ -551,7 +553,7 @@ impl Router {
                 routing_constraints,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))?;
+            .map_err(decode_query_error)?;
 
         match outcome {
             FindBestMatchOutcome::Routed {
@@ -743,6 +745,62 @@ fn completion_text_tokens_safe_to_inject(prompt: &Prompt) -> bool {
     !matches!(prompt, Prompt::StringArray(texts) if texts.len() > 1)
 }
 
+/// Whether a prefill or decode router's error is itself an `InvalidArgument` `DynamoError`, as
+/// it reports an unknown policy class. A cause wrapped inside another error does not count.
+fn is_invalid_argument(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<DynamoError>()
+        .is_some_and(|error| error.error_type() == ErrorType::InvalidArgument)
+}
+
+/// Wraps a decode-router error for [`Router::route_decode`]. An invalid-argument error keeps
+/// its type so [`decode_pick_error`] can report it as invalid input.
+fn decode_query_error(error: anyhow::Error) -> anyhow::Error {
+    if is_invalid_argument(&error) {
+        error
+    } else {
+        anyhow::anyhow!("Decode query failed: {:?}", error)
+    }
+}
+
+/// Maps a [`Router::route_decode`] error to the pick error.
+fn decode_pick_error(error: anyhow::Error) -> PickError {
+    if is_invalid_argument(&error) {
+        PickError::InvalidRequest(error.to_string())
+    } else {
+        PickError::RoutingFailed(error.to_string())
+    }
+}
+
+/// Wraps a prefill-reservation error for [`Router::route_prefill`]. An invalid-argument error
+/// keeps its type so [`prefill_disaggregated`] can fail the pick with it.
+fn prefill_reservation_error(error: anyhow::Error) -> anyhow::Error {
+    if is_invalid_argument(&error) {
+        error
+    } else {
+        anyhow::anyhow!("Prefill reservation failed: {error}")
+    }
+}
+
+/// Whether the pick routes disaggregated after its prefill reservation. An invalid-argument
+/// error fails the pick: the request's class was rejected when it entered the prefill class.
+/// Any other prefill error falls back to aggregated routing.
+fn prefill_disaggregated<T>(prefill: &Result<T>) -> Result<bool, PickError> {
+    match prefill {
+        Ok(_) => Ok(true),
+        Err(error) if is_invalid_argument(error) => {
+            Err(PickError::InvalidRequest(error.to_string()))
+        }
+        Err(error) => {
+            tracing::debug!(
+                error = %error,
+                "Prefill routing failed; falling back to aggregated mode"
+            );
+            Ok(false)
+        }
+    }
+}
+
 struct DiscoveredModelBootstrap {
     preprocessor: Arc<OpenAIPreprocessor>,
     card: ModelDeploymentCard,
@@ -830,10 +888,7 @@ async fn fetch_preprocessor_from_discovery(
             let actual_namespace = namespace.clone();
             match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(card) => {
-                    if card.model_type.supports_prefill()
-                        && !card.model_type.supports_chat()
-                        && !card.model_type.supports_completions()
-                    {
+                    if card.effective_worker_type() == WorkerType::Prefill {
                         continue;
                     }
                     model_card = Some((card, actual_namespace));
@@ -1282,10 +1337,7 @@ fn spawn_prefill_discovery_watcher(
                             Err(_) => continue,
                         };
 
-                        if !card.model_type.supports_prefill()
-                            || card.model_type.supports_chat()
-                            || card.model_type.supports_completions()
-                        {
+                        if card.effective_worker_type() != WorkerType::Prefill {
                             continue;
                         }
 
@@ -1481,16 +1533,7 @@ impl EndpointPicker for Router {
             )
             .await;
 
-        let is_disaggregated = match &prefill_booking {
-            Ok(_) => true,
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    "Prefill routing failed; falling back to aggregated mode"
-                );
-                false
-            }
-        };
+        let is_disaggregated = prefill_disaggregated(&prefill_booking)?;
 
         let (decode_worker, _overlap) = self
             .route_decode(
@@ -1504,7 +1547,7 @@ impl EndpointPicker for Router {
                 routing_constraints,
             )
             .await
-            .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
+            .map_err(decode_pick_error)?;
 
         // TODO(epp-endpoint-reconciliation): Reconcile Dynamo discovery with the
         // pod reflector and retry selection when the chosen worker has no endpoint.
@@ -1628,6 +1671,7 @@ impl EndpointPicker for Router {
             cache_namespace,
             // The Dynamo runtime encodes salt itself so leave the forwarded body's salt alone.
             cache_salt_forwarding: CacheSaltForwarding::Preserve,
+            strip_nvext: false,
             reservation_id: Some(reservation_id),
         })
     }
@@ -2802,5 +2846,200 @@ mod tests {
             endpoint_in_subset(&endpoint, &candidates, &candidate_ips),
             "bracketed IPv6 endpoint must match its bare-IP candidate"
         );
+    }
+
+    #[test]
+    fn only_a_top_level_invalid_argument_decode_error_is_invalid_input() {
+        use dynamo_kv_router::scheduling::KvSchedulerError;
+
+        let pick = |error: anyhow::Error| decode_pick_error(decode_query_error(error));
+        let invalid_argument = |message: &str| {
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(message)
+                .build()
+        };
+
+        // The decode router reports an unknown policy class as a top-level InvalidArgument.
+        let unknown = invalid_argument("unknown policy class \"missing\"");
+        let expected = unknown.to_string();
+        assert!(matches!(
+            pick(unknown.into()),
+            PickError::InvalidRequest(message) if message == expected
+        ));
+
+        // Every other error keeps its wrapper and routing-failure status, including
+        // classifier failures whose plugin cause is an InvalidArgument.
+        let overloaded = DynamoError::builder()
+            .error_type(ErrorType::ResourceExhausted)
+            .message("all eligible workers are overloaded")
+            .build();
+        let classifier_failure = DynamoError::builder()
+            .error_type(ErrorType::Unknown)
+            .message("request classifier failed")
+            .cause(invalid_argument("plugin rejected the request"))
+            .build();
+        for error in [
+            anyhow::Error::new(KvSchedulerError::NoEndpoints),
+            anyhow::Error::new(overloaded),
+            anyhow::Error::new(KvSchedulerError::RequestClassifierFailed(Arc::new(
+                invalid_argument("plugin rejected the request"),
+            ))),
+            anyhow::Error::new(classifier_failure),
+        ] {
+            let expected = format!("Decode query failed: {error:?}");
+            assert!(matches!(
+                pick(error),
+                PickError::RoutingFailed(message) if message == expected
+            ));
+        }
+    }
+
+    /// Prefill can run under its own advertised router configuration. Here prefill has no
+    /// policy file, so its synthetic profile has no `priority`, while decode configures one.
+    #[tokio::test]
+    async fn unknown_prefill_class_fails_the_pick_instead_of_falling_back() {
+        use dynamo_kv_router::config::KvRouterConfig;
+        use dynamo_kv_router::scheduling::KvSchedulerError;
+        use dynamo_llm::kv_router::prefill_router::PrefillError;
+        use dynamo_llm::kv_router::{KvRouter, SelectionPolicySource};
+        use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
+        use dynamo_runtime::distributed::DistributedConfig;
+
+        async fn kv_router(
+            drt: &DistributedRuntime,
+            role: WorkerType,
+            router_policy_config: Option<String>,
+        ) -> KvRouter {
+            let endpoint = drt
+                .namespace(format!("epp-policy-class-{}", Uuid::new_v4()))
+                .unwrap()
+                .component("workers".to_string())
+                .unwrap()
+                .endpoint("generate");
+            let client = endpoint.client().await.unwrap();
+            let (_workers_tx, workers_rx) = tokio::sync::watch::channel(HashMap::from([
+                (7, ModelRuntimeConfig::default()),
+                (8, ModelRuntimeConfig::default()),
+            ]));
+            let config = KvRouterConfig {
+                use_kv_events: false,
+                router_track_active_blocks: false,
+                skip_initial_worker_wait: true,
+                router_policy_config,
+                ..Default::default()
+            };
+            KvRouter::new_with_worker_role(
+                endpoint,
+                client,
+                workers_rx,
+                None,
+                16,
+                SelectionPolicySource::Registry,
+                Some(config),
+                None,
+                Some(role),
+                role.as_str(),
+                None,
+                false,
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+        }
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "default_policy_class: standard\npolicy_classes:\n  - name: standard\n    quantum: 1\n  - name: priority\n    quantum: 1\n",
+        )
+        .unwrap();
+        let decode = kv_router(
+            &drt,
+            WorkerType::Decode,
+            Some(policy_file.path().display().to_string()),
+        )
+        .await;
+        let prefill = kv_router(&drt, WorkerType::Prefill, None).await;
+        let tokens = [1u32; 64];
+
+        // Decode accepts `priority`, so an aggregated fallback would route the request.
+        let decoded = decode
+            .find_best_match_details_with_policy_class(
+                None,
+                &tokens,
+                None,
+                None,
+                false,
+                false,
+                None,
+                None,
+                0.0,
+                0,
+                Some("priority".to_string()),
+                None,
+                None,
+                None,
+                None,
+                RoutingConstraints::default(),
+            )
+            .await;
+        assert!(matches!(decoded, Ok(FindBestMatchOutcome::Routed { .. })));
+
+        // Prefill class entry, called as `reserve_prefill_worker` calls it, rejects `priority`,
+        // and the pick fails with that error instead of falling back.
+        let reserved = prefill
+            .find_best_match_details_with_policy_class_admitted(
+                Some("epp-prefill/unknown-class"),
+                &tokens,
+                None,
+                None,
+                true,
+                false,
+                None,
+                None,
+                0.0,
+                0,
+                Some("priority".to_string()),
+                None,
+                None,
+                None,
+                None,
+                RoutingConstraints::default(),
+            )
+            .await
+            .map_err(prefill_reservation_error);
+        assert!(matches!(
+            prefill_disaggregated(&reserved),
+            Err(PickError::InvalidRequest(message))
+                if message.ends_with("unknown policy class \"priority\"")
+        ));
+
+        // Every other prefill error keeps its message and falls back to aggregated routing,
+        // including a classifier failure whose plugin cause is an InvalidArgument.
+        let plugin_error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .message("plugin rejected the request")
+            .build();
+        for error in [
+            anyhow::anyhow!(PrefillError::NotActivated),
+            anyhow::anyhow!("No workers available for prefill"),
+            anyhow::Error::new(KvSchedulerError::RequestClassifierFailed(Arc::new(
+                plugin_error,
+            ))),
+        ] {
+            let expected = format!("Prefill reservation failed: {error}");
+            let wrapped = prefill_reservation_error(error);
+            assert_eq!(wrapped.to_string(), expected);
+            assert!(matches!(
+                prefill_disaggregated(&Err::<(), _>(wrapped)),
+                Ok(false)
+            ));
+        }
     }
 }

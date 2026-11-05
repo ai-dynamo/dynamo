@@ -24,8 +24,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
@@ -35,7 +33,7 @@ func TestConvertToServiceCheckpointConfigSetsNilIdentity(t *testing.T) {
 	ConvertToServiceCheckpointConfig(&v1beta1.ComponentCheckpointConfig{
 		Enabled:       true,
 		Mode:          v1beta1.CheckpointMode("auto"),
-		CheckpointRef: ptr.To("checkpoint"),
+		CheckpointRef: new("checkpoint"),
 	}, &got)
 	if got.Identity != nil {
 		t.Fatalf("ConvertToServiceCheckpointConfig().Identity = %#v, want nil", got.Identity)
@@ -77,13 +75,13 @@ func TestConvertFromSharedMemorySpec(t *testing.T) {
 func TestBugDGD_ExplicitFalseForceScalingGroupRoundTrips(t *testing.T) {
 	t.Log("Build a hub DGD with forceScalingGroup explicitly disabled")
 	in := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "explicit-false", Namespace: "ns"},
+		Name: "explicit-false", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 				ComponentName: "worker",
 				ComponentType: v1beta1.ComponentTypeWorker,
 				Experimental: &v1beta1.ExperimentalSpec{
-					Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(false)},
+					Grove: &v1beta1.GroveSpec{ForceScalingGroup: new(false)},
 				},
 			}},
 		},
@@ -99,7 +97,7 @@ func TestBugDGD_ExplicitFalseForceScalingGroupRoundTrips(t *testing.T) {
 
 func TestBugDGD_SpokeServiceAndExtraVolumeMountsCompose(t *testing.T) {
 	in := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "volume-mounts", Namespace: "ns"},
+		Name: "volume-mounts", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -119,10 +117,8 @@ func TestBugDGD_SpokeServiceAndExtraVolumeMountsCompose(t *testing.T) {
 					ExtraPodSpec: &ExtraPodSpec{
 						PodSpec: &corev1.PodSpec{
 							Volumes: []corev1.Volume{{
-								Name: "config",
-								VolumeSource: corev1.VolumeSource{
-									ConfigMap: &corev1.ConfigMapVolumeSource{},
-								},
+								Name:      "config",
+								ConfigMap: &corev1.ConfigMapVolumeSource{},
 							}},
 						},
 						MainContainer: &corev1.Container{
@@ -182,7 +178,7 @@ func TestBugDGD_SpokeServiceAndExtraVolumeMountsCompose(t *testing.T) {
 func TestBugDGD_HubVolumeMountOrderWithCompilationCacheRoundTrip(t *testing.T) {
 	t.Log("Build a hub component whose non-cache mount precedes its compilation-cache mount")
 	in := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "volume-mount-order", Namespace: "ns"},
+		Name: "volume-mount-order", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 				ComponentName: "worker",
@@ -213,7 +209,7 @@ func TestBugDGD_HubCarrierMountOrderRespectsLiveEdits(t *testing.T) {
 	t.Log("Define a compilation cache and native mounts with complete optional fields")
 	recursiveReadOnly := corev1.RecursiveReadOnlyEnabled
 	spoke := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "live-volume-mount-order", Namespace: "ns"},
+		Name: "live-volume-mount-order", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -312,7 +308,7 @@ func addGeneratedFrontendSidecarHubOnlySecurityContext(t *testing.T, podTemplate
 			continue
 		}
 		podTemplate.Spec.Containers[i].SecurityContext = &corev1.SecurityContext{
-			RunAsNonRoot: ptr.To(true),
+			RunAsNonRoot: new(true),
 		}
 		return
 	}
@@ -321,7 +317,7 @@ func addGeneratedFrontendSidecarHubOnlySecurityContext(t *testing.T, podTemplate
 
 func TestBugDCD_HubSidecarOnlyPodTemplateRoundTrips(t *testing.T) {
 	in := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "sidecar-only", Namespace: "ns"},
+		Name: "sidecar-only", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "sidecar-only",
@@ -347,7 +343,7 @@ func TestBugDCD_HubSidecarOnlyPodTemplateRoundTrips(t *testing.T) {
 
 func TestBugDCD_HubEmptyPodTemplateRoundTrips(t *testing.T) {
 	in := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "empty-pod-template", Namespace: "ns"},
+		Name: "empty-pod-template", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "empty-pod-template",
@@ -364,7 +360,7 @@ func TestBugDCD_HubEmptyPodTemplateRoundTrips(t *testing.T) {
 
 func TestBugDGD_HubEmptyPodTemplateRoundTrips(t *testing.T) {
 	in := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "empty-pod-template", Namespace: "ns"},
+		Name: "empty-pod-template", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 				ComponentName: "empty-pod-template",
@@ -381,7 +377,7 @@ func TestBugDGD_HubEmptyPodTemplateRoundTrips(t *testing.T) {
 
 func TestBugDGD_SpokeMainContainerNameOnlyRoundTrips(t *testing.T) {
 	in := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "main-container-name-only", Namespace: "ns"},
+		Name: "main-container-name-only", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -425,7 +421,7 @@ func TestBugDGD_SpokeMainContainerNameOnlyRoundTrips(t *testing.T) {
 
 func TestBugDGD_SpokeMultipleCompilationCacheVolumeMountsRoundTrip(t *testing.T) {
 	in := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "multi-cache", Namespace: "ns"},
+		Name: "multi-cache", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -476,7 +472,7 @@ func TestBugDGD_SpokeMultipleCompilationCacheVolumeMountsRoundTrip(t *testing.T)
 
 func TestBugDGD_ChangedCompilationCacheDoesNotRestoreStaleVolumeMounts(t *testing.T) {
 	in := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "multi-cache-edited", Namespace: "ns"},
+		Name: "multi-cache-edited", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -511,7 +507,7 @@ func TestBugDGD_ChangedCompilationCacheDoesNotRestoreStaleVolumeMounts(t *testin
 
 func TestBugDGD_DeletedSecondaryCompilationCacheDoesNotRestore(t *testing.T) {
 	in := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "secondary-cache-deleted", Namespace: "ns"},
+		Name: "secondary-cache-deleted", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -523,10 +519,8 @@ func TestBugDGD_DeletedSecondaryCompilationCacheDoesNotRestore(t *testing.T) {
 					ExtraPodSpec: &ExtraPodSpec{
 						PodSpec: &corev1.PodSpec{
 							Volumes: []corev1.Volume{{
-								Name: "config",
-								VolumeSource: corev1.VolumeSource{
-									ConfigMap: &corev1.ConfigMapVolumeSource{},
-								},
+								Name:      "config",
+								ConfigMap: &corev1.ConfigMapVolumeSource{},
 							}},
 						},
 						MainContainer: &corev1.Container{
@@ -598,7 +592,7 @@ func TestBugDGD_DeletedSecondaryCompilationCacheDoesNotRestore(t *testing.T) {
 
 func TestBugDGD_PodTemplateEditPreservesLiveMountsOnly(t *testing.T) {
 	in := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "multi-cache-edited-pod-template", Namespace: "ns"},
+		Name: "multi-cache-edited-pod-template", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
@@ -640,13 +634,13 @@ func TestBugDGD_PodTemplateEditPreservesLiveMountsOnly(t *testing.T) {
 
 func TestBugDGD_HubOriginSpokeMainContainerEnvSplitRoundTrips(t *testing.T) {
 	hub := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "main-container-env-split", Namespace: "ns"},
+		Name: "main-container-env-split", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 				ComponentName: "worker",
 				ComponentType: v1beta1.ComponentTypeWorker,
 				PodTemplate: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Name: "hub-origin-template"},
+					Name: "hub-origin-template",
 				},
 			}},
 		},
@@ -698,7 +692,7 @@ func TestBugDGD_HubOriginSpokeMainContainerEnvSplitRoundTrips(t *testing.T) {
 
 func TestBugDCD_HubPodTemplateWithoutContainersRoundTrips(t *testing.T) {
 	in := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "pod-template-no-containers", Namespace: "ns"},
+		Name: "pod-template-no-containers", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "pod-template-no-containers",
@@ -719,7 +713,7 @@ func TestBugDCD_HubPodTemplateWithoutContainersRoundTrips(t *testing.T) {
 
 func TestBugDCD_HubPodTemplateContainerOrderRoundTrips(t *testing.T) {
 	in := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "container-order", Namespace: "ns"},
+		Name: "container-order", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "container-order",
@@ -743,12 +737,12 @@ func TestBugDCD_HubPodTemplateContainerOrderRoundTrips(t *testing.T) {
 
 func TestBugDCD_MetadataOnlyPodTemplateSaveDoesNotFreezeContainerOrder(t *testing.T) {
 	hub := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "metadata-only-container-order", Namespace: "ns"},
+		Name: "metadata-only-container-order", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "metadata-only-container-order",
 				PodTemplate: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Name: testHubOnlyTemplateName},
+					Name: testHubOnlyTemplateName,
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{Name: "main", Image: "worker:latest"},
@@ -807,11 +801,11 @@ func TestBugDCD_MetadataOnlyPodTemplateSaveDoesNotFreezeContainerOrder(t *testin
 
 func TestBugDCD_HubEditToEnvFromSecretOptionalRoundTrips(t *testing.T) {
 	alpha := &DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "env-from-secret", Namespace: "ns"},
+		Name: "env-from-secret", Namespace: "ns",
 		Spec: DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
 				ServiceName:   "env-from-secret",
-				EnvFromSecret: ptr.To("secret-a"),
+				EnvFromSecret: new("secret-a"),
 			},
 		},
 	}
@@ -820,7 +814,7 @@ func TestBugDCD_HubEditToEnvFromSecretOptionalRoundTrips(t *testing.T) {
 	if err := alpha.ConvertTo(hub); err != nil {
 		t.Fatalf("ConvertTo: %v", err)
 	}
-	hub.Spec.PodTemplate.Spec.Containers[0].EnvFrom[0].SecretRef.Optional = ptr.To(true)
+	hub.Spec.PodTemplate.Spec.Containers[0].EnvFrom[0].SecretRef.Optional = new(true)
 
 	spoke := &DynamoComponentDeployment{}
 	if err := spoke.ConvertFrom(hub); err != nil {
@@ -837,7 +831,7 @@ func TestBugDCD_HubEditToEnvFromSecretOptionalRoundTrips(t *testing.T) {
 
 func TestBugDCD_HubEditToFrontendSidecarHubOnlyFieldRoundTrips(t *testing.T) {
 	alpha := &DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "frontend-sidecar-hub-only", Namespace: "ns"},
+		Name: "frontend-sidecar-hub-only", Namespace: "ns",
 		Spec: DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
 				ServiceName: "frontend-sidecar-hub-only",
@@ -857,7 +851,7 @@ func TestBugDCD_HubEditToFrontendSidecarHubOnlyFieldRoundTrips(t *testing.T) {
 		if hub.Spec.PodTemplate.Spec.Containers[i].Name == defaultFrontendSidecarContainerName {
 			foundSidecar = true
 			hub.Spec.PodTemplate.Spec.Containers[i].SecurityContext = &corev1.SecurityContext{
-				RunAsNonRoot: ptr.To(true),
+				RunAsNonRoot: new(true),
 			}
 		}
 	}
@@ -898,7 +892,7 @@ func TestBugDCD_HubEditToFrontendSidecarHubOnlyFieldRoundTrips(t *testing.T) {
 
 func TestBugDCD_IntermediateSpokeDeletesGeneratedFrontendSidecarDropsHubOnlyContainer(t *testing.T) {
 	alpha := &DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "stale-generated-sidecar", Namespace: "ns"},
+		Name: "stale-generated-sidecar", Namespace: "ns",
 		Spec: DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: DynamoComponentDeploymentSharedSpec{
 				ServiceName: "stale-generated-sidecar",
@@ -952,12 +946,12 @@ func TestBugDCD_IntermediateSpokeDeletesGeneratedFrontendSidecarDropsHubOnlyCont
 func TestDCD_IntermediateSpokeDeletesFrontendSidecarContainerDropsHubReference(t *testing.T) {
 	sidecarName := "sidecar"
 	src := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "stale-sidecar", Namespace: "ns"},
+		Name: "stale-sidecar", Namespace: "ns",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName:   "stale-sidecar",
 				ComponentType:   v1beta1.ComponentTypeFrontend,
-				FrontendSidecar: ptr.To(sidecarName),
+				FrontendSidecar: new(sidecarName),
 				PodTemplate: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
@@ -1016,7 +1010,7 @@ func TestDCD_IntermediateSpokeDeletesFrontendSidecarContainerDropsHubReference(t
 
 func TestBugDGD_IntermediateSpokeDeletesGeneratedFrontendSidecarDropsHubOnlyContainer(t *testing.T) {
 	alpha := &DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "stale-generated-sidecar", Namespace: "ns"},
+		Name: "stale-generated-sidecar", Namespace: "ns",
 		Spec: DynamoGraphDeploymentSpec{
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"frontend": {
@@ -1074,13 +1068,13 @@ func TestBugDGD_IntermediateSpokeDeletesGeneratedFrontendSidecarDropsHubOnlyCont
 func TestDGD_IntermediateSpokeDeletesFrontendSidecarContainerDropsHubReference(t *testing.T) {
 	sidecarName := "sidecar"
 	src := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "stale-sidecar", Namespace: "ns"},
+		Name: "stale-sidecar", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
 					ComponentName:   "frontend",
 					ComponentType:   v1beta1.ComponentTypeFrontend,
-					FrontendSidecar: ptr.To(sidecarName),
+					FrontendSidecar: new(sidecarName),
 					PodTemplate: &corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{

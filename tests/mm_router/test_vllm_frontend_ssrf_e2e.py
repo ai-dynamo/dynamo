@@ -20,7 +20,11 @@ import requests
 from tests.mm_router.utils import COMMON_PROCESS_KWARGS, build_vllm_gpu_mem_args
 from tests.utils.http_checks import check_health_ready, model_registered
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.network_canary import ConnectionCanary, running_canary
+from tests.utils.network_canary import (
+    ConnectionCanary,
+    assert_blocked_url_refused,
+    running_canary,
+)
 from tests.utils.port_utils import reserved_ports
 
 VLLM_MM_MODEL = os.getenv("DYN_TEST_VLLM_MM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
@@ -168,13 +172,8 @@ def test_blocked_url_is_refused_and_never_fetched(
         timeout=180,
     )
 
-    assert 400 <= response.status_code < 500, (
-        f"[{topology}] expected a 4xx for a blocked media URL, got "
-        f"HTTP {response.status_code}: {response.text[:2000]}"
-    )
-    expected_detail = {
+    private_detail = {
         "vllm_processor": "blocked range",
         "rust_decoding": "Direct IP access is not allowed",
     }[topology]
-    assert expected_detail in response.text, response.text
-    canary.assert_no_connection()
+    assert_blocked_url_refused(response, canary, private_detail, label=topology)

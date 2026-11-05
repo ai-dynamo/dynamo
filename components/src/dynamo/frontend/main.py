@@ -242,6 +242,20 @@ def load_frontend_route_extensions(extension_names: list[str]) -> list[FrontendR
     return routes
 
 
+def _fold_vllm_default_chat_template_kwargs(
+    config: FrontendConfig, vllm_flags: Namespace
+) -> None:
+    # vLLM's parser also takes the underscore and dotted spellings. Its value always comes
+    # from the command line, so it wins over DYN_DEFAULT_CHAT_TEMPLATE_KWARGS.
+    vllm_defaults = getattr(vllm_flags, "default_chat_template_kwargs", None) or {}
+    if vllm_defaults:
+        config.default_chat_template_kwargs = {
+            **(config.default_chat_template_kwargs or {}),
+            **vllm_defaults,
+        }
+        config.validate_default_chat_template_kwargs()
+
+
 def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]:
     """Parse command-line arguments for the Dynamo frontend.
 
@@ -260,6 +274,15 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
 
     config = FrontendConfig.from_cli_args(args)
     config.validate()
+
+    if config.chat_processor != "dynamo" and (
+        config.interactive or config.kserve_grpc_server
+    ):
+        mode_flag = "--interactive" if config.interactive else "--kserve-grpc-server"
+        parser.error(
+            f"--dyn-chat-processor {config.chat_processor} is only supported by the "
+            f"HTTP frontend, so it cannot be combined with {mode_flag}"
+        )
 
     vllm_flags = None
     sglang_flags = None
@@ -307,6 +330,7 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
         vllm_parser = AsyncEngineArgs.add_cli_args(vllm_parser)
         # the result is returned as Namespace object rather than AsyncEngineArgs object to avoid import error for non-vllm users.
         vllm_flags = vllm_parser.parse_args(unknown)
+        _fold_vllm_default_chat_template_kwargs(config, vllm_flags)
     elif config.chat_processor == "sglang":
         sglang_parser = argparse.ArgumentParser(add_help=False)
         sglang_parser.add_argument("--tool-call-parser", default=None)
@@ -426,17 +450,22 @@ async def async_main():
     kwargs: dict[str, Any] = {
         "http_host": config.http_host,
         "http_port": config.http_port,
+        "batch_gateway_url": config.batch_gateway_url,
         "kv_cache_block_size": config.kv_cache_block_size,
         "router_config": router_config,
         "migration_limit": config.migration_limit,
         "metrics_prefix": metrics_prefix,
         "enable_anthropic_api": config.enable_anthropic_api,
+        "enable_systemone_api": config.enable_systemone_api,
         "strip_anthropic_preamble": config.strip_anthropic_preamble,
+        "reject_media": config.reject_media,
+        "reject_media_status_code": config.reject_media_status_code,
         "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
         "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
         "reasoning_field_name": config.reasoning_field_name,
         "tokenizer_backend": config.tokenizer_backend,
         "tokenizer_fallback": config.tokenizer_fallback,
+        "default_chat_template_kwargs": config.default_chat_template_kwargs,
     }
     if config.migration_max_seq_len is not None:
         kwargs["migration_max_seq_len"] = config.migration_max_seq_len

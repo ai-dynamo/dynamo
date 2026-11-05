@@ -15,23 +15,139 @@ import (
 // lpxDGDAdmissionCases builds fresh LPX scenarios for the single native DGD admission table.
 func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 	const longLPXComponentName = "abcdefghijklmnopqrstuvwxyzabcd"
-	const conductorRoleErr = "spec.components: Forbidden: LPX components must each declare a conductor role or form a shared draft and target pair"
+	const conductorRoleErr = `spec.components: Forbidden: LPX components must each declare a conductor role or an agent "runtime" sidecar, or form a shared draft and target pair`
+	const sidecarRoleErr = "Forbidden: Dynamo sidecar mode in role pod templates is supported only on the LPX role that hosts the engine: the conductor role when the component declares one, otherwise the agent role"
 	const conductorTemplateErr = "spec.components[0].roles[1].podTemplate: Required value: LPX conductor requires an explicit podTemplate"
 	const lpxGateErr = "spec.components[0].type: Forbidden: LPX components require lpx.enabled=true"
 	const alphaLPXGateErr = "spec.services[lpx].componentType: Forbidden: LPX components require lpx.enabled=true"
+	const lpxOnDeleteErr = `metadata.annotations[nvidia.com/grove-update-strategy]: Invalid value: "OnDelete": must be "Coherent" or "RollingRecreate" when LPX components are configured`
 
 	// Keep LPX inputs and oracles together without a separate admission execution path.
 	tests := []dgdAdmissionTestCase{
+		{
+			name: "explicit Coherent externally scaled LPX accepts native minimum and budget without a capacity warning",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Replicas = nil
+				component.ProviderOverride = groveProviderOverride("", `{"minAvailable":2,"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+			wantReplicas: map[string]*int32{"lpx": nil},
+		},
+		{
+			name: "Coherent externally scaled LPX accepts a budget above its seed",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Replicas = nil
+				component.ProviderOverride = groveProviderOverride("", `{"minAvailable":2,"rollingUpdate":{"maxUnavailable":3}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+		},
+		{
+			name: "LPX budget may exceed the immutable PCS template seed",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Replicas = new(int32(4))
+				component.ProviderOverride = groveProviderOverride("", `{"minAvailable":2,"rollingUpdate":{"maxUnavailable":3}}`)
+			}),
+		},
+		{
+			name: "explicit Coherent LPX native budget must cover the native viable unit",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Replicas = nil
+				component.ProviderOverride = groveProviderOverride("", `{"minAvailable":3,"rollingUpdate":{"maxUnavailable":2}}`)
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}
+			}),
+			wantWebhookErrs: []string{`spec.components[0].providerOverride.value.rollingUpdate.maxUnavailable: Invalid value: 2: must not be less than minAvailable (3) under the Coherent update strategy`},
+		},
+
+		{
+			name: "unannotated LPX native budget keeps RollingRecreate without a Coherent minimum floor",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Replicas = nil
+				component.ProviderOverride = groveProviderOverride("", `{"minAvailable":3,"rollingUpdate":{"maxUnavailable":2}}`)
+			}),
+			wantReplicas: map[string]*int32{"lpx": nil},
+		},
+
+		// OnDelete leaves LPX Pods on stale templates, so LPX accepts only Grove-driven replacement.
+		{
+			name: "LPX rejects the OnDelete update strategy",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+			}),
+			wantWebhookErrs: []string{lpxOnDeleteErr},
+		},
+		{
+			name: "v1alpha1 LPX rejects the OnDelete update strategy after conversion",
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+			}),
+			wantWebhookErrs: []string{lpxOnDeleteErr},
+		},
+		{
+			name: "adding an LPX component rejects a stored OnDelete strategy",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+				dgd.Spec.Components = append(dgd.Spec.Components, betaLPXDGDForAdmission(nil).Spec.Components[0])
+			}),
+			wantWebhookErrs: []string{lpxOnDeleteErr},
+		},
+		{
+			name: "LPX accepts the RollingRecreate update strategy",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "RollingRecreate"}
+			}),
+		},
+		{
+			name:               "LPX rejects an unrelated update while a stored OnDelete strategy remains",
+			seedWithoutWebhook: true,
+			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+			}),
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+				dgd.Labels = map[string]string{"team": "lpx"}
+			}),
+			wantWebhookErrs: []string{lpxOnDeleteErr},
+		},
+		{
+			name:               "LPX admits removing a stored OnDelete strategy",
+			seedWithoutWebhook: true,
+			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete", "example.com/team": "lpx"}
+			}),
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{"example.com/team": "lpx"}
+			}),
+		},
+		{
+			name:               "LPX admits finalizer removal while a stored OnDelete strategy remains",
+			seedWithoutWebhook: true,
+			terminating:        true,
+			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+				dgd.Finalizers = []string{dgdTerminatingFinalizer}
+			}),
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+			}),
+		},
+
 		{
 			name: "singleton LPX preserves omitted replicas with minimum availability above one",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
 				component.Replicas = nil
-				component.MinAvailable = k8sptr.To(int32(2))
+				component.MinAvailable = new(int32(2))
 				component.Roles[0].PodTemplate.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "model-storage", MountPath: "/nfs"}}
-				component.Roles[0].PodTemplate.Spec.Volumes = []corev1.Volume{{Name: "model-storage", VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"},
-				}}}
+				component.Roles[0].PodTemplate.Spec.Volumes = []corev1.Volume{{Name: "model-storage",
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"}}}
 				component.Roles[0].PodTemplate.Spec.Affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
 					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
 						NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{{
@@ -47,7 +163,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			name: "v1alpha1 LPX preserves omitted replicas with minimum availability above one on CREATE",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["lpx"].Replicas = nil
-				dgd.Spec.Services["lpx"].MinAvailable = k8sptr.To(int32(2))
+				dgd.Spec.Services["lpx"].MinAvailable = new(int32(2))
 			}),
 			wantReplicas: map[string]*int32{"lpx": nil},
 			wantWarnings: []string{`spec.components[0].minAvailable ("lpx") is deprecated; use spec.components[0].providerOverride.value.minAvailable and migrate all component minima together without changing their effective values`},
@@ -55,38 +171,38 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		{
 			name: "LPX preserves omitted replicas with minimum availability above one on UPDATE",
 			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.Components[0].Replicas = k8sptr.To(int32(3))
-				dgd.Spec.Components[0].MinAvailable = k8sptr.To(int32(2))
+				dgd.Spec.Components[0].Replicas = new(int32(3))
+				dgd.Spec.Components[0].MinAvailable = new(int32(2))
 			}),
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].Replicas = nil
-				dgd.Spec.Components[0].MinAvailable = k8sptr.To(int32(2))
+				dgd.Spec.Components[0].MinAvailable = new(int32(2))
 			}),
 			wantReplicas: map[string]*int32{"lpx": nil},
 		},
 		{
 			name: "v1alpha1 LPX preserves omitted replicas with minimum availability above one on UPDATE",
 			oldDeployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].Replicas = k8sptr.To(int32(3))
-				dgd.Spec.Services["lpx"].MinAvailable = k8sptr.To(int32(2))
+				dgd.Spec.Services["lpx"].Replicas = new(int32(3))
+				dgd.Spec.Services["lpx"].MinAvailable = new(int32(2))
 			}),
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["lpx"].Replicas = nil
-				dgd.Spec.Services["lpx"].MinAvailable = k8sptr.To(int32(2))
+				dgd.Spec.Services["lpx"].MinAvailable = new(int32(2))
 			}),
 			wantReplicas: map[string]*int32{"lpx": nil},
 		},
 		{
 			name: "LPX rejects explicit replicas below minimum availability",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.Components[0].MinAvailable = k8sptr.To(int32(2))
+				dgd.Spec.Components[0].MinAvailable = new(int32(2))
 			}),
 			wantCELErr: "spec.components[0]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
 		},
 		{
 			name: "v1alpha1 LPX rejects explicit replicas below minimum availability",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["lpx"].MinAvailable = k8sptr.To(int32(2))
+				dgd.Spec.Services["lpx"].MinAvailable = new(int32(2))
 			}),
 			wantCELErr: "spec.services[lpx]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
 		},
@@ -95,7 +211,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.Replicas = nil
-				worker.MinAvailable = k8sptr.To(int32(2))
+				worker.MinAvailable = new(int32(2))
 			}),
 			wantCELErr: "spec.components[1]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
 		},
@@ -104,7 +220,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
 				worker.Replicas = nil
-				worker.MinAvailable = k8sptr.To(int32(2))
+				worker.MinAvailable = new(int32(2))
 			}),
 			wantCELErr: "spec.services[worker]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
 		},
@@ -112,7 +228,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			name: "LPX admits nine hybrid replicas with lowered conductor volumes",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
-				component.Replicas = k8sptr.To(int32(9))
+				component.Replicas = new(int32(9))
 				component.Roles[1].PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					// LPX lowering supplies these volume definitions after admission.
 					Containers: []corev1.Container{{Name: "main", Image: "gpu-runtime", VolumeMounts: []corev1.VolumeMount{
@@ -121,7 +237,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 					}}},
 				}}
 			}),
-			wantReplicas: map[string]*int32{"lpx": k8sptr.To(int32(9))},
+			wantReplicas: map[string]*int32{"lpx": new(int32(9))},
 		},
 		{
 			name: "LPX native template schema rejects duplicate main container names",
@@ -138,7 +254,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		{
 			name: "LPX supports more than nine replicas",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.Components[0].Replicas = k8sptr.To(int32(10))
+				dgd.Spec.Components[0].Replicas = new(int32(10))
 			}),
 		},
 		// Scheduling deadlines belong to each component, including shared draft and target pairs.
@@ -146,28 +262,28 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			name: "shared LPX components admit distinct scheduling deadlines at both bounds",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaLPXSpecDec(dgd, nil)
-				dgd.Spec.Components[0].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: k8sptr.To(int64(1))}
-				dgd.Spec.Components[1].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: k8sptr.To(int64(9223372036))}
+				dgd.Spec.Components[0].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: new(int64(1))}
+				dgd.Spec.Components[1].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: new(int64(9223372036))}
 			}),
 		},
 		{
 			name: "shared LPX components admit an omitted scheduling deadline beside a finite deadline",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaLPXSpecDec(dgd, nil)
-				dgd.Spec.Components[1].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: k8sptr.To(int64(120))}
+				dgd.Spec.Components[1].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: new(int64(120))}
 			}),
 		},
 		{
 			name: "LPX component scheduling deadline rejects zero",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.Components[0].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: k8sptr.To(int64(0))}
+				dgd.Spec.Components[0].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: new(int64(0))}
 			}),
 			wantSchemaErr: "spec.components[0].lpx.scheduling.attemptDeadlineSeconds: Invalid value: 0: spec.components[0].lpx.scheduling.attemptDeadlineSeconds in body should be greater than or equal to 1",
 		},
 		{
 			name: "LPX component scheduling deadline rejects duration overflow",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.Components[0].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: k8sptr.To(int64(9223372037))}
+				dgd.Spec.Components[0].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: new(int64(9223372037))}
 			}),
 			wantSchemaErr: "spec.components[0].lpx.scheduling.attemptDeadlineSeconds: Invalid value: 9223372037: spec.components[0].lpx.scheduling.attemptDeadlineSeconds in body should be less than or equal to 9223372036",
 		},
@@ -199,7 +315,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := *betaWorkerComponent(betaDGDForAdmission(nil))
-				worker.Replicas = k8sptr.To(int32(2))
+				worker.Replicas = new(int32(2))
 				dgd.Spec.Components = append([]nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{worker}, dgd.Spec.Components...)
 			}),
 		},
@@ -353,16 +469,13 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantSchemaErr: `spec.components[0].roles[1]: Duplicate value: map[string]interface {}{"name":"agent"}`,
 		},
 		{
-			name: "LPX reserves materialized agent container names",
+			name: "LPX allows role names in sidecars and init containers",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				role := &dgd.Spec.Components[0].Roles[0]
-				role.PodTemplate.Spec.Containers = append(role.PodTemplate.Spec.Containers, corev1.Container{Name: "agent", Image: "sidecar"})
-				role.PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "agent", Image: "setup"}}
+				for _, role := range dgd.Spec.Components[0].Roles {
+					role.PodTemplate.Spec.Containers = append(role.PodTemplate.Spec.Containers, corev1.Container{Name: "agent", Image: "sidecar"})
+					role.PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "conductor", Image: "setup"}}
+				}
 			}),
-			wantWebhookErrs: []string{
-				`spec.components[0].roles[0].podTemplate.spec.containers[1].name: Forbidden: LPX reserves "agent" for the materialized role container`,
-				`spec.components[0].roles[0].podTemplate.spec.initContainers[0].name: Forbidden: LPX reserves "agent" for the materialized role container`,
-			},
 		},
 		{
 			name: "LPX rejects a missing conductor role on CREATE despite a conductor-named sidecar",
@@ -384,7 +497,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 		},
 		{
-			name: "LPX defers explicit conductor name checks until build mode is known",
+			name: "LPX allows a conductor sidecar named conductor",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
 				component.Roles[1].PodTemplate = component.Roles[0].PodTemplate.DeepCopy()
@@ -412,6 +525,81 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				dgd.Spec.Components[0].Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "conductor", Image: "setup"}}
 			}),
 		},
+		// The Dynamo runtime sidecar runs on the role whose Pods host the engine:
+		// the conductor when the component declares one, otherwise the agent.
+		{
+			name: "LPX rejects an agent runtime sidecar beside a conductor role",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{
+					Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
+				}}
+			}),
+			wantWebhookErrs: []string{"spec.components[0].roles[0].podTemplate.spec.initContainers[0].name: " + sidecarRoleErr},
+		},
+		{
+			name: "LPX admits an agent runtime sidecar without a conductor role, with its own availability",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Roles = component.Roles[:1]
+				component.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{
+					{Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways)},
+				}
+				component.MinAvailable = new(int32(1))
+				component.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":1}}`)
+			}),
+			wantWarnings: []string{
+				`spec.components[0].minAvailable ("lpx") is deprecated; use spec.components[0].providerOverride.value.minAvailable and migrate all component minima together without changing their effective values`,
+				`spec.components[0] ("lpx"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=1, maxUnavailable=1); provision spare serving capacity before updating`,
+			},
+		},
+		{
+			name: "LPX agent runtime sidecar requires restartPolicy Always",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Roles = component.Roles[:1]
+				component.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{
+					{Name: "setup", Image: "setup"},
+					{Name: consts.RuntimeContainerName, Image: "sidecar"},
+				}
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[0].roles[0].podTemplate.spec.initContainers[1].restartPolicy: Invalid value: "": must be Always for the LPX runtime init container`,
+			},
+		},
+		{
+			name: "LPX reports container errors with the runtime sidecar restart policy in traversal order",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Roles = component.Roles[:1]
+				spec := &component.Roles[0].PodTemplate.Spec
+				spec.Containers[0].Image = ""
+				spec.InitContainers = []corev1.Container{{Name: consts.RuntimeContainerName, Image: "sidecar"}}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].roles[0].podTemplate.spec.containers[0].image: Required value: must specify a non-empty image",
+				`spec.components[0].roles[0].podTemplate.spec.initContainers[0].restartPolicy: Invalid value: "": must be Always for the LPX runtime init container`,
+			},
+		},
+		{
+			name: "LPX rejects an agent runtime sidecar as the shared speculative target",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaLPXSpecDec(dgd, nil)
+				target := &dgd.Spec.Components[1]
+				target.Roles = target.Roles[:1]
+				target.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{
+					{Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways)},
+				}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].roles: Forbidden: a shared draft and target pair requires the target's conductor role; the agent "runtime" sidecar serves only a single model`},
+		},
+		{
+			name: "LPX admits a conductor runtime sidecar",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Roles[1].PodTemplate.Spec.InitContainers = []corev1.Container{{
+					Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
+				}}
+			}),
+		},
 		{
 			name: "physical LPU rejects Grove opt out",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
@@ -422,7 +610,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		{
 			name: "v1alpha1 SpecDecode draft replicas must be positive",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				setAlphaLPXSpecDec(dgd, k8sptr.To(int32(0)))
+				setAlphaLPXSpecDec(dgd, new(int32(0)))
 			}),
 			wantCELErr: "spec.services[draft]: Invalid value: replicas must be positive when componentType is lpx",
 		},
@@ -493,7 +681,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		{
 			name: "v1alpha1 LPX conductor template error identifies the converted component and authored role indices",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				setAlphaLPXSpecDec(dgd, k8sptr.To(int32(1)))
+				setAlphaLPXSpecDec(dgd, new(int32(1)))
 				target := dgd.Spec.Services["target"]
 				target.Roles[0], target.Roles[1] = target.Roles[1], target.Roles[0]
 				target.Roles[0].PodTemplate = nil
@@ -533,7 +721,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].Roles[1].PodTemplate = nil
-				dgd.Spec.Components[0].Replicas = k8sptr.To(int32(3))
+				dgd.Spec.Components[0].Replicas = new(int32(3))
 			}),
 			wantWebhookErrs: []string{conductorTemplateErr},
 		},
@@ -545,26 +733,26 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["lpx"].Roles[1].PodTemplate = nil
-				dgd.Spec.Services["lpx"].Replicas = k8sptr.To(int32(3))
+				dgd.Spec.Services["lpx"].Replicas = new(int32(3))
 			}),
 			wantWebhookErrs: []string{conductorTemplateErr},
 		},
 		{
 			name: "LPX admits SpecDecode UPDATE with one conductor and Agent-only draft",
 			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				setBetaLPXSpecDec(dgd, k8sptr.To(int32(1)))
+				setBetaLPXSpecDec(dgd, new(int32(1)))
 			}),
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				setBetaLPXSpecDec(dgd, k8sptr.To(int32(2)))
+				setBetaLPXSpecDec(dgd, new(int32(2)))
 			}),
 		},
 		{
 			name: "v1alpha1 LPX admits SpecDecode UPDATE with one conductor and Agent-only draft",
 			oldDeployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				setAlphaLPXSpecDec(dgd, k8sptr.To(int32(1)))
+				setAlphaLPXSpecDec(dgd, new(int32(1)))
 			}),
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				setAlphaLPXSpecDec(dgd, k8sptr.To(int32(2)))
+				setAlphaLPXSpecDec(dgd, new(int32(2)))
 			}),
 		},
 		// Selected LPX workload shapes.
@@ -641,25 +829,25 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		{
 			name: "LPX rejects zero draft replicas",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				setBetaLPXSpecDec(dgd, k8sptr.To(int32(0)))
+				setBetaLPXSpecDec(dgd, new(int32(0)))
 			}),
 			wantCELErr: "spec.components[0]: Invalid value: replicas must be positive when type is lpx",
 		},
 		{
 			name: "LPX admits maximum draft fanout with default minimum availability",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				setBetaLPXSpecDec(dgd, k8sptr.To(int32(8)))
-				dgd.Spec.Components[0].MinAvailable = k8sptr.To(int32(1))
+				setBetaLPXSpecDec(dgd, new(int32(8)))
+				dgd.Spec.Components[0].MinAvailable = new(int32(1))
 			}),
 			wantWarnings: []string{`spec.components[0].minAvailable ("draft") is deprecated; remove this field and configure minimum availability on the shared target component; the draft's effective minimum remains 1`, `spec.components[1].minAvailable ("target") is deprecated; use spec.components[1].providerOverride.value.minAvailable and migrate all component minima together without changing their effective values`},
 		},
 		{
 			name: "LPX rejects draft endpoint and minimum availability at authored indices",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				setBetaLPXSpecDec(dgd, k8sptr.To(int32(3)))
+				setBetaLPXSpecDec(dgd, new(int32(3)))
 				dgd.Spec.Components[0], dgd.Spec.Components[1] = dgd.Spec.Components[1], dgd.Spec.Components[0]
 				draft := &dgd.Spec.Components[1]
-				draft.MinAvailable = k8sptr.To(int32(2))
+				draft.MinAvailable = new(int32(2))
 				draft.ModelRef = &nvidiacomv1beta1.ModelReference{Name: "draft-model"}
 			}),
 			wantWebhookErrs: []string{
@@ -671,8 +859,8 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		{
 			name: "LPX admits singleton minimum availability",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.Components[0].Replicas = k8sptr.To(int32(3))
-				dgd.Spec.Components[0].MinAvailable = k8sptr.To(int32(2))
+				dgd.Spec.Components[0].Replicas = new(int32(3))
+				dgd.Spec.Components[0].MinAvailable = new(int32(2))
 			}),
 			wantWarnings: []string{`spec.components[0].minAvailable ("lpx") is deprecated; use spec.components[0].providerOverride.value.minAvailable and migrate all component minima together without changing their effective values`},
 		},
@@ -683,7 +871,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				setAlphaLPXSpecDec(dgd, nil)
-				dgd.Spec.Services["target"].Replicas = k8sptr.To(int32(2))
+				dgd.Spec.Services["target"].Replicas = new(int32(2))
 			}),
 			wantWebhookErrs: []string{"spec.components[1].replicas: Invalid value: 2: shared target replicas must be one"},
 		},
@@ -738,10 +926,9 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
 				component.Roles[0].PodTemplate.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "model-storage", MountPath: "/nfs"}}
-				component.Roles[0].PodTemplate.Spec.Volumes = []corev1.Volume{{Name: "model-storage", VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"},
-				}}}
-				setBetaLPXSpecDec(dgd, k8sptr.To(int32(2)))
+				component.Roles[0].PodTemplate.Spec.Volumes = []corev1.Volume{{Name: "model-storage",
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"}}}
+				setBetaLPXSpecDec(dgd, new(int32(2)))
 			}),
 		},
 		{
@@ -769,7 +956,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 					MaxSkew: 1, TopologyKey: corev1.LabelHostname, WhenUnsatisfiable: corev1.DoNotSchedule,
 				}}
 				spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: "custom"}}
-				spec.ResourceClaims = []corev1.PodResourceClaim{{Name: "device", ResourceClaimName: k8sptr.To("device-claim")}}
+				spec.ResourceClaims = []corev1.PodResourceClaim{{Name: "device", ResourceClaimName: new("device-claim")}}
 			}),
 			wantWebhookErrs: []string{
 				"spec.components[0].roles[0].podTemplate.spec.schedulerName: Forbidden: LPX owns role scheduler selection",
@@ -786,7 +973,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		{
 			name: "LPX rejects excessive draft fanout",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				setBetaLPXSpecDec(dgd, k8sptr.To(int32(9)))
+				setBetaLPXSpecDec(dgd, new(int32(9)))
 			}),
 			wantWebhookErrs: []string{
 				"spec.components[0].replicas: Invalid value: 9: draft replicas must be between 1 and 8",
@@ -838,11 +1025,11 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		{
 			name: "LPX admits three independent engines with unrelated replica counts",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.Components[0].Replicas = k8sptr.To(int32(3))
+				dgd.Spec.Components[0].Replicas = new(int32(3))
 				second := dgd.Spec.Components[0].DeepCopy()
 				second.ComponentName, second.Replicas = "second", nil
 				third := dgd.Spec.Components[0].DeepCopy()
-				third.ComponentName, third.Replicas = "third", k8sptr.To(int32(9))
+				third.ComponentName, third.Replicas = "third", new(int32(9))
 				dgd.Spec.Components = append(dgd.Spec.Components, *second, *third)
 			}),
 		},
@@ -850,7 +1037,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			name: "v1alpha1 LPX admits independent conductors",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				second := dgd.Spec.Services["lpx"].DeepCopy()
-				second.Replicas = k8sptr.To(int32(3))
+				second.Replicas = new(int32(3))
 				dgd.Spec.Services["second"] = second
 			}),
 		},
@@ -868,7 +1055,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		{
 			name: "shared LPX draft does not consume the target Grove name budget",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				setBetaLPXSpecDec(dgd, k8sptr.To(int32(2)))
+				setBetaLPXSpecDec(dgd, new(int32(2)))
 				dgd.Spec.Components[0].ComponentName = longLPXComponentName
 			}),
 		},
@@ -991,7 +1178,7 @@ func betaLPXDGDForAdmission(
 			{
 				ComponentName: "lpx",
 				ComponentType: nvidiacomv1beta1.ComponentTypeLPX,
-				Replicas:      k8sptr.To(int32(1)),
+				Replicas:      new(int32(1)),
 				LPX:           &nvidiacomv1beta1.LPXConfig{BuildID: "test/build"},
 				Roles: []nvidiacomv1beta1.ComponentRoleSpec{
 					{Name: nvidiacomv1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
@@ -1017,7 +1204,7 @@ func alphaLPXDGDForAdmission(
 		dgd.Spec.Services = map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"lpx": {
 				ComponentType: string(nvidiacomv1beta1.ComponentTypeLPX),
-				Replicas:      k8sptr.To(int32(1)),
+				Replicas:      new(int32(1)),
 				LPX:           &nvidiacomv1beta1.LPXConfig{BuildID: "test/build"},
 				Roles: []nvidiacomv1alpha1.ComponentRoleSpec{
 					{Name: nvidiacomv1alpha1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{

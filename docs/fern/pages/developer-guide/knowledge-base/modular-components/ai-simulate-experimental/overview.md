@@ -39,9 +39,6 @@ path. They have no adapter migration.
 
 ## Install
 
-AISimulate requires Python 3.11 through 3.13. Dynamo itself still supports Python 3.10, but the
-`aisimulate` dependency and its CLI are not installed in a Python 3.10 environment.
-
 Released `dynamo-planner` images bundle matching Dynamo and AISimulate artifacts. The AISimulate
 Python wheel and Rust crate must come from the same source revision.
 

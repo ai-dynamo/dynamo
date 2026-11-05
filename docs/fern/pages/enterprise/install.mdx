@@ -7,6 +7,10 @@ subtitle: Pull the enterprise images and Helm chart, and reference them from you
 
 The Dynamo Enterprise Support install path parallels the open-source install path. It uses the same Kubernetes shape, the same values, and the same operational surface. The substantive differences are the container image references and the Helm chart name.
 
+<Note>
+The commands below pin one release. For the release currently in support, use the tags listed in [Supported Artifacts](../reference/general/enterprise-supported-artifacts.mdx).
+</Note>
+
 For the full walkthrough of cluster prerequisites, accelerator support, optional multinode orchestration, RDMA, Prometheus, and shared model storage, follow the [Kubernetes Installation Guide](../kubernetes/installation/install-dynamo.md). The steps below cover only what changes for the enterprise images and chart.
 
 ## Container Images

@@ -34,6 +34,8 @@
 #      Reference tab and the old label-keyed selector no-opped for six days.
 #  10. The composed default version starts with the shared Home tab so the
 #      bare site URL renders Home instead of the release snapshot's first page.
+#  12. Snapshot links to the dropped shared reference files point at their
+#      pages-dev copies, so they resolve instead of rendering as raw paths.
 #
 # Usage: ./scripts/simulate_docs_website.sh [TAG]
 #   TAG defaults to v9.9.9 (must not exist on docs-website yet).
@@ -196,6 +198,7 @@ while IFS= read -r f; do
   [ -e "fern/pages-dev/$rel" ] && rm -f "$f"
 done < <(find "fern/pages-$TAG/reference/general" -type f)
 find "fern/pages-$TAG/reference" -type d -empty -delete 2>/dev/null || true
+"$PY" "$SRC/scripts/relink_shared_reference.py" "fern/pages-$TAG" fern/pages-dev >/dev/null
 
 if [ -d "$SRC/translations" ]; then
   for lang_dir in "$SRC"/translations/*/; do
@@ -278,6 +281,11 @@ grep -q "path: \.\./pages-$TAG/$TAG_ONLY" "$VERSION_FILE" && \
   ! grep -q "path: \.\./pages-dev/$TAG_ONLY" "$VERSION_FILE" && s12=ok || s12=FAIL
 assert "11. tag-only reference/general page stays on pages-$TAG" "$s12"
 
+relinked=$(grep -rlE 'pages-dev/reference/general/' "fern/pages-$TAG" --include='*.md' --include='*.mdx' | wc -l | tr -d ' ')
+residual=$("$PY" "$SRC/scripts/relink_shared_reference.py" "fern/pages-$TAG" fern/pages-dev | grep -oE '[0-9]+ file' | grep -oE '[0-9]+')
+[ "$relinked" -gt 0 ] && [ "$residual" = "0" ] && s14=ok || s14=FAIL
+assert "12. snapshot links to dropped shared pages point at pages-dev ($relinked files)" "$s14"
+
 # The find target must exist, or find errors to stderr, wc counts 0 and the
 # assertion reports ok on a failure — which it did once pages-dev/components/
 # stopped existing.
@@ -331,6 +339,7 @@ from pathlib import Path
 root = Path(sys.argv[1])
 tag = sys.argv[2]
 link = re.compile(r"!?\[[^]]*\]\(([^)#\s]+)(?:#[^)]*)?\)")
+href = re.compile(r'\bhref="([^"#\s]+)')
 
 def counts(trees, version: str):
     relative = versioned = dev = 0
@@ -341,7 +350,7 @@ def counts(trees, version: str):
             if page.suffix not in {".md", ".mdx"}:
                 continue
             text = page.read_text(encoding="utf-8")
-            for target in link.findall(text):
+            for target in link.findall(text) + href.findall(text):
                 if target.endswith((".md", ".mdx")) and not target.startswith(
                     ("http://", "https://", "mailto:", "/")
                 ):

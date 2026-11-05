@@ -159,6 +159,7 @@ spec:
           - worker
           - decode
           - prefill
+          - lpx
       - key: nvidia.com/metrics-enabled
         operator: In
         values:

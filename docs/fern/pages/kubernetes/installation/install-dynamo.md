@@ -151,6 +151,21 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
 > [!TIP]
 > All `helm install` commands can be customized with your own values file: `helm install ... -f your-values.yaml`
 
+> [!WARNING]
+> **Experimental. Development clusters only.** The unfinished DGDR v1beta2 schemas are disabled by
+> default. The `1.2.1` chart shown above does not support this feature gate. To test the API before
+> a supporting release is available, use a development chart built from the current `main` branch
+> and add
+> `--set "dynamo-operator.dgdrV1Beta2.enabled=true"` to the Helm command.
+> The flag adds the v1beta2 `DynamoGraphDeploymentRequest` schema and installs the
+> `DynamoGraphDeploymentRun` and `DynamoGraphDeploymentCandidate` Custom Resource Definitions
+> (CRDs). It does not enable v1beta2 reconciliation, so the operator does not process resources
+> created with these schemas.
+>
+> Kubernetes persists Run and Candidate objects in etcd. Because the schemas are not finalized,
+> later schema changes can make stored objects unreadable or prevent a CRD upgrade. Do not enable
+> this API on production or shared clusters.
+
 > [!TIP]
 > **Shared/Multi-Tenant Clusters**: If a cluster-wide Dynamo operator is already running, do **not** install another one. Check with:
 > ```bash
@@ -184,9 +199,11 @@ The Dynamo install command above includes commented flags for each optional comp
 
 ### Multinode:
 
-Multinode deployments require either Grove + KAI Scheduler or an alternative orchestrator setup (LeaderWorkerSet + Volcano) to enable gang scheduling for workloads that span multiple nodes. See [Multinode Orchestration](multinode-orchestration.md) for details on orchestrator selection and configuration.
+Multinode deployments require an orchestrator for workloads that span multiple nodes. Gang scheduling is strongly recommended to schedule all required Pods together and avoid partial resource allocation that can leave workloads stalled. See [Multinode Orchestration](multinode-orchestration.md) for details on orchestrator selection and configuration.
 
 DisaggregatedSet is an opt-in multinode pathway below Grove. To request it for a new DGD, install an LWS release that serves `disaggregatedset.x-k8s.io/v1` and set `nvidia.com/enable-disaggregatedset: "true"`. When Grove is available and enabled, also set `nvidia.com/enable-grove: "false"`. Dynamo persists the selected provider in `nvidia.com/workload-provider`; installing the DS API or changing the enable annotations does not change existing deployments. If the selected provider becomes unavailable, Dynamo reports `Ready=False` instead of silently switching providers. Delete and recreate the DGD to choose a different pathway.
+
+The following sections describe how to enable gang scheduling for each supported orchestrator.
 
 #### Grove + KAI Scheduler
 
@@ -207,7 +224,7 @@ For the `enabled=true` path, install Grove and KAI Scheduler separately first. S
 > | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
 > | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.10 |
 > | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
-> | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.14 |
+> | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.15 |
 >
 > Upgrade Grove in lockstep with Dynamo while the Grove APIs remain unstable. Dynamo 1.3.x expects
 > Grove's earlier `ClusterTopology` API and is incompatible with the newer
@@ -262,7 +279,7 @@ helm install prometheus prometheus-community/kube-prometheus-stack \
   --set-json 'prometheus.prometheusSpec.probeNamespaceSelector={}'
 ```
 
-Then uncomment the `prometheusEndpoint` line in the Dynamo install command. The Dynamo operator automatically creates PodMonitors for its components. See [Metrics](../operations/observability.mdx) for dashboard setup and available metrics, and [Logging](observability.md) for the Grafana Loki + Alloy logging stack.
+Then uncomment the `prometheusEndpoint` line in the Dynamo install command. The Dynamo operator automatically creates PodMonitors for its components. See [Metrics](../operations/observability.mdx) for dashboard setup and available metrics, and [Logging](../../reference/observability/logging.mdx) for the Grafana Loki + Alloy logging stack.
 
 ### Shared Storage for Model Caching
 
@@ -290,65 +307,133 @@ This checks kubectl connectivity, default StorageClass configuration, GPU node a
 
 </Steps>
 
+## Upgrade Dynamo
+
+Dynamo supports Helm upgrades and downgrades within the installed minor release and between
+adjacent minor releases. Upgrade from `N.M` to `N.(M+1)` or downgrade from `N.(M+1)` to `N.M`.
+Move through every intermediate minor release for larger changes. For example, upgrade `1.2.x`
+to `1.3.x`, then `1.3.x` to `1.4.x`; a direct transition from `1.2.x` to `1.4.x` is unsupported.
+
+> [!IMPORTANT]
+> Flux users need helm-controller v1.7.0 or later, first included in Flux v2.10.0. Earlier
+> helm-controller versions panic on this chart's `helm.sh/hook-output-log-policy` annotation.
+> If a preflight fails, inspect the retained Job Pod logs as shown in
+> [Troubleshooting](#troubleshooting); Flux does not forward hook output to controller logs or events.
+
+1. Check the installed release and operator versions:
+
+   ```bash
+   helm list --namespace $NAMESPACE
+   kubectl get deployments --namespace $NAMESPACE \
+     -l app.kubernetes.io/name=dynamo-operator \
+     -L app.kubernetes.io/version
+   ```
+
+2. Read the [chart upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#upgrading)
+   for every minor release you cross, including the Grove and KAI Scheduler requirements.
+
+3. Set `RELEASE_VERSION` to the next target release, download its chart, and upgrade with your
+   existing configuration in `your-values.yaml`. Include all settings from the current installation,
+   including any originally passed with `--set`. For example, from `1.6.x` to `1.7.0`:
+
+   ```bash
+   export RELEASE_VERSION=1.7.0
+   helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$RELEASE_VERSION.tgz
+   helm upgrade dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
+     --namespace $NAMESPACE \
+     -f your-values.yaml
+   ```
+
+   Wait for the operator rollout before repeating this step for the next minor:
+
+   ```bash
+   kubectl rollout status deployment --namespace $NAMESPACE \
+     -l app.kubernetes.io/name=dynamo-operator --timeout=120s
+   ```
+
+The upgrade-path check is enforced by target charts v1.7.0 and later when
+`dynamo-operator.enabled=true`. Upgrades or downgrades **to** earlier charts are not checked.
+The read-only `pre-install,pre-upgrade` Job runs before the operator Deployment changes; an initial
+installation passes when no Deployment exists. Helm and Flux run the hook directly; Argo CD maps it
+to PreSync. Raw `kubectl apply`, Argo CD selective sync, or disabled hooks do not enforce the check.
+A separately managed operator release owns its upgrade policy when the subchart is disabled.
+See the [chart configuration](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#upgrading)
+for `upgradePreflight.job` settings, including images for internal registries and per-check overrides.
+
+### Unsupported Transitions
+
+If you have separately validated an unsupported forward upgrade, set
+`unsupportedUpgradeOverride` to the target minor version. For example, to upgrade from `1.7.x` to
+`1.9.x`, set `RELEASE_VERSION` to the intended `1.9.x` release and download that chart as above, then run:
+
+```bash
+helm upgrade dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
+  --namespace $NAMESPACE \
+  -f your-values.yaml \
+  --set-string dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride=1.9
+```
+
+For an unsupported downgrade from `1.9.x` to `1.7.x`, set `RELEASE_VERSION` to the intended `1.7.x`
+release and download that chart as above. Authorize the lower target minor with the downgrade override:
+
+```bash
+helm upgrade dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
+  --namespace $NAMESPACE \
+  -f your-values.yaml \
+  --set-string dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride=1.7
+```
+
+The override must match the target operator's `N.M` version. If you leave the override in your
+values, it has no effect on later upgrades or downgrades to a different minor. It applies only to
+the upgrade-path check; other preflight checks still run. It permits the Helm operation but does
+not make that upgrade or downgrade path supported.
 
 ## Alternative: Install with AICR
 
-Steps 1–3 install each component — GPU Operator, Dynamo Platform, Grove, RDMA — with its own Helm command. [NVIDIA AI Cluster Runtime (AICR)](https://github.com/NVIDIA/aicr) is an alternative that generates one version-locked **recipe** for the whole stack, then renders it into deployment-ready bundles for Helm, Argo CD, Flux, or Helmfile. For a supported environment, the `aicr` CLI drives the entire installation flow from a single recipe: GPU Operator, NVIDIA DRA driver, Network Operator (RDMA), Grove, KAI Scheduler, cert-manager, kube-prometheus-stack, and the Dynamo Platform.
-
-> [!NOTE]
-> AICR is a new, separately maintained project. It validates **specific combinations** of cloud, GPU, and OS, so it fits a cluster that matches a validated Dynamo recipe rather than an arbitrary environment. You still bring your own Kubernetes cluster — AICR generates and validates the runtime configuration, it does not provision clusters. See the [AICR documentation](https://docs.nvidia.com/aicr) for the authoritative support matrix.
-
-AICR validates recipes across these dimensions; not every combination has a Dynamo recipe, so check the AICR docs for the validated set:
-
-| Dimension | Supported values |
-|-----------|------------------|
-| Cloud / service | AKS, BCM, EKS, GKE, Kind, LKE, OKE |
-| GPU | A100, B200, GB200, H100, H200, L40, RTX PRO 6000 |
-| Operating system | Amazon Linux, COS, RHEL, Talos, Ubuntu |
-
-Dynamo recipes use Dynamic Resource Allocation (DRA) for GPUs, which requires **Kubernetes 1.34+**.
-
-### Install Dynamo with the AICR CLI
-
-1. Install the CLI with Homebrew:
-
-```bash
-brew tap NVIDIA/aicr
-brew install aicr
-```
-
-Or use the install script:
-
-```bash
-curl -sfL https://raw.githubusercontent.com/NVIDIA/aicr/main/install | bash -s --
-```
-
-2. Generate a recipe for your environment. Set `--platform dynamo` and match `--service`, `--accelerator`, and `--os` to your cluster:
-
-```bash
-aicr recipe --service eks --accelerator h100 --os ubuntu \
-  --intent inference --platform dynamo -o recipe.yaml
-```
-
-3. Render the recipe into deployment bundles. Choose the deployer that matches your workflow (`helm`, `argocd`, `flux`, or `helmfile`):
-
-```bash
-aicr bundle --recipe recipe.yaml --deployer helm --output ./bundles
-```
-
-4. Deploy the generated bundles to your cluster, then validate the running cluster against the recipe:
-
-```bash
-aicr validate --recipe recipe.yaml
-```
-
-For manual installation, the full command reference, and the supported environment matrix, see the [AICR documentation](https://docs.nvidia.com/aicr). Once AICR has installed the Dynamo Platform, continue with the verification steps above and Next Steps below.
+[NVIDIA AI Cluster Runtime (AICR)](https://github.com/NVIDIA/aicr) generates a version-locked recipe for the whole GPU and Dynamo stack, then deploys and validates it. Choose AICR when your cluster matches a validated Dynamo recipe and you want one reproducible install. Use the manual steps above for any other cluster. For the full walkthrough, see [Install with AICR](install-with-aicr.md).
 
 ## Next Steps
 
 Your cluster is ready. Follow the **[Model Deployment guide](../model-deployment/introduction.mdx)** to choose between applying a tuned DGD recipe, creating a DGD directly, or using DGDR to generate one.
 
 ## Troubleshooting
+
+**"Dynamo upgrade-path preflight failed: Unsupported Dynamo upgrade" (or downgrade)**
+
+Cause: The target chart rejected a skipped-minor or major-version upgrade or downgrade.
+For example:
+
+```text
+Dynamo upgrade-path preflight failed: Unsupported Dynamo upgrade from 1.5.0 to 1.7.0. ...
+```
+
+Find the retained Job and inspect its logs, replacing `<job-name>` with the name from the first command:
+
+```bash
+kubectl get jobs -n $NAMESPACE | grep check-upgrade-path
+kubectl logs job/<job-name> -n $NAMESPACE
+```
+
+Move through every intermediate minor release. If you have validated the unsupported path,
+use the target-minor override under [Unsupported Transitions](#unsupported-transitions).
+
+**"Installed operator Deployment has no app.kubernetes.io/version label"**
+
+Cause: The check cannot determine the installed operator version. Target-minor overrides cannot
+bypass this error.
+
+Inspect the installed release and the Deployment's metadata and image:
+
+```bash
+helm list --namespace $NAMESPACE
+kubectl get deployments --namespace $NAMESPACE \
+  -l app.kubernetes.io/name=dynamo-operator -o yaml
+```
+
+Confirm the version of the running operator from its image and release records. Restore the
+Deployment's `metadata.labels.app.kubernetes.io/version` to that verified version in the Helm or
+GitOps configuration that manages it, then retry. Do not use the target version as the installed
+version; custom image tags or digests require checking the corresponding build records.
 
 **"VALIDATION ERROR: Cannot install cluster-wide Dynamo operator"**
 
@@ -388,9 +473,17 @@ Add to the helm install command:
 
 **Clean uninstall?**
 
+Before uninstalling, record any customized hook names with `helm get hooks dynamo-platform -n $NAMESPACE`.
+For the default release and operator names shown in this guide, remove the retained upgrade-path
+Job and its supporting resources after uninstalling:
+
 ```bash
 # Uninstall the platform
 helm uninstall dynamo-platform --namespace $NAMESPACE
+
+# Remove upgrade-path hook resources that Helm does not uninstall
+kubectl delete job,serviceaccount,role,rolebinding dynamo-platform-dynamo-operator-check-upgrade-path \
+  --namespace $NAMESPACE --ignore-not-found
 
 # List Dynamo CRDs
 kubectl get crd | grep "dynamo.*nvidia.com"
