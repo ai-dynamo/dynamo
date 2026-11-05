@@ -92,8 +92,9 @@ ARG FAST_RELEASE_PROFILE=false
 #
 # One `cargo build` for all four compiles the shared tree once. Separate
 # `cargo build -p` calls resolve features per package, so each one recompiled
-# dynamo-llm and most of its dependencies. Every sidecar enables `mm-routing`
-# by default, so each SBOM matches the binary this shared build links.
+# dynamo-llm and most of its dependencies. The vLLM, SGLang and TRT-LLM sidecars
+# enable `mm-routing` by default (LPX inherits it from TRT-LLM), so each SBOM
+# matches the binary this shared build links.
 #
 # sharing=private: cargo's .package-cache lock lives in $CARGO_HOME, outside
 # these mounts, so two builds must not write one mount at once. A concurrent

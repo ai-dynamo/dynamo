@@ -20,9 +20,8 @@ name = "dynamo-sglang-sidecar"
 path = "src/main.rs"
 
 [features]
-# On by default because the sidecar image's single `cargo build` links the vLLM
-# sidecar's `mm-routing` here, and the SBOM must list it. The Python bindings
-# turn it off so the default wheel stays lean.
+# On for the sidecar image's SBOM (its shared build links vLLM's mm-routing here).
+# The Python bindings turn it off so the default wheel stays lean.
 default = ["mm-routing"]
 mm-routing = ["dynamo-llm/mm-routing"]
 
