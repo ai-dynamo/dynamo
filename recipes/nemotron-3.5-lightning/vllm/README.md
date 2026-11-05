@@ -73,10 +73,11 @@ internal measurements.
 - GB200 recipes use ARM-node scheduling.
 - B200 recipes disable the FlashInfer FP8 ScaledMM linear kernel.
 - `disagg-b200-dspark-bf16` sets `--attention-backend FLASH_ATTN` on both
-  workers. With vLLM's default FlashInfer backend on B200, the main attention
-  layers use a different kernel block size from the `TRITON_ATTN` DSpark draft,
-  and NixlConnector fails at startup with `KV cache view cannot be partitioned
-  into NIXL regions`.
+  workers. With vLLM 0.32.0 (the Dynamo 1.7.0 vLLM runtime), the default
+  FlashInfer backend on B200 gives the main attention layers a different
+  kernel block size from the `TRITON_ATTN` DSpark draft, and NixlConnector
+  fails at startup with `KV cache view cannot be partitioned into NIXL
+  regions` (vllm-project/vllm#63997).
 - Disaggregated recipes require matching speculative-decoding settings on the
   prefill and decode workers for compatible NIXL cache metadata.
 - AWS EFA disaggregated recipes require the EFA userspace stack before
