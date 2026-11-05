@@ -23,7 +23,6 @@ data:
     speculative_config:
       decoding_type: MTP
       max_draft_len: 7
-      mtp_eagle_one_model: true
       speculative_model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
 ---
 apiVersion: nvidia.com/v1beta1
