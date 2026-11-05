@@ -27,7 +27,8 @@ mod ports;
 mod scripted_chat_engine;
 
 use http_harness::{
-    HarnessService, IncrementalSseParser, MODEL, canonicalize, load_agent_fixture, parse_json_sse,
+    HarnessService, IncrementalSseParser, MODEL, canonicalize, load_agent_fixture,
+    parse_anthropic_sse,
 };
 use scripted_chat_engine::{Script, ScriptedChatEngine};
 
@@ -35,6 +36,27 @@ const ENV: [(&str, Option<&str>); 2] = [
     (DYN_ENABLE_ANTHROPIC_API, Some("1")),
     (DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0")),
 ];
+
+#[tokio::test]
+async fn sse_parser_requires_anthropic_termination() {
+    for terminal in ["message_stop", "error"] {
+        let body = format!("event: {terminal}\ndata: {{\"type\":\"{terminal}\"}}\n\n");
+        assert!(parse_anthropic_sse(&body).await.is_ok());
+        for trailer in ["data: [DONE]\n\n", body.as_str()] {
+            assert!(
+                parse_anthropic_sse(&format!("{body}{trailer}"))
+                    .await
+                    .is_err()
+            );
+        }
+    }
+    assert!(parse_anthropic_sse("").await.is_err());
+    assert!(
+        parse_anthropic_sse("event: message_start\ndata: {}\n\n")
+            .await
+            .is_err()
+    );
+}
 
 fn user_text(
     request: &dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest,
@@ -142,7 +164,7 @@ async fn matched_stop_sequence_reaches_messages_without_client_opt_in(
             assert_eq!(response.status(), reqwest::StatusCode::OK);
             let stop_fields = if streaming {
                 let raw = response.text().await.unwrap();
-                let events = parse_json_sse(&raw).await.unwrap();
+                let events = parse_anthropic_sse(&raw).await.unwrap();
                 assert_eq!(
                     events
                         .iter()
@@ -219,13 +241,9 @@ async fn streaming_graceful_stop_drains_tail_and_kill_terminates() {
 
             assert_eq!(raw.matches("event: message_stop\n").count(), 1);
             assert_eq!(raw.matches("event: message_delta\n").count(), 1);
-            if kill_after_stop {
-                // Best-effort finalizers still drain on kill, but it must not
-                // be recorded (or signaled with [DONE]) as successful completion.
-                assert!(!raw.contains("data: [DONE]"));
-            } else {
-                assert_eq!(raw.matches("data: [DONE]").count(), 1);
-                let events = parse_json_sse(&raw).await.unwrap();
+            assert!(!raw.contains("data: [DONE]"));
+            if !kill_after_stop {
+                let events = parse_anthropic_sse(&raw).await.unwrap();
                 insta::assert_json_snapshot!(
                     "anthropic_streaming_text",
                     canonicalize(serde_json::to_value(events).unwrap())
@@ -270,8 +288,12 @@ async fn streaming_text_baseline() {
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let raw = response.text().await.unwrap();
-        assert_eq!(raw.matches("data: [DONE]").count(), 1);
-        let events = parse_json_sse(&raw).await.unwrap();
+        assert!(!raw.contains("data: [DONE]"));
+        assert!(
+            raw.trim_end()
+                .ends_with("data: {\"type\":\"message_stop\"}")
+        );
+        let events = parse_anthropic_sse(&raw).await.unwrap();
         insta::assert_json_snapshot!(
             "anthropic_streaming_text",
             canonicalize(serde_json::to_value(events).unwrap())
@@ -301,7 +323,7 @@ async fn fragmented_tool_arguments_close_after_all_deltas() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_anthropic_sse(&response.text().await.unwrap())
             .await
             .unwrap();
 
@@ -351,20 +373,39 @@ async fn fragmented_tool_arguments_close_after_all_deltas() {
     .await;
 }
 
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
 #[tokio::test]
 #[serial]
-async fn finish_signal_publishes_tool_block_before_usage_tail() {
+async fn completed_tool_block_precedes_gated_tail(#[case] per_tool_completion: bool) {
     temp_env::async_with_vars(ENV, async {
-        let script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
-        let split_at = script
-            .iter()
-            .position(|chunk| {
-                chunk
-                    .data
-                    .as_ref()
-                    .is_some_and(|data| data.inner.usage.is_some())
-            })
-            .expect("fragmented-tool fixture has no usage chunk");
+        let fixture = if per_tool_completion {
+            "parallel-tools.sse"
+        } else {
+            "fragmented-tool.sse"
+        };
+        let mut script = load_agent_fixture(fixture).await.unwrap();
+        let split_at = if per_tool_completion {
+            script[1].data.as_mut().unwrap().tool_call_completion.push(
+                dynamo_llm::protocols::openai::chat_completions::ToolCallCompletion {
+                    choice_index: 0,
+                    tool_index: 0,
+                    complete: true,
+                },
+            );
+            2
+        } else {
+            script
+                .iter()
+                .position(|chunk| {
+                    chunk
+                        .data
+                        .as_ref()
+                        .is_some_and(|data| data.inner.usage.is_some())
+                })
+                .expect("fragmented-tool fixture has no usage chunk")
+        };
         let (svc, gate) = HarnessService::start_with_gated_tail(script, split_at).await;
         let response = post_messages(
             &svc,
@@ -372,7 +413,7 @@ async fn finish_signal_publishes_tool_block_before_usage_tail() {
                 "model": MODEL,
                 "max_tokens": 128,
                 "stream": true,
-                "tools": [tool("list_directory")],
+                "tools": [tool(if per_tool_completion { "read_file" } else { "list_directory" })],
                 "messages": [{"role": "user", "content": "List /tmp"}]
             }),
         )
@@ -398,24 +439,28 @@ async fn finish_signal_publishes_tool_block_before_usage_tail() {
             }
         })
         .await
-        .expect("tool block completion did not arrive before the gated usage tail");
+        .expect("tool block completion did not arrive before the gated tail");
 
         assert!(!saw_message_delta);
         gate.release();
-        while let Some(bytes) = body.next().await {
-            let bytes = bytes.expect("failed to drain response SSE bytes");
-            parser.push(&bytes).expect("failed to parse response SSE");
-        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(bytes) = body.next().await {
+                let bytes = bytes.expect("failed to drain response SSE bytes");
+                parser.push(&bytes).expect("failed to parse response SSE");
+            }
+        })
+        .await
+        .expect("response did not finish after releasing the tail");
 
         let raw = parser.into_body().expect("response SSE was not UTF-8");
-        assert_eq!(raw.matches("data: [DONE]").count(), 1);
-        let events = parse_json_sse(&raw).await.unwrap();
+        assert!(!raw.contains("data: [DONE]"));
+        let events = parse_anthropic_sse(&raw).await.unwrap();
         assert_eq!(
             events
                 .iter()
                 .filter(|event| event.event == "content_block_stop")
                 .count(),
-            1
+            if per_tool_completion { 2 } else { 1 }
         );
         assert_eq!(
             events
@@ -489,7 +534,7 @@ async fn tool_choice_controls_parallel_calls() {
                 assert_eq!(response.status(), reqwest::StatusCode::OK);
                 let expected_count = if parallel == Some(false) { 1 } else { 2 };
                 if stream {
-                    let events = parse_json_sse(&response.text().await.unwrap())
+                    let events = parse_anthropic_sse(&response.text().await.unwrap())
                         .await
                         .unwrap();
                     let starts: Vec<_> = events
@@ -551,6 +596,44 @@ async fn tool_choice_controls_parallel_calls() {
 
 #[tokio::test]
 #[serial]
+async fn auto_tool_choice_without_tools_reaches_backend() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(vec![script; 4]).await;
+
+        for tools in [Value::Null, json!([])] {
+            for stream in [false, true] {
+                let mut body = json!({
+                    "model": MODEL, "max_tokens": 64, "stream": stream,
+                    "tool_choice": {"type": "auto"},
+                    "messages": [{"role": "user", "content": "ping"}]
+                });
+                if !tools.is_null() {
+                    body["tools"] = tools.clone();
+                }
+                let response = post_messages(&svc, &body).await;
+                assert_eq!(
+                    response.status(),
+                    reqwest::StatusCode::OK,
+                    "tools={tools}, stream={stream}"
+                );
+                response.bytes().await.unwrap();
+
+                let requests = svc.engine.take_requests().await;
+                assert_eq!(requests.len(), 1);
+                assert!(requests[0].inner.tools.is_none());
+                assert!(requests[0].inner.tool_choice.is_none());
+            }
+        }
+
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 async fn non_object_tool_inputs_are_suppressed_without_dropping_valid_siblings() {
     temp_env::async_with_vars(ENV, async {
         for stream in [false, true] {
@@ -588,7 +671,7 @@ async fn non_object_tool_inputs_are_suppressed_without_dropping_valid_siblings()
                     "end_turn"
                 };
                 let inputs: Vec<Value> = if stream {
-                    let events = parse_json_sse(&response.text().await.unwrap())
+                    let events = parse_anthropic_sse(&response.text().await.unwrap())
                         .await
                         .unwrap();
                     let mut arguments = BTreeMap::<u64, String>::new();
@@ -661,7 +744,7 @@ async fn parallel_tools_preserve_identity_and_arguments() {
         )
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_json_sse(&response.text().await.unwrap())
+        let events = parse_anthropic_sse(&response.text().await.unwrap())
             .await
             .unwrap();
 
@@ -757,7 +840,7 @@ async fn tool_result_round_trip_reaches_the_chat_engine() {
             &svc,
             &json!({
                 "model": MODEL,
-                "max_tokens": 128,
+                "max_tokens": 2048,
                 "stream": false,
                 "thinking": {"type": "enabled", "budget_tokens": 1024},
                 "tools": [tool("list_directory")],
@@ -877,6 +960,56 @@ async fn count_tokens_returns_exact_estimate_without_calling_engine() {
         );
         assert!(svc.engine.take_requests().await.is_empty());
 
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn explicit_thinking_controls_reach_the_chat_engine() {
+    temp_env::async_with_vars(ENV, async {
+        let mut scripts = Vec::new();
+        for _ in 0..3 {
+            scripts.push(load_agent_fixture("text.sse").await.unwrap());
+        }
+        let svc = HarnessService::start(scripts).await;
+        let mut expected = Vec::new();
+        for (thinking, enabled) in [
+            (None, None),
+            (
+                Some(json!({"type": "enabled", "budget_tokens": 1024})),
+                Some(true),
+            ),
+            (Some(json!({"type": "disabled"})), Some(false)),
+        ] {
+            let mut body = json!({
+                "model": MODEL,
+                "max_tokens": 2048,
+                "stream": false,
+                "messages": [{"role": "user", "content": "ping"}]
+            });
+            if let Some(thinking) = thinking {
+                body["thinking"] = thinking;
+            }
+            let response = post_messages(&svc, &body).await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let _ = response.text().await.unwrap();
+            expected.push(enabled.map(Value::Bool));
+        }
+        let requests = svc.engine.take_requests().await;
+        let actual: Vec<_> = requests
+            .iter()
+            .map(|request| {
+                request
+                    .chat_template_args
+                    .as_ref()
+                    .and_then(|args| args.get("enable_thinking"))
+                    .cloned()
+            })
+            .collect();
+        assert_eq!(actual, expected);
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
         svc.shutdown().await;
     })
     .await;

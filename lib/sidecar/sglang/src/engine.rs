@@ -14,6 +14,9 @@ use dynamo_backend_common::{
     KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput,
     PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
 };
+use dynamo_llm::local_model::runtime_config::{
+    TOKEN_BUDGET_RUNTIME_KEY, TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
+};
 use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError,
 };
@@ -24,12 +27,14 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, Client, Discovery, KV_CONFIG_KEY, NodeMetadata, Pool, WORKER_GROUP_KEY};
+use crate::client::{
+    self, Client, Discovery, KV_CONFIG_KEY, MediaSupport, NodeMetadata, Pool, WORKER_GROUP_KEY,
+};
 use crate::native_http::{self, NativeHttp};
 use crate::proto as pb;
 use crate::protocol::{
     build_generate_request, disaggregated_params_to_json, engine_data_from_meta, extract_logprobs,
-    meta_u32, output_ids_to_u32, terminal_from_meta,
+    meta_u32, output_ids_to_u32, require_media_support, terminal_from_meta,
 };
 
 const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
@@ -43,6 +48,9 @@ pub struct SglangSidecarEngine {
     native_http_max_event_bytes: usize,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
+    /// Cancelled once SGLang is lost after `start`, with the reason set first.
+    lost: CancellationToken,
+    lost_reason: Arc<std::sync::OnceLock<String>>,
 }
 
 struct StartedState {
@@ -50,6 +58,7 @@ struct StartedState {
     native_http: Option<NativeHttp>,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
     combined_token_limit: Option<u32>,
+    media_support: MediaSupport,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -170,9 +179,17 @@ impl SglangSidecarEngine {
             model = %discovery.model_path,
             "sglang sidecar bootstrapped native gRPC discovery"
         );
+        if engine_sets_chat_template_defaults(&discovery.server_info) {
+            tracing::warn!(
+                "SGLang --default-chat-template-kwargs applies only to SGLang's own HTTP \
+                 server. The Dynamo frontend renders the chat template for Dynamo traffic, \
+                 so set --default-chat-template-kwargs on the Dynamo frontend."
+            );
+        }
 
         let native_http_max_event_bytes = args.native_http_max_event_bytes.get();
         let common = args.sidecar.common;
+        let structural_tag = common.structural_tag(true);
         let config = WorkerConfig {
             runtime: common.runtime,
             namespace: common.namespace,
@@ -194,6 +211,7 @@ impl SglangSidecarEngine {
             tool_call_parser: common
                 .dyn_tool_call_parser
                 .or_else(|| discovery_string(&discovery.server_info, "tool_call_parser")),
+            structural_tag,
             exclude_tools_when_tool_choice_none: common.exclude_tools_when_tool_choice_none,
             route_to_encoder: false,
             enable_rl: common.enable_rl,
@@ -210,6 +228,8 @@ impl SglangSidecarEngine {
                 native_http_max_event_bytes,
                 state: OnceCell::new(),
                 cancel: CancellationToken::new(),
+                lost: CancellationToken::new(),
+                lost_reason: Arc::default(),
             },
             config,
         ))
@@ -317,17 +337,20 @@ impl LLMEngine for SglangSidecarEngine {
         let kv_event_sources =
             discover_kv_event_sources(&discovery, &mut config, &self.endpoint, deadline).await?;
         let connection_count = pool.len();
+        let state_client = pool.control_client();
         let kv_event_source_count = kv_event_sources.len();
         let combined_token_limit = combined_token_limit(&discovery);
         if combined_token_limit.is_none() {
             tracing::warn!("requests without max_tokens keep SGLang's 128-token default");
         }
+        let media_support = client::media_support(&discovery.server_info);
         self.state
             .set(StartedState {
                 pool,
                 native_http,
                 kv_event_sources,
                 combined_token_limit,
+                media_support,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
         tracing::info!(
@@ -335,8 +358,23 @@ impl LLMEngine for SglangSidecarEngine {
             mode = ?self.disaggregation_mode,
             connections = connection_count,
             kv_event_sources = kv_event_source_count,
+            media_support = ?media_support,
             "sglang sidecar started"
         );
+        let (stop, lost) = (self.cancel.child_token(), self.lost.clone());
+        let reason = Arc::clone(&self.lost_reason);
+        let open_timeout = self.transport.connect_attempt_timeout;
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = stop.cancelled() => {}
+                why = client::watch_engine_state(state_client, open_timeout) => {
+                    if let Some(why) = why {
+                        let _ = reason.set(why);
+                        lost.cancel();
+                    }
+                }
+            }
+        });
         Ok(config)
     }
 
@@ -384,6 +422,7 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
         )?;
+        require_media_support(&grpc_request, state.media_support)?;
         let mut prefill_handoff = if self.disaggregation_mode.is_prefill() {
             grpc_request
                 .disaggregated_params
@@ -419,7 +458,7 @@ impl LLMEngine for SglangSidecarEngine {
             let mut stream = match opened {
                 Ok(response) => response.into_inner(),
                 Err(status) => {
-                    yield Err(client::status_to_dynamo("Generate", status));
+                    yield Err(client::stream_status_to_dynamo("Generate", status));
                     return;
                 }
             };
@@ -463,7 +502,7 @@ impl LLMEngine for SglangSidecarEngine {
                                 break;
                             }
                             Err(status) => {
-                                yield Err(client::status_to_dynamo("Generate", status));
+                                yield Err(client::stream_status_to_dynamo("Generate", status));
                                 break;
                             }
                         };
@@ -562,10 +601,15 @@ impl LLMEngine for SglangSidecarEngine {
         let Some(state) = self.state.get() else {
             return;
         };
+        let request_id = state
+            .native_http
+            .as_ref()
+            .and_then(|http| http.request_id(&ctx))
+            .unwrap_or_else(|| ctx.id().to_string());
         // HTTP queues scheduler cancellation without first closing the gRPC stream.
         if let Some(native_http) = &state.native_http {
             match native_http
-                .abort(ctx.id(), self.transport.connect_attempt_timeout)
+                .abort(&request_id, self.transport.connect_attempt_timeout)
                 .await
             {
                 Ok(()) => return,
@@ -578,7 +622,7 @@ impl LLMEngine for SglangSidecarEngine {
         }
         let mut grpc_client = state.pool.control_client();
         let request = pb::AbortRequest {
-            rid: ctx.id().to_string(),
+            rid: request_id,
             abort_all: false,
         };
         if let Err(error) = client::abort(
@@ -602,6 +646,12 @@ impl LLMEngine for SglangSidecarEngine {
         Ok(())
     }
 
+    async fn engine_lost(&self) -> DynamoError {
+        self.lost.cancelled().await;
+        let reason = self.lost_reason.get().map_or("unknown", String::as_str);
+        client::engine_shutdown(format!("SGLang engine lost: {reason}"))
+    }
+
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
         let state = self
             .state
@@ -611,6 +661,7 @@ impl LLMEngine for SglangSidecarEngine {
             .kv_event_sources
             .iter()
             .map(|source| KvEventSource::Zmq {
+                heartbeat_timeout: None,
                 endpoint: source.endpoint.clone(),
                 topic: source.topic.clone(),
                 dp_rank: source.dp_rank,
@@ -974,6 +1025,36 @@ fn combined_token_limit(discovery: &Discovery) -> Option<u32> {
     discovery.max_model_len?.checked_sub(reserved)
 }
 
+/// The engine's template defaults never reach Dynamo traffic: the frontend renders the template.
+fn engine_sets_chat_template_defaults(server_info: &Value) -> bool {
+    server_info
+        .get("default_chat_template_kwargs")
+        .and_then(Value::as_object)
+        .is_some_and(|kwargs| !kwargs.is_empty())
+}
+
+/// SGLang holds a request's grammar until its reasoning parser sees the end of thinking.
+fn sglang_gates_reasoning(server_info: &Value) -> bool {
+    discovery_string(server_info, "reasoning_parser").is_some()
+        && !server_info
+            .get("skip_tokenizer_init")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+/// SGLang rejects token overflow unless `allow_auto_truncate` is set.
+fn sglang_token_budget(discovery: &Discovery) -> Option<TokenBudget> {
+    let truncates = discovery
+        .server_info
+        .get("allow_auto_truncate")?
+        .as_bool()?;
+    Some(TokenBudget {
+        combined_limit: combined_token_limit(discovery)?,
+        reject_prompt_overflow: !truncates,
+        reject_total_overflow: !truncates,
+    })
+}
+
 /// SGLang's gRPC bridge turns an unset `max_new_tokens` into its 128-token
 /// default, so ask for the room left in the context. Leave it unset when that
 /// room cannot hold `min_tokens`, and SGLang clamps the request itself.
@@ -1090,21 +1171,33 @@ fn build_engine_config(
         }
         _ => None,
     };
-    let dp_size = client::json_u32(&discovery.server_info, "dp_size")
+    let model_dp_size = client::json_u32(&discovery.server_info, "dp_size")
         .unwrap_or(1)
         .max(1);
-    let enable_dp_attention = discovery
-        .server_info
-        .get("enable_dp_attention")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let attn_dp_size = client::json_u32(&discovery.server_info, "attn_dp_size")
+        .unwrap_or(1)
+        .max(1);
+    // dp_size describes model DP while attn_dp_size describes the additional
+    // attention-DP rank space used by KV event publishers.
+    let deployment_dp_size = model_dp_size.checked_mul(attn_dp_size).ok_or_else(|| {
+        client::invalid_arg("SGLang deployment DP size exceeds the supported range")
+    })?;
     let max_num_seqs =
         client::json_u64(&discovery.server_info, "max_running_requests").map(|value| {
-            if enable_dp_attention && dp_size > 1 {
-                value / u64::from(dp_size)
-            } else {
-                value
-            }
+            // Releases without attn_dp_size report attention DP as dp_size
+            // with enable_dp_attention, and max_running_requests covers all
+            // of those ranks.
+            let legacy_attention_dp = discovery
+                .server_info
+                .get("enable_dp_attention")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let ranks = match client::json_u32(&discovery.server_info, "attn_dp_size") {
+                Some(size) => size.max(1),
+                None if legacy_attention_dp => model_dp_size,
+                None => 1,
+            };
+            value / u64::from(ranks)
         });
     let max_num_batched_tokens =
         client::json_u64(&discovery.server_info, "max_prefill_tokens").or(max_total_tokens);
@@ -1112,7 +1205,7 @@ fn build_engine_config(
     // Native gRPC is exposed by the rank-zero frontend for the complete
     // SGLang endpoint, so one sidecar registers every pure- or attention-DP rank.
     let data_parallel_start_rank = Some(0);
-    let data_parallel_size = Some(dp_size);
+    let data_parallel_size = Some(deployment_dp_size);
 
     if mode.is_prefill() && (bootstrap_host.is_none() || bootstrap_port.is_none()) {
         return Err(client::protocol_error(
@@ -1133,6 +1226,18 @@ fn build_engine_config(
         runtime_data.insert(
             "native_offloading_capacity".to_string(),
             serde_json::json!({"total_tokens": total_tokens}),
+        );
+    }
+    if sglang_gates_reasoning(&discovery.server_info) {
+        runtime_data.insert(
+            TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY.to_string(),
+            Value::Bool(true),
+        );
+    }
+    if let Some(token_budget) = sglang_token_budget(discovery) {
+        runtime_data.insert(
+            TOKEN_BUDGET_RUNTIME_KEY.to_string(),
+            serde_json::to_value(token_budget).expect("token budget is serializable"),
         );
     }
 
@@ -1170,8 +1275,9 @@ mod tests {
     use super::{
         Args, DisaggregationMode, DiscoveredKvEventSource, Discovery, EngineConfig,
         SglangSidecarEngine, build_engine_config, combined_token_limit, discover_kv_event_sources,
-        discovery_bootstrap_port, hicache_native_offloading_capacity, kv_event_connect_host,
-        omitted_max_tokens_default, resolve_bootstrap_host_with_local, sglang_eagle_enabled,
+        discovery_bootstrap_port, engine_sets_chat_template_defaults,
+        hicache_native_offloading_capacity, kv_event_connect_host, omitted_max_tokens_default,
+        resolve_bootstrap_host_with_local, sglang_eagle_enabled,
     };
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
@@ -1292,6 +1398,20 @@ mod tests {
             .unwrap();
             assert!(config.reasoning_parser.is_none());
             assert!(config.tool_call_parser.is_none());
+        }
+    }
+
+    #[test]
+    fn engine_template_defaults_are_detected() {
+        assert!(engine_sets_chat_template_defaults(
+            &json!({"default_chat_template_kwargs": {"enable_thinking": false}})
+        ));
+        for server_info in [
+            json!({}),
+            json!({"default_chat_template_kwargs": null}),
+            json!({"default_chat_template_kwargs": {}}),
+        ] {
+            assert!(!engine_sets_chat_template_defaults(&server_info));
         }
     }
 
@@ -1702,6 +1822,76 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_gate_follows_the_engine_reasoning_parser() {
+        let gate = |server_info| {
+            build_engine_config(
+                &discovery(server_info),
+                DisaggregationMode::Aggregated,
+                None,
+                None,
+            )
+            .unwrap()
+            .runtime_data
+            .remove("tool_call_structural_tag_reasoning_gate")
+        };
+        assert_eq!(
+            gate(json!({"reasoning_parser": "kimi_k2"})),
+            Some(json!(true))
+        );
+        for server_info in [
+            json!({}),
+            json!({"reasoning_parser": ""}),
+            json!({"reasoning_parser": null}),
+            json!({"reasoning_parser": "kimi_k2", "skip_tokenizer_init": true}),
+        ] {
+            assert_eq!(gate(server_info.clone()), None, "{server_info}");
+        }
+    }
+
+    #[test]
+    fn token_budget_follows_sglang_auto_truncation() {
+        let budget = |server_info| {
+            let mut discovery = discovery(server_info);
+            discovery.max_model_len = Some(4096);
+            build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None)
+                .unwrap()
+                .runtime_data
+                .remove("token_budget")
+        };
+        assert_eq!(
+            budget(json!({"allow_auto_truncate": false})),
+            Some(json!({
+                "combined_limit": 4096,
+                "reject_prompt_overflow": true,
+                "reject_total_overflow": true,
+            }))
+        );
+        assert_eq!(
+            budget(json!({
+                "allow_auto_truncate": true,
+                "speculative_algorithm": "EAGLE",
+                "speculative_eagle_topk": 1,
+                "speculative_num_steps": 3,
+                "speculative_num_draft_tokens": 4,
+            })),
+            Some(json!({
+                "combined_limit": 4092,
+                "reject_prompt_overflow": false,
+                "reject_total_overflow": false,
+            }))
+        );
+        assert_eq!(budget(json!({})), None);
+        assert_eq!(
+            budget(json!({
+                "allow_auto_truncate": false,
+                "speculative_algorithm": "EAGLE",
+                "speculative_adaptive": true,
+            })),
+            None
+        );
+    }
+
+    #[test]
     fn omitted_max_tokens_default_fills_the_remaining_budget() {
         assert_eq!(omitted_max_tokens_default(Some(4096), 3, None), Some(4093));
         assert_eq!(omitted_max_tokens_default(Some(8), 3, Some(5)), Some(5));
@@ -1841,6 +2031,22 @@ mod tests {
     fn attention_dp_normalizes_aggregate_max_num_seqs_per_rank() {
         let config = build_engine_config(
             &discovery(json!({
+                "attn_dp_size": 4,
+                "max_running_requests": 256,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(config.llm.unwrap().max_num_seqs, Some(64));
+    }
+
+    #[test]
+    fn legacy_attention_dp_normalizes_max_num_seqs_per_rank() {
+        let config = build_engine_config(
+            &discovery(json!({
                 "dp_size": 4,
                 "enable_dp_attention": true,
                 "max_running_requests": 256,
@@ -1851,7 +2057,28 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(config.llm.unwrap().max_num_seqs, Some(64));
+        let registration = config.llm.unwrap();
+        assert_eq!(registration.data_parallel_size, Some(4));
+        assert_eq!(registration.max_num_seqs, Some(64));
+    }
+
+    #[test]
+    fn split_attention_dp_fields_register_the_deployment_rank_count() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "dp_size": 2,
+                "attn_dp_size": 4,
+                "max_running_requests": 256,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let registration = config.llm.unwrap();
+        assert_eq!(registration.data_parallel_size, Some(8));
+        assert_eq!(registration.max_num_seqs, Some(64));
     }
 
     #[test]

@@ -82,7 +82,7 @@ impl FromIterator<WorkerWithDpRank> for WorkerSet {
 }
 
 #[inline]
-fn mix_worker(worker: WorkerWithDpRank) -> u64 {
+pub(crate) fn mix_worker(worker: WorkerWithDpRank) -> u64 {
     splitmix64(splitmix64(worker.worker_id) ^ u64::from(worker.dp_rank))
 }
 

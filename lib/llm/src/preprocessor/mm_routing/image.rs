@@ -109,7 +109,7 @@ pub(crate) enum ImageRoutingRuntime {
 /// such as Nemotron override the request-wide or runtime-specific pieces
 /// without leaking model checks into the generic preprocessor.
 pub(super) trait ImageRoutingBackend: Send + Sync {
-    fn count_tokens(&self, width: u32, height: u32) -> usize;
+    fn count_tokens(&self, width: u32, height: u32) -> Result<usize>;
 
     fn count_tokens_for_images(
         &self,
@@ -117,10 +117,10 @@ pub(super) trait ImageRoutingBackend: Send + Sync {
         _max_model_len: usize,
         _text_prompt_len: usize,
     ) -> Result<Vec<usize>> {
-        Ok(dimensions
+        dimensions
             .iter()
             .map(|&(width, height)| self.count_tokens(width, height))
-            .collect())
+            .collect()
     }
 
     fn uses_request_context_budget(&self) -> bool {
@@ -150,9 +150,10 @@ struct RegistryImageRoutingBackend {
 }
 
 impl ImageRoutingBackend for RegistryImageRoutingBackend {
-    fn count_tokens(&self, width: u32, height: u32) -> usize {
-        self.processor
-            .calculate_num_tokens(width, height, &self.config)
+    fn count_tokens(&self, width: u32, height: u32) -> Result<usize> {
+        Ok(self
+            .processor
+            .calculate_num_tokens(width, height, &self.config))
     }
 
     fn routing_prompt_kind(&self) -> Option<ImagePromptKind> {
@@ -235,7 +236,9 @@ impl ImageRoutingProcessor {
         Ok(processor)
     }
 
-    pub fn count_tokens(&self, width: u32, height: u32) -> usize {
+    /// Count one image. Unsupported geometry must disable exact routing;
+    /// callers must not substitute a zero or approximate count on failure.
+    pub fn count_tokens(&self, width: u32, height: u32) -> Result<usize> {
         self.processor.count_tokens(width, height)
     }
 
@@ -603,6 +606,118 @@ mod tests {
     //! relies on so a future upstream matcher change shows up here instead
     //! of as a silent runtime fallback to text-prefix-only routing.
     use super::*;
+    use crate::preprocessor::{
+        ModelDeploymentCard, NvCreateChatCompletionRequest, OpenAIPreprocessor,
+        PreprocessedRequest, RoutingImagePromptLayout,
+    };
+
+    struct TestImageRoutingBackend {
+        failing_width: Option<u32>,
+    }
+
+    impl ImageRoutingBackend for TestImageRoutingBackend {
+        fn count_tokens(&self, width: u32, _height: u32) -> Result<usize> {
+            anyhow::ensure!(Some(width) != self.failing_width, "test counting failure");
+            Ok(8)
+        }
+
+        fn routing_prompt_kind(&self) -> Option<ImagePromptKind> {
+            Some(ImagePromptKind::RepeatedPad)
+        }
+    }
+
+    fn test_counter(failing_width: Option<u32>) -> ImageRoutingProcessor {
+        ImageRoutingProcessor {
+            processor: Box::new(TestImageRoutingBackend { failing_width }),
+            model_id: "test-image-counter".to_string(),
+        }
+    }
+
+    #[test]
+    fn batch_count_propagates_any_image_failure() {
+        let dimensions = [(1, 1), (2, 1)];
+        assert_eq!(
+            test_counter(None)
+                .count_tokens_for_images(&dimensions, 4096, 5)
+                .unwrap(),
+            [8, 8]
+        );
+        for width in [1, 2] {
+            let counter = test_counter(Some(width));
+            assert!(counter.count_tokens(width, 1).is_err());
+            assert!(
+                counter
+                    .count_tokens_for_images(&dimensions, 4096, 5)
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn image_count_failure_discards_partial_routing_and_metrics() {
+        use base64::Engine;
+
+        let image_urls: Vec<_> = [1, 2]
+            .into_iter()
+            .map(|width| {
+                let mut png = std::io::Cursor::new(Vec::new());
+                ::image::DynamicImage::new_rgb8(width, 1)
+                    .write_to(&mut png, ::image::ImageFormat::Png)
+                    .unwrap();
+                format!(
+                    "data:image/png;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+                )
+            })
+            .collect();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-image-counter",
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": image_urls[0]}},
+                {"type": "image_url", "image_url": {"url": image_urls[1]}}
+            ]}]
+        }))
+        .unwrap();
+        let ids = vec![7, 10, 8, 10, 9];
+        // Include a successful control and failures before and after a valid
+        // count, so neither partial totals nor cache keys can survive an error.
+        for failing_width in [None, Some(1), Some(2)] {
+            let mut mdc = ModelDeploymentCard::load_from_disk(
+                "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+                None,
+            )
+            .unwrap();
+            mdc.kv_cache_block_size = 16;
+            let mut preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+            let preprocessor = Arc::get_mut(&mut preprocessor).unwrap();
+            preprocessor.image_token_counter = Some(test_counter(failing_width));
+            preprocessor.routing_image_token_id = Some(10);
+            preprocessor.routing_image_prompt_layout = Some(RoutingImagePromptLayout::RepeatedPad);
+            let mut builder = PreprocessedRequest::builder();
+            builder
+                .model("test-image-counter".to_string())
+                .token_ids(ids.clone())
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default());
+            let (_, image_tokens) = preprocessor
+                .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &ids)
+                .await
+                .unwrap();
+            let result = builder.build().unwrap();
+            let success = failing_width.is_none();
+            assert_eq!(image_tokens, success.then_some(16));
+            assert_eq!(result.mm_routing_info.is_some(), success);
+            let extra = result.extra_args.as_ref().unwrap();
+            assert_eq!(extra.get("mm_hashes").is_some(), success);
+            assert!(extra.get("mm_hashes_by_modality").is_none());
+            assert_eq!(result.token_ids.as_ref(), &ids);
+            assert_eq!(
+                result.multi_modal_data.as_ref().unwrap()["image_url"].len(),
+                2
+            );
+        }
+    }
 
     #[test]
     fn image_processor_registry_resolves_qwen3vl_via_path_substring() {
@@ -650,7 +765,7 @@ mod tests {
 
         // 640x480 is already aligned to patch_size * merge_size (32).
         // (640 / 16) * (480 / 16) / merge_size² = 300.
-        assert_eq!(counter.count_tokens(640, 480), 300);
+        assert_eq!(counter.count_tokens(640, 480).unwrap(), 300);
     }
 
     fn write_nemotron_omni_configs(model_dir: &Path) {

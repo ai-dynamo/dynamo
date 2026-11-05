@@ -11,6 +11,7 @@ from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.connectors.virtual import VirtualConnector
 from dynamo.planner.environment.base import PlannerEnvironmentImpl
+from dynamo.planner.environment.batch_runtime import NativeBatchSchedulingProvider
 from dynamo.planner.environment.interface import PlannerEnvironment
 from dynamo.planner.environment.metrics_provider.prometheus_traffic_provider import (
     PrometheusTrafficProvider,
@@ -46,6 +47,7 @@ def construct_connector(
             global_planner_namespace=config.global_planner_namespace,
             global_planner_component="GlobalPlanner",
             model_name=config.model_name,
+            managed_allocation=config.global_planner_managed_allocation,
         )
     if config.environment == "kubernetes":
         return KubernetesConnector(
@@ -85,6 +87,7 @@ def construct_environment(
             backend=config.backend,
             model_name=config.model_name,
             runtime=runtime,
+            max_fpm_age_seconds=3.0 * config.load_adjustment_interval_seconds,
         )
         connector = construct_connector(
             config,
@@ -99,6 +102,19 @@ def construct_environment(
         controller=connector,
         require_prefill=require_prefill,
         require_decode=require_decode,
+        batch_provider=(
+            NativeBatchSchedulingProvider(
+                config.batch_scheduling,
+                actuation_enabled=not config.advisory,
+                writer_fence=(
+                    cast(KubernetesConnector, connector).acquire_batch_writer_fence
+                    if not config.advisory and config.environment == "kubernetes"
+                    else None
+                ),
+            )
+            if config.batch_scheduling.enabled
+            else None
+        ),
     )
 
     namespace_binding: Optional[RuntimeNamespaceBinding] = None
@@ -117,6 +133,7 @@ def construct_environment(
                 backend=config.backend,
                 model_name=config.model_name,
                 runtime=runtime,
+                max_fpm_age_seconds=3.0 * config.load_adjustment_interval_seconds,
                 state_source=environment,
                 namespace_source=namespace_binding,
             )

@@ -17,12 +17,12 @@ limitations under the License.
 
 ![Dynamo 横幅](./docs/fern/assets/img/dynamo-frontpage-banner.png)
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
-[![PyPI](https://img.shields.io/pypi/v/ai-dynamo)](https://pypi.org/project/ai-dynamo/)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/dynamo)
-[![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ)
-![Community Contributors](https://img.shields.io/badge/community_contributors-70%2B-brightgreen)
+[![License](https://img.shields.io/badge/License-Apache_2.0-76B900.svg)](https://opensource.org/licenses/Apache-2.0)
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo?color=76B900)](https://github.com/ai-dynamo/dynamo/releases/latest)
+[![PyPI](https://img.shields.io/pypi/v/ai-dynamo?color=76B900)](https://pypi.org/project/ai-dynamo/)
+[![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-76B900)](https://deepwiki.com/ai-dynamo/dynamo)
+[![Slack](https://img.shields.io/badge/Slack-Join%20ai--dynamo%20workspace-76B900?labelColor=4A154B&logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxZW0iIGhlaWdodD0iMWVtIiB2aWV3Qm94PSIwIDAgMjU2IDI1NiI+PHBhdGggZmlsbD0iI2UwMWU1YSIgZD0iTTUzLjg0MSAxNjEuMzJjMCAxNC44MzItMTEuOTg3IDI2LjgyLTI2LjgxOSAyNi44MlMuMjAzIDE3Ni4xNTIuMjAzIDE2MS4zMmMwLTE0LjgzMSAxMS45ODctMjYuODE4IDI2LjgyLTI2LjgxOEg1My44NHptMTMuNDEgMGMwLTE0LjgzMSAxMS45ODctMjYuODE4IDI2LjgxOS0yNi44MThzMjYuODE5IDExLjk4NyAyNi44MTkgMjYuODE5djY3LjA0N2MwIDE0LjgzMi0xMS45ODcgMjYuODItMjYuODIgMjYuODJjLTE0LjgzIDAtMjYuODE4LTExLjk4OC0yNi44MTgtMjYuODJ6Ii8+PHBhdGggZmlsbD0iIzM2YzVmMCIgZD0iTTk0LjA3IDUzLjYzOGMtMTQuODMyIDAtMjYuODItMTEuOTg3LTI2LjgyLTI2LjgxOVM3OS4yMzkgMCA5NC4wNyAwczI2LjgxOSAxMS45ODcgMjYuODE5IDI2LjgxOXYyNi44MnptMCAxMy42MTNjMTQuODMyIDAgMjYuODE5IDExLjk4NyAyNi44MTkgMjYuODE5cy0xMS45ODcgMjYuODE5LTI2LjgyIDI2LjgxOUgyNi44MkMxMS45ODcgMTIwLjg4OSAwIDEwOC45MDIgMCA5NC4wNjljMC0xNC44MyAxMS45ODctMjYuODE4IDI2LjgxOS0yNi44MTh6Ii8+PHBhdGggZmlsbD0iIzJlYjY3ZCIgZD0iTTIwMS41NSA5NC4wN2MwLTE0LjgzMiAxMS45ODctMjYuODIgMjYuODE4LTI2LjgyczI2LjgyIDExLjk4OCAyNi44MiAyNi44MnMtMTEuOTg4IDI2LjgxOS0yNi44MiAyNi44MTlIMjAxLjU1em0tMTMuNDEgMGMwIDE0LjgzMi0xMS45ODggMjYuODE5LTI2LjgyIDI2LjgxOWMtMTQuODMxIDAtMjYuODE4LTExLjk4Ny0yNi44MTgtMjYuODJWMjYuODJDMTM0LjUwMiAxMS45ODcgMTQ2LjQ4OSAwIDE2MS4zMiAwczI2LjgxOSAxMS45ODcgMjYuODE5IDI2LjgxOXoiLz48cGF0aCBmaWxsPSIjZWNiMjJlIiBkPSJNMTYxLjMyIDIwMS41NWMxNC44MzIgMCAyNi44MiAxMS45ODcgMjYuODIgMjYuODE4cy0xMS45ODggMjYuODItMjYuODIgMjYuODJjLTE0LjgzMSAwLTI2LjgxOC0xMS45ODgtMjYuODE4LTI2LjgyVjIwMS41NXptMC0xMy40MWMtMTQuODMxIDAtMjYuODE4LTExLjk4OC0yNi44MTgtMjYuODJjMC0xNC44MzEgMTEuOTg3LTI2LjgxOCAyNi44MTktMjYuODE4aDY3LjI1YzE0LjgzMiAwIDI2LjgyIDExLjk4NyAyNi44MiAyNi44MTlzLTExLjk4OCAyNi44MTktMjYuODIgMjYuODE5eiIvPjwvc3ZnPg==)](https://ai-dynamo.org/slack)
+![Community Contributors](https://img.shields.io/badge/community_contributors-160%2B-76B900)
 
 | **[文档](https://docs.nvidia.com/dynamo/)** | **[路线图](https://github.com/ai-dynamo/dynamo/issues/5506)** | **[配方](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[示例](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[预构建容器](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[摘要](docs/fern/pages/blog/latest.mdx)** | **[设计提案](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** | **[如何贡献](#社区与贡献)** |
 
@@ -113,7 +113,7 @@ limitations under the License.
 
 ```bash
 # 拉取预构建容器（SGLang 示例）
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0
 
 # 在容器内启动 frontend 和 worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
@@ -127,7 +127,7 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 }' | jq
 ```
 
-另有 [`tensorrtllm-runtime:1.5.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) 和 [`vllm-runtime:1.5.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) 可用。
+另有 [`tensorrtllm-runtime:1.6.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) 和 [`vllm-runtime:1.6.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) 可用。
 
 ### 选项 B：从 PyPI 安装
 
@@ -198,8 +198,8 @@ Dynamo 采用 OSS 优先的开放开发模式。我们欢迎各种形式的贡�
 - **[贡献指南](docs/fern/pages/community/contributing/overview.md)** — 如何贡献代码、文档和配方
 - **[设计提案](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** — 重大功能的 RFC，以带 `dep:*` 标签的 GitHub issue 形式跟踪
 - **[Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)** — 双周会议
-- **[社区会议](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view)** ([Youtube](https://www.youtube.com/@ai-dynamo-community)) – 每周（Wed 10:30 AM PT）开发者社区会议
-- **[Discord](https://discord.gg/D92uqZRjCZ)** — 与团队和社区交流
+- **[社区会议](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view)** ([Youtube](https://www.youtube.com/@ai-dynamo-community)) – 每周（Tue 9:00 AM PT）开发者社区会议
+- **[Slack](https://ai-dynamo.org/slack)** — 与团队和社区交流
 - **[Dynamo Day 录像](https://nvevents.nvidia.com/dynamoday)** — 来自生产用户的深入分享
 
 ## 最新动态

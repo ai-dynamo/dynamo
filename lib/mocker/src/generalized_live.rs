@@ -418,6 +418,10 @@ impl GroupedLiveActor {
                 self.next_pass_deadline_ms,
             );
             self.advance_engine_time(started_at_ms);
+            // The start can be later than the last settlement (a catch-up or
+            // wall-clock start), so complete transfers due before it first.
+            let internal = self.settle_internal_work(started_at_ms)?;
+            self.publish_internal_effects(internal).await?;
             let Some(started) = self.engine.execute_pass(started_at_ms)? else {
                 self.next_pass_deadline_ms = None;
                 continue;
@@ -492,6 +496,14 @@ impl GroupedLiveActor {
         command: SchedulerCommand<Command>,
     ) -> Result<(Result<EngineEffects<CommandEffects>>, InternalEffects)> {
         let now_ms = self.command_time_ms();
+        let internal = self.settle_internal_work(now_ms)?;
+        Ok((self.engine.apply_command_effects(command, now_ms), internal))
+    }
+
+    /// Process all internal work due by `now_ms`. Commands and passes at
+    /// `now_ms` mutate G2 state, which requires earlier transfers to be
+    /// completed first.
+    fn settle_internal_work(&mut self, now_ms: f64) -> Result<InternalEffects> {
         let mut internal = Vec::new();
         while self
             .engine
@@ -503,7 +515,7 @@ impl GroupedLiveActor {
                 internal.push(effects);
             }
         }
-        Ok((self.engine.apply_command_effects(command, now_ms), internal))
+        Ok(internal)
     }
 
     async fn publish_internal_effects(&self, effects: InternalEffects) -> Result<()> {
@@ -779,8 +791,8 @@ mod tests {
 
     use aisimulate_core::engine::generalized::EngineIdentity;
     use aisimulate_core::engine::{
-        CommandResult, EngineConfig, EngineFactory, HandoffId, Request, TimingModel,
-        TimingModelConfig, WorkerType,
+        CommandResult, EngineConfig, EngineFactory, HandoffId, NativeHostOffloadConfig, Request,
+        TimingModel, TimingModelConfig, WorkerType,
     };
 
     use super::*;
@@ -791,6 +803,9 @@ mod tests {
             tokens: (0..prompt_len as u32).collect(),
             max_output_tokens: output_len,
             output_token_ids: Some((0..output_len as u32).map(|token| token + 10_000).collect()),
+            session_id: None,
+            images: Vec::new(),
+            kv_hint: None,
         }
     }
 
@@ -1895,5 +1910,85 @@ mod tests {
             .unwrap()
             .unwrap();
         shutdown.await.unwrap();
+    }
+
+    // Regression: a pass that starts late must first settle every G2 transfer
+    // due by its start, or its own host store trips the private FIFO tier's
+    // "host completions must be ticked before a later mutation" assertion.
+    #[tokio::test(start_paused = true)]
+    async fn late_pass_start_settles_due_host_transfers() {
+        let GroupedLiveRuntime {
+            handle,
+            mut events,
+            actor,
+        } = runtime_with_config(
+            1,
+            EngineConfig {
+                num_gpu_blocks: 128,
+                block_size: 4,
+                max_num_seqs: 8,
+                max_num_batched_tokens: 256,
+                // One 1 MB block at 0.2 GB/s takes 5 ms to copy to G2.
+                kv_cache_bytes_per_token: Some(250_000),
+                native_host_offload: Some(
+                    NativeHostOffloadConfig::new(16).with_bandwidths(0.2, 0.2),
+                ),
+                timing_model: TimingModelConfig::Fixed {
+                    prefill_ms: 10.0,
+                    decode_ms: 10.0,
+                },
+                ..EngineConfig::default()
+            },
+        );
+        let prompt = |id: u128, first_token: u32| Request {
+            request_id: Uuid::from_u128(id),
+            tokens: (first_token..first_token + 4).collect(),
+            max_output_tokens: 3,
+            output_token_ids: Some(vec![10_000, 10_001, 10_002]),
+            session_id: None,
+            images: Vec::new(),
+            kv_hint: None,
+        };
+
+        // One pass stores both prompts; the FIFO D2H lane finishes the copies
+        // 5 ms and 10 ms after its boundary.
+        for (id, first_token) in [(1, 0), (2, 100)] {
+            handle
+                .enqueue_command(SchedulerCommand::new(
+                    0,
+                    Command::Submit(prompt(id, first_token)),
+                ))
+                .await
+                .unwrap();
+        }
+        let first = loop {
+            if let GroupedLiveEvent::PassStarted(started) = next_event(&mut events).await {
+                break started;
+            }
+        };
+        tokio::time::advance(Duration::from_millis(10)).await;
+        let GroupedLiveEvent::PassCompleted { boundary, .. } = next_event(&mut events).await else {
+            panic!("expected first pass completion");
+        };
+        boundary
+            .apply_command(SchedulerCommand::new(0, Command::Submit(prompt(3, 200))))
+            .await
+            .unwrap()
+            .command
+            .unwrap();
+        // Finish late so the next pass starts 15 ms after the boundary, past
+        // both copies.
+        tokio::time::advance(Duration::from_millis(20)).await;
+        boundary.finish().await.unwrap();
+
+        let second = loop {
+            if let GroupedLiveEvent::PassStarted(started) = next_event(&mut events).await {
+                break started;
+            }
+        };
+        assert_eq!(second.started_at_ms, first.end_ms + 15.0);
+
+        handle.shutdown();
+        actor.await.unwrap().unwrap();
     }
 }

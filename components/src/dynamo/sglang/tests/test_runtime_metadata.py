@@ -506,3 +506,116 @@ def test_unreadable_at_file_extra_config_is_ignored(register, tmp_path, filename
         path.write_text("extra_backend_tag = t\n")
 
     assert register._parse_hicache_storage_extra_config(f"@{path}") == {}
+
+
+@pytest.mark.parametrize(
+    "extra_config, file_tenant, env_tenant, expected",
+    [
+        (
+            {"master_server_address": "master", "tenant_id": " tenant-a "},
+            "file",
+            "env",
+            "tenant-a",
+        ),
+        ({"tenant_id": "unused"}, "file", "env", "file"),
+        (
+            {"master_server_address": "master", "tenant_id": None},
+            "file",
+            "env",
+            "default",
+        ),
+        ({}, None, "  ", "default"),
+    ],
+)
+def test_mooncake_runtime_data_publishes_effective_tenant(
+    register, monkeypatch, tmp_path, extra_config, file_tenant, env_tenant, expected
+):
+    monkeypatch.setattr(register, "envs", SimpleNamespace(MOONCAKE_TENANT_ID=object()))
+    monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
+    monkeypatch.delenv("SGLANG_HICACHE_MOONCAKE_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("MOONCAKE_TENANT_ID", raising=False)
+    if file_tenant is not None:
+        config_path = tmp_path / "mooncake.json"
+        config_path.write_text(json.dumps({"tenant_id": file_tenant}))
+        monkeypatch.setenv("SGLANG_HICACHE_MOONCAKE_CONFIG_PATH", str(config_path))
+    if env_tenant is not None:
+        monkeypatch.setenv("MOONCAKE_TENANT_ID", env_tenant)
+    args = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=json.dumps(extra_config),
+        served_model_name="model",
+        page_size=4,
+    )
+    assert register._get_mooncake_runtime_data(args)["tenant_id"] == expected
+
+
+def test_mooncake_tenant_stays_default_without_upstream_support(register, monkeypatch):
+    monkeypatch.setattr(register, "envs", SimpleNamespace())
+    monkeypatch.setenv("MOONCAKE_TENANT_ID", "tenant-a")
+    assert (
+        register._mooncake_tenant_id(
+            {"master_server_address": "master", "tenant_id": "tenant-a"}
+        )
+        == "default"
+    )
+
+
+def test_mooncake_runtime_data_describes_the_direct_linker(register):
+    linker = SimpleNamespace(
+        enable_unified_cache_external_linker=True,
+        unified_cache_external_linker_backend="mooncake",
+        hicache_storage_backend=None,
+        hicache_storage_backend_extra_config=None,
+        model_path="Org/Model",
+        served_model_name="served",
+        page_size=256,
+        tp_size=4,
+    )
+    data = register._get_mooncake_runtime_data(linker)
+    assert data["key_layout"] == "linker"
+    # The linker names keys after model_path, HiCache after served_model_name.
+    assert data["key_prefix"] == "Org-Model"
+    assert data["page_size"] == 256
+
+    # The linker's own config flag wins over the deprecated HiCache extra config.
+    linker_with_config = SimpleNamespace(
+        enable_unified_cache_external_linker=True,
+        unified_cache_external_linker_backend="mooncake",
+        unified_cache_external_linker_config={
+            "master_server_address": "new",
+            "extra_backend_tag": "linker-tag",
+        },
+        hicache_storage_backend=None,
+        hicache_storage_backend_extra_config='{"extra_backend_tag": "old-tag"}',
+        model_path="Org/Model",
+        served_model_name="served",
+    )
+    data = register._get_mooncake_runtime_data(linker_with_config)
+    assert data["extra_backend_tag"] == "linker-tag"
+    assert data["key_prefix"] == "linker-tag_Org-Model"
+
+    # Without the new flag the linker still reads the deprecated extra config.
+    legacy_linker = SimpleNamespace(
+        enable_unified_cache_external_linker=True,
+        unified_cache_external_linker_backend="mooncake",
+        unified_cache_external_linker_config=None,
+        hicache_storage_backend=None,
+        hicache_storage_backend_extra_config='{"extra_backend_tag": "old-tag"}',
+        model_path="Org/Model",
+        served_model_name="served",
+    )
+    data = register._get_mooncake_runtime_data(legacy_linker)
+    assert data["extra_backend_tag"] == "old-tag"
+
+    hicache = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=None,
+        model_path="Org/Model",
+        served_model_name="served",
+    )
+    data = register._get_mooncake_runtime_data(hicache)
+    assert data["key_layout"] == "hicache"
+    assert data["key_prefix"] == "served"
+
+    neither = SimpleNamespace(hicache_storage_backend=None)
+    assert register._get_mooncake_runtime_data(neither) is None

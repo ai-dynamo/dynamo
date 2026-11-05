@@ -13,7 +13,7 @@ use super::registry::Registry;
 
 pub struct Context<T: Data> {
     current: T,
-    controller: Arc<Controller>, //todo: hold this as an arc
+    controller: Arc<Controller>,
     registry: Registry,
     stages: Vec<String>,
     metadata: BTreeMap<String, String>,
@@ -98,6 +98,11 @@ impl<T: Send + Sync + 'static> Context<T> {
     /// Insert an object into the registry with a specific key.
     pub fn insert<K: ToString, U: Send + Sync + 'static>(&mut self, key: K, value: U) {
         self.registry.insert_shared(key, value);
+    }
+
+    /// Insert an existing shared object without allocating another Arc.
+    pub fn insert_arc<K: ToString, U: Send + Sync + 'static>(&mut self, key: K, value: Arc<U>) {
+        self.registry.insert_arc(key, value);
     }
 
     /// Insert a unique and takable object into the registry with a specific key.
@@ -393,6 +398,16 @@ impl Controller {
     pub fn id(&self) -> &str {
         &self.id
     }
+
+    fn transition_to_stopped(&self) {
+        self.tx.send_if_modified(|state| {
+            if *state != State::Live {
+                return false;
+            }
+            *state = State::Stopped;
+            true
+        });
+    }
 }
 
 impl Default for Controller {
@@ -448,7 +463,7 @@ impl AsyncEngineContext for Controller {
             child.stop_generating();
         }
 
-        let _ = self.tx.send(State::Stopped);
+        self.transition_to_stopped();
     }
 
     fn stop(&self) {
@@ -464,7 +479,7 @@ impl AsyncEngineContext for Controller {
             child.stop();
         }
 
-        let _ = self.tx.send(State::Stopped);
+        self.transition_to_stopped();
     }
 
     fn kill(&self) {
@@ -531,6 +546,24 @@ mod tests {
                 message: format!("Processed length: {}", processed.length),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn parent_stop_does_not_downgrade_killed_child() {
+        let parent = Controller::default();
+        let child = Arc::new(Controller::default());
+        parent.link_child(child.clone());
+
+        child.kill();
+        parent.stop();
+
+        assert!(child.is_killed());
+        tokio::time::timeout(std::time::Duration::from_secs(1), child.killed())
+            .await
+            .expect("killed child no longer reported its terminal state");
+
+        child.stop_generating();
+        assert!(child.is_killed());
     }
 
     #[test]

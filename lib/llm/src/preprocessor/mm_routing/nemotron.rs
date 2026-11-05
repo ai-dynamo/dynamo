@@ -233,8 +233,8 @@ impl NemotronImageTokenCounter {
 }
 
 impl ImageRoutingBackend for NemotronImageTokenCounter {
-    fn count_tokens(&self, width: u32, height: u32) -> usize {
-        NemotronImageTokenCounter::count_tokens(self, width, height)
+    fn count_tokens(&self, width: u32, height: u32) -> Result<usize> {
+        Ok(NemotronImageTokenCounter::count_tokens(self, width, height))
     }
 
     fn count_tokens_for_images(
