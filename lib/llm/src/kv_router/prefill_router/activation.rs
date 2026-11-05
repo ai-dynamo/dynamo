@@ -1443,6 +1443,7 @@ mod tests {
     async fn migrate(
         router: &Arc<PrefillRouter>,
         id: &str,
+        prompt: PreprocessedRequest,
         decode: UnreachableDecodeHost,
     ) -> Result<Vec<u32>> {
         let migration = crate::migration::Migration::new(
@@ -1459,7 +1460,7 @@ mod tests {
             decode: Arc::new(decode),
         });
         let request = dynamo_runtime::pipeline::Context::with_id_and_metadata(
-            request(),
+            prompt,
             id.to_string(),
             Default::default(),
         );
@@ -1596,7 +1597,7 @@ mod tests {
         .await
         .expect("prefill target must activate");
 
-        // Requests the scheduler counts against the prefill worker.
+        // Requests and prompt tokens the scheduler counts against the prefill worker.
         let prefill_load = || async {
             router
                 .binding
@@ -1608,32 +1609,45 @@ mod tests {
                 .await
                 .unwrap()
                 .iter()
-                .map(|load| load.active_requests)
-                .sum::<usize>()
+                .fold((0, 0), |(requests, tokens), load| {
+                    (
+                        requests + load.active_requests,
+                        tokens + load.potential_prefill_tokens,
+                    )
+                })
         };
 
         // Migration retries a failed attempt under the same request ID, starting
         // again from remote prefill. Each attempt's prefill is still in flight
         // when its decode fails, as when a decode worker dies between discovery
         // and dispatch or fails before its first token.
-        for streamed in [false, true] {
-            let before = prefill_load().await;
+        for (prompt_token, streamed) in [(1, false), (2, true)] {
+            let (requests_before, tokens_before) = prefill_load().await;
+            let mut prompt = request();
+            prompt.token_ids = vec![prompt_token; prompt.token_ids.len()].into();
+            let isl = prompt.token_ids.len();
             let decode = UnreachableDecodeHost {
                 stream: streamed,
                 failures: 1.into(),
             };
             let id = uuid::Uuid::new_v4().to_string();
-            let tokens =
-                tokio::time::timeout(Duration::from_secs(5), migrate(&router, &id, decode))
-                    .await
-                    .expect("retry must not hang")
-                    .unwrap_or_else(|error| {
-                        panic!("migration retry must book its own remote prefill: {error:#}")
-                    });
+            let tokens = tokio::time::timeout(
+                Duration::from_secs(5),
+                migrate(&router, &id, prompt, decode),
+            )
+            .await
+            .expect("retry must not hang")
+            .unwrap_or_else(|error| {
+                panic!("migration retry must book its own remote prefill: {error:#}")
+            });
             assert_eq!(tokens, vec![7]);
+            // The superseded prefill has emitted no token, so it still counts
+            // its full prompt: the router cannot tell whether the failed decode
+            // received the request. Without KV events the router assumes that
+            // prefill cached the prompt, so the retry books no prompt tokens.
             assert_eq!(
                 prefill_load().await,
-                before + 2,
+                (requests_before + 2, tokens_before + isl),
                 "the superseded prefill must keep its load beside the retry's"
             );
         }
@@ -1647,7 +1661,7 @@ mod tests {
         // Finishing the prefills releases their load.
         held.cancel();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while prefill_load().await > 0 {
+            while prefill_load().await != (0, 0) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
