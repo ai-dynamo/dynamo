@@ -13,13 +13,19 @@ logger = logging.getLogger(__name__)
 
 
 def has_vllm_output_clamping() -> bool:
-    """vLLM 0.32 caps oversized output budgets instead of rejecting them.
+    """Check whether the renderer leaves output-budget clamping to sampling.
 
-    Remove when the CPU and XPU images reach vLLM 0.32.
+    Some modern development wheels report a 0.1 version. Probe the renderer's
+    admission policy instead: older renderers subtract the requested output
+    allowance from the input limit and reject combined overflow.
     """
-    from vllm.version import __version_tuple__
+    try:
+        from vllm.renderers.params import TokenizeParams
+    except ImportError:
+        return False
 
-    return __version_tuple__[:2] >= (0, 32)
+    params = TokenizeParams(max_total_tokens=2, max_output_tokens=1)
+    return params.max_input_tokens == 2
 
 
 def publish_vllm_token_budget(runtime_config: Any, max_model_len: int | None) -> None:

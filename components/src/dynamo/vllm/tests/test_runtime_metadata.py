@@ -90,6 +90,49 @@ def test_vllm_token_budget_matches_rejection_policy():
     }
 
 
+@pytest.mark.parametrize("version_tuple", [(0, 1, "dev24216"), (0, 32, 0)])
+@pytest.mark.parametrize("reserves_output_tokens", [False, True])
+def test_vllm_token_budget_uses_renderer_policy_not_version(
+    monkeypatch, version_tuple, reserves_output_tokens
+):
+    from vllm import version
+    from vllm.renderers import params
+
+    from dynamo.vllm.capacity import publish_vllm_token_budget
+
+    class RendererTokenizeParams:
+        def __init__(self, *, max_total_tokens, max_output_tokens):
+            self.max_input_tokens = max_total_tokens
+            if reserves_output_tokens:
+                self.max_input_tokens -= max_output_tokens
+
+    monkeypatch.setattr(params, "TokenizeParams", RendererTokenizeParams)
+    monkeypatch.setattr(version, "__version_tuple__", version_tuple)
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    publish_vllm_token_budget(runtime_config, 4096)
+
+    runtime_config.set_engine_specific.assert_called_once()
+    key, value = runtime_config.set_engine_specific.call_args.args
+    assert key == TOKEN_BUDGET_RUNTIME_KEY
+    assert json.loads(value) == {
+        "combined_limit": 4096,
+        "reject_prompt_overflow": True,
+        "reject_total_overflow": reserves_output_tokens,
+    }
+
+
+def test_vllm_token_budget_preserves_rejection_without_renderer(monkeypatch):
+    from dynamo.vllm.capacity import publish_vllm_token_budget
+
+    monkeypatch.setitem(sys.modules, "vllm.renderers.params", None)
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    publish_vllm_token_budget(runtime_config, 4096)
+
+    runtime_config.set_engine_specific.assert_called_once()
+    _, value = runtime_config.set_engine_specific.call_args.args
+    assert json.loads(value)["reject_total_overflow"] is True
+
+
 def test_build_sampling_params_caps_oversized_max_tokens():
     from dynamo.vllm.handlers import build_sampling_params
 
