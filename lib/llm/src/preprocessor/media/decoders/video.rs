@@ -410,10 +410,8 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
         )
     };
     let source_timing = if stream_duration > 0 {
-        // A known duration says nothing about where the stream starts. Use the
-        // selected stream's own start (not the container's, which is the
-        // minimum over all streams) so frame timestamps are clip-relative, as
-        // in the packet-derived branch.
+        // Use the selected stream's start, not the container's minimum over all
+        // streams, so timestamps are clip-relative as in the packet-derived branch.
         let start_time_secs = if stream_start_time == ffmpeg_next::ffi::AV_NOPTS_VALUE {
             0.0
         } else {
@@ -819,10 +817,8 @@ mod tests {
         }
     }
 
-    /// Same clip as `webm_nonzero_start_6.webm`, but in MP4, which reports a
-    /// positive stream duration (3 s) and so takes the known-duration branch
-    /// instead of the packet scan. The stream starts at PTS 5 s. Regenerate with
-    /// `ffmpeg -i webm_nonzero_start_6.webm -map 0:v:0 -c copy -copyts mp4_nonzero_start_6.mp4`.
+    /// MP4 copy of `webm_nonzero_start_6.webm` (starts at PTS 5 s) that takes the known-duration branch.
+    /// Regenerate: `ffmpeg -i webm_nonzero_start_6.webm -map 0:v:0 -c copy -copyts mp4_nonzero_start_6.mp4`.
     #[cfg(target_os = "linux")]
     #[test]
     fn test_decode_video_samples_relative_to_known_duration_nonzero_start() {
