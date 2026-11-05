@@ -475,6 +475,17 @@ a value from `1` through `31536000` to enable it, then send
 `X-Dynamo-Session-ID` to keep related requests on one worker. Supplying the header
 without the TTL option provides session identity but does not enable router affinity.
 
+Each session holds one entry in an affinity table until it has been idle for the TTL. A
+frontend keeps one table per worker set it routes to, including the prefill set in
+disaggregated serving, and each table holds at most `65536` entries by default. A request that
+would start a new session past that limit fails as resource exhausted (HTTP 529 by default)
+until an idle session expires. To admit more concurrent sessions, such as one per
+reinforcement-learning rollout, set `--router-session-affinity-max-entries` or
+`DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES`. Available since v1.7. Replica sync copies bindings
+into the matching table on every frontend, so size the limit for the sessions live across all
+frontends, not per frontend. Sync is best effort, so treat this as a sizing guide rather than a
+hard fleet-wide cap.
+
 The first successfully dispatched request binds the session ID to its selected worker and, when available, data-parallel rank. Choose how later requests use that binding with `--router-session-affinity-mode` or `DYN_ROUTER_SESSION_AFFINITY_MODE`:
 
 | Mode | Behavior |

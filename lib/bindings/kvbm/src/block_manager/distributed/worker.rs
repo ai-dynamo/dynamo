@@ -302,7 +302,7 @@ impl KvbmWorker {
 /// Owning wrapper for an NCCL communicator; calls ncclCommDestroy on drop.
 ///
 /// Returned by NcclBootstrap.init_communicator. Pass this object to workers
-/// (e.g. KvbmWorker, PyTrtllmKvConnectorWorker) so they keep the comm alive.
+/// (e.g. KvbmWorker) so they keep the comm alive.
 /// The raw handle is exposed via as_raw() for NcclConfig; ownership stays here.
 #[cfg(feature = "nccl")]
 #[pyclass(name = "NcclCommRef")]
