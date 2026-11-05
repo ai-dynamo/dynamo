@@ -690,7 +690,7 @@ async fn handle_reader(
 async fn handle_writer(
     mut framed_writer: FramedWrite<BoxWrite, TwoPartCodec>,
     mut bytes_rx: tokio::sync::mpsc::Receiver<TwoPartMessage>,
-    alive_rx: tokio::sync::oneshot::Receiver<()>,
+    mut alive_rx: tokio::sync::oneshot::Receiver<()>,
     context: Arc<dyn AsyncEngineContext>,
 ) -> Result<FramedWrite<BoxWrite, TwoPartCodec>> {
     // Keep one cancellation future per stream. Recreating these futures for every queued
@@ -714,6 +714,13 @@ async fn handle_writer(
 
             _ = &mut stopped => {
                 tracing::trace!("context stop signal received; shutting down");
+                send_sentinel = false;
+                break;
+            }
+
+            // Reader exit means no peer remains to consume this response.
+            _ = &mut alive_rx => {
+                context.kill();
                 send_sentinel = false;
                 break;
             }
@@ -929,6 +936,39 @@ mod tests {
         );
     }
 
+    /// A peer FIN while the producer is idle must cancel the request and writer.
+    #[tokio::test]
+    async fn test_peer_eof_cancels_idle_response_writer() {
+        let (client, mut server) = create_tcp_pair().await;
+        let (read_half, write_half) = tokio::io::split(client);
+        let reader = FramedRead::new(Box::new(read_half) as BoxRead, TwoPartCodec::default());
+        let writer = FramedWrite::new(Box::new(write_half) as BoxWrite, TwoPartCodec::default());
+        let (bytes_tx, bytes_rx) = mpsc::channel(64);
+        let (alive_tx, alive_rx) = oneshot::channel();
+        let controller = Arc::new(Controller::default());
+        let reader_task = tokio::spawn(handle_reader(reader, controller.clone(), alive_tx, None));
+        let writer_task = tokio::spawn(handle_writer(
+            writer,
+            bytes_rx,
+            alive_rx,
+            controller.clone(),
+        ));
+
+        server.shutdown().await.unwrap();
+        drop(server);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            reader_task.await.unwrap();
+            writer_task.await.unwrap().unwrap();
+        })
+        .await
+        .expect("peer EOF must wake an idle writer");
+        assert!(controller.is_killed());
+        assert!(
+            bytes_tx.is_closed(),
+            "producer must lose its response receiver"
+        );
+    }
+
     /// Test that handle_writer forwards messages from the channel to the framed writer
     #[tokio::test]
     async fn test_handle_writer_forwards_messages() {
@@ -937,6 +977,7 @@ mod tests {
             framed_writer,
             bytes_tx,
             bytes_rx,
+            alive_tx: _alive_tx,
             alive_rx,
             controller,
             ..
@@ -971,6 +1012,7 @@ mod tests {
             framed_writer,
             bytes_tx,
             bytes_rx,
+            alive_tx: _alive_tx,
             alive_rx,
             controller,
             ..
@@ -1058,6 +1100,7 @@ mod tests {
             mut server,
             framed_writer,
             bytes_rx,
+            alive_tx: _alive_tx,
             alive_rx,
             controller,
             ..
@@ -1096,6 +1139,7 @@ mod tests {
             mut server,
             framed_writer,
             bytes_rx,
+            alive_tx: _alive_tx,
             alive_rx,
             controller,
             ..
@@ -1135,6 +1179,7 @@ mod tests {
             framed_writer,
             bytes_tx,
             bytes_rx,
+            alive_tx: _alive_tx,
             alive_rx,
             controller,
             ..
@@ -1196,6 +1241,7 @@ mod tests {
             framed_writer,
             bytes_tx,
             bytes_rx,
+            alive_tx: _alive_tx,
             alive_rx,
             controller,
             ..
@@ -1229,6 +1275,7 @@ mod tests {
             framed_writer,
             bytes_tx,
             bytes_rx,
+            alive_tx: _alive_tx,
             alive_rx,
             controller,
             ..
