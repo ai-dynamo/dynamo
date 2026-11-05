@@ -596,6 +596,44 @@ async fn tool_choice_controls_parallel_calls() {
 
 #[tokio::test]
 #[serial]
+async fn auto_tool_choice_without_tools_reaches_backend() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(vec![script; 4]).await;
+
+        for tools in [Value::Null, json!([])] {
+            for stream in [false, true] {
+                let mut body = json!({
+                    "model": MODEL, "max_tokens": 64, "stream": stream,
+                    "tool_choice": {"type": "auto"},
+                    "messages": [{"role": "user", "content": "ping"}]
+                });
+                if !tools.is_null() {
+                    body["tools"] = tools.clone();
+                }
+                let response = post_messages(&svc, &body).await;
+                assert_eq!(
+                    response.status(),
+                    reqwest::StatusCode::OK,
+                    "tools={tools}, stream={stream}"
+                );
+                response.bytes().await.unwrap();
+
+                let requests = svc.engine.take_requests().await;
+                assert_eq!(requests.len(), 1);
+                assert!(requests[0].inner.tools.is_none());
+                assert!(requests[0].inner.tool_choice.is_none());
+            }
+        }
+
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 async fn non_object_tool_inputs_are_suppressed_without_dropping_valid_siblings() {
     temp_env::async_with_vars(ENV, async {
         for stream in [false, true] {

@@ -24,9 +24,12 @@ use crate::{
     session_affinity::{SessionAffinityMode, create_affinity_coordinator},
     types::{
         Annotated,
-        openai::chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-            OpenAIChatCompletionsStreamingEngine,
+        openai::{
+            chat_completions::{
+                NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+                OpenAIChatCompletionsStreamingEngine,
+            },
+            completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         },
     },
 };
@@ -114,8 +117,7 @@ fn router_client(
 
 /// LoRA-aware routing is only implemented for the KV, Random, and RoundRobin modes. `Direct`
 /// dispatches to a caller-chosen worker and bypasses both the LoRA filter and non-KV load
-/// tracking; the advanced load-based modes (`PowerOfTwoChoices`, `LeastLoaded`,
-/// `DeviceAwareWeighted`) have no 2-stage LoRA filtering. Reject those combinations so a
+/// tracking; the advanced load-based modes (`LeastLoaded`, `DeviceAwareWeighted`) have no 2-stage LoRA filtering. Reject those combinations so a
 /// misconfiguration fails fast — at startup, before the initial-worker wait — instead of
 /// silently mis-routing adapter traffic to a worker without the adapter.
 fn validate_router_mode_for_lora(
@@ -399,22 +401,51 @@ where
             Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
         >,
 {
-    let frontend = ServiceFrontend::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let PromptFormatter::OAI(formatter) = prompt_formatter_from_mdc(card)?;
     let preprocessor =
         OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())?;
-    let operator = preprocessor.clone().into_operator();
+    let pipeline = link_pipeline(engine, tokenizer, preprocessor.clone())?;
+    Ok((pipeline, preprocessor))
+}
+
+type InputFrontend<Req, Resp> = Arc<ServiceFrontend<SingleIn<Req>, ManyOut<Annotated<Resp>>>>;
+
+pub(crate) fn build_completions_pipeline(
+    card: &ModelDeploymentCard,
+    engine: ExecutionContext,
+    tokenizer: crate::tokenizers::Tokenizer,
+) -> anyhow::Result<InputFrontend<NvCreateCompletionRequest, NvCreateCompletionResponse>> {
+    let preprocessor = OpenAIPreprocessor::new_for_completions(card.clone(), tokenizer.clone())?;
+    link_pipeline(engine, tokenizer, preprocessor)
+}
+
+fn link_pipeline<Req, Resp>(
+    engine: ExecutionContext,
+    tokenizer: crate::tokenizers::Tokenizer,
+    preprocessor: Arc<OpenAIPreprocessor>,
+) -> anyhow::Result<InputFrontend<Req, Resp>>
+where
+    Req: Data,
+    Resp: Data,
+    OpenAIPreprocessor: Operator<
+            Context<Req>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
+            Context<PreprocessedRequest>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
+        >,
+{
+    let frontend = ServiceFrontend::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
+    let preprocessor = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(tokenizer).into_operator();
     let engine = ServiceBackend::from_engine(engine);
 
-    let pipeline = frontend
-        .link(operator.forward_edge())?
+    Ok(frontend
+        .link(preprocessor.forward_edge())?
         .link(backend.forward_edge())?
         .link(engine)?
         .link(backend.backward_edge())?
-        .link(operator.backward_edge())?
-        .link_terminal(frontend)?;
-    Ok((pipeline, preprocessor))
+        .link(preprocessor.backward_edge())?
+        .link_terminal(frontend)?)
 }
 
 impl PreprocessedRouting {
@@ -511,7 +542,6 @@ mod tests {
             KV,
             Random,
             RoundRobin,
-            PowerOfTwoChoices,
             LeastLoaded,
             DeviceAwareWeighted,
         ];
@@ -533,7 +563,7 @@ mod tests {
         }
 
         // LoRA enabled: Direct + the advanced load-based modes are rejected with a clear error.
-        for m in [Direct, PowerOfTwoChoices, LeastLoaded, DeviceAwareWeighted] {
+        for m in [Direct, LeastLoaded, DeviceAwareWeighted] {
             let err = validate_router_mode_for_lora(m, true, false)
                 .expect_err("must reject unsupported LoRA router mode")
                 .to_string();

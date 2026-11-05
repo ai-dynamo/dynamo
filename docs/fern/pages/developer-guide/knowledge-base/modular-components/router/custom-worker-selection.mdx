@@ -56,7 +56,7 @@ Use `dynamo_kv_router::plugins` for plugin registration and these modules for pl
 
 Dynamo owns scheduler queues, eligibility checks, reservations, lifecycle synchronization, and the default selector implementation. Low-level host interfaces such as `WorkerSelector` are used to connect Dynamo components; external plugins use `WorkerSelectionPolicy`.
 
-Existing plugin imports and the `WorkerSelectionPolicyRegistry` name remain available through compatibility re-exports until version 1.7. They refer to the same types and traits, so existing policies can register into `RouterPluginRegistry` without adapters. Migrate imports to `plugins::worker_selection`, rename the registry to `RouterPluginRegistry`, and use `register_worker_selection` for worker policies. The compatibility exports, registry alias, worker-only `register` method, and frontend `worker_selection_policy_factory` setter are scheduled for removal in 1.7.
+Version 1.7 removed the compatibility import paths for these contracts, such as `dynamo_kv_router::WorkerFilter` and `dynamo_kv_router::scheduling::RequestClassifier`, along with the `WorkerSelectionPolicyRegistry` alias, the worker-only `RouterPluginRegistry::register` method, and the frontend `worker_selection_policy_factory` setter. Import from `plugins::worker_selection` and `plugins::request_classifier`, use `RouterPluginRegistry`, and register worker policies with `register_worker_selection`. The types and traits are unchanged.
 
 ## Build the Policy
 
@@ -124,7 +124,7 @@ impl WorkerFilter for MinimumDeviceOverlapFilter {
     }
 
     fn keep(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -159,7 +159,7 @@ impl WorkerScorer for ActiveRequestsScorer {
     }
 
     fn score(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -201,7 +201,7 @@ struct LowestCostPicker;
 
 impl WorkerPicker for LowestCostPicker {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -451,6 +451,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `LOAD` | `decode_cost_blocks()` | Projected active decode footprint, including this request's additional active blocks |
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
 | `PREFERRED_TAINT` | `preferred_taint_multiplier()` | Optional cost multiplier from matching preferred routing taints |
+| `ACTIVE_REQUESTS` | `WorkerInputView::active_requests(row)` | Picker only. Requests in flight on the row's worker; `None` only when the picker did not declare the group or the row is out of range |
 | `KV_TRANSFER` | `kv_transfer()` | `None` if the host has no transfer data for this request: no worker in the partition consumes router hints, or the indexer cannot retain the matched block chain |
 | `KV_TRANSFER` | `source_prefix_blocks()` | Prefix blocks held by the source this worker would fetch from, and so held by the worker after the fetch; `None` when no eligible source holds more than the worker's device-resident plus host-pinned prefix |
 
@@ -459,6 +460,8 @@ The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier 
 `BusyThresholds::has_room(load, info.capacity())` is the check Dynamo's router queue uses to decide whether a worker has room; a component that declares `LOAD` can run the same check.
 
 A filter or scorer reads groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned views through `WorkerInputView`; its cache view supports `get(row)` and `iter()`. Each component must declare every group it reads; another component requesting a group does not grant access.
+
+Declare `ACTIVE_REQUESTS` instead of `LOAD` when a request count is all the picker needs. It is cheaper, and `LOAD` needs the KV scheduler, which tracks each worker's active tokens and blocks.
 
 A scorer reads `KV_TRANSFER` through `WorkerCandidate::kv_transfer()`. Filters and pickers do not receive it, and declaring it there has no effect. The host picks each worker's source with the [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints) rules, including topology islands, and booking a worker attaches a fetch hint for that same source. Fetches are best effort: the source may no longer hold the blocks when the request runs.
 
@@ -477,7 +480,7 @@ impl WorkerScorer for UncoveredPromptScorer {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -634,6 +637,7 @@ impl RequestClassifier for InspectPrefixes {
 - Treat candidate order as unspecified.
 - Request only the signal groups that the component reads.
 - Keep blocking I/O and panics out of `keep`, `score`, and `pick`.
+- Keep any state your policy shares across requests correct under concurrent updates. Dynamo reuses one policy for every request to a model and worker role and handles many requests at once, so two selections can read and change that state at the same time. Policies without such state need nothing extra.
 - Keep policy state local to the factory-created policy unless cross-partition sharing is a deliberate requirement.
 - Build the policy against the same Dynamo revision as the frontend or EPP.
 - If a signal adds work, storage, allocation, or another scan, run the worker-selection benchmark.
@@ -691,8 +695,9 @@ patch, and reset semantics.
 
 Updates run between selection calls. A replacement cannot add worker-input groups beyond those
 declared at startup, change the worker label, or change exclusive-affinity behavior. Queues,
-worker discovery, cache indexes, and host accounting are retained. Scorer/picker-local scratch
-state is rebuilt. A cancelled control request still waiting in the actor queue is skipped.
+worker discovery, cache indexes, and host accounting are retained. The replacement's filters,
+scorers, and picker are new instances, so state the previous instances held, such as a cursor,
+does not carry over. A cancelled control request still waiting in the actor queue is skipped.
 
 The [simple-filter-score-pick example](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/simple-filter-score-pick/src/lib.rs)
 opts in for its `min_device_overlap_blocks` parameter. The built-in default policy opts in for

@@ -129,15 +129,21 @@ impl Server {
         fixtures: &[(&Fixture, bool)],
         alias: bool,
     ) -> (Self, Vec<watch::Sender<Vec<u64>>>) {
-        Self::start_with_registration(fixtures, alias, false).await
+        Self::start_with_registration(fixtures, alias, false, ChatTemplateDefaults::default()).await
     }
 
     async fn start_with_registration(
         fixtures: &[(&Fixture, bool)],
         alias: bool,
         in_process: bool,
+        template_defaults: ChatTemplateDefaults,
     ) -> (Self, Vec<watch::Sender<Vec<u64>>>) {
-        let service = service_v2::HttpService::builder().build().unwrap();
+        let mut config = crate::frontend_config::FrontendApiConfig::default();
+        config.set_chat_template_defaults(template_defaults);
+        let service = service_v2::HttpService::builder()
+            .frontend_api_config(config)
+            .build()
+            .unwrap();
         let backend = Arc::new(RecordingBackend::default());
         let mut workers = Vec::new();
         for (fixture, countable) in fixtures {
@@ -409,6 +415,30 @@ async fn count_tokens_admission_observes_interleaved_beta_and_current_modes() {
 }
 
 #[tokio::test]
+async fn count_tokens_matches_generation_with_frontend_template_defaults() {
+    let fixture = Fixture::new(
+        "model",
+        "{{ custom_header | default('') }} ",
+        "WhitespaceSplit",
+        |_| {},
+    );
+    let mut defaults = ChatTemplateDefaults::default();
+    defaults.set_default_chat_template_kwargs(Some(
+        json!({"custom_header": "prefix prefix", "enable_thinking": true})
+            .as_object()
+            .unwrap()
+            .clone(),
+    ));
+    let (server, _workers) =
+        Server::start_with_registration(&[(&fixture, true)], false, false, defaults).await;
+    let mut request = body("model", "hello");
+    assert_eq!(server.assert_generation_parity(request.clone()).await, 6);
+    request["thinking"] = json!({"type": "disabled"});
+    assert_eq!(server.assert_generation_parity(request).await, 5);
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn count_tokens_supports_in_process_registration_without_changing_thinking_defaults() {
     let fixture = Fixture::new("model", "", "WhitespaceSplit", |card| {
         card.runtime_config.reasoning_parser = Some("deepseek_r1".into());
@@ -419,7 +449,13 @@ async fn count_tokens_supports_in_process_registration_without_changing_thinking
             )
             .unwrap();
     });
-    let (server, _) = Server::start_with_registration(&[(&fixture, true)], false, true).await;
+    let (server, _) = Server::start_with_registration(
+        &[(&fixture, true)],
+        false,
+        true,
+        ChatTemplateDefaults::default(),
+    )
+    .await;
     assert_eq!(
         server
             .assert_generation_parity(body("model", "hello"))
