@@ -53,7 +53,7 @@ def _sglang_graceful_shutdown(
     """Keep the failed worker alive until the request outcome is observable."""
     endpoint = ("backend", "generate")
     response = requests.get(
-        f"http://localhost:{frontend.frontend_port}/health",
+        f"http://localhost:{frontend.frontend_port}/health?instances=true",
         timeout=1,
     )
     response.raise_for_status()

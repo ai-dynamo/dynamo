@@ -27,11 +27,15 @@ for the architecture.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
+| Kubernetes multinode tensor parallelism (TP) | Yes |
 | Attention DP (`--attn-dp-size N`) | Yes, one sidecar per node |
 | Replica DP (`--dp-size N`) | Aggregated and decode; SGLang rejects it for prefill |
+| Image, video, and audio input | No; the sidecar returns 400 |
 
 SGLang's Rust server runs one listener per DP rank. One sidecar per node serves
 all of the node's listeners as one worker.
+
+Media-aware KV routing on wide-token SGLang builds is not supported by the sidecar; see the [multimodal compatibility limits](multimodal.md#wide-token-sglang-builds).
 
 ## Launch Locally
 
@@ -68,6 +72,18 @@ kubectl create secret generic hf-token-secret -n <namespace> \
 kubectl apply -f lib/sidecar/sglang/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 ```
+
+Multinode deployments require complete `leader` and `worker` role PodTemplates. Set
+`backendFramework: sglang` as the examples do; the operator does not infer a backend from
+a native engine launch. The templates own the native engine commands and
+sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and
+[attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). Attention-DP (any DP>1) needs an SGLang build with [sgl-project/sglang#46637](https://github.com/sgl-project/sglang/pull/46637) (unmerged) on SGLang main at or after [sgl-project/sglang#46181](https://github.com/sgl-project/sglang/pull/46181).
+Engine-failure KV recovery remains
+incomplete and is tracked in [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
+
+The examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which exist only in
+DGDs created by operator 1.6.0 or later. For an older DGD, see
+[Use the variables in a DGD created before 1.6.0](../../../../../kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160).
 
 ## Topologies
 

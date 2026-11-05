@@ -112,7 +112,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libfontconfig-dev && \
     # Target system Python even when a framework venv is first on PATH.
     # Debian pip lacks RECORD metadata; overlay it instead of uninstalling it.
-    PIP_BREAK_SYSTEM_PACKAGES=1 /usr/bin/python3 -m pip install --no-cache-dir --ignore-installed --upgrade certifi==2026.10.19 pip==26.2.2 yq && \
+    PIP_BREAK_SYSTEM_PACKAGES=1 /usr/bin/python3 -m pip install --no-cache-dir --ignore-installed --upgrade certifi==2026.10.23 pip==26.2.2 yq && \
     rm -rf /var/lib/apt/lists/* && \
     # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
     git lfs install

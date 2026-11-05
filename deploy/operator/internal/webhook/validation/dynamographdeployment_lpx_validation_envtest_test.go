@@ -15,7 +15,8 @@ import (
 // lpxDGDAdmissionCases builds fresh LPX scenarios for the single native DGD admission table.
 func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 	const longLPXComponentName = "abcdefghijklmnopqrstuvwxyzabcd"
-	const conductorRoleErr = "spec.components: Forbidden: LPX components must each declare a conductor role or form a shared draft and target pair"
+	const conductorRoleErr = `spec.components: Forbidden: LPX components must each declare a conductor role or an agent "runtime" sidecar, or form a shared draft and target pair`
+	const sidecarRoleErr = "Forbidden: Dynamo sidecar mode in role pod templates is supported only on the LPX role that hosts the engine: the conductor role when the component declares one, otherwise the agent role"
 	const conductorTemplateErr = "spec.components[0].roles[1].podTemplate: Required value: LPX conductor requires an explicit podTemplate"
 	const lpxGateErr = "spec.components[0].type: Forbidden: LPX components require lpx.enabled=true"
 	const alphaLPXGateErr = "spec.services[lpx].componentType: Forbidden: LPX components require lpx.enabled=true"
@@ -522,6 +523,81 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaLPXSpecDec(dgd, k8sptr.To[int32](1))
 				dgd.Spec.Components[0].Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "conductor", Image: "setup"}}
+			}),
+		},
+		// The Dynamo runtime sidecar runs on the role whose Pods host the engine:
+		// the conductor when the component declares one, otherwise the agent.
+		{
+			name: "LPX rejects an agent runtime sidecar beside a conductor role",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{
+					Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
+				}}
+			}),
+			wantWebhookErrs: []string{"spec.components[0].roles[0].podTemplate.spec.initContainers[0].name: " + sidecarRoleErr},
+		},
+		{
+			name: "LPX admits an agent runtime sidecar without a conductor role, with its own availability",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Roles = component.Roles[:1]
+				component.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{
+					{Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways)},
+				}
+				component.MinAvailable = new(int32(1))
+				component.ProviderOverride = groveProviderOverride("", `{"rollingUpdate":{"maxUnavailable":1}}`)
+			}),
+			wantWarnings: []string{
+				`spec.components[0].minAvailable ("lpx") is deprecated; use spec.components[0].providerOverride.value.minAvailable and migrate all component minima together without changing their effective values`,
+				`spec.components[0] ("lpx"): RollingRecreate updates may temporarily make this entire component unavailable (replicas=1, maxUnavailable=1); provision spare serving capacity before updating`,
+			},
+		},
+		{
+			name: "LPX agent runtime sidecar requires restartPolicy Always",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Roles = component.Roles[:1]
+				component.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{
+					{Name: "setup", Image: "setup"},
+					{Name: consts.RuntimeContainerName, Image: "sidecar"},
+				}
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[0].roles[0].podTemplate.spec.initContainers[1].restartPolicy: Invalid value: "": must be Always for the LPX runtime init container`,
+			},
+		},
+		{
+			name: "LPX reports container errors with the runtime sidecar restart policy in traversal order",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Roles = component.Roles[:1]
+				spec := &component.Roles[0].PodTemplate.Spec
+				spec.Containers[0].Image = ""
+				spec.InitContainers = []corev1.Container{{Name: consts.RuntimeContainerName, Image: "sidecar"}}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].roles[0].podTemplate.spec.containers[0].image: Required value: must specify a non-empty image",
+				`spec.components[0].roles[0].podTemplate.spec.initContainers[0].restartPolicy: Invalid value: "": must be Always for the LPX runtime init container`,
+			},
+		},
+		{
+			name: "LPX rejects an agent runtime sidecar as the shared speculative target",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaLPXSpecDec(dgd, nil)
+				target := &dgd.Spec.Components[1]
+				target.Roles = target.Roles[:1]
+				target.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{
+					{Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways)},
+				}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].roles: Forbidden: a shared draft and target pair requires the target's conductor role; the agent "runtime" sidecar serves only a single model`},
+		},
+		{
+			name: "LPX admits a conductor runtime sidecar",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Roles[1].PodTemplate.Spec.InitContainers = []corev1.Container{{
+					Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
+				}}
 			}),
 		},
 		{

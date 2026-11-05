@@ -5,12 +5,17 @@
 //! listener runs every request on its own DP rank, so the router's rank
 //! picks the listener.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use dynamo_backend_common::{DisaggregationMode, DynamoError, PreprocessedRequest};
+use dynamo_backend_common::{
+    AsyncEngineContext, DisaggregationMode, DynamoError, PreprocessedRequest,
+};
 use dynamo_sidecar_common::GrpcEndpoint;
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 
-use crate::client::{AbortRpc, Pool};
+use crate::client::{self, AbortRpc, Pool};
 use crate::native_http::NativeHttp;
 use crate::protocol::validate_dp_rank;
 
@@ -76,15 +81,55 @@ impl NodeListeners {
         })
     }
 
-    /// Abort `request_id` on every listener: it runs on exactly one, and the
-    /// others answer that nothing matched. Each RPC is bounded by `timeout`.
-    pub(crate) async fn abort(&self, request_id: &str, timeout: Duration) {
+    /// Abort the request of `ctx`. A native `/generate` dispatch is aborted
+    /// by its own rid on the listener that runs it. A gRPC request's rid is
+    /// `ctx.id()` and its listener is not recorded, so that rid goes to every
+    /// listener: it runs on exactly one, and the others answer that nothing
+    /// matched. Each RPC is bounded by `timeout`.
+    pub(crate) async fn abort(&self, ctx: &Arc<dyn AsyncEngineContext>, timeout: Duration) {
+        let native = self.listeners.iter().find_map(|listener| {
+            let rid = listener.native_http.as_ref()?.request_id(ctx)?;
+            Some((listener, rid))
+        });
+        if let Some((listener, rid)) = native {
+            return AbortRpc::new(listener.pool.control_client())
+                .abort(&rid, timeout)
+                .await;
+        }
+        let request_id = ctx.id();
         let aborts = self.listeners.iter().map(|listener| async move {
             AbortRpc::new(listener.pool.control_client())
                 .abort(request_id, timeout)
                 .await
         });
         futures::future::join_all(aborts).await;
+    }
+
+    /// Polls every listener and resolves when the first one stops serving,
+    /// naming it: the node is lost with any of its ranks. Dropping the
+    /// future stops every poll.
+    pub(crate) fn watch_serving(
+        &self,
+        attempt_timeout: Duration,
+    ) -> impl Future<Output = String> + Send + 'static {
+        let mut watches: FuturesUnordered<_> = self
+            .listeners
+            .iter()
+            .map(|listener| {
+                let polls = client::watch_serving(listener.pool.control_client(), attempt_timeout);
+                let (dp_rank, endpoint) = (listener.dp_rank, listener.endpoint.clone());
+                async move {
+                    let why = polls.await;
+                    format!("listener for DP rank {dp_rank} at {endpoint}: {why}")
+                }
+            })
+            .collect();
+        async move {
+            watches
+                .next()
+                .await
+                .expect("a node has at least one listener")
+        }
     }
 }
 

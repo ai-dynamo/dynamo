@@ -27,11 +27,15 @@ server. See the [sidecar overview](../README.md) for installation.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
+| Kubernetes multinode tensor parallelism (TP) | Yes |
 | Attention DP (`--attn-dp-size N`) | Yes, one sidecar per node |
 | Replica DP (`--dp-size N`) | Aggregated and decode; SGLang rejects it for prefill |
+| Image, video, and audio input | No; the sidecar returns 400 |
 
 SGLang's Rust server runs one listener per DP rank. One sidecar per node serves
 all of the node's listeners as one worker.
+
+See [support notes](../SUPPORT_NOTES.md#sglang) for feature restrictions and operational limits.
 
 ## Run locally
 
@@ -69,17 +73,21 @@ kubectl apply -f lib/sidecar/sglang/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 ```
 
+Multinode deployments use complete `leader` and `worker` role PodTemplates. See
+[`multinode_tp.yaml`](deploy/multinode_tp.yaml), [`multinode_dp.yaml`](deploy/multinode_dp.yaml),
+and the [SGLang sidecar guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes).
+
 ### Kubernetes manifest notes
 
 The examples use an engine-primary layout: SGLang runs as the `main` container
 and `dynamo-sglang-sidecar` runs as a restartable `runtime` init container.
 Those reserved names activate operator sidecar behavior. SGLang native gRPC
-requires SGLang's Rust server (`SGLANG_RUST_SERVER=1`) from a build with
-[sgl-project/sglang#45859](https://github.com/sgl-project/sglang/pull/45859) and
-[sgl-project/sglang#45883](https://github.com/sgl-project/sglang/pull/45883).
+requires SGLang's Rust server (`SGLANG_RUST_SERVER=1`) from SGLang v0.5.23 or
+later. [sgl-project/sglang#45859](https://github.com/sgl-project/sglang/pull/45859)
+is optional; without it, an EAGLE engine gets no token budget and the sidecar
+treats `--allow-auto-truncate` and `--skip-tokenizer-init` as off.
 SGLang can alternatively load the sidecar in-process with
-`--sidecar dynamo.sglang.sidecar`, which under the Rust server needs
-[sgl-project/sglang#46635](https://github.com/sgl-project/sglang/pull/46635).
+`--sidecar dynamo.sglang.sidecar`.
 
 Aggregated serving uses loopback between the engine and sidecar. Disaggregated
 serving binds SGLang to the pod network so decode workers can reach prefill's
