@@ -410,10 +410,14 @@ def bucket_history_inprocess(
                         continue
                     location = f"{path}@{item.offset}:{index + 1}"
                     event = _event(raw, location, "trace_corrupt")
+                    # Buckets read arrival, ISL and OSL only, as the replay
+                    # read task's history does: no hashes needed.
                     row = (
                         None
                         if event is None
-                        else _request_row(event, location, "trace_corrupt")
+                        else _request_row(
+                            event, location, "trace_corrupt", need_hashes=False
+                        )
                     )
                     if row is None or not (
                         history_start_ms <= row.arrival_ms < window_end_ms
@@ -1136,10 +1140,14 @@ def _event(
 
 
 def _request_row(
-    event: dict[str, Any], location: str, failure: WindowCutFailure
+    event: dict[str, Any],
+    location: str,
+    failure: WindowCutFailure,
+    *,
+    need_hashes: bool = True,
 ) -> Optional[_RequestRow]:
     try:
-        return _parse_request_end(event, location, need_hashes=True)
+        return _parse_request_end(event, location, need_hashes=need_hashes)
     except ValueError as error:
         raise WindowCutError(failure, str(error)) from error
 

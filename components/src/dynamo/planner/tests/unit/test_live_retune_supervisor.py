@@ -588,10 +588,15 @@ class FakeHost:
         self.variant = "a" if inputs is None else variant_of(inputs)
         self.replacements: list[tuple[Any, int]] = []
         self.fail_replace = False
+        # Decisions whose Planner fields the supervisor handed over.
+        self.persisted: list[Any] = []
 
     @property
     def controller(self) -> Optional[TracedController]:
         return self._engine.retune_controller
+
+    def retune_decision_persisted(self, decision):
+        self.persisted.append(decision)
 
     async def replace_live_retune(self, inputs, *, generation):
         async with self._config_lock:
@@ -1067,6 +1072,51 @@ async def test_applied_decision_is_persisted_then_deployed() -> None:
     assert sup.launch_gate(K0 + 1, window(K0 + 1)).reason == "already_decided"
 
 
+def _with_planner_changes(process: Process, k: int) -> RetuneDecision:
+    """An applied decision with a Planner field, recorded in the controller
+    as its decide step does."""
+
+    chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
+    process.controller.restore_desired(chosen)
+    changes = {"load_scaling_down_sensitivity": 70}
+    process.controller._pending_planner.update(changes)
+    return dataclasses.replace(
+        make_decision(k, "applied", chosen=chosen), planner_changes=changes
+    )
+
+
+async def test_planner_fields_apply_only_once_their_decision_is_persisted() -> None:
+    world = World()
+    process = await leading(world)
+    decision = _with_planner_changes(process, K0 + 1)
+
+    enqueue(process, decision)
+    assert process.host.persisted == []  # queued, not written yet
+    await process.sup.outbox_round()
+
+    assert world.shared_state().history[-1]["decision_id"] == decision.decision_id
+    assert process.host.persisted == [decision]
+
+
+async def test_planner_fields_of_an_unwritten_decision_are_discarded() -> None:
+    world = World()
+    process = await leading(world)
+    sup = process.sup
+    store = StateStore(world.kube, sup.dgd)
+    snapshot = store.read()
+    store.write(dataclasses.replace(snapshot.state, leader_term="9/x/1"), snapshot)
+    decision = _with_planner_changes(process, K0 + 1)
+
+    enqueue(process, decision)
+    await sup.outbox_round()  # lost_term: not written
+    await sup.lease_round()  # re-initializes and drops the outbox
+
+    assert sup.outbox_size == 0
+    assert process.host.persisted == []
+    # The controller's current point is the running configuration again.
+    assert process.controller._pending_planner == {}
+
+
 async def test_advisory_decision_records_the_recommendation_only() -> None:
     world = World()
     process = await leading(world, advisory=True)
@@ -1216,10 +1266,13 @@ async def test_decisions_are_dropped_and_rewound_without_leadership() -> None:
     controller = process.controller
     controller._last_k = K0 + 1
     # Dropped decisions are not handed back: the planner applies none of
-    # their planner changes.
-    assert enqueue(process, make_decision(K0 + 1, "kept")) == []
+    # their planner changes, and the controller forgets them.
+    decision = _with_planner_changes(process, K0 + 1)
+    assert enqueue(process, make_decision(K0 + 1, "kept"), decision) == []
     assert process.sup.outbox_size == 0
     assert controller._last_k == -1  # no state: every window is due again
+    assert controller._pending_planner == {}
+    assert process.host.persisted == []
 
 
 async def test_a_foreign_term_forces_reinitialization() -> None:

@@ -109,7 +109,7 @@ from dynamo.planner.retune.sweep import (
     sweep_throughput_intervals,
     write_observations,
 )
-from dynamo.planner.simulation.config import retune_sweep_base
+from dynamo.planner.simulation.config import inner_planner_config, retune_sweep_base
 
 logger = logging.getLogger(__name__)
 
@@ -1319,13 +1319,7 @@ class _DgdrSweep:
         # The configuration the Runs replay (only its scaling fields): the
         # live dump may hold settings, such as non-advisory batch
         # scheduling, that need what a dump leaves out.
-        inner_base = {
-            **retune_sweep_base(request.base_planner or {}),
-            "retune": None,
-            "advisory": False,
-            "report_interval_hours": None,
-            "live_dashboard_port": 0,
-        }
+        inner_base = inner_planner_config(retune_sweep_base(request.base_planner or {}))
         with tempfile.TemporaryDirectory(prefix="retune-dgdr-planner-") as work:
             work_dir = Path(work)
             paths = {

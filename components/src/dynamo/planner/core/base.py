@@ -55,12 +55,8 @@ from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
 from dynamo.planner.offline.trace_data import extract_traffic_observations_from_trace
 from dynamo.planner.reconfiguration import (
-    PREPARATION_TIMEOUT_SECONDS,
     PlannerReconfiguration,
-    candidate_config,
     live_retune_sla_errors,
-    predictor_rebuild_required,
-    prepare_predictor,
     runtime_candidate_errors,
     runtime_configuration_errors,
 )
@@ -121,7 +117,9 @@ class LiveRetuneHandle(Protocol):
         ...
 
     def on_effects(self, effects: PlannerEffects) -> Sequence[RetuneDecision]:
-        """Take the tick's decisions; return the ones it accepted."""
+        """Take the tick's decisions; return the ones it queued to persist.
+        The Planner fields of each apply once it is persisted
+        (``retune_decision_persisted``)."""
         ...
 
 
@@ -638,60 +636,30 @@ class NativePlannerBase:
             setter(age)
             logger.info("FPM freshness window is now %.1fs", age)
 
-    def _schedule_retune_planner_changes(
-        self, decisions: Sequence[RetuneDecision]
-    ) -> None:
-        """Apply each ``applied`` live retune decision's Planner fields.
+    def retune_decision_persisted(self, decision: RetuneDecision) -> None:
+        """Apply a persisted live retune decision's Planner fields
+        (``LiveRetuneHost``).
 
-        In the background, through the runtime reconfiguration path: a new
-        load predictor is prepared off the event loop on the decision's
-        warmup, then the candidate activates under the effect admission and
-        configuration locks, as a control API update does.
+        In the background, through ``PlannerReconfiguration.apply_decision``,
+        the control API's two-phase path. The supervisor calls this only once
+        the decision is written under this process's term.
         """
 
-        for decision in decisions:
-            if decision.outcome != "applied" or not decision.planner_changes:
-                continue
-            task = asyncio.create_task(
-                self._apply_retune_planner_changes(decision),
-                name=f"planner-retune-apply-{decision.decision_id}",
-            )
-            self._retune_apply_tasks.add(task)
-            task.add_done_callback(self._retune_apply_tasks.discard)
+        if decision.outcome != "applied" or not decision.planner_changes:
+            return
+        task = asyncio.create_task(
+            self._apply_retune_planner_changes(decision),
+            name=f"planner-retune-apply-{decision.decision_id}",
+        )
+        self._retune_apply_tasks.add(task)
+        task.add_done_callback(self._retune_apply_tasks.discard)
 
     async def _apply_retune_planner_changes(self, decision: RetuneDecision) -> None:
         changes = dict(decision.planner_changes)
         try:
-            async with self._config_lock:
-                candidate = candidate_config(self.config, changes)
-                self.validate_runtime_candidate(candidate)
-                rebuild = predictor_rebuild_required(self.config, candidate)
-                # Like the control API's expected_revision: a change made
-                # while the predictor is prepared (the control API or another
-                # decision) wins, and this one is dropped.
-                revision = self._config_generation
-            predictor = None
-            if rebuild:
-                predictor = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        prepare_predictor,
-                        candidate,
-                        self._build_worker_capabilities(),
-                        decision.predictor_warmup,
-                    ),
-                    PREPARATION_TIMEOUT_SECONDS,
-                )
-            async with self._effect_admission_lock:
-                async with self._config_lock:
-                    if self._config_generation != revision:
-                        raise ValueError(
-                            "the configuration changed while the predictor was "
-                            f"prepared (revision {revision} -> "
-                            f"{self._config_generation})"
-                        )
-                    candidate = candidate_config(self.config, changes)
-                    self.validate_runtime_candidate(candidate)
-                    self.apply_runtime_candidate(candidate, changes.keys(), predictor)
+            await self.reconfiguration.apply_decision(
+                changes, decision.predictor_warmup
+            )
             logger.info(
                 "Retune %s applied planner changes %s",
                 decision.decision_id,
@@ -1380,16 +1348,13 @@ class NativePlannerBase:
             effects = await engine.tick(tick, tick_input)
         if self._live_retune is not None:
             # Retune decisions go to the live supervisor's outbox, which
-            # persists them before actuating routers; _apply_effects never
-            # sees router parameters.
-            # Only a decision the supervisor accepted (persisted, then
-            # actuated) changes the planner: a dropped one is rewound.
-            accepted: Sequence[RetuneDecision] = ()
+            # persists them before actuating routers and before calling back
+            # retune_decision_persisted for the Planner fields; _apply_effects
+            # never sees router parameters.
             try:
-                accepted = self._live_retune.on_effects(effects)
+                self._live_retune.on_effects(effects)
             except Exception:
                 logger.exception("Live retune failed to take the tick's effects")
-            self._schedule_retune_planner_changes(accepted)
         await self._submit_effects(effects, config_generation)
         emit_diagnostics = self._should_emit_tick_diagnostics(tick, effects)
         if emit_diagnostics:

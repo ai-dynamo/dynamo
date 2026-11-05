@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Annotated, Any, Literal, TypeAlias
 
 from aisimulate.config.common import Choices, IntegerRange, NumericRange
@@ -445,6 +446,38 @@ def retune_sweep_base(planner: Mapping[str, Any]) -> dict[str, Any]:
             if key in PLANNER_RETUNE_SWEEP_SCHEDULING_FIELDS
         }
     return base
+
+
+# What a retune candidate's inner planner overrides in the running planner's
+# configuration. It is never retuned and always actuates, even under an
+# advisory outer planner: a candidate is scored on the replicas it would
+# drive. It writes no reports and opens no listener, warms from the sweep's
+# history instead of the outer planner's warmup trace, and runs no batch
+# scheduling, which replay never runs and which would need the Redis settings
+# an actuating planner requires.
+INNER_PLANNER_OVERRIDES: dict[str, Any] = {
+    "retune": None,
+    "advisory": False,
+    "report_interval_hours": None,
+    "live_dashboard_port": 0,
+    "metric_reporting_prometheus_port": 0,
+    "load_predictor_warmup_trace": None,
+    "batch_scheduling": {"enabled": False},
+}
+
+
+def inner_planner_config(
+    base: Mapping[str, Any], point: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """A retune candidate's inner planner: ``base`` with ``point`` applied and
+    ``INNER_PLANNER_OVERRIDES`` over both. Every retune executor (the replay
+    sweep, the DGDR executor and the AISimulate adapter) builds it here."""
+
+    return {
+        **deepcopy(dict(base)),
+        **deepcopy(dict(point or {})),
+        **deepcopy(INNER_PLANNER_OVERRIDES),
+    }
 
 
 class PlannerRetuneConfig(PlannerRecommendationConfig):

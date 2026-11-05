@@ -73,6 +73,7 @@ from dynamo.planner.retune.window import (
     read_trace_history,
     read_trace_window,
 )
+from dynamo.planner.simulation.config import inner_planner_config
 from dynamo.planner.simulation.load_predictor import (
     Window,
     evaluate_preset,
@@ -876,22 +877,8 @@ def _run_sweep(
         inner_base = None
         if request.base_planner is not None:
             # The inner planner is the current one, warmed from the recorded
-            # history (the read task's warmup buckets) instead of the outer
-            # run's own warmup trace, never retuned, and without diagnostics
-            # reports (one HTML file per candidate). It always scales, even
-            # under an advisory outer planner: a candidate is scored on the
-            # replicas it would drive. Replay never runs batch scheduling, so
-            # it is off, which also drops the Redis settings an actuating
-            # planner would require.
-            inner_base = {
-                **request.base_planner,
-                "retune": None,
-                "load_predictor_warmup_trace": None,
-                "report_interval_hours": None,
-                "live_dashboard_port": 0,
-                "advisory": False,
-                "batch_scheduling": {"enabled": False},
-            }
+            # history (the read task's warmup buckets).
+            inner_base = inner_planner_config(request.base_planner)
         if presweep_intervals:
             presweep = run_presweeps(
                 request,

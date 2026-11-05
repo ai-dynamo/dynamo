@@ -571,18 +571,20 @@ async def test_window_started_before_the_controller_launches_unverified():
     assert request.replicas == SPEC
 
 
-def _scaling_config():
+def _scaling_config(planner="default", **overrides):
     # Scenario 2: load scaling (easy mode) with the default sensitivities.
+    retune = {
+        "interval_seconds": INTERVAL,
+        "grace_seconds": GRACE,
+        "router": ROUTER,
+    }
+    if planner is not None:
+        retune["planner"] = planner
     return PlannerConfig(
         namespace="test-ns",
         mode="agg",
-        enable_throughput_scaling=False,
-        retune={
-            "interval_seconds": INTERVAL,
-            "grace_seconds": GRACE,
-            "router": ROUTER,
-            "planner": "default",
-        },
+        **{"enable_throughput_scaling": False, **overrides},
+        retune=retune,
     )
 
 
@@ -631,6 +633,43 @@ async def test_a_scaling_planner_sweeps_from_the_ready_counts_at_window_start(
     assert sorted(
         planner["load_scaling_down_sensitivity"] for planner in request.grid_planners
     ) == [70, 80, 90]
+
+
+@pytest.mark.parametrize(
+    ("planner", "overrides"),
+    [
+        (None, {}),
+        (
+            {"load_predictor": {"preset": ["constant_last", "kalman_default_raw"]}},
+            {
+                "optimization_target": "sla",
+                "enable_throughput_scaling": True,
+                "load_predictor": "kalman",
+            },
+        ),
+    ],
+    ids=["router_only", "predictor_only"],
+)
+async def test_a_scaling_planner_without_planner_points_keeps_one_planner_point(
+    planner, overrides
+):
+    # The grid searches no planner field: its one planner point is {}, the
+    # running planner (with the pre-sweep winner), so every Run still
+    # replays an inner planner.
+    sweeps = FakeSweeps()
+    sweeps.default = _flat()
+    config = _scaling_config(planner, **overrides)
+    controller = _live(sweeps, start=T0 - INTERVAL - 2 * STEP, config=config)
+    try:
+        await _run_window(
+            controller, lambda _now: 2, start=T0 - INTERVAL - 2 * STEP, until=L_K
+        )
+    finally:
+        controller.close()
+
+    (request,) = _requests_for_k(sweeps)
+    assert request.base_planner is not None
+    assert request.grid_planners == ({},)
 
 
 # ---------------------------------------------------------------------------

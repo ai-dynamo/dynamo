@@ -1281,6 +1281,22 @@ def test_history_is_bucketed_at_each_interval_from_the_segments(tmp_path):
     assert {obs.duration_s for obs in history.observations[5]} == {5.0}
 
 
+def test_history_rows_need_no_block_hashes(tmp_path):
+    # History buckets read arrival, ISL and OSL only: a row without its
+    # replay hashes is counted, not a corrupt trace.
+    root = tmp_path / "segments"
+    record = _row("r1", 1000)
+    del record["request"]["replay"]["input_sequence_hashes"]
+    del record["request"]["replay"]["trace_block_size"]
+    _write(root / "pod-a" / "req.000001.jsonl.gz", _member([_envelope(record)]))
+
+    history = window_cut.bucket_history_inprocess(
+        str(root), 1000, START, END, AS_OF, [5]
+    )
+
+    assert history.history_requests == 1
+
+
 def test_history_runs_in_a_child_that_the_deadline_stops(tmp_path):
     root = tmp_path / "segments"
     _write(

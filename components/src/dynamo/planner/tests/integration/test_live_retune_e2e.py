@@ -571,6 +571,11 @@ class PlannerHost:
                 inputs, generation=generation, now_s=self._clock.time()
             )
 
+    def retune_decision_persisted(self, decision):
+        # Router-only retune: no decision carries Planner fields.
+        if decision.planner_changes:
+            raise AssertionError(f"unexpected planner changes {decision}")
+
 
 class Planner:
     """One planner process: its supervisor, engine, actuator and reconciler."""

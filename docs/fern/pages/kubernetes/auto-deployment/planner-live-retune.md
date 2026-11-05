@@ -65,10 +65,12 @@ Live retune searches the three router knobs a DGDR Request can express,
    reaches any router.
 6. **Apply.** The Planner sets all eight router policy parameters of every frontend router to
    the decided values, and keeps them there: a manual change to them is reverted. Decided Planner
-   parameters take effect in the Planner itself through its
+   parameters take effect in the Planner itself once the decision is persisted, through its
    [runtime reconfiguration](../../reference/components/planner-configuration.mdx#system-port-reconfiguration-api),
-   with a new load predictor warmed on the window's history when the decision needs one. A
-   Planner that restarts runs its configured values again: retune does not restore applied
+   with a new load predictor warmed on the window's history when the decision needs one. They
+   share the control API's one-update-at-a-time rule: the decision's Planner parameters are
+   dropped when another update is still preparing, or activates while their predictor is warmed.
+   A Planner that restarts runs its configured values again: retune does not restore applied
    Planner parameters, and logs the ones it lost.
 
 Windows are aligned to `retune.dgdr.phase_seconds + k × interval_seconds` in epoch time, so a

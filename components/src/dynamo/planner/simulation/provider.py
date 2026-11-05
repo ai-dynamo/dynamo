@@ -49,6 +49,7 @@ from .config import (
     PLANNER_PUBLIC_TO_CONFIG,
     PlannerRecommendationConfig,
     Policy,
+    inner_planner_config,
 )
 from .load_predictor import (
     LOAD_PREDICTOR_PRESETS,
@@ -499,15 +500,7 @@ def _retune_sweep_planner_config(
     serialized, never environment-derived connection settings.
     """
 
-    payload: dict[str, Any] = {
-        **deepcopy(spec.base),
-        **deepcopy(dict(point)),
-        "retune": None,
-        "advisory": False,
-        "report_interval_hours": None,
-        "live_dashboard_port": 0,
-        "metric_reporting_prometheus_port": 0,
-    }
+    payload: dict[str, Any] = inner_planner_config(spec.base, point)
     if sample is not None:
         mode = str(sample["deployment_mode"])
         if mode == "disagg":

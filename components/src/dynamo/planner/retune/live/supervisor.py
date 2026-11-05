@@ -43,7 +43,9 @@ thread with a timeout):
   leader of the round's epoch or the budget has passed.
 - outbox: write each decision, conditional on the state's ``leader_term``
   being this process's term and on the resourceVersion read; N consecutive
-  failures re-initialize.
+  failures re-initialize. Once an applied decision is written, its Planner
+  fields go to ``host.retune_decision_persisted``; a decision dropped
+  before that has its Planner fields discarded from the controller.
 
 Local leadership loss, a failed outbox, and a controller rebuild share one
 path: clear ``initialized``, stop the outbox writer and the in-flight
@@ -219,6 +221,11 @@ class LiveRetuneHost(Protocol):
     async def replace_live_retune(
         self, inputs: Optional[RetuneInputs], *, generation: int
     ) -> None:
+        ...
+
+    def retune_decision_persisted(self, decision: RetuneDecision) -> None:
+        """Apply a persisted ``applied`` decision's Planner fields (in the
+        background; must not block)."""
         ...
 
 
@@ -900,7 +907,8 @@ class LiveRetuneSupervisor:
 
     def on_effects(self, effects: PlannerEffects) -> list[RetuneDecision]:
         """Enqueue the tick's decisions and return them, or ``[]`` when they
-        are dropped; never raises into the tick."""
+        are dropped; never raises into the tick. Their Planner fields apply
+        once written (``outbox_round``)."""
 
         decisions = list(effects.retune_decisions or ())
         if not decisions:
@@ -911,6 +919,7 @@ class LiveRetuneSupervisor:
                 len(decisions),
                 [decision.decision_id for decision in decisions],
             )
+            self._discard_planner_changes(decisions)
             self._rewind_now()
             return []
         router_parameters = effects.router_parameters
@@ -1061,12 +1070,17 @@ class LiveRetuneSupervisor:
                     "retune outbox: dropped %s of an earlier term/generation",
                     entry.decision.decision_id,
                 )
+                self._discard_planner_changes([entry.decision])
                 continue
             outcome = await self._write_decision(entry)
             if outcome in ("ok", "already", "discarded"):
                 if self._outbox and self._outbox[0] is entry:
                     self._outbox.popleft()
                 self._write_failures = 0
+                if outcome == "discarded":
+                    self._discard_planner_changes([entry.decision])
+                else:
+                    self._decision_persisted(entry.decision)
                 continue
             if outcome == "lost_term":
                 self._request_reinit("the state's leader_term is not ours")
@@ -1398,6 +1412,7 @@ class LiveRetuneSupervisor:
         await self._cancel(self._reconcile_task)
         self._reconcile_task = None
         dropped = len(self._outbox)
+        unwritten = [entry.decision for entry in self._outbox]
         self._outbox.clear()
         self._write_failures = 0
         controller = self._controller()
@@ -1407,6 +1422,7 @@ class LiveRetuneSupervisor:
                     controller.drop_pending()
                 except Exception:
                     logger.exception("retune: drop_pending failed")
+                self._discard_planner_changes(unwritten)
                 self._rewind(controller)
         if was:
             logger.info(
@@ -2059,6 +2075,42 @@ class LiveRetuneSupervisor:
         controller = self._controller()
         if controller is not None:
             self._rewind(controller)
+
+    def _decision_persisted(self, decision: RetuneDecision) -> None:
+        """Hand a written ``applied`` decision's Planner fields to the host."""
+
+        if decision.outcome != "applied" or not decision.planner_changes:
+            return
+        host = self._host
+        try:
+            if host is None:
+                raise RuntimeError("no planner host")
+            host.retune_decision_persisted(decision)
+        except Exception:
+            logger.exception(
+                "retune: applying the Planner fields of %s failed",
+                decision.decision_id,
+            )
+            self._discard_planner_changes([decision])
+
+    def _discard_planner_changes(self, decisions: Sequence[RetuneDecision]) -> None:
+        """Forget the Planner fields of ``applied`` decisions that will not be
+        applied, so the controller's current point is the running
+        configuration again."""
+
+        controller = self._controller()
+        if controller is None:
+            return
+        for decision in decisions:
+            if decision.outcome != "applied" or not decision.planner_changes:
+                continue
+            try:
+                controller.discard_planner_changes(decision.planner_changes)
+            except Exception:
+                logger.exception(
+                    "retune: discarding the Planner fields of %s failed",
+                    decision.decision_id,
+                )
 
     def _engine(self) -> Any:
         """The host's engine adapter; ``None`` before ``start`` or without one."""

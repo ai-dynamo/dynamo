@@ -34,11 +34,14 @@ pytest.importorskip(
 
 from dynamo.planner.config.planner_config import (
     DgdrExecutorConfig,
+    PlannerConfig,
     RetuneConfig,
     RetuneEngineSpec,
     dgdr_need_seconds,
 )
-from dynamo.planner.core.types import RetuneParams
+from dynamo.planner.core.types import RetuneParams, TrafficObservation
+from dynamo.planner.retune import sweep as sweep_module
+from dynamo.planner.retune.domains import PREDICTOR_KEYS
 from dynamo.planner.retune.live import dgdr
 from dynamo.planner.retune.live.contracts import (
     LABEL_ATTEMPT,
@@ -68,6 +71,7 @@ from dynamo.planner.retune.live.dgdr import (
     window_selection,
 )
 from dynamo.planner.retune.live.reconciler import trace_pvc_source
+from dynamo.planner.retune.live.window_cut import TraceHistory
 from dynamo.planner.retune.sweep import SweepRequest, score_summary
 from dynamo.planner.tests.live_retune_fakes import (
     FakeDgdrOperator,
@@ -2162,9 +2166,6 @@ class FakeHistory:
         deadline_s,
         cancel=None,
     ):
-        from dynamo.planner.core.types import TrafficObservation
-        from dynamo.planner.retune.live.window_cut import TraceHistory
-
         self.calls.append(
             {
                 "segments_root": segments_root,
@@ -2189,8 +2190,6 @@ class FakeHistory:
 
 
 def _base_planner(**overrides: Any) -> dict[str, Any]:
-    from dynamo.planner.config.planner_config import PlannerConfig
-
     values: dict[str, Any] = {
         "namespace": "test-ns",
         "mode": "agg",
@@ -2380,8 +2379,6 @@ def test_scenario_2_presweep_winner_keeps_the_planner_axis(tmp_path, monkeypatch
             "by_interval": {interval: {"fields": {"load_predictor": "kalman"}}}
         },
     )
-    from dynamo.planner.retune import sweep as sweep_module
-
     monkeypatch.setattr(sweep_module, "prepare_predictor", lambda *args: None)
 
     result = h.sweep(request, bucket_history=FakeHistory(), worker_pool=InlinePool)
@@ -2389,6 +2386,68 @@ def test_scenario_2_presweep_winner_keeps_the_planner_axis(tmp_path, monkeypatch
     assert result.status == "ok", (result.error, result.details)
     assert result.details["planner"]["points"] == 2
     assert "point-baseline" in result.details["shards"]
+    assert all(result.scores[c.key()] is not None for c in request.candidates)
+
+
+@pytest.mark.parametrize(
+    "predictor_only", [False, True], ids=["router_only", "predictor_only"]
+)
+def test_scenario_2_without_planner_points_replays_the_running_planner(
+    tmp_path, monkeypatch, predictor_only
+):
+    # The grid searches no planner field, so its one planner point is {}:
+    # every Run still replays the running planner (with the pre-sweep winner
+    # when the predictor is searched), and every candidate gets a score.
+    h = Harness(tmp_path)
+    running: dict[str, Any] = {}
+    if predictor_only:
+        base = _base_planner(
+            optimization_target="sla",
+            enable_throughput_scaling=True,
+            enable_load_scaling=True,
+            load_predictor="arima",
+        )
+        running = {key: base[key] for key in PREDICTOR_KEYS}
+    else:
+        base = _base_planner()
+    request = make_request(planner=running)
+    request = dataclasses.replace(
+        request,
+        replicas={"aggregated": 2},
+        base_planner=base,
+        history_start_ms=request.window_start_ms - 600_000.0,
+        grid_planners=({},),
+    )
+    if predictor_only:
+        request = dataclasses.replace(
+            request,
+            predictor_candidates=(("kalman_default", {"load_predictor": "kalman"}),),
+        )
+        interval = str(base[THROUGHPUT_INTERVAL])
+        monkeypatch.setattr(
+            dgdr,
+            "run_presweeps",
+            lambda *args: {
+                "by_interval": {interval: {"fields": {"load_predictor": "kalman"}}}
+            },
+        )
+        monkeypatch.setattr(sweep_module, "prepare_predictor", lambda *args: None)
+
+    result = h.sweep(request, bucket_history=FakeHistory(), worker_pool=InlinePool)
+
+    assert result.status == "ok", (result.error, result.details)
+    assert result.details["planner"]["points"] == 1
+    grid_points = [
+        point
+        for body in h.created()
+        if body["metadata"]["labels"][LABEL_SHARD].startswith("grid-")
+        for point in body["spec"]["aisim"]["inputOverrides"]["planner"]["retune_sweep"][
+            "points"
+        ]
+    ]
+    assert grid_points
+    if predictor_only:
+        assert {point["load_predictor"] for point in grid_points} == {"kalman"}
     assert all(result.scores[c.key()] is not None for c in request.candidates)
 
 
@@ -2437,8 +2496,6 @@ def test_scenario_2_prepares_the_predictor_of_a_new_throughput_interval(
         request,
         candidates=tuple(sorted({*request.candidates, *slower}, key=RetuneParams.key)),
     )
-
-    from dynamo.planner.retune import sweep as sweep_module
 
     prepared = []
     monkeypatch.setattr(

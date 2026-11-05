@@ -869,13 +869,15 @@ class RetuneController:
             ),
             "replicas_verified": verified,
             # The planner axis a DGDR sweep shards: the grid's planner
-            # points, without the baseline's or the startup point's.
+            # points, without the baseline's or the startup point's. A grid
+            # that does not search the planner has the one point {}: the
+            # running planner, with the pre-sweep winner when the predictor
+            # is searched.
             "grid_planners": tuple(
                 dict(planner)
                 for planner in {
                     RetuneParams(planner=point.planner).key(): point.planner
                     for point in sorted(self._grid, key=RetuneParams.key)
-                    if point.planner
                 }.values()
             ),
         }
