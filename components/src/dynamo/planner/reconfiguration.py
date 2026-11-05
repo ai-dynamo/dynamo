@@ -26,6 +26,7 @@ from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.control_api import _MinimumEndpointUnavailableError
 from dynamo.planner.core.budget import minimum_power_footprint_fits
 from dynamo.planner.offline.trace_data import extract_traffic_observations_from_bytes
+from dynamo.planner.retune.domains import PREDICTOR_KEYS, SCALING_POLICY_KEYS
 
 if TYPE_CHECKING:
     from dynamo.planner.core.base import NativePlannerBase
@@ -35,28 +36,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-PREDICTOR_FIELDS = frozenset(
-    {
-        "load_predictor",
-        "load_predictor_log1p",
-        "prophet_window_size",
-        "kalman_q_level",
-        "kalman_q_trend",
-        "kalman_r",
-        "kalman_min_points",
-    }
-)
+PREDICTOR_FIELDS = frozenset(PREDICTOR_KEYS)
 # The scaling policy. A change re-registers the builtin plugins of the running
 # engine; see ``predictor_rebuild_required`` for when it also needs a new
 # load predictor.
-SCALING_POLICY_FIELDS = frozenset(
-    {
-        "enable_throughput_scaling",
-        "enable_load_scaling",
-        "throughput_adjustment_interval_seconds",
-        "load_adjustment_interval_seconds",
-    }
-)
+SCALING_POLICY_FIELDS = frozenset(SCALING_POLICY_KEYS)
 RUNTIME_FIELDS = (
     PREDICTOR_FIELDS
     | SCALING_POLICY_FIELDS

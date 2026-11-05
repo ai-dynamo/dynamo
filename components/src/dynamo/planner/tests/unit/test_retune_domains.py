@@ -23,7 +23,7 @@ from dynamo.planner.retune.domains import (
     required_history_seconds,
     throughput_intervals,
 )
-from dynamo.planner.retune.sweep import evaluated_params, with_predictor_fields
+from dynamo.planner.retune.sweep import evaluated_params
 from dynamo.planner.simulation.load_predictor import (
     LOAD_PREDICTOR_PRESETS,
     predictor_fields,
@@ -123,10 +123,9 @@ def test_custom_predictor_mapping_values_take_their_field_types():
     baseline = RetuneParams(
         planner={name: getattr(config, name) for name in PREDICTOR_FIELDS}
     )
-    assert (
-        with_predictor_fields(RetuneParams(), baseline, predictor_fields(entry))
-        == baseline
-    )
+    presweep = {"fields": predictor_fields(entry)}
+    base = config.model_dump(mode="json")
+    assert evaluated_params(RetuneParams(), baseline, presweep, base) == baseline
 
 
 # --- scaling policy -------------------------------------------------------

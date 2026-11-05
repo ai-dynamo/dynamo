@@ -1102,12 +1102,6 @@ impl FpmEventSubscriber {
         Ok(())
     }
 
-    /// The current freshness and cleanup window, in seconds.
-    #[getter]
-    fn max_age_seconds(&self) -> f64 {
-        self.max_age.get().as_secs_f64()
-    }
-
     /// Selected model deployment cards for active workers, as serialized JSON.
     fn get_model_cards(&self) -> PyResult<HashMap<String, String>> {
         if !self.tracking_started.load(Ordering::SeqCst) {

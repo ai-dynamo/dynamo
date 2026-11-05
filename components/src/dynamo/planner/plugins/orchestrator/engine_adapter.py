@@ -584,7 +584,7 @@ class OrchestratorEngineAdapter:
 
         A builtin the policy no longer runs is unregistered; one it newly
         runs is registered as at startup, so it first fires one interval
-        after registration, and its loop restarts with it; one it keeps is
+        after the last tick, and its loop restarts with it; one it keeps is
         updated in place (interval, observation window and needs), keeping
         its state, its phase and its loop's phase. A new or kept load
         predictor takes ``predictor``'s prepared forecasts when given.
@@ -612,6 +612,13 @@ class OrchestratorEngineAdapter:
                 self._orchestrator.register_internal(
                     plugin_id=instance.plugin_id, instance=instance, **registration
                 )
+                # Anchored at the last tick, as initial_tick anchors the
+                # startup builtins, so it fires on the tick its loop is due
+                # (register_internal aligns to the scale interval instead,
+                # which a wall-clock tick is not).
+                plugin = self._orchestrator._registry.get_plugin(instance.plugin_id)
+                if plugin is not None:
+                    plugin.registered_at = self._last_tick_monotonic
                 continue
             if name == "load_predict" and predictor is not None:
                 instance.install_prepared_predictors(predictor)
@@ -631,8 +638,6 @@ class OrchestratorEngineAdapter:
         load_started = self._config.enable_load_scaling and not load_was_running
         if not self._config.enable_throughput_scaling or load_started:
             self._scaling_state.reset_throughput_lower_bounds()
-            for component in ("prefill", "decode"):
-                self._orchestrator.set_throughput_lower_bound(component, 1)
         # A loop restarts with its newly registered builtins, as at startup;
         # a kept loop keeps the phase its kept builtins fire at.
         if load_started:
@@ -838,6 +843,16 @@ class OrchestratorEngineAdapter:
                 self._retune.start(start_s, self._retune_hooks.phase_s)
         return self._compute_next_scheduled_tick()
 
+    def next_scheduled_tick(self) -> ScheduledTick:
+        """The pending tick recomputed under the active configuration.
+
+        The host's pending tick was planned under the configuration of the
+        tick before it: an activation in between can change which loops and
+        plugins it runs and whether it pulls traffic. Its time is unchanged,
+        because the scale interval is fixed.
+        """
+        return self._compute_next_scheduled_tick()
+
     def apply_runtime_configuration(
         self,
         candidate: PlannerConfig,
@@ -851,7 +866,8 @@ class OrchestratorEngineAdapter:
         predictor; it is required when the candidate needs a new one
         (``reconfiguration.predictor_rebuild_required``: throughput scaling
         turning on, or a predictor field or the throughput interval
-        changing). Everything is checked before anything changes.
+        changing). Everything is checked before anything changes. The host
+        then replaces its pending tick with ``next_scheduled_tick()``.
         """
         fields = list(fields)
         if predictor is not None:

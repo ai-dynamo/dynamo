@@ -5,6 +5,7 @@ import asyncio
 import gzip
 import json
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -844,3 +845,45 @@ async def test_run_loop_polls_at_the_current_load_interval(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await planner.run()
     assert sleeps == [1.0, 2.0]
+
+
+async def test_run_loop_replans_the_pending_tick_after_an_activation(monkeypatch):
+    class Engine:
+        def __init__(self):
+            self.replans = 0
+
+        def initial_tick(self, start_s):
+            return ScheduledTick(at_s=start_s + 1_000.0)
+
+        def next_scheduled_tick(self):
+            self.replans += 1
+            return ScheduledTick(at_s=time.time() + 1_000.0)
+
+        def apply_runtime_configuration(self, candidate, fields, predictor):
+            raise AssertionError("not called")
+
+        async def tick(self, scheduled_tick, tick_input):
+            raise AssertionError("no tick is due")
+
+        async def shutdown(self):
+            pass
+
+    planner = _planner("agg", load_adjustment_interval_seconds=10)
+    engine = Engine()
+    planner._engine = engine
+    sleeps = 0
+
+    async def sleep(seconds):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            # An activation between the loop's checks.
+            planner._config_generation += 1
+        elif sleeps == 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("dynamo.planner.core.base.asyncio.sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await planner.run()
+    # Replanned once, at the first check after the activation.
+    assert engine.replans == 1

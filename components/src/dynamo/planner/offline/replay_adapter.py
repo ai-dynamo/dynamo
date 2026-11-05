@@ -376,7 +376,7 @@ class ReplayPlannerAdapter:
         tick = self._pending_tick
         tick_input = self._build_tick_input(tick, result)
         effects: PlannerEffects = self._run_sync(self._engine.tick(tick, tick_input))
-        self._apply_retune_decisions(effects.retune_decisions)
+        reconfigured = self._apply_retune_decisions(effects.retune_decisions)
         emit_diagnostics = self._should_emit_tick_diagnostics(tick, effects)
         self._total_ticks += 1
         if self._capture_details:
@@ -416,8 +416,14 @@ class ReplayPlannerAdapter:
 
         next_tick_ms: Optional[float] = None
         if effects.next_tick is not None:
-            self._pending_tick = effects.next_tick
-            next_tick_ms = effects.next_tick.at_s * 1000.0
+            # The tick's next tick was planned before its decisions applied.
+            self._pending_tick = (
+                self._engine.next_scheduled_tick()
+                if reconfigured
+                and isinstance(self._engine, ReconfigurableEngineProtocol)
+                else effects.next_tick
+            )
+            next_tick_ms = self._pending_tick.at_s * 1000.0
 
         decision = {
             "target_prefill": target_prefill,
@@ -459,15 +465,17 @@ class ReplayPlannerAdapter:
             self._ticks.append(tick_record)
         return decision
 
-    def _apply_retune_decisions(self, decisions: Sequence[RetuneDecision]) -> None:
-        """Record retune decisions and apply their planner changes.
+    def _apply_retune_decisions(self, decisions: Sequence[RetuneDecision]) -> bool:
+        """Record retune decisions and apply their planner changes; whether
+        any were applied.
 
         Planner changes take effect from the next tick, as live. The
         controller validated them when it decided, so any error here is a
         bug and fails the replay.
         """
+        applied = False
         if not decisions:
-            return
+            return applied
         # Decisions are rare (at most a few per retune window).
         self._retune_decisions = (*self._retune_decisions, *decisions)
         capabilities = self._capabilities or WorkerCapabilities()
@@ -501,12 +509,14 @@ class ReplayPlannerAdapter:
                     candidate, capabilities, decision.predictor_warmup
                 )
             engine.apply_runtime_configuration(candidate, changes.keys(), predictor)
+            applied = True
             logger.info(
                 "Retune %s (%s) applied planner changes %s",
                 decision.decision_id,
                 decision.outcome,
                 changes,
             )
+        return applied
 
     def finalize(
         self, lifecycle_operations: list[dict[str, Any]] | None = None

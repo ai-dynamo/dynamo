@@ -66,14 +66,16 @@ ENABLE_LOAD = "enable_load_scaling"
 THROUGHPUT_INTERVAL = "throughput_adjustment_interval_seconds"
 LOAD_INTERVAL = "load_adjustment_interval_seconds"
 MAX_THROUGHPUT_REPLICAS = "max_throughput_scaling_replicas"
-# The scaling-policy fields, in the order a grid lists them.
+# The scaling-policy fields, in the order a grid lists them
+# (``reconfiguration.SCALING_POLICY_FIELDS`` is this set).
 SCALING_POLICY_KEYS: tuple[str, ...] = (
     ENABLE_THROUGHPUT,
     ENABLE_LOAD,
     THROUGHPUT_INTERVAL,
     LOAD_INTERVAL,
 )
-# The load predictor's fields (``reconfiguration.PREDICTOR_FIELDS``).
+# The load predictor's fields (``reconfiguration.PREDICTOR_FIELDS`` is this
+# set).
 PREDICTOR_KEYS: tuple[str, ...] = (
     "load_predictor",
     "load_predictor_log1p",

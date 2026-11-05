@@ -29,7 +29,7 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from dynamo.planner.config.planner_config import RetuneObjective
+from dynamo.planner.config.planner_config import PlannerConfig, RetuneObjective
 from dynamo.planner.core.types import RetuneParams, TrafficObservation
 from dynamo.planner.retune import sweep as sweep_module
 from dynamo.planner.retune.sweep import (
@@ -38,7 +38,6 @@ from dynamo.planner.retune.sweep import (
     evaluated_params,
     objective_maximized,
     score_summary,
-    with_predictor_fields,
 )
 from dynamo.planner.retune.window import ObservationBuckets
 from dynamo.planner.tests.retune_sweep_helpers import (
@@ -213,17 +212,28 @@ def test_a_grid_point_equivalent_to_the_baseline_gets_its_key():
         "load_predictor_log1p": False,
         "prophet_window_size": 50,
     }
+    # A hybrid SLA planner: the sensitivity and the predictor are active.
+    base = PlannerConfig(
+        namespace="test-ns",
+        mode="disagg",
+        optimization_target="sla",
+        enable_throughput_scaling=True,
+        enable_load_scaling=True,
+    ).model_dump(mode="json")
 
-    assert with_predictor_fields(grid_point, baseline, winner) == baseline
-    assert with_predictor_fields(other, baseline, winner).planner == {
+    def evaluated(candidate, fields):
+        return evaluated_params(candidate, baseline, {"fields": fields}, base)
+
+    assert evaluated(grid_point, winner) == baseline
+    assert evaluated(other, winner).planner == {
         **current,
         "load_scaling_down_sensitivity": 70,
     }
     # The baseline keeps the current predictor; other candidates take the
     # winner's fields over the baseline's.
     kalman = {"load_predictor": "kalman", "kalman_r": 5.0}
-    assert with_predictor_fields(baseline, baseline, kalman) == baseline
-    assert with_predictor_fields(other, baseline, kalman).planner == {
+    assert evaluated(baseline, kalman) == baseline
+    assert evaluated(other, kalman).planner == {
         **current,
         "load_scaling_down_sensitivity": 70,
         **kalman,

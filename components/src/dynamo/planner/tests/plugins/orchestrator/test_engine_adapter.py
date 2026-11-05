@@ -2245,6 +2245,114 @@ async def test_a_kept_throughput_loop_keeps_its_phase_on_a_load_interval_change(
     assert rows and all(run == fired for _, run, fired in rows), rows
 
 
+async def _predictor_cadence(adapter, until_s, *, at_tick=None, start_s=0.0):
+    """Drive ticks to ``until_s``; the ticks where the predictor or the
+    throughput loop flag fired, as ``(at_s, run_throughput, fired, traffic)``.
+    ``at_tick(adapter, tick, effects)`` may return a replacement next tick."""
+
+    registry = adapter._orchestrator.registry
+    tick = adapter.initial_tick(start_s=start_s)
+    observations = FpmObservations(decode={("w1", 0): _make_fpm("w1")})
+    traffic = TrafficObservation(60.0, 10.0, 100.0, 10.0)
+    rows = []
+    while tick.at_s <= until_s:
+        plugin = registry.get_plugin("builtin_load_predict")
+        before = None if plugin is None else plugin.last_call_at
+        effects = await adapter.tick(
+            tick,
+            TickInput(now_s=tick.at_s, fpm_observations=observations, traffic=traffic),
+        )
+        plugin = registry.get_plugin("builtin_load_predict")
+        fired = plugin is not None and plugin.last_call_at != before
+        if tick.run_throughput_scaling or fired:
+            rows.append(
+                (
+                    tick.at_s,
+                    tick.run_throughput_scaling,
+                    fired,
+                    tick.need_traffic_metrics,
+                )
+            )
+        replacement = None if at_tick is None else at_tick(adapter, tick, effects)
+        tick = replacement if replacement is not None else effects.next_tick
+    return rows
+
+
+def _sla_config(**overrides):
+    return PlannerConfig.model_validate(
+        {
+            "mode": "agg",
+            "optimization_target": "sla",
+            "served_model_name": "test",
+            "scheduling": {"scale_interval_seconds": 5.0},
+            "load_predictor": "constant",
+            **overrides,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_shorter_throughput_interval_replans_the_pending_tick():
+    cfg = _sla_config(
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        load_adjustment_interval_seconds=10,
+        throughput_adjustment_interval_seconds=120,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=VirtualClock())
+    stale = []
+
+    def shorten(adapter, tick, effects):
+        if tick.at_s != 90.0:
+            return None
+        updates = {"throughput_adjustment_interval_seconds": 60}
+        candidate = candidate_config(cfg, updates)
+        adapter.apply_runtime_configuration(
+            candidate, list(updates), prepare_predictor(candidate, _caps(), None)
+        )
+        stale.append(effects.next_tick)
+        return adapter.next_scheduled_tick()
+
+    rows = await _predictor_cadence(adapter, 300, at_tick=shorten)
+
+    # The tick planned before the change would run the now-due predictor
+    # without traffic and without its loop.
+    assert not stale[0].run_throughput_scaling
+    assert not stale[0].need_traffic_metrics
+    assert rows[0][0] == 95.0
+    assert all(run == fired and traffic for _, run, fired, traffic in rows), rows
+
+
+@pytest.mark.asyncio
+async def test_a_builtin_registered_between_ticks_fires_with_its_loop():
+    # Ticks off the scale-interval grid (start 2 s), and the activation
+    # lands after a grid boundary (11 s, after the tick at 7 s), as on a
+    # wall clock: the new predictor must keep its loop's phase.
+    cfg = _sla_config(
+        enable_load_scaling=True,
+        enable_throughput_scaling=False,
+        load_adjustment_interval_seconds=5,
+        throughput_adjustment_interval_seconds=60,
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=VirtualClock())
+
+    def turn_on(adapter, tick, effects):
+        if tick.at_s != 7.0:
+            return None
+        adapter._clock.advance(4.0)
+        updates = {"enable_throughput_scaling": True}
+        candidate = candidate_config(cfg, updates)
+        adapter.apply_runtime_configuration(
+            candidate, list(updates), prepare_predictor(candidate, _caps(), None)
+        )
+        return adapter.next_scheduled_tick()
+
+    rows = await _predictor_cadence(adapter, 200, at_tick=turn_on, start_s=2.0)
+
+    assert rows[0][0] == 67.0
+    assert all(run == fired for _, run, fired, _ in rows), rows
+
+
 @pytest.mark.asyncio
 async def test_runtime_scaling_policy_change_reregisters_builtins():
     cfg = PlannerConfig.model_validate(

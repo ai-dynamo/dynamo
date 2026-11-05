@@ -1507,11 +1507,6 @@ class FpmEventSubscriber:
         """
         ...
 
-    @property
-    def max_age_seconds(self) -> float:
-        """The current freshness and cleanup window, in seconds."""
-        ...
-
     def get_recent_stats(self) -> dict[tuple[str, int], bytes]:
         """
         Return the latest FPM bytes for every tracked (worker_id, dp_rank).
