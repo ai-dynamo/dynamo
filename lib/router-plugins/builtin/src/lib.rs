@@ -4,11 +4,13 @@
 //! Router plugins Dynamo ships.
 //!
 //! Routing hosts always link the default through `default_registry`. The optional custom
-//! catalog adds the named default, two-tier, and ThunderAgent providers through `register`. The default
+//! catalog adds the named default, two-tier, KV-capacity-aware, and ThunderAgent providers through
+//! `register`. The default
 //! itself uses the same public candidate inputs and scorer/picker dispatch as external policies.
 //! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
 
 mod default;
+mod kv_capacity_aware;
 pub mod router_modes;
 mod sticky_min_load;
 mod thunderagent;
@@ -44,6 +46,7 @@ pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginR
     default::register(registry)?;
     sticky_min_load::register(registry)?;
     two_tier_cost_fn::register(registry)?;
+    kv_capacity_aware::register(registry)?;
     thunderagent::register(registry)?;
     Ok(())
 }
@@ -132,6 +135,50 @@ worker_selection:
         ] {
             factory(&config, worker_type, partition);
         }
+    }
+
+    /// The KV-capacity-aware decode policy resolves from YAML with its parameters, and a misspelled
+    /// parameter fails startup like the other policies.
+    #[test]
+    fn resolves_kv_capacity_aware_for_decode() {
+        let (config, resolved) = resolve(
+            r#"
+worker_selection:
+  decode: kvca
+  instances:
+    - name: kvca
+      type: dynamo-kv-capacity-aware
+      parameters:
+        capacity_blocks: 20000
+        capacity_fraction: 1.0
+        count_priority: true
+        decode_active_request_weight: 1000
+"#,
+        );
+        let factory = resolved
+            .unwrap()
+            .expect("a configured instance resolves to a factory");
+        factory(
+            &config,
+            WorkerType::Decode,
+            RoutingPartitionRef::new("model", "default"),
+        );
+
+        let (_config, resolved) = resolve(
+            r#"
+worker_selection:
+  decode: kvca
+  instances:
+    - name: kvca
+      type: dynamo-kv-capacity-aware
+      parameters:
+        capacity: 20000
+"#,
+        );
+        let Err(error) = resolved else {
+            panic!("an unknown parameter must fail resolution");
+        };
+        assert!(error.to_string().contains("capacity"), "{error}");
     }
 
     /// An unknown parameter key is a mistake, most often a misremembered threshold name. It must
