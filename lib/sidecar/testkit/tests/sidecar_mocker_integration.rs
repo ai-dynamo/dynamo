@@ -489,6 +489,35 @@ async fn teardown_with_live_clients<F: WireFixture>() -> (Outputs, Vec<u32>) {
     (outputs, handle.tokens())
 }
 
+#[tokio::test]
+async fn sglang_shutdown_releases_pending_health_check() {
+    use dynamo_sglang_sidecar::proto::{
+        HealthCheckRequest, sglang_service_client::SglangServiceClient,
+    };
+
+    let mut fixture =
+        support::sglang::Fixture::start(Controller::default(), FixtureConfig::default()).await;
+    fixture.set_health(None);
+    let mut client = bounded(
+        "connect health client",
+        SglangServiceClient::connect(fixture.endpoint()),
+    )
+    .await
+    .unwrap();
+    let health = client.health_check(HealthCheckRequest {});
+    tokio::pin!(health);
+    tokio::select! {
+        result = &mut health => panic!("health check completed before shutdown: {result:?}"),
+        _ = fixture.health_check_received() => {},
+    }
+    fixture.shutdown().await;
+    assert!(
+        bounded("pending health check terminated", health)
+            .await
+            .is_err()
+    );
+}
+
 macro_rules! enroll_baseline {
     ($backend:ident, $fixture:ty) => {
         mod $backend {
@@ -623,6 +652,22 @@ async fn vllm_native_rejection_recovers_on_same_engine() {
     );
 }
 
+#[tokio::test]
+async fn sglang_native_rejection_recovers_on_same_engine() {
+    let error = bounded(
+        "native rejection and recovery",
+        native_rejection::<support::sglang::Fixture>(32_769),
+    )
+    .await;
+    let message = error.to_string();
+    assert!(message.contains("Generate"), "{message}");
+    assert!(
+        message.contains("maximum context length of 32768 tokens"),
+        "{message}"
+    );
+    assert!(message.contains("(code 400)"), "{message}");
+}
+
 /// Another worker would refuse the request the same way, so the sidecar
 /// delivers the refusal in the stream rather than as a migratable error.
 #[tokio::test]
@@ -638,6 +683,17 @@ async fn lpx_native_rejection_is_the_first_stream_item() {
             .to_string()
             .contains("max_tokens 1000001 exceeds the Mocker limit of 1000000")
     );
+}
+
+#[tokio::test]
+async fn sglang_teardown_terminates_handlers_with_clients_alive() {
+    let (outputs, tokens) = bounded(
+        "server teardown with live clients",
+        teardown_with_live_clients::<support::sglang::Fixture>(),
+    )
+    .await;
+    let error = failure(outputs, &tokens, BackendError::Disconnected);
+    assert!(error.to_string().contains("Generate"));
 }
 
 #[tokio::test]
@@ -729,70 +785,12 @@ async fn vllm_engine_lost_on_not_serving() {
 }
 
 #[tokio::test]
-async fn sglang_shutdown_releases_pending_health_check() {
-    use dynamo_sglang_sidecar::proto::{
-        HealthCheckRequest, sglang_service_client::SglangServiceClient,
-    };
-
-    let mut fixture =
-        sglang_fixture::Fixture::start(Controller::default(), FixtureConfig::default()).await;
-    fixture.set_health(None);
-    let mut client = bounded(
-        "connect health client",
-        SglangServiceClient::connect(fixture.endpoint()),
-    )
-    .await
-    .unwrap();
-    let health = client.health_check(HealthCheckRequest {});
-    tokio::pin!(health);
-    tokio::select! {
-        result = &mut health => panic!("health check completed before shutdown: {result:?}"),
-        _ = fixture.health_check_received() => {},
-    }
-    fixture.shutdown().await;
-    assert!(
-        bounded("pending health check terminated", health)
-            .await
-            .is_err()
-    );
-}
-
-#[tokio::test]
-async fn sglang_native_rejection_recovers_on_same_engine() {
-    let error = bounded(
-        "native rejection and recovery",
-        native_rejection::<sglang_fixture::Fixture>(32_769),
-    )
-    .await;
-    // The Rust server checks the context inside the open stream and reports
-    // it as a coded error item.
-    let message = error.to_string();
-    assert!(message.contains("Generate"), "{message}");
-    assert!(
-        message.contains("maximum context length of 32768 tokens"),
-        "{message}"
-    );
-    assert!(message.contains("(code 400)"), "{message}");
-}
-
-#[tokio::test]
-async fn sglang_teardown_terminates_handlers_with_clients_alive() {
-    let (outputs, tokens) = bounded(
-        "server teardown with live clients",
-        teardown_with_live_clients::<sglang_fixture::Fixture>(),
-    )
-    .await;
-    let error = failure(outputs, &tokens, BackendError::Disconnected);
-    assert!(error.to_string().contains("Generate"));
-}
-
-#[tokio::test]
 async fn sglang_malformed_terminal_fails_then_recovers() {
     bounded("malformed terminal and recovery", async {
         use sglang_fixture::token_frame;
-        let control = Controller::<sglang_fixture::Adapter>::default();
+        let control = Controller::<support::sglang::Adapter>::default();
         let mut fixture =
-            sglang_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
+            support::sglang::Fixture::start(control.clone(), FixtureConfig::default()).await;
         let engine = fixture.engine().await;
         engine.start(0).await.unwrap();
         let ctx = mock_context();
@@ -1163,8 +1161,6 @@ async fn start_http_engine(
     engine
 }
 
-/// SGLang's Rust server serves no `/abort_request`; the Abort RPC cancels
-/// native requests.
 #[tokio::test]
 async fn sglang_http_cancellation_and_drop_abort_only_the_target() {
     bounded("HTTP cancellation phases and recovery", async {
