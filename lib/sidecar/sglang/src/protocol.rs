@@ -6,13 +6,17 @@
 use std::collections::HashMap;
 
 use dynamo_backend_common::{
-    DisaggregationMode, DynamoError, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest,
-    PromptTokensDetails, StopConditions, StopReason, TopLogprob, usage,
+    DisaggregationMode, DynamoError, LLMEngineOutput, LLMEngineOutputExt, MultimodalData,
+    PreprocessedRequest, PromptTokensDetails, StopConditions, StopReason, TopLogprob, usage,
 };
 use serde_json::{Map, Value};
 
-use crate::client;
+use crate::client::{self, MediaSupport};
 use crate::proto as pb;
+
+const IMAGE_URL_KEY: &str = "image_url";
+const VIDEO_URL_KEY: &str = "video_url";
+const AUDIO_URL_KEY: &str = "audio_url";
 
 pub(crate) fn build_generate_request(
     request: &PreprocessedRequest,
@@ -22,6 +26,7 @@ pub(crate) fn build_generate_request(
     bootstrap_port: Option<u16>,
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(request)?;
+    let [image_data, video_data, audio_data] = media_data(request)?;
     let input_ids = request
         .token_ids
         .iter()
@@ -179,7 +184,97 @@ pub(crate) fn build_generate_request(
             bootstrap_host,
             bootstrap_port,
         )?,
+        image_data,
+        video_data,
+        audio_data,
     })
+}
+
+/// SGLang matches each list to the placeholder runs of that modality in
+/// `input_ids`, so each list keeps the request order.
+fn media_data(request: &PreprocessedRequest) -> Result<[Vec<String>; 3], DynamoError> {
+    let (mut image_data, mut video_data, mut audio_data) = (Vec::new(), Vec::new(), Vec::new());
+    for (key, items) in request.multi_modal_data.iter().flatten() {
+        let data = match key.as_str() {
+            IMAGE_URL_KEY => &mut image_data,
+            VIDEO_URL_KEY => &mut video_data,
+            AUDIO_URL_KEY => &mut audio_data,
+            _ => {
+                return Err(client::invalid_request(
+                    "SGLang's native Generate RPC accepts only image, video, and audio media",
+                ));
+            }
+        };
+        for item in items {
+            data.push(media_source(item)?);
+        }
+    }
+    let media = [image_data, video_data, audio_data];
+    // Text requests ignore these options, but SGLang would decode media with its own defaults.
+    if request.media_io_kwargs.is_some() && media.iter().any(|data| !data.is_empty()) {
+        return Err(client::invalid_request(
+            "media_io_kwargs are not supported by SGLang's native Generate RPC",
+        ));
+    }
+    Ok(media)
+}
+
+/// SGLang reads `file://` URLs and bare paths from the disk of the SGLang server.
+fn media_source(item: &MultimodalData) -> Result<String, DynamoError> {
+    let source = match item {
+        MultimodalData::Url(url) => url.as_str(),
+        MultimodalData::RawUrl(source) => source,
+        MultimodalData::Decoded(_) => {
+            return Err(client::invalid_request(
+                "the SGLang sidecar cannot read frontend-decoded media; configure URL passthrough",
+            ));
+        }
+        MultimodalData::UuidOnly(_) => {
+            return Err(client::invalid_request(
+                "the SGLang sidecar needs a media URL and cannot resolve UUID-only media",
+            ));
+        }
+    };
+    if ["http://", "https://", "data:"]
+        .iter()
+        .any(|scheme| source.starts_with(scheme))
+    {
+        Ok(source.to_string())
+    } else {
+        Err(client::invalid_request(
+            "the SGLang sidecar accepts media only as http://, https://, or data: URLs",
+        ))
+    }
+}
+
+/// SGLang drops media that the server or the model cannot read without an error,
+/// so the model would answer without seeing it.
+pub(crate) fn require_media_support(
+    request: &pb::GenerateRequest,
+    support: MediaSupport,
+) -> Result<(), DynamoError> {
+    for (present, supported, message) in [
+        (
+            !request.image_data.is_empty(),
+            support.image,
+            "this SGLang server does not accept image inputs over gRPC; serve an image model with an SGLang version that supports gRPC media",
+        ),
+        (
+            !request.video_data.is_empty(),
+            support.video,
+            "this SGLang server does not accept video inputs over gRPC; serve a video model with an SGLang version that supports gRPC media",
+        ),
+        (
+            !request.audio_data.is_empty(),
+            support.audio,
+            "this SGLang server does not accept audio inputs over gRPC; serve an audio model with an SGLang version that supports gRPC media",
+        ),
+    ] {
+        if present && !supported {
+            return Err(client::invalid_request(message));
+        }
+    }
+    Ok(())
 }
 
 fn kv_hint_to_proto(
@@ -231,9 +326,24 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     if request.token_ids.is_empty() {
         return Err(client::invalid_request("token_ids must not be empty"));
     }
-    if request.multi_modal_data.is_some() || request.mm_processor_kwargs.is_some() {
+    if request.mm_processor_kwargs.is_some() {
         return Err(client::invalid_request(
-            "multimodal payloads are not supported by SGLang's native Generate RPC",
+            "mm_processor_kwargs are not supported by SGLang's native Generate RPC",
+        ));
+    }
+    if request
+        .multi_modal_uuids
+        .iter()
+        .flat_map(|uuids| uuids.values().flatten())
+        .any(|uuid| uuid.as_deref().is_some_and(|uuid| !uuid.is_empty()))
+    {
+        return Err(client::invalid_request(
+            "media uuids are not supported by SGLang's native Generate RPC",
+        ));
+    }
+    if request.encoder_result.is_some() {
+        return Err(client::invalid_request(
+            "encoder handoff (encoder_result) is not supported by the SGLang sidecar",
         ));
     }
     if request.sampling_options.n.unwrap_or(1) != 1 {

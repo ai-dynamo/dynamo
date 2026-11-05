@@ -41,7 +41,10 @@ fn local_core_with(
         cancel_token,
         SelectionCacheConfig::default(),
         std::sync::Arc::new(|config, role, _| {
-            crate::WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
+            crate::plugins::worker_selection::WorkerSelectionPolicy::reference(
+                config.clone(),
+                role.default_selector_label(),
+            )
         }),
     )
     .expect("valid test config")
@@ -66,7 +69,7 @@ fn core_with(
         None,
         policy_factory.unwrap_or_else(|| {
             Arc::new(|config, role, _| {
-                crate::WorkerSelectionPolicy::reference(
+                crate::plugins::worker_selection::WorkerSelectionPolicy::reference(
                     config.clone(),
                     role.default_selector_label(),
                 )
@@ -858,15 +861,15 @@ struct SelectionObservation {
     shared_beyond_device_blocks: Vec<u32>,
 }
 
-impl crate::scheduling::selector::WorkerPicker for CapturingPicker {
-    fn required_worker_inputs(&self) -> crate::scheduling::selector::WorkerInputs {
-        crate::scheduling::selector::WorkerInputs::CACHE
+impl crate::plugins::worker_selection::WorkerPicker for CapturingPicker {
+    fn required_worker_inputs(&self) -> crate::plugins::worker_selection::WorkerInputs {
+        crate::plugins::worker_selection::WorkerInputs::CACHE
     }
 
     fn pick(
-        &mut self,
-        context: &crate::scheduling::selector::WorkerSelectionContext<'_>,
-        input: crate::scheduling::selector::WorkerInputView<'_>,
+        &self,
+        context: &crate::plugins::worker_selection::WorkerSelectionContext<'_>,
+        input: crate::plugins::worker_selection::WorkerInputView<'_>,
     ) -> Result<usize, crate::scheduling::WorkerSelectionPolicyError> {
         self.observed.lock().push(SelectionObservation {
             session_context: context.session_context().cloned(),
@@ -2824,6 +2827,8 @@ async fn queued_selection_returns_refreshed_overlap_snapshot() {
     // Freeze time only after async setup so background timers cannot expire the fixture.
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(11)).await;
+    // Let the real-thread indexer respond without paused-time auto-advance.
+    tokio::time::resume();
     core.free_reservation("occupy-2")
         .await
         .expect("release worker 2");

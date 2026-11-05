@@ -146,6 +146,42 @@ mod tests {
     }
 
     #[test]
+    fn frontend_thinking_default_reaches_reasoning_policy() {
+        // Kimi K2.5 reasons unless the request or a default turns thinking off.
+        let options = ParsingOptions::new(None, Some("kimi_k25".to_string()));
+        let reasoning_disabled = |defaults: &crate::frontend_config::ChatTemplateDefaults,
+                                  kwargs: Value| {
+            let mut req = request(json!("auto"));
+            req.chat_template_args = serde_json::from_value(kwargs).unwrap();
+            defaults.apply_to_request(&mut req);
+            req.normalize_reasoning_template_args().unwrap();
+            apply_request_tool_call_parsing_options(options.clone(), &req)
+                .unwrap()
+                .reasoning_disabled
+        };
+        let mut defaults = crate::frontend_config::ChatTemplateDefaults::default();
+        assert!(!reasoning_disabled(&defaults, Value::Null));
+        defaults.set_default_chat_template_kwargs(
+            json!({"enable_thinking": false}).as_object().cloned(),
+        );
+        assert!(reasoning_disabled(&defaults, Value::Null));
+        for unset in [Value::Null, json!("auto")] {
+            assert!(reasoning_disabled(
+                &defaults,
+                json!({"enable_thinking": unset})
+            ));
+            assert!(reasoning_disabled(
+                &defaults,
+                json!({"reasoning_effort": unset})
+            ));
+        }
+        assert!(!reasoning_disabled(
+            &defaults,
+            json!({"enable_thinking": true})
+        ));
+    }
+
+    #[test]
     fn muse_auto_batch_reasoning_policy_honors_disabled_request() {
         if crate::test_utils::run_isolated(
             concat!(
@@ -228,6 +264,7 @@ mod tests {
                         result.reasoning_disabled,
                         match family {
                             "gpt_oss" => false,
+                            "glm47" => false,
                             "beam" => false,
                             // Kept on with the Gemma 4 tool-call parser.
                             "gemma4" => thinking != Some(true) && tool.is_none(),
