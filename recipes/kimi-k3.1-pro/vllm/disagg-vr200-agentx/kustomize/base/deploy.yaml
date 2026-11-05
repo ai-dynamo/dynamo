@@ -266,7 +266,8 @@ spec:
           runAsUser: 0
           runAsGroup: 0
     replicas: 2
-    sharedMemorySize: 64Gi
+    # VR200 workers need more than the 64Gi default shared memory.
+    sharedMemorySize: 264Gi
     type: prefill
   - multinode:
       nodeCount: 2
@@ -470,7 +471,8 @@ spec:
           runAsUser: 0
           runAsGroup: 0
     replicas: 1
-    sharedMemorySize: 64Gi
+    # VR200 workers need more than the 64Gi default shared memory.
+    sharedMemorySize: 264Gi
     type: decode
 ---
 apiVersion: resource.nvidia.com/v1beta1
