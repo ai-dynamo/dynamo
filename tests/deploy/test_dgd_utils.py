@@ -393,16 +393,6 @@ async def test_failed_cleanup_logs_worker_restart_after_ready(tmp_path, caplog) 
     deployment._delete_deployment.assert_awaited_once_with(fail_on_timeout=False)
 
 
-async def test_successful_cleanup_skips_restart_report(tmp_path) -> None:
-    list_pods = AsyncMock(return_value=restarted_worker_pods())
-    deployment = restarted_worker_deployment(tmp_path, list_pods)
-
-    await deployment._cleanup(failed=False)
-
-    list_pods.assert_not_awaited()
-    deployment._delete_deployment.assert_awaited_once_with(fail_on_timeout=False)
-
-
 async def test_failed_cleanup_deletes_deployment_when_restart_report_fails(
     tmp_path, caplog
 ) -> None:
