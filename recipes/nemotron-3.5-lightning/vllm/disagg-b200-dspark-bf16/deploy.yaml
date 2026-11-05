@@ -146,6 +146,13 @@ spec:
           - nemotron_nano
           - --reasoning-parser
           - nemotron_v3
+          # NIXL needs every attention group on one kernel block size. On B200,
+          # vLLM picks FlashInfer for the main layers, which splits their
+          # blocks, while the DSpark draft stays on TRITON_ATTN, which does not.
+          # Registration then fails with "KV cache view cannot be partitioned
+          # into NIXL regions". FLASH_ATTN keeps the main blocks unsplit.
+          - --attention-backend
+          - FLASH_ATTN
           - --speculative-config=$(SPECULATIVE_CONFIG)
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
@@ -283,6 +290,13 @@ spec:
           - nemotron_nano
           - --reasoning-parser
           - nemotron_v3
+          # NIXL needs every attention group on one kernel block size. On B200,
+          # vLLM picks FlashInfer for the main layers, which splits their
+          # blocks, while the DSpark draft stays on TRITON_ATTN, which does not.
+          # Registration then fails with "KV cache view cannot be partitioned
+          # into NIXL regions". FLASH_ATTN keeps the main blocks unsplit.
+          - --attention-backend
+          - FLASH_ATTN
           - --speculative-config=$(SPECULATIVE_CONFIG)
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
