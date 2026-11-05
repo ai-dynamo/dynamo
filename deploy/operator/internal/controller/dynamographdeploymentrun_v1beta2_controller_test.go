@@ -174,7 +174,7 @@ func dgdrRunForTest(t *testing.T, inputOverrides map[string]any) *nvidiacomv1bet
 			Objective: &nvidiacomv1beta2.ObjectiveSpec{
 				Mode: nvidiacomv1beta2.ObjectiveModeOptimize, Metric: &metric, SLA: &nvidiacomv1beta2.ObjectiveSLASpec{},
 			},
-			AISimulate:     &nvidiacomv1beta2.AISimulateSpec{InputOverrides: &runtime.RawExtension{Raw: raw}},
+			AISim:          &nvidiacomv1beta2.AISimSpec{InputOverrides: &runtime.RawExtension{Raw: raw}},
 			Recommendation: &nvidiacomv1beta2.RecommendationSpec{MaxCandidates: 2},
 		}},
 	}
@@ -1407,12 +1407,12 @@ func assertDGDRRunStatusInputMatchesConfigMap(
 	job *batchv1.Job,
 ) {
 	t.Helper()
-	if run.Status.AISimulate == nil || run.Status.AISimulate.Input == nil {
-		t.Fatal("status.aisimulate.input is empty")
+	if run.Status.AISim == nil || run.Status.AISim.Input == nil {
+		t.Fatal("status.aisim.input is empty")
 	}
 	var statusInput map[string]any
-	if err := json.Unmarshal(run.Status.AISimulate.Input.Raw, &statusInput); err != nil {
-		t.Fatalf("decode status.aisimulate.input: %v", err)
+	if err := json.Unmarshal(run.Status.AISim.Input.Raw, &statusInput); err != nil {
+		t.Fatalf("decode status.aisim.input: %v", err)
 	}
 	configMap := &corev1.ConfigMap{}
 	if err := c.Get(t.Context(), client.ObjectKeyFromObject(job), configMap); err != nil {
