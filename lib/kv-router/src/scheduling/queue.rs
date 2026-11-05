@@ -2586,9 +2586,12 @@ impl<
             .expect("tracked mode always has a request ID")
             .to_string();
 
+        // Selection discounts host and disk hits to model transfer cost, but the active-load
+        // booking must not carry that discount: those blocks are transfer work, not GPU prefill
+        // compute. Book against the selected rank's raw cached tokens across all tiers.
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
-            selected.selection.cached_tokens,
+            request.raw_cached_tokens_for(selected.selection.worker, self.block_size),
             request.track_prefill_tokens,
         );
 
@@ -2700,14 +2703,14 @@ impl<
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,
-        cached_tokens: usize,
+        raw_cached_tokens: usize,
         track_prefill_tokens: bool,
     ) -> Option<PrefillLoadHint> {
         if !track_prefill_tokens {
             return None;
         }
 
-        let effective_isl = effective_prefill_tokens(isl_tokens, cached_tokens);
+        let effective_isl = effective_prefill_tokens(isl_tokens, raw_cached_tokens);
         if effective_isl == 0 {
             return None;
         }

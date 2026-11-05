@@ -1696,7 +1696,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_schedule_uses_weighted_cached_tokens_for_active_tracking() {
+    async fn test_schedule_excludes_lower_tier_cached_tokens_from_active_tracking() {
         let mut workers = HashMap::new();
         workers.insert(
             0,
@@ -1756,8 +1756,60 @@ mod tests {
         assert_eq!(log_fields.total_kv_blocks, Some(0));
         assert_eq!(
             slots.active_tokens(Instant::now()).get(&worker).copied(),
-            Some(16),
-            "weighted cached tokens should reduce tracked prefill load",
+            Some(0),
+            "host and disk hits are transfer work and must not be booked as GPU prefill",
+        );
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_schedule_books_prefill_against_raw_cached_tokens_across_tiers() {
+        let mut workers = HashMap::new();
+        workers.insert(
+            0,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(256),
+                ..Default::default()
+            },
+        );
+        let (scheduler, slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
+        let worker = WorkerWithDpRank::new(0, 0);
+
+        // 4-block prompt at block size 64: one device and one host-pinned block are cached.
+        // Selection credit is weighted (1 + 0.75 blocks = 112 tokens); the booking is not.
+        let response = scheduler
+            .schedule(
+                Some("req-1".to_string()),
+                256,
+                Some(vec![1, 2, 3, 4]),
+                TierOverlapBlocks {
+                    device: FxHashMap::from_iter([(worker, 1)]),
+                    host_pinned: FxHashMap::from_iter([(worker, 1)]),
+                    ..Default::default()
+                },
+                FxHashMap::from_iter([(worker, 1.75)]),
+                FxHashMap::from_iter([(worker, 112)]),
+                None,
+                true,
+                None,
+                0.0,
+                0,
+                None,
+                None,
+                None,
+                crate::protocols::RoutingConstraints::default(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.best_worker, worker);
+        assert_eq!(response.cached_tokens, 112);
+        assert_eq!(
+            slots.active_tokens(Instant::now()).get(&worker).copied(),
+            Some(128),
+            "booking must subtract all raw cached tiers (256 - 2 * 64), not the weighted 112",
         );
 
         cancel_token.cancel();
