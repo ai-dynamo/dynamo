@@ -46,9 +46,21 @@ pub struct Fixture {
     reasoning_parser: Arc<Mutex<String>>,
     readiness: watch::Sender<Option<bool>>,
     health_received: watch::Receiver<bool>,
+    health: tonic_health::server::HealthReporter,
 }
 
 impl Fixture {
+    /// Sets what `Watch` reports for overall health (`""`); `Check` follows
+    /// `set_health` instead.
+    pub async fn set_overall_serving(&self, is_serving: bool) {
+        let status = if is_serving {
+            tonic_health::ServingStatus::Serving
+        } else {
+            tonic_health::ServingStatus::NotServing
+        };
+        self.health.set_service_status("", status).await;
+    }
+
     pub fn set_reasoning_parser(&self, parser: &str) {
         *self.reasoning_parser.lock().unwrap() = parser.to_owned();
     }
@@ -107,7 +119,7 @@ impl SidecarFixture for Fixture {
         let (readiness, is_healthy) = watch::channel(Some(true));
         let (health_requested, health_received) = watch::channel(false);
         let health_service = HealthServer::new(ControlledHealth {
-            inner: tonic_health::server::HealthService::from_health_reporter(health),
+            inner: tonic_health::server::HealthService::from_health_reporter(health.clone()),
             is_healthy,
             health_requested,
         });
@@ -137,6 +149,7 @@ impl SidecarFixture for Fixture {
             reasoning_parser,
             readiness,
             health_received,
+            health,
         }
     }
 
@@ -160,7 +173,7 @@ impl SidecarFixture for Fixture {
     }
 
     fn eof_error() -> BackendError {
-        BackendError::Unknown
+        BackendError::StreamIncomplete
     }
 
     fn native_model(request: &pb::GenerateRequest) -> Option<&str> {
@@ -218,6 +231,7 @@ impl WireFixture for Fixture {
         );
         assert!(native.response.as_ref().unwrap().output_logprobs);
         assert!(native.response.as_ref().unwrap().prompt_logprobs);
+        assert_eq!(native.response.as_ref().unwrap().output_text, Some(false));
         let native_outputs: Vec<_> = handle
             .native_responses()
             .into_iter()
@@ -244,16 +258,7 @@ impl WireFixture for Fixture {
                 .collect::<Vec<_>>(),
             native_tokens
         );
-        assert_eq!(
-            outputs
-                .iter()
-                .filter_map(|output| output.text.as_deref())
-                .collect::<String>(),
-            native_outputs
-                .iter()
-                .map(|output| output.text.as_str())
-                .collect::<String>()
-        );
+        assert!(outputs.iter().all(|output| output.text.is_none()));
         assert_eq!(
             outputs
                 .iter()
@@ -313,12 +318,13 @@ impl WireFixture for Fixture {
                 expected
             );
         }
+        // The first output carries them, before any frontend stop string.
         assert!(
-            outputs[..outputs.len() - 1]
+            outputs[1..]
                 .iter()
                 .all(|output| output.engine_data.is_none())
         );
-        let prompts = &outputs.last().unwrap().engine_data.as_ref().unwrap()["prompt_logprobs"];
+        let prompts = &outputs[0].engine_data.as_ref().unwrap()["prompt_logprobs"];
         let prompt_info = handle
             .native_responses()
             .into_iter()

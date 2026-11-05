@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -9,7 +10,7 @@ use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::identity::{RoutingPartitionId, default_routing_group};
-use crate::kv_hints::KvHint;
+use crate::kv_hints::{KvHint, WorkerKvTransferKeys, WorkerKvTransferKeysCache};
 use crate::protocols::{
     BlockExtraInfo, DpRank, KvHintTransferWorkerMetadata, KvTransferEnforcement,
     RoutingConstraints, WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
@@ -65,6 +66,10 @@ pub struct SelectionWorkerConfig {
     /// a router-hint source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_event_source_mode: Option<String>,
+    /// Derived from the fields above on first use; published configs are
+    /// replaced, never mutated.
+    #[serde(skip)]
+    pub kv_transfer_keys: WorkerKvTransferKeysCache,
 }
 
 impl WorkerConfigLike for SelectionWorkerConfig {
@@ -116,14 +121,20 @@ impl WorkerConfigLike for SelectionWorkerConfig {
         if worker_type.is_empty() {
             return None;
         }
+        // A state-agent worker's blocks are served by its cache owner.
+        let is_source = self.kv_event_source_mode.as_deref() != Some("state_agent_v2");
         Some(KvHintTransferWorkerMetadata {
             worker_type,
             source_control_endpoint: self
                 .router_hint_source_control_endpoints
                 .get(&dp_rank)
                 .map(String::as_str)
-                .filter(|endpoint| !endpoint.is_empty()),
+                .filter(|endpoint| is_source && !endpoint.is_empty()),
         })
+    }
+
+    fn kv_transfer_keys(&self) -> Cow<'_, WorkerKvTransferKeys> {
+        Cow::Borrowed(self.kv_transfer_keys.get_or_init(self))
     }
 }
 
@@ -158,6 +169,10 @@ pub struct WorkerCatalogRecord {
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_event_source_mode: Option<String>,
+    /// The KV event source derives multimodal pad values from engine identities
+    /// (SGLang after sgl-project/sglang#43043). Unset means a legacy source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_owned_mm_identity: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_schedulable_reasons: Vec<String>,
 }
@@ -188,6 +203,7 @@ impl WorkerCatalogRecord {
             router_hint_worker_type: req.router_hint_worker_type,
             router_hint_source_control_endpoints: req.router_hint_source_control_endpoints,
             kv_event_source_mode: req.kv_event_source_mode,
+            engine_owned_mm_identity: req.engine_owned_mm_identity,
             not_schedulable_reasons: Vec::new(),
         }
     }
@@ -227,6 +243,7 @@ impl WorkerCatalogRecord {
             router_hint_worker_type: self.router_hint_worker_type.clone(),
             router_hint_source_control_endpoints: self.router_hint_source_control_endpoints.clone(),
             kv_event_source_mode: self.kv_event_source_mode.clone(),
+            kv_transfer_keys: Default::default(),
         })
     }
 
@@ -288,6 +305,7 @@ impl Default for WorkerRequest {
             router_hint_worker_type: None,
             router_hint_source_control_endpoints: HashMap::new(),
             kv_event_source_mode: None,
+            engine_owned_mm_identity: None,
         }
     }
 }
@@ -327,6 +345,10 @@ pub struct WorkerRequest {
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
     #[serde(default)]
     pub kv_event_source_mode: Option<String>,
+    /// The KV event source derives multimodal pad values from engine identities
+    /// (SGLang after sgl-project/sglang#43043). Unset means a legacy source.
+    #[serde(default)]
+    pub engine_owned_mm_identity: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -353,6 +375,8 @@ pub struct WorkerPatchRequest {
     pub router_hint_source_control_endpoints: Option<HashMap<u32, String>>,
     #[serde(default)]
     pub kv_event_source_mode: Option<String>,
+    #[serde(default)]
+    pub engine_owned_mm_identity: Option<bool>,
 }
 
 impl WorkerCatalogRecord {
@@ -416,6 +440,9 @@ impl WorkerCatalogRecord {
         }
         if patch.kv_event_source_mode.is_some() {
             self.kv_event_source_mode = patch.kv_event_source_mode;
+        }
+        if patch.engine_owned_mm_identity.is_some() {
+            self.engine_owned_mm_identity = patch.engine_owned_mm_identity;
         }
     }
 }

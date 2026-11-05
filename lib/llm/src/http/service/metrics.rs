@@ -26,7 +26,7 @@ use std::{
         Arc, LazyLock, OnceLock,
         atomic::{AtomicU64, Ordering::Relaxed},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::discovery::{ModelManager, UNKNOWN_METRIC_MODEL};
@@ -158,6 +158,31 @@ const UNSET_DP_RANK_LABEL: &str = "none";
 const LOCAL_FLUSH_TOKENS: u64 = 64;
 
 const MODEL_READY_HELP: &str = "Whether the frontend can route at least one inference request for the model (1 = ready, 0 = not ready)";
+const FRONTEND_METRICS_START_TIME_HELP: &str =
+    "Time when frontend metrics were first initialized in this process, in Unix seconds";
+
+static FRONTEND_METRICS_START_TIME_SECONDS: LazyLock<f64> = LazyLock::new(|| {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("frontend metrics initialization predates the Unix epoch")
+        .as_secs_f64()
+});
+
+/// Register a stable process identity in one frontend-local metrics registry.
+///
+/// The frontend creates a custom registry per service instance, so each
+/// registry receives its own collector while all collectors expose the same
+/// process-global initialization value, not the OS process start time.
+pub fn register_frontend_metrics_start_time_metric(
+    registry: &Registry,
+) -> Result<(), prometheus::Error> {
+    let gauge = prometheus::Gauge::new(
+        "dynamo_frontend_metrics_start_time_seconds",
+        FRONTEND_METRICS_START_TIME_HELP,
+    )?;
+    gauge.set(*FRONTEND_METRICS_START_TIME_SECONDS);
+    registry.register(Box::new(gauge))
+}
 
 fn model_ready_metric_name(metrics_prefix: Option<&str>) -> String {
     let prefix =
@@ -672,6 +697,96 @@ struct MetricsHandlerState {
     drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum SystemOnePhase {
+    Preflight,
+    FirstBranch,
+    Fanout,
+}
+
+impl SystemOnePhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Preflight => "preflight",
+            Self::FirstBranch => "first_branch",
+            Self::Fanout => "fanout",
+        }
+    }
+}
+
+struct SystemOneMetrics {
+    questions: HistogramVec,
+    input_tokens: HistogramVec,
+    candidate_ids: HistogramVec,
+    cached_tokens: HistogramVec,
+    admitted_branches: IntCounterVec,
+    phase_seconds: HistogramVec,
+}
+
+impl SystemOneMetrics {
+    fn new(prefix: &str) -> Self {
+        let work_histogram = |name: &str, help: &str, max: f64| {
+            HistogramVec::new(
+                HistogramOpts::new(format!("{prefix}_{name}"), help)
+                    .buckets(generate_log_buckets(1.0, max, 12)),
+                &["model"],
+            )
+            .expect("fixed System One work metric is valid")
+        };
+        Self {
+            questions: work_histogram(
+                frontend_service::SYSTEMONE_QUESTIONS,
+                "Questions per admitted System One request",
+                128.0,
+            ),
+            input_tokens: work_histogram(
+                frontend_service::SYSTEMONE_INPUT_TOKENS,
+                "Expanded prompt tokens per admitted System One request",
+                65_536.0,
+            ),
+            candidate_ids: work_histogram(
+                frontend_service::SYSTEMONE_CANDIDATE_IDS,
+                "Requested candidate token IDs per admitted System One request",
+                32_640.0,
+            ),
+            cached_tokens: work_histogram(
+                frontend_service::SYSTEMONE_CACHED_TOKENS,
+                "Cached prompt tokens reported by a completed System One branch",
+                65_536.0,
+            ),
+            admitted_branches: IntCounterVec::new(
+                Opts::new(
+                    format!(
+                        "{prefix}_{}",
+                        frontend_service::SYSTEMONE_ADMITTED_BRANCHES_TOTAL
+                    ),
+                    "Total question branches admitted for System One dispatch",
+                ),
+                &["model"],
+            )
+            .expect("fixed System One branch metric is valid"),
+            phase_seconds: HistogramVec::new(
+                HistogramOpts::new(
+                    format!("{prefix}_{}", frontend_service::SYSTEMONE_PHASE_SECONDS),
+                    "Duration of a System One execution phase in seconds",
+                )
+                .buckets(generate_log_buckets(0.001, 120.0, 15)),
+                &["model", "phase"],
+            )
+            .expect("fixed System One phase metric is valid"),
+        }
+    }
+
+    fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
+        registry.register(Box::new(self.questions.clone()))?;
+        registry.register(Box::new(self.input_tokens.clone()))?;
+        registry.register(Box::new(self.candidate_ids.clone()))?;
+        registry.register(Box::new(self.cached_tokens.clone()))?;
+        registry.register(Box::new(self.admitted_branches.clone()))?;
+        registry.register(Box::new(self.phase_seconds.clone()))
+    }
+}
+
 pub struct Metrics {
     load_incarnation: u64,
     load_sequence: AtomicU64,
@@ -698,6 +813,7 @@ pub struct Metrics {
     /// inference rather than the 1-512s LLM-generation range. Labeled by
     /// `model`.
     embedding_latency: HistogramVec,
+    systemone: SystemOneMetrics,
 
     // Per-request multimodal content-part count histograms (labeled by `model`).
     images_per_request: HistogramVec,
@@ -966,6 +1082,9 @@ pub enum Endpoint {
     /// OAI Audio Speech
     Audios,
 
+    /// OAI Audio Transcriptions
+    Transcriptions,
+
     /// OAI Responses
     Responses,
 
@@ -977,6 +1096,11 @@ pub enum Endpoint {
 
     /// Generate (token-in/token-out)
     Generate,
+
+    /// System One typed decisions
+    SystemOne,
+    /// OpenAI decisions
+    Decisions,
 }
 
 /// Metrics for the HTTP service
@@ -1050,6 +1174,9 @@ pub enum ErrorType {
     Internal,
     /// Feature not implemented (501)
     NotImplemented,
+    /// Media refused by a text-only frontend (`--reject-media`), labeled apart
+    /// from validation and capacity errors whatever status it is sent with
+    UnsupportedModality,
 }
 
 /// Track response-specific metrics
@@ -1203,6 +1330,7 @@ impl Metrics {
             );
         }
         let frontend_metric_name = |suffix: &str| format!("{}_{}", &prefix, suffix);
+        let systemone = SystemOneMetrics::new(&prefix);
 
         let awaiting_first_token_requests = IntGaugeVec::new(
             Opts::new(
@@ -1611,6 +1739,7 @@ impl Metrics {
             time_to_first_token,
             inter_token_latency,
             embedding_latency,
+            systemone,
             images_per_request,
             videos_per_request,
             audio_per_request,
@@ -1715,6 +1844,40 @@ impl Metrics {
             .observe(seconds);
     }
 
+    pub(crate) fn observe_systemone_work(
+        &self,
+        model: &str,
+        questions: usize,
+        input_tokens: usize,
+        candidate_ids: usize,
+    ) {
+        for (histogram, count) in [
+            (&self.systemone.questions, questions),
+            (&self.systemone.input_tokens, input_tokens),
+            (&self.systemone.candidate_ids, candidate_ids),
+        ] {
+            histogram.with_label_values(&[model]).observe(count as f64);
+        }
+        self.systemone
+            .admitted_branches
+            .with_label_values(&[model])
+            .inc_by(questions as u64);
+    }
+
+    pub(crate) fn observe_systemone_branch(&self, model: &str, cached_tokens: usize) {
+        self.systemone
+            .cached_tokens
+            .with_label_values(&[model])
+            .observe(cached_tokens as f64);
+    }
+
+    pub(crate) fn observe_systemone_phase(&self, model: &str, phase: SystemOnePhase, seconds: f64) {
+        self.systemone
+            .phase_seconds
+            .with_label_values(&[model, phase.as_str()])
+            .observe(seconds);
+    }
+
     /// Get the cumulative count of embedding latency observations for the given
     /// model. Test helper.
     #[cfg(test)]
@@ -1776,6 +1939,7 @@ impl Metrics {
             input_tokens: self.inflight_input_tokens.clone(),
             input_tokens_total: self.input_tokens_counter.clone(),
         }))?;
+        self.systemone.register(registry)?;
         registry.register(Box::new(self.request_started_counter.clone()))?;
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
@@ -2241,6 +2405,7 @@ impl Drop for InflightGuard {
                     ErrorType::Overload => "service overloaded or rate limited",
                     ErrorType::Unavailable => "no backend worker available",
                     ErrorType::NotImplemented => "requested feature not implemented",
+                    ErrorType::UnsupportedModality => "unsupported input modality",
                     // `request_completion()` routes `(Error, Cancelled)` to
                     // `RequestCompletion::Cancelled`, so only `None` reaches
                     // here. `Cancelled` is listed to keep the match total
@@ -2299,10 +2464,13 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Images => write!(f, "images"),
             Endpoint::Videos => write!(f, "videos"),
             Endpoint::Audios => write!(f, "audios"),
+            Endpoint::Transcriptions => write!(f, "transcriptions"),
             Endpoint::Responses => write!(f, "responses"),
             Endpoint::AnthropicMessages => write!(f, "anthropic_messages"),
             Endpoint::Tensor => write!(f, "tensor"),
             Endpoint::Generate => write!(f, "generate"),
+            Endpoint::SystemOne => write!(f, "systemone"),
+            Endpoint::Decisions => write!(f, "decisions"),
         }
     }
 }
@@ -2319,10 +2487,13 @@ impl Endpoint {
             Endpoint::Images => "images",
             Endpoint::Videos => "videos",
             Endpoint::Audios => "audios",
+            Endpoint::Transcriptions => "transcriptions",
             Endpoint::Responses => "responses",
             Endpoint::AnthropicMessages => "anthropic_messages",
             Endpoint::Tensor => "tensor",
             Endpoint::Generate => "generate",
+            Endpoint::SystemOne => "systemone",
+            Endpoint::Decisions => "decisions",
         }
     }
 }
@@ -2363,6 +2534,7 @@ impl ErrorType {
             ErrorType::ResponseTimeout => frontend_service::error_type::RESPONSE_TIMEOUT,
             ErrorType::Internal => frontend_service::error_type::INTERNAL,
             ErrorType::NotImplemented => frontend_service::error_type::NOT_IMPLEMENTED,
+            ErrorType::UnsupportedModality => frontend_service::error_type::UNSUPPORTED_MODALITY,
         }
     }
 }
@@ -3045,6 +3217,37 @@ mod tests {
     }
 
     #[test]
+    fn frontend_metrics_start_time_is_stable_across_registries() {
+        let registries = [Registry::new(), Registry::new()];
+        let mut values = Vec::new();
+
+        for registry in &registries {
+            // A standard process collector must be able to coexist with ours.
+            registry
+                .register(Box::new(
+                    prometheus::Gauge::new("process_start_time_seconds", "OS process start time")
+                        .unwrap(),
+                ))
+                .unwrap();
+            register_frontend_metrics_start_time_metric(registry).unwrap();
+            let families: Vec<_> = registry
+                .gather()
+                .into_iter()
+                .filter(|family| family.name() == "dynamo_frontend_metrics_start_time_seconds")
+                .collect();
+            assert_eq!(families.len(), 1);
+            assert_eq!(families[0].get_metric().len(), 1);
+            let metric = &families[0].get_metric()[0];
+            assert!(metric.get_label().is_empty());
+            let value = metric.get_gauge().value();
+            assert!(value.is_finite() && value > 0.0);
+            values.push(value);
+        }
+
+        assert_eq!(values[0], values[1]);
+    }
+
+    #[test]
     fn model_ready_metric_tracks_live_routing_catalog() {
         let manager = Arc::new(ModelManager::new());
         let registry = Registry::new();
@@ -3552,6 +3755,7 @@ mod tests {
             logprobs: None,
         };
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "test".to_string(),
                 choices: vec![choice],
@@ -4891,6 +5095,10 @@ mod tests {
         assert_eq!(ErrorType::ResponseTimeout.as_str(), "response_timeout");
         assert_eq!(ErrorType::Internal.as_str(), "internal");
         assert_eq!(ErrorType::NotImplemented.as_str(), "not_implemented");
+        assert_eq!(
+            ErrorType::UnsupportedModality.as_str(),
+            "unsupported_modality"
+        );
     }
 
     #[test]
@@ -5165,6 +5373,7 @@ mod tests {
             ErrorType::ResponseTimeout,
             ErrorType::Internal,
             ErrorType::NotImplemented,
+            ErrorType::UnsupportedModality,
         ];
 
         for error_type in &error_types {
@@ -5388,6 +5597,7 @@ mod tests {
             id: Some("test-id".to_string()),
             data: Some(
                 crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
+                    message_boundary: None,
                     inner: CreateChatCompletionStreamResponse {
                         id: "test-id".to_string(),
                         choices: vec![choice],
@@ -5779,6 +5989,7 @@ mod tests {
                 logprobs: None,
             };
             let response = NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                     id: REQUEST_ID.to_string(),
                     choices: vec![choice],
@@ -6094,5 +6305,70 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn systemone_metrics_use_configured_prefix_and_bounded_labels() {
+        let metrics = Metrics::new_with_prefix(Some("custom_frontend".to_string()));
+        let registry = Registry::new();
+        metrics.register(&registry).unwrap();
+        metrics.observe_systemone_work("served-model", 3, 120, 7);
+        metrics.observe_systemone_branch("served-model", 80);
+        for phase in [
+            SystemOnePhase::Preflight,
+            SystemOnePhase::FirstBranch,
+            SystemOnePhase::Fanout,
+        ] {
+            metrics.observe_systemone_phase("served-model", phase, 0.125);
+        }
+
+        let families: Vec<_> = registry
+            .gather()
+            .into_iter()
+            .filter(|family| family.name().starts_with("custom_frontend_systemone_"))
+            .collect();
+        assert_eq!(families.len(), 6);
+        for family in &families {
+            for metric in family.get_metric() {
+                for label in metric.get_label() {
+                    match label.name() {
+                        "model" => assert_eq!(label.value(), "served-model"),
+                        "phase" => assert!(matches!(
+                            label.value(),
+                            "preflight" | "first_branch" | "fanout"
+                        )),
+                        other => panic!("unexpected System One label {other}"),
+                    }
+                }
+            }
+        }
+        for (suffix, expected) in [
+            ("questions", 3.0),
+            ("input_tokens", 120.0),
+            ("candidate_ids", 7.0),
+            ("cached_tokens", 80.0),
+        ] {
+            let family = families
+                .iter()
+                .find(|family| family.name() == format!("custom_frontend_systemone_{suffix}"))
+                .unwrap();
+            let histogram = family.get_metric()[0].get_histogram();
+            assert_eq!(histogram.sample_count(), 1);
+            assert_eq!(histogram.sample_sum(), expected);
+        }
+        let branches = families
+            .iter()
+            .find(|family| family.name() == "custom_frontend_systemone_admitted_branches_total")
+            .unwrap();
+        assert_eq!(branches.get_metric()[0].get_counter().value(), 3.0);
+        let phases = families
+            .iter()
+            .find(|family| family.name() == "custom_frontend_systemone_phase_seconds")
+            .unwrap();
+        assert_eq!(phases.get_metric().len(), 3);
+        assert!(phases.get_metric().iter().all(|metric| {
+            let histogram = metric.get_histogram();
+            histogram.sample_count() == 1 && histogram.sample_sum() == 0.125
+        }));
     }
 }

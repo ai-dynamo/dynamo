@@ -97,10 +97,9 @@ func TestV1Beta2RoundTripUsesEnvelope(t *testing.T) {
 				},
 				Workload: &WorkloadSpec{
 					Static: &StaticWorkloadSpec{
-						ISL:             new(int32(4096)),
-						OSL:             new(int32(1024)),
-						NumRequestRatio: new(2.0),
-						RequestRate:     new(12.5),
+						InputTokens:  new(int32(4096)),
+						OutputTokens: new(int32(1024)),
+						Load:         &StaticLoadSpec{RequestsPerSecond: new(12.5)},
 					},
 				},
 				Objective: &ObjectiveSpec{
@@ -108,12 +107,11 @@ func TestV1Beta2RoundTripUsesEnvelope(t *testing.T) {
 					Metrics: []ObjectiveMetric{"ThroughputPerGPU", "TTFT"},
 					SLA:     &ObjectiveSLASpec{TTFTMs: new(2000.0), ITLMs: new(30.0)},
 				},
-				AISimulate: &AISimulateSpec{
-					Image:           "nvcr.io/nvidia/aisimulate:latest",
-					VersionOverride: "1.0.0",
-					Parameters:      &runtime.RawExtension{Raw: []byte(`{"search_method":"grid"}`)},
+				AISim: &AISimSpec{
+					InputOverrides: &runtime.RawExtension{Raw: []byte(`{"search_method":"grid"}`)},
 				},
 				Recommendation: &RecommendationSpec{MaxCandidates: 3},
+				Overrides:      &OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(`{"apiVersion":"nvidia.com/v1beta1","kind":"DynamoGraphDeployment","spec":{"components":[{"name":"worker","replicas":2}]}}`)}},
 			},
 		},
 		Status: DynamoGraphDeploymentRequestStatus{
@@ -302,7 +300,7 @@ func TestConversionRejectsMixedRepresentations(t *testing.T) {
 func TestNativeV1Beta2SpecFields(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Verify the shared input contains exactly the AISimulate-native fields.")
+	t.Log("Verify the shared input contains the complete frozen search and publication intent.")
 	nativeType := reflect.TypeFor[NativeSearchInput]()
 	gotNative := make([]string, nativeType.NumField())
 	for i := range nativeType.NumField() {
@@ -314,8 +312,9 @@ func TestNativeV1Beta2SpecFields(t *testing.T) {
 		"Hardware",
 		"Workload",
 		"Objective",
-		"AISimulate",
+		"AISim",
 		"Recommendation",
+		"Overrides",
 	}
 	if !reflect.DeepEqual(gotNative, wantNative) {
 		t.Fatalf("native search input fields = %v, want %v", gotNative, wantNative)
@@ -350,8 +349,9 @@ func TestNativeV1Beta2SpecFields(t *testing.T) {
 		"hardware":       {NativeSearchInput: NativeSearchInput{Hardware: &HardwareSpec{}}},
 		"workload":       {NativeSearchInput: NativeSearchInput{Workload: &WorkloadSpec{}}},
 		"objective":      {NativeSearchInput: NativeSearchInput{Objective: &ObjectiveSpec{}}},
-		"aisimulate":     {NativeSearchInput: NativeSearchInput{AISimulate: &AISimulateSpec{}}},
+		"aisim":          {NativeSearchInput: NativeSearchInput{AISim: &AISimSpec{}}},
 		"recommendation": {NativeSearchInput: NativeSearchInput{Recommendation: &RecommendationSpec{}}},
+		"overrides":      {NativeSearchInput: NativeSearchInput{Overrides: &OverridesSpec{}}},
 	}
 	for name, spec := range tests {
 		t.Run(name, func(t *testing.T) {

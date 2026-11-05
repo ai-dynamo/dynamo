@@ -74,10 +74,10 @@ export const CURRENT_TAG = "1.6.0";
 export const CURRENT_WHEEL = "1.6.0";
 
 export const MAIN_TOT: BackendPins = {
-  sglang: "0.5.22",
-  trtllm: "1.4.0rc0",
+  sglang: "0.5.23",
+  trtllm: "1.4.0rc2",
   vllm: "0.32.0",
-  nixlSglang: "1.5.0",
+  nixlSglang: "1.5.2",
   nixlTrtllm: "1.3.1",
   nixlVllm: "1.5.0",
 };
@@ -1262,7 +1262,7 @@ export const FEATURE_INTERACTIONS: BackendInteractions[] = [
       // KV Block Manager
       [{ status: "wip" }, { status: "wip" }, { status: "wip" }, { status: "na" }],
       // Multimodal
-      [{ status: "yes", label: "Supported serving patterns", note: "Supports aggregated EPD, E/PD, and E/P/D patterns. Traditional disaggregated EP/D is not supported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/sglang-multimodal" }, { status: "yes", label: "Image-aware routing on Dynamo's SGLang image", note: "Hash forwarding is upstream in SGLang 0.5.13+ and Dynamo pins 0.5.22, so the shipped image routes on image overlap. A custom build without that patch still serves the request but degrades to text-prefix routing.", source: "/dynamo/dev/multimodal/multimodal-kv-routing" }, { status: "na" }, { status: "wip" }, { status: "na" }],
+      [{ status: "yes", label: "Supported serving patterns", note: "Supports aggregated EPD, E/PD, and E/P/D patterns. Traditional disaggregated EP/D is not supported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/sglang-multimodal" }, { status: "yes", label: "Text-prefix routing on Dynamo's SGLang image", note: "SGLang 0.5.23 uses wide pad values (sgl-project/sglang#43043), so routing matches only the text before the first image or video block. Requests still serve. Builds before that change route on image overlap through hash forwarding (SGLang 0.5.13+).", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/sglang-multimodal" }, { status: "na" }, { status: "wip" }, { status: "na" }],
       // Request Migration
       [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "yes" }, { status: "na" }],
       // Request Cancellation

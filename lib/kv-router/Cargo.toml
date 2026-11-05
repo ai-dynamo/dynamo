@@ -52,7 +52,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
-zmq = { version = "0.10", optional = true }
+zmq = { workspace = true, optional = true }
 uuid = { workspace = true }
 xxhash-rust = { workspace = true }
 zeroize = { workspace = true }
