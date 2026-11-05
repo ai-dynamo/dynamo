@@ -82,7 +82,7 @@ func (r *groveRestartProgressResolver) Resolve(
 
 		// A ready clique from the previous revision must not satisfy a new
 		// restart, for example when the first PodCliqueSet write failed.
-		if !groveRestartApplied(pcs, componentName, restartID) {
+		if restartID != "" && !groveRestartApplied(pcs, componentName, restartID) {
 			logger.V(1).Info(
 				"component has not observed the requested restart",
 				"componentName", componentName,
@@ -133,9 +133,6 @@ func (r *groveRestartProgressResolver) Resolve(
 // groveRestartApplied requires restartID on every clique rendered for
 // componentName in the observed PodCliqueSet spec. pcs is non-nil, never mutated.
 func groveRestartApplied(pcs *grovev1alpha1.PodCliqueSet, componentName string, restartID string) bool {
-	if restartID == "" {
-		return false
-	}
 	// Select cliques the way groveRestartAnnotations maps them to components.
 	found := false
 	for _, clique := range pcs.Spec.Template.Cliques {

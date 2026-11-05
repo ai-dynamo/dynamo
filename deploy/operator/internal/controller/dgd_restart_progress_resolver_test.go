@@ -46,7 +46,7 @@ func TestComponentRestartAppliedRequiresEveryTemplate(t *testing.T) {
 		{name: "only one role template updated", sharedID: "requested", leaderID: "requested", workerID: "previous", multinode: true, requestedID: "requested"},
 		{name: "annotation missing", requestedID: "requested"},
 		{name: "no pod template", noTemplate: true, requestedID: "requested"},
-		{name: "empty requested restart", requestedID: ""},
+		{name: "empty ID matches a template without an annotation", requestedID: "", wantApplied: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Build the observed DCD templates")
@@ -118,9 +118,10 @@ func TestGroveRestartAppliedRequiresEverySelectedClique(t *testing.T) {
 			requestedID: "requested",
 		},
 		{
-			name:        "empty requested restart",
+			name:        "empty ID matches a clique without an annotation",
 			cliques:     []*grovev1alpha1.PodCliqueTemplateSpec{restartClique("decode", "decode", "")},
 			requestedID: "",
+			wantApplied: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

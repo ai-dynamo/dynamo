@@ -129,7 +129,7 @@ func checkDCDReady(
 
 	// A ready DCD from the previous revision must not satisfy a new restart,
 	// for example when the first write of the restarted DCD failed.
-	if !componentRestartApplied(dcd, restartID) {
+	if restartID != "" && !componentRestartApplied(dcd, restartID) {
 		logger.V(1).Info("DynamoComponentDeployment has not observed the requested restart",
 			"resourceName", resourceName,
 			"restartID", restartID)
@@ -158,9 +158,6 @@ func checkDCDReady(
 // componentRestartApplied requires the requested restart on every effective
 // pod template of the DCD. dcd is non-nil and is never mutated.
 func componentRestartApplied(dcd *nvidiacomv1beta1.DynamoComponentDeployment, restartID string) bool {
-	if restartID == "" {
-		return false
-	}
 	// Check the shared template and every role template the DCD renders.
 	templates := dynamo.ComponentPodTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 	if len(templates) == 0 {
