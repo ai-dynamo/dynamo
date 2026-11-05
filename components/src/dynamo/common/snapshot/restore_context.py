@@ -146,7 +146,7 @@ def apply_snapshot_restore_env() -> dict[str, str | None]:
 
 
 def _read_restore_proxy_env(control_path: Path) -> dict[str, str] | None:
-    """Read destination env only from Snapshot's verified PID-1 proxy.
+    """Read destination env only from a verified ``snapshot-restore-proxy``.
 
     The command and binary name follow snapshot/api/podcontract. Older agents
     run the standby entrypoint instead and supply a context file directly.

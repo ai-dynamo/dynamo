@@ -17,8 +17,9 @@ using another backend or topology.
 </Warning>
 
 On restore, Dynamo refreshes Pod identity and discovery settings from the
-destination container before creating its runtime. With Snapshot's PID-1 restore
-proxy, Dynamo reads the verified proxy's allowlisted environment into
+destination container before creating its runtime. When Snapshot uses
+[`snapshot-restore-proxy`](https://github.com/ai-dynamo/snapshot/blob/main/docs/reference/restore-pod-contract.md)
+as the container's main process, Dynamo verifies it and reads its allowlisted environment into
 `restore-context.json` in the snapshot-control volume. Older standby entrypoints
 can still provide that file directly. A restore within the same Pod can retain
 its Pod UID.
