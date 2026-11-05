@@ -3342,6 +3342,61 @@ func TestListOldWorkerDCDs_ExcludesCurrentHash(t *testing.T) {
 	assert.Equal(t, []string{"test-dgd-worker-hashaaaa", "test-dgd-worker-hashbbbb"}, names)
 }
 
+func TestWorkerHashHelpers_StaleSameHashDCDWithLongName(t *testing.T) {
+	const dgdName = "dsv41-flash-vllm-gb200-disagg-agentic-production-us-east-1"
+	const workerHash = "hash1234"
+	dgd := createTestDGD(dgdName, map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"decode": {ComponentType: consts.ComponentTypeDecode},
+	})
+
+	// An older operator named this DCD without shortening; it shares the hash label.
+	staleName := dgdName + "-decode-" + workerHash
+	canonicalName := dynamo.GetDCDResourceName(dgd, "decode", workerHash)
+	require.NotEqual(t, staleName, canonicalName)
+
+	newDCD := func(name string, ready int32) *nvidiacomv1beta1.DynamoComponentDeployment {
+		return createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
+			Name:      name,
+			Namespace: "default",
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: dgdName,
+				consts.KubeLabelDynamoWorkerHash:          workerHash,
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: consts.ComponentTypeDecode,
+					ServiceName:   "decode",
+					Replicas:      new(int32(2)),
+				},
+			},
+			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+				Service: &nvidiacomv1alpha1.ServiceReplicaStatus{ReadyReplicas: new(ready)},
+			},
+		})
+	}
+	ctx := context.Background()
+
+	staleOnly := createTestReconcilerWithStatus(dgd, withObjects(newDCD(staleName, 0)))
+	observed, err := staleOnly.dcdObservesWorkerHash(ctx, dgd, workerHash)
+	require.NoError(t, err)
+	assert.False(t, observed, "a stale DCD must not stand in for the canonical one")
+
+	r := createTestReconcilerWithStatus(dgd, withObjects(newDCD(staleName, 0), newDCD(canonicalName, 2)))
+	observed, err = r.dcdObservesWorkerHash(ctx, dgd, workerHash)
+	require.NoError(t, err)
+	assert.True(t, observed)
+
+	info, err := r.getWorkerInfoForWorkerHash(ctx, dgd, workerHash)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), info.components["decode"].readyReplicas)
+	assert.Equal(t, int32(2), info.totalReadyWorkers)
+
+	old, err := r.listOldWorkerDCDs(ctx, dgd, workerHash)
+	require.NoError(t, err)
+	require.Len(t, old, 1)
+	assert.Equal(t, staleName, old[0].Name)
+}
+
 func TestScaleOldWorkerDCDs_MultipleOldGenerations(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {

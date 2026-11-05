@@ -862,6 +862,9 @@ func (r *dgdWorkerRolloutReconciler) getWorkerInfoForWorkerHash(
 		if !dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
 			continue
 		}
+		if isNonCanonicalWorkerDCD(dgd, &dcd, workerHash) {
+			continue
+		}
 		componentName := dynamo.GetDCDComponentName(&dcd)
 
 		// Add ready replicas
@@ -1197,8 +1200,24 @@ func (r *dgdWorkerRolloutReconciler) scaleOldWorkerDCDs(
 	return nil
 }
 
+// isNonCanonicalWorkerDCD reports whether dcd belongs to a DGD component but is not
+// named as GetDCDResourceName names it for workerHash. An older operator that did not
+// shorten long names can leave such a DCD with the same worker hash label.
+func isNonCanonicalWorkerDCD(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	workerHash string,
+) bool {
+	componentName := dynamo.GetDCDComponentName(dcd)
+	if dgd.GetComponentByName(componentName) == nil {
+		return false
+	}
+	return dcd.Name != dynamo.GetDCDResourceName(dgd, componentName, workerHash)
+}
+
 // listOldWorkerDCDs returns all worker DCDs for this DGD whose worker hash label
-// does NOT match the given newWorkerHash. This captures all old generations (including legacy).
+// does NOT match the given newWorkerHash. This captures all old generations (including legacy),
+// and same-hash DCDs whose name is not the canonical name for that hash.
 func (r *dgdWorkerRolloutReconciler) listOldWorkerDCDs(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -1224,7 +1243,8 @@ func (r *dgdWorkerRolloutReconciler) listOldWorkerDCDs(
 		if !dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
 			continue
 		}
-		if dcd.Labels[consts.KubeLabelDynamoWorkerHash] != newWorkerHash {
+		if dcd.Labels[consts.KubeLabelDynamoWorkerHash] != newWorkerHash ||
+			isNonCanonicalWorkerDCD(dgd, &dcd, newWorkerHash) {
 			workers = append(workers, dcd)
 		}
 	}
@@ -1255,7 +1275,8 @@ func (r *dgdWorkerRolloutReconciler) dcdObservesWorkerHash(
 		if !metav1.IsControlledBy(dcd, dgd) || dcd.DeletionTimestamp != nil {
 			continue
 		}
-		if dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
+		if dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) &&
+			!isNonCanonicalWorkerDCD(dgd, dcd, targetHash) {
 			observed[dynamo.GetDCDComponentName(dcd)] = struct{}{}
 		}
 	}
