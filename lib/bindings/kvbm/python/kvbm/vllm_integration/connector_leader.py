@@ -7,7 +7,7 @@ Implementation of vLLM KV cache manager protocol.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
@@ -150,6 +150,18 @@ class KvConnectorLeader:
         block_ids = blocks.get_block_ids()[0]
         self._connector.update_state_after_alloc(
             request.request_id, block_ids, num_external_tokens
+        )
+
+    def on_rewind(self, request: "Request", live_block_ids: List[int]):
+        """Notify the KVBM leader that a request's KV cache was rewound.
+
+        ``num_tokens`` is the exact post-rewind token count
+        (``request.num_tokens``) so the leader can truncate the token
+        sequence correctly when the rewind lands inside the last live
+        block.
+        """
+        self._connector.on_rewind(
+            request.request_id, live_block_ids, request.num_tokens
         )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> bytes:
