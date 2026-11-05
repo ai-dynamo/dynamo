@@ -38,6 +38,10 @@ use crate::protocols::{
     openai::chat_completions::NvCreateChatCompletionStreamResponse,
 };
 use crate::reasoning_field::{ReasoningField, RoutedReasoning};
+use dynamo_protocols::types::{
+    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
+    CreateChatCompletionStreamResponse,
+};
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 use dynamo_runtime::{engine::Data, pipeline::Context};
 
@@ -2941,11 +2945,106 @@ impl<T> From<crate::types::Annotated<T>> for EventConverter<T> {
     }
 }
 
-fn sse_json_data<T: Serialize>(event: Event, data: &T) -> Result<Event, axum::Error> {
-    // serde_json escapes literal LF/CR in string content, so the resulting JSON
-    // is one SSE data line and can avoid Axum json_data's per-write filtering.
-    let json = serde_json::to_string(data).map_err(axum::Error::new)?;
-    Ok(event.data(json))
+fn chat_stream_json(
+    response: &NvCreateChatCompletionStreamResponse,
+    reasoning_field: ReasoningField,
+) -> serde_json::Result<String> {
+    if reasoning_field == ReasoningField::ReasoningContent
+        && let Some(json) = text_delta_chunk_json(response)
+    {
+        return Ok(json);
+    }
+    serde_json::to_string(&RoutedReasoning::new(response, reasoning_field))
+}
+
+/// Fixed bytes of a text-delta chunk outside its string values and numbers.
+const TEXT_DELTA_CHUNK_OVERHEAD: usize = 160;
+
+/// Serializes the common streamed chunk (one choice whose delta carries only
+/// text content or only reasoning content) without serde's map serializer,
+/// which re-escapes every constant field name on every chunk. String values
+/// still go through serde_json, so the output is byte-identical to
+/// `serde_json::to_string`. Returns `None` for any other shape.
+///
+/// The destructuring below is exhaustive so that a field added to these types
+/// fails to compile here instead of being dropped from the stream.
+fn text_delta_chunk_json(response: &NvCreateChatCompletionStreamResponse) -> Option<String> {
+    let NvCreateChatCompletionStreamResponse {
+        message_boundary: _,
+        inner,
+        nvext,
+        prompt_logprobs: _,
+        llm_metrics: _,
+        tool_call_completion,
+    } = response;
+    let CreateChatCompletionStreamResponse {
+        id,
+        choices,
+        created,
+        model,
+        service_tier,
+        system_fingerprint,
+        object,
+        usage,
+    } = inner;
+    if nvext.is_some()
+        || !tool_call_completion.is_empty()
+        || service_tier.is_some()
+        || system_fingerprint.is_some()
+        || usage.is_some()
+    {
+        return None;
+    }
+    let [
+        ChatChoiceStream {
+            index,
+            delta,
+            finish_reason: None,
+            logprobs: None,
+        },
+    ] = choices.as_slice()
+    else {
+        return None;
+    };
+    let (key, text) = match delta {
+        ChatCompletionStreamResponseDelta {
+            content: Some(ChatCompletionMessageContent::Text(text)),
+            function_call: None,
+            tool_calls: None,
+            role: None,
+            refusal: None,
+            reasoning_content: None,
+        } => ("content", text),
+        ChatCompletionStreamResponseDelta {
+            content: None,
+            function_call: None,
+            tool_calls: None,
+            role: None,
+            refusal: None,
+            reasoning_content: Some(text),
+        } => ("reasoning_content", text),
+        _ => return None,
+    };
+
+    let mut out = Vec::with_capacity(
+        TEXT_DELTA_CHUNK_OVERHEAD + id.len() + model.len() + object.len() + text.len(),
+    );
+    out.extend_from_slice(br#"{"id":"#);
+    serde_json::to_writer(&mut out, id).ok()?;
+    out.extend_from_slice(br#","choices":[{"index":"#);
+    serde_json::to_writer(&mut out, index).ok()?;
+    out.extend_from_slice(br#","delta":{""#);
+    out.extend_from_slice(key.as_bytes());
+    out.extend_from_slice(br#"":"#);
+    serde_json::to_writer(&mut out, text).ok()?;
+    out.extend_from_slice(br#"},"finish_reason":null,"logprobs":null}],"created":"#);
+    serde_json::to_writer(&mut out, created).ok()?;
+    out.extend_from_slice(br#","model":"#);
+    serde_json::to_writer(&mut out, model).ok()?;
+    out.extend_from_slice(br#","object":"#);
+    serde_json::to_writer(&mut out, object).ok()?;
+    out.push(b'}');
+    String::from_utf8(out).ok()
 }
 
 fn observe_llm_metrics(
@@ -2991,13 +3090,17 @@ fn observe_annotation_metrics<T>(
     }
 }
 
-fn annotated_to_sse_event<T: Serialize>(
+fn annotated_to_sse_event<T>(
     annotated: crate::types::Annotated<T>,
+    to_json: impl FnOnce(&T) -> serde_json::Result<String>,
 ) -> Result<Option<Event>, axum::Error> {
     let mut event = Event::default();
 
     if let Some(ref data) = annotated.data {
-        event = sse_json_data(event, data)?;
+        // serde_json escapes literal LF/CR in string content, so the resulting JSON
+        // is one SSE data line and can avoid Axum json_data's per-write filtering.
+        let json = to_json(data).map_err(axum::Error::new)?;
+        event = event.data(json);
     }
 
     if let Some(ref msg) = annotated.event {
@@ -3061,7 +3164,7 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
         annotated.data = None;
     }
 
-    annotated_to_sse_event(annotated)
+    annotated_to_sse_event(annotated, serde_json::to_string)
 }
 
 /// Process chat-derived streaming responses with typed metrics before SSE conversion.
@@ -3105,9 +3208,9 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
 
     // Route reasoning at the SSE boundary. Internal representation stays
     // `reasoning_content`.
-    let annotated =
-        annotated.map_data(|response| Ok(RoutedReasoning::new(response, reasoning_field)));
-    annotated_to_sse_event(annotated)
+    annotated_to_sse_event(annotated, |response| {
+        chat_stream_json(response, reasoning_field)
+    })
 }
 
 /// Create a new router with optional DRT metrics integration.
@@ -5712,6 +5815,65 @@ mod tests {
 
         let json = extract_sse_data_json(event);
         assert_eq!(json["choices"][0]["delta"]["content"], content);
+    }
+
+    #[test]
+    fn test_text_delta_chunk_json_matches_serde() {
+        let chunk = |content: &str| make_chat_stream_annotated(content).data.unwrap();
+        let assert_matches_serde = |response: &NvCreateChatCompletionStreamResponse| {
+            assert_eq!(
+                text_delta_chunk_json(response).expect("text-delta fast path"),
+                serde_json::to_string(response).unwrap()
+            );
+        };
+
+        assert_matches_serde(&chunk("hello"));
+        assert_matches_serde(&chunk(""));
+        assert_matches_serde(&chunk(
+            "a\nb\r\t\"q\" \\ / \u{1}\u{1f}\u{7f} 你好 🚀 </script>",
+        ));
+
+        let mut response = chunk("x");
+        response.inner.id = "id-\"with\"-quotes\\".to_string();
+        response.inner.model = "org/模型\n".to_string();
+        response.inner.created = u32::MAX;
+        response.inner.choices[0].index = 7;
+        assert_matches_serde(&response);
+
+        let mut reasoning = chunk("unused");
+        let delta = &mut reasoning.inner.choices[0].delta;
+        delta.content = None;
+        delta.reasoning_content = Some("think\n\"hard\"".to_string());
+        assert_matches_serde(&reasoning);
+
+        // Every other shape falls back to serde.
+        let fallbacks: [fn(&mut NvCreateChatCompletionStreamResponse); 7] = [
+            |r| r.inner.choices[0].delta.role = Some(dynamo_protocols::types::Role::Assistant),
+            |r| {
+                r.inner.choices[0].finish_reason = Some(dynamo_protocols::types::FinishReason::Stop)
+            },
+            |r| r.inner.choices[0].delta.reasoning_content = Some("both".to_string()),
+            |r| r.inner.choices.push(r.inner.choices[0].clone()),
+            |r| r.inner.system_fingerprint = Some("fp".to_string()),
+            |r| r.nvext = Some(serde_json::json!({"worker_id": 1})),
+            |r| {
+                r.tool_call_completion.push(
+                    crate::protocols::openai::chat_completions::ToolCallCompletion {
+                        choice_index: 0,
+                        tool_index: 0,
+                        complete: true,
+                    },
+                )
+            },
+        ];
+        for mutate in fallbacks {
+            let mut response = chunk("hello");
+            mutate(&mut response);
+            assert!(text_delta_chunk_json(&response).is_none());
+        }
+        // The `reasoning` field mode keeps the serde route that renames the key.
+        let routed = chat_stream_json(&reasoning, ReasoningField::Reasoning).unwrap();
+        assert!(routed.contains(r#""reasoning":"#) && !routed.contains("reasoning_content"));
     }
 
     #[test]
