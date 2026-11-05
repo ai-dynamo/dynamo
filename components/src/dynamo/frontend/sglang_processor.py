@@ -275,13 +275,29 @@ _FINISH_REASON_MAP: dict[str, str] = {
 }
 
 
-def _map_finish_reason(raw: str | None) -> str | None:
+def _finish_reason_error_message(
+    raw_reason: str | dict[str, Any] | None,
+) -> str | None:
+    """Extract a backend error before OpenAI finish-reason projection."""
+    if isinstance(raw_reason, dict):
+        error_message = raw_reason.get("error")
+        return error_message if isinstance(error_message, str) else None
+    if isinstance(raw_reason, str) and raw_reason.startswith("error"):
+        _, separator, detail = raw_reason.partition(":")
+        return detail.strip() if separator and detail.strip() else raw_reason
+    return None
+
+
+def _map_finish_reason(raw: str | dict[str, Any] | None) -> str | None:
     """Map Dynamo router finish reasons to OpenAI finish reasons.
 
     Exact matches use the dict.  Prefixed variants (``error:timeout``,
     ``abort:cancelled``) are handled by ``startswith`` fallbacks.
     """
     if raw is None:
+        return None
+    if not isinstance(raw, str):
+        logger.warning("Malformed finish_reason from router: %r", raw)
         return None
     mapped = _FINISH_REASON_MAP.get(raw)
     if mapped is not None:
@@ -1031,13 +1047,21 @@ class SglangProcessor:
                     break
 
                 raw_finish_reason = engine_response.get("finish_reason")
-                finish_reason = _map_finish_reason(raw_finish_reason)
-                backend_finished = raw_finish_reason is not None
-                if pending_terminal is not None and finish_reason == "error":
+                # Backend errors (structured or legacy "error: ..." strings)
+                # end the stream before OpenAI finish-reason projection.
+                error_message = _finish_reason_error_message(raw_finish_reason)
+                if error_message is not None:
+                    logger.error(
+                        "Router reported a generation error for request %s: %s",
+                        request_id,
+                        error_message,
+                    )
                     yield as_error_envelope(
-                        make_internal_error(request_id, raw_finish_reason)
+                        make_internal_error(request_id, error_message)
                     )
                     break
+                finish_reason = _map_finish_reason(raw_finish_reason)
+                backend_finished = raw_finish_reason is not None
                 prompt_logprobs.update(engine_response)
                 if usage := engine_response.get("completion_usage"):
                     update_usage_metadata(latest_usage, usage)

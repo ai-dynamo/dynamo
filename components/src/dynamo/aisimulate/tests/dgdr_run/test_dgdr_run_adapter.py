@@ -813,10 +813,14 @@ def test_custom_candidate_system_root_reaches_candidate_materialization(
     assert load(tmp_path)["candidates"][0]["outcome"] == "materialized"
 
 
-def test_invalid_candidate_topology_does_not_abort_other_candidates(
+@pytest.mark.parametrize(
+    "invalid_part", ["topology", "unknown_backend", "empty_backend"]
+)
+def test_invalid_candidate_does_not_abort_other_candidates(
     tmp_path: Path,
     renders: list[str],
     monkeypatch: pytest.MonkeyPatch,
+    invalid_part: str,
 ) -> None:
     def load_candidate_system(
         sku: str, systems_paths: list[str] | None = None
@@ -828,11 +832,22 @@ def test_invalid_candidate_topology_does_not_abort_other_candidates(
 
     monkeypatch.setattr(adapter_module, "load_system_spec", load_candidate_system)
     adapter = DGDRRunOutputAdapter(
-        make_config(tmp_path, num_gpus_per_node=None, max_candidates=2),
+        make_config(
+            tmp_path,
+            num_gpus_per_node=None,
+            max_candidates=2,
+            derive_runtime_images=True,
+        ),
         workload=None,
     )
     broken = record("broken-topology", 2.0)
-    broken.config["hardware_sku"] = "broken_system"
+    broken.config["hardware_sku"] = (
+        "broken_system" if invalid_part == "topology" else "h200_sxm"
+    )
+    if invalid_part != "topology":
+        broken.config["backend"] = (
+            "unsupported" if invalid_part == "unknown_backend" else ""
+        )
     valid = record("valid-topology", 1.0)
     valid.config["hardware_sku"] = "h200_sxm"
 
@@ -849,12 +864,12 @@ def test_invalid_candidate_topology_does_not_abort_other_candidates(
     assert renders == ["valid-topology"]
 
 
-def test_max_candidates_has_no_default_of_its_own() -> None:
+def test_max_candidates_has_no_default_of_its_own(tmp_path: Path) -> None:
     # The operator supplies the already-defaulted API value; a missing one must fail.
     with pytest.raises(ValueError, match="max_candidates"):
         DGDRRunOutputConfig(
             name="sweep",
-            snapshot_dir="/tmp/x",
+            snapshot_dir=str(tmp_path),
             runtime_image="nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
             num_gpus_per_node=8,
         )
