@@ -48,7 +48,7 @@ targets:
     asset: recipes/deepseek-v4/perf/perf.yaml
   expected_performance:
     available: true
-    summary: Floor-pick c28 = 77.31 system tok/s/GPU @ user 51.3 (1P1D, +6% over AGG).
+    summary: Floor-pick c28 = 77.31 system tok/s/GPU @ user 51.3 (1P1D, +6% over AGG). Measured on vllm-runtime:1.3.0.
 - id: agg-b200-agentic
   recommended: false
   hardware:
@@ -75,7 +75,7 @@ targets:
     asset: recipes/deepseek-v4/perf/perf.yaml
   expected_performance:
     available: true
-    summary: Floor-pick c13 = 72.79 system tok/s/GPU @ user 51.3.
+    summary: Floor-pick c13 = 72.79 system tok/s/GPU @ user 51.3. Measured on vllm-runtime:1.3.0.
 - id: agg-h200-agentic
   recommended: false
   hardware:
