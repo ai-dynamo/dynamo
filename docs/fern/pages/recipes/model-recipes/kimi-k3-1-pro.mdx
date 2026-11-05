@@ -22,7 +22,7 @@ body:has(#recipe-framework-vllm:checked):has(#recipe-sku-vr200:checked):has(#rec
 }
 `}</style>
 
-Serve `moonshotai/Kimi-K3.1-Pro` (currently private; authorized access required) with NVIDIA Dynamo using vLLM or SGLang. Pick your framework, GPU, and serving topology; deployment commands update to match. SGLang targets are experimental, text-only, and functional-only; no performance claims are made.
+Serve `moonshotai/Kimi-K3.1-Pro` with NVIDIA Dynamo using vLLM or SGLang. Pick your framework, GPU, and serving topology; deployment commands update to match. SGLang targets are experimental, text-only, and functional-only; no performance claims are made.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -282,24 +282,9 @@ kubectl apply -f recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/deploy-vr200.yam
 
 </div>
 
-You can also apply the B200 or VR200 target overlay directly:
+As an alternative to the SKU manifests above, each target has a `generic` Kustomize overlay that requires customization for your cluster. It inherits the base model paths and hardware requirements. For SGLang GB300, do not apply a generic overlay after a SKU deployment: both use the same DGD name, so the generic overlay replaces the SKU settings, including the ComputeDomain claim.
 
-```bash
-kubectl apply -k recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/kustomize/overlays/b200 -n ${NAMESPACE}
-# Or choose one VR200 topology:
-kubectl apply -k recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/kustomize/overlays/vr200 -n ${NAMESPACE}
-kubectl apply -k recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/kustomize/overlays/vr200 -n ${NAMESPACE}
-```
-
-To render and apply a generic overlay, for example:
-
-```bash
-kubectl kustomize recipes/kimi-k3.1-pro/sglang/agg-gb300-agentic/kustomize/overlays/generic | kubectl apply -f - -n ${NAMESPACE}
-```
-
-Use the SKU overlay (for example `gb300`) to add scheduling, registry credentials, and ComputeDomain settings for your cluster.
-
-Each target also has a `generic` Kustomize overlay for customization. It inherits the base model paths and hardware requirements. B200 and VR200 targets enable DSpark; separate `*-synthetic-al` overlays change draft acceptance for benchmarking.
+B200 and VR200 targets enable DSpark; separate `*-synthetic-al` overlays change draft acceptance for benchmarking.
 
 ## Smoke Test
 
