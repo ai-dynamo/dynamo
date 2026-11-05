@@ -274,6 +274,23 @@ impl<V: Copy + Eq> BlockLookup<V> {
         changed
     }
 
+    /// How many leading `keys` hold `value`, prefetching slots ahead as the batch
+    /// operations do.
+    pub(crate) fn leading_holding(&self, keys: &[ExternalSequenceBlockHash], value: V) -> usize {
+        for &key in keys.iter().take(PREFETCH_DISTANCE) {
+            self.prefetch(key);
+        }
+        for (i, key) in keys.iter().enumerate() {
+            if let Some(&ahead) = keys.get(i + PREFETCH_DISTANCE) {
+                self.prefetch(ahead);
+            }
+            if self.get(key) != Some(&value) {
+                return i;
+            }
+        }
+        keys.len()
+    }
+
     /// Points keys holding `from` at `to`, leaving missing keys and keys holding anything
     /// else alone: lookup repair treats a missing or differently placed entry as
     /// meaningful state. Returns the number changed.
