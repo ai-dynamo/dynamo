@@ -98,6 +98,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 # TODO: re-enable GPU-parallel scheduling with
                 # profiled_vram_gib=9.6 once this has a bounded --kv-bytes profile.
                 timeout_s=220,
+                # agg_multimodal.sh's default, made explicit so the video
+                # decoder reservation below is added on top of it.
+                requested_vllm_kv_cache_bytes=922_354_000,
                 tests=[
                     # Vanilla / baseline single-GPU multimodal smoke
                     # (HTTP-URL image, no frontend decoding).
@@ -143,6 +146,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     "DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS[
                         "opencv-python-headless"
                     ],
+                    "VLLM_VIDEO_LOADER_BACKEND": "opencv",
                     # Frontend decoding fetches the VP9 fixture from the local
                     # image server and samples four frames in the Rust decoder.
                     "DYN_MM_ALLOW_INTERNAL": "1",
@@ -310,6 +314,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     "DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS[
                         "opencv-python-headless"
                     ],
+                    "VLLM_VIDEO_LOADER_BACKEND": "opencv",
                 },
                 tests=[
                     MmCase(
@@ -760,3 +765,38 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         },
     ),
 ]
+
+
+# vLLM's per-engine PyNvVideoCodec reservation: PYNVVIDEOCODEC_DEFAULT_HW_DECODERS
+# x PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
+# (vllm/multimodal/video_decoders). Kept as a literal because importing vLLM at
+# collection mutates the environment; test_vllm.py checks it against vLLM.
+PYNVVIDEOCODEC_RESERVED_BYTES = 2 * 128 * 1024**2 + int(1.8 * 1024 * 1024**2)
+
+
+def _reserve_for_pynvvideocodec(profiles: list[MultimodalModelProfile]) -> None:
+    """Add vLLM's PyNvVideoCodec decoder reservation back to each topology.
+
+    When the image selects the PyNvVideoCodec video loader, vLLM subtracts the
+    reservation from the requested KV cache. Topologies that select another
+    loader are left unchanged.
+    """
+    if os.environ.get("VLLM_VIDEO_LOADER_BACKEND") != "pynvvideocodec":
+        return
+    reserved = PYNVVIDEOCODEC_RESERVED_BYTES
+    for profile in profiles:
+        for topo in profile.topologies.values():
+            if topo.env.get("VLLM_VIDEO_LOADER_BACKEND", "pynvvideocodec") != (
+                "pynvvideocodec"
+            ):
+                continue
+            engines = topo.health_check_worker_count if topo.health_check_workers else 1
+            if topo.requested_vllm_kv_cache_bytes:
+                topo.requested_vllm_kv_cache_bytes += reserved
+            if topo.profiled_vram_gib is not None:
+                topo.profiled_vram_gib = round(
+                    topo.profiled_vram_gib + engines * reserved / 1024**3, 1
+                )
+
+
+_reserve_for_pynvvideocodec(VLLM_MULTIMODAL_PROFILES)
