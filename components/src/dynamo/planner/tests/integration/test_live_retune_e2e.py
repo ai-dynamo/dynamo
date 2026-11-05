@@ -163,6 +163,8 @@ def dgd_object() -> dict[str, Any]:
         {"name": "DYN_REQUEST_TRACE_SINKS", "value": "file"},
         {"name": "DYN_REQUEST_TRACE_FILE_FORMAT", "value": "jsonl_gz"},
         {"name": "DYN_REQUEST_TRACE_FILE_PATH", "value": TRACE_FILE_PATH},
+        {"name": "DYN_ENABLE_FRONTEND_ADMIN_API", "value": "1"},
+        {"name": "DYN_FRONTEND_ADMIN_HOST", "value": "0.0.0.0"},
     ]
     frontend = {
         "name": "Frontend",

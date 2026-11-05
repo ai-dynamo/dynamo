@@ -867,6 +867,11 @@ func dgdrRunPublisherRules(runName string) []rbacv1.PolicyRule {
 			Resources: []string{"pods"},
 			Verbs:     []string{"get", "list", "watch"},
 		},
+		{
+			APIGroups: []string{nvidiacomv1beta2.GroupVersion.Group},
+			Resources: []string{"dynamographdeployments"},
+			Verbs:     []string{"create"}, // Server-side dry-run uses the normal create authorization.
+		},
 	}
 }
 
@@ -888,6 +893,9 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 
 	if job != nil {
 		if r.APIReader != nil {
+			// Distinguish cache lag from deletion before declaring frozen input lost.
+			// Status and watches cannot prove whether the ConfigMap currently exists;
+			// rebuilding it from current operator settings would change this Run's input.
 			persisted := &corev1.ConfigMap{}
 			apiErr := r.APIReader.Get(ctx, key, persisted)
 			if apiErr == nil {

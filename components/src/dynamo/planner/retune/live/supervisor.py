@@ -683,6 +683,8 @@ class LiveRetuneSupervisor:
         self._canary_ok: Optional[bool] = None
         self._canary_at: Optional[float] = None
         self._last_report: Optional[ActuationReport] = None
+        # (P12, admin API disabled) as last logged; a change is logged once.
+        self._p12_logged: Optional[tuple[bool, bool]] = None
         # (deploy_seq, monotonic since) of a converged rollback.
         self._rollback_since: Optional[tuple[int, float]] = None
 
@@ -789,14 +791,28 @@ class LiveRetuneSupervisor:
     def ready(self) -> bool:
         """Whether a due window may launch (spec, controller and health)."""
 
-        return (
-            self._spec_ok
-            and self._controller_ok
-            and self._evaluation.spec_replicas is not None
-            and self._canary_ok is True
-            and self._p12_ok()
-            and not self._settings.decommission
-        )
+        return not self.not_ready_reasons()
+
+    def not_ready_reasons(self) -> list[str]:
+        """The launch conditions that fail now; ``ready()`` when none."""
+
+        reasons: list[str] = []
+        if not self._spec_ok:
+            spec = list(self._evaluation.report.reasons) or ["P14 parity"]
+            reasons.append("spec: " + "; ".join(spec))
+        if not self._controller_ok:
+            reasons.append("no retune controller")
+        if self._evaluation.spec_replicas is None:
+            reasons.append("worker replicas unknown")
+        if self._canary_ok is not True:
+            reasons.append(
+                "P11 canary pending" if self._canary_ok is None else "P11 canary failed"
+            )
+        if not self._p12_ok():
+            reasons.append(self._p12_detail())
+        if self._settings.decommission:
+            reasons.append("decommissioning")
+        return reasons
 
     def retune_inputs(self) -> Optional[RetuneInputs]:
         """Inputs for the engine's first controller; ``None`` if P4 fails."""
@@ -864,7 +880,15 @@ class LiveRetuneSupervisor:
             if (k, reason) not in self._skips_seen:
                 self._skips_seen.append((k, reason))
                 self._metrics.skipped(reason)
-                logger.info("retune gate: window %d %s", k, reason)
+                if reason == "not_ready":
+                    why = self.not_ready_reasons()
+                    if not self._initialized or state is None:
+                        why.insert(0, "state not initialized")
+                    logger.warning(
+                        "retune gate: window %d not_ready: %s", k, "; ".join(why)
+                    )
+                else:
+                    logger.info("retune gate: window %d %s", k, reason)
             return GateResult(reason=reason)
         # Set by the controller's drop_pending (local loss, rebuild, stop).
         return GateResult(
@@ -1676,6 +1700,13 @@ class LiveRetuneSupervisor:
         if epoch != self._epoch:
             return None
         self._last_report = report
+        p12 = (self._p12_ok(), bool(report.admin_api_disabled))
+        if p12 != self._p12_logged:
+            if p12[0]:
+                logger.info("retune: P12 ok (every frontend's routers answer)")
+            else:
+                logger.warning("retune: P12 fails: %s", self._p12_detail())
+            self._p12_logged = p12
         if startup is not None and report.parity_ok is not None:
             if report.parity_ok != self._p14_ok:
                 logger.info(
@@ -2053,6 +2084,27 @@ class LiveRetuneSupervisor:
             return False
         present = report.routers_present
         return bool(report.converged if present is None else present)
+
+    def _p12_detail(self) -> str:
+        """Why P12 fails, from the last actuator round."""
+
+        report = self._last_report
+        if report is None:
+            return "P12: no router round yet"
+        if report.admin_api_disabled:
+            return (
+                "P12: a frontend serves no /router_policy the planner can reach: "
+                "its admin listener is off, unreadable from the pod spec, or "
+                "answers 404 (DYN_ENABLE_FRONTEND_ADMIN_API, "
+                "DYN_FRONTEND_ADMIN_HOST, DYN_FRONTEND_ADMIN_PORT)"
+            )
+        errors = ", ".join(
+            f"{kind} x{count}"
+            for kind, count in sorted(report.errors.items(), key=lambda kv: str(kv[0]))
+        )
+        return "P12: not every ready frontend has its routers" + (
+            f" (errors: {errors})" if errors else ""
+        )
 
     def _last_decided_k(self) -> Optional[int]:
         state = self.state

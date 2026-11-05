@@ -339,7 +339,7 @@ def candidate_parameters(
     point_public: Mapping[str, float],
     planner: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
-    """``Candidate.spec.parameters`` of one evaluated router (and planner)
+    """``Candidate.status.parameters`` of one evaluated router (and planner)
     point."""
 
     router = effective_input.get("router") or {}
@@ -562,7 +562,7 @@ class FakeRetuneKube:
         ready: bool = True,
         terminating: bool = False,
         ip: str | None = None,
-        http_port: int | None = 8000,
+        admin_port: int | None = 8002,
         labels: Mapping[str, str] | None = None,
         restarts: int | None = 0,
     ) -> PodInfo:
@@ -578,7 +578,7 @@ class FakeRetuneKube:
             ready=ready,
             terminating=terminating,
             labels=all_labels,
-            http_port=http_port,
+            admin_port=admin_port,
             restarts=restarts,
         )
         with self._lock:
@@ -966,6 +966,8 @@ class FakeRetuneKube:
         parameters: Mapping[str, Any],
         metrics: Mapping[str, Any],
     ) -> dict:
+        """Publish evaluation status separately from the Candidate's DGD spec."""
+
         with self._lock:
             run = self.runs[run_name]
             canonical = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
@@ -989,8 +991,21 @@ class FakeRetuneKube:
                         }
                     ],
                 },
-                "spec": {"parameters": json.loads(canonical)},
-                "status": {"metrics": json.loads(json.dumps(dict(metrics)))},
+                "spec": {"components": []},
+                "status": {
+                    "parameters": json.loads(canonical),
+                    "metrics": json.loads(json.dumps(dict(metrics))),
+                    "conditions": [
+                        {
+                            "type": "Valid",
+                            "status": "True",
+                            "reason": "ValidationSucceeded",
+                            "message": "Strict DGD dry-run succeeded",
+                            "observedGeneration": 1,
+                            "lastTransitionTime": rfc3339(self.now()),
+                        }
+                    ],
+                },
             }
             self._stamp(
                 candidate,

@@ -2020,7 +2020,7 @@ class _DgdrSweep:
                 candidates, key=lambda obj: (obj.get("metadata") or {}).get("name", "")
             ):
                 name = (candidate.get("metadata") or {}).get("name", "")
-                parameters = _get(candidate, ("spec", "parameters"))
+                parameters = _get(candidate, ("status", "parameters"))
                 try:
                     point, planner, signature = _map_parameters(parameters, run.shard)
                 except _Unmapped as error:
@@ -2160,13 +2160,13 @@ def _map_parameters(
     """
 
     if not isinstance(parameters, Mapping):
-        raise _Unmapped("spec.parameters is not an object")
+        raise _Unmapped("status.parameters is not an object")
     adapters = parameters.get("adapters")
     if not isinstance(adapters, Mapping):
-        raise _Unmapped("spec.parameters.adapters is missing")
+        raise _Unmapped("status.parameters.adapters is missing")
     router = adapters.get(ROUTER_ADAPTER)
     if not isinstance(router, Mapping):
-        raise _Unmapped(f"spec.parameters.adapters[{ROUTER_ADAPTER!r}] is missing")
+        raise _Unmapped(f"status.parameters.adapters[{ROUTER_ADAPTER!r}] is missing")
     load_model = router.get("prefill_load_model")
     load_type = (
         load_model.get("type") if isinstance(load_model, Mapping) else load_model
@@ -2198,13 +2198,15 @@ def _map_parameters(
     if shard.searches_planner:
         section = adapters.get(PLANNER_ADAPTER)
         if not isinstance(section, Mapping):
-            raise _Unmapped(f"spec.parameters.adapters[{PLANNER_ADAPTER!r}] is missing")
+            raise _Unmapped(
+                f"status.parameters.adapters[{PLANNER_ADAPTER!r}] is missing"
+            )
         sweep = section.get(RETUNE_SWEEP)
         points = sweep.get("points") if isinstance(sweep, Mapping) else None
         chosen = points[0] if isinstance(points, list) and len(points) == 1 else None
         if not isinstance(chosen, Mapping):
             raise _Unmapped(
-                f"spec.parameters.adapters[{PLANNER_ADAPTER!r}].{RETUNE_SWEEP} "
+                f"status.parameters.adapters[{PLANNER_ADAPTER!r}].{RETUNE_SWEEP} "
                 "does not name one planner point"
             )
         match = next(
