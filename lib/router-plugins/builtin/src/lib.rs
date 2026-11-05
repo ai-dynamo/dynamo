@@ -137,8 +137,8 @@ worker_selection:
         }
     }
 
-    /// The KV-capacity-aware decode policy resolves from YAML with its parameters, and a misspelled
-    /// parameter fails startup like the other policies.
+    /// The KV-capacity-aware decode policy resolves from the YAML its documentation shows, and a
+    /// misspelled parameter fails startup like the other policies.
     #[test]
     fn resolves_kv_capacity_aware_for_decode() {
         let (config, resolved) = resolve(
@@ -149,10 +149,10 @@ worker_selection:
     - name: kvca
       type: dynamo-kv-capacity-aware
       parameters:
-        capacity_blocks: 20000
         capacity_fraction: 1.0
         count_priority: true
-        decode_active_request_weight: 1000
+        decode_active_request_weight: 0
+        capacity_blocks: 20000
 "#,
         );
         let factory = resolved

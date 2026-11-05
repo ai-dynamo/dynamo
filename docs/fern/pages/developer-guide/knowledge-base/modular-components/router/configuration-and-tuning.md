@@ -118,6 +118,7 @@ link no catalog and reject a configured policy type at startup.
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [ThunderAgent Program Scheduler](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
 | `dynamo-sticky-min-load` | Session-sticky least-loaded placement. A session's first request goes to the eligible worker with the fewest active requests; later requests carrying the same `X-Dynamo-Session-ID` return to that worker until it leaves the candidate set. Ignores cache overlap and load once a session is bound. Requests without a session ID go to the least-loaded worker. Inspired by SMG's `manual` policy with `assignment_mode: min_load`. |
+| `dynamo-kv-capacity-aware` | **Experimental.** For decode pools. Skips the ranks this request would overfill (blocks already booked plus this request's, against the rank's advertised `total_kv_blocks`), then prefers the fewest active requests, then the lowest decode cost. When no rank has room it takes the rank with the smallest footprint, so it never queues or rejects a request. |
 
 Write the instance into the same YAML file that `--router-policy-config` already points at:
 
@@ -251,6 +252,36 @@ largest device-KV overlap when that overlap covers more than 50% of the request'
 | `eviction_interval_secs` | `60` | Minimum seconds between sweeps for idle bindings. |
 
 Each worker pool keeps its own bindings, so prefill and decode stages bind sessions independently. The table holds at most 65,536 bindings and ignores session IDs longer than 256 bytes; requests that cannot be bound go to the least-loaded worker.
+
+`dynamo-kv-capacity-aware` places a decode request only on a rank it fits on. For each rank it reads `D`, the KV blocks booked on the rank plus this request's (`decode_cost_blocks`); `N`, the rank's active requests; and the rank's capacity, the `total_kv_blocks` it advertises:
+
+```yaml
+worker_selection:
+  decode: kvca
+  instances:
+    - name: kvca
+      type: dynamo-kv-capacity-aware
+      parameters:
+        capacity_fraction: 1.0
+        count_priority: true
+        decode_active_request_weight: 0
+        capacity_blocks: 20000
+```
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `capacity_fraction` | `1.0` | Share of a rank's capacity a booking may fill. A rank fits when `D <= capacity_fraction × capacity`, compared exactly to six decimal places. `null` turns the filter off. Must be at least `0.000001`. |
+| `count_priority` | `true` | Among the ranks that fit, prefer fewer active requests before the block cost. |
+| `decode_active_request_weight` | `0` | `W` in the cost `D + W·N`. Must be at least `0`. `--router-decode-active-request-weight` does not set it. |
+| `capacity_blocks` | unset | Capacity for ranks that do not advertise `total_kv_blocks`, or advertise `0`. Must be greater than `0`. |
+
+Among the ranks the request fits on, the policy picks the fewest active requests, then the lowest `(D + W·N) × multiplier`, where the multiplier comes from the request's preferred taints as in the default policy. When no rank fits, it picks the lowest `D` and ignores preferred taints, so every request lands on a rank. A rank with no known capacity is never filtered, and the router logs one warning for it. Session-affinity targets bind as they do with the default policy. With `capacity_fraction: null` and `count_priority: false`, the policy ties exactly like the default plain-decode cost.
+
+Use it to keep decode ranks within their KV capacity when one `W` cannot balance both request counts and KV blocks, typically with data-parallel attention. [Policy-class queues](#policy-class-queues) with `decode_busy_threshold_frac` hold a request while every worker is busy; this policy instead chooses among the ranks eligible now, and counts the incoming request's own blocks.
+
+- It is meant for decode pools. Selected for a prefill or aggregated pool, it logs a warning at startup: it ignores cache overlap and prefill load, and on a prefill pool every rank's `D` is 0.
+- `D` counts prompt blocks only unless the router runs with `--router-track-output-blocks`, and it needs active-block tracking, which the decode router keeps by default.
+- Some backends advertise an aggregate or representative-rank `total_kv_blocks` instead of each rank's own value, so treat the capacity as an estimate when you set `capacity_fraction`.
 
 #### Override the Selection
 
