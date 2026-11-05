@@ -34,9 +34,10 @@ use super::selector::{
     CandidatePreparer, PreparedCandidates, WorkerSelectionInput, WorkerSelector, worker_input_rows,
 };
 use super::types::{
-    AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, KvSchedulerError,
-    NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
-    SchedulingContext, SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider,
+    AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, AvailableWorkerIds,
+    KvSchedulerError, NonMaxOverlapSelection, NonMaxOverlapSelectionObserver,
+    OverloadedWorkerProvider, SchedulingContext, SchedulingRequest, SchedulingResponse,
+    WorkerAvailabilityProvider, WorkerIdSet,
 };
 use crate::plugins::request_classifier::ClassifyRequest;
 use crate::plugins::worker_selection::{
@@ -111,7 +112,7 @@ struct PreparedAdmission {
     candidates: PreparedCandidates,
     /// Configuration generation, loaded before the configuration was read.
     workers_generation: u64,
-    available_worker_ids: Option<Arc<HashSet<WorkerId>>>,
+    available_worker_ids: Option<Arc<WorkerIdSet>>,
     overloaded_worker_ids: Option<Arc<HashSet<WorkerId>>>,
 }
 
@@ -120,7 +121,7 @@ impl PreparedAdmission {
     fn into_current(
         self,
         workers_generation: u64,
-        available_worker_ids: Option<&Arc<HashSet<WorkerId>>>,
+        available_worker_ids: Option<&Arc<WorkerIdSet>>,
         overloaded_worker_ids: Option<&Arc<HashSet<WorkerId>>>,
     ) -> Option<PreparedCandidates> {
         // Availability and overload are each one shared snapshot until they change,
@@ -138,7 +139,7 @@ fn selection_eligibility<'a, C: WorkerConfigLike>(
     request: &'a SchedulingRequest,
     workers: &HashMap<WorkerId, C>,
     overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
-    available_worker_ids: Option<&'a HashSet<WorkerId>>,
+    available_worker_ids: Option<&'a WorkerIdSet>,
     full_ranks: Option<&'a FullRankCounts>,
     exclusive_affinity: bool,
 ) -> RoutingEligibility<'a> {
@@ -790,7 +791,7 @@ struct SchedulerQueueActor<
     overlap_scores_refresh: Option<Arc<RF>>,
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-    available_worker_provider: Option<WorkerAvailabilityProvider>,
+    available_worker_ids: Option<Arc<AvailableWorkerIds>>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
     /// Per-candidate cost capture for admitted selections, installed once by the host.
     selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
@@ -826,7 +827,7 @@ pub struct SchedulerQueue<
     block_size: u32,
     profile: Arc<PolicyProfile>,
     start_time: Instant,
-    available_worker_provider: Option<WorkerAvailabilityProvider>,
+    available_worker_ids: Option<Arc<AvailableWorkerIds>>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     supports_overlap_refresh: bool,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
@@ -962,6 +963,8 @@ impl<
             })
         };
         let workers_generation = Arc::new(AtomicU64::new(0));
+        let available_worker_ids =
+            available_worker_provider.map(|provider| Arc::new(AvailableWorkerIds::new(provider)));
         let candidate_preparer = Arc::new(ArcSwapOption::from(
             selector.candidate_preparer().map(Arc::new),
         ));
@@ -991,7 +994,7 @@ impl<
             overlap_scores_refresh,
             overlap_refresh_after,
             overloaded_worker_provider: overloaded_worker_provider.clone(),
-            available_worker_provider: available_worker_provider.clone(),
+            available_worker_ids: available_worker_ids.clone(),
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
             selection_trace: Arc::clone(&selection_trace),
             reject_thresholds: reject_thresholds.clone(),
@@ -1013,7 +1016,7 @@ impl<
             block_size,
             profile,
             start_time,
-            available_worker_provider,
+            available_worker_ids,
             overloaded_worker_provider,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
             non_max_overlap_selection_observer,
@@ -1164,9 +1167,9 @@ impl<
         worker_inputs: WorkerInputs,
     ) -> (ClassifyRequest, WorkerInputRows) {
         let available = self
-            .available_worker_provider
+            .available_worker_ids
             .as_ref()
-            .and_then(|provider| provider(request));
+            .and_then(|ids| ids.get(request));
         let workers = self.workers_with_configs.borrow();
         let cached_tokens = SchedulingContext::new(request, &workers)
             .with_available_workers(available.as_deref())
@@ -1247,9 +1250,9 @@ impl<
         ingress_at: Instant,
     ) -> QueueMetadata {
         let available = self
-            .available_worker_provider
+            .available_worker_ids
             .as_ref()
-            .and_then(|provider| provider(request));
+            .and_then(|ids| ids.get(request));
         let workers = self.workers_with_configs.borrow();
         let snapshot = QueueSnapshot::new(
             request.isl_tokens,
@@ -1468,9 +1471,9 @@ impl<
         // advances the generation before the actor selects with these rows.
         let workers_generation = self.workers_generation.load(AtomicOrdering::Acquire);
         let available_worker_ids = self
-            .available_worker_provider
+            .available_worker_ids
             .as_ref()
-            .and_then(|provider| provider(request));
+            .and_then(|ids| ids.get(request));
         let overloaded_worker_ids = self
             .overloaded_worker_provider
             .as_ref()
@@ -1718,9 +1721,9 @@ impl<
         // limit-zero rejection the queued path always has.
         if class.never_queues() {
             let available = self
-                .available_worker_provider
+                .available_worker_ids
                 .as_ref()
-                .and_then(|provider| provider(&request));
+                .and_then(|ids| ids.get(&request));
             let should_queue = class.queueing_enabled()
                 && (self.pending.has_backlog(class_index) || {
                     let configs = self.workers_with_configs.borrow();
@@ -2007,13 +2010,13 @@ impl<
     fn has_dispatchable_ready_head(&self) -> bool {
         let decay_now = Instant::now();
         let slots = &self.slots;
-        let provider = self.available_worker_provider.as_ref();
+        let available_ids = self.available_worker_ids.as_ref();
         let workers = &self.workers_with_configs;
         self.pending.any_ready_head(|_, class, queued| {
             if !class.queueing_enabled() {
                 return true;
             }
-            let available = provider.and_then(|provider| provider(&queued.request));
+            let available = available_ids.and_then(|ids| ids.get(&queued.request));
             let configs = workers.borrow();
             !Self::all_eligible_workers_full(
                 &slots.worker_load_reader(decay_now),
@@ -2103,13 +2106,13 @@ impl<
             // two reads, as they can right after the gate.
             let extracted = {
                 let slots = &self.slots;
-                let provider = self.available_worker_provider.as_ref();
+                let available_ids = self.available_worker_ids.as_ref();
                 let workers = &self.workers_with_configs;
                 self.pending.extract_next(|_, class, queued| {
                     if !class.queueing_enabled() {
                         return true;
                     }
-                    let available = provider.and_then(|provider| provider(&queued.request));
+                    let available = available_ids.and_then(|ids| ids.get(&queued.request));
                     let configs = workers.borrow();
                     // TODO: This preserves head-of-line blocking within each policy
                     // class. A blocked constrained head can stall later entries in
@@ -2374,9 +2377,9 @@ impl<
         prepared: Option<Box<PreparedAdmission>>,
     ) -> Result<SelectedWorkerForRequest, KvSchedulerError> {
         let available_worker_ids = self
-            .available_worker_provider
+            .available_worker_ids
             .as_ref()
-            .and_then(|provider| provider(request));
+            .and_then(|ids| ids.get(request));
 
         {
             let workers = self.workers_with_configs.borrow();
@@ -4501,7 +4504,7 @@ policy_classes:
             overlap_scores_refresh: None::<Arc<NoopOverlapScoresRefresh>>,
             overlap_refresh_after: None,
             overloaded_worker_provider: None,
-            available_worker_provider: None,
+            available_worker_ids: None,
             non_max_overlap_selection_observer: Arc::clone(
                 &queue.non_max_overlap_selection_observer,
             ),
@@ -9335,7 +9338,7 @@ policy_classes:
                 None
             })
         };
-        actor.available_worker_provider = Some(available_workers);
+        actor.available_worker_ids = Some(Arc::new(AvailableWorkerIds::new(available_workers)));
 
         // A request still in time is rejected by the zero limit.
         let in_time_due = Instant::now() + Duration::from_millis(300);
