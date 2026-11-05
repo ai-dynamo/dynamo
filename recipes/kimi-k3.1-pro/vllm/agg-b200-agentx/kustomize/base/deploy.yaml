@@ -200,6 +200,9 @@ spec:
             value: fastsafetensors
           - name: DRAFT_MODEL_NAME
             value: Inferact/Kimi-K3-DSpark
+          # Benchmark-only alternative; keep natural acceptance for serving.
+          # - name: SPECULATIVE_CONFIG
+          #   value: '{"method":"dspark","model":"$(DRAFT_MODEL_NAME)","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.84,"draft_load_config":{"load_format":"safetensors"}}'
           - name: SPECULATIVE_CONFIG
             value: '{"method":"dspark","model":"$(DRAFT_MODEL_NAME)","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"standard","draft_load_config":{"load_format":"safetensors"}}'
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7

@@ -19,6 +19,3 @@ matrix:
   variant:
   - name: b200
     components: []
-  - name: b200-synthetic-al
-    components:
-    - kustomize/components/synthetic-al

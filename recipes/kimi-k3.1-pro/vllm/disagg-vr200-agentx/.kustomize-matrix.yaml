@@ -19,9 +19,3 @@ matrix:
   variant:
   - name: vr200
     components: []
-  - name: generic-synthetic-al
-    components:
-    - kustomize/components/synthetic-al
-  - name: vr200-synthetic-al
-    components:
-    - kustomize/components/synthetic-al
