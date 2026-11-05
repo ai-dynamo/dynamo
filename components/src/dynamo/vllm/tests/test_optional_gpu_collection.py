@@ -21,11 +21,13 @@ pytestmark = [
     [
         ("test_gpu_offloading.py", False, True, 1),
         ("test_gpu_memory.py", False, True, 1),
+        ("test_gpu_event_metadata.py", False, True, 1),
         ("test_vllm_args.py", False, True, 1),
         ("test_vllm_mnnvl_memory.py", False, None, 0),
         ("test_kv_hints.py", False, None, 0),
         ("test_gpu_offloading.py", True, None, 1),
         ("test_gpu_memory.py", True, None, 1),
+        ("test_gpu_event_metadata.py", True, None, 1),
     ],
 )
 def test_optional_framework_collection_boundary(
@@ -119,6 +121,7 @@ def test_absent_optional_kvcr_is_cached_without_importing_upstream(monkeypatch):
     [
         ("test_gpu_offloading.py", True),
         ("test_gpu_memory.py", True),
+        ("test_gpu_event_metadata.py", True),
         ("test_vllm_args.py", None),
         ("test_kv_hints.py", None),
         ("test_optional_gpu_collection.py", None),
@@ -141,7 +144,10 @@ def test_missing_kvcr_omits_only_the_gpu_framework_file(
     assert module.pytest_ignore_collect(path.with_name(filename), None) is expected
 
 
-@pytest.mark.parametrize("filename", ["test_gpu_offloading.py", "test_gpu_memory.py"])
+@pytest.mark.parametrize(
+    "filename",
+    ["test_gpu_offloading.py", "test_gpu_memory.py", "test_gpu_event_metadata.py"],
+)
 def test_gpu_file_with_absent_optional_upstream_is_ignored(monkeypatch, filename):
     path = Path(__file__).with_name("conftest.py")
     spec = importlib.util.spec_from_file_location("pure_gpu_optional_file", path)
@@ -158,6 +164,10 @@ def test_gpu_file_with_absent_optional_upstream_is_ignored(monkeypatch, filename
         ModuleNotFoundError(name="kvcr"),
         ModuleNotFoundError(name="kvcr.config"),
         ModuleNotFoundError(name="kvcr._bindings"),
+        ModuleNotFoundError(name="kvbm"),
+        ModuleNotFoundError(
+            name="vllm.distributed.kv_transfer.kv_connector.v1.offloading.events"
+        ),
         ModuleNotFoundError(name="unrelated_dependency"),
         ImportError("broken adapter ABI"),
         RuntimeError("bad API"),

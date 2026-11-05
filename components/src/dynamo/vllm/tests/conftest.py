@@ -88,7 +88,11 @@ def pytest_ignore_collect(collection_path, config):
     Checks test_vllm_*.py and the retained-GPU framework-dependent modules.
     """
     filename = collection_path.name
-    gpu_tiering_test = filename in {"test_gpu_offloading.py", "test_gpu_memory.py"}
+    gpu_tiering_test = filename in {
+        "test_gpu_offloading.py",
+        "test_gpu_memory.py",
+        "test_gpu_event_metadata.py",
+    }
     # FABRIC driver tests load only the stdlib helper, without vLLM or CUDA.
     requires_vllm = (
         filename.startswith("test_vllm_") and filename != "test_vllm_mnnvl_memory.py"
