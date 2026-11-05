@@ -25,7 +25,8 @@ type componentPowerCapPreservation struct {
 }
 
 // resolvePowerCapPreservation proves the exception from owned live DCDs and their owned Deployments.
-// It renders without a new restart: restarts stamp the retained DCDs in place and are not worker identity.
+// It renders without a new restart and with the retained DCDs' restart stamps: restarts stamp the
+// retained DCDs in place and are not worker identity.
 // dgd must be non-nil.
 func (r *componentWorkloadsReconciler) resolvePowerCapPreservation(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, checkpoints map[string]*checkpoint.CheckpointInfo) (*componentPowerCapPreservation, error) {
 	if len(desiredWorkerPowerCaps(dgd)) == 0 || powerCapRolloutBlocked(dgd.Status.RollingUpdate) {
@@ -39,7 +40,7 @@ func (r *componentWorkloadsReconciler) resolvePowerCapPreservation(ctx context.C
 	if hash == "" {
 		return nil, nil
 	}
-	restarts, err := r.getExistingRestartAnnotationsDCD(ctx, dgd)
+	restarts, err := getRestartAnnotationsForWorkerHashes(ctx, r.syncer, dgd, []string{hash})
 	if err != nil {
 		return nil, err
 	}

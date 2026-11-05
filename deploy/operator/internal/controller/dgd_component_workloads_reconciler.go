@@ -74,7 +74,13 @@ func (r *componentWorkloadsReconciler) Reconcile(
 		}
 	}
 
-	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd)
+	// A retained cap-only edit keeps the restart stamps of the generation it retains.
+	var existingRestartAnnotations map[string]string
+	if retained != nil {
+		existingRestartAnnotations, err = getRestartAnnotationsForWorkerHashes(ctx, r.syncer, dgd, []string{retained.hash})
+	} else {
+		existingRestartAnnotations, err = r.getExistingRestartAnnotationsDCD(ctx, dgd)
+	}
 	if err != nil {
 		logger.Error(err, "failed to get existing restart annotations")
 		return ReconcileResult{}, fmt.Errorf("failed to get existing restart annotations: %w", err)
@@ -157,13 +163,22 @@ func getExistingRestartAnnotationsDCD(
 	reader client.Reader,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (map[string]string, error) {
-	logger := log.FromContext(ctx)
 	hashes, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return nil, err
 	}
-	workerHashes := activeWorkerHashCandidates(dgd, hashes)
+	return getRestartAnnotationsForWorkerHashes(ctx, reader, dgd, activeWorkerHashCandidates(dgd, hashes))
+}
 
+// getRestartAnnotationsForWorkerHashes reads each component's restart stamp from the first existing
+// worker DCD among workerHashes, in order. dgd must be non-nil.
+func getRestartAnnotationsForWorkerHashes(
+	ctx context.Context,
+	reader client.Reader,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	workerHashes []string,
+) (map[string]string, error) {
+	logger := log.FromContext(ctx)
 	restartAnnotations := make(map[string]string)
 	for i := range dgd.Spec.Components {
 		componentName := dgd.Spec.Components[i].ComponentName

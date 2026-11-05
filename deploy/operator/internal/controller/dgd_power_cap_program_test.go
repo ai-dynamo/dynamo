@@ -175,38 +175,64 @@ func TestPowerCapGrovePendingSurvivesPodCliqueSetSyncFailure(t *testing.T) {
 }
 
 func TestPowerCapComponentRestartAppliesToRetainedWorkers(t *testing.T) {
-	t.Log("Store the active component generation at 300 W with its owned Deployment")
-	dgd := powerCapTestDGD(t, "component")
-	hash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
-	require.NoError(t, err)
-	dgd.Annotations[consts.AnnotationCurrentWorkerHashV2] = hash
-	dcds, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, dynamo.RollingUpdateContext{NewWorkerHash: hash})
-	require.NoError(t, err)
-	dcd := dcds["worker"]
-	dcd.UID = "worker-uid"
-	dcd.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}
-	deployment := &appsv1.Deployment{Name: dcd.Name, Namespace: dcd.Namespace, UID: "deployment-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dcd, v1beta1.DynamoComponentDeploymentGVK)}}
-	scheme := powerCapTestScheme(t)
-	require.NoError(t, rbacv1.AddToScheme(scheme))
-	c := powerCapTestClient(scheme).WithObjects(dgd, dcd, deployment).WithStatusSubresource(dgd).Build()
-	config := &configv1alpha1.OperatorConfiguration{}
-	config.Namespace.Restricted = "default"
-	root := &DynamoGraphDeploymentReconciler{Client: c, Config: config, RuntimeConfig: &commoncontroller.RuntimeConfig{}, DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}}
+	for _, scenario := range []string{"restart-with-cap-edit", "cap-edit-after-restart"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Log("Store the active component generation at 300 W with its owned Deployment")
+			dgd := powerCapTestDGD(t, "component")
+			hash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			dgd.Annotations[consts.AnnotationCurrentWorkerHashV2] = hash
+			dcds, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, dynamo.RollingUpdateContext{NewWorkerHash: hash})
+			require.NoError(t, err)
+			dcd := dcds["worker"]
+			dcd.UID = "worker-uid"
+			dcd.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}
+			dcd.Status.Conditions = []metav1.Condition{{Type: v1beta1.DynamoComponentDeploymentConditionTypeAvailable, Status: metav1.ConditionTrue, Reason: "Available", LastTransitionTime: metav1.Now()}}
+			if scenario == "cap-edit-after-restart" {
+				t.Log("An earlier restart completed and left its stamp on the worker DCD")
+				dcd.Spec.PodTemplate.Annotations[consts.RestartAnnotation] = "restart-0"
+				dgd.Spec.Restart = &v1beta1.Restart{ID: "restart-0"}
+				dgd.Status.Restart = &v1beta1.RestartStatus{ObservedID: "restart-0", Phase: v1beta1.RestartPhaseCompleted}
+			}
+			deployment := &appsv1.Deployment{Name: dcd.Name, Namespace: dcd.Namespace, UID: "deployment-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dcd, v1beta1.DynamoComponentDeploymentGVK)}}
+			scheme := powerCapTestScheme(t)
+			require.NoError(t, rbacv1.AddToScheme(scheme))
+			c := powerCapTestClient(scheme).WithObjects(dgd, dcd, deployment).WithStatusSubresource(dgd).Build()
+			config := &configv1alpha1.OperatorConfiguration{}
+			config.Namespace.Restricted = "default"
+			root := &DynamoGraphDeploymentReconciler{Client: c, Config: config, RuntimeConfig: &commoncontroller.RuntimeConfig{}, DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}}
+			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(dcd), dcd))
+			stamp := dcd.Spec.PodTemplate.Annotations[consts.RestartAnnotation]
 
-	t.Log("Request a restart together with a cap-only edit")
-	dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
-	dgd.Spec.Restart = &v1beta1.Restart{ID: "restart-1"}
-	result, err := root.newComponentProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
-	require.NoError(t, err)
+			t.Log("Edit only the cap, with a new restart in the restart-with-cap-edit scenario")
+			dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
+			if scenario == "restart-with-cap-edit" {
+				dgd.Spec.Restart = &v1beta1.Restart{ID: "restart-1"}
+			}
 
-	t.Log("The restart is not superseded and stamps the retained worker in place")
-	require.False(t, rollingUpdateInProgress(result.Status.RollingUpdate))
-	require.NotNil(t, result.Status.Restart)
-	require.NotEqual(t, v1beta1.RestartPhaseSuperseded, result.Status.Restart.Phase)
-	require.Equal(t, hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(dcd), dcd))
-	require.Equal(t, "300", dcd.Spec.PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit])
-	require.NotEmpty(t, dcd.Spec.PodTemplate.Annotations[consts.RestartAnnotation])
+			t.Log("Reconcile through convergence, persisting status between passes")
+			for range 3 {
+				result, err := root.newComponentProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+				require.NoError(t, err)
+				dgd.Status = result.Status
+				require.False(t, rollingUpdateInProgress(dgd.Status.RollingUpdate))
+				require.NotEqual(t, v1beta1.RestartPhaseSuperseded, dgd.Status.Restart.Phase)
+			}
+
+			t.Log("The retained worker keeps its identity, creation cap and restart stamp, and the restart completes")
+			require.Equal(t, hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
+			dcdList := &v1beta1.DynamoComponentDeploymentList{}
+			require.NoError(t, c.List(t.Context(), dcdList))
+			require.Len(t, dcdList.Items, 1)
+			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(dcd), dcd))
+			require.Equal(t, "300", dcd.Spec.PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit])
+			require.NotEmpty(t, dcd.Spec.PodTemplate.Annotations[consts.RestartAnnotation])
+			if scenario == "cap-edit-after-restart" {
+				require.Equal(t, stamp, dcd.Spec.PodTemplate.Annotations[consts.RestartAnnotation])
+			}
+			require.Equal(t, v1beta1.RestartPhaseCompleted, dgd.Status.Restart.Phase)
+		})
+	}
 }
 
 func TestPowerCapGroveRoleTemplateWorkerHasNoCap(t *testing.T) {

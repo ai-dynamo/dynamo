@@ -45,7 +45,10 @@ A DGD using Grove or the single-node component pathway can change an existing
 worker cap value without restarting workers. The cap must be set on the worker's
 own `podTemplate`. Live cap changes are not supported, and the cap stays
 immutable, for graphs with a `type: planner` component, graphs with `type: lpx`
-components, and graphs whose `spec.annotations` sets the cap. Admission names the
+components, graphs whose `spec.annotations` sets the cap, graphs stored through
+`v1alpha1` with the cap in a service's `annotations`, and graphs with a worker that
+uses automatic checkpoints (`experimental.checkpoint.enabled` without
+`checkpointRef`). Admission names the
 reason when it rejects a change. Adding or removing the annotation remains
 forbidden. GPU allocation remains immutable.
 

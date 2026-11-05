@@ -5,10 +5,12 @@ package dynamo
 
 import (
 	"maps"
+	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/utils/ptr"
 )
 
 // LivePowerCapSupport reports the Stage-1 graph boundary and, when excluded, why. dgd must be non-nil.
@@ -31,6 +33,26 @@ func LivePowerCapSupport(dgd *v1beta1.DynamoGraphDeployment) (reason string, sup
 	// Inherited caps have no per-worker source that preservation and propagation can follow.
 	if _, inherited := dgd.Spec.Annotations[consts.KubeAnnotationGPUPowerLimit]; inherited {
 		return "live power-cap updates are unsupported when spec.annotations sets " + consts.KubeAnnotationGPUPowerLimit, false
+	}
+
+	// Preserved v1alpha1 service annotations render into templates outside the component pod-template source.
+	if alpha := getDGDAlpha(dgd); alpha != nil {
+		for name, service := range alpha.Spec.Services {
+			if service == nil {
+				continue
+			}
+			if _, inherited := service.Annotations[consts.KubeAnnotationGPUPowerLimit]; inherited {
+				return "live power-cap updates are unsupported when the v1alpha1 annotations of service " + name + " set " + consts.KubeAnnotationGPUPowerLimit, false
+			}
+		}
+	}
+
+	// Automatic worker checkpoints are keyed by the edited worker hash and would capture and roll a new generation.
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if checkpoint := GetCheckpoint(component); checkpoint != nil && IsWorkerComponent(string(component.ComponentType)) && strings.TrimSpace(ptr.Deref(checkpoint.CheckpointRef, "")) == "" {
+			return "live power-cap updates are unsupported for worker " + component.ComponentName + " with automatic checkpoints", false
+		}
 	}
 	return "", true
 }

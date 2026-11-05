@@ -151,7 +151,11 @@ func (p *componentProgram) Reconcile(
 
 	// Commit restart resolution after the selected rollout decision is reflected in status.
 	previousRestart := programResult.Status.Restart
-	restart := p.restart.Resolve(ctx, req.DGD, &programResult.Status, p.restartProgress.Resolve)
+	resolveRestartProgress := p.restartProgress.Resolve
+	if retained != nil {
+		resolveRestartProgress = p.restartProgress.retainedResolver(retained.hash)
+	}
+	restart := p.restart.Resolve(ctx, req.DGD, &programResult.Status, resolveRestartProgress)
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
 

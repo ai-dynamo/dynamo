@@ -267,7 +267,8 @@ The operator maintains observed state under `status`.
   `PowerCapPropagationReady` reports live Pod annotation convergence for graphs with
   power-annotated workers that use the `grove` workload provider or the `component`
   provider without multinode components, and that have no `type: planner` or
-  `type: lpx` component and no cap in `spec.annotations`. Compare its
+  `type: lpx` component, no cap in `spec.annotations` or in a `v1alpha1` service's
+  `annotations`, and no worker with automatic checkpoints. Compare its
   `observedGeneration` with the DGD generation. Reasons:
 
   - `PodAnnotationsMatch` (`True`): every owned nonterminal worker Pod matches,

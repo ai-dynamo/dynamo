@@ -106,6 +106,7 @@ and GPU allocation through DRA resource claims are not supported by this
 projection.
 
 Live cap updates without worker restarts are supported only for DGDs without a
-Planner or LPX components that use Grove or single-node component workloads and
-set each cap on the worker's own pod template. That mode does not refresh Planner
+Planner or LPX components that use Grove or single-node component workloads, set
+each cap on the worker's own pod template, and have no worker with automatic
+checkpoints. That mode does not refresh Planner
 budgets and does not apply to this example.

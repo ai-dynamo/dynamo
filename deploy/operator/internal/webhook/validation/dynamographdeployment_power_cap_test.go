@@ -6,6 +6,7 @@ package validation_test
 import (
 	"fmt"
 
+	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
@@ -17,7 +18,7 @@ func powerCapAdmissionCases() []dgdAdmissionTestCase {
 	for _, scenario := range []string{
 		"grove", "component", "planner-old", "planner-new", "multinode-old", "multinode-new",
 		"Pending", "InProgress", "Failed", "Completed", "None", "non-worker", "type-transition", "image-and-cap",
-		"lpx-mixed", "lpx-added", "lpx-removed", "graph-cap-old", "graph-cap-new",
+		"lpx-mixed", "lpx-added", "lpx-removed", "graph-cap-old", "graph-cap-new", "auto-checkpoint",
 		"legacy-v1-component", "legacy-v1-grove", "migrated-component", "migrated-grove",
 	} {
 		old := betaDGDForAdmission(nil)
@@ -50,6 +51,9 @@ func powerCapAdmissionCases() []dgdAdmissionTestCase {
 		}
 		if scenario == "graph-cap-old" {
 			old.Spec.Annotations = map[string]string{consts.KubeAnnotationGPUPowerLimit: "300"}
+		}
+		if scenario == "auto-checkpoint" {
+			old.Spec.Components[1].Experimental = &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true}}
 		}
 
 		// Preservation needs the additive v2 hash; migration is incomplete while only v1 is recorded.
@@ -95,7 +99,21 @@ func powerCapAdmissionCases() []dgdAdmissionTestCase {
 		row.wantWebhookErrs, row.wantCELErr = powerCapAdmissionWant(scenario)
 		rows = append(rows, row)
 	}
-	return rows
+
+	// A v1alpha1 service-annotation cap renders into a second worker without a podTemplate source.
+	alphaOld := alphaDGDForAdmission(func(dgd *v1alpha1.DynamoGraphDeployment) {
+		dgd.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: "grove"}
+		worker := dgd.Spec.Services["worker"]
+		inherited := worker.DeepCopy()
+		worker.ExtraPodMetadata = &v1alpha1.ExtraPodMetadata{Annotations: map[string]string{consts.KubeAnnotationGPUPowerLimit: "300"}}
+		inherited.Annotations = map[string]string{consts.KubeAnnotationGPUPowerLimit: "300"}
+		dgd.Spec.Services["inherited"] = inherited
+	})
+	alphaUpdated := alphaOld.DeepCopy()
+	alphaUpdated.Spec.Services["worker"].ExtraPodMetadata.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
+	row := dgdAdmissionTestCase{name: "live power cap alpha-service-cap", oldDeployment: alphaOld, deployment: alphaUpdated}
+	row.wantWebhookErrs, row.wantCELErr = powerCapAdmissionWant("alpha-service-cap")
+	return append(rows, row)
 }
 
 // powerCapAdmissionWant is the expected admission oracle for one powerCapAdmissionCases scenario.
@@ -118,6 +136,10 @@ func powerCapAdmissionWant(scenario string) (webhookErrs []string, celErr string
 		detail += ": live power-cap updates are unsupported for graphs with LPX components"
 	case "graph-cap-old", "graph-cap-new":
 		detail += ": live power-cap updates are unsupported when spec.annotations sets dynamo.nvidia.com/gpu-power-limit"
+	case "auto-checkpoint":
+		detail += ": live power-cap updates are unsupported for worker worker with automatic checkpoints"
+	case "alpha-service-cap":
+		detail += ": live power-cap updates are unsupported when the v1alpha1 annotations of service inherited set dynamo.nvidia.com/gpu-power-limit"
 	case "legacy-v1-component", "legacy-v1-grove":
 		detail = "cannot change power cap until the operator records nvidia.com/current-worker-hash-v2: worker hash migration is incomplete; retry after the DGD is reconciled"
 	}
