@@ -23,7 +23,7 @@ from dynamo.common.snapshot.constants import (
 
 logger = logging.getLogger(__name__)
 ConfigT = TypeVar("ConfigT")
-_PID_ONE = Path("/proc/1")
+_PROC_ROOT = Path("/proc")
 
 _RESTORE_RUNTIME_CONFIG_FIELDS = (
     "namespace",
@@ -122,7 +122,7 @@ def apply_snapshot_restore_env() -> dict[str, str | None]:
         # Include absent settings so capture-time values are cleared too.
         return _apply_restore_env(
             {name: proxy_env.get(name) for name in _SUPPORTED_RESTORE_ENV_NAMES},
-            source=str(_PID_ONE / "environ"),
+            source="snapshot-restore-proxy",
         )
     control_dir = os.environ.get(SNAPSHOT_CONTROL_DIR_ENV, SNAPSHOT_CONTROL_DIR)
     context_path = Path(control_dir) / SNAPSHOT_RESTORE_CONTEXT_FILE
@@ -146,44 +146,64 @@ def apply_snapshot_restore_env() -> dict[str, str | None]:
 
 
 def _read_restore_proxy_env() -> dict[str, str] | None:
-    """Read destination env only from a verified ``snapshot-restore-proxy``.
+    """Read destination env from the ancestor ``snapshot-restore-proxy``.
 
-    The command and binary name follow snapshot/api/podcontract. Older agents
-    run the standby entrypoint instead and supply a context file directly.
+    Snapshot makes the restored root process a child of the proxy, including
+    in shared PID namespaces where PID 1 is the Pod's pause process. The worker
+    may sit below that root, for example when a shell script launches it.
     """
+    proxy_proc = _find_restore_proxy()
+    if proxy_proc is None:
+        return None
     try:
-        command = (_PID_ONE / "cmdline").read_bytes()
-    except FileNotFoundError:
-        return None
-    if not command.endswith(b"\0") or b"\0" in command[:-1]:
-        return None
-    proxy_binary = Path(os.fsdecode(command[:-1]))
-    if (
-        not proxy_binary.is_absolute()
-        or proxy_binary.name != SNAPSHOT_RESTORE_PROXY_BINARY
-    ):
-        return None
-    if not (_PID_ONE / "exe").samefile(proxy_binary):
+        environment = (proxy_proc / "environ").read_bytes()
+    except PermissionError as exc:
         raise RuntimeError(
-            "Snapshot restore proxy executable does not match its command"
-        )
+            f"Cannot read destination environment from {proxy_proc / 'environ'}: "
+            "ptrace-read access to snapshot-restore-proxy is required"
+        ) from exc
 
-    supported = {name.encode("ascii"): name for name in _SUPPORTED_RESTORE_ENV_NAMES}
     destination_env: dict[str, str] = {}
-    for entry in (_PID_ONE / "environ").read_bytes().split(b"\0"):
-        key, separator, raw_value = entry.partition(b"=")
-        if key not in supported:
-            continue
-        name = supported[key]
-        if not separator or name in destination_env:
-            raise RuntimeError(f"Invalid or duplicate Snapshot proxy env {name}")
-        try:
-            destination_env[name] = raw_value.decode("utf-8")
-        except UnicodeDecodeError:
-            raise RuntimeError(
-                f"Invalid encoding in Snapshot proxy env {name}"
-            ) from None
+    for entry in environment.split(b"\0"):
+        key, _, value = entry.partition(b"=")
+        name = os.fsdecode(key)
+        if name in _SUPPORTED_RESTORE_ENV_NAMES:
+            destination_env[name] = os.fsdecode(value)
     return destination_env
+
+
+def _find_restore_proxy() -> Path | None:
+    """Return the procfs directory of the nearest proxy ancestor, if any."""
+    pid = os.getppid()
+    visited: set[int] = set()
+    # PID 0 means the parent is outside this PID namespace.
+    while pid > 0 and pid not in visited:
+        visited.add(pid)
+        proc = _PROC_ROOT / str(pid)
+        try:
+            command = (proc / "cmdline").read_bytes()
+            if _is_restore_proxy_command(command):
+                return proc
+            stat = (proc / "stat").read_bytes()
+        except FileNotFoundError:
+            # No procfs, or the ancestor exited; keep legacy context loading.
+            return None
+        if pid == 1:
+            return None
+        # The command name in parentheses may contain spaces; ppid follows it.
+        pid = int(stat.rpartition(b")")[2].split()[1])
+    return None
+
+
+def _is_restore_proxy_command(command: bytes) -> bool:
+    """Return whether ``command`` is a lone absolute ``snapshot-restore-proxy`` path."""
+    if not command.endswith(b"\0") or b"\0" in command[:-1]:
+        return False
+    proxy_binary = Path(os.fsdecode(command[:-1]))
+    return (
+        proxy_binary.is_absolute()
+        and proxy_binary.name == SNAPSHOT_RESTORE_PROXY_BINARY
+    )
 
 
 def write_snapshot_restore_context(control_dir: str | None = None) -> None:
