@@ -17,6 +17,15 @@ logger = logging.getLogger(__name__)
 def get_dp_range_for_worker(vllm_config: VllmConfig) -> tuple[int, int]:
     """Return the global DP start rank and number of ranks managed by this worker."""
     parallel_config = vllm_config.parallel_config
+    if (
+        parallel_config.enable_elastic_ep
+        and parallel_config.data_parallel_backend == "mp"
+        and parallel_config.elastic_ep_auto_bootstrap
+    ):
+        return (
+            parallel_config.data_parallel_rank,
+            parallel_config.data_parallel_size_local,
+        )
     if parallel_config.data_parallel_external_lb:
         return (parallel_config.data_parallel_rank, 1)
     if parallel_config.data_parallel_hybrid_lb:

@@ -7,7 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 The runtime image must include the native correlated controls in
 [vLLM #62082](https://github.com/vllm-project/vllm/pull/62082) and native automatic
-bootstrap in [#62973](https://github.com/vllm-project/vllm/pull/62973).
+range bootstrap in [#62973](https://github.com/vllm-project/vllm/pull/62973),
+including allocation-index startup, and
+[native local-range resizing](https://github.com/julienmancuso/vllm/pull/1).
 The managed deployment uses the existing `python3 -m dynamo.vllm` worker.
 
 ## Startup and growth
@@ -27,17 +29,20 @@ DGD declaration → one Grove template → native vLLM automatic bootstrap
                                complete initial world
 
 Engine Group target → Grove /scale → joiner waits in native bootstrap
-                  └→ correlated resize on every old rank → membership commit
+                  └→ one correlated resize per old client → membership commit
 ```
 
 There is no Dynamo bootstrap process, command annotation, receipt file or receipt
-probe. Pod allocation/readiness and native inference readiness remain independent;
+probe. Native preparation waits for the main container to be running, not image
+pulling. Pod allocation/readiness and native inference readiness remain independent;
 an API-unready joiner must not block submission of the resize that initializes it.
 
-The current launch profile has one local DP member per non-restarting Pod, with
-its fixed TP subgroup filling the GPU allocation. Packed launching, multi-node TP,
-fault-tolerant masking and arbitrary selected retirement are not enabled. Initial
-DP must exceed one, and the native MP/external-DP profile reserves an explicit maximum.
+Each non-restarting Pod runs one Dynamo worker with one native client. The client
+owns `--data-parallel-size-local` engines, each using a fixed TP subgroup; together
+they fill the Pod's GPU allocation. vLLM owns their launch, GPU assignment, local
+routing, cancellation and resize barriers. Dynamo does not supervise child processes.
+Multi-node TP, fault-tolerant masking and arbitrary selected retirement are not enabled.
+Initial DP must exceed one, but it may fit in a single packed allocation.
 
 See [`poc.yaml`](poc.yaml) for the worker template. It declares the
 Downward API engine identity, native mode environment and retention readiness gate;
@@ -48,7 +53,28 @@ The operator supplies `DYNAMO_RANK` as the allocation index and
 `DYNAMO_LEADER_ADDRESS` as this world's allocation-zero hostname. The mapping to
 Grove stays inside the renderer; user commands need no `GROVE_*` references.
 Both aliases precede user environment entries and cannot be overridden, including
-through parent `spec.env`. In this profile one allocation owns one native DP member.
+through parent `spec.env`. Packed templates pass the index explicitly as
+`--elastic-ep-allocation-index=$(DYNAMO_RANK)`; native vLLM computes the first global
+rank as index times local DP size. Single-member templates may instead use the native
+external rank flag. The operator does not rewrite either command.
+
+For the four-GPU smoke test, [`packed-test.yaml`](packed-test.yaml) declares
+one DGD with two GPUs per Pod and TP1:
+
+```text
+Engine Group replicas:    1          2          1
+Pods / Dynamo workers:   1    ->    2    ->    1
+Native DP / EP:          2          4          2
+
+Pod 0: worker -> native client -> engines dp-0, dp-1 (retained)
+Pod 1: worker -> native client -> engines dp-2, dp-3 (created, then retired)
+```
+
+Each worker verifies all its local engines before registering its serving endpoint.
+The status reports the complete owned member list and the shared native client ID.
+Every member remains individually correlated with its Pod UID/rank and with native
+retirement evidence. Child restarts and partial survival require recovery support
+and are not enabled by this healthy-resize profile.
 
 Engine Group main containers do not inherit the generated inference probes;
 explicit caller probes are preserved. Choose allocation/process health appropriate to the
@@ -73,17 +99,31 @@ or native transaction phases. Process restart counts and native API instance IDs
 provide additional fences.
 
 The worker does not need the Engine Group CR's UID to start. Its status identifies
-the exact Pod UID and native member, while the operator proves their ownership
+the exact Pod UID and native members, while the operator proves their ownership
 chain and correlates the native API instance. Registration never waits for a
 second controller permission or status write.
 
 ## Membership and release
 
 The adapter fans the same operation ID and absolute target to every existing
-rank, including retirees, with each server's expected instance ID. Native status
+client, including retirees, with each server's expected instance ID. One request
+covers all the client's local ranks; targets cannot bisect its range. Native status
 is authoritative for pending/unknown/terminal outcomes, effective topology and epoch.
 The journal retains exact target and native identity correlation; it does not
 run a second collective state machine.
+
+The native prerequisites must expose bounded `submit_elastic_ep` acceptance.
+The request includes the original opaque topology token and complete effect
+parameters. Native execution owns the accepted resize independently of the HTTP
+connection; Dynamo returns from reconciliation without waiting for the collective.
+The existing synchronous API and Ray path are not replaced.
+
+Acceptance is per client and its complete local range, not the shared collective
+record. The adapter retains those receipts and reasserts an identical request to
+repair missing participation. A transport failure or request-level 409/422 is not
+proof that the whole operation was rejected. Pending or uncertain native work
+cannot be superseded. Terminal evidence remains retained until a safely accepted
+successor, and a late old request cannot bypass the original topology fence.
 
 Native protocol support covers contiguous append, healthy suffix retirement and
 suffix restoration. The composed planner enables healthy growth and suffix shrink
@@ -102,32 +142,15 @@ checks the exact victim UID and fails closed on mismatch.
 
 ## Validation and scope
 
-Go tests cover native request/status codecs, all-rank fan-out, preflight, ambiguous
+Go tests cover native request/status codecs, all-client fan-out, preflight, ambiguous
 transport outcomes, restart recovery, exact process bindings, serving/drain evidence,
 native-template rendering and real API-server Scale/Pod identity behavior.
 Worker tests cover registration from native readiness without controller permission.
 
-GPU validation requires images built with both native prerequisites and this
+GPU validation requires images built with the native prerequisites and this
 worker integration. Existing functional-test image pins do not qualify the native
 bootstrap path; rebuild and rerun the manual fixtures before claiming GPU validation.
 
 Sidecar integration follows [DEP #14657](https://github.com/ai-dynamo/dynamo/issues/14657)
 and [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897). This HTTP/worker
 integration does not establish native gRPC or sidecar conformance.
-
-## Bounded native submission
-
-The native prerequisites must expose bounded `submit_elastic_ep` acceptance.
-The immutable request includes operation ID, expected API instance, original
-opaque topology token, absolute target and drain parameters. Native execution
-owns the accepted resize independently of the HTTP connection. Dynamo observes
-later progress without holding reconciliation open for the collective. Existing
-synchronous callers and Ray retain their APIs.
-
-Acceptance proves only this client's participation and complete local range, not
-every client's receipt of the shared operation. Retained scoped receipts and
-identical reassertion repair partial delivery. Transport failures and request-level
-409/422 responses are not authoritative whole-operation rejection. Pending or
-uncertain native work cannot be superseded. Results remain retained until a
-safe successor, with base fencing preventing delayed old requests becoming new
-work. Commit alone does not prove serving readiness or terminal drain.

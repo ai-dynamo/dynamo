@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Four-GPU functional smoke test: /scale replicas 1 -> 2 -> 1 means EP2 -> EP4 -> EP2.
+# Build IMAGE from this branch and the native prerequisites listed in README.md.
+# This B200/MoE fixture is not a shared L4 CI test or a performance recommendation.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-packed-enginegroup
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    runtimeVersionOverride: "1.7.0"
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${IMAGE}
+  - name: Worker
+    type: worker
+    runtimeVersionOverride: "1.7.0"
+    replicas: 1
+    engineGroup:
+      initialSize: 1
+      policy: {minSize: 1, maxSize: 2}
+    podTemplate:
+      spec:
+        restartPolicy: Never
+        readinessGates:
+        - conditionType: dynamo.nvidia.com/retained
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        tolerations:
+        - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+        containers:
+        - name: main
+          image: ${IMAGE}
+          command: [python3, -m, dynamo.vllm]
+          env:
+          - {name: VLLM_ENABLE_V1_MULTIPROCESSING, value: "1"}
+          - {name: VLLM_USE_RUST_FRONTEND, value: "0"}
+          - {name: VLLM_ELASTIC_EP_DRAIN_REQUESTS, value: "1"}
+          - {name: DYNAMO_ENGINE_GROUP, value: "1"}
+          - {name: HF_HOME, value: /models/hf-bootstrap-4a3}
+          - {name: HF_HUB_OFFLINE, value: "1"}
+          - {name: HF_MODULES_CACHE, value: /tmp/hf-modules}
+          - name: DYNAMO_POD_UID
+            valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+          args:
+          - --model=deepseek-ai/DeepSeek-V2-Lite-Chat
+          - --revision=85864749cd611b4353ce1decdb286193298f64c7
+          - --served-model-name=deepseek-ai/DeepSeek-V2-Lite-Chat
+          - --trust-remote-code
+          - --tensor-parallel-size=1
+          - --data-parallel-size-local=2
+          - --elastic-ep-auto-bootstrap
+          - --elastic-ep-allocation-index=$(DYNAMO_RANK)
+          - --elastic-ep-initial-dp-size=2
+          - --elastic-ep-max-dp-size=4
+          - --data-parallel-address=$(DYNAMO_LEADER_ADDRESS)
+          - --data-parallel-rpc-port=29550
+          - --distributed-executor-backend=mp
+          - --enable-expert-parallel
+          - --enable-eplb
+          - --eplb-config={"communicator":"pynccl","use_async":false}
+          - --enable-elastic-ep
+          - --all2all-backend=allgather_reducescatter
+          - --attention-backend=TRITON_MLA
+          - --gpu-memory-utilization=0.8
+          - --max-model-len=1024
+          - --enforce-eager
+          # Use the pinned native scheduler, independently of Dynamo's scheduler instrumentation.
+          - --scheduler-cls=vllm.v1.core.sched.async_scheduler.AsyncScheduler
+          resources:
+            requests: {cpu: "4", memory: 32Gi}
+            limits: {cpu: "16", memory: 96Gi, nvidia.com/gpu: "2"}
+          volumeMounts:
+          - {name: model, mountPath: /models, readOnly: true}
+        volumes:
+        - name: model
+          persistentVolumeClaim: {claimName: moe-model}

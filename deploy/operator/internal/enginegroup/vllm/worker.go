@@ -113,6 +113,9 @@ func (v *WorkerVerifier) Verify(ctx context.Context, groupID enginegroup.GroupID
 		if err != nil {
 			return enginegroup.VerificationResult{}, err
 		}
+		if process.Rank != int32(rank) {
+			continue
+		}
 		status, err := observeWorker(ctx, process)
 		if err != nil {
 			return enginegroup.VerificationResult{}, err

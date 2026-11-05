@@ -25,10 +25,14 @@ func ResolveVLLMLaunchProfile(source VLLMProfileGeometrySource) (ResolvedVLLMEla
 	if err != nil {
 		return ResolvedVLLMElasticEPProfile{}, err
 	}
-	if !flags["--elastic-ep-auto-bootstrap"] || !flags["--data-parallel-external-lb"] ||
-		values["--data-parallel-rank"] != engineGroupOrdinalRef || values["--data-parallel-size-local"] != "1" ||
+	indexed := values["--elastic-ep-allocation-index"] == engineGroupOrdinalRef
+	singleRank := profile.NativeMembersPerReplica == 1 && flags["--data-parallel-external-lb"] && values["--data-parallel-rank"] == engineGroupOrdinalRef
+	if !flags["--elastic-ep-auto-bootstrap"] || (!indexed && !singleRank) || values["--data-parallel-size-local"] == "" ||
 		values["--data-parallel-address"] != engineGroupRendezvousRef {
-		return ResolvedVLLMElasticEPProfile{}, fmt.Errorf("vLLM Engine Group template must explicitly declare native automatic bootstrap, external LB, local DP=1, --data-parallel-rank=%s and --data-parallel-address=%s", engineGroupOrdinalRef, engineGroupRendezvousRef)
+		return ResolvedVLLMElasticEPProfile{}, fmt.Errorf("vLLM Engine Group template requires native automatic bootstrap, explicit local DP size, --elastic-ep-allocation-index=%s (or external rank at local DP=1) and --data-parallel-address=%s", engineGroupOrdinalRef, engineGroupRendezvousRef)
+	}
+	if profile.NativeMembersPerReplica > 1 && !IsVLLMWorkerLaunch(source) {
+		return ResolvedVLLMElasticEPProfile{}, fmt.Errorf("packed allocations require one Dynamo worker owning the native local-range client")
 	}
 	if _, _, err := ResolveVLLMControlPorts(source); err != nil {
 		return ResolvedVLLMElasticEPProfile{}, err
