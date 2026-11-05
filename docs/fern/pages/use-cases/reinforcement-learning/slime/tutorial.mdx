@@ -1,0 +1,549 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Train a Model with Slime and Dynamo
+subtitle: Run a GRPO training loop with Slime on KubeRay and rollouts served by Dynamo
+---
+
+**Experimental.** This tutorial runs three GRPO iterations on `Qwen/Qwen3-0.6B` with the GSM8K dataset. Dynamo serves rollouts from two SGLang engines, and Slime trains on a single-GPU Ray cluster. In each iteration, Slime generates 32 samples through the Dynamo frontend, trains on them, writes the new weights to a shared volume, and reloads them on both engines.
+
+| Workload | Kubernetes resource | GPUs |
+|---|---|---|
+| Dynamo frontend | DGD component `frontend` | 0 |
+| Two SGLang engines | DGD components `worker-0` and `worker-1` | 1 each |
+| Slime trainer | KubeRay `RayCluster` named `slime-trainer` | 1 |
+
+Expect about 20 minutes on a fresh cluster. Most of that time is spent pulling the images; the training job itself takes a few minutes.
+
+## Prerequisites
+
+- Complete [Installation](installation.mdx).
+- Have three free GPUs. The tutorial was validated on H100 80 GB GPUs.
+- If your GPU nodes have taints, add matching tolerations to the worker Pod templates in the DGD and to the Ray head Pod template.
+
+<Steps toc={true}>
+  <Step title="Set the environment variables">
+
+Set the namespace, image versions, and the `ReadWriteMany` StorageClass that you chose during installation:
+
+```bash
+export NAMESPACE=slime-dynamo
+export DYNAMO_VERSION=1.6.1
+export SLIME_IMAGE=slimerl/slime:nightly-dev-20261027a-cu130
+export STORAGE_CLASS=azurefile-csi-premium
+```
+
+  </Step>
+  <Step title="Create the namespace and shared volume">
+
+The trainer and both engines mount this volume at `/data`. It holds the model, the dataset, the Megatron-LM checkpoints, and the weight updates that Slime sends to the engines.
+
+```bash
+kubectl create namespace "$NAMESPACE"
+kubectl apply -n "$NAMESPACE" -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: slime-data
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ${STORAGE_CLASS}
+  resources:
+    requests:
+      storage: 100Gi
+EOF
+kubectl wait -n "$NAMESPACE" --for=jsonpath='{.status.phase}'=Bound pvc/slime-data --timeout=5m
+```
+
+  </Step>
+  <Step title="Deploy the Dynamo rollout workers">
+
+Apply two engine Services and a DGD with one frontend and two SGLang workers:
+
+```bash
+kubectl apply -n "$NAMESPACE" -f - <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: slime-sglang-engine-0
+spec:
+  selector:
+    dynamo.nvidia.com/slime-role: worker-0
+  ports:
+    - name: sglang-http
+      port: 30000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: slime-sglang-engine-1
+spec:
+  selector:
+    dynamo.nvidia.com/slime-role: worker-1
+  ports:
+    - name: sglang-http
+      port: 30000
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: slime-sglang
+spec:
+  backendFramework: sglang
+  components:
+    - name: frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            dynamo.nvidia.com/slime-role: frontend
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:${DYNAMO_VERSION}
+              env:
+                - name: DYN_SGLANG_ENABLE_GENERATE
+                  value: "1"
+    - name: worker-0
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            dynamo.nvidia.com/slime-role: worker-0
+        spec:
+          volumes:
+            - name: slime-data
+              persistentVolumeClaim:
+                claimName: slime-data
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:${DYNAMO_VERSION}
+              command:
+                - python3
+                - -m
+                - sglang.launch_server
+              args:
+                - --model-path
+                - Qwen/Qwen3-0.6B
+                - --served-model-name
+                - Qwen/Qwen3-0.6B
+                - --host
+                - 0.0.0.0
+                - --port
+                - "30000"
+                - --grpc-port
+                - "30001"
+                - --incremental-streaming-output
+                - --sidecar
+                - dynamo.sglang.sidecar
+                - --sidecar-args
+                - '["--grpc-endpoint","http://127.0.0.1:30001"]'
+              resources:
+                requests:
+                  nvidia.com/gpu: "1"
+                limits:
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: slime-data
+                  mountPath: /data
+              startupProbe:
+                httpGet:
+                  path: /health_generate
+                  port: 30000
+                periodSeconds: 5
+                timeoutSeconds: 5
+                failureThreshold: 120
+              readinessProbe:
+                httpGet:
+                  path: /health_generate
+                  port: 30000
+                periodSeconds: 10
+                timeoutSeconds: 5
+    - name: worker-1
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            dynamo.nvidia.com/slime-role: worker-1
+        spec:
+          volumes:
+            - name: slime-data
+              persistentVolumeClaim:
+                claimName: slime-data
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:${DYNAMO_VERSION}
+              command:
+                - python3
+                - -m
+                - sglang.launch_server
+              args:
+                - --model-path
+                - Qwen/Qwen3-0.6B
+                - --served-model-name
+                - Qwen/Qwen3-0.6B
+                - --host
+                - 0.0.0.0
+                - --port
+                - "30000"
+                - --grpc-port
+                - "30001"
+                - --incremental-streaming-output
+                - --sidecar
+                - dynamo.sglang.sidecar
+                - --sidecar-args
+                - '["--grpc-endpoint","http://127.0.0.1:30001"]'
+              resources:
+                requests:
+                  nvidia.com/gpu: "1"
+                limits:
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: slime-data
+                  mountPath: /data
+              startupProbe:
+                httpGet:
+                  path: /health_generate
+                  port: 30000
+                periodSeconds: 5
+                timeoutSeconds: 5
+                failureThreshold: 120
+              readinessProbe:
+                httpGet:
+                  path: /health_generate
+                  port: 30000
+                periodSeconds: 10
+                timeoutSeconds: 5
+EOF
+```
+
+The manifest sets up these parts of the integration:
+
+- `DYN_SGLANG_ENABLE_GENERATE=1` enables the SGLang-native streaming `/generate` route on the frontend. Slime's streaming generator calls this route.
+- Each worker runs unmodified `sglang.launch_server`. The `--sidecar dynamo.sglang.sidecar` option loads the Dynamo sidecar, which connects to the engine's gRPC port 30001 and registers the engine with the frontend.
+- `--incremental-streaming-output` must match the `--sglang-incremental-streaming-output` flag that you pass to Slime.
+- Each engine Service selects exactly one worker. Slime uses it to call that engine's native SGLang API on port 30000 for `/server_info`, pause, weight updates, and resume. Keep every worker component at one replica.
+- The `/data` mount lets each engine reload the weights that Slime writes to the shared volume.
+
+The operator also creates a `slime-sglang-frontend` Service on port 8000 for the frontend. Wait for the engines to load the model:
+
+```bash
+kubectl wait -n "$NAMESPACE" --for=condition=Ready dgd/slime-sglang --timeout=30m
+```
+
+<Warning>
+The engine Services expose SGLang administrative and weight-update APIs. Restrict access to them, for example with a NetworkPolicy that admits only the trainer Pods.
+</Warning>
+
+  </Step>
+  <Step title="Add the Dynamo generate function">
+
+Slime registers the engines with its own SGLang router and normally sends rollout requests to that router. This module redirects those requests to the Dynamo frontend. It copies Slime's arguments, replaces the router host and port with the address in `DYNAMO_ROLLOUT_URL`, and calls Slime's streaming generator. `abort_mode = "request"` tells Slime to cancel each in-flight stream on its own instead of calling the engines' server-wide abort API.
+
+```bash
+kubectl apply -n "$NAMESPACE" -f - <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dynamo-generate
+data:
+  dynamo_generate.py: |
+    import copy
+    import os
+    from urllib.parse import urlsplit
+
+    from slime.rollout.sglang_streaming_rollout import generate_streaming as slime_generate_streaming
+
+
+    async def generate_streaming(args, sample, sampling_params):
+        frontend = urlsplit(os.environ["DYNAMO_ROLLOUT_URL"])
+        frontend_args = copy.copy(args)
+        frontend_args.sglang_router_ip = frontend.hostname
+        frontend_args.sglang_router_port = frontend.port
+        return await slime_generate_streaming(frontend_args, sample, sampling_params)
+
+
+    generate_streaming.abort_mode = "request"
+EOF
+```
+
+  </Step>
+  <Step title="Start the Slime trainer on Ray">
+
+Create a Ray cluster with one head Pod that runs the Slime image. KubeRay runs `ray start --head` in the container and passes the Pod's GPU, CPU, and memory resources to Ray. The head Pod mounts the shared volume at `/data`, the generate function at `/opt/dynamo-slime`, and a memory-backed `/dev/shm` for the Ray object store.
+
+```bash
+kubectl apply -n "$NAMESPACE" -f - <<EOF
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: slime-trainer
+spec:
+  headGroupSpec:
+    rayStartParams: {}
+    template:
+      spec:
+        volumes:
+          - name: slime-data
+            persistentVolumeClaim:
+              claimName: slime-data
+          - name: dynamo-generate
+            configMap:
+              name: dynamo-generate
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 32Gi
+        containers:
+          - name: ray-head
+            image: ${SLIME_IMAGE}
+            resources:
+              requests:
+                cpu: "16"
+                memory: 128Gi
+                nvidia.com/gpu: "1"
+              limits:
+                memory: 128Gi
+                nvidia.com/gpu: "1"
+            volumeMounts:
+              - name: slime-data
+                mountPath: /data
+              - name: dynamo-generate
+                mountPath: /opt/dynamo-slime
+              - name: dshm
+                mountPath: /dev/shm
+EOF
+kubectl wait -n "$NAMESPACE" --for=condition=HeadPodReady raycluster/slime-trainer --timeout=30m
+```
+
+KubeRay creates the `slime-trainer-head-svc` Service for the head Pod. The remaining steps run commands in the head Pod through that Service.
+
+  </Step>
+  <Step title="Check the engines from the trainer">
+
+Confirm that the trainer can reach both engines and the Dynamo frontend:
+
+```bash
+kubectl exec -n "$NAMESPACE" svc/slime-trainer-head-svc -- \
+  curl -s -o /dev/null -w '%{http_code}\n' http://slime-sglang-engine-0:30000/health_generate
+kubectl exec -n "$NAMESPACE" svc/slime-trainer-head-svc -- \
+  curl -s -o /dev/null -w '%{http_code}\n' http://slime-sglang-engine-1:30000/health_generate
+kubectl exec -n "$NAMESPACE" svc/slime-trainer-head-svc -- \
+  curl -s http://slime-sglang-frontend:8000/health
+```
+
+Each engine returns `200`. The frontend returns `"status":"healthy"` and lists two `worker` instances.
+
+  </Step>
+  <Step title="Download the model and dataset">
+
+Download the Hugging Face checkpoint and the GSM8K prompts to the shared volume:
+
+```bash
+kubectl exec -n "$NAMESPACE" svc/slime-trainer-head-svc -- \
+  hf download Qwen/Qwen3-0.6B --local-dir /data/models/Qwen3-0.6B
+kubectl exec -n "$NAMESPACE" svc/slime-trainer-head-svc -- \
+  hf download --repo-type dataset zhuzilin/gsm8k --local-dir /data/datasets/gsm8k
+```
+
+  </Step>
+  <Step title="Convert the checkpoint for Megatron-LM">
+
+Slime trains with Megatron-LM, which loads a `torch_dist` checkpoint. Convert the Hugging Face checkpoint on the head Pod's GPU. The model flags describe the Qwen3-0.6B architecture and come from `/root/slime/scripts/models/qwen3-0.6B.sh` in the Slime image.
+
+```bash
+kubectl exec -n "$NAMESPACE" svc/slime-trainer-head-svc -- \
+  env PYTHONPATH=/root/Megatron-LM \
+  torchrun --nproc-per-node 1 /root/slime/tools/convert_hf_to_torch_dist.py \
+  --swiglu \
+  --num-layers 28 \
+  --hidden-size 1024 \
+  --ffn-hidden-size 3072 \
+  --num-attention-heads 16 \
+  --group-query-attention \
+  --num-query-groups 8 \
+  --use-rotary-position-embeddings \
+  --disable-bias-linear \
+  --normalization RMSNorm \
+  --norm-epsilon 1e-6 \
+  --rotary-base 1000000 \
+  --vocab-size 151936 \
+  --kv-channels 128 \
+  --qk-layernorm \
+  --hf-checkpoint /data/models/Qwen3-0.6B \
+  --save /data/models/Qwen3-0.6B_torch_dist
+```
+
+The command ends with `successfully saved checkpoint from iteration 1 to /data/models/Qwen3-0.6B_torch_dist`.
+
+  </Step>
+  <Step title="Forward the Ray dashboard port">
+
+In a second terminal, forward the Ray job-submission port to your workstation and keep the command running. The new terminal doesn't have your environment variables, so the command names the namespace directly:
+
+```bash
+kubectl port-forward -n slime-dynamo svc/slime-trainer-head-svc 8265:8265
+```
+
+  </Step>
+  <Step title="Submit the training job">
+
+Submit `train.py` to the Ray cluster. The `--runtime-env-json` environment variables apply to every Ray process in the job: `PYTHONPATH` adds Megatron-LM and the generate function, and `DYNAMO_ROLLOUT_URL` points the generate function at the Dynamo frontend.
+
+```bash
+ray job submit \
+  --address http://localhost:8265 \
+  --runtime-env-json '{
+    "env_vars": {
+      "PYTHONPATH": "/root/Megatron-LM:/opt/dynamo-slime",
+      "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+      "DYNAMO_ROLLOUT_URL": "http://slime-sglang-frontend:8000"
+    }
+  }' \
+  -- python3 /root/slime/train.py \
+  --actor-num-nodes 1 \
+  --actor-num-gpus-per-node 1 \
+  --rollout-external-engine-addrs slime-sglang-engine-0:30000 slime-sglang-engine-1:30000 \
+  --custom-generate-function-path dynamo_generate.generate_streaming \
+  --sglang-incremental-streaming-output \
+  --update-weight-transport disk \
+  --update-weight-disk-dir /data/weight-updates \
+  --hf-checkpoint /data/models/Qwen3-0.6B \
+  --ref-load /data/models/Qwen3-0.6B_torch_dist \
+  --save /data/checkpoints/qwen3-0.6b-grpo \
+  --save-interval 20 \
+  --swiglu \
+  --num-layers 28 \
+  --hidden-size 1024 \
+  --ffn-hidden-size 3072 \
+  --num-attention-heads 16 \
+  --group-query-attention \
+  --num-query-groups 8 \
+  --use-rotary-position-embeddings \
+  --disable-bias-linear \
+  --normalization RMSNorm \
+  --norm-epsilon 1e-6 \
+  --rotary-base 1000000 \
+  --vocab-size 151936 \
+  --kv-channels 128 \
+  --qk-layernorm \
+  --prompt-data /data/datasets/gsm8k/train.parquet \
+  --input-key messages \
+  --label-key label \
+  --apply-chat-template \
+  --apply-chat-template-kwargs '{"enable_thinking": false}' \
+  --rollout-shuffle \
+  --rm-type math \
+  --num-rollout 3 \
+  --rollout-batch-size 8 \
+  --n-samples-per-prompt 4 \
+  --global-batch-size 32 \
+  --rollout-max-response-len 1024 \
+  --rollout-temperature 1 \
+  --advantage-estimator grpo \
+  --optimizer adam \
+  --lr 1e-6 \
+  --lr-decay-style constant \
+  --weight-decay 0.1 \
+  --adam-beta1 0.9 \
+  --adam-beta2 0.98 \
+  --use-dynamic-batch-size \
+  --max-tokens-per-gpu 4096 \
+  --attention-dropout 0.0 \
+  --hidden-dropout 0.0 \
+  --accumulate-allreduce-grads-in-fp32 \
+  --attention-softmax-in-fp32 \
+  --attention-backend flash
+```
+
+These flags connect Slime to Dynamo. The other flags are standard Slime model, data, GRPO, and optimizer settings; see the [Slime usage guide](https://github.com/THUDM/slime/blob/main/docs/en/get_started/usage.md).
+
+| Flag | Purpose |
+|---|---|
+| `--rollout-external-engine-addrs` | Uses the two Dynamo-managed engines instead of launching SGLang. Slime reads each engine's `/server_info` and sends it control and weight-update requests. |
+| `--custom-generate-function-path` | Loads `dynamo_generate.generate_streaming` from `/opt/dynamo-slime` so rollouts go through the Dynamo frontend. |
+| `--sglang-incremental-streaming-output` | Matches the engines' `--incremental-streaming-output` setting. |
+| `--update-weight-transport disk` and `--update-weight-disk-dir` | Writes each new policy to `/data/weight-updates`, then asks every engine to reload it with `/update_weights_from_disk`. |
+| `--apply-chat-template-kwargs` | Turns off Qwen3 thinking so that answers fit in `--rollout-max-response-len`. |
+
+The command streams the job logs until the job finishes. Each iteration logs a line like this one:
+
+```text
+rollout 0: {'rollout/response_lengths': 135.0, ..., 'rollout/truncated': 0.0, ..., 'rollout/raw_reward': 0.65625, ...}
+```
+
+  </Step>
+  <Step title="Verify the run">
+
+The `ray job submit` command ends with this line:
+
+```text
+Job 'raysubmit_...' succeeded
+```
+
+Confirm that both engines received the weight updates. Repeat the command for `worker-1`:
+
+```bash
+kubectl logs -n "$NAMESPACE" -l dynamo.nvidia.com/slime-role=worker-0 --tail=-1 \
+  | grep -E 'POST /(pause_generation|update_weights_from_disk|continue_generation)'
+```
+
+```text
+[2026-11-05 00:21:02] INFO:     10.244.4.39:51230 - "POST /pause_generation HTTP/1.1" 200 OK
+[2026-11-05 00:21:06] INFO:     10.244.4.39:51240 - "POST /update_weights_from_disk HTTP/1.1" 200 OK
+[2026-11-05 00:21:06] INFO:     10.244.4.39:51242 - "POST /continue_generation HTTP/1.1" 200 OK
+```
+
+Confirm that the rollouts went through the Dynamo frontend. The frontend logs one `Selected worker` line for each request that it routes, so three rollouts of 32 samples print `96`:
+
+```bash
+kubectl logs -n "$NAMESPACE" -l dynamo.nvidia.com/slime-role=frontend --tail=-1 \
+  | grep -c 'Selected worker'
+```
+
+```text
+96
+```
+
+Confirm that Slime saved the final checkpoint:
+
+```bash
+kubectl exec -n "$NAMESPACE" svc/slime-trainer-head-svc -- \
+  cat /data/checkpoints/qwen3-0.6b-grpo/latest_checkpointed_iteration.txt
+```
+
+```text
+2
+```
+
+  </Step>
+  <Step title="Clean up">
+
+Stop the port forward, then delete the namespace. Deleting the namespace removes the DGD, the Ray cluster, and the PersistentVolumeClaim. If the StorageClass uses the `Delete` reclaim policy, the storage provider then deletes the volume and its checkpoints:
+
+```bash
+kubectl delete namespace "$NAMESPACE"
+```
+
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `update_weights_from_distributed` returns HTTP 400 | Slime is using NCCL weight updates, which SGLang 0.5.21 engines reject. Keep `--update-weight-transport disk`. See [Choose a Weight-Update Transport](overview.md#choose-a-weight-update-transport). |
+| The job fails with `ModuleNotFoundError: No module named 'dynamo_generate'` | Check that the `dynamo-generate` ConfigMap is mounted at `/opt/dynamo-slime` and that `PYTHONPATH` in `--runtime-env-json` includes that path. |
+| The job fails during startup with an `AssertionError` that compares engine arguments | Slime checks each engine's `/server_info` against the settings it would have launched. Remove Slime flags that change engine settings, such as `--offload-rollout`, or apply the same setting to the DGD workers. |
+| `ray job submit` fails with `Connection refused` | Restart the port forward. A running job continues on the cluster; follow it with `ray job logs --address http://localhost:8265 --follow <submission-id>`. |
+| An engine Pod restarts during training | Slime does not recover external engines. Wait for the DGD to become ready, then submit the job again. |
+
+## Next Steps
+
+- To add rollout capacity, add `worker-2` and later components with their own engine Services, and list every engine address in `--rollout-external-engine-addrs`.
+- To train on more than one node, add a `workerGroupSpecs` entry with the same image and volumes to the `RayCluster` and raise `--actor-num-nodes`.
+- Review the integration limits in the [overview](overview.md#current-limitations).
