@@ -684,12 +684,6 @@ ENTRYPOINT []
 {% endif %}
 
 
-# Backport vllm-project/vllm#57662 (NIXL region dedup by (base_addr, block_len)): without it PD
-# disaggregation of DeepSeek-V4.1-Flash silently returns garbled output (vllm#57661). Fails the
-# build if the installed vLLM does not match; delete once the base vLLM contains the fix.
-COPY --chmod=755 container/deps/vllm/patch_nixl_region_dedup.py /tmp/patch_nixl_region_dedup.py
-RUN python3 /tmp/patch_nixl_region_dedup.py && rm -f /tmp/patch_nixl_region_dedup.py
-
 FROM pre_runtime AS runtime
 {% if target not in ("dev", "local-dev") %}
 # Verify artifact capture and delivery imports in the shipped runtime, not only the test image.
