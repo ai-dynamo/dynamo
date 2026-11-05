@@ -73,6 +73,7 @@ def _with_token_input(
     handler, *, max_token_id=MAX_TOKEN_ID, engine=None, tokenizer=None
 ):
     handler.config = _config()
+    handler._default_sampling_params = {}
     handler.use_sglang_tokenizer = tokenizer is not None
     handler.input_param_manager = InputParamManager(tokenizer)
     handler._max_input_token_id = max_token_id

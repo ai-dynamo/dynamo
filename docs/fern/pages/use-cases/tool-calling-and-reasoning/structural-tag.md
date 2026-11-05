@@ -185,17 +185,20 @@ Not all parsers support structural tags. Parsers without a structural-tag
 builder fall back to their existing best-effort tool-calling behavior without
 rejecting the request.
 
-Currently tested and supported:
+After selector validation, builder lookup tries the compatible Unified builder, then the tool selector’s V1 builder if none is available. This does not change the response parser route: explicit V2 still rejects unavailable or incompatible selector configurations. Backend compilation and request-schema support are separate checks.
 
-- `qwen3_coder`, `nemotron_nano`
+- `beam` through the pinned Unified library builder
+- `deepseek_v3_2`, `deepseek_v4`, `deepseek_v41`
+- `glm47` (V1 and V2 builders)
+- `gpt_oss` / `harmony` on V2; Dynamo suppresses the V1 Harmony builder because of a stop-token conflict
 - `hermes`, `qwen25`
-- `deepseek_v3_2`, `deepseek_v4`
-- `kimi_k2`, `kimi_k3`, `kimi-k3`
 - `inkling`
-- `glm47` with parsers v2
+- `kimi_k2`, `kimi_k3`, `kimi-k3`
+- `minimax_m3` / `minimax-m3` with explicit V2
+- `muse_spark` / `muse_spark_open` on V2
+- `nemotron_nano`, `qwen3_coder`
 
-The parsers-v2 builders for `qwen3_coder`, `deepseek_v4`, and `glm47` require
-a compatible V2 parser route in the worker and frontend processes. Unset `DYN_PARSER_VERSION` and `auto` select V2 when the configured tool and reasoning parsers resolve to a compatible family; explicit `DYN_PARSER_VERSION=2` requires V2.
+V2 builders need compatible frontend and worker routes; see [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing). The pinned V2 library has no native builder for `muse_glimmer`, `gemma4`, or `nemotron_v3`. Engine fallback uses the installed engine registry.
 
 Contributions adding structural tag support for new parsers are welcome.
 
@@ -203,6 +206,22 @@ This list describes Dynamo's Rust parser registry. The Python vLLM and SGLang
 frontend processors apply the same mode, scope, and schema policy through the
 tool parser supplied by their installed engine version. Parser availability can
 therefore differ by backend and engine version.
+
+### Checking Grammar Availability
+
+Output-parser availability does not guarantee structural-tag support. Query the registered grammar builders separately:
+
+```python
+from dynamo._core import get_structural_tag_parser_names
+
+parser_name = "deepseek_v41"
+if parser_name not in get_structural_tag_parser_names():
+    raise ValueError(f"No structural-tag grammar registered for {parser_name}")
+```
+
+`get_structural_tag_parser_names()` returns a sorted, deduplicated inventory across the V1 and V2 registries. It does not select a parser generation, validate a tool/reasoning parser pair, or qualify the backend's installed XGrammar version. Check those deployment requirements separately.
+
+On a compatible V2 route, `deepseek_v41` uses its V4.1 framing and `deepseek_v4_1_xml` argument style; `deepseek_v4` retains `deepseek_xml`. With structural tags enabled, the registered V4.1 builder supplies guidance by default. Set `--dyn-structural-tag false` to disable optional guidance.
 
 ## Activation Scope
 

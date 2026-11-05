@@ -324,7 +324,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	for i := range spec.Components {
 		if spec.Components[i].IsLPX() {
 			lpxComponentCount++
-			if spec.Components[i].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) != nil {
+			if dynamolpx.ServesEndpoint(&spec.Components[i]) {
 				independentEngineCount++
 			}
 		}
@@ -379,7 +379,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		// Draft fanout expands models; the target owns the shared endpoint and availability.
 		if lpxComponentCount == 2 && independentEngineCount == 1 && component.IsLPX() {
 			replicas := k8sptr.Deref(component.Replicas, 1)
-			if component.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil {
+			if !dynamolpx.ServesEndpoint(component) {
 				if replicas > dynamolpx.MaxSpecDecodeNumDrafts {
 					allErrs = append(allErrs, field.Invalid(componentPath.Child("replicas"), replicas, "draft replicas must be between 1 and 8"))
 				}
@@ -389,8 +389,17 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				if k8sptr.Deref(component.MinAvailable, 1) != 1 {
 					allErrs = append(allErrs, field.Forbidden(componentPath.Child("minAvailable"), "draft minAvailable must be omitted or 1; the shared target owns minimum availability"))
 				}
-			} else if replicas != 1 {
-				allErrs = append(allErrs, field.Invalid(componentPath.Child("replicas"), replicas, "shared target replicas must be one"))
+			} else {
+				// Draft replicas count models; the target stands for the one shared engine.
+				if replicas != 1 {
+					allErrs = append(allErrs, field.Invalid(componentPath.Child("replicas"), replicas, "shared target replicas must be one"))
+				}
+
+				// The target's conductor launches the shared speculative runtime; an agent sidecar serves only a single model.
+				if component.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil {
+					allErrs = append(allErrs, field.Forbidden(componentPath.Child("roles"), fmt.Sprintf(
+						"a shared draft and target pair requires the target's conductor role; the agent %q sidecar serves only a single model", consts.RuntimeContainerName)))
+				}
 			}
 		}
 
@@ -483,7 +492,8 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		}
 	}
 	if hasLPXComponent && independentEngineCount != lpxComponentCount && !(lpxComponentCount == 2 && independentEngineCount == 1) {
-		allErrs = append(allErrs, field.Forbidden(componentsPath, "LPX components must each declare a conductor role or form a shared draft and target pair"))
+		allErrs = append(allErrs, field.Forbidden(componentsPath, fmt.Sprintf(
+			"LPX components must each declare a conductor role or an agent %q sidecar, or form a shared draft and target pair", consts.RuntimeContainerName)))
 	}
 
 	if spec.Restart != nil {

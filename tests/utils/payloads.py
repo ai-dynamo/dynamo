@@ -31,6 +31,7 @@ from fractions import Fraction
 from io import BytesIO
 from typing import Any, Callable, Dict, List, Optional, cast
 
+import psutil
 import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
@@ -242,6 +243,129 @@ class HttpCancellationPayload(BasePayload):
                 before=self._before, completion_progress=self._completion_progress
             )
         return content
+
+
+def _listener_pid(port: int) -> int:
+    for conn in psutil.net_connections(kind="tcp"):
+        if (
+            conn.status == psutil.CONN_LISTEN
+            and conn.laddr
+            and conn.laddr.port == port
+            and conn.pid is not None
+        ):
+            return conn.pid
+    raise AssertionError(f"No process listens on port {port}")
+
+
+def _kill_tree(pid: int) -> None:
+    try:
+        parent = psutil.Process(pid)
+        processes = [parent, *parent.children(recursive=True)]
+    except psutil.NoSuchProcess:
+        return
+    for process in processes:
+        try:
+            process.kill()
+        except psutil.NoSuchProcess:
+            pass
+
+
+@dataclass
+class EngineFailurePayload(BasePayload):
+    """Kill the engine serving a chat stream; migration must finish the stream.
+
+    `workers` are launch-script worker indices N. The worker whose sidecar
+    (DYN_SYSTEM_PORT{N}) reports the in-flight request loses its engine
+    (DYN_ENGINE_GRPC_PORT{N}) to SIGKILL, and the sidecar stays up. The
+    deployment needs DYN_MIGRATION_LIMIT > 0, and DYN_LAUNCH_WAIT_ALL=1 so the
+    launch script outlives the engine. It loses that worker, so run it last.
+    """
+
+    workers: tuple[int, ...] = field(kw_only=True)
+    endpoint: str = "/v1/chat/completions"
+    http_stream: bool = True
+    timeout: int = 180
+    chunks_before_fault: int = 5
+    _system_ports: dict[int, int] = field(default_factory=dict, init=False)
+    _engine_ports: dict[int, int] = field(default_factory=dict, init=False)
+    _frontend_port: int = field(default=0, init=False)
+    _migrations_before: float = field(default=0, init=False)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        self._frontend_port = int(env["DYN_HTTP_PORT"])
+        for index in self.workers:
+            self._system_ports[index] = int(env[f"DYN_SYSTEM_PORT{index}"])
+            self._engine_ports[index] = int(env[f"DYN_ENGINE_GRPC_PORT{index}"])
+
+    def _scrape(self, port: int, name: str, labels: dict[str, str]) -> float:
+        with requests.get(f"http://127.0.0.1:{port}/metrics", timeout=2) as response:
+            response.raise_for_status()
+            return sum_metric_samples(response.text, name, labels)
+
+    def _migrations(self) -> float:
+        return self._scrape(
+            self._frontend_port,
+            "dynamo_frontend_model_migration_total",
+            {"migration_type": "ongoing_request"},
+        )
+
+    def before_request(self) -> None:
+        self._migrations_before = self._migrations()
+
+    def _serving_worker(self) -> int:
+        deadline = time.monotonic() + 10
+        while True:
+            for index, port in self._system_ports.items():
+                inflight = self._scrape(
+                    port,
+                    "dynamo_component_inflight_requests",
+                    {"dynamo_endpoint": "generate"},
+                )
+                if inflight > 0:
+                    return index
+            assert time.monotonic() < deadline, "No worker reports the request"
+            time.sleep(0.05)
+
+    def response_handler(self, response: requests.Response) -> str:
+        try:
+            response.raise_for_status()
+            deadline = time.monotonic() + self.timeout
+            parts: list[str] = []
+            chunks = 0
+            finish_reason = None
+            usage = None
+            faulted = False
+            for line in response.iter_lines(chunk_size=1):
+                assert time.monotonic() < deadline, "Stream exceeded its deadline"
+                if not line.startswith(b"data:"):
+                    continue
+                data = line[5:].strip()
+                if data == b"[DONE]":
+                    break
+                chunk = json.loads(data)
+                assert "error" not in chunk, ("Stream failed after fault", chunk)
+                usage = chunk.get("usage") or usage
+                for choice in chunk.get("choices", []):
+                    delta = choice.get("delta") or {}
+                    content = delta.get("content") or delta.get("reasoning_content")
+                    if content:
+                        parts.append(content)
+                        chunks += 1
+                    finish_reason = choice.get("finish_reason") or finish_reason
+                if not faulted and chunks >= self.chunks_before_fault:
+                    engine_port = self._engine_ports[self._serving_worker()]
+                    _kill_tree(_listener_pid(engine_port))
+                    faulted = True
+        finally:
+            response.close()
+        assert faulted, "Stream ended before the fault was injected"
+        assert finish_reason == "length", f"Unexpected finish: {finish_reason}"
+        assert usage is not None, "Missing usage"
+        assert usage["completion_tokens"] == self.body["max_tokens"], usage
+        # The router may first retry the faulted worker, which is still
+        # registered, so more than one migration is fine.
+        assert self._migrations() > self._migrations_before, "Request did not migrate"
+        return "".join(parts)
 
 
 @dataclass
@@ -1084,13 +1208,35 @@ class StreamingChatPayload(BasePayload):
         return content
 
 
+def _validate_single_tool_call(call: Dict[str, Any], arguments: Dict[str, Any]) -> None:
+    assert call.get("type") == "function", f"Not a function call: {call}"
+    assert call.get("id"), f"Tool call has no id: {call}"
+    assert (
+        json.loads(call["function"]["arguments"]) == arguments
+    ), f"Wrong arguments: {call}"
+
+
+def _one_value(values: List[Any]) -> Any:
+    # Later stream deltas may repeat a tool call's id, type, or name, but never change it.
+    distinct = {value for value in values if value is not None}
+    assert len(distinct) == 1, f"Expected one value, got {distinct}"
+    return distinct.pop()
+
+
 @dataclass
 class ToolCallingChatPayload(ChatPayload):
     """ChatPayload that validates tool calls in the response."""
 
-    def __init__(self, *args, expected_tool_name: Optional[str] = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        expected_tool_name: Optional[str] = None,
+        expected_arguments: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.expected_tool_name = expected_tool_name
+        self.expected_arguments = expected_arguments
 
     def validate(self, response, content: str) -> None:
         """Validate that tool calls exist in the response.
@@ -1149,6 +1295,52 @@ class ToolCallingChatPayload(ChatPayload):
                 )
             else:
                 logger.info(f"Found expected keywords in tool args: {found}")
+
+        if self.expected_arguments is not None:
+            assert len(tool_calls) == 1, f"Expected one tool call, got {tool_calls}"
+            assert not (message.get("content") or "").strip(), f"Content: {message}"
+            _validate_single_tool_call(tool_calls[0], self.expected_arguments)
+
+
+@dataclass
+class StreamingToolCallingChatPayload(BasePayload):
+    expected_tool_name: str = field(kw_only=True)
+    expected_arguments: Dict[str, Any] = field(kw_only=True)
+    expected_finish_reason: str = field(kw_only=True)
+    endpoint: str = "/v1/chat/completions"
+    http_stream: bool = True
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        text = response.content.decode("utf-8")
+        events = [
+            line[5:].strip() for line in text.splitlines() if line.startswith("data:")
+        ]
+        assert events[-1:] == ["[DONE]"], "Stream did not end with [DONE]"
+        chunks = parse_sse_json_chunks(text)
+        assert not any("error" in chunk for chunk in chunks), chunks
+        choices = [choice for chunk in chunks for choice in chunk["choices"]]
+        assert all(choice["index"] == 0 for choice in choices), choices
+        deltas = [choice.get("delta") or {} for choice in choices]
+        content = "".join(delta.get("content") or "" for delta in deltas)
+        assert not content.strip(), f"Unexpected content: {content!r}"
+        parts = [part for delta in deltas for part in delta.get("tool_calls") or []]
+        assert {part["index"] for part in parts} == {0}, f"Not one tool call: {parts}"
+        functions = [part.get("function") or {} for part in parts]
+        call = {
+            "id": _one_value([part.get("id") for part in parts]),
+            "type": _one_value([part.get("type") for part in parts]),
+            "function": {
+                "name": _one_value([function.get("name") for function in functions]),
+                "arguments": "".join(f.get("arguments") or "" for f in functions),
+            },
+        }
+        assert call["function"]["name"] == self.expected_tool_name, call
+        _validate_single_tool_call(call, self.expected_arguments)
+        finish_reasons = [choice.get("finish_reason") for choice in choices]
+        assert finish_reasons[-1:] == [self.expected_finish_reason], finish_reasons[-1:]
+        assert not any(finish_reasons[:-1]), f"Choices after the end: {finish_reasons}"
+        return call["function"]["arguments"]
 
 
 @dataclass
@@ -1282,6 +1474,9 @@ class CachedTokensChatPayload(ChatPayload):
         # block-count, etc.), move into a RouterMetricsAssertion
         # mixin/subclass.
         self.min_avg_kv_hit_rate = min_avg_kv_hit_rate
+        # Require new router_kv_hit_rate observations on R2+. A subclass may
+        # drop the floor at run time and keep this check.
+        self.require_kv_hit_rate_observations = min_avg_kv_hit_rate > 0
         self._metrics_baseline: Optional[tuple[float, float]] = None
 
     def validate(self, response: Any, content: str) -> None:
@@ -1336,7 +1531,7 @@ class CachedTokensChatPayload(ChatPayload):
         if (
             self._metrics_baseline is None
             and self._request_count == 1
-            and self.min_avg_kv_hit_rate > 0
+            and self.require_kv_hit_rate_observations
         ):
             self._metrics_baseline = self._scrape_router_kv_hit_rate()
 
@@ -1372,8 +1567,8 @@ class CachedTokensChatPayload(ChatPayload):
 
     def final_validation(self) -> None:
         """Assert cached_tokens >= min_cached_tokens on at least one repeat
-        (only when min_cached_tokens > 0), and (if set) router_kv_hit_rate
-        post-R1 mean >= min_avg_kv_hit_rate.
+        (only when min_cached_tokens > 0), and (if set) new router_kv_hit_rate
+        observations with a post-R1 mean >= min_avg_kv_hit_rate.
         """
         # Only assert cached tokens when a positive threshold is set; a caller
         # validating purely via the router metric passes min_cached_tokens=0.
@@ -1389,11 +1584,11 @@ class CachedTokensChatPayload(ChatPayload):
                 "✓ Final validation PASSED: cached_tokens found in repeated requests"
             )
 
-        if self.min_avg_kv_hit_rate <= 0:
+        if not self.require_kv_hit_rate_observations:
             return
         if self._metrics_baseline is None:
             raise AssertionError(
-                "min_avg_kv_hit_rate set but no metrics baseline captured "
+                "router_kv_hit_rate check set but no metrics baseline captured "
                 "(R1 validate() didn't run or /metrics was unreachable)."
             )
         after = self._scrape_router_kv_hit_rate()
@@ -1412,6 +1607,12 @@ class CachedTokensChatPayload(ChatPayload):
                 f"MM-routing likely not engaging on repeat requests."
             )
         avg = d_sum / d_count
+        if self.min_avg_kv_hit_rate <= 0:
+            logger.info(
+                f"✓ router_kv_hit_rate: {d_count} new observations over R2+ "
+                f"(mean {avg:.3f}, no floor)"
+            )
+            return
         if avg < self.min_avg_kv_hit_rate:
             raise AssertionError(
                 f"router_kv_hit_rate: mean over R2+ ({avg:.3f}) below required "

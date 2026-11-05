@@ -535,6 +535,41 @@ async def test_min_improvement_percentage_boundary(sweeps, best_score, outcome):
     assert decision.best_score == best_score
 
 
+@pytest.mark.parametrize(
+    ("objective", "baseline_score", "best_score", "outcome"),
+    [
+        # Maximized: the best must exceed the baseline by more than 3% of it.
+        ("Goodput", 100.0, 100.0, "kept"),
+        ("Goodput", 0.0, 0.0, "kept"),
+        ("Goodput", 0.0, 1e-9, "applied"),
+        # Minimized: the best must fall below the baseline by more than 3%.
+        ("TTFT", 100.0, 97.0, "kept"),
+        ("TTFT", 100.0, 96.99, "applied"),
+        ("TTFT", 100.0, 100.0, "kept"),
+        ("TTFT", 0.0, 0.0, "kept"),
+        ("E2ELatency", 1_000.0, 969.99, "applied"),
+    ],
+)
+async def test_min_improvement_follows_the_objective_direction(
+    sweeps, objective, baseline_score, best_score, outcome
+):
+    # Every candidate but BEST scores the baseline's value, so a tie with
+    # BEST goes to the baseline.
+    sweeps.default = _best_wins(best_score=best_score, other_score=baseline_score)
+    controller = _controller(_s1(objective=objective))
+
+    ticks = await _run(controller, 70)
+
+    ((_, decision),) = _decisions(ticks)
+    assert sweeps.requests[0].objective == objective
+    assert decision.outcome == outcome
+    assert (decision.baseline_score, decision.best_score) == (
+        baseline_score,
+        best_score,
+    )
+    assert decision.chosen == (BEST if outcome == "applied" else STARTUP)
+
+
 async def test_advisory_records_the_best_point_without_actuating(sweeps):
     sweeps.default = _best_wins()
     controller = _controller(_s1(advisory=True))

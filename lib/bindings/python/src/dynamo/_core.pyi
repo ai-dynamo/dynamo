@@ -41,6 +41,10 @@ def get_reasoning_parser_names() -> list[str]:
     """Get list of available reasoning parser names."""
     ...
 
+def get_structural_tag_parser_names() -> list[str]:
+    """Get selectable parser names with registered structural-tag builders."""
+    ...
+
 def run_kv_indexer(args: List[str]) -> None:
     """Run the KV indexer with the given arguments."""
     ...
@@ -82,7 +86,7 @@ class DistributedRuntime:
             request_plane: Request plane transport ("tcp" or "nats")
             enable_nats: Deprecated; NATS enablement is inferred from runtime config
             event_plane: Event plane transport ("nats" or "zmq")
-            response_plane: Response plane transport ("tcp" or "quic")
+            response_plane: Response plane transport ("tcp", "quic", or "velo")
         """
         ...
 
@@ -783,11 +787,17 @@ class SelectionService:
         replica_sync_peers: Optional[list[str]] = None,
         selection_cache: Optional[SelectionCacheConfig] = None,
         session_affinity_ttl_secs: Optional[float] = None,
+        session_affinity_mode: Literal["hard", "soft"] = "hard",
+        session_replication_writer_id: Optional[int] = None,
     ) -> None:
         """Create a selection service. `indexer_threads` sizes the KV indexer pool.
 
         `session_affinity_ttl_secs` enables session affinity with an idle TTL
         between 1 and 31536000 seconds.
+        `session_affinity_mode`: hard rejects dispatch away from a live binding;
+        soft rebinds when the bound worker is excluded from the request's candidates.
+        `session_replication_writer_id` exports affinity updates for a host transport;
+        use an id unique to this replica incarnation.
         """
         ...
 
@@ -798,6 +808,27 @@ class SelectionService:
 
         The KV indexer thread pool is released when the handle is dropped.
         Idempotent, and also runs automatically on drop.
+        """
+        ...
+
+    async def shutdown_async(self) -> None:
+        """Await service shutdown without blocking the Python event loop."""
+        ...
+
+    def session_binding_updates(self) -> AsyncIterator[List[JsonLike]]:
+        """Stream session bindings this service commits or refreshes, for the
+        host to broadcast to its peers.
+
+        Each item is every binding queued since the last one (at least one).
+        Requires session_replication_writer_id. Ends on shutdown.
+        """
+        ...
+
+    def apply_session_binding(self, update: JsonLike) -> None:
+        """Merge a versioned peer binding without echoing it.
+
+        A binding this replica cannot place yet is dropped; the owner's next
+        refresh repairs it.
         """
         ...
 
@@ -1216,6 +1247,7 @@ class KvEventPublisher:
         image_token_id: Optional[int] = None,
         kv_state_endpoint: Optional[str] = None,
         video_token_id: Optional[int] = None,
+        engine_owned_mm_identity: bool = False,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -1239,6 +1271,10 @@ class KvEventPublisher:
             image_token_id: Optional model image-placeholder token for exact MM routing.
             kv_state_endpoint: KV event ownership endpoint; defaults to endpoint.
             video_token_id: Optional model video-placeholder token for exact MM routing.
+            engine_owned_mm_identity: The source uses SGLang's wide multimodal pad
+                format (after sgl-project/sglang#43043), including for caller hashes,
+                so every event token at or above 1,000,000 is excluded from the index.
+                Otherwise only values that do not fit in 32 bits are.
         """
 
     def publish_stored(
@@ -1724,7 +1760,8 @@ class ModelType:
     """OpenAI-style surfaces supported by a model.
 
     Values are Chat, Completions, Embedding, Classify, Pooling, Rerank,
-    TensorBased, Images, Audios, Videos, Realtime, and Empty (no OpenAI surface).
+    TensorBased, Images, Audios, Transcriptions, Videos, Realtime, and Empty
+    (no OpenAI surface).
     """
     # No OpenAI surface — used by prefill / encode workers whose role is
     # carried by WorkerType. Symmetric with the other ModelType.Foo members.
@@ -1739,6 +1776,7 @@ class ModelType:
     Prefill: ModelType
     Images: ModelType
     Audios: ModelType
+    Transcriptions: ModelType
     Videos: ModelType
     Realtime: ModelType
     # Sequence-classification / cross-encoder pooling models served on /v1/classify.
@@ -1776,7 +1814,6 @@ class RouterMode:
     """Router mode for load balancing requests across workers"""
     RoundRobin: "RouterMode"
     Random: "RouterMode"
-    PowerOfTwoChoices: "RouterMode"
     KV: "RouterMode"
     Direct: "RouterMode"
     LeastLoaded: "RouterMode"
@@ -1920,9 +1957,9 @@ class KvRouterConfig:
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set a numeric value to enable queueing.
-            router_policy_config: Startup-only policy-family and cache-bucket queue
-                YAML path. When omitted, router_queue_threshold and
-                router_queue_policy define one synthetic policy class.
+            router_policy_config: Startup-only policy-class queue YAML path.
+                When omitted, router_queue_threshold and router_queue_policy
+                define one synthetic policy class.
             router_prefill_policy: Process-local override of
                 worker_selection.prefill for disaggregated prefill workers.
             router_decode_policy: Process-local override of worker_selection.decode
@@ -1931,6 +1968,8 @@ class KvRouterConfig:
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.
             router_queue_policy: Scheduling policy for the router queue (default: "fcfs").
+                It sets the synthetic policy class; configured policy classes default to "edf".
+                "edf": earliest due time first, then arrival order; priorities do not reorder it.
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
                 "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
@@ -2421,6 +2460,7 @@ def run_mocker_trace_replay(
     agentic_warmup: bool = False,
     agentic_profile: Optional[Dict[str, Any]] = None,
     deterministic: bool = False,
+    conversation_affinity: Optional[Dict[str, Any]] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2777,11 +2817,11 @@ class KvbmRequest:
     def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
         ...
 
-class KvDcRelay:
+class PoolRelay:
     def __init__(
         self,
         endpoint: Endpoint,
-        dc_id: str,
+        cluster_id: str,
         namespace_filter: Optional[str] = None,
         endpoint_prefix: Optional[str] = None,
         publication_threshold: int = 16,
@@ -2796,6 +2836,10 @@ class KvDcRelay:
         tuning: Optional[Dict[str, int]] = None,
         sources_file: Optional[str] = None,
         connection_revision: Optional[str] = None,
+        global_discovery_url: Optional[str] = None,
+        routing_pool: Optional[str] = None,
+        routing_pool_region: Optional[str] = None,
+        routing_pool_frontends: Optional[List[str]] = None,
     ) -> None:
         ...
 
@@ -2992,9 +3036,9 @@ class KvRouter:
                            blocks. When provided, this is used in block hash computation
                            to enable MM-aware worker selection.
             cache_namespace: Optional cache namespace used in block hash computation.
-            policy_class: Requested policy family, or an exact explicit class.
-                          Missing, unknown, and ordinary physical-class names use the
-                          configured default family before cache-bucket resolution.
+            policy_class: Requested policy class name. An omitted name uses
+                          the configured default class; a name that matches no
+                          configured class raises an error.
 
         Returns:
             A tuple of (worker_id, dp_rank, overlap_blocks) where:
@@ -3147,12 +3191,16 @@ class EntrypointArgs:
         tls_client_ca_cert_path: Optional[str] = None,
         metrics_prefix: Optional[str] = None,
         enable_anthropic_api: Optional[bool] = None,
+        enable_systemone_api: Optional[bool] = None,
         strip_anthropic_preamble: Optional[bool] = None,
         enable_streaming_tool_dispatch: Optional[bool] = None,
         enable_streaming_reasoning_dispatch: Optional[bool] = None,
         tokenizer_backend: Optional[str] = None,
         tokenizer_fallback: Optional[bool] = None,
         batch_gateway_url: Optional[str] = None,
+        reject_media: Optional[bool] = None,
+        reject_media_status_code: Optional[int] = None,
+        default_chat_template_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3185,12 +3233,17 @@ class EntrypointArgs:
             ais_perf_config: Canonical AIS configuration for default KV routing
             metrics_prefix: Optional Prometheus metrics prefix override
             enable_anthropic_api: Optional Anthropic Messages API override
+            enable_systemone_api: Optional System One typed-decisions API override
             strip_anthropic_preamble: Optional Anthropic preamble stripping override
             enable_streaming_tool_dispatch: Optional streaming tool dispatch override
             enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
             tokenizer_backend: Optional tokenizer backend override ("default", "fastokens", or "basetenkenizer")
             tokenizer_fallback: Whether alternate tokenizer load failures fall back to HuggingFace
             batch_gateway_url: Internal Batch Gateway URL for the files and batch APIs.
+            reject_media: Optional override: refuse chat requests carrying image, video, or audio content before routing
+            reject_media_status_code: Optional 4xx/5xx status for a request refused by reject_media (default 415)
+            default_chat_template_kwargs: Chat template kwargs that the frontend applies
+                under each request's own kwargs, for every discovered model
         """
         ...
 

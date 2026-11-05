@@ -10,7 +10,6 @@ import logging
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
 from contextlib import aclosing
-from importlib.util import find_spec
 from typing import Any
 
 import numpy as np
@@ -94,14 +93,9 @@ def build_realtime_text_factories(
     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
     from vllm.entrypoints.serve.engine.protocol import ErrorResponse
     from vllm.inputs import tokens_input
+    from vllm.renderers.chat_utils import load_chat_template
     from vllm.renderers.online_renderer import OnlineRenderer
     from vllm.sampling_params import RequestOutputKind, SamplingParams
-
-    # vLLM 0.32 moved the chat helpers to vllm.renderers.
-    if find_spec("vllm.renderers.chat_utils") is not None:
-        from vllm.renderers.chat_utils import load_chat_template
-    else:
-        from vllm.entrypoints.chat_utils import load_chat_template
 
     class RealtimeServingChat(OpenAIServingChat):
         async def chat_completion_stream_generator(

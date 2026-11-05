@@ -22,19 +22,13 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
-	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-const (
-	dcdDefaultingWebhookName = "dynamocomponentdeployment-defaulting-webhook"
-	dcdDefaultingWebhookPath = "/mutate-nvidia-com-v1beta1-dynamocomponentdeployment"
-)
+const dcdDefaultingWebhookPath = "/mutate-nvidia-com-v1beta1-dynamocomponentdeployment"
 
 // DCDDefaulter is a mutating webhook handler for v1beta1 DynamoComponentDeployment.
 type DCDDefaulter struct {
@@ -52,8 +46,6 @@ func NewDCDDefaulter(operatorVersion string) *DCDDefaulter {
 // On every operation, explicit multinode roles receive their implied replica
 // counts. UPDATE does not default spec.name because that would rewrite user intent.
 func (d *DCDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
-	logger := log.FromContext(ctx).WithName(dcdDefaultingWebhookName)
-
 	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1beta1.DynamoComponentDeploymentGVK); err != nil {
 		return err
 	}
@@ -65,29 +57,10 @@ func (d *DCDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
-		logger.Error(err, "failed to get admission request from context, skipping defaulting")
-		return nil
+		return fmt.Errorf("get admission request from context: %w", err)
 	}
 
-	if req.Operation == admissionv1.Create && dcd.Spec.ComponentName == "" && dcd.Name != "" {
-		dcd.Spec.ComponentName = dcd.Name
-		logger.Info("defaulted spec.name from metadata.name",
-			"name", dcd.Name,
-			"namespace", dcd.Namespace,
-		)
-	}
-
-	// Only standalone CREATEs acquire a creation origin. Graph children already
-	// carry their parent's origin in the template, even when created much later.
-	if req.Operation == admissionv1.Create && dcd.GetParentGraphDeploymentName() == "" {
-		if dcd.Annotations == nil {
-			dcd.Annotations = map[string]string{}
-		}
-		dcd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = d.OperatorVersion
-	}
-
-	defaultMultinodeRoleReplicas(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
-
+	defaultDynamoComponentDeployment(dcd, req.Operation, d.OperatorVersion)
 	return nil
 }
 
