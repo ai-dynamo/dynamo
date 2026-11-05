@@ -2487,6 +2487,8 @@ impl<
                     cached_tokens: selected.selection.cached_tokens,
                     max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
                     selected_raw_cached_tokens: selected.selection.selected_raw_cached_tokens,
+                    selected_rank_raw_cached_tokens: request
+                        .raw_cached_tokens_for(selected.selection.worker, actor.block_size),
                     selected_worker_tiers: selected.selected_worker_tiers,
                     kv_transfer_source: selected.selection.kv_transfer_source,
                     kv_transfer_candidates: request.kv_transfer_candidates.take(),
@@ -2550,12 +2552,18 @@ impl<
             }
         };
 
+        // Selection discounts host and disk hits to model transfer cost, but the active-load
+        // booking must not carry that discount: those blocks are transfer work, not GPU prefill
+        // compute. Book against the selected rank's raw cached tokens across all tiers.
+        let selected_rank_raw_cached_tokens =
+            request.raw_cached_tokens_for(selected.selection.worker, self.block_size);
         let response = SchedulingResponse {
             best_worker: selected.selection.worker,
             effective_overlap_blocks: selected.selection.effective_overlap_blocks,
             cached_tokens: selected.selection.cached_tokens,
             max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
             selected_raw_cached_tokens: selected.selection.selected_raw_cached_tokens,
+            selected_rank_raw_cached_tokens,
             selected_worker_tiers: selected.selected_worker_tiers,
             kv_transfer_source: selected.selection.kv_transfer_source,
             kv_transfer_candidates: request.kv_transfer_candidates.take(),
@@ -2586,12 +2594,9 @@ impl<
             .expect("tracked mode always has a request ID")
             .to_string();
 
-        // Selection discounts host and disk hits to model transfer cost, but the active-load
-        // booking must not carry that discount: those blocks are transfer work, not GPU prefill
-        // compute. Book against the selected rank's raw cached tokens across all tiers.
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
-            request.raw_cached_tokens_for(selected.selection.worker, self.block_size),
+            selected_rank_raw_cached_tokens,
             request.track_prefill_tokens,
         );
 

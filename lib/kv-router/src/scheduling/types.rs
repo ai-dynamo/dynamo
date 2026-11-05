@@ -197,6 +197,10 @@ pub struct SchedulingResponse {
     pub max_raw_cached_tokens: Option<usize>,
     /// Raw prefix overlap for the selected worker and DP rank, in tokens.
     pub selected_raw_cached_tokens: Option<usize>,
+    /// Raw cached tokens for the selected worker and DP rank across device,
+    /// host-pinned and disk tiers, set in every schedule mode. Active prefill
+    /// bookings subtract this, not the weighted `cached_tokens`.
+    pub(crate) selected_rank_raw_cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
     /// The source `best_worker` fetches its KV prefix from; see
     /// [`crate::protocols::WorkerSelectionResult::kv_transfer_source`].

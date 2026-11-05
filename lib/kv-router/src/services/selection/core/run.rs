@@ -483,7 +483,10 @@ impl SelectionCore {
                 });
             (Some(endpoint), total_kv_blocks)
         };
-        let effective_prefill = effective_prefill_tokens(isl_tokens, response.cached_tokens);
+        // A deferred `create_reservation` books this value directly, so it uses
+        // the raw cached tokens the queue books with, not the weighted credit.
+        let effective_prefill =
+            effective_prefill_tokens(isl_tokens, response.selected_rank_raw_cached_tokens);
         // Hints are attached to bookings only, for the source selection chose.
         let kv_hint = match (
             book,

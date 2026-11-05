@@ -152,10 +152,11 @@ PolicyClassQueue("agents")
   iteration, and WSPT priority.
 - Prefill load hints are computed at scheduler/request boundaries from the
   selected DP rank's raw cached tokens across device, host, and disk tiers
-  (`SchedulingRequest::raw_cached_tokens_for`). Host and disk hits are transfer
-  work, not GPU prefill compute; the tier-weighted `cached_tokens` is for
-  selection cost only. Do not move ISL/cache-token math back into
-  `ActiveSequences`.
+  (`SchedulingRequest::raw_cached_tokens_for`, returned in every mode as
+  `SchedulingResponse::selected_rank_raw_cached_tokens` for callers that book
+  later). Host and disk hits are transfer work, not GPU prefill compute; the
+  tier-weighted `cached_tokens` is for selection cost only. Do not move
+  ISL/cache-token math back into `ActiveSequences`.
 - Selectors should be side-effect free: no capacity reservation, no queue mutation, and no
   `PromptRegistry` mutation.
 - Do not hold the pending-heap lock while selecting, reading worker capacity,

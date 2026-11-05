@@ -14,8 +14,8 @@ pub trait PrefillLoadEstimator: Send + Sync {
     ) -> anyhow::Result<Duration>;
 }
 
-pub fn effective_prefill_tokens(isl_tokens: usize, weighted_cached_tokens: usize) -> usize {
-    isl_tokens.saturating_sub(weighted_cached_tokens.min(isl_tokens))
+pub fn effective_prefill_tokens(isl_tokens: usize, cached_tokens: usize) -> usize {
+    isl_tokens.saturating_sub(cached_tokens.min(isl_tokens))
 }
 
 pub fn prefill_load_hint_from_effective_tokens(

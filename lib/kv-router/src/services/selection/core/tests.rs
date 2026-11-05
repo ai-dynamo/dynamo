@@ -2842,6 +2842,52 @@ async fn queued_selection_returns_refreshed_overlap_snapshot() {
     assert_eq!(response.overlap.dp, HashMap::from([("0".to_string(), 8)]));
 }
 
+/// A deferred `create_reservation` books what the queue would: host-pinned hits
+/// are transfer work, so the booked prefill is `isl - raw_cached`, not the
+/// weighted selection credit.
+#[tokio::test]
+async fn cached_reservation_books_prefill_against_raw_lower_tier_hits() {
+    use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
+
+    let core = local_core(test_config(true));
+    core.upsert_worker(worker_with_kv_events(1))
+        .await
+        .expect("worker upsert");
+    let tokens: Vec<u32> = (0..16).collect();
+    let hashes: Vec<_> = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default())
+        .iter()
+        .map(|hash| hash.0)
+        .collect();
+    let entry = core.entry(&default_key()).expect("entry");
+    entry
+        .indexer
+        .apply_event_routed(store_event(
+            1,
+            0,
+            1,
+            &[],
+            &hashes[..2],
+            StorageTier::HostPinned,
+        ))
+        .await
+        .unwrap();
+    entry.indexer.dump_events().await.expect("flush indexer");
+
+    let mut request = select_request();
+    request.prompt.token_ids = Some(tokens);
+    request.selection_id = Some("host-hit".to_string());
+    let selected = core.select(request).await.expect("select");
+    assert_eq!(selected.worker_id, 1);
+    assert_eq!(selected.overlap.cpu, 8);
+    assert_eq!(selected.effective_prefill_tokens, 8);
+
+    core.create_reservation(replay_reservation("host-hit"))
+        .await
+        .expect("cached reservation");
+    let booked = core.loads(Some("model"), Some("default"))[0].loads[0].potential_prefill_tokens;
+    assert_eq!(booked, 8);
+}
+
 fn core_with_session_affinity_mode(mode: SessionAffinityMode) -> SelectionCore {
     core_with(
         test_config(false),
