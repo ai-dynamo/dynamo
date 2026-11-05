@@ -55,14 +55,17 @@ python -m pytest tests/deploy/test_deploy_efa_sglang.py \
 ```
 
 `test_gaie_deployment` in `test_dgd.py` is the Gateway API Inference Extension
-lane. Its `vllm-agg` and `vllm-disagg` cases deploy
-`examples/backends/vllm/deploy/gaie/agg.yaml` and `disagg.yaml`, with each vLLM
-engine replaced by a mocker from the frontend image, apply an HTTPRoute to the
-generated `InferencePool`, and send a chat completion through the Gateway.
-Because the mockers run from the frontend image, the test needs no GPU and no
-`--image`. The cluster needs the Dynamo operator, an `hf-token-secret` Secret in
-the test namespace, and the Gateway that
-`deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh` installs:
+lane. Its `vllm-agg`, `vllm-disagg`, and `sglang-agg` cases deploy the GAIE
+examples in `examples/backends/vllm/deploy/gaie/` and
+`examples/backends/sglang/deploy/gaie/`; `trtllm-agg` deploys
+`gaie/trtllm-agg.yaml`, since no TensorRT-LLM GAIE example exists. Each case
+replaces every engine with a mocker of that engine from the frontend image,
+applies an HTTPRoute to the generated `InferencePool`, and sends a chat
+completion through the Gateway. Because the mockers run from the frontend
+image, the test needs no GPU and no `--image`. The cluster needs the Dynamo
+operator, an `hf-token-secret` Secret in the test namespace, and the Gateway
+that `deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh`
+installs:
 
 ```bash
 python -m pytest tests/deploy/test_dgd.py \

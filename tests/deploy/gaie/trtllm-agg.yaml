@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated TensorRT-LLM behind the Gateway, for test_gaie_deployment in
+# tests/deploy/test_dgd.py, which runs a TensorRT-LLM mocker in place of the
+# engine. No TensorRT-LLM GAIE example exists; this follows the vLLM and
+# SGLang ones in examples/backends/*/deploy/gaie/agg.yaml.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-gaie-agg
+spec:
+  backendFramework: trtllm
+  components:
+  - name: Epp
+    type: epp
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag
+          env:
+          - name: DYN_KV_CACHE_BLOCK_SIZE
+            value: "32"
+          - name: DYN_MODEL_NAME
+            value: Qwen/Qwen3-0.6B
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+  - name: worker
+    type: worker
+    replicas: 1
+    frontendSidecar: sidecar-frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --kv-block-size
+          - "32"
+          - --extra-engine-args
+          - /workspace/examples/backends/trtllm/engine_configs/qwen3/agg.yaml
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+        - name: sidecar-frontend
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag
+          args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - direct
+          envFrom:
+          - secretRef:
+              name: hf-token-secret

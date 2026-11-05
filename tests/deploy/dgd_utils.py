@@ -516,13 +516,23 @@ class ServiceSpec:
         self.gpus = value
 
     # ----- Mocker -----
+    # Engine flags that use_mocker keeps, by the mocker flag that takes them.
+    _MOCKER_FLAGS = {
+        "--block-size": "--block-size",  # vLLM
+        "--page-size": "--block-size",  # SGLang
+        "--kv-block-size": "--block-size",  # TensorRT-LLM
+        "--disaggregation-mode": "--disaggregation-mode",
+    }
+
     def use_mocker(self, image: str, model: str) -> None:
         """Replace this worker's engine with a mocker from ``image``.
 
-        The mocker serves ``model`` and keeps the engine's ``--block-size`` and
-        ``--disaggregation-mode``, in either ``--flag value`` or ``--flag=value``
-        form, so the router sees the same block size and worker role. Removes
-        the container's GPU request. v1beta1 only.
+        The mocker simulates the engine it replaces (``dynamo.vllm``,
+        ``dynamo.sglang`` or ``dynamo.trtllm``), serves ``model``, and keeps the
+        engine's KV block size and ``--disaggregation-mode``, in either
+        ``--flag value`` or ``--flag=value`` form, so the router sees the same
+        block size and worker role. Removes the container's GPU request.
+        v1beta1 only.
         """
         if self._schema != SCHEMA_V1BETA1:
             raise NotImplementedError("use_mocker supports v1beta1 manifests only")
@@ -530,13 +540,26 @@ class ServiceSpec:
         if container is None:
             raise ValueError(f"{self._name} has no main container")
         engine_args = self._get_args()
+        # Shell-style manifests name the engine module in args, others in command.
+        argv = [*(container.get("command") or []), *engine_args]
+        engine = next(
+            (e for e in ("vllm", "sglang", "trtllm") if f"dynamo.{e}" in argv), None
+        )
+        if engine is None:
+            raise ValueError(
+                f"{self._name} runs no vLLM, SGLang or TensorRT-LLM engine"
+            )
         mocker_args = ["--model-path", model, "--model-name", model]
-        for flag in ("--block-size", "--disaggregation-mode"):
-            for i, arg in enumerate(engine_args):
-                if arg == flag and i + 1 < len(engine_args):
-                    mocker_args += [flag, engine_args[i + 1]]
-                elif arg.startswith(f"{flag}="):
-                    mocker_args.append(arg)
+        mocker_args += ["--engine-type", engine]
+        for i, arg in enumerate(engine_args):
+            flag, has_value, value = arg.partition("=")
+            if flag not in self._MOCKER_FLAGS:
+                continue
+            if not has_value:
+                if i + 1 == len(engine_args):
+                    continue
+                value = engine_args[i + 1]
+            mocker_args += [self._MOCKER_FLAGS[flag], value]
         container.update(
             image=image, command=["python3", "-m", "dynamo.mocker"], args=mocker_args
         )

@@ -379,8 +379,21 @@ async def test_deployment(
 @pytest.mark.parametrize(
     "manifest,workers",
     [
-        pytest.param("agg.yaml", ("worker",), id="vllm-agg"),
-        pytest.param("disagg.yaml", ("prefill", "decode"), id="vllm-disagg"),
+        pytest.param(
+            "examples/backends/vllm/deploy/gaie/agg.yaml", ("worker",), id="vllm-agg"
+        ),
+        pytest.param(
+            "examples/backends/vllm/deploy/gaie/disagg.yaml",
+            ("prefill", "decode"),
+            id="vllm-disagg",
+        ),
+        pytest.param(
+            "examples/backends/sglang/deploy/gaie/agg.yaml",
+            ("worker",),
+            id="sglang-agg",
+        ),
+        # No TensorRT-LLM GAIE example exists, so this case has its own manifest.
+        pytest.param("tests/deploy/gaie/trtllm-agg.yaml", ("worker",), id="trtllm-agg"),
     ],
 )
 async def test_gaie_deployment(
@@ -390,13 +403,13 @@ async def test_gaie_deployment(
     skip_service_restart: bool,
     request,
 ) -> None:
-    """Test a vLLM GAIE example through the Gateway, with mocker workers.
+    """Test a GAIE deployment through the Gateway, with mocker workers.
 
-    Deploys the example's EPP and workers with frontend sidecars, each vLLM
-    engine replaced by a mocker from the frontend image, so the test needs no
-    GPU and no ``--image``. Applies an HTTPRoute to the generated
-    InferencePool, sends a chat completion through the Gateway, and checks
-    which workers served it.
+    Deploys a vLLM, SGLang or TensorRT-LLM GAIE manifest's EPP and workers
+    with frontend sidecars, each engine replaced by a mocker of that engine
+    from the frontend image, so the test needs no GPU and no ``--image``.
+    Applies an HTTPRoute to the generated InferencePool, sends a chat
+    completion through the Gateway, and checks which workers served it.
     """
     frontend_image = request.config.getoption("--frontend-image")
 
@@ -404,26 +417,30 @@ async def test_gaie_deployment(
     assert namespace, "--namespace is required for GAIE deploy test"
 
     workspace = _get_workspace_dir()
-    gaie_dir = os.path.join(workspace, "examples", "backends", "vllm", "deploy", "gaie")
-    manifest_path = os.path.join(gaie_dir, manifest)
-    httproute_path = os.path.join(gaie_dir, "http-route.yaml")
+    manifest_path = os.path.join(workspace, manifest)
+    # The route has nothing backend-specific, so every case uses the vLLM one.
+    httproute_path = os.path.join(
+        workspace, "examples", "backends", "vllm", "deploy", "gaie", "http-route.yaml"
+    )
 
-    assert os.path.exists(manifest_path), f"{manifest} not found: {manifest_path}"
+    assert os.path.exists(manifest_path), f"GAIE manifest not found: {manifest_path}"
     assert os.path.exists(
         httproute_path
     ), f"http-route.yaml not found: {httproute_path}"
 
     deployment_spec = DeploymentSpec(manifest_path)
     deployment_spec.namespace = namespace
-    # Both examples name their DGD "qwen". A name per case keeps one case's
-    # teardown from racing the next, and the prefix keeps it apart from the
-    # vllm-agg and vllm-disagg DGDs that the vLLM deploy lane runs in the same
+    # A name per case keeps one case's teardown from racing the next, and the
+    # prefix keeps it apart from the DGDs of the same name (vllm-agg,
+    # sglang-agg, trtllm-agg) that the backend deploy lanes run in the same
     # namespace at the same time.
     deployment_spec.name = f"gaie-{request.node.callspec.id}"
 
     logger.info(f"Frontend image: {frontend_image}")
 
     deployment_spec.set_image(frontend_image, service_name="Epp")
+    # The SGLang example's EPP names a larger model than the mockers serve.
+    deployment_spec.set_service_env_var("Epp", "DYN_MODEL_NAME", GAIE_MODEL_NAME)
     for worker in workers:
         deployment_spec[worker].use_mocker(frontend_image, GAIE_MODEL_NAME)
         deployment_spec.set_frontend_sidecar_image(frontend_image, service_name=worker)

@@ -1443,12 +1443,14 @@ jobs:
 
   # ============================================================================
   # TEMPORARY: GAIE DEPLOY TEST ON EVERY PUSH (PR #17477)
-  # Remove this job, and its entries in deploy-cleanup and deploy-status-check,
-  # before merging: post-merge-ci.yml calls the same workflow. It runs only on
-  # this PR's CI branch, so a copy merged by mistake is skipped.
+  # A copy of post-merge-ci.yml's deploy-test-gaie, so this PR runs it. Remove
+  # this job, and its entries in deploy-cleanup and deploy-status-check, before
+  # merging. It runs only on this PR's CI branch, so a copy merged by mistake
+  # is skipped.
   # ============================================================================
   deploy-test-gaie:
     name: GAIE Deploy Test
+    runs-on: prod-deploy-tester-v1
     needs: [changed-files, deploy-operator, frontend-copy-to-acr]
     if: |
       github.ref_name == 'pull-request/17477' &&
@@ -1456,18 +1458,60 @@ jobs:
       !cancelled() && !failure() &&
       needs.deploy-operator.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
-    uses: $/.github/workflows/shared-gaie-deploy-test.yml
-    with:
-      namespace: ${{ needs.deploy-operator.outputs.namespace }}
-      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
-      frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
-    secrets:
-      AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      DOCKERHUB_LOGIN_USER: ${{ secrets.DOCKERHUB_LOGIN_USER }}
-      DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
-      DD_API_KEY: ${{ secrets.DD_API_KEY }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: $/.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: $/.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: $/.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Install GAIE prerequisites (Gateway API, agentgateway, Inference Extension CRDs)
+        shell: bash
+        env:
+          KUBECONFIG_B64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+        run: |
+          echo "${KUBECONFIG_B64}" | base64 -d > ${{ github.workspace }}/.kubeconfig_gaie
+          export KUBECONFIG=${{ github.workspace }}/.kubeconfig_gaie
+          export NAMESPACE=default
+          bash deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
+          rm -f ${{ github.workspace }}/.kubeconfig_gaie
+      - name: Run GAIE Deploy Test
+        id: deploy-test
+        uses: $/.github/actions/dynamo-deploy-test
+        with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          test_name: gaie
+          extra_pytest_args: >-
+            -m framework_with_gaie
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
 
   # Serialize checkpoint lifecycles through cleanup: each Snapshot install
   # reserves resources on the same GPU nodes until its namespace is deleted.
