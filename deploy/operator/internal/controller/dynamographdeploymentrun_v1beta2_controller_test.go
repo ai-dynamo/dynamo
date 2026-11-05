@@ -2764,7 +2764,7 @@ func TestV1beta2RunControllerDoesNotLetAStaleRunUndoATraceCancellation(t *testin
 				t.Fatalf("reconcile error = %v, want a status conflict", err)
 			}
 			f.reconciler.Client = cached
-			if got := f.run(); !reflect.DeepEqual(got.Status, canceled.Status) {
+			if got := f.run(); !apiequality.Semantic.DeepEqual(got.Status, canceled.Status) {
 				t.Fatalf("status = %+v, want the recorded cancellation %+v", got.Status, canceled.Status)
 			}
 			wantStaleJobs := 0
@@ -2786,7 +2786,7 @@ func TestV1beta2RunControllerDoesNotLetAStaleRunUndoATraceCancellation(t *testin
 			} else {
 				assertDGDRRunTraceClaimFinalizers(t, f, "kubernetes.io/pvc-protection")
 			}
-			if got := f.run(); !reflect.DeepEqual(got.Status, canceled.Status) {
+			if got := f.run(); !apiequality.Semantic.DeepEqual(got.Status, canceled.Status) {
 				t.Fatalf("status = %+v, want the recorded cancellation %+v", got.Status, canceled.Status)
 			}
 		})

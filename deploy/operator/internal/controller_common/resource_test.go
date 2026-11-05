@@ -20,11 +20,11 @@ package controller_common
 import (
 	"context"
 	stderrors "errors"
-	"reflect"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -1239,7 +1239,7 @@ func TestSyncResourceOwnership(t *testing.T) {
 			if got.Data["value"] != tt.wantValue {
 				t.Fatalf("stored value = %q, want %q", got.Data["value"], tt.wantValue)
 			}
-			if !reflect.DeepEqual(got.OwnerReferences, tt.wantOwnerRefs) {
+			if !apiequality.Semantic.DeepEqual(got.OwnerReferences, tt.wantOwnerRefs) {
 				t.Fatalf("owner references = %#v, want %#v", got.OwnerReferences, tt.wantOwnerRefs)
 			}
 		})
