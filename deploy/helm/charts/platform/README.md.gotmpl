@@ -159,34 +159,36 @@ plan for frontend replacement, including a possible single-replica Grove Service
 ##### Environment variable order in newly created DGDs
 
 **Change:** For DGDs whose `nvidia.com/dynamo-operator-origin-version` annotation is 1.7.0 or later,
-the operator preserves environment variable order and duplicate names. The rendered order is
-operator-provided defaults, then DGD-level `spec.env`, then component
-`podTemplate.spec.containers[*].env`. Operator-provided variables, including component,
-infrastructure/transport, KV-transfer, and inference-backend variables, precede user-provided
-variables. Previously, the operator sorted the combined list alphabetically and collapsed entries
-with the same name.
+the operator preserves source-list order and topologically orders references between environment
+layers. Precedence is operator defaults, DGD-level `spec.env`, then the selected component or role
+PodTemplate's container `env`. A specific definition replaces the entire general definition,
+including `valueFrom`, without emitting duplicate names for a cross-layer override. Existing
+operator-owned topology, GMS, and per-engine failover bindings remain authoritative.
 
-Kubernetes resolves a `$(NAME)` reference only against entries defined earlier in the list. The
-reference uses the value in effect at that position; a later duplicate does not change an already
-expanded value. This lets user variables reference operator-provided variables and lets a later
-user entry override an operator-provided value with the same name.
+Layers may be interleaved: a general variable referencing a component override follows that
+override. Independent entries use their original input order, not alphabetical name order.
+Cycles and conflicts with local list order fail rendering with a source-path diagnostic.
+Generated DCDs now retain graph defaults in a separate `spec.env`, supported natively in both
+served DCD API versions. Previously these defaults were flattened into each PodTemplate.
 
 **Affected:** Newly created DGDs whose environment lists depend on alphabetical sorting or contain
-duplicate names. If the referenced variable is not defined earlier, Kubernetes leaves the reference
-literal. For example, `MODEL_PATH` remains `$(MODEL_ROOT)/model` if `MODEL_ROOT` appears later.
+cross-layer overrides or references. Within one input list, Kubernetes still leaves a forward
+reference literal unless an external value is available; those entries are not reordered.
+The operator does not fetch ConfigMaps or Secrets for sorting.
 
 **Action:** Review `spec.env` and each `podTemplate.spec.containers[*].env` list. Declare a source
-variable before variables that reference it, and remove unintended duplicate names. Keep an
-intentional override after the value it replaces. A component variable can therefore override a
-DGD-level variable, but a DGD-level variable cannot reference a component variable. Intentional
-duplicates remain visible as two entries in the rendered Pod; the API server might warn that the
-later definition `hides previous definition`. This is expected, and the later value wins. For example:
+variable before dependent variables within the same list. Use component entries to override graph
+defaults; dependent entries in other layers will reference the effective override. Do not depend
+on retaining a lower-layer definition to expand a same-named self-reference. Existing same-list
+duplicate validation is unchanged. For example:
 
 ```yaml
 spec:
   env:
     - name: MODEL_ROOT
       value: /models
+    - name: MODEL_PATH
+      value: "$(MODEL_ROOT)/model"
   components:
     - name: worker
       podTemplate:
@@ -194,9 +196,11 @@ spec:
           containers:
             - name: main
               env:
-                - name: MODEL_PATH
-                  value: $(MODEL_ROOT)/model
+                - name: MODEL_ROOT
+                  value: /fast/models
 ```
+
+The effective `MODEL_ROOT` precedes `MODEL_PATH`, which expands to `/fast/models/model`.
 
 **Existing deployments:** DGDs created by an operator older than 1.7.0, or without the origin
 annotation, retain the legacy sorted and de-duplicated output. An operator-only upgrade does not

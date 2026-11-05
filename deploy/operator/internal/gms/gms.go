@@ -46,49 +46,49 @@ const (
 // Snapshot-coupled GMS uses the V1 protocol: sidecar, extra GMS clients,
 // and the engine container all receive DYN_GMS_USE_V1=true. Intra-pod
 // GMS without snapshot keeps the V0 sidecar and does not set that env.
-func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container, useV1 bool) {
+func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container, useV1 bool) []corev1.EnvVar {
 	if podSpec == nil || mainContainer == nil {
-		return
+		return nil
 	}
 
-	EnsureClient(podSpec, mainContainer)
+	bindings := EnsureClient(podSpec, mainContainer)
 
 	sidecar := Container(ServerContainerName, ServerModule, mainContainer.Image)
 	if useV1 {
 		EnableV1(&sidecar)
-		EnableV1(mainContainer)
+		bindings = append(bindings, EnableV1(mainContainer)...)
 	}
 	sidecar.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
 	for i := range podSpec.InitContainers {
 		if podSpec.InitContainers[i].Name == sidecar.Name {
-			return
+			return bindings
 		}
 	}
 	podSpec.InitContainers = append(podSpec.InitContainers, sidecar)
+	return bindings
 }
 
 // EnableV1 sets DYN_GMS_USE_V1=true on a GMS process container. Idempotent.
-func EnableV1(container *corev1.Container) {
+func EnableV1(container *corev1.Container) []corev1.EnvVar {
 	if container == nil {
-		return
+		return nil
 	}
+	binding := corev1.EnvVar{Name: EnvUseV1, Value: "true"}
 	for i := range container.Env {
 		if container.Env[i].Name == EnvUseV1 {
-			container.Env[i] = corev1.EnvVar{Name: EnvUseV1, Value: "true"}
-			return
+			container.Env[i] = binding
+			return []corev1.EnvVar{binding}
 		}
 	}
-	container.Env = append(container.Env, corev1.EnvVar{
-		Name:  EnvUseV1,
-		Value: "true",
-	})
+	container.Env = append(container.Env, binding)
+	return []corev1.EnvVar{binding}
 }
 
 // EnsureClient adds the GMS UDS socket volume, mount, GMS_SOCKET_DIR env var,
 // and DRA claim to a GMS client container. Idempotent.
-func EnsureClient(podSpec *corev1.PodSpec, container *corev1.Container) {
+func EnsureClient(podSpec *corev1.PodSpec, container *corev1.Container) []corev1.EnvVar {
 	if podSpec == nil || container == nil {
-		return
+		return nil
 	}
 	sharedVolume := corev1.Volume{
 		Name:     SharedVolumeName,
@@ -144,6 +144,7 @@ func EnsureClient(podSpec *corev1.PodSpec, container *corev1.Container) {
 	if !foundClaim {
 		container.Resources.Claims = append(container.Resources.Claims, corev1.ResourceClaim{Name: dra.ClaimName})
 	}
+	return []corev1.EnvVar{sharedEnv}
 }
 
 // Container builds a GMS container with the shared socket volume, env, and DRA claim.

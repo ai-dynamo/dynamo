@@ -419,6 +419,7 @@ func renderSelectedLPXRole(
 		nil,
 		defaults,
 		func() (int64, error) { return 0, nil },
+		dgd.Spec.Env...,
 	)
 	if err != nil {
 		return nil, err

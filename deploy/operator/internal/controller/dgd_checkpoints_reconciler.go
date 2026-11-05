@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
@@ -50,7 +51,9 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 )
 
 // dgdCheckpointsResult is the cohesive output consumed by later workload
@@ -348,6 +351,7 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 			targetContainerName,
 			checkpointID,
 			gmsSpec,
+			dynamoDeployment.Annotations,
 		); err != nil {
 			return nil, err
 		}
@@ -741,6 +745,7 @@ func prepareCheckpointGMSPodTemplate(
 	targetContainerName string,
 	checkpointID string,
 	gmsSpec *nvidiacomv1alpha1.GPUMemoryServiceSpec,
+	annotations map[string]string,
 ) error {
 	switch gmsSpec.Mode {
 	case "", nvidiacomv1alpha1.GMSModeIntraPod:
@@ -760,12 +765,34 @@ func prepareCheckpointGMSPodTemplate(
 		}
 	}
 	dra.ApplyPodClaim(&podTemplate.Spec, checkpointGMSResourceClaimTemplateName(checkpointID))
-	checkpoint.EnsureIntraPodGPUMemoryService(
+	var baseEnvironment map[string][]corev1.EnvVar
+	if compatibility.OrderedEnvironmentVariables.Enabled(annotations) {
+		baseEnvironment = make(map[string][]corev1.EnvVar)
+		for _, container := range podTemplate.Spec.Containers {
+			baseEnvironment[container.Name] = slices.Clone(container.Env)
+		}
+	}
+	bindings := checkpoint.EnsureIntraPodGPUMemoryService(
 		&podTemplate.Spec,
 		[]*corev1.Container{targetContainer},
 		gmsSpec.ExtraClientContainers,
 		true,
 	)
+	if baseEnvironment != nil {
+		for i := range podTemplate.Spec.Containers {
+			container := &podTemplate.Spec.Containers[i]
+			if values, exists := bindings[container.Name]; exists {
+				env, err := semanticenv.Compose(
+					semanticenv.Layer{Source: "snapshot.containers[name=" + container.Name + "].env", Env: baseEnvironment[container.Name]},
+					semanticenv.Layer{Source: "operator.gpuMemoryService", Env: values},
+				)
+				if err != nil {
+					return err
+				}
+				container.Env = env
+			}
+		}
+	}
 	return nil
 }
 
@@ -964,6 +991,18 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 	componentForJob.Experimental = nil
 	componentForJob.FrontendSidecar = nil
 
+	// Retain job overrides as a fourth user layer before final composition.
+	var jobEnvironment map[string]semanticenv.Layer
+	if config := dynamo.GetCheckpoint(component); config != nil && config.Job != nil && config.Job.PodTemplate != nil {
+		jobEnvironment = make(map[string]semanticenv.Layer)
+		for _, container := range config.Job.PodTemplate.Spec.Containers {
+			jobEnvironment[container.Name] = semanticenv.Layer{
+				Source: "experimental.checkpoint.job.podTemplate.spec.containers[name=" + container.Name + "].env",
+				Env:    container.Env,
+			}
+		}
+	}
+
 	// Use the normal DGD path so graph-level defaults such as spec.env,
 	// annotations, labels, and pod-template metadata are applied consistently.
 	podSpec, err := dynamo.GeneratePodSpecForComponent(
@@ -978,6 +1017,7 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 		componentName,
 		nil,                                     // Use default deployer
 		func() (int64, error) { return 0, nil }, // Checkpoint jobs are single-node
+		jobEnvironment,
 	)
 	if err != nil {
 		return corev1.PodTemplateSpec{}, fmt.Errorf("failed to generate base pod spec: %w", err)
@@ -1069,7 +1109,12 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 				if err := mergo.Merge(existing, *user, mergo.WithOverride); err != nil {
 					return corev1.PodTemplateSpec{}, fmt.Errorf("failed to merge SnapshotJob container %q: %w", override.Name, err)
 				}
-				existing.Env = dynamo.MergeEnvsForOrigin(dynamoDeployment.Annotations, baseEnv, user.Env)
+				if compatibility.OrderedEnvironmentVariables.Enabled(dynamoDeployment.Annotations) {
+					// The renderer already composed this override with the original source layers.
+					existing.Env = baseEnv
+				} else {
+					existing.Env = dynamo.MergeEnvsForOrigin(dynamoDeployment.Annotations, baseEnv, user.Env)
+				}
 				if user.LivenessProbe != nil {
 					existing.LivenessProbe = user.LivenessProbe.DeepCopy()
 				}

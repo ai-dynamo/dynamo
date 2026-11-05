@@ -76,7 +76,7 @@ func shellQuotePOSIX(s string) string {
 // findEnvVar returns the named environment variable entry, or nil when absent. The
 // entry, not its value, so a valueFrom variable is distinguishable from an absent one.
 func findEnvVar(env []corev1.EnvVar, name string) *corev1.EnvVar {
-	for i := range env {
+	for i := len(env) - 1; i >= 0; i-- {
 		if env[i].Name == name {
 			return &env[i]
 		}

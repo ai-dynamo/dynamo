@@ -220,7 +220,7 @@ func TestNativeSidecarEnvironmentByOrigin(t *testing.T) {
 			require.Len(t, children, 1)
 			pods := []*corev1.PodSpec{pod}
 			for _, child := range children {
-				childPod, err := GenerateBasePodSpec(&child.Spec.DynamoComponentDeploymentSharedSpec, BackendFrameworkVLLM, nil, dgd.Name, dgd.Namespace, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
+				childPod, err := GenerateBasePodSpec(&child.Spec.DynamoComponentDeploymentSharedSpec, BackendFrameworkVLLM, nil, dgd.Name, dgd.Namespace, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0), child.Spec.Env...)
 				require.NoError(t, err)
 				pods = append(pods, childPod)
 			}
@@ -236,9 +236,19 @@ func TestNativeSidecarEnvironmentByOrigin(t *testing.T) {
 				require.Equal(t, "nats://user:4222", envVarsToMap(runtime.Env)["NATS_SERVER"])
 				require.Equal(t, "nats://frontend:4222", envVarsToMap(frontend.Env)["NATS_SERVER"])
 				if origin == currentOrigin {
-					require.Equal(t, slices.Concat([]corev1.EnvVar{{Name: "VLLM_CACHE_ROOT", Value: "/cache"}}, graphEnv, engineEnv), engine.Env)
+					require.Equal(t, slices.Concat(graphEnv, engineEnv), engine.Env)
+					require.Len(t, envVarsToMap(runtime.Env), len(runtime.Env))
+					require.Len(t, envVarsToMap(frontend.Env), len(frontend.Env))
 					runtimeSuffix := slices.Concat(graphEnv, runtimeEnv[:len(runtimeEnv)-1])
-					require.Equal(t, runtimeSuffix, runtime.Env[len(runtime.Env)-len(runtimeSuffix):])
+					var authored []corev1.EnvVar
+					for _, env := range runtime.Env {
+						for _, input := range runtimeSuffix {
+							if env.Name == input.Name {
+								authored = append(authored, env)
+							}
+						}
+					}
+					require.Equal(t, runtimeSuffix, authored)
 					require.Equal(t, frontendEnv, frontend.Env[len(frontend.Env)-len(frontendEnv):])
 					continue
 				}
@@ -512,7 +522,7 @@ func TestCombinedWorkerCompilationCacheEnvironmentOrder(t *testing.T) {
 				{Name: "VLLM_CACHE_ROOT", Value: "/cache"},
 			}
 			if origin == currentOrigin {
-				want = slices.Concat(want[3:], want[:3])
+				want = want[:3]
 			}
 			require.Equal(t, want, cacheEnv)
 			require.Equal(t, want[len(want)-1], pod.Containers[0].Env[len(pod.Containers[0].Env)-1])
@@ -969,7 +979,7 @@ func TestRenderedRuntimeVersionSource(t *testing.T) {
 			_, err := generateBasePodSpecWithDefaultsAndOwnership(
 				component, BackendFrameworkNoop, nil, "graph", "ns", tc.role, nodes,
 				&configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove,
-				"engine", nil, defaults, roleLaunchOwnedByPodTemplate, tc.nativeSidecar, staticContainerGPUCount(0),
+				"engine", nil, defaults, roleLaunchOwnedByPodTemplate, tc.nativeSidecar, staticContainerGPUCount(0), nil,
 			)
 			require.NoError(t, err)
 			if tc.wantVersion == "" {

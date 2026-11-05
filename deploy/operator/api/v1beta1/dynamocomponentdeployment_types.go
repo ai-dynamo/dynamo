@@ -57,6 +57,16 @@ type DynamoComponentDeploymentSpec struct {
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
 	BackendFramework string `json:"backendFramework,omitempty"`
 
+	// env supplies general environment defaults for main and declared runtime
+	// containers. Container-specific env overrides entries with the same name.
+	// For origins using semantic environment composition, source-list order is
+	// preserved and cross-layer references are topologically ordered; cycles
+	// fail rendering. Graph-generated DCDs carry the DGD spec.env here so the
+	// original layers remain separate until operator defaults are available.
+	// Older origins retain legacy sorted composition. No default is applied.
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
+
 	// DynamoComponentDeploymentSharedSpec embeds common deployment and runtime
 	// settings that apply to the component.
 	DynamoComponentDeploymentSharedSpec `json:",inline"`

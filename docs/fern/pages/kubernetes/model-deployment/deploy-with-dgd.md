@@ -538,17 +538,47 @@ The following spec assembles the steps above into one aggregated Qwen3-32B deplo
 
 ### Environment variable order
 
-For DGDs created by Dynamo Operator 1.7.0 or later, the operator preserves environment variable
-order and duplicate names. The rendered list contains operator-provided defaults first, including
-component, infrastructure/transport, KV-transfer, and inference-backend variables. DGD-level
-`spec.env` follows, then component `podTemplate.spec.containers[*].env`.
+For DGDs with operator origin 1.7.0 or later, environment precedence is operator defaults,
+DGD `spec.env`, then the selected component or role PodTemplate's container `env`.
+A more-specific definition replaces the entire general definition, including `valueFrom`;
+cross-layer overrides do not produce duplicate names. Operator-owned topology, GMS, and
+per-engine failover bindings retain their generated values.
 
-Kubernetes resolves a `$(NAME)` reference only against entries defined earlier in the list. A
-reference uses the value in effect at that position, and a later duplicate does not change the
-already-expanded value. A component variable can override a DGD-level variable, but a DGD-level
-variable cannot reference a component variable. Duplicate names remain visible in the rendered Pod;
-the API server might warn that the later definition `hides previous definition`. This is expected,
-and the later value wins.
+The operator preserves the relative order of surviving entries within each input list. It
+topologically orders references between layers, so a DGD-level variable can reference a
+component-specific override. Independent entries retain their original general-to-specific
+input order; names are never sorted alphabetically. Cycles or conflicting ordering constraints
+fail rendering with the variables and source paths in the error.
+
+```yaml
+spec:
+  env:
+    - name: BASE
+      value: /models
+    - name: MODEL
+      value: "$(BASE)/qwen"
+  components:
+    - name: worker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - name: STORAGE
+                  value: /fast
+                - name: BASE
+                  value: "$(STORAGE)/models"
+```
+
+These entries render as `STORAGE`, `BASE`, then `MODEL`. Kubernetes expands `MODEL` to
+`/fast/models/qwen`. Graph-generated DCDs retain the general list in their separate `spec.env`
+until the final renderer adds operator defaults.
+
+Within a single list, Kubernetes' sequential semantics still apply: forward references are not
+reordered and remain literal unless an external value is available. `$$(NAME)` is escaped, and
+shell syntax such as `$NAME` is not a Kubernetes reference. ConfigMap/Secret values, `envFrom`,
+and provider-injected variables remain runtime inputs; the operator does not fetch or expand them
+for ordering. Existing same-list duplicate-name validation is unchanged.
 
 In `v1alpha1`, `service.envs` and `extraPodSpec.mainContainer.env` are combined during API
 conversion. When both lists define the same name, the extra container value replaces the
