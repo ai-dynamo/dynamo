@@ -157,7 +157,16 @@ async fn duplicate_request_fields_are_rejected_before_generation() {
                     .send()
                     .await
                     .unwrap();
-                assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
+                let error =
+                    assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
+                // Counting must reject duplicates before checking tokenizer availability.
+                assert!(
+                    !error["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("frontend tokenizer"),
+                    "{error}"
+                );
             }
         }
         assert!(svc.engine.take_requests().await.is_empty());
@@ -319,7 +328,7 @@ async fn valid_choices_and_shapes_preserve_backend_requests_and_assigned_ids() {
 
 #[tokio::test]
 #[serial]
-async fn handler_errors_and_token_counts_have_request_ids() {
+async fn handler_and_token_count_errors_have_request_ids() {
     temp_env::async_with_vars(ENV, async {
         let svc = HarnessService::start([]).await;
         let mut invalid_max_tokens = request();
@@ -341,15 +350,13 @@ async fn handler_errors_and_token_counts_have_request_ids() {
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        let body = assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
         assert!(
-            !response.headers()["request-id"]
-                .to_str()
+            body["error"]["message"]
+                .as_str()
                 .unwrap()
-                .is_empty()
+                .contains("frontend tokenizer")
         );
-        let body: Value = response.json().await.unwrap();
-        assert!(body["input_tokens"].is_number());
 
         let mut invalid = request();
         invalid["system"] = json!([{"type": "image", "text": "instructions"}]);
@@ -373,51 +380,49 @@ async fn handler_errors_and_token_counts_have_request_ids() {
 async fn thinking_admission_observes_interleaved_beta_and_current_modes() {
     temp_env::async_with_vars(ENV, async {
         let script = load_agent_fixture("text.sse").await.unwrap();
-        let svc = HarnessService::start(std::iter::repeat_n(script, 4)).await;
-        for path in ["/v1/messages", "/v1/messages/count_tokens"] {
-            for (thinking, beta, accepted) in [
-                (json!({"type": "between_tools"}), None, true),
-                (
-                    json!({"type": "enabled", "budget_tokens": 4096}),
-                    None,
-                    false,
-                ),
-                (
-                    json!({"type": "enabled", "budget_tokens": 4096}),
-                    Some("other-beta, interleaved-thinking-2025-05-14"),
-                    true,
-                ),
-                (
-                    json!({"type": "enabled", "budget_tokens": 4096}),
-                    Some("interleaved-thinking-2025-05-14-extra"),
-                    false,
-                ),
-                (
-                    json!({"type": "between_tools", "budget_tokens": 1024}),
-                    None,
-                    false,
-                ),
-            ] {
-                let mut body = request();
-                body["thinking"] = thinking;
-                let mut post = svc
-                    .client
-                    .post(format!("{}{path}", svc.base_url))
-                    .json(&body);
-                if let Some(beta) = beta {
-                    post = post.header("anthropic-beta", beta);
-                }
-                let response = post.send().await.unwrap();
-                if accepted {
-                    assert_eq!(
-                        response.status(),
-                        StatusCode::OK,
-                        "{}",
-                        response.text().await.unwrap()
-                    );
-                } else {
-                    assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
-                }
+        let svc = HarnessService::start(std::iter::repeat_n(script, 2)).await;
+        for (thinking, beta, accepted) in [
+            (json!({"type": "between_tools"}), None, true),
+            (
+                json!({"type": "enabled", "budget_tokens": 4096}),
+                None,
+                false,
+            ),
+            (
+                json!({"type": "enabled", "budget_tokens": 4096}),
+                Some("other-beta, interleaved-thinking-2025-05-14"),
+                true,
+            ),
+            (
+                json!({"type": "enabled", "budget_tokens": 4096}),
+                Some("interleaved-thinking-2025-05-14-extra"),
+                false,
+            ),
+            (
+                json!({"type": "between_tools", "budget_tokens": 1024}),
+                None,
+                false,
+            ),
+        ] {
+            let mut body = request();
+            body["thinking"] = thinking;
+            let mut post = svc
+                .client
+                .post(format!("{}/v1/messages", svc.base_url))
+                .json(&body);
+            if let Some(beta) = beta {
+                post = post.header("anthropic-beta", beta);
+            }
+            let response = post.send().await.unwrap();
+            if accepted {
+                assert_eq!(
+                    response.status(),
+                    StatusCode::OK,
+                    "{}",
+                    response.text().await.unwrap()
+                );
+            } else {
+                assert_error(response, StatusCode::BAD_REQUEST, "invalid_request_error").await;
             }
         }
         assert_eq!(svc.engine.take_requests().await.len(), 2);

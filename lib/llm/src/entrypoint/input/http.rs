@@ -270,12 +270,18 @@ async fn run_with_router_plugins(
             let checksum = model.card().mdcsum();
 
             let tokenizer = model.card().tokenizer()?;
-            let chat_pipeline = common::build_pipeline::<
-                NvCreateChatCompletionRequest,
-                NvCreateChatCompletionStreamResponse,
-            >(model.card(), inner_engine.clone(), tokenizer.clone())
-            .await?;
-            manager.add_chat_completions_model(model.display_name(), checksum, chat_pipeline)?;
+            let (chat_pipeline, preprocessor) =
+                common::build_pipeline::<
+                    NvCreateChatCompletionRequest,
+                    NvCreateChatCompletionStreamResponse,
+                >(model.card(), inner_engine.clone(), tokenizer.clone())
+                .await?;
+            manager.add_chat_completions_model_with_preprocessor(
+                model.display_name(),
+                checksum,
+                chat_pipeline,
+                preprocessor,
+            )?;
 
             let cmpl_pipeline =
                 common::build_completions_pipeline(model.card(), inner_engine, tokenizer)?;

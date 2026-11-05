@@ -365,7 +365,7 @@ pub async fn prepare_engine(
             model,
             ..
         } => {
-            let pipeline = build_pipeline::<
+            let (pipeline, _) = build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
             >(model.card(), inner_engine, model.card().tokenizer()?)
@@ -387,7 +387,10 @@ pub async fn build_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     engine: ExecutionContext,
     tokenizer: crate::tokenizers::Tokenizer,
-) -> anyhow::Result<Arc<ServiceFrontend<SingleIn<Req>, ManyOut<Annotated<Resp>>>>>
+) -> anyhow::Result<(
+    Arc<ServiceFrontend<SingleIn<Req>, ManyOut<Annotated<Resp>>>>,
+    Arc<OpenAIPreprocessor>,
+)>
 where
     Req: Data,
     Resp: Data,
@@ -401,7 +404,8 @@ where
     let PromptFormatter::OAI(formatter) = prompt_formatter_from_mdc(card)?;
     let preprocessor =
         OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())?;
-    link_pipeline(engine, tokenizer, preprocessor)
+    let pipeline = link_pipeline(engine, tokenizer, preprocessor.clone())?;
+    Ok((pipeline, preprocessor))
 }
 
 type InputFrontend<Req, Resp> = Arc<ServiceFrontend<SingleIn<Req>, ManyOut<Annotated<Resp>>>>;

@@ -509,6 +509,8 @@ jobs:
     - name: Run standalone slot-tracker feature tests
       # No workspace member requests standalone-slot-tracker, so it needs an explicit run here.
       run: cargo test --locked -p dynamo-kv-router --features standalone-slot-tracker --lib 'services::'
+    - name: Run Messages token-counting tests with image accounting
+      run: cargo test --locked -p dynamo-llm --features mm-routing --lib 'count_tokens'
     - name: Run canonical replay feature tests
       run: |
         cargo test --locked -p dynamo-bench --features replay-bench \
