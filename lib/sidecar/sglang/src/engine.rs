@@ -614,8 +614,9 @@ impl LLMEngine for SglangSidecarEngine {
         }))
     }
 
-    /// The Abort RPC goes to the listener that runs the request; it also
-    /// cancels requests opened through native HTTP.
+    /// A native dispatch is aborted on its own listener; otherwise the Abort
+    /// RPC goes to every listener. It also cancels requests opened through
+    /// native HTTP.
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
         let Some(state) = self.state.get() else {
             return;
