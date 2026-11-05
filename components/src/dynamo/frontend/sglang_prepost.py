@@ -1788,8 +1788,9 @@ class SglangStreamingPostProcessor:
                     normal_text
                 )
             content_text = parsed_text
-            if self._named_zero_arg_tool is not None:
-                # The exact regex emits the argument object, not user-visible text.
+            if self._is_json_array_parser:
+                # Forced calls may use native markup when JSON guidance is not
+                # enforced. Hold it for finish-time recovery, not answer text.
                 content_text = ""
 
             for tc in tool_calls:
@@ -1873,9 +1874,10 @@ class SglangStreamingPostProcessor:
                 # work on plain-text responses (common when tools are
                 # offered but the model replies without calling any) and
                 # guards against detectors that raise on arbitrary input.
-                should_reparse = bool(
-                    full_text
-                ) and self.tool_call_parser.has_tool_call(full_text)
+                should_reparse = bool(full_text) and (
+                    self._is_json_array_parser
+                    or self.tool_call_parser.has_tool_call(full_text)
+                )
 
             if should_reparse:
                 if self._is_json_array_parser:

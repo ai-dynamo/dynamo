@@ -537,6 +537,42 @@ class TestJsonArrayParserReparse:  # FRONTEND.4 — JSON-array parser reparse pa
     API surface so a SGLang upgrade can't silently break it.
     """
 
+    @pytest.mark.parametrize("batch_size", [1, 8, 1000])
+    def test_hunyuan_native_fallback(self, tokenizer, batch_size):
+        """Forced calls recover native markup without emitting it as content."""
+        text = (
+            "<tool_calls><tool_call>get_weather"
+            "<arg_key>city</arg_key><arg_value>NYC</arg_value>"
+            "</tool_call></tool_calls>"
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=JsonArrayParser(),
+            reasoning_parser=None,
+            sglang_tools=TOOLS,
+            tool_call_parser_name="hunyuan",
+        )
+        token_ids = tokenizer.encode(text)
+        choices = []
+        for start in range(0, len(token_ids), batch_size):
+            end = start + batch_size
+            choice = post.process_output(
+                {
+                    "token_ids": token_ids[start:end],
+                    "finish_reason": "stop" if end >= len(token_ids) else None,
+                }
+            )
+            if choice is not None:
+                choices.append(choice)
+
+        assert all(not choice["delta"].get("content") for choice in choices)
+        final = choices[-1]
+        assert final["finish_reason"] == "tool_calls"
+        calls = final["delta"]["tool_calls"]
+        assert len(calls) == 1
+        assert calls[0]["function"]["name"] == "get_weather"
+        assert json.loads(calls[0]["function"]["arguments"]) == {"city": "NYC"}
+
     def test_single_call_reparse(self, tokenizer):
         """Full JSON array arriving in one chunk triggers the re-parse."""
         text = '[{"name": "get_weather", "parameters": {"city": "NYC"}}]'
