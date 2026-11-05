@@ -126,6 +126,15 @@ def trace_env(**overrides: Any) -> list[dict[str, Any]]:
             "name": "DYN_REQUEST_TRACE_CAPACITY",
             "value": "8192",
         },
+        # The admin listener that serves /router_policy (P10).
+        "DYN_ENABLE_FRONTEND_ADMIN_API": {
+            "name": "DYN_ENABLE_FRONTEND_ADMIN_API",
+            "value": "1",
+        },
+        "DYN_FRONTEND_ADMIN_HOST": {
+            "name": "DYN_FRONTEND_ADMIN_HOST",
+            "value": "0.0.0.0",
+        },
     }
     for name, entry in overrides.items():
         if entry is None:
@@ -1997,6 +2006,9 @@ def test_worker_env_from_is_warned_once():
     assert report.p4_ok and report.spec_ok, report.reasons
     env_from = sorted(w for w in report.warnings if "envFrom" in w)
     assert env_from == [
+        "P10: the frontend uses envFrom, which the planner cannot read; it "
+        "assumes envFrom sets no DYN_FRONTEND_ADMIN_PORT and calls port 8002. "
+        "Set DYN_FRONTEND_ADMIN_PORT in the container's env to be sure",
         "P4: the frontend container uses envFrom secretRef 'hf-token-secret'; "
         "the planner cannot read it and assumes it sets no router env (P14 "
         "still checks the routers' policy parameters)",
@@ -2315,6 +2327,24 @@ P10_CASES = [
         },
         None,
     ),
+    # The admin listener that serves /router_policy.
+    (
+        {"DYN_ENABLE_FRONTEND_ADMIN_API": None},
+        None,
+        "must set DYN_ENABLE_FRONTEND_ADMIN_API=1",
+    ),
+    (
+        {"DYN_FRONTEND_ADMIN_HOST": None},
+        None,
+        "its admin listener binds 127.0.0.1 by default",
+    ),
+    ({"DYN_FRONTEND_ADMIN_PORT": "9100"}, None, None),
+    # The planner reads the pod spec, where $(VAR) is not expanded yet.
+    (
+        {"DYN_FRONTEND_ADMIN_PORT": "$(DYN_POD_NAME)"},
+        None,
+        "DYN_FRONTEND_ADMIN_PORT must be a literal value",
+    ),
 ]
 
 
@@ -2332,6 +2362,27 @@ def test_p10_trace_recipe(env, frontend_kwargs, match):
     else:
         assert any(match in r for r in p10), p10
         assert not report.spec_ok
+
+
+def test_p10_warns_when_env_from_could_set_the_admin_port():
+    def with_env_from(env: list[dict[str, Any]], source: dict[str, Any]) -> dict:
+        component = frontend(env=env)
+        component["podTemplate"]["spec"]["containers"][0]["envFrom"] = [source]
+        return dgd(component, worker(), planner())
+
+    def port_warnings(report: Any) -> list[str]:
+        return [w for w in report.warnings if "DYN_FRONTEND_ADMIN_PORT" in w]
+
+    source = {"configMapRef": {"name": "frontend-env"}}
+    report = evaluate(with_env_from(trace_env(), source))
+    assert report.spec_ok, report.reasons
+    assert port_warnings(report), report.warnings
+    # An explicit env entry wins over envFrom.
+    report = evaluate(with_env_from(trace_env(DYN_FRONTEND_ADMIN_PORT="8002"), source))
+    assert report.spec_ok and not port_warnings(report)
+    # A prefixed source cannot define the name.
+    report = evaluate(with_env_from(trace_env(), {**source, "prefix": "APP_"}))
+    assert report.spec_ok and not port_warnings(report)
 
 
 def test_p10_custom_segments_dir_and_graph_env():
