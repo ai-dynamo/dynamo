@@ -79,6 +79,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, applyCondition(ctx, r.client, dgd, nil)
 	}
 
+	// A stored Grove graph without the Grove integration has no observable update state; the DGD
+	// program rejects it as unavailable, so its Pods and condition are left untouched as well.
+	if dgd.Annotations[consts.KubeAnnotationWorkloadProvider] == "grove" && !r.groveEnabled {
+		return ctrl.Result{}, nil
+	}
+
 	condition, requeueAfter := r.propagate(ctx, dgd, caps)
 	if err := applyCondition(ctx, r.client, dgd, &condition); err != nil {
 		return ctrl.Result{}, err
@@ -88,7 +94,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 // propagate reports the observation before writes; a later observation proves convergence.
 // A Grove PodCliqueSet that Grove has not acknowledged or finished defers all Pod reads and writes.
-// dgd must be non-nil and caps non-empty.
+// dgd must be non-nil and caps non-empty; a Grove graph requires the Grove integration to be enabled.
 func (r *Reconciler) propagate(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, caps map[string]string) (metav1.Condition, time.Duration) {
 	condition := metav1.Condition{Type: ConditionType, ObservedGeneration: dgd.Generation, Status: metav1.ConditionTrue, Reason: "PodAnnotationsMatch", Message: "No live workers were observed"}
 	var requeueAfter time.Duration
@@ -100,7 +106,7 @@ func (r *Reconciler) propagate(ctx context.Context, dgd *v1beta1.DynamoGraphDepl
 	logger := log.FromContext(ctx)
 
 	// Wait for the observed Grove update to finish; the PodCliqueSet watch wakes the next pass.
-	if r.groveEnabled && dgd.Annotations[consts.KubeAnnotationWorkloadProvider] == "grove" {
+	if dgd.Annotations[consts.KubeAnnotationWorkloadProvider] == "grove" {
 		waiting, err := r.groveUpdatePending(ctx, dgd)
 		if err != nil {
 			logger.Error(err, "Failed to observe the power-cap PodCliqueSet")

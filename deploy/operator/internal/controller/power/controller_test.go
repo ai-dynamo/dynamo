@@ -16,6 +16,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -309,23 +310,48 @@ func TestPropagateGroveBarrier(t *testing.T) {
 	}
 }
 
-func TestReconcileWithoutCapsSkipsObservation(t *testing.T) {
-	t.Log("A graph without explicit worker caps and without the condition is not observed or written")
-	dgd := testDGD("default", "component")
-	delete(dgd.Spec.Components[0].PodTemplate.Annotations, consts.KubeAnnotationGPUPowerLimit)
-	calls := 0
-	c := testClient(t).WithObjects(dgd).WithInterceptorFuncs(interceptor.Funcs{
-		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			calls++
-			return c.List(ctx, list, opts...)
-		},
-		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-			calls++
-			return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
-		},
-	}).Build()
-	result, err := (&Reconciler{client: c}).Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dgd)})
-	require.NoError(t, err)
-	require.Zero(t, result.RequeueAfter)
-	require.Zero(t, calls)
+func TestReconcileSkipsUnobservableGraphs(t *testing.T) {
+	for _, scenario := range []string{"no-caps", "grove-disabled"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Log("Store a worker Pod at 300 W under a graph this controller must not observe")
+			provider := "component"
+			if scenario == "grove-disabled" {
+				provider = "grove"
+			}
+			dgd := testDGD("default", provider)
+			dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
+			if scenario == "no-caps" {
+				delete(dgd.Spec.Components[0].PodTemplate.Annotations, consts.KubeAnnotationGPUPowerLimit)
+			}
+			owners, pod := testOwners(dgd, provider)
+			podReads, podPatches := 0, 0
+			c := testClient(t).WithObjects(append(owners, dgd, pod)...).WithStatusSubresource(dgd).WithInterceptorFuncs(interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if _, ok := list.(*corev1.PodList); ok {
+						podReads++
+					}
+					return c.List(ctx, list, opts...)
+				},
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if _, ok := obj.(*corev1.Pod); ok {
+						podPatches++
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			}).Build()
+
+			t.Log("Reconcile with Grove disabled, as after an operator restart without the Grove integration")
+			result, err := (&Reconciler{client: c, groveEnabled: false}).Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dgd)})
+			require.NoError(t, err)
+			require.Zero(t, result.RequeueAfter)
+
+			t.Log("No Pod is read or patched and no condition is written")
+			require.Zero(t, podReads)
+			require.Zero(t, podPatches)
+			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
+			require.Equal(t, "300", pod.Annotations[consts.KubeAnnotationGPUPowerLimit])
+			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(dgd), dgd))
+			require.Nil(t, meta.FindStatusCondition(dgd.Status.Conditions, ConditionType))
+		})
+	}
 }
