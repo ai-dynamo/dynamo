@@ -264,7 +264,7 @@ The decode worker logs `Error in kv cache transfer for generation requests`, and
 - **NIXL LIBFABRIC plugin.** The image runs Dynamo's NIXL `v1.3.1` build. Its plugin caches the owning CUDA context of the first registered VRAM buffer. For virtual memory that context is NULL, and the check before posting descriptors then fails at `libfabric_backend.cpp:1130`. Fixed in [ai-dynamo/nixl#2425](https://github.com/ai-dynamo/nixl/pull/2425), first released in NIXL `v1.5.1`.
 - **libfabric EFA provider.** The EFA provider sets `CU_POINTER_ATTRIBUTE_SYNC_MEMOPS` on CUDA buffers. The CUDA driver returns `CUDA_ERROR_NOT_SUPPORTED` for virtual memory, so RMA writes and reads fail with `-FI_EINVAL` ([ofiwg/libfabric#12853](https://github.com/ofiwg/libfabric/issues/12853)). Fixed on the `v2.7.x` branch by [ofiwg/libfabric#12972](https://github.com/ofiwg/libfabric/pull/12972), after `v2.7.0`. The image uses the libfabric from EFA installer 1.50.0.
 
-The 1.6.0 images use TensorRT-LLM `1.3.0rc29`, which defaults to the `CPP` transceiver and KV cache manager v1. KV cache manager v1 allocates KV cache memory with `cudaMalloc`, which has an owning context, so neither defect is reached.
+The 1.6.0 images use TensorRT-LLM `1.3.0rc29`, which defaults to KV cache manager v1 for these models; with the NIXL backend it runs the `PYTHON` transceiver over the v1 pool. That pool is ordinary device memory, which has an owning context, so neither defect is reached.
 
 **Upstream status:** The image stays affected until it ships NIXL `v1.5.1` or newer and a libfabric that contains [ofiwg/libfabric#12972](https://github.com/ofiwg/libfabric/pull/12972). No libfabric release tag contains that fix yet.
 
