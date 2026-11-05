@@ -156,6 +156,8 @@ def test_uv_workspace_crates_retain_upstream_notices(tmp_path, version):
         "wrong-version",
         "extra-location",
         "wrong-name",
+        "shared-library",
+        "wrong-library-version",
     ],
 )
 def test_bundled_cpython_requires_matching_installation_and_notice(
@@ -182,6 +184,11 @@ def test_bundled_cpython_requires_matching_installation_and_notice(
         item["version"] = "3.12.14"
     if change == "extra-location":
         item["locations"].append({"path": "/opt/other/bin/python3.12"})
+    if change in {"shared-library", "wrong-library-version"}:
+        library_version = "3.12" if change == "shared-library" else "3.11"
+        item["locations"].append(
+            {"path": f"/{prefix}/lib/libpython{library_version}.so.1.0"}
+        )
     if change == "wrong-name":
         item["name"] = "unreviewed"
     components = shipped.supplement(
@@ -193,7 +200,7 @@ def test_bundled_cpython_requires_matching_installation_and_notice(
         tmp_path / "legal",
     )
     component = components[0]
-    if change == "none":
+    if change in {"none", "shared-library"}:
         assert component.spdx == "Python-2.0"
         assert component.license_text == text
         assert not component.license_text_is_canonical

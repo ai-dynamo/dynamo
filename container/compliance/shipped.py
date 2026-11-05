@@ -341,8 +341,12 @@ def _bundled_cpython(artifact: dict, root: Path) -> tuple[str, str, str]:
     notices = []
     for location in artifact.get("locations", []):
         path = _path(location["path"])
+        # Syft merges the executable and libpython into the same component.
+        # Both must belong to a version-matched standalone installation.
         match = re.fullmatch(
-            rf"(/opt/python/cpython-{re.escape(version)}-[^/]+)/bin/python{re.escape(major_minor)}",
+            rf"(/opt/python/cpython-{re.escape(version)}-[^/]+)/"
+            rf"(?:bin/python{re.escape(major_minor)}|"
+            rf"lib/libpython{re.escape(major_minor)}\.so(?:\.\d+)*)",
             path,
         )
         if not match:
