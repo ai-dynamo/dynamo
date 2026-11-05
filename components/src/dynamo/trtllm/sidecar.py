@@ -5,15 +5,19 @@
 
 import sys
 
-from dynamo._core import backend as _backend
-from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo._jemalloc import maybe_preload
 
 
 def main(argv: list[str] | None = None) -> None:
     """Run the Dynamo sidecar against a TensorRT-LLM gRPC endpoint."""
+    from dynamo._core import backend as _backend
+    from dynamo.runtime.logging import configure_dynamo_logging
+
     configure_dynamo_logging(service_name="dynamo.trtllm.sidecar")
     _backend._run_trtllm_sidecar(sys.argv[1:] if argv is None else argv)
 
 
 if __name__ == "__main__":
+    # Re-execs with the bundled jemalloc, so it must run before dynamo._core is imported.
+    maybe_preload()
     main()

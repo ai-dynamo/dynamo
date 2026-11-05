@@ -256,7 +256,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 # inherently GPL (no LGPL replacement), so the compliant fix is to not ship it.
 # (sglang_runtime.Dockerfile is the reference codec-compliance pattern.)
 # libjemalloc2 lets Dynamo processes opt into jemalloc via
-# LD_PRELOAD or DYN_FRONTEND_JEMALLOC; it is not preloaded by default.
+# LD_PRELOAD; Dynamo entrypoints preload their own bundled copy.
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

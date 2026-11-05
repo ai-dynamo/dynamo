@@ -75,6 +75,23 @@ packages:
       - trtllm-runtime
       - trtllm-runtime-efa
 
+  # jemalloc shared library built in wheel_builder (container/deps/jemalloc/build.sh) and
+  # bundled in the ai-dynamo-runtime wheel as dynamo/libjemalloc_dynamo.so.2, with its
+  # license as dynamo/libjemalloc_dynamo.COPYING. Ships wherever that wheel is installed.
+  - name: jemalloc
+    version: "5.3.0"
+    license: BSD-2-Clause
+    source: https://github.com/jemalloc/jemalloc
+    images:
+      - vllm-runtime
+      - vllm-runtime-efa
+      - sglang-runtime
+      - sglang-runtime-efa
+      - trtllm-runtime
+      - trtllm-runtime-efa
+      - dynamo-frontend
+      - dynamo-planner
+
   - name: libvpx
     # VP8/VP9 codec library — the in-tree ffmpeg's only video encoder now that
     # H.264/NVENC is removed. Shipped in every image that carries the ffmpeg libs.

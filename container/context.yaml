@@ -89,6 +89,10 @@ dynamo:
   # ffmpeg build inputs (only consumed when ENABLE_MEDIA_FFMPEG=true).
   nv_codec_headers_ref: "n13.0.19.0"
   libvpx_ref: "v1.14.1"
+  # jemalloc shared library bundled in the ai-dynamo-runtime wheel (container/deps/jemalloc/build.sh).
+  # Keep in sync with native_packages.yaml's jemalloc entry.
+  jemalloc_version: "5.3.0"
+  jemalloc_sha256: "2db82d1e7119df3e71b7640219b6dfe84789bc0537983c3b7ac4f7189aecfeaa"
   sccache_version: "v0.14.0"
   efa_version: 1.50.0
 

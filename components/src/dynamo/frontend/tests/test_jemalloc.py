@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import ctypes.util
 import os
 import runpy
 import sys
@@ -11,85 +10,38 @@ from unittest.mock import Mock
 
 import pytest
 
+from dynamo import _jemalloc
+
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 ENTRYPOINT = Path(__file__).resolve().parents[1] / "__main__.py"
 
 
 @pytest.fixture
-def startup(monkeypatch):
-    monkeypatch.delenv("DYN_FRONTEND_JEMALLOC", raising=False)
+def startup(monkeypatch, tmp_path):
+    monkeypatch.delenv(_jemalloc.DISABLE_ENV, raising=False)
     monkeypatch.delenv("LD_PRELOAD", raising=False)
+    monkeypatch.setattr(sys, "platform", "linux")
+    library = tmp_path / "libjemalloc_dynamo.so.2"
+    library.touch()
+    monkeypatch.setattr(_jemalloc, "LIBRARY", library)
     runtime = ModuleType("dynamo.frontend.main")
     runtime.main = Mock()
     monkeypatch.setitem(sys.modules, "dynamo.frontend.main", runtime)
-    find_library = Mock(return_value="libjemalloc.so.2")
     execve = Mock(side_effect=SystemExit)
-    monkeypatch.setattr(ctypes.util, "find_library", find_library)
     monkeypatch.setattr(os, "execve", execve)
-    return find_library, execve, runtime.main
-
-
-@pytest.mark.parametrize("enabled", [None, "0", "false"])
-def test_disabled(startup, monkeypatch, enabled):
-    if enabled is not None:
-        monkeypatch.setenv("DYN_FRONTEND_JEMALLOC", enabled)
-    find_library, execve, main = startup
-    runpy.run_path(str(ENTRYPOINT), run_name="__main__")
-    find_library.assert_not_called()
-    execve.assert_not_called()
-    main.assert_called_once_with()
-    assert "LD_PRELOAD" not in os.environ
-
-
-@pytest.mark.parametrize("separator", [":", " "])
-def test_already_preloaded(startup, monkeypatch, separator):
-    monkeypatch.setenv("DYN_FRONTEND_JEMALLOC", "1")
-    preload = f"libother.so{separator}/usr/lib/libjemalloc.so.2"
-    monkeypatch.setenv("LD_PRELOAD", preload)
-    find_library, execve, main = startup
-    runpy.run_path(str(ENTRYPOINT), run_name="__main__")
-    find_library.assert_not_called()
-    execve.assert_not_called()
-    main.assert_called_once_with()
-    assert os.environ["LD_PRELOAD"] == preload
-
-
-def test_missing_library(startup, monkeypatch, capsys):
-    monkeypatch.setenv("DYN_FRONTEND_JEMALLOC", "1")
-    find_library, execve, main = startup
-    find_library.return_value = None
-    runpy.run_path(str(ENTRYPOINT), run_name="__main__")
-    find_library.assert_called_once_with("jemalloc")
-    execve.assert_not_called()
-    main.assert_called_once_with()
-    assert "libjemalloc was not found" in capsys.readouterr().err
-    assert "LD_PRELOAD" not in os.environ
+    return library, execve, runtime.main
 
 
 @pytest.mark.parametrize(
-    "enabled,existing",
-    [
-        ("1", ""),
-        ("true", "libother.so:libanother.so"),
-        ("YES", "/opt/jemalloc-tools/libheaptrace.so"),
-    ],
+    "existing",
+    ["", "libother.so:libanother.so", "/opt/jemalloc-tools/libheaptrace.so"],
 )
-def test_restart(startup, monkeypatch, enabled, existing):
-    monkeypatch.setenv("DYN_FRONTEND_JEMALLOC", enabled)
+def test_restart(startup, monkeypatch, existing):
     monkeypatch.setenv("LD_PRELOAD", existing)
-    argv = [
-        sys.executable,
-        "-u",
-        "-X",
-        "faulthandler",
-        "-m",
-        "dynamo.frontend",
-        "--http-port",
-        "8123",
-    ]
+    argv = [sys.executable, "-u", "-m", "dynamo.frontend", "--http-port", "8123"]
     monkeypatch.setattr(sys, "orig_argv", argv)
-    find_library, execve, main = startup
+    library, execve, main = startup
     stdout, stderr = Mock(), Mock()
     monkeypatch.setattr(sys, "stdout", stdout)
     monkeypatch.setattr(sys, "stderr", stderr)
@@ -100,20 +52,55 @@ def test_restart(startup, monkeypatch, enabled, existing):
         raise SystemExit
 
     execve.side_effect = replace_process
-    expected_env = dict(
-        os.environ, LD_PRELOAD="libjemalloc.so.2" + (f":{existing}" if existing else "")
-    )
+    preload = f"{library}:{existing}" if existing else str(library)
     with pytest.raises(SystemExit):
         runpy.run_path(str(ENTRYPOINT), run_name="__main__")
-    find_library.assert_called_once_with("jemalloc")
-    execve.assert_called_once_with(sys.executable, argv, expected_env)
+    execve.assert_called_once_with(
+        sys.executable, argv, dict(os.environ, LD_PRELOAD=preload)
+    )
     assert os.environ["LD_PRELOAD"] == existing
     main.assert_not_called()
 
 
-@pytest.mark.parametrize("existing", [None, "", "libother.so"])
+@pytest.mark.parametrize("disabled", ["1", "true", "YES"])
+def test_disabled(startup, monkeypatch, disabled):
+    monkeypatch.setenv(_jemalloc.DISABLE_ENV, disabled)
+    _, execve, main = startup
+    runpy.run_path(str(ENTRYPOINT), run_name="__main__")
+    execve.assert_not_called()
+    main.assert_called_once_with()
+    assert "LD_PRELOAD" not in os.environ
+
+
+@pytest.mark.parametrize(
+    "preload",
+    [
+        "libother.so:/usr/lib/libjemalloc.so.2",
+        "libother.so /usr/lib/libjemalloc.so.2",
+        "/site-packages/dynamo/libjemalloc_dynamo.so.2",
+    ],
+)
+def test_already_preloaded(startup, monkeypatch, preload):
+    monkeypatch.setenv("LD_PRELOAD", preload)
+    _, execve, main = startup
+    runpy.run_path(str(ENTRYPOINT), run_name="__main__")
+    execve.assert_not_called()
+    main.assert_called_once_with()
+    assert os.environ["LD_PRELOAD"] == preload
+
+
+def test_library_not_bundled(startup, monkeypatch, capsys):
+    library, execve, main = startup
+    library.unlink()
+    runpy.run_path(str(ENTRYPOINT), run_name="__main__")
+    execve.assert_not_called()
+    main.assert_called_once_with()
+    assert "is not bundled" in capsys.readouterr().err
+    assert "LD_PRELOAD" not in os.environ
+
+
+@pytest.mark.parametrize("existing", [None, "libother.so"])
 def test_exec_failure(startup, monkeypatch, capsys, existing):
-    monkeypatch.setenv("DYN_FRONTEND_JEMALLOC", "1")
     if existing is not None:
         monkeypatch.setenv("LD_PRELOAD", existing)
     _, execve, main = startup
@@ -124,10 +111,8 @@ def test_exec_failure(startup, monkeypatch, capsys, existing):
     assert "exec blocked" in capsys.readouterr().err
 
 
-def test_import_does_not_restart(startup, monkeypatch):
-    monkeypatch.setenv("DYN_FRONTEND_JEMALLOC", "1")
-    find_library, execve, main = startup
+def test_import_does_not_restart(startup):
+    _, execve, main = startup
     runpy.run_path(str(ENTRYPOINT), run_name="dynamo.frontend.__main__")
-    find_library.assert_not_called()
     execve.assert_not_called()
     main.assert_not_called()

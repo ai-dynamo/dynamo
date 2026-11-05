@@ -112,20 +112,21 @@ measured traffic.
 ## Bound frontend host memory growth
 
 The frontend allocates host memory per request for tokenization, routing bookkeeping, and response
-assembly. With the default glibc allocator, freed memory may be retained in allocator arenas instead
-of being returned to the operating system, so frontend resident memory can climb to a high-water
-mark under load and may not drop when the load stops. This retention is allocator behavior rather
+assembly. Freed memory is not always returned to the operating system right away, so frontend
+resident memory rises to a high-water mark under load. This retention is allocator behavior rather
 than a leak.
 
-To bound the retained footprint, preload jemalloc with decay enabled on the frontend container. See
+The frontend preloads a bundled jemalloc by default, with a background thread that returns freed
+pages after about 10 seconds, so resident memory should fall back toward the live heap once the load
+stops. To change the decay or arena settings, set `MALLOC_CONF` on the frontend container; to keep
+the system allocator, set `DYN_DISABLE_JEMALLOC=1`. See
 [Host memory allocator](../../reference/components/frontend-configuration.mdx#host-memory-allocator)
-for the `LD_PRELOAD` and `MALLOC_CONF` values and for which container images ship `libjemalloc2`.
+for the defaults.
 
 To verify the change, run the same workload and track the frontend container's memory usage
 (`memory.current` on cgroup v2, or `memory.usage_in_bytes` on cgroup v1) across repeated benchmark
 rounds and through an idle window after the load stops.
 
-With glibc the value typically stays at its peak, while with jemalloc and decay it may
-settle toward a floor. Those decay settings do not guarantee that purging occurs during an idle
-window; include an idle period in the benchmark to confirm whether memory actually settles for
-your workload.
+With glibc (`DYN_DISABLE_JEMALLOC=1`) the value typically stays at its peak, while with the
+bundled jemalloc it settles toward a floor once the load stops. Include an idle period in the
+benchmark to see how far memory settles for your workload.
