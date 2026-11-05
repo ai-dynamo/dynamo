@@ -493,6 +493,15 @@ frontend:
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
   - 'container/templates/verify_ca_certificates.Dockerfile'
+  # Direct frontend image BuildKit inputs. These are not promoted from core
+  # into frontend_any_modified, so a PR that only touches them would otherwise
+  # skip frontend-build and dedicated frontend-runtime-epp-parity.
+  - '.dockerignore'
+  - 'container/Dockerfile.template'
+  - 'container/templates/args.Dockerfile'
+  - 'container/templates/dynamo_base.Dockerfile'
+  - 'container/templates/wheel_builder.Dockerfile'
+  - 'container/templates/compliance.Dockerfile'
   # The frontend image is rendered from these two: render.py generates its
   # Dockerfile, and context.yaml supplies EPP_IMAGE -- the `FROM` that the
   # compliance stages read /sbom-rust-epp.cdx.json and /rust-licenses out of.
