@@ -52,7 +52,7 @@ spec:
 
 `metadata.name` can have at most 63 characters, because the operator copies it unchanged into the `nvidia.com/dynamo-graph-deployment-name` label. Admission rejects a longer name when the DGD is created. An existing DGD with a longer name can still be updated and deleted.
 
-Each component's DCD, Service, and `nvidia.com/selector` label value is named `<dgd-name>-<component-name>`. Worker DCDs also end with a worker hash. When this name is longer than 63 characters, the operator keeps its first 46 characters and appends `-` and 16 hexadecimal characters of a SHA-256 hash of the full name. Names of 63 characters or fewer are not changed.
+Each component's DCD, Service, and `nvidia.com/selector` label value is named `<dgd-name>-<component-name>`, with the component name in lowercase. Worker DCDs also end with a worker hash. When this name is longer than 63 characters, the operator keeps at most its first 46 characters, without a trailing `-` or `.`, and appends `-` and 16 hexadecimal characters of a SHA-256 hash of the full name. Names of 63 characters or fewer are not changed.
 
 ## Grove update strategy
 

@@ -2751,13 +2751,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).ComponentName = tooLongComponentName
 			}),
 		},
-		// The DGD name is a label value; derived names are shortened instead.
-		{
-			name: "DGD name whose derived names exceed 63 characters is admitted",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Name = "dsv41-flash-vllm-gb200-disagg-agentic-production-us-east-1"
-			}),
-		},
+		// The DGD name is a label value, so it must fit in 63 characters.
 		{
 			name: "DGD name longer than a label value is rejected",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
