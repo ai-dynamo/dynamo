@@ -45,6 +45,9 @@ knowledge_base:
   code_guidelines:
     filePatterns:
       - ".ai/**/*.md"
-      - ".github/review-prompts/metrics.md"
+      - files: ".ai/metrics-guidelines.md"
+        applyTo: "**/*.{rs,py,go}, docs/fern/pages/reference/observability/*.mdx"
+      - files: ".github/review-prompts/metrics.md"
+        applyTo: "**/*.{rs,py,go}, docs/fern/pages/reference/observability/*.mdx"
 chat:
   auto_reply: true
