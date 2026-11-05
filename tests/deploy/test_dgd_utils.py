@@ -48,6 +48,31 @@ def test_logging_config_reads_existing_v1beta1_env(tmp_path) -> None:
     assert deployment_spec.get_logging_config()["jsonl_enabled"] is True
 
 
+def test_set_logging_writes_graph_env_for_v1beta1(tmp_path) -> None:
+    """set_logging must write v1beta1's graph-level ``spec.env`` key."""
+    manifest = {
+        "apiVersion": "nvidia.com/v1beta1",
+        "kind": "DynamoGraphDeployment",
+        "metadata": {"name": "logging-test"},
+        "spec": {"components": []},
+    }
+    manifest_path = tmp_path / "deploy.yaml"
+    manifest_path.write_text(yaml.safe_dump(manifest))
+
+    deployment_spec = DeploymentSpec(str(manifest_path))
+    deployment_spec.set_logging(enable_jsonl=True, log_level="info")
+
+    env = deployment_spec.spec()["spec"]["env"]
+    names = [e["name"] for e in env]
+    assert "DYN_LOGGING_JSONL" in names and "DYN_LOG" in names
+    assert deployment_spec.get_logging_config() == {
+        "jsonl_enabled": True,
+        "log_level": "info",
+    }
+    # The v1alpha1 graph-level key must not appear on a v1beta1 manifest.
+    assert "envs" not in deployment_spec.spec()["spec"]
+
+
 @pytest.mark.parametrize(
     "connection_error",
     [

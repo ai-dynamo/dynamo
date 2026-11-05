@@ -133,11 +133,16 @@ jobs:
           digest=$(skopeo inspect --raw "docker://$image" | jq -er '
             .manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest')
           export RUNTIME_IMAGE="$image@$digest"
-          yq -i '.spec.services[].extraPodSpec.mainContainer.image = strenv(RUNTIME_IMAGE) |
-            .spec.services[].extraPodSpec.imagePullSecrets = [{"name": strenv(ACR_SECRET)}]' "$OVERLAY/patch-deploy.yaml"
+          yq -i '.spec.components[].podTemplate.spec.containers |=
+              map(if .name == "main" then .image = strenv(RUNTIME_IMAGE) else . end) |
+            .spec.components[].podTemplate.spec.imagePullSecrets = [{"name": strenv(ACR_SECRET)}]' "$OVERLAY/patch-deploy.yaml"
           for worker in ${WORKERS//,/ }; do
             export WORKER="$worker"
-            yq -i '.spec.services[strenv(WORKER)].envFromSecret = strenv(HF_SECRET)' "$OVERLAY/patch-deploy.yaml"
+            yq -i '.spec.components[] |= (if .name == strenv(WORKER) then
+                .podTemplate.spec.containers |= map(if .name == "main" then
+                  .envFrom = [{"secretRef": {"name": strenv(HF_SECRET)}}]
+                else . end)
+              else . end)' "$OVERLAY/patch-deploy.yaml"
           done
           yq -i '.commonLabels.ci-run = strenv(RUN_KEY) |
             .commonLabels.ci-workflow = strenv(RECIPE)' "$OVERLAY/kustomization.yaml"

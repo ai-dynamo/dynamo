@@ -1,53 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-moe-agg
 spec:
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
-    worker:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      replicas: 1
-      resources:
-        requests:
-          memory: "50Gi"
-          gpu: "2"
-        limits:
-          memory: "100Gi"
-          gpu: "2"
-      envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
-        # MoE-specific environment variables
-        - name: VLLM_ALL2ALL_BACKEND
-          value: "pplx"
-        - name: VLLM_USE_ELASTIC_EP
-          value: "1"
-        - name: VLLM_USE_DEEP_GEMM
-          value: "1"
-        - name: VLLM_USE_V1
-          value: "1"
-        - name: VLLM_WORKER_MULTIPROC_METHOD
-          value: "spawn"
-        - name: CUDA_VISIBLE_DEVICES
-          value: "0,1"
-        - name: VLLM_DEBUG
-          value: "1"
-        - name: VLLM_LOGGING_LEVEL
-          value: "DEBUG"
-      extraPodSpec:
+  - name: worker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
         imagePullSecrets:
         - name: nvcr-imagepullsecret
-        mainContainer:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
           workingDir: /workspace/examples/backends/vllm
           command:
@@ -77,3 +53,33 @@ spec:
             - "10"
             - --no-enable-prefix-caching
             - --enforce-eager
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          env:
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            # MoE-specific environment variables
+            - name: VLLM_ALL2ALL_BACKEND
+              value: "pplx"
+            - name: VLLM_USE_ELASTIC_EP
+              value: "1"
+            - name: VLLM_USE_DEEP_GEMM
+              value: "1"
+            - name: VLLM_USE_V1
+              value: "1"
+            - name: VLLM_WORKER_MULTIPROC_METHOD
+              value: "spawn"
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0,1"
+            - name: VLLM_DEBUG
+              value: "1"
+            - name: VLLM_LOGGING_LEVEL
+              value: "DEBUG"
+          resources:
+            requests:
+              memory: "50Gi"
+              nvidia.com/gpu: "2"
+            limits:
+              memory: "100Gi"
+              nvidia.com/gpu: "2"

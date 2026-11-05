@@ -1,24 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: dsv4-pro-disagg
 spec:
   priorityClassName: ci-nightly-high-priority
-  pvcs:
-  - name: shared-model-cache
-    create: false
-  services:
-    Frontend:
-      extraPodMetadata: &podMetadata
+  components:
+  - name: Frontend
+    podTemplate:
+      metadata: &podMetadata
         annotations:
           nvidia.com/disable-image-pull-secret-discovery: "true"
-      volumeMounts: &modelVolumeMounts
-      - name: shared-model-cache
-        mountPoint: /opt/models
-      extraPodSpec:
+      spec:
+        volumes: &modelCacheVolume
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
         priorityClassName: ci-nightly-high-priority
         imagePullSecrets:
         - name: acr-token-secret
@@ -44,25 +43,17 @@ spec:
                 - key: cloud.google.com/gke-nodepool
                   operator: In
                   values: [customer-gpu-o7v, customer-gpu-w0e]
-    prefill:
-      extraPodMetadata: *podMetadata
-      envs: &workerEnvs
-      - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
-        value: "1200"
-      # vLLM reads per-transfer NIXL telemetry. The NOP exporter keeps that
-      # data available without binding one Prometheus port per DP process.
-      - name: NIXL_TELEMETRY_ENABLE
-        value: "y"
-      - name: NIXL_TELEMETRY_EXPORTER
-        value: NOP
-      volumeMounts: *modelVolumeMounts
-      extraPodSpec:
+        containers:
+        - name: main
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /opt/models
+  - name: decode
+    podTemplate:
+      metadata: *podMetadata
+      spec:
+        volumes: *modelCacheVolume
         priorityClassName: ci-nightly-high-priority
-        mainContainer: &workerMainContainer
-          # DeepSeek V4 Pro loads an 805 GiB checkpoint from Lustre. Preserve
-          # the first cold-start attempt instead of restarting it at 90 minutes.
-          startupProbe:
-            failureThreshold: 900
         imagePullSecrets:
         - name: acr-token-secret
         nodeSelector: *arm64NodeSelector
@@ -78,13 +69,30 @@ spec:
                 - key: nvidia.com/dynamo-component-type
                   operator: In
                   values: [prefill, decode]
-    decode:
-      extraPodMetadata: *podMetadata
-      envs: *workerEnvs
-      volumeMounts: *modelVolumeMounts
-      extraPodSpec:
+        containers:
+        - name: main
+          env: &workerEnvs
+          - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+            value: "1200"
+          # vLLM reads per-transfer NIXL telemetry. The NOP exporter keeps that
+          # data available without binding one Prometheus port per DP process.
+          - name: NIXL_TELEMETRY_ENABLE
+            value: "y"
+          - name: NIXL_TELEMETRY_EXPORTER
+            value: NOP
+          startupProbe: &workerStartupProbe
+            # DeepSeek V4 Pro loads an 805 GiB checkpoint from Lustre. Preserve
+            # the first cold-start attempt instead of restarting it at 90 minutes.
+            failureThreshold: 900
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /opt/models
+  - name: prefill
+    podTemplate:
+      metadata: *podMetadata
+      spec:
+        volumes: *modelCacheVolume
         priorityClassName: ci-nightly-high-priority
-        mainContainer: *workerMainContainer
         imagePullSecrets:
         - name: acr-token-secret
         nodeSelector: *arm64NodeSelector
@@ -92,3 +100,10 @@ spec:
         affinity:
           nodeAffinity: *gb200NodeAffinity
           podAffinity: *workerPodAffinity
+        containers:
+        - name: main
+          env: *workerEnvs
+          startupProbe: *workerStartupProbe
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /opt/models
