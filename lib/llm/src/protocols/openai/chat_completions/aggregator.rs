@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize;
 
-use super::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse};
+use super::{
+    NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse, ResponseOutputEvent,
+};
 use crate::protocols::{
     Annotated,
     codec::{Message, SseCodecError},
@@ -143,6 +145,9 @@ async fn parse_complete_tool_output(
 /// from a streaming OpenAI API call into a complete final response.
 pub struct DeltaAggregator {
     /// Unique identifier for the chat completion.
+    response_events: Vec<ResponseOutputEvent>,
+    has_message_phases: bool,
+    recorded_calls: std::collections::HashSet<String>,
     id: String,
     /// Model name used for the chat completion.
     model: String,
@@ -173,6 +178,7 @@ struct DeltaChoice {
     role: Option<dynamo_protocols::types::Role>,
     /// The reason the completion was finished (if applicable).
     finish_reason: Option<dynamo_protocols::types::FinishReason>,
+    model_eos: bool,
     /// Optional log probabilities for the chat choice.
     logprobs: Option<dynamo_protocols::types::ChatChoiceLogprobs>,
     // Tool-call chunks accumulated in the order they arrived from the stream,
@@ -350,6 +356,19 @@ fn merge_tool_call_chunk(
     {
         existing.r#type = Some(ty);
     }
+    // Custom deltas carry freeform input instead of function JSON fragments.
+    if let Some(incoming_custom) = incoming.custom {
+        let custom = existing.custom.get_or_insert_with(Default::default);
+        if custom.name.is_none() {
+            custom.name = incoming_custom.name;
+        }
+        if let Some(input) = incoming_custom.input {
+            custom
+                .input
+                .get_or_insert_with(String::new)
+                .push_str(&input);
+        }
+    }
     let Some(incoming_fn) = incoming.function else {
         return;
     };
@@ -390,6 +409,22 @@ fn finalize_merged_tool_chunk(
         );
         return None;
     };
+    if chunk.r#type == Some(dynamo_protocols::types::FunctionType::Custom) {
+        let custom = chunk.custom?;
+        let name = custom.name?;
+        let input = custom.input.unwrap_or_default();
+        return Some(dynamo_protocols::types::ChatCompletionMessageToolCall {
+            id,
+            r#type: dynamo_protocols::types::FunctionType::Custom,
+            function: dynamo_protocols::types::FunctionCall {
+                name: name.clone(),
+                arguments:
+                    serde_json::json!({dynamo_protocols::types::CUSTOM_TOOL_INPUT_ARG:&input})
+                        .to_string(),
+            },
+            custom: Some(dynamo_protocols::types::CustomToolCall { name, input }),
+        });
+    }
     let Some(function) = chunk.function else {
         tracing::warn!(
             tool_call_index = index,
@@ -407,11 +442,9 @@ fn finalize_merged_tool_chunk(
         return None;
     };
     Some(dynamo_protocols::types::ChatCompletionMessageToolCall {
+        custom: None,
         id,
-        // Use the merged r#type if the stream carried one. Falls back to
-        // `Function` — today the only variant in the OpenAI schema, but
-        // threading the merged value keeps us forward-compat if variants
-        // are added later and avoids dead state in `merge_tool_call_chunk`.
+        // Preserve the merged function type; custom calls were handled above.
         r#type: chunk
             .r#type
             .unwrap_or(dynamo_protocols::types::FunctionType::Function),
@@ -426,6 +459,9 @@ impl DeltaAggregator {
     /// Creates a new, empty [`DeltaAggregator`] instance.
     pub fn new() -> Self {
         Self {
+            response_events: Vec::new(),
+            has_message_phases: false,
+            recorded_calls: std::collections::HashSet::new(),
             id: "".to_string(),
             model: "".to_string(),
             created: 0,
@@ -500,6 +536,31 @@ impl DeltaAggregator {
 
                     merge_response_nvext(&mut aggregator.nvext, delta.nvext);
 
+                    if let Some(boundary) = delta.message_boundary {
+                        aggregator.has_message_phases = true;
+                        aggregator.response_events.push(ResponseOutputEvent::Boundary(boundary));
+                    }
+                    for choice in delta.inner.choices.iter().filter(|choice| choice.index == 0) {
+                        if let Some(reasoning) = &choice.delta.reasoning_content {
+                            if let Some(ResponseOutputEvent::Reasoning(previous)) = aggregator.response_events.last_mut() {
+                                previous.push_str(reasoning);
+                            } else {
+                                aggregator.response_events.push(ResponseOutputEvent::Reasoning(reasoning.clone()));
+                            }
+                        }
+                        if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
+                            if let Some(ResponseOutputEvent::Text(previous)) = aggregator.response_events.last_mut() {
+                                previous.push_str(text);
+                            } else {
+                                aggregator.response_events.push(ResponseOutputEvent::Text(text.clone()));
+                            }
+                        }
+                        for call in choice.delta.tool_calls.iter().flatten() {
+                            if let Some(id) = &call.id && aggregator.recorded_calls.insert(id.clone()) {
+                                aggregator.response_events.push(ResponseOutputEvent::ToolCall(id.clone()));
+                            }
+                        }
+                    }
                     if let Some(prompt_logprobs) = delta.prompt_logprobs {
                         aggregator.prompt_logprobs = Some(prompt_logprobs);
                     }
@@ -516,6 +577,7 @@ impl DeltaAggregator {
                                     text: "".to_string(),
                                     role: choice_role,
                                     finish_reason: None,
+                                    model_eos: false,
                                     logprobs: None,
                                     tool_call_chunks: BTreeMap::new(),
                                     parser_call_completion: HashMap::new(),
@@ -564,6 +626,7 @@ impl DeltaAggregator {
                                     .entry(chunk.index)
                                     .or_insert_with(|| {
                                         dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                                            custom: None,
                                             index: chunk.index,
                                             id: None,
                                             r#type: None,
@@ -577,6 +640,7 @@ impl DeltaAggregator {
                         // Update finish reason if provided.
                         if let Some(finish_reason) = choice.finish_reason {
                             state_choice.finish_reason = Some(finish_reason);
+                            state_choice.model_eos = delta.model_eos.contains(&choice.index);
                         }
 
                         // Update logprobs
@@ -689,7 +753,7 @@ impl DeltaAggregator {
                 {
                     continue;
                 }
-                match super::unified_parser::parse_complete_with_policy(
+                match super::unified_parser::parse_complete_with_eos(
                     family,
                     &choice.text,
                     &parsing_options.guided_tool_constraint,
@@ -697,9 +761,22 @@ impl DeltaAggregator {
                     super::unified_parser::UnifiedRequestPolicy {
                         reasoning_disabled: parsing_options.reasoning_disabled,
                         structured_response: parsing_options.structured_response,
+                        ..Default::default()
                     },
+                    choice.model_eos
+                        && choice.finish_reason
+                            == Some(dynamo_protocols::types::FinishReason::Stop),
                 ) {
                     Ok(parsed) => {
+                        if choice.index == 0
+                            && parsed
+                                .events
+                                .iter()
+                                .any(|event| matches!(event, ResponseOutputEvent::Boundary(_)))
+                        {
+                            aggregator.has_message_phases = true;
+                            aggregator.response_events = parsed.events;
+                        }
                         if parsed.incomplete_native_call
                             && matches!(
                                 choice.finish_reason,
@@ -730,6 +807,12 @@ impl DeltaAggregator {
                                     Some(dynamo_protocols::types::FinishReason::ToolCalls);
                             }
                         }
+                    }
+                    Err(error) if family == super::unified_parser::BEAM_UNIFIED_FAMILY => {
+                        return Err(DynamoError::builder()
+                            .class(dynamo_runtime::error::ErrorClass::Internal)
+                            .diagnostic(format!("Invalid Beam tool output: {error}"))
+                            .build());
                     }
                     Err(error) => {
                         // Best-effort: the aggregated text is served as-is rather than
@@ -884,6 +967,11 @@ impl DeltaAggregator {
 
         // Construct the final response object.
         let response = NvCreateChatCompletionResponse {
+            response_events: if aggregator.has_message_phases {
+                aggregator.response_events
+            } else {
+                Vec::new()
+            },
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: aggregator.id,
                 created: aggregator.created,
@@ -1076,6 +1164,7 @@ mod tests {
         let tool_call_chunks = tool_calls.map(|tool_calls| {
             vec![
                 dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                    custom: None,
                     index: 0,
                     id: Some("test_id".to_string()),
                     r#type: Some(dynamo_protocols::types::FunctionType::Function),
@@ -1116,6 +1205,7 @@ mod tests {
         };
 
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "meta/llama-3.1-8b-instruct".to_string(),
@@ -1130,6 +1220,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
 
         Annotated {
@@ -1166,6 +1257,7 @@ mod tests {
             logprobs: None,
         };
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "nvidia/nvidia-nemotron-3-ultra".to_string(),
@@ -1180,6 +1272,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
         Annotated {
             data: Some(data),
@@ -1289,6 +1382,7 @@ mod tests {
             logprobs: None,
         };
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "m".to_string(),
@@ -1303,6 +1397,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
         let annotated = Annotated {
             data: Some(data),
@@ -1349,6 +1444,7 @@ mod tests {
             logprobs: None,
         };
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "meta/llama-3.1-8b-instruct".to_string(),
@@ -1363,6 +1459,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
         Annotated {
             data: Some(data),
@@ -1387,6 +1484,7 @@ mod tests {
     #[tokio::test]
     async fn test_issue_8640_split_tool_call_arguments_reconstructed() {
         let name_chunk = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("tc1".to_string()),
             r#type: Some(dynamo_protocols::types::FunctionType::Function),
@@ -1396,6 +1494,7 @@ mod tests {
             }),
         };
         let args_chunk_1 = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: None,
             r#type: None,
@@ -1405,6 +1504,7 @@ mod tests {
             }),
         };
         let args_chunk_2 = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: None,
             r#type: None,
@@ -1470,6 +1570,7 @@ mod tests {
     async fn test_parallel_tool_calls_interleaved_chunks_aggregate_independently() {
         let make_name = |idx: u32, id: &str, name: &str| {
             dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: idx,
                 id: Some(id.to_string()),
                 r#type: Some(dynamo_protocols::types::FunctionType::Function),
@@ -1481,6 +1582,7 @@ mod tests {
         };
         let make_args = |idx: u32, fragment: &str| {
             dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: idx,
                 id: None,
                 r#type: None,
@@ -1545,6 +1647,7 @@ mod tests {
     async fn test_parallel_tool_calls_false_caps_to_first_call() {
         let make_name = |idx: u32, id: &str, name: &str| {
             dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: idx,
                 id: Some(id.to_string()),
                 r#type: Some(dynamo_protocols::types::FunctionType::Function),
@@ -1556,6 +1659,7 @@ mod tests {
         };
         let make_args = |idx: u32, fragment: &str| {
             dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: idx,
                 id: None,
                 r#type: None,
@@ -1625,6 +1729,7 @@ mod tests {
     #[tokio::test]
     async fn test_fragment_only_chunks_without_opener_drop_cleanly() {
         let args_only = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: None,
             r#type: None,
@@ -1968,6 +2073,7 @@ mod tests {
         // Create a delta with multiple choices
         // ALLOW: function_call is deprecated
         let data = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
                 model: "test_model".to_string(),
@@ -2013,6 +2119,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
 
         // Wrap it in Annotated and create a stream
@@ -2275,6 +2382,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nemotron_already_parsed_answer_survives_aggregation() {
+        // A non-streaming request still runs the unified stream parser first, so the
+        // aggregator receives the split `reasoning_content` + `content` deltas and then
+        // re-reads the choice text as a safety net. Nemotron's implicit-thought default
+        // must not relabel that already-parsed answer as reasoning.
+        const CHILD: &str = "DYNAMO_NEMOTRON_AGGREGATION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = crate::test_utils::isolated_command(
+                "protocols::openai::chat_completions::aggregator::tests::nemotron_already_parsed_answer_survives_aggregation",
+            )
+            .env(CHILD, "1")
+            .env(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )
+            .output()
+            .unwrap();
+            crate::test_utils::assert_isolated_success(&output);
+            return;
+        }
+        let options = ParsingOptions::new(
+            Some("qwen3_coder".to_string()),
+            Some("nemotron_v3".to_string()),
+        );
+        assert_eq!(
+            super::super::unified_parser::selected_batch_family(
+                options.tool_call_parser.as_deref(),
+                options.reasoning_parser.as_deref(),
+            ),
+            Some("nemotron_v3")
+        );
+        let result = NvCreateChatCompletionResponse::from_annotated_stream(
+            stream::iter([create_reasoning_delta(0, "Hello!", "Let me greet them.")]),
+            options.clone(),
+        )
+        .await
+        .unwrap();
+        let message = &result.inner.choices[0].message;
+        assert_eq!(
+            message.content,
+            Some(ChatCompletionMessageContent::Text("Hello!".to_string()))
+        );
+        assert_eq!(
+            message.reasoning_content.as_deref(),
+            Some("Let me greet them.")
+        );
+        assert!(message.tool_calls.is_none());
+
+        // Reasoning-only, empty answer: the safety net has nothing to re-read, and
+        // force_nonempty_content still surfaces the thought as content.
+        let result = NvCreateChatCompletionResponse::from_annotated_stream(
+            stream::iter([create_reasoning_delta(0, "", "Only thinking.")]),
+            options.with_move_reasoning_to_content_when_empty(true),
+        )
+        .await
+        .unwrap();
+        let message = &result.inner.choices[0].message;
+        assert_eq!(
+            message.content,
+            Some(ChatCompletionMessageContent::Text(
+                "Only thinking.".to_string()
+            ))
+        );
+        assert!(message.reasoning_content.is_none());
+    }
+
+    #[tokio::test]
     async fn terminal_validation_preserves_legacy_structured_calls() {
         use super::super::unified_parser;
         use dynamo_protocols::types::FinishReason;
@@ -2449,8 +2623,6 @@ mod tests {
                 incomplete_filtered,
                 unterminated,
             ])),
-            // DeepSeek V4.1 selects the unified adapter without the Qwen opt-in flag,
-            // so this terminal-policy regression also runs in the default test suite.
             ParsingOptions::new(
                 Some("deepseek_v41".to_string()),
                 Some("deepseek_v41".to_string()),
@@ -2590,6 +2762,7 @@ mod tests {
     async fn terminal_normalization_drops_incomplete_call_but_keeps_closed_json() {
         let make_chunk = |id: Option<&str>, name: Option<&str>, arguments: Option<&str>| {
             dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: 0,
                 id: id.map(str::to_string),
                 r#type: id.map(|_| dynamo_protocols::types::FunctionType::Function),
@@ -2703,6 +2876,7 @@ mod tests {
     async fn terminal_normalization_keeps_valid_calls_when_sibling_is_malformed() {
         let make_chunk = |index, id: Option<&str>, name: Option<&str>, arguments: &str| {
             dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index,
                 id: id.map(str::to_string),
                 r#type: id.map(|_| dynamo_protocols::types::FunctionType::Function),
@@ -2783,6 +2957,7 @@ mod tests {
     async fn test_length_drops_a_nonfinal_invalid_structured_tool_call() {
         let make_name = |idx: u32, id: &str, name: &str| {
             dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: idx,
                 id: Some(id.to_string()),
                 r#type: Some(dynamo_protocols::types::FunctionType::Function),
@@ -2794,6 +2969,7 @@ mod tests {
         };
         let make_args = |idx: u32, fragment: &str| {
             dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: idx,
                 id: None,
                 r#type: None,
@@ -2869,6 +3045,7 @@ mod tests {
     async fn test_length_drops_the_final_invalid_structured_tool_call() {
         let make_name = |idx: u32, id: &str, name: &str| {
             dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: idx,
                 id: Some(id.to_string()),
                 r#type: Some(dynamo_protocols::types::FunctionType::Function),
@@ -2880,6 +3057,7 @@ mod tests {
         };
         let make_args = |idx: u32, fragment: &str| {
             dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: idx,
                 id: None,
                 r#type: None,
@@ -2927,6 +3105,7 @@ mod tests {
     #[tokio::test]
     async fn test_length_drops_a_final_tool_call_with_no_argument_bytes() {
         let call = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("first".to_string()),
             r#type: Some(dynamo_protocols::types::FunctionType::Function),
@@ -2961,6 +3140,7 @@ mod tests {
     #[tokio::test]
     async fn test_finished_tool_call_with_no_argument_bytes_remains_valid() {
         let call = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("first".to_string()),
             r#type: Some(dynamo_protocols::types::FunctionType::Function),
@@ -3537,6 +3717,7 @@ mod tests {
             logprobs: None,
             tool_call_chunks: BTreeMap::new(),
             parser_call_completion: HashMap::new(),
+            model_eos: false,
             tool_calls: None,
             reasoning_content: Some("Analyzing the question.".to_string()),
             refusal: None,

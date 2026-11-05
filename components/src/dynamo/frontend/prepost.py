@@ -14,14 +14,20 @@ from dataclasses import dataclass
 from functools import lru_cache, partial
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
 )
 from vllm.reasoning import ReasoningParser
-from vllm.renderers import ChatParams, merge_kwargs
+from vllm.renderers import ChatParams
+from vllm.renderers.chat_utils import make_tool_call_id
+from vllm.renderers.hf import resolve_chat_template
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
@@ -29,9 +35,9 @@ from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
 from dynamo.common.utils.guided_json import admits_only_empty_object
-from dynamo.frontend.vllm_protocol import DeltaFunctionCall, DeltaMessage, DeltaToolCall
 from dynamo.llm.exceptions import InvalidArgument
 
+from .responses_history import responses_history_template, responses_tools_request
 from .structural_tag_policy import (
     ToolChoiceKind,
     effective_tool_strict,
@@ -577,7 +583,6 @@ def _prepare_request(
     model_config: ModelConfig | None = None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
-    default_chat_template_kwargs: dict[str, Any] | None = None,
     default_thinking_mode: str | None = None,
     validated_request: ChatCompletionRequest | None = None,
     guidance_snapshots: dict[str, Any] | None = None,
@@ -598,6 +603,27 @@ def _prepare_request(
         messages_for_render: Messages to pass as first arg to render_messages.
         chat_params: ChatParams for render_messages / render_messages_async.
     """
+    resolved_responses_template = None
+    if (
+        isinstance(request, dict)
+        and request.get("responses_native_tools")
+        and not (
+            exclude_tools_when_tool_choice_none and request.get("tool_choice") == "none"
+        )
+    ):
+        # Resolve using the legacy function view so variant/override precedence
+        # is unchanged, then switch the whole in-process view together.
+        resolved_responses_template = resolve_chat_template(
+            tokenizer,
+            request.get("chat_template"),
+            request.get("tools"),
+            model_config=model_config,
+        )
+        selected_request = responses_tools_request(request, resolved_responses_template)
+        if selected_request is not request:
+            request = selected_request
+            validated_request = None
+
     request_for_sampling = (
         validated_request
         if validated_request is not None
@@ -630,14 +656,9 @@ def _prepare_request(
     raw_template_args = (
         request.get("chat_template_args") if isinstance(request, dict) else None
     )
-    # Reuse vLLM's merge so unset request values (None/"auto") keep the server
-    # default; copy the result since the default dict is shared across requests
-    # and we mutate reasoning_effort below.
+    # A copy, because reasoning_effort is written into it below.
     chat_template_kwargs = dict(
-        merge_kwargs(
-            default_chat_template_kwargs,
-            request_for_sampling.chat_template_kwargs or raw_template_args or {},
-        )
+        request_for_sampling.chat_template_kwargs or raw_template_args or {}
     )
     # reasoning_effort is a request-level thinking control. Put an explicit
     # value into the kwargs before applying the deployment default so the two
@@ -708,8 +729,22 @@ def _prepare_request(
         else request_for_sampling.messages
     )
 
+    if tool_dicts and isinstance(request, dict):
+        tool_dicts = request.get("responses_template_tools", tool_dicts)
+
+    chat_template = responses_history_template(
+        resolved_responses_template or request_for_sampling.chat_template,
+        request.get("responses_history_phases") if isinstance(request, dict) else None,
+        lambda: resolved_responses_template
+        or resolve_chat_template(
+            tokenizer,
+            request_for_sampling.chat_template,
+            tool_dicts,
+            model_config=model_config,
+        ),
+    )
     chat_params = ChatParams(
-        chat_template=request_for_sampling.chat_template,
+        chat_template=chat_template,
         chat_template_content_format="auto",
         # Renderer-managed keys last so a nested duplicate can't raise TypeError.
         chat_template_kwargs={
@@ -741,7 +776,6 @@ async def preprocess_chat_request(
     model_config: ModelConfig | None = None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
-    default_chat_template_kwargs: dict[str, Any] | None = None,
     default_thinking_mode: str | None = None,
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
@@ -776,7 +810,6 @@ async def preprocess_chat_request(
         model_config=model_config,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
         enable_auto_tool_choice=enable_auto_tool_choice,
-        default_chat_template_kwargs=default_chat_template_kwargs,
         default_thinking_mode=default_thinking_mode,
         validated_request=validated_request,
         guidance_snapshots=guidance_snapshots,
@@ -1520,9 +1553,10 @@ class StreamingPostProcessor:
 
             # When reasoning ends in this chunk, reset accumulated state.
             # If there is post-reasoning content (e.g. <tool_call> markup),
-            # buffer it for non-streaming extraction rather than feeding it
-            # to the streaming tool parser which cannot handle the combined
-            # reasoning-end + tool-start in a single chunk.
+            # an engine-based tool parser streams it; otherwise buffer it for
+            # non-streaming extraction rather than feeding it to a streaming
+            # tool parser that cannot handle the combined reasoning-end +
+            # tool-start in a single chunk.
             if self.reasoning_parser.engine_based_streaming:
                 reasoning_ended = (
                     self.reasoning_parser.has_engine_confirmed_reasoning_end()
@@ -1548,7 +1582,30 @@ class StreamingPostProcessor:
                 current_token_ids = []
 
                 tool_start_markers = self._tool_start_markers()
-                if post_content and any(
+                if (
+                    post_content
+                    and self._should_parse_tools()
+                    and self.tool_parser is not None
+                    and self.tool_parser.engine_based_streaming
+                ):
+                    # An engine-based tool parser holds back an opener split
+                    # across steps, so the text after the reasoning end goes to
+                    # it with its token IDs. Emitting that text as content here
+                    # leaked a partial opener and lost the tool call.
+                    current_text = post_content
+                    current_token_ids = self.reasoning_parser.extract_content_ids(
+                        delta_token_ids
+                    )
+                    delta_message = self._merge_delta_messages(
+                        self._compose_delta_message(saved_reasoning, None),
+                        self._extract_tool_calls_streaming(
+                            current_text=current_text,
+                            delta_text=current_text,
+                            current_token_ids=current_token_ids,
+                            delta_token_ids=current_token_ids,
+                        ),
+                    )
+                elif post_content and any(
                     marker in post_content for marker in tool_start_markers
                 ):
                     # Tool call markup present — buffer for non-streaming

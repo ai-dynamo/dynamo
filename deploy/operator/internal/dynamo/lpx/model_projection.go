@@ -72,6 +72,15 @@ type ModelProjection struct {
 	agentReplicas int
 	// localPartitionIDs lists the runtime partitions that run on the Cyborg GPU, in build order.
 	localPartitionIDs []int
+	// checkpoint is the build checkpoint projected into the Cyborg conductor, or nil.
+	// Projecting or dropping it leaves the digest unchanged. The build's
+	// contentID still hashes the whole deployment contract, so a rebuild whose
+	// recorded checkpoint differs has a new digest and rolls the workload.
+	checkpoint *Checkpoint
+}
+
+func (p *ModelProjection) Checkpoint() *Checkpoint {
+	return p.checkpoint
 }
 
 // AgentReplicas returns the number of LPU Agent Pods that the projection requires.

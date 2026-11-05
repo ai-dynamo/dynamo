@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
+import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -10,6 +13,55 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@unittest.skipUnless(shutil.which("jq"), "requires jq CLI")
+class GroveWebhookConfigurationTest(unittest.TestCase):
+    def test_alpha_requests_are_covered_by_fail_closed_webhooks(self):
+        """Accept equivalent beta rules without accepting fail-open or exact beta rules."""
+        action = (
+            ROOT.parents[3] / ".github/actions/setup-dynamo-operator/action.yml"
+        ).read_text()
+        query = re.search(
+            r"(?s)if ! jq -e --arg webhook_name.*? '\n(.*?)\n          ' <<<",
+            action,
+        ).group(1)
+        webhook = {
+            "name": "pcs.defaulting.webhooks.grove.io",
+            "failurePolicy": "Fail",
+            "rules": [
+                {
+                    "apiGroups": ["grove.io"],
+                    "apiVersions": ["v1alpha1"],
+                    "resources": ["podcliquesets"],
+                    "operations": ["CREATE"],
+                }
+            ],
+        }
+        for version, policy, failure, accepted in (
+            ("v1alpha1", "Exact", "Fail", True),
+            ("v1beta1", "Equivalent", "Fail", True),
+            ("v1beta1", None, "Fail", True),
+            ("v1beta1", "Exact", "Fail", False),
+            ("v1beta1", "Equivalent", "Ignore", False),
+            ("v1beta2", "Equivalent", "Fail", False),
+        ):
+            with self.subTest(version=version, policy=policy, failure=failure):
+                candidate = copy.deepcopy(webhook)
+                candidate["failurePolicy"] = failure
+                if policy is not None:
+                    candidate["matchPolicy"] = policy
+                candidate["rules"][0]["apiVersions"] = [version]
+                result = subprocess.run(
+                    ["jq", "-e", "--arg", "webhook_name", webhook["name"], query],
+                    input=json.dumps({"webhooks": [candidate]}),
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0 if accepted else 1, result.stderr)
+
+
+@unittest.skipUnless(shutil.which("helm"), "requires Helm CLI")
 class GroveVersionTest(unittest.TestCase):
     def helm(self, *args):
         result = subprocess.run(

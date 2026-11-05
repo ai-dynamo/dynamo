@@ -131,6 +131,19 @@ def test_event_plane_zmq_ignores_ambient_nats(monkeypatch):
 
 
 @pytest.mark.forked
+def test_default_event_plane_ignores_ambient_nats(monkeypatch):
+    """Without event_plane, file/TCP mode defaults to ZMQ and must not connect to ambient NATS."""
+
+    async def _run():
+        monkeypatch.setenv("NATS_SERVER", "nats://127.0.0.1:9")
+        monkeypatch.delenv("DYN_EVENT_PLANE", raising=False)
+        runtime = DistributedRuntime(asyncio.get_running_loop(), "file", "tcp")
+        runtime.shutdown()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.forked
 def test_invalid_event_plane_errors():
     async def _run():
         with pytest.raises(ValueError, match="Invalid event_plane value"):

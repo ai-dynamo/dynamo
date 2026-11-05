@@ -12,24 +12,33 @@ repository.workspace = true
 description = "Dynamo Runtime Library"
 
 [package.metadata.cargo-machete]
-ignored = ["mio"]
+# nvtx is depended on for the static C library its build script compiles with
+# `cc`, not for its Rust API: src/nvtx.rs declares the `ffi_*` symbols itself so
+# the signatures match nvtx-sys/export.c (the upstream `ffi_range_end` binding
+# does not) and so marker names cannot panic on an interior NUL. No Rust path
+# names the crate, which is exactly the case machete cannot see.
+ignored = ["mio", "nvtx"]
 
 [features]
 default = []
 integration = []
+velo-ucx = ["velo/ucx"]
 testing-etcd = [] # Tests that require an active ETCD server
 # White-box helpers for cross-crate lifecycle tests. Never enabled by a normal build.
 testing = []
 tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 compute-validation = [] # Enable validation and timing for compute macros
 tcp-low-latency = [] # Enable Linux-specific TCP optimizations (TCP_QUICKACK, SO_BUSY_POLL)
-# NVTX timeline annotations for Nsight Systems (compile-time off; also gated at runtime by DYN_ENABLE_RUST_NVTX).
-# Overhead: feature off = zero; feature on, env off = ~1ns AtomicBool load; feature on, env on = ~50ns/annotation.
+# NVTX v3 timeline annotations for Nsight Systems (compile-time off; also gated at runtime by DYN_NVTX).
+# Overhead: feature off = zero. Feature on, env off = an inlined relaxed atomic load plus a
+# predictable branch. Feature on, env on = two heap allocations (the crate renders the name with
+# to_string() then copies it into a CString) plus the injection-library call. See lib/runtime/src/nvtx.rs.
 # The nvtx crate compiles the header-only NVTX3 shim in, so a wheel built with this
 # feature has no libnvToolsExt.so dependency (CUDA 12.9+ no longer ships that library).
 nvtx = ["dep:nvtx"]
 
 [dependencies]
+velo = { workspace = true }
 # repo
 dynamo-truthy = { workspace = true }
 
@@ -41,6 +50,7 @@ async-trait = { workspace = true }
 tmq = { workspace = true }
 lru = { version = "0.16" }
 axum = { workspace = true }
+base64 = { version = "0.22" }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
@@ -87,6 +97,9 @@ url = { workspace = true }
 validator = { workspace = true }
 xxhash-rust = { workspace = true }
 
+# NVTX v3: header-only, statically linked by the crate's build script. Unlike the
+# NVTX v2 C API (nvToolsExt), this needs no shared library at runtime — the stubs
+# bind to the profiler's injection library via NVTX_INJECTION64_PATH on first use.
 nvtx = { version = "1.3", optional = true }
 
 arc-swap = { version = "1" }
@@ -128,6 +141,7 @@ nix = { version = "0.30.1", default-features = false, features = ["net"] }
 
 [dev-dependencies]
 h2 = "0.4"
+velo = { workspace = true, features = ["test-helpers"] }
 tower = { workspace = true }
 criterion = { version = "0.5", features = ["async_tokio"] }
 rcgen = { workspace = true }

@@ -49,6 +49,12 @@ def create_config() -> DynamoVllmConfig:
     config.embedding_worker = False
     config.embedding_frontend_tokenization = False
     config.embedding_worker_processes = 1
+    config.transcription_worker = False
+    config.realtime = False
+    config.classify_worker = False
+    config.custom_encoder_class = None
+    config.gms_shadow_mode = False
+    config.enable_rl = False
     config.headless = False
     config.benchmark_mode = None
     config.use_vllm_tokenizer = False
@@ -318,6 +324,38 @@ class TestEmbeddingFrontendTokenization:
             DynamoVllmArgGroup().add_arguments(parser)
 
 
+class TestTranscriptionWorkerExclusivity:
+    def test_baseline_aggregated_is_accepted(self):
+        config = create_config()
+        config.transcription_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config._validate_transcription_worker_exclusivity()
+
+    def test_non_aggregated_mode_is_rejected(self):
+        config = create_config()
+        config.transcription_worker = True
+        config.disaggregation_mode = DisaggregationMode.DECODE
+        with pytest.raises(ValueError, match="disaggregation-mode=agg"):
+            config._validate_transcription_worker_exclusivity()
+
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [
+            ("embedding_worker", True),
+            ("classify_worker", True),
+            ("realtime", True),
+            ("headless", True),
+        ],
+    )
+    def test_standalone_role_combinations_are_rejected(self, option, value):
+        config = create_config()
+        config.transcription_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        setattr(config, option, value)
+        with pytest.raises(ValueError, match=option.replace("_", "-")):
+            config._validate_transcription_worker_exclusivity()
+
+
 class TestRealtimeWorkerExclusivity:
     def test_baseline_aggregated_is_accepted(self):
         config = create_config()
@@ -534,6 +572,20 @@ class TestParseArgsLoraExclusivity:
         config = self._parse(["--realtime"])
         assert config.realtime is True
         assert not config.engine_args.enable_lora
+
+
+@pytest.mark.usefixtures("vllm_cpu_platform_when_no_accelerator")
+@pytest.mark.parametrize(
+    "flag",
+    [
+        ["--default-chat-template-kwargs", '{"enable_thinking": false}'],
+        ['--default_chat_template_kwargs={"enable_thinking": false}'],
+        ["--default-chat-template-kwargs.enable_thinking", "false"],
+    ],
+)
+def test_default_chat_template_kwargs_points_to_the_frontend(flag):
+    with pytest.raises(ValueError, match="python -m dynamo.frontend"):
+        parse_args(["--model", "Qwen/Qwen3-0.6B", *flag])
 
 
 class TestValidateCustomEncoder:
@@ -843,3 +895,57 @@ class TestEmbeddingWorkerProcesses:
         config.headless = True
         with pytest.raises(ValueError, match="--headless"):
             config._validate_embedding_worker_processes()
+
+
+class TestFreezeGcAfterInit:
+    """--freeze-gc-after-init is opt-in and rejected where it cannot run."""
+
+    def test_is_opt_in(self, monkeypatch):
+        monkeypatch.delenv("DYN_VLLM_FREEZE_GC_AFTER_INIT", raising=False)
+        parser = argparse.ArgumentParser()
+        DynamoVllmArgGroup().add_arguments(parser)
+
+        assert parser.parse_args([]).freeze_gc_after_init is False
+        assert parser.parse_args(["--freeze-gc-after-init"]).freeze_gc_after_init
+        assert DynamoVllmConfig.freeze_gc_after_init is False
+
+    def test_env_enables(self, monkeypatch):
+        monkeypatch.setenv("DYN_VLLM_FREEZE_GC_AFTER_INIT", "true")
+        parser = argparse.ArgumentParser()
+        DynamoVllmArgGroup().add_arguments(parser)
+
+        assert parser.parse_args([]).freeze_gc_after_init is True
+
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            DisaggregationMode.AGGREGATED,
+            DisaggregationMode.DECODE,
+            DisaggregationMode.PREFILL,
+        ],
+    )
+    def test_registering_roles_accepted(self, mode):
+        config = create_config()
+        config.freeze_gc_after_init = True
+        config.disaggregation_mode = mode
+        config._validate_freeze_gc_after_init()
+
+    def test_encode_rejected(self):
+        config = create_config()
+        config.freeze_gc_after_init = True
+        config.disaggregation_mode = DisaggregationMode.ENCODE
+        with pytest.raises(ValueError, match="--freeze-gc-after-init"):
+            config._validate_freeze_gc_after_init()
+
+    def test_headless_rejected(self):
+        config = create_config()
+        config.freeze_gc_after_init = True
+        config.headless = True
+        with pytest.raises(ValueError, match="--headless"):
+            config._validate_freeze_gc_after_init()
+
+    def test_disabled_skips_checks(self):
+        config = create_config()
+        config.headless = True
+        config.disaggregation_mode = DisaggregationMode.ENCODE
+        config._validate_freeze_gc_after_init()

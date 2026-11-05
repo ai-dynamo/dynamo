@@ -138,9 +138,9 @@ Expose one registration function from the policy crate:
 
 ```rust
 pub fn register(
-    registry: &mut WorkerSelectionPolicyRegistry,
+    registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    registry.register("simple-filter-score-pick", Arc::new(provider))
+    registry.register_worker_selection("simple-filter-score-pick", Arc::new(provider))
 }
 ```
 
@@ -248,7 +248,7 @@ For a private catalog, keep the dependency alias and change the package name and
 The example EPP links the example catalog and registers it before the standard runner starts:
 
 ```rust
-let mut registry = WorkerSelectionPolicyRegistry::default();
+let mut registry = RouterPluginRegistry::default();
 dynamo_custom_policy_example_catalog::register(&mut registry)?;
 run(Some(registry)).await
 ```
@@ -376,3 +376,11 @@ python3 -m dynamo.mocker \
 ```
 
 Send the same `curl` request from a fourth terminal. The frontend log records separate prefill and decode selections. Each worker set runs its own filter, scorer, and picker.
+
+## Runtime Parameters
+
+The `simple-filter-score-pick` provider supports runtime updates to
+`min_device_overlap_blocks`; the other examples remain startup-only. See the
+[runtime policy API](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#runtime-policy-updates).
+A positive threshold requires usable device-overlap data. Cold or replay requests without
+that data, including in the Mocker walkthrough, can have no eligible workers.

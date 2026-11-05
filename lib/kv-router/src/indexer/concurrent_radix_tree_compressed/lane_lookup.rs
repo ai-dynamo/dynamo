@@ -19,17 +19,17 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use super::block_lookup::BlockLookup;
+use super::block_lookup::{BlockLookup, Slot};
 use super::node::CleanupEdge;
 use super::types::SharedNode;
 use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
 /// A lane-local name for a node the lane holds. Non-zero so a lookup slot holding a key
-/// and an id stays 16 bytes.
+/// and an id stays 12 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct NodeId(NonZeroU32);
 
-const _: () = assert!(size_of::<Option<(ExternalSequenceBlockHash, NodeId)>>() == 16);
+const _: () = assert!(size_of::<Option<Slot<NodeId>>>() == 12);
 
 impl NodeId {
     fn from_index(index: usize) -> Self {
@@ -183,8 +183,18 @@ impl LaneLookup {
         worker: WorkerWithDpRank,
         hash: ExternalSequenceBlockHash,
     ) -> Option<SharedNode> {
+        self.held(worker, hash).map(|(_, node)| node.clone())
+    }
+
+    /// Like [`Self::node`], but borrows the lane's hold instead of cloning the `Arc`, and
+    /// also returns the id [`Self::upsert_all_held`] takes.
+    pub(super) fn held(
+        &self,
+        worker: WorkerWithDpRank,
+        hash: ExternalSequenceBlockHash,
+    ) -> Option<(NodeId, &SharedNode)> {
         let &id = self.workers.get(&worker)?.get(&hash)?;
-        Some(self.nodes.node(id).clone())
+        Some((id, self.nodes.node(id)))
     }
 
     pub(super) fn names(&self, node: &SharedNode) -> bool {
@@ -202,10 +212,7 @@ impl LaneLookup {
         let (Some(blocks), Some(id)) = (self.workers.get(&worker), self.nodes.id_of(node)) else {
             return 0;
         };
-        hashes
-            .iter()
-            .take_while(|hash| blocks.get(hash) == Some(&id))
-            .count()
+        blocks.leading_holding(hashes, id)
     }
 
     /// Points `worker`'s entries for `hashes` at `node`. Returns the number of entries
@@ -219,8 +226,22 @@ impl LaneLookup {
     where
         I: Iterator<Item = ExternalSequenceBlockHash> + Clone,
     {
+        let id = self.nodes.hold(node);
+        self.upsert_all_held(worker, hashes, id)
+    }
+
+    /// Like [`Self::upsert_all`], for the node the lane holds as `id`, which
+    /// [`Self::held`] returned with no lane change since.
+    pub(super) fn upsert_all_held<I>(
+        &mut self,
+        worker: WorkerWithDpRank,
+        hashes: I,
+        id: NodeId,
+    ) -> usize
+    where
+        I: Iterator<Item = ExternalSequenceBlockHash> + Clone,
+    {
         let Self { workers, nodes, .. } = self;
-        let id = nodes.hold(node);
         let changed = workers
             .entry(worker)
             .or_default()
@@ -314,7 +335,7 @@ impl LaneLookup {
             if !target(worker) {
                 return true;
             }
-            for (&hash, &id) in blocks.iter() {
+            for (hash, &id) in blocks.iter() {
                 nodes.drop_refs(id, 1);
                 on_removed(worker, hash);
             }
