@@ -75,6 +75,7 @@ var snapshotRestoreEnvironmentNames = map[string]struct{}{
 	"ENGINE_ID":                             {},
 	"ETCD_ENDPOINTS":                        {},
 	"FAILOVER_LOCK_PATH":                    {},
+	"HF_HUB_OFFLINE":                        {},
 	"MODEL_EXPRESS_URL":                     {},
 	"NATS_SERVER":                           {},
 	"POD_NAME":                              {},

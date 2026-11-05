@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -12,8 +13,17 @@ from dynamo.common.snapshot.constants import (
     READY_FOR_SNAPSHOT_FILE,
     RESTORE_COMPLETE_FILE,
     SNAPSHOT_CONTROL_DIR_ENV,
+    SNAPSHOT_RESTORE_CONTEXT_FILE,
 )
-from dynamo.common.snapshot.lifecycle import SnapshotConfig, elect_and_wake
+from dynamo.common.snapshot.lifecycle import (
+    SnapshotConfig,
+    configure_snapshot_capture_env,
+    elect_and_wake,
+)
+from dynamo.common.snapshot.restore_context import (
+    refresh_snapshot_restore_config,
+    write_snapshot_restore_context,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
@@ -104,6 +114,50 @@ async def test_elect_and_wake_resumes_without_lock(monkeypatch):
 
     assert lock is None
     assert controller.resumed is True
+
+
+@pytest.mark.parametrize(
+    "destination_policy", ["1", "0", "true", "false", "", None, "legacy"]
+)
+async def test_restore_applies_destination_offline_policy_before_runtime_parsing(
+    monkeypatch, tmp_path, destination_policy
+):
+    monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+    if destination_policy is None or destination_policy == "legacy":
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    else:
+        monkeypatch.setenv("HF_HUB_OFFLINE", destination_policy)
+    write_snapshot_restore_context()
+    if destination_policy == "legacy":
+        context_path = tmp_path / SNAPSHOT_RESTORE_CONTEXT_FILE
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        context["env"].pop("HF_HUB_OFFLINE", None)
+        context_path.write_text(json.dumps(context), encoding="utf-8")
+
+    for name in (
+        "NCCL_IB_DISABLE",
+        "NCCL_RAS_ENABLE",
+        "TORCH_NCCL_ENABLE_MONITORING",
+        "TORCH_NCCL_DUMP_ON_TIMEOUT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    configure_snapshot_capture_env()
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+
+    (tmp_path / RESTORE_COMPLETE_FILE).write_text("done", encoding="utf-8")
+    controller = _PauseController()
+    config = SnapshotConfig.from_env()
+    assert config is not None
+    assert await asyncio.wait_for(config.run_lifecycle(controller), timeout=1) is True
+
+    expected_policy = None if destination_policy == "legacy" else destination_policy
+
+    def parse_config():
+        assert os.environ.get("HF_HUB_OFFLINE") == expected_policy
+        return SimpleNamespace(discovery_backend="file")
+
+    await refresh_snapshot_restore_config(SimpleNamespace(), parse_config)
+    assert controller.resumed is False
 
 
 def _patch_flock_lock(monkeypatch, fake_lock):

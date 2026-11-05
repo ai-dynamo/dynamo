@@ -25,6 +25,8 @@ RESTORE_COMPLETE_FILE = "restore-complete"
 READY_FOR_SNAPSHOT_FILE = "ready-for-snapshot"
 
 RESTORE_RUNTIME_ENV_NAMES = {
+    # Destination policy replaces the temporary capture-time offline override.
+    "HF_HUB_OFFLINE",
     # Parsed Python runtime config that must also refresh the in-memory config
     # passed to create_runtime().
     "DYN_DISCOVERY_BACKEND",
