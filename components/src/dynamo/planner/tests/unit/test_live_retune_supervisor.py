@@ -261,6 +261,8 @@ class FakeFrontend:
         self._ids = itertools.count()
         self.kube = kube
         self.down = False
+        # The pod answers, but its listener serves no /router_policy (404).
+        self.no_policy_api = False
         # (writer, advisory, kind, router_id)
         self.writes: list[tuple[str, bool, str, str]] = []
         self.routers: dict[str, Router] = {}
@@ -317,6 +319,8 @@ class FrontendPolicyClient:
         frontend = self.world.frontend
         if frontend.down:
             return PolicyCallResult(status=0, error="connection refused")
+        if frontend.no_policy_api:
+            return PolicyCallResult(status=404, error="Not Found")
         routers = tuple(self._info(r) for r in frontend.routers.values())
         return PolicyCallResult(status=200, routers=routers)
 
@@ -1016,6 +1020,48 @@ async def test_gate_reasons_and_the_skip_metric() -> None:
     world.spec.replicas = None
     await sup.control_round()
     assert sup.launch_gate(K0 + 2, window(K0 + 2)).reason == "not_ready"
+
+
+async def test_not_ready_and_p12_say_why(caplog) -> None:
+    world = World()
+    process = await leading(world)
+    sup = process.sup
+    assert sup.ready() and sup.not_ready_reasons() == []
+    with caplog.at_level(logging.INFO, logger="dynamo.planner.retune.live"):
+        world.frontend.down = True
+        await sup.control_round()
+        assert "retune: P12 fails: P12: not every ready frontend has its routers" in (
+            caplog.text
+        )
+        assert sup.launch_gate(K0 + 1, window(K0 + 1)).reason == "not_ready"
+        gate_logs = [r for r in caplog.records if "retune gate" in r.message]
+        assert gate_logs[-1].levelname == "WARNING"
+        assert f"window {K0 + 1} not_ready: P12:" in gate_logs[-1].message
+
+        # A frontend that answers 404 on /router_policy serves no router
+        # policy API on that port: after ADMIN_API_DISABLED_ROUNDS rounds,
+        # P12 names the admin listener.
+        world.frontend.down = False
+        world.frontend.no_policy_api = True
+        caplog.clear()
+        for _ in range(3):
+            await sup.control_round()
+        assert not sup.ready()
+        assert any(
+            "DYN_ENABLE_FRONTEND_ADMIN_API" in reason
+            for reason in sup.not_ready_reasons()
+        )
+        # P12 stayed false, but its cause changed: logged again.
+        assert "admin listener is off" in caplog.text
+        caplog.clear()
+        world.frontend.no_policy_api = False
+        await sup.control_round()
+        assert sup.ready()
+        assert "retune: P12 ok" in caplog.text
+        # Logged once per change, not every round.
+        caplog.clear()
+        await sup.control_round()
+        assert "P12" not in caplog.text
 
 
 async def test_harvest_allowed_needs_leader_initialized_and_generation() -> None:
