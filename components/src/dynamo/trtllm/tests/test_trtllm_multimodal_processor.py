@@ -1260,16 +1260,11 @@ async def test_loaded_embedding_log_keeps_signed_url_out(
     signed_url = f"{embedding_server.url}/emb.safetensors{_SIGNED_QUERY}"
 
     with caplog.at_level(logging.DEBUG):
-        try:
-            await processor.process_openai_request(
-                _embedding_request(signed_url),
-                embeddings=None,
-                ep_disaggregated_params=None,
-            )
-        except Exception:
-            # Steps after the embedding load may fail on the mock tokenizer;
-            # the log line under test has already been written by then.
-            pass
+        await processor.process_openai_request(
+            _embedding_request(signed_url),
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
 
     # The signed URL went out on the wire, so the client had the credential.
     assert len(embedding_server.hits) == 1
