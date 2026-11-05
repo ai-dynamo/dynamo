@@ -40,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	runtimejson "k8s.io/apimachinery/pkg/runtime/serializer/json"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
@@ -1397,10 +1398,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleFailedPhase(ctx context.C
 	return ctrl.Result{}, nil
 }
 
-// getProfilingJobName returns the job name for a DGDR
+// getProfilingJobName returns the profiling Job name for a DGDR: "profile-<name>".
+// Kubernetes copies the Job name into the pod template's job-name labels, and a
+// label value can be at most 63 characters, so a longer name is cut and given a
+// stable hash suffix. Names that already fit are unchanged.
 func getProfilingJobName(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) string {
-	// Use "profile-" prefix for all profiling jobs
-	return fmt.Sprintf("profile-%s", dgdr.Name)
+	return truncateDNSLabelWithHash("profile-"+dgdr.Name, validation.DNS1123LabelMaxLength)
 }
 
 // getOutputConfigMapName returns the ConfigMap name for profiling output
