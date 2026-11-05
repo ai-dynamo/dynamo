@@ -232,14 +232,14 @@ func statClusterTestTrace(t *testing.T, env *clusterenv.TestEnv, trace clusterTe
 // requireClusterTestTraceInput checks that run replayed trace through its fixed mount path.
 func requireClusterTestTraceInput(t *testing.T, run *nvidiacomv1beta2.DynamoGraphDeploymentRun, trace clusterTestTraceFile) {
 	t.Helper()
-	require.NotNil(t, run.Status.AISimulate, "completed Run has no AISimulate status")
+	require.NotNil(t, run.Status.AISim, "completed Run has no AISimulate status")
 	var input struct {
 		Traffic struct {
 			Source map[string]any `json:"source"`
 			Load   map[string]any `json:"load"`
 		} `json:"traffic"`
 	}
-	require.NoError(t, yaml.Unmarshal(run.Status.AISimulate.Input.Raw, &input))
+	require.NoError(t, yaml.Unmarshal(run.Status.AISim.Input.Raw, &input))
 	require.Equal(t, map[string]any{
 		"type": "trace", "format": "dynamo", "paths": []any{aisimulate.TracePath(trace.subPath)},
 	}, input.Traffic.Source)

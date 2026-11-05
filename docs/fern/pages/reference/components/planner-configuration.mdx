@@ -733,7 +733,7 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
       GPU SKU, written as each Request's `spec.hardware.gpu.sku`.
     </ParamField>
     <ParamField path="engine" type="object" required={true}>
-      The pinned AISimulate `engine` section, written as each Request's `spec.aisimulate.inputOverrides.engine`. Every value must be a scalar, each worker role of `mode` sets one `parallelism.preset` entry and both scheduler knobs, and `replicas` must not be set: the Planner fills them in from the DGD spec at each launch. See [Engine section](../../kubernetes/auto-deployment/planner-live-retune.md#engine-section).
+      The pinned AISimulate `engine` section, written as each Request's `spec.aisim.inputOverrides.engine`. Every value must be a scalar, each worker role of `mode` sets one `parallelism.preset` entry and both scheduler knobs, and `replicas` must not be set: the Planner fills them in from the DGD spec at each launch. See [Engine section](../../kubernetes/auto-deployment/planner-live-retune.md#engine-section).
     </ParamField>
     <ParamField path="cut_budget_seconds" type="number" default="900.0">
       Deadline of the subprocess that cuts a window file from the segments. Must be greater than 0.
