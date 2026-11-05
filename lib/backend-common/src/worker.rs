@@ -636,10 +636,10 @@ impl Worker {
         };
         if let Some(error) = teardown_error {
             // Do not disarm the watchdog when transport teardown is unfinished.
-            return Err(DynamoError::builder()
+            return result.and(Err(DynamoError::builder()
                 .error_type(ErrorType::Backend(BackendError::EngineShutdown))
                 .message(error)
-                .build());
+                .build()));
         }
         if !self.cleanup_abandoned
             && let Some(watchdog) = watchdog.lock().unwrap_or_else(|e| e.into_inner()).take()
