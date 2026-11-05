@@ -9112,6 +9112,27 @@ mod token_data_tests {
         assert_rejected(&preprocessor, &[0, 3]).await;
     }
 
+    #[test]
+    fn added_tokens_in_tokenizer_json_render_as_ordinary_text() {
+        // TinyLlama's tokenizer_config.json does not list `<x>`; only tokenizer.json does.
+        let (mdc, _dir) = tinyllama_card(NO_VOCAB_SIZE, Some(ADDED_TOKEN_TOKENIZER));
+        let PromptFormatter::OAI(formatter) = prompt_formatter_from_mdc(&mdc).unwrap();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "a<x>"}]
+        }))
+        .unwrap();
+        let prompt = formatter.render_prompt(&request).unwrap();
+        let ordinary: Vec<_> = prompt
+            .segments()
+            .unwrap_or_default()
+            .iter()
+            .filter(|segment| !segment.allow_special)
+            .map(|segment| segment.text.as_str())
+            .collect();
+        assert_eq!(ordinary, ["<x>"]);
+    }
+
     fn completion(prompt: serde_json::Value) -> NvCreateCompletionRequest {
         serde_json::from_value(serde_json::json!({"model": "test-model", "prompt": prompt}))
             .unwrap()

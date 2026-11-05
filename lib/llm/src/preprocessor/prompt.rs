@@ -443,12 +443,14 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
 
             // Some HF models (e.g. DeepSeek-R1) list their chat markers only in
             // tokenizer.json, so pass its added tokens to the renderer as well.
-            if let Some(TokenizerKind::HfTokenizerJson(file)) = &mdc.tokenizer
-                && let Some(path) = file.path()
+            if let Some(TokenizerKind::HfTokenizerJson(tokenizer_file)) = &mdc.tokenizer
+                && let Some(path) = tokenizer_file.path()
             {
                 let tokenizer_json = std::fs::read_to_string(path)
                     .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
-                config = config.with_tokenizer_json(&tokenizer_json)?;
+                config = config
+                    .with_tokenizer_json(&tokenizer_json)
+                    .with_context(|| format!("added_tokens in '{}'", path.display()))?;
             }
 
             // Some HF models (e.g. Llama-4-Maverick) store the chat template in a
