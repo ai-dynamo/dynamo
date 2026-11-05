@@ -349,6 +349,213 @@ fn mm_routing_hashes_are_not_used_as_engine_cache_uuids() {
 }
 
 #[test]
+fn image_routing_hints_require_capability_and_exact_frontend_metadata() {
+    let mut req = request();
+    add_images(&mut req, ["https://example.com/first.png"]);
+    req.extra_args = Some(json!({"mm_hashes": ["0123456789abcdef"]}));
+    req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
+        routing_token_ids: vec![11, 22, 33],
+        expanded_prompt_len: 3,
+        ..Default::default()
+    });
+    let mut enabled = image_limits(4096).unwrap();
+    enabled.supports_image_routing = true;
+    let proto = build_generate_request(req.clone(), "req", "model", Some(enabled), AGG).unwrap();
+    assert_eq!(proto.media[0].uuid, "dynamo-image-v1:0123456789abcdef");
+
+    for mode in [DisaggregationMode::Prefill, DisaggregationMode::Decode] {
+        let proto =
+            build_generate_request(req.clone(), "req", "model", Some(enabled), mode).unwrap();
+        assert!(proto.media[0].uuid.is_empty());
+    }
+
+    let proto =
+        build_generate_request(req.clone(), "req", "model", image_limits(4096), AGG).unwrap();
+    assert!(proto.media[0].uuid.is_empty());
+    let mut no_routing = req.clone();
+    no_routing.mm_routing_info = None;
+    let proto = build_generate_request(no_routing, "req", "model", Some(enabled), AGG).unwrap();
+    assert!(proto.media[0].uuid.is_empty());
+
+    req.multi_modal_uuids = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![Some("caller-owned".to_string())],
+    )]));
+    let proto = build_generate_request(req, "req", "model", Some(enabled), AGG).unwrap();
+    assert_eq!(proto.media[0].uuid, "caller-owned");
+}
+
+#[test]
+fn caller_uuids_cannot_spoof_internal_image_routing_hints() {
+    let mut req = request();
+    add_images(
+        &mut req,
+        [
+            "https://example.com/first.png",
+            "https://example.com/second.png",
+        ],
+    );
+    req.multi_modal_uuids = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![
+            Some("caller-owned".to_string()),
+            Some("dynamo-image-v1:0123456789abcdef".to_string()),
+        ],
+    )]));
+    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
+        .expect_err("caller UUIDs must not masquerade as adapter-generated routing hints");
+    assert!(
+        error
+            .to_string()
+            .contains("reserved `dynamo-image-v1:` prefix")
+    );
+}
+
+#[test]
+fn image_routing_uses_only_the_image_hashes_from_grouped_metadata() {
+    let mut req = request();
+    add_images(&mut req, ["https://example.com/first.png"]);
+    req.extra_args = Some(json!({
+        "mm_hashes": ["1111111111111111"],
+        "mm_hashes_by_modality": {"image": ["0123456789abcdef"], "video": ["fedcba9876543210"]}
+    }));
+    req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
+        routing_token_ids: vec![11],
+        expanded_prompt_len: 1,
+        ..Default::default()
+    });
+    let mut limits = image_limits(4096).unwrap();
+    limits.supports_image_routing = true;
+    let proto = build_generate_request(req.clone(), "req", "model", Some(limits), AGG).unwrap();
+    assert_eq!(proto.media[0].uuid, "dynamo-image-v1:0123456789abcdef");
+
+    req.extra_args.as_mut().unwrap()["mm_hashes_by_modality"] =
+        json!({"video": ["fedcba9876543210"]});
+    let proto = build_generate_request(req, "req", "model", Some(limits), AGG).unwrap();
+    assert!(proto.media[0].uuid.is_empty());
+}
+
+#[test]
+fn mixed_media_image_hints_follow_modality_indices_and_preserve_video_uuids() {
+    let mut req = request();
+    add_images(
+        &mut req,
+        ["https://example.com/a.png", "https://example.com/b.png"],
+    );
+    req.multi_modal_data.as_mut().unwrap().insert(
+        "video_url".into(),
+        vec![MultimodalData::RawUrl(
+            "https://example.com/video.mp4".into(),
+        )],
+    );
+    req.multi_modal_order = Some(vec![
+        MultimodalItemRef {
+            modality: "video_url".into(),
+            index: 0,
+        },
+        MultimodalItemRef {
+            modality: "image_url".into(),
+            index: 1,
+        },
+        MultimodalItemRef {
+            modality: "image_url".into(),
+            index: 0,
+        },
+    ]);
+    req.multi_modal_uuids = Some(HashMap::from([(
+        "video_url".into(),
+        vec![Some("caller-video".into())],
+    )]));
+    req.extra_args = Some(json!({
+        "mm_hashes": ["fedcba9876543210", "2222222222222222", "1111111111111111"],
+        "mm_hashes_by_modality": {"image": ["1111111111111111", "2222222222222222"]}
+    }));
+    req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
+        routing_token_ids: vec![11, 22, 33],
+        expanded_prompt_len: 3,
+        ..Default::default()
+    });
+    let mut limits = image_video_limits(4096).unwrap();
+    limits.supports_image_routing = true;
+    let proto = build_generate_request(req.clone(), "req", "model", Some(limits), AGG).unwrap();
+    assert_eq!(
+        proto
+            .media
+            .iter()
+            .map(|item| (item.modality, item.uuid.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (pb::Modality::Video as i32, "caller-video"),
+            (
+                pb::Modality::Image as i32,
+                "dynamo-image-v1:2222222222222222"
+            ),
+            (
+                pb::Modality::Image as i32,
+                "dynamo-image-v1:1111111111111111"
+            ),
+        ]
+    );
+    assert_eq!(
+        proto
+            .media
+            .into_iter()
+            .map(|item| item.source.unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "https://example.com/video.mp4",
+            "https://example.com/b.png",
+            "https://example.com/a.png"
+        ]
+        .map(|url| pb::media_item::Source::Url(url.into()))
+    );
+    req.extra_args
+        .as_mut()
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .remove("mm_hashes_by_modality");
+    let proto = build_generate_request(req.clone(), "req", "model", Some(limits), AGG).unwrap();
+    assert_eq!(proto.media[0].uuid, "caller-video");
+    assert!(proto.media[1..].iter().all(|item| item.uuid.is_empty()));
+
+    req.multi_modal_uuids
+        .as_mut()
+        .unwrap()
+        .get_mut("video_url")
+        .unwrap()[0] = Some("dynamo-image-v1:0123456789abcdef".into());
+    let error = build_generate_request(req, "req", "model", Some(limits), AGG).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("reserved `dynamo-image-v1:` prefix")
+    );
+}
+
+#[test]
+fn malformed_image_routing_hashes_are_rejected_before_dispatch() {
+    for hashes in [
+        json!([]),
+        json!([""]),
+        json!(["not-a-valid-hash"]),
+        json!("bad"),
+        json!([null]),
+    ] {
+        let mut req = request();
+        add_images(&mut req, ["https://example.com/first.png"]);
+        req.extra_args = Some(json!({"mm_hashes": hashes}));
+        req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
+            routing_token_ids: vec![11],
+            expanded_prompt_len: 1,
+            ..Default::default()
+        });
+        let mut limits = image_limits(4096).unwrap();
+        limits.supports_image_routing = true;
+        assert!(build_generate_request(req, "req", "model", Some(limits), AGG).is_err());
+    }
+}
+
+#[test]
 fn media_requires_the_loaded_models_advertised_capability() {
     for (key, modality) in [
         ("image_url", "image"),

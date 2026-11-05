@@ -57,6 +57,7 @@ pub(crate) fn limits(context_length: u32) -> Option<ModelLimits> {
         engine_context_length: Some(context_length),
         max_output_tokens: None,
         supported_inputs: None,
+        supports_image_routing: false,
         supported_media: Some(SupportedMedia::default()),
         ..Default::default()
     })
@@ -68,6 +69,7 @@ pub(crate) fn image_limits(context_length: u32) -> Option<ModelLimits> {
         engine_context_length: Some(context_length),
         max_output_tokens: None,
         supported_inputs: None,
+        supports_image_routing: false,
         supported_media: Some(SupportedMedia {
             image: true,
             ..Default::default()
@@ -82,6 +84,7 @@ pub(crate) fn image_video_limits(context_length: u32) -> Option<ModelLimits> {
         engine_context_length: Some(context_length),
         max_output_tokens: None,
         supported_inputs: None,
+        supports_image_routing: false,
         supported_media: Some(SupportedMedia {
             image: true,
             video: true,
@@ -97,6 +100,7 @@ pub(crate) fn all_media_limits(context_length: u32) -> Option<ModelLimits> {
         engine_context_length: Some(context_length),
         max_output_tokens: None,
         supported_inputs: None,
+        supports_image_routing: false,
         supported_media: Some(SupportedMedia {
             image: true,
             video: true,
