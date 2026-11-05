@@ -17,7 +17,7 @@ limitations under the License.
 
 # Dynamo KVBM
 
-The Dynamo KVBM is a distributed KV-cache block management system designed for scalable LLM inference. It cleanly separates memory management from inference runtimes (vLLM, TensorRT-LLM, and SGLang), enabling GPU↔CPU↔Disk/Remote tiering, asynchronous block offload/onboard, and efficient block reuse.
+The Dynamo KVBM is a distributed KV-cache block management system designed for scalable LLM inference. It separates memory management from the inference runtime, enabling GPU↔CPU↔Disk/Remote tiering, asynchronous block offload/onboard, and efficient block reuse.
 
 ![A block diagram showing a layered architecture view of Dynamo KV Block manager.](../../../docs/fern/assets/img/kvbm-components.svg)
 
@@ -26,7 +26,7 @@ The Dynamo KVBM is a distributed KV-cache block management system designed for s
 
 - **Distributed KV-Cache Management:** Unified GPU↔CPU↔Disk↔Remote tiering for scalable LLM inference.
 - **Async Offload & Reuse:** Seamlessly move KV blocks between memory tiers using GDS-accelerated transfers powered by NIXL, without recomputation.
-- **Runtime-Agnostic:** Works out-of-the-box with vLLM, TensorRT-LLM, and SGLang via lightweight connectors.
+- **vLLM Integration:** Connects vLLM to Dynamo's KV-cache memory management. See the support matrix below for backend availability.
 - **Memory-Safe & Modular:** RAII lifecycle and pluggable design for reliability, portability, and backend extensibility.
 
 ## Installation
@@ -117,29 +117,6 @@ DYN_KVBM_CPU_CACHE_GB=100 vllm serve \
 ```
 
 See the [KVBM configuration reference](../../../docs/fern/pages/reference/components/kvbm-configuration.mdx) for all KVBM settings.
-
-### TensorRT-LLM
-
-```bash
-cat >/tmp/kvbm_llm_api_config.yaml <<EOF
-cuda_graph_config: null
-kv_cache_config:
-  enable_partial_reuse: false
-  free_gpu_memory_fraction: 0.80
-kv_connector_config:
-  connector_module: kvbm.trtllm_integration.connector
-  connector_scheduler_class: DynamoKVBMConnectorLeader
-  connector_worker_class: DynamoKVBMConnectorWorker
-EOF
-
-DYN_KVBM_CPU_CACHE_GB=100 trtllm-serve Qwen/Qwen3-8B \
-  --host localhost --port 8000 \
-  --backend pytorch \
-  --extra_llm_api_options /tmp/kvbm_llm_api_config.yaml
-```
-
-See the [KVBM configuration reference](../../../docs/fern/pages/reference/components/kvbm-configuration.mdx) for all KVBM settings.
-
 
 ## 📚 Docs
 

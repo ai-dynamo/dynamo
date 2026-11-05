@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# ruff: noqa: E402
 
 """CPU-only end-to-end coverage for the public Dynamo-stack CLI."""
 
@@ -14,12 +13,6 @@ from typing import Any
 
 import pytest
 import yaml
-
-pytest.importorskip(
-    "aisimulate.config.cli",
-    reason="AISimulate is an optional Dynamo simulation dependency",
-)
-
 from aisimulate.config.cli import CorePredictionConfig
 from aisimulate.config.common import split_config_sections
 
@@ -99,11 +92,15 @@ def test_dynamo_predict_cli_cases(config_path: Path, tmp_path: Path) -> None:
         "11-trace-agentic-mooncake.yaml": 3,
         "12-trace-applied-compute-agentic.yaml": 3,
         "13-trace-dynamo-agentic.yaml": 4,
+        "14-trace-dynamo-kvcr.yaml": 2,
     }
     if config_path.name in expected_trace_requests:
         assert (
             summary["completed_requests"] == expected_trace_requests[config_path.name]
         )
+
+    if config_path.name == "14-trace-dynamo-kvcr.yaml":
+        assert "kvcr" in report["summary"]
 
     if config_path.name == "08-synthetic-throughput-planner.yaml":
         assert report["planner"]["metadata"]["bootstrap"]["status"] == "installed"

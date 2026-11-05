@@ -16,6 +16,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
+from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
@@ -695,6 +696,14 @@ def test_each_cli_rejection_threshold_is_independently_opt_in(
     assert all(value is None for name, value in thresholds.items() if name != field)
     assert f"{flag}={expected}" in caplog.text
 
+    # The deprecation notice is emitted where the frontend forwards the value,
+    # the same path worker advertisements take, and exactly once per process.
+    build_router_config(config)
+    deprecated = field == "active_prefill_tokens_threshold"
+    assert caplog.text.count("--active-prefill-tokens-threshold is deprecated") == int(
+        deprecated
+    )
+
 
 @pytest.mark.parametrize(
     ("env_var", "field", "expected"),
@@ -961,6 +970,35 @@ def test_session_affinity_mode_cli_and_environment(monkeypatch) -> None:
         parser.parse_args(["--router-session-affinity-mode", "hard"])
     )
     assert config.session_affinity_mode == "hard"
+
+
+def test_session_affinity_max_entries_cli_and_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def parse(argv: list[str]) -> FrontendConfig:
+        parser = argparse.ArgumentParser()
+        FrontendArgGroup().add_arguments(parser)
+        config = FrontendConfig.from_cli_args(parser.parse_args(argv))
+        config.validate()
+        return config
+
+    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES", raising=False)
+    assert parse([]).session_affinity_max_entries == 65_536
+
+    monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES", "1000000")
+    assert parse([]).session_affinity_max_entries == 1_000_000
+
+    config = parse(["--router-session-affinity-max-entries", "2000000"])
+    assert config.session_affinity_max_entries == 2_000_000
+    assert "session_affinity_max_entries" not in config.router_kwargs()
+
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-session-affinity-max-entries", "0"])
+    )
+    with pytest.raises(ValueError, match="router-session-affinity-max-entries"):
+        config.validate()
 
 
 @pytest.mark.parametrize("ttl", [0, 31_536_001])

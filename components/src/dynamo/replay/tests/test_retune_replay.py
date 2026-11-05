@@ -246,6 +246,76 @@ def test_retune_lands_router_and_planner_changes_mid_run(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+@pytest.mark.timeout(300)
+def test_retune_lands_a_scaling_policy_change_mid_run(tmp_path, monkeypatch):
+    # The router temperature wins the window; the load interval rides along.
+    # Neither grid interval is the running 5 s, so the decision changes it,
+    # and the running engine re-registers its load plugin at the new one.
+    traces = _write_workload(tmp_path, blocks=16, output_tokens=128)
+    seen: list[tuple[float, int, float]] = []
+    original_tick = OrchestratorEngineAdapter.tick
+
+    async def recording_tick(self, scheduled_tick, tick_input):
+        plugin = self._orchestrator.registry.get_plugin("builtin_load_propose")
+        seen.append(
+            (
+                tick_input.now_s,
+                self._config.load_adjustment_interval_seconds,
+                plugin.execution_interval_seconds,
+            )
+        )
+        return await original_tick(self, scheduled_tick, tick_input)
+
+    monkeypatch.setattr(OrchestratorEngineAdapter, "tick", recording_tick)
+    planner_config = {
+        "mode": "agg",
+        "optimization_target": "throughput",
+        "report_interval_hours": None,
+        "live_dashboard_port": 0,
+        "min_endpoint": 4,
+        "retune": {
+            "interval_seconds": _INTERVAL_S,
+            "grace_seconds": 1,
+            "max_parallel": 2,
+            "sla_ttft_ms": 60.0,
+            "sla_itl_ms": 100.0,
+            "router": _ROUTER_DOMAIN,
+            "planner": {
+                "scaling_policy": {"preset": False},
+                "load_adjustment_interval_seconds": {"choices": [10, 15]},
+                "load_sensitivity": {"preset": False},
+                "load_scaling_down_sensitivity": 80,
+            },
+        },
+    }
+
+    report = run_trace_replay(
+        traces,
+        trace_format="dynamo",
+        router_mode="kv_router",
+        router_config=KvRouterConfig(router_temperature=100.0),
+        num_workers=4,
+        extra_engine_args=_engine(),
+        planner_config=planner_config,
+    )
+
+    assert report.summary["completed_requests"] == _HEAD_REQUESTS + _TAIL_REQUESTS
+    first = report.planner.retune_events[0]
+    assert first["outcome"] == "applied", first
+    assert first["chosen"]["router"] == _router_point(0.0)
+    changes = first["planner_changes"]
+    assert set(changes) == {"load_adjustment_interval_seconds"}
+    new_interval = changes["load_adjustment_interval_seconds"]
+    assert new_interval in (10, 15)
+    # Easy mode scales on load only: no predictor to swap.
+    assert first["predictor_warmup"] is None
+    before = {(value, plugin) for now_s, value, plugin in seen if now_s <= _DECIDE_S}
+    after = {(value, plugin) for now_s, value, plugin in seen if now_s > _DECIDE_S}
+    assert before == {(5, 5.0)}
+    assert after == {(new_interval, float(new_interval))}
+
+
+@pytest.mark.integration
 @pytest.mark.timeout(120)
 def test_candidate_replays_share_common_random_numbers(tmp_path):
     # Near-random routing (router_temperature 100) makes every placement a
@@ -276,8 +346,8 @@ def test_candidate_replays_share_common_random_numbers(tmp_path):
 
     baseline = evaluate({})
     assert evaluate({}) == baseline
-    # Replay reports no shared cache hits, so this candidate changes no
-    # routing decision: it ties the baseline, and the controller keeps it.
+    # These workers take no KV fetch hints and replay has no shared cache, so
+    # this candidate changes no routing decision: it ties the baseline and is kept.
     assert evaluate({"shared_cache_multiplier": 0.5}) == baseline
     assert evaluate({"router_temperature": 0.0})[0] != baseline[0]
 
@@ -579,6 +649,38 @@ def test_retune_rejects_an_engine_shape_that_differs_from_the_planner_mode(
 
 
 @pytest.mark.unit
+def test_retune_rejects_the_dgdr_executor(tmp_path):
+    # Replay runs local sweeps only; executor 'dgdr' needs a live Planner.
+    preset = dict.fromkeys(
+        ("tensor", "pipeline", "attention_data", "moe_tensor", "moe_expert"), 1
+    )
+    worker = {
+        "parallelism": {"preset": [preset]},
+        "scheduler": {"max_batched_tokens": 8192, "max_sequences": 256},
+    }
+    engine = {"mode": "aggregated", "workers": {"aggregated": worker}}
+    dgdr = {"claim_name": "traces", "model": "m", "sku": "h200_sxm", "engine": engine}
+    config = PlannerConfig.model_validate(
+        _guard_config()
+        | {
+            "retune": {
+                "interval_seconds": 21600,
+                "timeout_seconds": 20400,
+                "router": "default",
+                "executor": "dgdr",
+                "dgdr": dgdr,
+            }
+        }
+    )
+    trace = _write_trace(
+        tmp_path / "trace.jsonl", count=4, gap_ms=100, blocks=1, output_tokens=2
+    )
+
+    with pytest.raises(ValueError, match="executor 'dgdr' is not supported in replay"):
+        api._retune_inputs(config, **_inputs_kwargs(trace))
+
+
+@pytest.mark.unit
 def test_synthetic_replay_rejects_retune():
     with pytest.raises(
         ValueError, match="traffic.source type: trace with format: dynamo"
@@ -688,6 +790,7 @@ _PER_CANDIDATE = {  # set by sweep.evaluate_candidate
     "_deterministic",
 }
 _REJECTED = {  # by _retune_inputs: retune replays complete open-loop windows
+    "conversation_affinity",  # rejected before constructing the Planner
     "replay_concurrency",
     "agentic_lanes",
     "agentic_snapshot",

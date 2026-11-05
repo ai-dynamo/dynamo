@@ -329,17 +329,31 @@ StrictFloatDomain: TypeAlias = Annotated[
 PLANNER_RETUNE_STARTUP_ONLY = frozenset(
     {
         "policy",
-        "scaling_policy",
         "fpm_sampling",
-        "enable_throughput_scaling",
-        "enable_load_scaling",
-        "throughput_adjustment_interval_seconds",
-        "load_adjustment_interval_seconds",
         "max_num_fpm_samples",
         "fpm_sample_bucket_size",
         "load_min_observations",
     }
 )
+# Public recommendation knobs that are deployment constraints the user owns,
+# not tuning knobs. Retune never searches them; the Planner config and the
+# runtime control API change them.
+PLANNER_RETUNE_USER_CONSTRAINTS = frozenset(
+    {
+        "min_workers",
+        "prefill_min_workers",
+        "decode_min_workers",
+        "max_num_gpus",
+        "min_num_gpus",
+    }
+)
+_PLANNER_USER_CONSTRAINT_FIELDS = {
+    "min_endpoint": "min_workers",
+    "prefill_min_endpoint": "prefill_min_workers",
+    "decode_min_endpoint": "decode_min_workers",
+    "max_gpu_budget": "max_num_gpus",
+    "min_gpu_budget": "min_num_gpus",
+}
 # Runtime ``PlannerConfig`` fields without an AISimulate public name. Retune
 # accepts them under their own names.
 PLANNER_RETUNE_EXTENSIONS: tuple[str, ...] = (
@@ -351,23 +365,17 @@ PLANNER_RETUNE_EXTENSIONS: tuple[str, ...] = (
 # Public retune grid knob -> ``PlannerConfig`` field. Retune searches these
 # only when written; omitted, each keeps its current value.
 PLANNER_RETUNE_KNOBS: dict[str, str] = {
-    **{
-        name: PLANNER_PUBLIC_TO_CONFIG[name]
-        for name in (
-            "min_workers",
-            "prefill_min_workers",
-            "decode_min_workers",
-            "max_num_gpus",
-            "min_num_gpus",
-            "max_throughput_scaling_replicas",
-        )
-    },
+    "max_throughput_scaling_replicas": "max_throughput_scaling_replicas",
     **{name: name for name in PLANNER_RETUNE_EXTENSIONS},
 }
-# Preset groups retune searches the runtime part of:
-# ``load_scaling_down_sensitivity`` in the goodput grid, the load predictor in
-# the forecast-loss pre-sweep.
-PLANNER_RETUNE_GROUPS: tuple[str, ...] = ("load_sensitivity", "load_predictor")
+# Preset groups retune searches the runtime part of: the scaling policy
+# (when written) and ``load_scaling_down_sensitivity`` in the goodput grid,
+# the load predictor in the forecast-loss pre-sweep.
+PLANNER_RETUNE_GROUPS: tuple[str, ...] = (
+    "scaling_policy",
+    "load_sensitivity",
+    "load_predictor",
+)
 _PLANNER_FIXED_SLA = ("ttft_ms", "itl_ms")
 _PLANNER_LIVE_NAME_HINTS = {
     live: public for public, live in PLANNER_RETUNE_KNOBS.items() if live != public
@@ -379,19 +387,18 @@ class PlannerRetuneConfig(PlannerRecommendationConfig):
     running planner can change.
 
     Syntax, preset groups and the preset-conflict rules are the recommendation
-    ones. ``PLANNER_RETUNE_STARTUP_ONLY`` knobs are rejected; ``max_num_gpus``
-    and ``max_throughput_scaling_replicas``, scalars in recommend, accept a
-    domain here, and like ``min_num_gpus`` and ``PLANNER_RETUNE_EXTENSIONS``
-    keep their current value when omitted. The SLA (``ttft_ms``/``itl_ms``) is
-    not a knob. Retune knobs do not accept ``null``, and role minimums do not
-    list ``null`` (inherit ``min_workers``) yet.
+    ones. ``PLANNER_RETUNE_STARTUP_ONLY`` knobs are rejected, and so are the
+    ``PLANNER_RETUNE_USER_CONSTRAINTS`` (worker minimums and GPU budgets):
+    the user owns them. ``max_throughput_scaling_replicas``, a scalar in
+    recommend, accepts a domain here, and like ``PLANNER_RETUNE_EXTENSIONS``
+    and the ``scaling_policy`` group keeps its current value when omitted.
+    The SLA (``ttft_ms``/``itl_ms``) is not a knob. Retune knobs do not
+    accept ``null``.
     """
 
     policy: PolicyDomain | None = None
-    # Recommend pins these two to one value; retune searches them, so the
-    # override widens the field type on purpose.
-    max_num_gpus: StrictIntDomain | None = None  # type: ignore[assignment]
-    min_num_gpus: StrictIntDomain | None = None
+    # Recommend pins it to one value; retune searches it, so the override
+    # widens the field type on purpose.
     max_throughput_scaling_replicas: IntDomain | None = None  # type: ignore[assignment]
     prefill_scale_up_queue_tokens: StrictIntDomain | None = None
     prefill_scale_down_queue_tokens: StrictIntDomain | None = None
@@ -410,6 +417,21 @@ class PlannerRetuneConfig(PlannerRecommendationConfig):
                     f"during retune; set retune.sla_{name} to change the SLA "
                     "that retune scores against"
                 )
+        constraints = sorted(
+            {
+                str(_PLANNER_USER_CONSTRAINT_FIELDS.get(name, name))
+                for name in value
+                if name in PLANNER_RETUNE_USER_CONSTRAINTS
+                or name in _PLANNER_USER_CONSTRAINT_FIELDS
+            }
+        )
+        if constraints:
+            raise ValueError(
+                f"retune.planner cannot search {constraints}: worker minimums "
+                "and GPU budgets are user constraints, not tuning knobs; "
+                "change them through the Planner config or the runtime "
+                "control API"
+            )
         for live, public in _PLANNER_LIVE_NAME_HINTS.items():
             if live in value:
                 raise ValueError(
@@ -431,12 +453,5 @@ class PlannerRetuneConfig(PlannerRecommendationConfig):
                 raise ValueError(
                     f"retune.planner.{name} does not accept null; omit it to "
                     "keep the current value"
-                )
-        for name in ("prefill_min_workers", "decode_min_workers"):
-            domain = getattr(self, name)
-            if isinstance(domain, Choices) and None in domain.choices:
-                raise ValueError(
-                    f"retune.planner.{name} does not accept null (inherit "
-                    "min_workers) yet; list explicit worker counts"
                 )
         return self

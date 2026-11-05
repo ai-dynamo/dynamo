@@ -14,7 +14,8 @@ use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tonic::transport::Channel;
 
 pub(crate) use dynamo_sidecar_common::{
-    engine_shutdown, invalid_argument, protocol_error, status_to_dynamo,
+    engine_shutdown, invalid_argument, is_broken_stream, protocol_error, status_to_dynamo,
+    stream_incomplete, stream_status_to_dynamo,
 };
 
 use crate::pb;
@@ -128,6 +129,30 @@ impl OpenEngineClient {
         })?
         .map(tonic::Response::into_inner)
         .map_err(|status| status_to_dynamo("GetServerInfo", status))
+    }
+
+    /// The engine's load per data-parallel rank, abandoned at `deadline`, or
+    /// `None` when the engine does not implement `GetLoad`.
+    pub(crate) async fn load(
+        &self,
+        deadline: Instant,
+    ) -> Result<Option<pb::LoadInfo>, DynamoError> {
+        let request = pb::GetLoadRequest {
+            include_per_rank: true,
+        };
+        match timeout_at(deadline, self.control().get_load(request)).await {
+            Ok(Ok(response)) => Ok(Some(response.into_inner())),
+            Ok(Err(status)) if status.code() == tonic::Code::Unimplemented => Ok(None),
+            Ok(Err(status)) => Err(status_to_dynamo("GetLoad", status)),
+            Err(_) => Err(connection_timeout(format!(
+                "the {} server did not answer GetLoad in time",
+                self.peer
+            ))),
+        }
+    }
+
+    pub(crate) fn peer(&self) -> &str {
+        &self.peer
     }
 
     /// An LPX engine serves one model and accepts an empty model name. The
