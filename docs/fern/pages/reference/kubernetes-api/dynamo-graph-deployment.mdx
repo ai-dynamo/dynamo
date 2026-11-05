@@ -52,7 +52,9 @@ spec:
 
 `metadata.name` can have at most 63 characters, because the operator copies it unchanged into the `nvidia.com/dynamo-graph-deployment-name` label. Admission rejects a longer name when the DGD is created. An existing DGD with a longer name can still be updated and deleted.
 
-Each component's DCD, Service, and `nvidia.com/selector` label value is named `<dgd-name>-<component-name>`, with the component name in lowercase. For worker DCDs, the operator first appends `-` and the worker hash. When the resulting name is longer than 63 characters, the operator keeps at most its first 46 characters, without a trailing `-` or `.`, and appends `-` and 16 hexadecimal characters of a SHA-256 hash of the full name. A shortened worker DCD name therefore ends with this SHA-256 suffix, not with the worker hash. Names of 63 characters or fewer are not changed.
+The operator names each component's DCD `<dgd-name>-<component-name>`, with the component name in lowercase. For a worker DCD, it appends `-` and the worker hash. When this name is longer than 63 characters, the operator keeps at most its first 46 characters, without a trailing `-` or `.`, and appends `-` and 16 hexadecimal characters of a SHA-256 hash of the full name. A shortened worker DCD name therefore ends with this SHA-256 suffix, not with the worker hash. Names of 63 characters or fewer are not changed.
+
+Services and the `nvidia.com/selector` Pod label reuse the same shortened name. On the Grove path, the Service and the Pods use the name without the worker hash. On the single-node Deployment path, the Service and the Pods use the DCD name. Multinode leader and worker Pods do not carry the `nvidia.com/selector` label, and a DisaggregatedSet uses a selector value derived from the DGD name.
 
 ## Grove update strategy
 
