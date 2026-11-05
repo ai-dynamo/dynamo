@@ -12,7 +12,6 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
 import time
 from contextlib import nullcontext
 from functools import partial
@@ -474,38 +473,20 @@ async def test_gaie_deployment(
 
     # Debug: verify namespace state before creating DGD
     logger.info(f"Namespace: {namespace}")
-    ns_check = subprocess.run(
-        ["kubectl", "get", "namespace", namespace],
-        capture_output=True,
-        text=True,
-    )
+    ns_check = kubectl("get", "namespace", namespace)
     logger.info(f"Namespace check: {ns_check.stdout.strip()}")
     if ns_check.returncode != 0:
         logger.error(f"Namespace not found: {ns_check.stderr}")
 
     # Debug: check if operator CRD is registered
-    crd_check = subprocess.run(
-        ["kubectl", "get", "crd", "dynamographdeployments.nvidia.com"],
-        capture_output=True,
-        text=True,
-    )
+    crd_check = kubectl("get", "crd", "dynamographdeployments.nvidia.com")
     logger.info(f"CRD check: {crd_check.stdout.strip()}")
     if crd_check.returncode != 0:
         logger.error(f"CRD not found: {crd_check.stderr}")
 
     # Debug: check operator pod status
-    operator_check = subprocess.run(
-        [
-            "kubectl",
-            "get",
-            "pods",
-            "-n",
-            namespace,
-            "-l",
-            "app.kubernetes.io/name=dynamo-operator",
-        ],
-        capture_output=True,
-        text=True,
+    operator_check = kubectl(
+        "get", "pods", "-n", namespace, "-l", "app.kubernetes.io/name=dynamo-operator"
     )
     logger.info(f"Operator pods: {operator_check.stdout.strip()}")
 
@@ -524,18 +505,10 @@ async def test_gaie_deployment(
         readiness_timeout=300,
     ) as deployment:
         # Debug: check what DGDs exist after creation
-        dgd_check = subprocess.run(
-            ["kubectl", "get", "dynamographdeployments", "-n", namespace],
-            capture_output=True,
-            text=True,
-        )
+        dgd_check = kubectl("get", "dynamographdeployments", "-n", namespace)
         logger.info(f"DGDs after creation: {dgd_check.stdout.strip()}")
 
-        pod_check = subprocess.run(
-            ["kubectl", "get", "pods", "-n", namespace, "-o", "wide"],
-            capture_output=True,
-            text=True,
-        )
+        pod_check = kubectl("get", "pods", "-n", namespace, "-o", "wide")
         logger.info(f"Pods after creation: {pod_check.stdout.strip()}")
         epp_pods = deployment.get_pods(["Epp"])
         epp_pod_list = epp_pods.get("Epp", [])
