@@ -74,6 +74,7 @@ from .capacity import (
     get_metrics_model_name,
     get_spec_decode_runtime_data,
     per_rank_kv_blocks,
+    publish_vllm_lookahead_block_hashing,
     publish_vllm_token_budget,
 )
 from .constants import MX_LOAD_FORMATS
@@ -1038,6 +1039,8 @@ async def register_vllm_model(
             SPEC_DECODE_RUNTIME_KEY, json.dumps(spec_decode)
         )
         logging.info("Published vLLM spec decode runtime metadata: %s", spec_decode)
+
+    publish_vllm_lookahead_block_hashing(runtime_config, vllm_config)
 
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config, _worker_topology_config())

@@ -302,7 +302,7 @@ impl SelectionCore {
     ) -> Result<ReservationResponse, SelectionError> {
         let entry = self.ready_entry(&key)?;
         let normalized = req.prompt.view().normalize_for_reservation(
-            entry.is_eagle,
+            entry.lookahead_tokens,
             TrackingHashInput {
                 context: &self.tracking_hash,
                 scope: tracking_scope(&entry),
@@ -337,7 +337,7 @@ impl SelectionCore {
             .then(|| {
                 req.prompt
                     .view()
-                    .block_hashes_for_indexer(entry.block_size, entry.is_eagle)
+                    .block_hashes_for_indexer(entry.block_size, entry.lookahead_tokens)
             })
             .transpose()?;
 

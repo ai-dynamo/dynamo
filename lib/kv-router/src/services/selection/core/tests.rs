@@ -132,7 +132,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         max_num_batched_tokens: Some(1024),
         total_kv_blocks: None,
         stable_routing_id: None,
-        is_eagle: None,
+        lookahead_tokens: None,
         taints: HashSet::new(),
         topology_domains: HashMap::new(),
         kv_transfer_domain: None,
@@ -162,7 +162,7 @@ fn prompt() -> PromptRequest {
         isl_tokens: None,
         lora_name: None,
         cache_namespace: None,
-        is_eagle: None,
+        lookahead_tokens: None,
     }
 }
 
@@ -3725,7 +3725,7 @@ fn hint_config(worker_type: &str, endpoints: &[(u32, &str)]) -> SelectionWorkerC
         max_num_batched_tokens: None,
         total_kv_blocks: None,
         stable_routing_id: None,
-        is_eagle: None,
+        lookahead_tokens: None,
         taints: HashSet::new(),
         topology_domains: HashMap::new(),
         kv_transfer_domain: None,

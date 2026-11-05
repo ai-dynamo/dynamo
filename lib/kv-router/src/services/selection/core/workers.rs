@@ -234,7 +234,11 @@ impl SelectionCore {
         let block_size = record
             .block_size
             .ok_or_else(|| SelectionError::BadRequest("block_size is required".to_string()))?;
-        self.ensure_entry_for(record.key(), block_size, record.is_eagle.unwrap_or(false))
+        self.ensure_entry_for(
+            record.key(),
+            block_size,
+            record.lookahead_tokens.unwrap_or(0),
+        )
     }
 
     /// Create the partition scheduler and indexer for `key` before any worker
@@ -245,7 +249,7 @@ impl SelectionCore {
         &self,
         key: RoutingPartitionId,
         block_size: u32,
-        is_eagle: bool,
+        lookahead_tokens: u32,
     ) -> Result<SelectionPartition, SelectionError> {
         self.ensure_running()?;
         if block_size == 0 {
@@ -253,7 +257,7 @@ impl SelectionCore {
                 "block_size must be greater than 0".to_string(),
             ));
         }
-        self.ensure_entry_for(key, block_size, is_eagle)
+        self.ensure_entry_for(key, block_size, lookahead_tokens)
             .map(SelectionPartition)
     }
 
@@ -261,7 +265,7 @@ impl SelectionCore {
         &self,
         key: RoutingPartitionId,
         block_size: u32,
-        is_eagle: bool,
+        lookahead_tokens: u32,
     ) -> Result<Arc<SelectionEntry>, SelectionError> {
         self.reservation_sweep_started.get_or_init(|| {
             spawn_reservation_index_sweep(
@@ -372,7 +376,7 @@ impl SelectionCore {
                 Ok(Arc::new(SelectionEntry {
                     key: key.clone(),
                     block_size,
-                    is_eagle,
+                    lookahead_tokens,
                     indexer,
                     workers_tx,
                     hint_capable_workers: AtomicBool::new(false),
@@ -391,10 +395,10 @@ impl SelectionCore {
                 entry.block_size
             )));
         }
-        if entry.is_eagle != is_eagle {
+        if entry.lookahead_tokens != lookahead_tokens {
             return Err(SelectionError::Conflict(format!(
-                "is_eagle mismatch for {key}: existing={} requested={is_eagle}",
-                entry.is_eagle
+                "lookahead_tokens mismatch for {key}: existing={} requested={lookahead_tokens}",
+                entry.lookahead_tokens
             )));
         }
         if let Some(config) = self.session_affinity {

@@ -813,7 +813,7 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
         tokens: &[u32],
         lora_name: Option<&str>,
         cache_namespace: Option<&str>,
-        is_eagle: Option<bool>,
+        lookahead_tokens: Option<u32>,
     ) -> Result<OverlapScores, KvRouterError> {
         let sequence = compute_block_hash_for_seq(
             tokens,
@@ -821,7 +821,7 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
             BlockHashOptions {
                 lora_name,
                 cache_namespace,
-                is_eagle,
+                lookahead_tokens,
                 block_mm_infos: None,
             },
         );

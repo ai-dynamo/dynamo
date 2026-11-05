@@ -1141,8 +1141,13 @@ fn init_standalone_logging() {
         .try_init();
 }
 
+/// `is_eagle` is the legacy boolean for a one-token lookahead; `lookahead_tokens` wins.
+fn resolve_lookahead_tokens(is_eagle: Option<bool>, lookahead_tokens: Option<u32>) -> Option<u32> {
+    lookahead_tokens.or(is_eagle.map(u32::from))
+}
+
 #[pyfunction]
-#[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None, lora_name=None, is_eagle=None, cache_namespace=None))]
+#[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None, lora_name=None, is_eagle=None, cache_namespace=None, lookahead_tokens=None))]
 pub fn compute_block_hash_for_seq_py(
     _py: Python,
     tokens: Vec<u32>,
@@ -1151,6 +1156,7 @@ pub fn compute_block_hash_for_seq_py(
     lora_name: Option<String>,
     is_eagle: Option<bool>,
     cache_namespace: Option<String>,
+    lookahead_tokens: Option<u32>,
 ) -> PyResult<Vec<u64>> {
     if kv_block_size == 0 {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -1170,7 +1176,7 @@ pub fn compute_block_hash_for_seq_py(
             block_mm_infos: mm_infos.as_deref(),
             lora_name: lora_name.as_deref(),
             cache_namespace: cache_namespace.as_deref(),
-            is_eagle,
+            lookahead_tokens: resolve_lookahead_tokens(is_eagle, lookahead_tokens),
         },
     );
 
@@ -1291,6 +1297,7 @@ enum KvEventInput {
         lora_name: Option<String>,
         is_eagle: Option<bool>,
         cache_salt: Option<String>,
+        lookahead_tokens: Option<u32>,
     },
     Removed {
         block_hashes: Vec<i64>,
@@ -1336,7 +1343,7 @@ impl KvEventPublisher {
         parent_hash: Option<i64>,
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         lora_name: Option<&str>,
-        is_eagle: Option<bool>,
+        lookahead_tokens: Option<u32>,
         cache_salt: Option<&str>,
     ) -> KvCacheEvent {
         let block_hashes_u64: Vec<u64> = block_hashes.iter().map(|&hash| hash as u64).collect();
@@ -1354,7 +1361,7 @@ impl KvEventPublisher {
                     cache_salt,
                     &self.warning_count,
                     block_mm_infos,
-                    is_eagle,
+                    lookahead_tokens,
                     self.image_token_id,
                     self.video_token_id,
                 ),
@@ -1469,7 +1476,7 @@ impl KvEventPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None, is_eagle=None, cache_salt=None))]
+    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None, is_eagle=None, cache_salt=None, lookahead_tokens=None))]
     fn publish_stored(
         &self,
         py: Python,
@@ -1481,6 +1488,7 @@ impl KvEventPublisher {
         lora_name: Option<String>,
         is_eagle: Option<bool>,
         cache_salt: Option<String>,
+        lookahead_tokens: Option<u32>,
     ) -> PyResult<()> {
         let inner = self.inner.clone();
 
@@ -1498,7 +1506,7 @@ impl KvEventPublisher {
                 parent_hash,
                 mm_infos.as_deref(),
                 lora_name.as_deref(),
-                is_eagle,
+                resolve_lookahead_tokens(is_eagle, lookahead_tokens),
                 cache_salt.as_deref(),
             );
             inner.publish(event).map_err(to_pyerr)
@@ -1536,6 +1544,7 @@ impl KvEventPublisher {
                         lora_name,
                         is_eagle,
                         cache_salt,
+                        lookahead_tokens,
                     } => self.stored_event(
                         event_id,
                         &token_ids,
@@ -1544,7 +1553,7 @@ impl KvEventPublisher {
                         parent_hash,
                         block_mm_infos.as_deref(),
                         lora_name.as_deref(),
-                        is_eagle,
+                        resolve_lookahead_tokens(is_eagle, lookahead_tokens),
                         cache_salt.as_deref(),
                     ),
                     KvEventInput::Removed { block_hashes } => {
@@ -2073,7 +2082,7 @@ async fn create_kv_router_from_endpoint(
         .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
     let needs_policy_role = plugins.has_custom_worker_selection();
-    let (model_name, policy_model_name, enable_eagle, worker_role, policy_worker_role, load_source) = {
+    let (model_name, policy_model_name, lookahead_tokens, worker_role, policy_worker_role, load_source) = {
         let maybe_card = if needs_model_name || needs_policy_role {
             let wait_secs: u64 = std::env::var("DYN_ROUTER_MODEL_CARD_WAIT_SECS")
                 .ok()
@@ -2122,7 +2131,7 @@ async fn create_kv_router_from_endpoint(
                 (
                     model_name,
                     Some(card.display_name.clone()),
-                    card.runtime_config.enable_eagle,
+                    card.runtime_config.hash_lookahead_tokens(),
                     worker_role,
                     policy_worker_role,
                     llm_rs::kv_router::RouterLoadSource::from_worker_type(
@@ -2140,12 +2149,12 @@ async fn create_kv_router_from_endpoint(
                     namespace = %endpoint_id.namespace,
                     component = %endpoint_id.component,
                     endpoint = %endpoint_id.name,
-                    "No model card found in discovery; defaulting to non-Eagle routing semantics"
+                    "No model card found in discovery; defaulting to plain block hashing"
                 );
                 (
                     None,
                     None,
-                    false,
+                    0,
                     None,
                     None,
                     if metric_worker_type == llm_rs::protocols::common::timing::WORKER_TYPE_PREFILL
@@ -2202,7 +2211,7 @@ async fn create_kv_router_from_endpoint(
             worker_role,
             metric_worker_type,
             model_name,
-            enable_eagle,
+            lookahead_tokens,
             load_context.scheduler_load_sender(),
             load_context.cancellation_token(),
         )
@@ -2665,7 +2674,7 @@ impl KvRouter {
                 if !cfg.use_kv_events || cfg.predict_on_route_enabled() {
                     let mut tokens_with_hashes =
                         TokensWithHashes::new(token_ids.clone(), chooser.block_size())
-                            .with_is_eagle(chooser.is_eagle());
+                            .with_lookahead_tokens(chooser.lookahead_tokens());
                     if let Some(infos) = block_mm_infos.as_ref() {
                         tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.clone());
                     }

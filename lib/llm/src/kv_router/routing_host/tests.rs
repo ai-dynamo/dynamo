@@ -1846,7 +1846,7 @@ async fn router_with_config_and_classifier(
         None,
         "decode",
         None,
-        false,
+        0,
         None,
         None,
     )
@@ -1973,7 +1973,7 @@ async fn router_with_recorded_dispatch_affinity_and_classifier(
         None,
         "decode",
         None,
-        false,
+        0,
         None,
         None,
     )
@@ -3637,7 +3637,7 @@ async fn two_worker_migration_harness(
         None,
         "decode",
         None,
-        false,
+        0,
         None,
         None,
         load_context.scheduler_load_sender(),

@@ -820,7 +820,7 @@ impl KvIndexerInterface for KvIndexer {
         tokens: &[u32],
         lora_name: Option<&str>,
         cache_namespace: Option<&str>,
-        is_eagle: Option<bool>,
+        lookahead_tokens: Option<u32>,
     ) -> Result<OverlapScores, KvRouterError> {
         tracing::debug!(
             "Finding matches for request tokens: {:?} / len: {}",
@@ -833,7 +833,7 @@ impl KvIndexerInterface for KvIndexer {
             BlockHashOptions {
                 lora_name,
                 cache_namespace,
-                is_eagle,
+                lookahead_tokens,
                 ..Default::default()
             },
         );

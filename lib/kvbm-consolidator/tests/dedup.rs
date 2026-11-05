@@ -51,7 +51,7 @@ fn bs_event(
         medium: None,
         cache_namespace: None,
         block_mm_infos: None,
-        is_eagle: None,
+        lookahead_tokens: None,
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,

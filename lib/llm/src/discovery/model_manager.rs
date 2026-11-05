@@ -2192,7 +2192,7 @@ impl ModelManager {
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metric_worker_type: &'static str,
         model_name: Option<String>,
-        is_eagle: bool,
+        lookahead_tokens: u32,
     ) -> anyhow::Result<Arc<KvRouter>> {
         self.kv_chooser_for_with_worker_role(
             endpoint,
@@ -2202,7 +2202,7 @@ impl ModelManager {
             None,
             metric_worker_type,
             model_name,
-            is_eagle,
+            lookahead_tokens,
         )
         .await
     }
@@ -2217,7 +2217,7 @@ impl ModelManager {
         worker_role: Option<WorkerType>,
         metric_worker_type: &'static str,
         model_name: Option<String>,
-        is_eagle: bool,
+        lookahead_tokens: u32,
     ) -> anyhow::Result<Arc<KvRouter>> {
         self.kv_chooser_for_with_policy(
             endpoint,
@@ -2228,7 +2228,7 @@ impl ModelManager {
             worker_role,
             metric_worker_type,
             model_name,
-            is_eagle,
+            lookahead_tokens,
         )
         .await
     }
@@ -2245,7 +2245,7 @@ impl ModelManager {
         worker_role: Option<WorkerType>,
         metric_worker_type: &'static str,
         model_name: Option<String>,
-        is_eagle: bool,
+        lookahead_tokens: u32,
     ) -> anyhow::Result<Arc<KvRouter>> {
         let client = endpoint.client().await?;
         let parent_token = endpoint.component().drt().child_token();
@@ -2260,7 +2260,7 @@ impl ModelManager {
             worker_role,
             metric_worker_type,
             model_name,
-            is_eagle,
+            lookahead_tokens,
             scheduler_load,
             parent_token,
         )
@@ -2276,7 +2276,7 @@ impl ModelManager {
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metric_worker_type: &'static str,
         model_name: Option<String>,
-        is_eagle: bool,
+        lookahead_tokens: u32,
     ) -> anyhow::Result<crate::kv_router::ManagedKvRouter> {
         self.managed_kv_router_for_with_worker_role(
             endpoint,
@@ -2286,7 +2286,7 @@ impl ModelManager {
             None,
             metric_worker_type,
             model_name,
-            is_eagle,
+            lookahead_tokens,
         )
         .await
     }
@@ -2301,7 +2301,7 @@ impl ModelManager {
         worker_role: Option<WorkerType>,
         metric_worker_type: &'static str,
         model_name: Option<String>,
-        is_eagle: bool,
+        lookahead_tokens: u32,
     ) -> anyhow::Result<crate::kv_router::ManagedKvRouter> {
         self.managed_kv_router_for_with_policy(
             endpoint,
@@ -2312,7 +2312,7 @@ impl ModelManager {
             worker_role,
             metric_worker_type,
             model_name,
-            is_eagle,
+            lookahead_tokens,
         )
         .await
     }
@@ -2329,7 +2329,7 @@ impl ModelManager {
         worker_role: Option<WorkerType>,
         metric_worker_type: &'static str,
         model_name: Option<String>,
-        is_eagle: bool,
+        lookahead_tokens: u32,
     ) -> anyhow::Result<crate::kv_router::ManagedKvRouter> {
         let client = endpoint.client().await?;
         let source = crate::kv_router::RouterLoadSource::from_worker_role_or_metric(
@@ -2354,7 +2354,7 @@ impl ModelManager {
                 worker_role,
                 metric_worker_type,
                 model_name,
-                is_eagle,
+                lookahead_tokens,
                 load_context.scheduler_load_sender(),
                 load_context.cancellation_token(),
             )
@@ -2374,7 +2374,7 @@ impl ModelManager {
         worker_role: Option<WorkerType>,
         metric_worker_type: &'static str,
         model_name: Option<String>,
-        is_eagle: bool,
+        lookahead_tokens: u32,
         scheduler_load: crate::kv_router::SchedulerLoadSender,
         cancellation_token: CancellationToken,
     ) -> anyhow::Result<Arc<KvRouter>> {
@@ -2391,7 +2391,7 @@ impl ModelManager {
                 worker_role,
                 metric_worker_type,
                 model_name,
-                is_eagle,
+                lookahead_tokens,
                 scheduler_load,
                 cancellation_token,
             )
@@ -2411,7 +2411,7 @@ impl ModelManager {
         worker_role: Option<WorkerType>,
         metric_worker_type: &'static str,
         model_name: Option<String>,
-        is_eagle: bool,
+        lookahead_tokens: u32,
         scheduler_load: crate::kv_router::SchedulerLoadSender,
         cancellation_token: CancellationToken,
     ) -> anyhow::Result<Arc<KvRouter>> {
@@ -2486,7 +2486,7 @@ impl ModelManager {
             worker_role,
             metric_worker_type,
             model_name,
-            is_eagle,
+            lookahead_tokens,
             shared_cache,
             self.lora_enabled.then(|| lora_domain.filter.clone()),
             scheduler_load,
@@ -3277,7 +3277,7 @@ mod tests {
                 None,
                 crate::protocols::common::timing::WORKER_TYPE_DECODE,
                 Some("test-model".to_string()),
-                false,
+                0,
             )
             .await
             .unwrap();

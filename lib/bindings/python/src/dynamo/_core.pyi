@@ -442,6 +442,7 @@ def compute_block_hash_for_seq(
     lora_name: Optional[str] = None,
     is_eagle: Optional[bool] = None,
     cache_namespace: Optional[str] = None,
+    lookahead_tokens: Optional[int] = None,
 ) -> List[int]:
     """
     Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
@@ -465,6 +466,11 @@ def compute_block_hash_for_seq(
         lora_name: Optional LoRA adapter name for adapter-aware block hashing.
         is_eagle: Optional Eagle mode flag. When true, hashes use overlapping
                   `kv_block_size + 1` token windows with `kv_block_size` stride.
+                  Equivalent to `lookahead_tokens=1`.
+        lookahead_tokens: Optional number of tokens after each block that its hash
+                  also covers, using overlapping `kv_block_size + lookahead_tokens`
+                  token windows with `kv_block_size` stride. Takes precedence over
+                  `is_eagle`.
 
     Returns:
         List of block hashes (one per block)
@@ -953,6 +959,7 @@ class ModelRuntimeConfig:
     kv_event_source_mode: str | None
     kv_state_endpoint: str | None
     enable_eagle: bool
+    hash_lookahead_tokens: int
     taints: Set[str]
     stable_routing_id: str | None
     runtime_data: dict[str, Any]
@@ -1220,6 +1227,7 @@ class KvStoredEventInput(TypedDict):
     lora_name: NotRequired[Optional[str]]
     is_eagle: NotRequired[Optional[bool]]
     cache_salt: NotRequired[Optional[str]]
+    lookahead_tokens: NotRequired[Optional[int]]
 
 
 class KvRemovedEventInput(TypedDict):
@@ -1287,6 +1295,7 @@ class KvEventPublisher:
         lora_name: Optional[str] = None,
         is_eagle: Optional[bool] = None,
         cache_salt: Optional[str] = None,
+        lookahead_tokens: Optional[int] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -1304,6 +1313,10 @@ class KvEventPublisher:
             lora_name: Optional LoRA adapter name for adapter-aware block hashing.
             is_eagle: Optional Eagle mode flag. When true, stored blocks are
                 reconstructed using overlapping `kv_block_size + 1` token windows.
+            lookahead_tokens: Optional number of tokens after each block that its
+                hash also covers; stored blocks are reconstructed using overlapping
+                `kv_block_size + lookahead_tokens` token windows. Takes precedence
+                over `is_eagle`.
         """
         ...
 

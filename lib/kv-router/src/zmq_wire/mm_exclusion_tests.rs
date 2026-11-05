@@ -124,7 +124,7 @@ fn is_noop(event: &PlacementEvent) -> bool {
     matches!(&event.event.data, KvCacheEventData::Removed(remove) if remove.block_hashes.is_empty())
 }
 
-fn hashes(tokens: &[u64], is_eagle: bool) -> Vec<LocalBlockHash> {
+fn hashes(tokens: &[u64], lookahead_tokens: u32) -> Vec<LocalBlockHash> {
     let tokens: Vec<u32> = tokens
         .iter()
         .map(|&token| u32::try_from(token).expect("routing tokens fit in u32"))
@@ -135,14 +135,14 @@ fn hashes(tokens: &[u64], is_eagle: bool) -> Vec<LocalBlockHash> {
         BlockHashOptions {
             block_mm_infos: None,
             lora_name: None,
-            is_eagle: Some(is_eagle),
+            lookahead_tokens: Some(lookahead_tokens),
             cache_namespace: None,
         },
     )
 }
 
 fn request_hashes(blocks: &[Vec<u64>]) -> Vec<LocalBlockHash> {
-    hashes(&blocks.concat(), false)
+    hashes(&blocks.concat(), 0)
 }
 
 /// Request: text, one image, text. Routing tokens use Dynamo's pad.
@@ -483,7 +483,7 @@ fn eagle_overlap_token_is_classified_with_the_preceding_block() {
         assert_eq!(store.blocks[0].block_hash.0, E_T);
         assert_eq!(
             store.blocks[0].tokens_hash,
-            hashes(&after_overlap[..=BLOCK], true)[0],
+            hashes(&after_overlap[..=BLOCK], 1)[0],
             "block 0 hashes its tokens plus the overlap token"
         );
     }

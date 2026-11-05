@@ -608,7 +608,7 @@ pub struct KvRouter {
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     cancellation_token: CancellationToken,
     client: Client,
-    is_eagle: bool,
+    lookahead_tokens: u32,
     ingress: Arc<indexer::RuntimeIngress>,
     tracking_hash: TrackingHashContext,
     tracking_model_name: String,
@@ -650,7 +650,7 @@ impl KvRouter {
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metric_worker_type: &'static str,
         model_name: Option<String>,
-        is_eagle: bool,
+        lookahead_tokens: u32,
         shared_cache: Option<Arc<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
@@ -666,7 +666,7 @@ impl KvRouter {
             None,
             metric_worker_type,
             model_name,
-            is_eagle,
+            lookahead_tokens,
             shared_cache,
             lora_filter,
         )
@@ -686,7 +686,7 @@ impl KvRouter {
         worker_role: Option<WorkerType>,
         metric_worker_type: &'static str,
         model_name: Option<String>,
-        is_eagle: bool,
+        lookahead_tokens: u32,
         shared_cache: Option<Arc<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
@@ -705,7 +705,7 @@ impl KvRouter {
             worker_role,
             metric_worker_type,
             model_name,
-            is_eagle,
+            lookahead_tokens,
             shared_cache,
             lora_filter,
             scheduler_load,
@@ -727,7 +727,7 @@ impl KvRouter {
         worker_role: Option<WorkerType>,
         metric_worker_type: &'static str,
         model_name: Option<String>,
-        is_eagle: bool,
+        lookahead_tokens: u32,
         shared_cache: Option<Arc<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
         scheduler_load: SchedulerLoadSender,
@@ -890,7 +890,7 @@ impl KvRouter {
                 metric_worker_type,
                 model_name: model_name.clone(),
                 block_size,
-                is_eagle,
+                lookahead_tokens,
                 prefill_load_estimator: prefill_load_estimator.clone(),
                 overloaded_worker_provider,
                 reject_thresholds,
@@ -927,7 +927,7 @@ impl KvRouter {
             prefill_load_estimator,
             cancellation_token,
             client,
-            is_eagle,
+            lookahead_tokens,
             ingress,
             tracking_hash,
             tracking_model_name,
@@ -1019,8 +1019,8 @@ impl KvRouter {
         self.required_worker_inputs
     }
 
-    pub fn is_eagle(&self) -> bool {
-        self.is_eagle
+    pub fn lookahead_tokens(&self) -> u32 {
+        self.lookahead_tokens
     }
 
     fn approximate_lru_rank_registration(
@@ -1173,7 +1173,7 @@ impl KvRouter {
                 token_count,
                 local_hashes.len(),
                 usize::try_from(self.block_size).unwrap_or(usize::MAX),
-                self.is_eagle,
+                self.lookahead_tokens,
             );
             if let Err(error) = lease
                 .acquire(
@@ -1382,7 +1382,7 @@ impl KvRouter {
                     isl_tokens: None,
                     lora_name: lora_name.as_deref(),
                     cache_namespace: cache_namespace.as_deref(),
-                    is_eagle: Some(self.is_eagle),
+                    lookahead_tokens: Some(self.lookahead_tokens),
                 },
                 router_config_override: router_config_override.cloned(),
                 expected_output_tokens,
@@ -1573,7 +1573,7 @@ impl KvRouter {
             block_mm_infos,
             lora_name: lora_name.as_deref(),
             cache_namespace: cache_namespace.as_deref(),
-            is_eagle: Some(self.is_eagle),
+            lookahead_tokens: Some(self.lookahead_tokens),
         };
 
         let maybe_seq_hashes = self
@@ -1770,7 +1770,7 @@ impl KvRouter {
                 block_mm_infos,
                 lora_name,
                 cache_namespace,
-                is_eagle: Some(self.is_eagle),
+                lookahead_tokens: Some(self.lookahead_tokens),
             },
         );
         let tiered_matches = self.indexer.find_matches_by_tier(block_hashes).await?;
@@ -1792,7 +1792,7 @@ impl KvRouter {
             block_mm_infos,
             lora_name,
             cache_namespace,
-            is_eagle: Some(self.is_eagle),
+            lookahead_tokens: Some(self.lookahead_tokens),
         };
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, hash_options);
 
@@ -1837,7 +1837,7 @@ impl KvRouter {
             block_mm_infos,
             lora_name,
             cache_namespace,
-            is_eagle: Some(self.is_eagle),
+            lookahead_tokens: Some(self.lookahead_tokens),
         };
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, hash_options);
         let num_blocks = block_hashes.len();
@@ -2599,7 +2599,7 @@ mod tests {
             worker_role,
             metric_label,
             None,
-            false,
+            0,
             shared_cache,
             None,
         )
@@ -2719,7 +2719,7 @@ mod tests {
             Some(WorkerType::Decode),
             "decode",
             None,
-            false,
+            0,
             None,
             None,
         )
@@ -3260,7 +3260,7 @@ mod tests {
             None,
             "decode",
             None,
-            false,
+            0,
             None,
             Some(Arc::new(LoraFilter::new(routing, tracker.clone()))),
         )
@@ -3596,7 +3596,7 @@ mod tests {
                 block_mm_infos: None,
                 lora_name: None,
                 cache_namespace: None,
-                is_eagle: Some(false),
+                lookahead_tokens: Some(0),
             },
         );
         let expected_sequence = compute_seq_hash_for_block(&expected_local);

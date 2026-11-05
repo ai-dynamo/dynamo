@@ -44,7 +44,7 @@ struct PrefillAdvertisement {
     /// advertisement replaces the decode set's configuration rather than
     /// merging with it. `None` here when nothing was advertised at all.
     session_affinity_ttl: Option<Option<std::time::Duration>>,
-    is_eagle: bool,
+    lookahead_tokens: u32,
     /// The prefill workers' own block size, which is what their KV events are
     /// keyed on. The decode set's value would index this pool at the wrong
     /// granularity if the two ever differ.
@@ -79,7 +79,7 @@ fn resolve_advertisement_from_cards(
                 .session_affinity_ttl_secs
                 .map(std::time::Duration::from_secs)
         }),
-        is_eagle: first.runtime_config.enable_eagle,
+        lookahead_tokens: first.runtime_config.hash_lookahead_tokens(),
         kv_cache_block_size: first.kv_cache_block_size,
     };
 
@@ -356,7 +356,7 @@ impl PrefillRouter {
             ?prefill_router_mode,
             decode_router_mode = ?context.decode_router_mode,
             advertised = advertised_kv_tuning,
-            is_eagle = advertisement.is_eagle,
+            lookahead_tokens = advertisement.lookahead_tokens,
             block_size = prefill_block_size,
             session_affinity_ttl = ?prefill_session_affinity_ttl,
             kv_tuning = ?prefill_kv_config,
@@ -376,7 +376,7 @@ impl PrefillRouter {
                     Some(crate::worker_type::WorkerType::Prefill),
                     WORKER_TYPE_PREFILL,
                     Some(context.model_name.clone()),
-                    advertisement.is_eagle,
+                    advertisement.lookahead_tokens,
                     load_context.scheduler_load_sender(),
                     load_context.cancellation_token(),
                 )

@@ -1144,7 +1144,7 @@ mod tests {
                     data_parallel_size: Some(2),
                     max_num_batched_tokens: Some(1024),
                     total_kv_blocks: Some(100),
-                    is_eagle: Some(false),
+                    lookahead_tokens: Some(0),
                     ..Default::default()
                 })
                 .await?;

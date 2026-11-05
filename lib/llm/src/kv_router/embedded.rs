@@ -48,7 +48,7 @@ pub(crate) struct EmbeddedSelectionArgs {
     pub metric_worker_type: &'static str,
     pub model_name: Option<String>,
     pub block_size: u32,
-    pub is_eagle: bool,
+    pub lookahead_tokens: u32,
     pub prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     pub overloaded_worker_provider: OverloadedWorkerProvider,
     /// Live busy thresholds the queue applies at selection.
@@ -301,7 +301,7 @@ impl EmbeddedSelection {
         let service = Arc::new(service);
         let partition = service
             .core()
-            .ensure_partition(key.clone(), args.block_size, args.is_eagle)
+            .ensure_partition(key.clone(), args.block_size, args.lookahead_tokens)
             .context("failed to create embedded selection partition")?;
         if let Some(spec) = crate::request_trace::router_selection_spec()
             && !partition.scheduler().set_selection_trace(spec)
@@ -346,7 +346,7 @@ impl EmbeddedSelection {
             watch: workers_with_configs,
             key,
             block_size: args.block_size,
-            is_eagle: args.is_eagle,
+            lookahead_tokens: args.lookahead_tokens,
             primed: false,
         };
         let mut reconciler = CatalogReconciler::new(Arc::clone(service.core()));
@@ -435,7 +435,7 @@ struct RuntimeDiscoverySource {
     watch: RuntimeConfigWatch,
     key: RoutingPartitionId,
     block_size: u32,
-    is_eagle: bool,
+    lookahead_tokens: u32,
     primed: bool,
 }
 
@@ -456,7 +456,7 @@ impl WorkerCatalogSource for RuntimeDiscoverySource {
                     config,
                     &self.key,
                     self.block_size,
-                    self.is_eagle,
+                    self.lookahead_tokens,
                 )
             })
             .collect();
@@ -472,7 +472,7 @@ pub(crate) fn worker_request_from_runtime_config(
     config: &ModelRuntimeConfig,
     key: &RoutingPartitionId,
     block_size: u32,
-    is_eagle: bool,
+    lookahead_tokens: u32,
 ) -> WorkerRequest {
     let dp_start = config.data_parallel_start_rank();
     let dp_size = config.data_parallel_size();
@@ -503,7 +503,7 @@ pub(crate) fn worker_request_from_runtime_config(
         ),
         total_kv_blocks: config.total_kv_blocks,
         stable_routing_id: config.stable_routing_id.clone(),
-        is_eagle: Some(is_eagle),
+        lookahead_tokens: Some(lookahead_tokens),
         taints: config.taints().clone(),
         topology_domains: config.topology_domains.clone(),
         kv_transfer_domain: config.kv_transfer_domain.clone(),
@@ -593,7 +593,7 @@ mod tests {
             serde_json::json!({"2": "tcp://w:9002", "3": "tcp://w:9003"}),
         );
         let key = RoutingPartitionId::new("model", DEFAULT_ROUTING_GROUP);
-        let request = worker_request_from_runtime_config(7, &config, &key, 16, false);
+        let request = worker_request_from_runtime_config(7, &config, &key, 16, 0);
         assert_eq!(request.worker_id, 7);
         assert_eq!(request.model_name, "model");
         assert_eq!(request.endpoint.as_deref(), Some("dyn://7"));
@@ -618,7 +618,7 @@ mod tests {
     fn worker_request_defaults_unreported_capacity() {
         let key = RoutingPartitionId::new("model", DEFAULT_ROUTING_GROUP);
         let request =
-            worker_request_from_runtime_config(7, &ModelRuntimeConfig::default(), &key, 16, false);
+            worker_request_from_runtime_config(7, &ModelRuntimeConfig::default(), &key, 16, 0);
         assert_eq!(
             request.max_num_batched_tokens,
             Some(DEFAULT_MAX_BATCHED_TOKENS)

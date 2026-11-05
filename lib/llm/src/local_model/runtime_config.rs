@@ -380,6 +380,12 @@ pub struct ModelRuntimeConfig {
     #[serde(default = "default_eagle")]
     pub enable_eagle: bool,
 
+    /// Tokens after each KV block that the engine's block hashes also cover.
+    /// Published only for lookaheads `enable_eagle` cannot express (more than one
+    /// token); read it through [`Self::hash_lookahead_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_hash_lookahead_tokens: Option<u32>,
+
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub taints: HashSet<String>,
 
@@ -477,6 +483,7 @@ impl Default for ModelRuntimeConfig {
             runtime_data: HashMap::new(),
             disaggregated_endpoint: None,
             enable_eagle: false,
+            kv_hash_lookahead_tokens: None,
             taints: HashSet::new(),
             stable_routing_id: None,
             topology_domains: HashMap::new(),
@@ -489,6 +496,23 @@ impl Default for ModelRuntimeConfig {
 }
 
 impl ModelRuntimeConfig {
+    /// Tokens after each KV block that the engine's block hashes cover: one for an
+    /// Eagle-style engine, none for plain block hashes. Older workers publish only
+    /// `enable_eagle`.
+    pub fn hash_lookahead_tokens(&self) -> u32 {
+        self.kv_hash_lookahead_tokens
+            .unwrap_or_else(|| u32::from(self.enable_eagle))
+    }
+
+    /// Publish the hash lookahead. `enable_eagle` keeps describing the one-token
+    /// window so older frontends hash prompts the same way; a wider lookahead is
+    /// only visible through `kv_hash_lookahead_tokens` and leaves older frontends
+    /// on plain hashing.
+    pub fn set_hash_lookahead_tokens(&mut self, lookahead_tokens: u32) {
+        self.enable_eagle = lookahead_tokens == 1;
+        self.kv_hash_lookahead_tokens = (lookahead_tokens > 1).then_some(lookahead_tokens);
+    }
+
     /// Whether the configured grammar can replay distinct Responses phases.
     pub fn preserves_response_message_phases(&self) -> bool {
         crate::protocols::openai::chat_completions::unified_parser::configured_family(
@@ -899,6 +923,36 @@ impl ModelRuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hash_lookahead_tokens_stays_compatible_with_enable_eagle() {
+        // Cards from workers that only know `enable_eagle`.
+        let legacy_eagle: ModelRuntimeConfig =
+            serde_json::from_value(serde_json::json!({"enable_eagle": true})).unwrap();
+        assert_eq!(legacy_eagle.hash_lookahead_tokens(), 1);
+        assert_eq!(ModelRuntimeConfig::default().hash_lookahead_tokens(), 0);
+
+        // A wider lookahead has no `enable_eagle` encoding; the new field wins.
+        let wide: ModelRuntimeConfig =
+            serde_json::from_value(serde_json::json!({"kv_hash_lookahead_tokens": 3})).unwrap();
+        assert_eq!(wide.hash_lookahead_tokens(), 3);
+
+        // Writers keep `enable_eagle` for one token, so older frontends hash the
+        // same window, and publish the new field only when it is needed.
+        let mut config = ModelRuntimeConfig::default();
+        config.set_hash_lookahead_tokens(1);
+        assert!(config.enable_eagle);
+        assert_eq!(config.kv_hash_lookahead_tokens, None);
+        config.set_hash_lookahead_tokens(3);
+        assert!(!config.enable_eagle);
+        assert_eq!(config.hash_lookahead_tokens(), 3);
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["kv_hash_lookahead_tokens"],
+            3
+        );
+        config.set_hash_lookahead_tokens(0);
+        assert_eq!(config.hash_lookahead_tokens(), 0);
+    }
 
     use crate::protocols::openai::chat_completions::tool_parser_v2::V2_FAMILIES;
 

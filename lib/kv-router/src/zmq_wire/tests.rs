@@ -234,16 +234,129 @@ fn test_deserialize_bigram_block_stored() {
             RawKvEvent::BlockStored {
                 token_ids,
                 block_size,
-                is_eagle,
+                lookahead_tokens,
                 ..
             } => {
                 assert_eq!(token_ids, vec![10, 11, 12, 13, 14]);
                 assert_eq!(block_size, 2);
-                assert_eq!(is_eagle, Some(true));
+                assert_eq!(lookahead_tokens, Some(1));
             }
             other => panic!("expected BlockStored, got {other:?}"),
         }
     }
+}
+
+fn decode_lookahead_event(
+    token_ids: Vec<u32>,
+    lookahead: serde_json::Value,
+) -> (Vec<u32>, Option<u32>) {
+    let event = serde_json::json!({
+        "type": "BlockStored",
+        "block_hashes": [11, 12],
+        "parent_block_hash": null,
+        "token_ids": token_ids,
+        "block_size": 2,
+        "lookahead_token_ids": lookahead,
+    });
+    match serde_json::from_value::<RawKvEvent>(event).unwrap() {
+        RawKvEvent::BlockStored {
+            token_ids,
+            lookahead_tokens,
+            ..
+        } => (token_ids, lookahead_tokens),
+        other => panic!("expected BlockStored, got {other:?}"),
+    }
+}
+
+#[test]
+fn lookahead_one_maps_to_eagle_window() {
+    // Blocks [10,11] and [12,13]; vLLM hashes them with lookahead 12 and 14.
+    let (token_ids, lookahead_tokens) =
+        decode_lookahead_event(vec![10, 11, 12, 13], serde_json::json!([[12], [14]]));
+    assert_eq!(token_ids, vec![10, 11, 12, 13, 14]);
+    assert_eq!(lookahead_tokens, Some(1));
+}
+
+#[test]
+fn lookahead_of_any_width_extends_the_window() {
+    // Block size 2, two blocks. L = 2: block 0 covers [10,11]+[12,13] and block 1
+    // covers [12,13]+[14,15].
+    let (token_ids, lookahead_tokens) = decode_lookahead_event(
+        vec![10, 11, 12, 13],
+        serde_json::json!([[12, 13], [14, 15]]),
+    );
+    assert_eq!(token_ids, vec![10, 11, 12, 13, 14, 15]);
+    assert_eq!(lookahead_tokens, Some(2));
+
+    // L = 3 is wider than a block: block 0's lookahead reaches into the tail.
+    let (token_ids, lookahead_tokens) = decode_lookahead_event(
+        vec![10, 11, 12, 13],
+        serde_json::json!([[12, 13, 14], [14, 15, 16]]),
+    );
+    assert_eq!(token_ids, vec![10, 11, 12, 13, 14, 15, 16]);
+    assert_eq!(lookahead_tokens, Some(3));
+}
+
+#[test]
+fn lookahead_decodes_from_vllm_positional_layout() {
+    // vLLM's array_like BlockStored: hashes, parent, tokens, block_size, lora_id,
+    // medium, lora_name, extra_keys, group_idx, kind, window, locality,
+    // ownership, session_id, lookahead_token_ids.
+    let raw_event = (
+        "BlockStored",
+        vec![BlockHashValue::Unsigned(11), BlockHashValue::Unsigned(12)],
+        Option::<BlockHashValue>::None,
+        vec![10u32, 11, 12, 13],
+        2usize,
+        Option::<u64>::None,
+        Option::<String>::None,
+        Option::<String>::None,
+        Option::<Vec<u32>>::None,
+        Some(0u32),
+        Some("full_attention"),
+        Option::<u32>::None,
+        Option::<String>::None,
+        Option::<String>::None,
+        Option::<String>::None,
+        Some(vec![vec![12u32], vec![14]]),
+    );
+    let event: RawKvEvent = from_slice(&to_vec(&raw_event).unwrap()).unwrap();
+    match event {
+        RawKvEvent::BlockStored {
+            token_ids,
+            lookahead_tokens,
+            group_idx,
+            ..
+        } => {
+            assert_eq!(token_ids, vec![10, 11, 12, 13, 14]);
+            assert_eq!(lookahead_tokens, Some(1));
+            assert_eq!(group_idx, Some(0));
+        }
+        other => panic!("expected BlockStored, got {other:?}"),
+    }
+}
+
+#[test]
+fn lookahead_unsupported_layouts_fall_back_to_plain_hashing() {
+    for lookahead in [
+        serde_json::json!([[99], [14]]), // not contiguous with the next block
+        serde_json::json!([[12]]),       // does not match the block count
+        serde_json::json!([[12], [14, 15]]), // widths differ between blocks
+        serde_json::json!([[12, 99], [14, 15]]), // wider lookahead disagrees with the next block
+        serde_json::json!([[], []]),     // empty lookahead
+    ] {
+        let (token_ids, lookahead_tokens) = decode_lookahead_event(vec![10, 11, 12, 13], lookahead);
+        assert_eq!(token_ids, vec![10, 11, 12, 13]);
+        assert_eq!(lookahead_tokens, Some(0));
+    }
+}
+
+#[test]
+fn missing_or_null_lookahead_is_unchanged() {
+    let (token_ids, lookahead_tokens) =
+        decode_lookahead_event(vec![10, 11, 12, 13], serde_json::Value::Null);
+    assert_eq!(token_ids, vec![10, 11, 12, 13]);
+    assert_eq!(lookahead_tokens, Some(0));
 }
 
 #[test]
@@ -971,7 +1084,7 @@ fn test_normalizer_propagates_cache_namespace_from_parent() {
         lora_name: None,
         cache_namespace: Some("tenant-a".to_string()),
         block_mm_infos: None,
-        is_eagle: Some(false),
+        lookahead_tokens: Some(0),
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
@@ -988,7 +1101,7 @@ fn test_normalizer_propagates_cache_namespace_from_parent() {
         lora_name: None,
         cache_namespace: None,
         block_mm_infos: None,
-        is_eagle: Some(false),
+        lookahead_tokens: Some(0),
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
@@ -1034,7 +1147,7 @@ fn test_normalizer_shares_cache_namespace_across_blocks() {
         lora_name: None,
         cache_namespace: Some("tenant-a".to_string()),
         block_mm_infos: None,
-        is_eagle: Some(false),
+        lookahead_tokens: Some(0),
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
@@ -1068,7 +1181,7 @@ fn test_normalizer_rejects_ambiguous_parent_cache_namespace() {
             lora_name: None,
             cache_namespace: cache_namespace.map(str::to_owned),
             block_mm_infos: None,
-            is_eagle: Some(false),
+            lookahead_tokens: Some(0),
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
@@ -1108,7 +1221,7 @@ fn test_normalizer_treats_empty_namespace_as_absent() {
         lora_name: None,
         cache_namespace: Some("tenant-a".to_string()),
         block_mm_infos: None,
-        is_eagle: Some(false),
+        lookahead_tokens: Some(0),
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
@@ -1125,7 +1238,7 @@ fn test_normalizer_treats_empty_namespace_as_absent() {
         lora_name: None,
         cache_namespace: Some(String::new()),
         block_mm_infos: None,
-        is_eagle: Some(false),
+        lookahead_tokens: Some(0),
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
@@ -1173,7 +1286,7 @@ fn test_convert_event_bigram_emits_eagle_windows() {
         lora_name: None,
         cache_namespace: None,
         block_mm_infos: None,
-        is_eagle: Some(true),
+        lookahead_tokens: Some(1),
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
@@ -1208,7 +1321,7 @@ fn test_convert_event_bigram_emits_eagle_windows() {
                 &[10, 11, 12],
                 2,
                 BlockHashOptions {
-                    is_eagle: Some(true),
+                    lookahead_tokens: Some(1),
                     ..Default::default()
                 },
             );
@@ -1216,7 +1329,7 @@ fn test_convert_event_bigram_emits_eagle_windows() {
                 &[12, 13, 14],
                 2,
                 BlockHashOptions {
-                    is_eagle: Some(true),
+                    lookahead_tokens: Some(1),
                     ..Default::default()
                 },
             );
@@ -1250,7 +1363,7 @@ fn cpu_block_stored(fixture: CpuBlockStoredFixture<'_>) -> RawKvEvent {
         lora_name: None,
         cache_namespace: None,
         block_mm_infos: None,
-        is_eagle: None,
+        lookahead_tokens: None,
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
@@ -1346,7 +1459,7 @@ fn gpu_block_stored(block_hashes: &[u64], token_ids: &[u32], block_size: usize) 
         lora_name: None,
         cache_namespace: None,
         block_mm_infos: None,
-        is_eagle: None,
+        lookahead_tokens: None,
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
@@ -1582,7 +1695,7 @@ fn raw_placement_event(
             lora_name: None,
             cache_namespace: None,
             block_mm_infos: None,
-            is_eagle: Some(false),
+            lookahead_tokens: Some(0),
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
@@ -1775,7 +1888,7 @@ fn test_storage_placeholder_store_is_indexed_as_disk_noop() {
         lora_name: None,
         cache_namespace: None,
         block_mm_infos: None,
-        is_eagle: None,
+        lookahead_tokens: None,
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
@@ -1822,7 +1935,7 @@ fn namespaced_block_stored(
         lora_name: None,
         cache_namespace: cache_namespace.map(str::to_owned),
         block_mm_infos: None,
-        is_eagle: Some(false),
+        lookahead_tokens: Some(0),
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,

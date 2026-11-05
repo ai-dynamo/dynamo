@@ -160,7 +160,7 @@ fn normalize_with(
 ) -> Result<super::input::NormalizedPrompt, SelectionError> {
     request.view().normalize_for_selection(
         4,
-        false,
+        0,
         Some(TrackingHashInput {
             context,
             scope: TrackingHashScope {
@@ -557,7 +557,7 @@ fn prompt_normalization_uses_mm_routing_info_and_eagle_hashing() {
         isl_tokens: None,
         lora_name: Some("adapter".to_string()),
         cache_namespace: Some("tenant-a".to_string()),
-        is_eagle: Some(true),
+        lookahead_tokens: Some(1),
     };
 
     let normalized = normalize_prompt(&request);
@@ -568,7 +568,7 @@ fn prompt_normalization_uses_mm_routing_info_and_eagle_hashing() {
             block_mm_infos: Some(&mm_infos),
             lora_name: Some("adapter"),
             cache_namespace: Some("tenant-a"),
-            is_eagle: Some(true),
+            lookahead_tokens: Some(1),
         },
     );
     assert_eq!(normalized.block_hashes, expected_block_hashes);
@@ -610,7 +610,7 @@ fn prompt_carrying_requests_read_top_level_prompt_fields() {
     let assert_prompt = |prompt: &PromptRequest| {
         assert_eq!(prompt.token_ids.as_deref(), Some(&[1, 2, 3][..]));
         assert_eq!(prompt.cache_namespace.as_deref(), Some("tenant-a"));
-        assert_eq!(prompt.is_eagle, Some(true));
+        assert_eq!(prompt.lookahead_tokens, Some(1));
     };
 
     let select: SelectRequest = serde_json::from_value(body.clone()).unwrap();
@@ -728,7 +728,7 @@ fn keyed_reservation_hashes_directly_from_tokens() {
     let normalized = request
         .view()
         .normalize_for_reservation(
-            false,
+            0,
             TrackingHashInput {
                 context: &context,
                 scope,
@@ -777,7 +777,7 @@ fn keyed_hash_only_inputs_remain_trusted_for_selection_and_reservation() {
     let reservation = request
         .view()
         .normalize_for_reservation(
-            false,
+            0,
             TrackingHashInput {
                 context: &context,
                 scope,
@@ -812,16 +812,16 @@ fn randomized_reservation_uses_canonical_complete_block_count() {
         (vec![1, 2, 3, 4, 5, 6, 7, 8, 9], true, 2),
     ];
 
-    for (token_ids, is_eagle, expected_blocks) in cases {
+    for (token_ids, lookahead_tokens, expected_blocks) in cases {
         let request: PromptRequest = serde_json::from_value(serde_json::json!({
             "token_ids": token_ids,
-            "is_eagle": is_eagle
+            "lookahead_tokens": lookahead_tokens
         }))
         .unwrap();
         let normalized = request
             .view()
             .normalize_for_reservation(
-                false,
+                0,
                 TrackingHashInput {
                     context: &context,
                     scope: TrackingHashScope {

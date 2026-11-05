@@ -85,7 +85,7 @@ impl EngineMmState {
             parent_block_hash,
             token_ids,
             block_size,
-            is_eagle,
+            lookahead_tokens,
             ..
         } = raw
         else {
@@ -111,11 +111,11 @@ impl EngineMmState {
             return false;
         }
 
-        // Conversion hashes each block's tokens and, for Eagle, also the next
-        // block's first token. Classify exactly those windows.
+        // Conversion hashes each block's tokens and, with lookahead, also the
+        // tokens after it. Classify exactly those windows.
         let block_len = *block_size;
-        let eagle = is_eagle.unwrap_or(false);
-        let window = block_len + usize::from(eagle);
+        let lookahead = lookahead_tokens.unwrap_or(0) as usize;
+        let window = block_len + lookahead;
         let cut = (0..block_hashes.len()).find(|&block_idx| {
             let start = block_idx * block_len;
             token_ids
@@ -132,8 +132,9 @@ impl EngineMmState {
             for hash in block_hashes.drain(block_idx..) {
                 self.exclude((worker, tier, hash.into_u64()));
             }
-            // Keep the overlap token the last surviving Eagle block hashes.
-            token_ids.truncate(block_idx * block_len + usize::from(eagle && block_idx > 0));
+            // Keep the lookahead tokens the last surviving block hashes.
+            let kept_lookahead = if block_idx > 0 { lookahead } else { 0 };
+            token_ids.truncate(block_idx * block_len + kept_lookahead);
         }
 
         !block_hashes.is_empty()

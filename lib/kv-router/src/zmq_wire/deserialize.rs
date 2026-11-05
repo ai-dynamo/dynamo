@@ -44,6 +44,15 @@ enum BlockStoredNamespace {
     SglangMetadata { cache_salt: String },
 }
 
+/// Positional `lookahead_token_ids` slot; any other shape is ignored.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LookaheadSlot {
+    Tokens(Vec<Vec<u64>>),
+    #[allow(dead_code)]
+    Other(IgnoredAny),
+}
+
 impl<'de> Visitor<'de> for RawKvEventVisitor {
     type Value = RawKvEvent;
 
@@ -70,6 +79,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut locality: Option<Option<Locality>> = None;
         let mut ownership: Option<Option<String>> = None;
         let mut session_id: Option<Option<String>> = None;
+        let mut lookahead_token_ids: Option<Option<Vec<Vec<u64>>>> = None;
         let mut metadata = KvCacheEventMetadata::default();
 
         while let Some(key) = map.next_key::<String>()? {
@@ -128,6 +138,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "session_id" => {
                     session_id = Some(map.next_value()?);
                 }
+                "lookahead_token_ids" => {
+                    lookahead_token_ids = Some(map.next_value()?);
+                }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
@@ -141,7 +154,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let token_ids = token_ids.ok_or_else(|| de::Error::missing_field("token_ids"))?;
                 let block_size =
                     block_size.ok_or_else(|| de::Error::missing_field("block_size"))?;
-                let (raw_token_ids, is_eagle) = match (token_ids, trtllm_routing) {
+                let (raw_token_ids, lookahead_tokens) = match (token_ids, trtllm_routing) {
                     (MapTokenIds::Plain(ids), None) => normalize_token_ids(ids),
                     (ids, Some(metadata)) => {
                         let Some(tokens) = trtllm::token_ids(
@@ -153,10 +166,16 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                         ) else {
                             return Ok(RawKvEvent::Ignored);
                         };
-                        (tokens, false)
+                        (tokens, 0)
                     }
                     _ => return Ok(RawKvEvent::Ignored),
                 };
+                let (raw_token_ids, lookahead_tokens) = apply_lookahead_token_ids(
+                    raw_token_ids,
+                    lookahead_tokens,
+                    block_size,
+                    lookahead_token_ids.unwrap_or(None),
+                );
                 let medium = normalize_medium(medium.unwrap_or(None));
                 let lora_name = lora_name.unwrap_or(None);
                 let extra_keys = extra_keys.unwrap_or(None);
@@ -175,7 +194,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     lora_name,
                     cache_namespace,
                     block_mm_infos,
-                    is_eagle: Some(is_eagle),
+                    lookahead_tokens: Some(lookahead_tokens),
                     group_idx: metadata.group_idx,
                     kv_cache_spec_kind: metadata.kv_cache_spec_kind,
                     kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
@@ -257,6 +276,17 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     trailing[trailing_len] = field;
                     trailing_len += 1;
                 }
+                // vLLM's fixed layout continues with `session_id` (index 14) and
+                // `lookahead_token_ids` (index 15) after the five trailing fields.
+                let mut lookahead_token_ids = None;
+                if trailing_len == trailing.len() {
+                    let _session_id = seq.next_element::<IgnoredAny>()?;
+                    if let Some(Some(LookaheadSlot::Tokens(tokens))) =
+                        seq.next_element::<Option<LookaheadSlot>>()?
+                    {
+                        lookahead_token_ids = Some(tokens);
+                    }
+                }
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
 
                 let parsed = parse_block_stored_trailing::<A::Error>(trailing, trailing_len)?;
@@ -267,7 +297,13 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let block_mm_infos = parsed
                     .block_mm_infos
                     .or_else(|| extra_keys_to_block_mm_infos(extra_keys));
-                let (raw_token_ids, is_eagle) = normalize_token_ids(token_ids);
+                let (raw_token_ids, lookahead_tokens) = normalize_token_ids(token_ids);
+                let (raw_token_ids, lookahead_tokens) = apply_lookahead_token_ids(
+                    raw_token_ids,
+                    lookahead_tokens,
+                    block_size,
+                    lookahead_token_ids,
+                );
 
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
@@ -278,7 +314,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     lora_name,
                     cache_namespace,
                     block_mm_infos,
-                    is_eagle: Some(is_eagle),
+                    lookahead_tokens: Some(lookahead_tokens),
                     group_idx: parsed.metadata.group_idx,
                     kv_cache_spec_kind: parsed.metadata.kv_cache_spec_kind,
                     kv_cache_spec_sliding_window: parsed.metadata.kv_cache_spec_sliding_window,
@@ -528,9 +564,63 @@ fn narrow_token_id(token_id: u64) -> u32 {
     u32::try_from(token_id).unwrap_or(WIDE_TOKEN_SENTINEL)
 }
 
-fn normalize_token_ids(token_ids: KvTokenIds) -> (Vec<u32>, bool) {
+/// Fold vLLM lookahead block hashes into the router's lookahead representation.
+///
+/// vLLM hashes each block over its tokens plus the next `L` tokens and reports
+/// those tokens per block in `lookahead_token_ids`. The router hashes the same
+/// windows (`block_size + L` tokens, stride `block_size`) from one flat token
+/// stream, so the last block's lookahead is appended to the event's tokens.
+/// Layouts that do not describe one consistent stream fall back to plain
+/// hashing.
+fn apply_lookahead_token_ids(
+    mut token_ids: Vec<u32>,
+    lookahead_tokens: u32,
+    block_size: usize,
+    lookahead: Option<Vec<Vec<u64>>>,
+) -> (Vec<u32>, u32) {
+    let Some(lookahead) = lookahead else {
+        return (token_ids, lookahead_tokens);
+    };
+    if lookahead_tokens > 0 || lookahead.is_empty() {
+        return (token_ids, lookahead_tokens);
+    }
+
+    let width = lookahead[0].len();
+    let uniform = width > 0 && lookahead.iter().all(|tokens| tokens.len() == width);
+    let valid = uniform
+        && block_size > 0
+        && token_ids.len() == lookahead.len() * block_size
+        && u32::try_from(width).is_ok();
+    if valid {
+        let tail = lookahead[lookahead.len() - 1]
+            .iter()
+            .map(|&t| narrow_token_id(t));
+        token_ids.extend(tail);
+        // Every block's lookahead must be exactly the tokens that follow it.
+        let consistent = lookahead.iter().enumerate().all(|(block_idx, tokens)| {
+            let start = (block_idx + 1) * block_size;
+            token_ids.get(start..start + width).is_some_and(|next| {
+                next.iter()
+                    .zip(tokens)
+                    .all(|(&a, &b)| a == narrow_token_id(b))
+            })
+        });
+        if consistent {
+            return (token_ids, width as u32);
+        }
+        token_ids.truncate(lookahead.len() * block_size);
+    }
+
+    tracing::warn!(
+        blocks = lookahead.len(),
+        "Inconsistent lookahead_token_ids layout; hashing without lookahead"
+    );
+    (token_ids, 0)
+}
+
+fn normalize_token_ids(token_ids: KvTokenIds) -> (Vec<u32>, u32) {
     match token_ids {
-        KvTokenIds::Single(tids) => (tids.into_iter().map(narrow_token_id).collect(), false),
+        KvTokenIds::Single(tids) => (tids.into_iter().map(narrow_token_id).collect(), 0),
         KvTokenIds::Bigram(tids) => {
             let mut new_tids: Vec<u32> = tids
                 .iter()
@@ -539,7 +629,7 @@ fn normalize_token_ids(token_ids: KvTokenIds) -> (Vec<u32>, bool) {
             if let Some(&(_, last_token)) = tids.last() {
                 new_tids.push(narrow_token_id(last_token));
             }
-            (new_tids, true)
+            (new_tids, 1)
         }
     }
 }

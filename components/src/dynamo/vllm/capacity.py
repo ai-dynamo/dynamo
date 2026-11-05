@@ -27,6 +27,20 @@ def publish_vllm_token_budget(runtime_config: Any, max_model_len: int | None) ->
     )
 
 
+def publish_vllm_lookahead_block_hashing(runtime_config: Any, vllm_config: Any) -> None:
+    """Tell the router how many tokens past each block vLLM's block hashes cover.
+
+    vLLM resolves this as ``VllmConfig.num_hash_lookahead_tokens``: zero for plain
+    hashes, one for EAGLE-family drafters, and the speculative token count for
+    multi-module MTP. The frontend hashes prompts with the same lookahead so its
+    request-side hashes match the worker's KV events. Older vLLM has no such
+    attribute and keeps plain hashes.
+    """
+    lookahead_tokens = getattr(vllm_config, "num_hash_lookahead_tokens", 0)
+    if lookahead_tokens > 0:
+        runtime_config.hash_lookahead_tokens = lookahead_tokens
+
+
 def per_rank_kv_blocks(
     total_kv_blocks: int | None, data_parallel_size: int
 ) -> int | None:
