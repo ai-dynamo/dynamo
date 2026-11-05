@@ -23,7 +23,7 @@ use dynamo_renderer::{
     kimi_k3_formatter_for, may_be_fix_tool_schema,
 };
 
-use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
+use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact, TokenizerKind};
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
 };
@@ -440,6 +440,16 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
             let mut config: ChatTemplate = serde_json::from_str(&contents).inspect_err(|err| {
                 crate::log_json_err(&file.display().to_string(), &contents, err)
             })?;
+
+            // Some HF models (e.g. DeepSeek-R1) list their chat markers only in
+            // tokenizer.json, so pass its added tokens to the renderer as well.
+            if let Some(TokenizerKind::HfTokenizerJson(file)) = &mdc.tokenizer
+                && let Some(path) = file.path()
+            {
+                let tokenizer_json = std::fs::read_to_string(path)
+                    .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
+                config = config.with_tokenizer_json(&tokenizer_json)?;
+            }
 
             // Some HF models (e.g. Llama-4-Maverick) store the chat template in a
             // separate file, or it may be a custom template provided via CLI flag.
