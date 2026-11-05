@@ -115,6 +115,7 @@ pub(crate) fn request(
         body.remove("bootstrap_host");
         body.remove("bootstrap_port");
         body.remove("bootstrap_room");
+        body.remove("disagg_prefill_dp_rank");
     }
 
     // SGLang's Rust listeners run a request on their own rank, and the rank
@@ -145,9 +146,8 @@ pub(crate) fn request(
 }
 
 /// SGLang's native `/generate`, served by its Rust server beside the gRPC
-/// service. The server has no HTTP `/abort_request`, so requests are aborted
-/// through the gRPC Abort RPC, and it reports a failed request as one
-/// `{"error": {message, code}}` frame.
+/// service. Requests are aborted through the gRPC Abort RPC, and a failed
+/// request ends with one `{"error": {message, code}}` frame.
 #[derive(Clone)]
 pub(crate) struct NativeHttp {
     client: reqwest::Client,
@@ -549,12 +549,8 @@ fn engine_error(message: &str, code: u32) -> DynamoError {
     protocol::coded_error("/generate", message, code)
 }
 
-/// A `/generate` failure answered with an HTTP error status instead of a
-/// stream: a body SGLang cannot parse or decode, or a header override it
-/// rejects. It answers these unary even for a streaming request, with the
-/// same `{"error": {message, code}}` object as its error frames, so they map
-/// like one, keeping the HTTP status as the code. Any other body maps by the
-/// status alone.
+/// A `/generate` error status. An `{"error": {message, ...}}` body maps like an
+/// error frame with the HTTP status as its code; any other body by status alone.
 fn response_error(status: StatusCode, detail: String) -> DynamoError {
     if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
         return authentication_error("/generate", status);
@@ -825,6 +821,11 @@ mod tests {
                 .get("disagg_prefill_dp_rank")
                 .is_none()
         );
+
+        let native = request(&canonical, "rid", DisaggregationMode::Aggregated, ranked)
+            .unwrap()
+            .unwrap();
+        assert!(native.body.get("disagg_prefill_dp_rank").is_none());
     }
 
     #[test]

@@ -34,7 +34,7 @@ spec:
         spec:
           initContainers:
           - name: runtime
-            image: <your-registry>/dynamo-sidecar:1.6.0
+            image: <your-registry>/dynamo-sidecar:<your-version>
             command:
             - dynamo-sglang-sidecar
             args:
@@ -120,7 +120,7 @@ spec:
         spec:
           initContainers:
           - name: runtime
-            image: <your-registry>/dynamo-sidecar:1.6.0
+            image: <your-registry>/dynamo-sidecar:<your-version>
             command:
             - dynamo-sglang-sidecar
             args:

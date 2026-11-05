@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use dynamo_mocker::common::protocols::{EngineType, MockerConfig};
 use dynamo_sglang_sidecar::proto::generate_stream_item::Item;
 use dynamo_sglang_sidecar::proto::sglang_service_server::SglangService;
 use futures::StreamExt;
@@ -154,7 +153,6 @@ async fn generate_rejects_invalid_requests() {
         );
     }
 
-    // Like SGLang, the context check fails the request inside its stream.
     let short_context = SglangMockerService::new(
         MockerServerConfig {
             context_length: 4,
@@ -266,8 +264,6 @@ async fn zero_top_logprobs_omits_top_logprob_metadata() {
         );
         assert!(meta.output_top_logprobs.is_empty());
         assert!(meta.input_top_logprobs.is_empty());
-        // Like SGLang's incremental stream, prompt logprobs ride the first
-        // frame and later frames carry an empty list.
         let input = &meta.input_token_logprobs.as_ref().unwrap().entries;
         if index == 0 {
             assert_eq!(input.len(), 3);
@@ -324,7 +320,7 @@ async fn missing_abort_is_idempotent() {
         // Like SGLang, an unknown or finished rid matches nothing.
         assert!(!response.success);
     }
-    for (rid, abort_all) in [("", false), ("rid", true)] {
+    for (rid, abort_all) in [("", false), ("  ", false), ("rid", true)] {
         assert_eq!(
             service
                 .abort(Request::new(pb::AbortRequest {

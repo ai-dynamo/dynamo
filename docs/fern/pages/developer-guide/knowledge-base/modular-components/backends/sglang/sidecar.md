@@ -12,7 +12,8 @@ subtitle: Run Dynamo beside SGLang's Rust server through native gRPC.
 > experimental. Manifests, flags, and behavior may change without notice.
 
 `dynamo-sglang-sidecar` connects a Dynamo worker to SGLang's Rust server
-(`SGLANG_RUST_SERVER=1`) through its native gRPC service, `sglang.api.v1`. See
+(`SGLANG_RUST_SERVER=1`, SGLang v0.5.23 or later) through its native gRPC
+service, `sglang.api.v1`. See
 [Sidecar Backends](../../../concepts/system-architecture/sidecar-backends.md)
 for the architecture.
 

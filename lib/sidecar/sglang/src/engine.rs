@@ -246,6 +246,11 @@ impl SglangSidecarEngine {
                     self.disaggregation_mode, info.disaggregation_mode
                 )));
             }
+            if info.dp_rank != dp_rank || info.table.listeners != self.table.listeners {
+                return Err(client::invalid_arg(
+                    "SGLang's node listener table changed since bootstrap",
+                ));
+            }
             Ok((pool, info))
         }
         .await
