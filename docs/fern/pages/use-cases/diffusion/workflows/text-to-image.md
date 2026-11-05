@@ -88,10 +88,15 @@ to `/v1/images/edits`. Use a model that supports image conditioning; text-to-ima
 alone does not establish editing support. This example uses `black-forest-labs/FLUX.2-klein-4B`
 with vLLM 0.31.0 and vLLM-Omni 0.31.0rc1.
 
-> [!IMPORTANT]
-> Use a Dynamo build containing the [image-reference forwarding fix](https://github.com/ai-dynamo/dynamo/pull/15390).
-> Dynamo 1.5.1 ignores edit references. See [Image API Compatibility](../../../reference/components/frontend-configuration.mdx#image-api-compatibility)
-> for the JSON request contract and the remaining multipart-upload limitation.
+Both the frontend and Omni worker must meet the Dynamo version requirement for the
+input format you use:
+
+| Feature | Minimum Dynamo version |
+|---|---|
+| Single-reference JSON edits | First release containing [image-reference forwarding (#15390)](https://github.com/ai-dynamo/dynamo/pull/15390); absent from v1.5.1 and v1.6.0 |
+| Multipart uploads, multiple references | First release containing [multipart image-edit support (#16455)](https://github.com/ai-dynamo/dynamo/pull/16455) |
+
+See the [Image Edits API](../../../reference/api/image-edits.mdx) for the request contract.
 
 Launch the reference-capable model from the repository root:
 
@@ -141,8 +146,24 @@ PY
 ```
 
 To use a hosted reference instead, set `input_reference` to an HTTP(S) image URL that the
-worker can fetch. Do not use `curl -F` or the native vLLM-Omni `image` field through the
-Dynamo frontend; this endpoint currently requires the JSON `input_reference` contract.
+worker can fetch. To upload the same file directly, use multipart:
+
+```bash
+curl --fail-with-body -sS http://localhost:8000/v1/images/edits \
+  -F 'model=black-forest-labs/FLUX.2-klein-4B' \
+  -F 'prompt=Create a watercolor variation, preserving the main subject.' \
+  -F 'image=@reference.png' \
+  -F 'size=512x512' \
+  -F 'response_format=b64_json' \
+  -F 'nvext={"num_inference_steps":4,"guidance_scale":1.0,"seed":42}' \
+  > edit-response.json
+```
+
+For multiple references, repeat `-F 'image[]=@reference.png'` with each file in
+its intended order. Do not mix `image` and `image[]`. The JSON equivalent sets
+`input_reference` to an ordered array of URLs or data URLs. See
+[Image Edit Limits](../../../reference/api/image-edits.mdx#image-edit-limits)
+before increasing input count or image size.
 
 ## See Also
 

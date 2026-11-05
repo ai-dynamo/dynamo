@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -27,12 +28,15 @@ func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 	projection.stage = testRenderComponentName
 	projection.configuredBuild.ioFPGACount = 1
 	projection.configuredBuild.ioFanoutFactor = 1
+	serving := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}},
+	}
 	workload := &Workload{
 		modelProjections:     []*ModelProjection{projection},
 		scalingGroupReplicas: 2496,
 	}
 	pcsName := strings.Repeat("a", 28) // target + target-cond consume the remaining Grove budget.
-	plan, err := workload.PlanNodeLocalMaterialization(pcsName)
+	plan, err := workload.PlanNodeLocalMaterialization(pcsName, serving)
 	require.NoError(t, err)
 	plan, err = plan.WithGroup("target")
 	require.NoError(t, err)
@@ -132,10 +136,11 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	cyborg := namedClique(t, rendered, "cond")
 
 	t.Log("Keep runtime environment opaque while supplying its manifest before authored references")
-	manifestEnv := corev1.EnvVar{
-		Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/manifest.v2.capnp.bin",
+	modelEnv := []corev1.EnvVar{
+		{Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/manifest.v2.capnp.bin"},
+		{Name: "LPX_MODEL_PATH", Value: "/models/model-build"},
 	}
-	require.Equal(t, append([]corev1.EnvVar{manifestEnv}, authoredEnv...), cyborg.Spec.PodSpec.Containers[0].Env)
+	require.Equal(t, append(modelEnv, authoredEnv...), cyborg.Spec.PodSpec.Containers[0].Env)
 	require.Equal(t, &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "cyborg-models", ReadOnly: true}, cyborg.Spec.PodSpec.Volumes[0].PersistentVolumeClaim)
 	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
 		Name: "model-storage", MountPath: "/models", SubPath: "cyborg", ReadOnly: true,
@@ -149,7 +154,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	imageEntrypointCyborg.Spec.Replicas = 4
 	imageEntrypointCyborg.Spec.MinAvailable = ptr.To[int32](4)
 	imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args = []string{"serve"}
-	imageEntrypointEnv := append([]corev1.EnvVar{manifestEnv}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env...)
+	imageEntrypointEnv := append(modelEnv, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env...)
 
 	t.Log("Leave the image ENTRYPOINT selected when command is omitted")
 	input.Stages = map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}

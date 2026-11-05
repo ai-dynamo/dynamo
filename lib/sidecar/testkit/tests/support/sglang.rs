@@ -970,6 +970,7 @@ pub mod http {
         let mut body = vec![0; length];
         reader.read_exact(&mut body).await?;
         let request: Value = serde_json::from_slice(&body)?;
+        let native_id = request["rid"].as_str().unwrap();
         let (mut reader, mut writer) = reader.into_inner().into_split();
         let gate = held.lock().unwrap().remove(Adapter::request_id(&request));
         let mut eof = [0];
@@ -978,14 +979,14 @@ pub mod http {
             received = reader.read(&mut eof) => {
                 assert_eq!(received?, 0, "unexpected bytes after /generate body");
                 assert!(
-                    has_terminal || aborts.ids().iter().any(|id| id == Adapter::request_id(&request)),
+                    has_terminal || aborts.ids().iter().any(|id| id == native_id),
                     "unfinished generation disconnected before its abort request"
                 );
             }
             result = async {
                 let opened = control.open(&request).await?;
                 writer.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await?;
-                let responses = if let Some(gate) = gate {
+                let mut responses = if let Some(gate) = gate {
                     // The Rust server omits output_ids while a frame has no tokens.
                     let empty = json!({"text": "", "meta_info": {"finish_reason": null}});
                     writer.write_all(format!("data: {empty}\n\n").as_bytes()).await?;
@@ -993,8 +994,11 @@ pub mod http {
                     gate.release.notified().await;
                     gate.responses.clone()
                 } else {
-                    responses(Adapter::request_id(&request)).into()
+                    responses(native_id).into()
                 };
+                for response in &mut responses {
+                    response["meta_info"]["id"] = json!(native_id);
+                }
                 let source = futures::stream::iter(responses.into_iter().map(Ok));
                 let mut stream = opened.wrap(Box::pin(source));
                 while let Some(response) = stream.next().await {
@@ -1015,6 +1019,15 @@ pub mod http {
         ]
     }
 
+    pub fn logical_request_id(native_id: &str) -> &str {
+        let (id, attempt) = native_id
+            .rsplit_once('-')
+            .expect("dispatch-specific engine ID");
+        assert_eq!(attempt.len(), 8);
+        assert!(attempt.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        id
+    }
+
     pub struct Adapter;
 
     impl Protocol for Adapter {
@@ -1023,7 +1036,7 @@ pub mod http {
         type Error = io::Error;
 
         fn request_id(request: &Value) -> &str {
-            request["rid"].as_str().unwrap()
+            logical_request_id(request["rid"].as_str().unwrap())
         }
 
         fn record_tokens(response: &Value, tokens: &mut Vec<u32>) -> bool {

@@ -44,6 +44,9 @@ pub struct SglangSidecarEngine {
     native_http_max_event_bytes: usize,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
+    /// Cancelled once SGLang is lost after `start`, with the reason set first.
+    lost: CancellationToken,
+    lost_reason: Arc<std::sync::OnceLock<String>>,
 }
 
 struct StartedState {
@@ -122,6 +125,7 @@ impl SglangSidecarEngine {
     }
 
     pub(crate) fn validate_args(args: &Args) -> Result<(), DynamoError> {
+        args.routing.router_config().map_err(client::invalid_arg)?;
         if args.sidecar.common.route_to_encoder {
             return Err(client::invalid_arg(
                 "route-to-encoder is not supported by the SGLang sidecar",
@@ -176,6 +180,7 @@ impl SglangSidecarEngine {
         let common = args.sidecar.common;
         let structural_tag = common.structural_tag(true);
         let config = WorkerConfig {
+            router_config: args.routing.router_config().map_err(client::invalid_arg)?,
             runtime: common.runtime,
             namespace: common.namespace,
             component: if disaggregation_mode == DisaggregationMode::Aggregated {
@@ -213,6 +218,8 @@ impl SglangSidecarEngine {
                 native_http_max_event_bytes,
                 state: OnceCell::new(),
                 cancel: CancellationToken::new(),
+                lost: CancellationToken::new(),
+                lost_reason: Arc::default(),
             },
             config,
         ))
@@ -322,6 +329,7 @@ impl LLMEngine for SglangSidecarEngine {
                 .insert("sglang_generate".into(), true.into());
         }
         let connection_count = pool.len();
+        let state_client = pool.control_client();
         let kv_event_source_count = kv_event_sources.len();
         let combined_token_limit = combined_token_limit(&discovery);
         if lacks_draft_reserve(&discovery) {
@@ -349,6 +357,18 @@ impl LLMEngine for SglangSidecarEngine {
             kv_event_sources = kv_event_source_count,
             "sglang sidecar started"
         );
+        let (stop, lost) = (self.cancel.child_token(), self.lost.clone());
+        let reason = Arc::clone(&self.lost_reason);
+        let attempt_timeout = self.transport.connect_attempt_timeout;
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = stop.cancelled() => {}
+                why = client::watch_serving(state_client, attempt_timeout) => {
+                    let _ = reason.set(why);
+                    lost.cancel();
+                }
+            }
+        });
         Ok(config)
     }
 
@@ -431,7 +451,7 @@ impl LLMEngine for SglangSidecarEngine {
             let mut stream = match opened {
                 Ok(response) => response.into_inner(),
                 Err(status) => {
-                    yield Err(client::status_to_dynamo("Generate", status));
+                    yield Err(client::stream_status_to_dynamo("Generate", status));
                     return;
                 }
             };
@@ -471,7 +491,7 @@ impl LLMEngine for SglangSidecarEngine {
                                 break;
                             }
                             Err(status) => {
-                                yield Err(client::status_to_dynamo("Generate", status));
+                                yield Err(client::stream_status_to_dynamo("Generate", status));
                                 break;
                             }
                         };
@@ -514,8 +534,13 @@ impl LLMEngine for SglangSidecarEngine {
         let Some(state) = self.state.get() else {
             return;
         };
+        let request_id = state
+            .native_http
+            .as_ref()
+            .and_then(|http| http.request_id(&ctx))
+            .unwrap_or_else(|| ctx.id().to_string());
         AbortRpc::new(state.pool.control_client())
-            .abort(ctx.id(), self.transport.connect_attempt_timeout)
+            .abort(&request_id, self.transport.connect_attempt_timeout)
             .await;
     }
 
@@ -523,6 +548,12 @@ impl LLMEngine for SglangSidecarEngine {
         self.cancel.cancel();
         tracing::info!("sglang sidecar shutdown complete");
         Ok(())
+    }
+
+    async fn engine_lost(&self) -> DynamoError {
+        self.lost.cancelled().await;
+        let reason = self.lost_reason.get().map_or("unknown", String::as_str);
+        client::engine_shutdown(format!("SGLang engine lost: {reason}"))
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
@@ -882,6 +913,33 @@ mod tests {
             "11",
         ])
         .unwrap()
+    }
+
+    #[test]
+    fn worker_preserves_routing_advertisement_without_changing_decode_defaults() {
+        use dynamo_runtime::pipeline::RouterMode;
+
+        let mut prefill_args = args();
+        prefill_args.bootstrap_host = Some("worker.example".into());
+        prefill_args.routing.router_mode = Some(RouterMode::KV);
+        prefill_args.routing.router_replica_sync = Some(true);
+        prefill_args.routing.router_session_affinity_ttl_secs = Some(3600);
+        let prefill = discovery(|reported| {
+            reported.server.disaggregation_mode = "prefill".into();
+            reported.server.port = 30000;
+            reported.deployment.disaggregation_bootstrap_port = Some(30000);
+        });
+        let (_, config) = SglangSidecarEngine::from_discovered(prefill_args, prefill).unwrap();
+        let routing = config.router_config.unwrap();
+        assert_eq!(routing.router_mode, RouterMode::KV);
+        assert!(routing.kv_router_config.router_replica_sync);
+        assert_eq!(routing.session_affinity_ttl_secs, Some(3600));
+
+        let decode = discovery(|reported| {
+            reported.server.disaggregation_mode = "decode".into();
+        });
+        let (_, config) = SglangSidecarEngine::from_discovered(args(), decode).unwrap();
+        assert!(config.router_config.is_none());
     }
 
     #[test]

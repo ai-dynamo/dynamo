@@ -11,9 +11,18 @@ an optional scaling component. Rust owns the drive loop:
       per ScalingTick:
         adapter.on_tick(metrics)     -> _build_tick_input() -> TickInput
                                         EngineProtocol.tick() -> PlannerEffects
-                                        -> {target_prefill, target_decode, next_tick_ms}
-        # Rust applies the scaling decision and re-arms the next tick itself
+                                        -> retune planner_changes applied
+                                        -> {target_prefill, target_decode,
+                                            next_tick_ms, router_parameters}
+        # Rust applies the scaling decision and the desired router policy
+        # parameters, and re-arms the next tick itself
       adapter.finalize() -> PlannerReplayDetails
+
+With ``PlannerConfig.advisory`` the adapter is the replay counterpart of a
+live advisory planner: every tick still runs, but the targets and router
+parameters handed to Rust are always ``None`` (unchanged), so the simulated
+deployment stays fixed, and the planner's recommendations are recorded in
+``recommended_scaling_events`` instead of ``scaling_events``.
 
 The tick engine is the builtin orchestrator path:
 ``OrchestratorEngineAdapter`` wrapping ``LocalPlannerOrchestrator`` +
@@ -25,7 +34,11 @@ Async orchestrator calls (``bootstrap_from_fpms`` / ``tick``)
 run inside a single replay-scoped event loop so callers don't change.
 
 Supports both aggregated and disaggregated topologies. No I/O, no
-runtime dependencies. Fully deterministic with offline replay.
+runtime dependencies. The ``VirtualClock`` engine runs every pipeline tick
+to completion, without the live wall-clock deadlines, so host speed does not
+change the scaling decisions. What still reads the host clock does so by
+design: a retune sweep's ``timeout_seconds`` and ``decision_latency_seconds:
+measured``, and the call timeout of a remote gRPC plugin.
 """
 
 from __future__ import annotations
@@ -34,7 +47,8 @@ import asyncio
 import hashlib
 import json
 import logging
-from dataclasses import asdict, dataclass
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Literal, Optional
 
 import msgspec
@@ -45,10 +59,15 @@ from dynamo.common.forward_pass_metrics import (
     ScheduledRequestMetrics,
 )
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.core.engine_protocol import EngineProtocol
+from dynamo.planner.core.engine_protocol import (
+    EngineProtocol,
+    ReconfigurableEngineProtocol,
+)
 from dynamo.planner.core.types import (
     FpmObservations,
     PlannerEffects,
+    RetuneDecision,
+    RetuneInputs,
     ScheduledTick,
     TickInput,
     TrafficObservation,
@@ -59,6 +78,12 @@ from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
 from dynamo.planner.monitoring.traffic_metrics import Metrics
 from dynamo.planner.plugins.clock import VirtualClock
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
+from dynamo.planner.reconfiguration import (
+    PREDICTOR_FIELDS,
+    candidate_config,
+    prepare_predictor,
+    runtime_candidate_errors,
+)
 from dynamo.replay.report import PlannerReplayDetails
 
 logger = logging.getLogger(__name__)
@@ -194,6 +219,13 @@ def _merge_traffic(
 class ReplayPlannerAdapter:
     """Context-managed planner scaling policy for offline replay."""
 
+    # Set by ``start()``. Class-level immutable defaults keep partially
+    # constructed adapters finalizable: ``finalize`` then reports no retune
+    # events or recommendations and digests the current config.
+    _start_config_dump: Optional[dict[str, Any]] = None
+    _retune_decisions: tuple[RetuneDecision, ...] = ()
+    _recommended_events: tuple[ScalingEvent, ...] = ()
+
     def __init__(
         self,
         planner_config: PlannerConfig,
@@ -206,6 +238,13 @@ class ReplayPlannerAdapter:
         self._config = planner_config
         self._capabilities = capabilities
         self._is_disagg = planner_config.mode == "disagg"
+        if planner_config.advisory:
+            logger.warning(
+                "[ADVISORY] planner.advisory=true: the replay keeps the simulated "
+                "deployment fixed (no scaling, no retune changes) and only records "
+                "the planner's recommendations; set advisory: false to simulate "
+                "scaling"
+            )
 
         self._engine = engine
         self._warmup_observations = list(warmup_observations or [])
@@ -310,8 +349,15 @@ class ReplayPlannerAdapter:
     def start(self) -> None:
         """Bootstrap the orchestrator and compute the first tick. Idempotent."""
         self._bootstrap_orchestrator_if_needed()
+        # Retune mutates the shared config during the run; the reported
+        # config digest identifies the configuration the replay started with.
+        self._start_config_dump = self._planner_config_dump()
         self._pending_tick: ScheduledTick = self._engine.initial_tick(0.0)
         self._scaling_events: list[ScalingEvent] = []
+        self._recommended_events = ()
+        # Component -> the count last recommended away from the deployment.
+        self._last_recommended: dict[str, int] = {}
+        self._retune_decisions = ()
         self._ticks: list[dict[str, Any]] = []
         self._total_ticks = 0
 
@@ -323,11 +369,14 @@ class ReplayPlannerAdapter:
 
     def on_tick(self, result: dict[str, Any]) -> dict[str, Any]:
         """Drive one planner tick from the runtime snapshot. Returns the scaling
-        decision (absolute targets, ``None`` = unchanged) + the next tick time in ms
-        (``None`` = stop) for the Rust loop to apply and re-arm."""
+        decision (absolute targets, ``None`` = unchanged), the next tick time in ms
+        (``None`` = stop) and the desired router policy parameters (``None`` =
+        unchanged) for the Rust loop to apply and re-arm. In advisory mode the
+        targets and router parameters are always ``None``."""
         tick = self._pending_tick
         tick_input = self._build_tick_input(tick, result)
         effects: PlannerEffects = self._run_sync(self._engine.tick(tick, tick_input))
+        self._apply_retune_decisions(effects.retune_decisions)
         emit_diagnostics = self._should_emit_tick_diagnostics(tick, effects)
         self._total_ticks += 1
         if self._capture_details:
@@ -352,7 +401,15 @@ class ReplayPlannerAdapter:
 
         target_prefill: Optional[int] = None
         target_decode: Optional[int] = None
-        if effects.scale_to is not None:
+        advisory = self._config.advisory
+        if advisory:
+            # Never set ``_scaling_target_*``: like a live advisory planner
+            # whose deployment never changes, the planner keeps seeing
+            # expected == current and no scaling in progress.
+            self._record_recommendations(
+                tick, effects, current_p, current_d, tick_input.now_s
+            )
+        elif effects.scale_to is not None:
             target_prefill, target_decode = self._compute_scale_decision(
                 effects, result, tick_input.now_s
             )
@@ -366,21 +423,91 @@ class ReplayPlannerAdapter:
             "target_prefill": target_prefill,
             "target_decode": target_decode,
             "next_tick_ms": next_tick_ms,
+            # Level-triggered desired state; Rust patches only the diff
+            # against each replay router at this tick's virtual time.
+            "router_parameters": None if advisory else effects.router_parameters,
         }
         tick_ordinal = int(result["tick_ordinal"])
         if self._capture_details:
-            self._ticks.append(
-                {
-                    "ordinal": tick_ordinal,
-                    "at_ms": tick.at_s * 1000.0,
-                    "scheduled_tick": asdict(tick),
-                    "input": self._tick_input_record(tick_input),
-                    "topology": self._topology_record(result),
-                    "effects": asdict(effects),
-                    "runtime_decision": decision,
-                }
-            )
+            # The desired router map is in ``runtime_decision``, and retune
+            # decisions are recorded once in ``retune_events`` (their
+            # ``decided_at_s`` is the tick's time). Clearing the decisions
+            # first keeps ``asdict`` from expanding ``predictor_warmup``.
+            effects_record = asdict(replace(effects, retune_decisions=[]))
+            del effects_record["router_parameters"], effects_record["retune_decisions"]
+            tick_record = {
+                "ordinal": tick_ordinal,
+                "at_ms": tick.at_s * 1000.0,
+                "scheduled_tick": asdict(tick),
+                "input": self._tick_input_record(tick_input),
+                "topology": self._topology_record(result),
+                "effects": effects_record,
+                "runtime_decision": decision,
+            }
+            router_policies = result.get("router_policies")
+            if self._config.retune is not None and router_policies is not None:
+                # Replay router state (revision and parameters per worker
+                # type) before this tick's router update.
+                tick_record["router_policies"] = [
+                    {
+                        "worker_type": policy["worker_type"],
+                        "revision": policy["revision"],
+                        "parameters": dict(policy["parameters"]),
+                    }
+                    for policy in router_policies
+                ]
+            self._ticks.append(tick_record)
         return decision
+
+    def _apply_retune_decisions(self, decisions: Sequence[RetuneDecision]) -> None:
+        """Record retune decisions and apply their planner changes.
+
+        Planner changes take effect from the next tick, as live. The
+        controller validated them when it decided, so any error here is a
+        bug and fails the replay.
+        """
+        if not decisions:
+            return
+        # Decisions are rare (at most a few per retune window).
+        self._retune_decisions = (*self._retune_decisions, *decisions)
+        capabilities = self._capabilities or WorkerCapabilities()
+        for decision in decisions:
+            if decision.outcome == "applied" and self._config.advisory:
+                # The controller records ``advisory`` instead under advisory.
+                raise RuntimeError(
+                    f"retune decision {decision.decision_id} is applied, but the "
+                    "planner is in advisory mode"
+                )
+            changes = decision.planner_changes
+            if decision.outcome != "applied" or not changes:
+                continue
+            engine = self._engine
+            if not isinstance(engine, ReconfigurableEngineProtocol):
+                raise TypeError(
+                    "retune planner changes require a reconfigurable replay engine"
+                )
+            candidate = candidate_config(self._config, dict(changes))
+            errors = runtime_candidate_errors(candidate, capabilities)
+            if errors:
+                raise ValueError(
+                    f"retune decision {decision.decision_id} produced an invalid "
+                    f"planner configuration: {'; '.join(errors)}"
+                )
+            predictor = None
+            if any(
+                getattr(candidate, field) != getattr(self._config, field)
+                for field in PREDICTOR_FIELDS
+            ):
+                predictor = prepare_predictor(
+                    candidate, capabilities, decision.predictor_warmup
+                )
+            engine.apply_runtime_configuration(candidate, changes.keys(), predictor)
+            logger.info(
+                "Retune %s (%s) applied planner changes %s",
+                decision.decision_id,
+                decision.outcome,
+                changes,
+            )
 
     def finalize(
         self, lifecycle_operations: list[dict[str, Any]] | None = None
@@ -388,7 +515,7 @@ class ReplayPlannerAdapter:
         """Finalize planner-owned replay details after successful execution."""
         html_report_path = self._recorder.finalize() if self._capture_details else None
         return PlannerReplayDetails(
-            metadata=self._planner_metadata(),
+            metadata=self._planner_metadata(self._start_config_dump),
             ticks=self._ticks if self._capture_details else [],
             scaling_events=self._scaling_events,
             lifecycle_operations=(
@@ -396,6 +523,17 @@ class ReplayPlannerAdapter:
             ),
             total_ticks=self._total_ticks,
             html_report_path=html_report_path,
+            # Recorded like scaling events, independent of ``capture_details``;
+            # present (possibly empty) whenever retune is configured.
+            retune_events=(
+                None
+                if self._config.retune is None
+                else [decision.to_dict() for decision in self._retune_decisions]
+            ),
+            # Present (possibly empty) whenever the planner is advisory.
+            recommended_scaling_events=(
+                list(self._recommended_events) if self._config.advisory else None
+            ),
         )
 
     @staticmethod
@@ -461,7 +599,14 @@ class ReplayPlannerAdapter:
         }
         return record
 
-    def _planner_metadata(self) -> dict[str, Any]:
+    def _planner_config_dump(self) -> dict[str, Any]:
+        return self._config.model_dump(mode="json", by_alias=True)
+
+    def _planner_metadata(
+        self, config: Optional[dict[str, Any]] = None
+    ) -> dict[str, Any]:
+        """Planner identity metadata; digests ``config`` (a config dump)
+        when given, else the current config."""
         excluded_fields = [
             "report_output_dir",
             "report_filename",
@@ -481,7 +626,8 @@ class ReplayPlannerAdapter:
             "scheduling.external_plugins.auth_token",
             "scheduling.gateway",
         ]
-        config = self._config.model_dump(mode="json", by_alias=True)
+        if config is None:
+            config = self._planner_config_dump()
         decision_config = dict(config)
         for field in (name for name in excluded_fields if "." not in name):
             decision_config.pop(field, None)
@@ -554,6 +700,7 @@ class ReplayPlannerAdapter:
             "benchmark_granularity": self._benchmark_granularity,
             "bootstrap": self._bootstrap_metadata,
             "details_captured": self._capture_details,
+            "advisory": self._config.advisory,
         }
 
     def close(self) -> None:
@@ -697,6 +844,61 @@ class ReplayPlannerAdapter:
             )
         return (target_p, target_d)
 
+    def _record_recommendations(
+        self,
+        tick: ScheduledTick,
+        effects: PlannerEffects,
+        current_p: int,
+        current_d: int,
+        now_s: float,
+    ) -> None:
+        """Record what an advisory planner recommends; never applies it.
+
+        An event marks each change of a component's recommended count away
+        from its deployed count (never ``from_count == to_count``). A decision
+        tick without ``scale_to`` holds the deployment, and a ``scale_to``
+        without a target for a role (the power-aware projection drops roles it
+        keeps) holds that role; a hold resets the recommendation, so a
+        recommendation repeated after a hold is recorded again.
+        """
+        scale = effects.scale_to
+        if scale is None:
+            if tick.run_load_scaling or tick.run_throughput_scaling:
+                self._last_recommended.clear()
+            return
+        if self._is_disagg:
+            roles = [
+                ("prefill", scale.num_prefill, current_p),
+                ("decode", scale.num_decode, current_d),
+            ]
+        else:
+            roles = [("agg", scale.num_decode, current_d)]
+        for component, target, current in roles:
+            target = current if target is None else target
+            last = self._last_recommended.get(component, current)
+            self._last_recommended[component] = target
+            if target in (current, last):
+                continue
+            direction = "scale_up" if target > current else "scale_down"
+            logger.info(
+                "[ADVISORY] Planner recommends %s: %d -> %d at t=%.1fs (%s, "
+                "not applied)",
+                component,
+                current,
+                target,
+                now_s,
+                direction,
+            )
+            self._recommended_events += (
+                ScalingEvent(
+                    at_s=now_s,
+                    component=component,
+                    from_count=current,
+                    to_count=target,
+                    reason=direction,
+                ),
+            )
+
     def _is_easy_mode(self) -> bool:
         """Easy-mode check routed via config — both paths honour this
         the same way (no regression in non-SLA modes)."""
@@ -824,12 +1026,17 @@ def create_replay_planner_adapter(
     warmup_observations: Optional[list[TrafficObservation]] = None,
     benchmark_granularity: Optional[int] = None,
     capture_details: bool = True,
+    retune_inputs: Optional[RetuneInputs] = None,
 ) -> ReplayPlannerAdapter:
-    """Create a replay adapter backed by the builtin planner orchestrator."""
+    """Create a replay adapter backed by the builtin planner orchestrator.
+
+    ``retune_inputs`` is required when ``planner_config.retune`` is set.
+    """
     engine = OrchestratorEngineAdapter(
         planner_config,
         capabilities or WorkerCapabilities(),
         clock=VirtualClock(),
+        retune_inputs=retune_inputs,
     )
     adapter = ReplayPlannerAdapter(
         planner_config=planner_config,

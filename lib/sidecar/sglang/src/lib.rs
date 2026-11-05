@@ -42,6 +42,9 @@ const SGLANG_GRPC_ENDPOINT_ENV: &str = "SGLANG_GRPC_ENDPOINT";
 fn parse_args(argv: Vec<String>, injected_endpoint: Option<String>) -> clap::error::Result<Args> {
     let mut command = Args::command();
     if let Some(endpoint) = injected_endpoint {
+        // Leaked once per process so clap can take it as `&'static str` without its
+        // `string` feature, which would change the workspace's clap build.
+        let endpoint: &'static str = endpoint.leak();
         command = command.mut_arg("grpc_endpoint", |arg| {
             arg.default_value(endpoint).required(false)
         });
