@@ -90,7 +90,7 @@ ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 COPY --from=dynamo_base_export / /
 
 RUN uv pip install --no-cache --python /usr/bin/python3 --break-system-packages --no-deps \
-    certifi==2026.10.19 pip==26.2.2
+    certifi==2026.10.23 pip==26.2.2
 
 # dynamo user (group 0 for OpenShift), clear upstream /workspace baggage, and
 # create the Dynamo venv. --system-site-packages keeps the upstream Triton Python
@@ -128,7 +128,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     # Dynamo's own wheels — with deps (unlike other backends) so the Python
     # packages the Triton base lacks come from PyPI.
     uv pip install \
-        certifi==2026.10.19 pip==26.2.2 \
+        certifi==2026.10.23 pip==26.2.2 \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     \

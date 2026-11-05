@@ -13,7 +13,9 @@ use clap::ValueEnum;
 use dynamo_mocker::common::protocols::{
     EngineType, KvEventPublishers, MockerConfig, OutputSignal, WorkerType,
 };
-use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, stable_request_uuid};
+use dynamo_mocker::live::{
+    LiveEngine, LiveEngineConfig, RequestOutputBuffering, stable_request_uuid,
+};
 use dynamo_mocker::scheduler::MockerMetrics;
 use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
 use dynamo_sglang_sidecar::proto as pb;
@@ -185,7 +187,8 @@ impl SglangMockerService {
                 engine_args.max_num_batched_tokens
             },
         };
-        let engine = LiveEngine::start_with_config(
+        // Buffer the full response so a slow gRPC consumer is never shed, as in the TRT-LLM mock.
+        let engine = LiveEngine::start_with_config_and_request_output_buffering(
             engine_args,
             DP_RANK,
             LiveEngineConfig {
@@ -195,6 +198,7 @@ impl SglangMockerService {
                 ),
                 ..Default::default()
             },
+            RequestOutputBuffering::FullResponse,
         )?;
         let max_concurrent_requests = config.max_concurrent_requests;
         Ok(Self {
@@ -311,47 +315,12 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
             self.engine.submit(direct).await
         }
         .map_err(|error| Status::internal(format!("Mocker request submission failed: {error}")))?;
-        // Keep LiveEngine's fixed delivery queue independent of client and
-        // transport pacing. This request-owned buffer cannot exceed the
-        // validated output-token budget, and dropping the client stream closes
-        // the receiver so the pump drops `live` and cancels unfinished work.
-        let (signal_tx, mut signal_rx) = tokio::sync::mpsc::channel(prepared.max_output_tokens);
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = signal_tx.closed() => break,
-                    signal = live.recv() => {
-                        let Some(signal) = signal else {
-                            if live.is_aborted() {
-                                let _ = signal_tx.send(Err(error_item(
-                                    CLIENT_CLOSED_REQUEST,
-                                    "client disconnected".to_string(),
-                                ))).await;
-                            }
-                            break;
-                        };
-                        let completed = signal.completed;
-                        if signal_tx.send(Ok(signal)).await.is_err() || completed {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
         let stream = async_stream::stream! {
             let _permit = permit;
             let mut completion_tokens = 0_usize;
             // The sidecar contract enables SGLang's incremental streaming output,
             // so each frame contains only this chunk's token and metadata.
-            while let Some(signal) = signal_rx.recv().await {
-                let signal = match signal {
-                    Ok(signal) => signal,
-                    Err(item) => {
-                        yield Ok(item);
-                        return;
-                    }
-                };
+            while let Some(signal) = live.recv().await {
                 let token_id = match checked_token(&signal) {
                     Ok(token_id) => token_id,
                     Err((code, message)) => {
@@ -371,6 +340,10 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
                 if signal.completed {
                     return;
                 }
+            }
+            if live.is_aborted() {
+                yield Ok(error_item(CLIENT_CLOSED_REQUEST, "client disconnected".to_string()));
+                return;
             }
             yield Ok(error_item(
                 500,

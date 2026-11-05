@@ -169,6 +169,18 @@ def _parse_cli_args(argv: list[str] | None) -> tuple[Config, argparse.Namespace]
     # Consume the router flags before the engine parser sees the remainder.
     dynamo_config.router_advertisement, unknown = parse_worker_router_config(unknown)
 
+    # Name the frontend flag instead of failing with vLLM's generic parse error.
+    if any(
+        arg.split("=", 1)[0].split(".", 1)[0]
+        in ("--default-chat-template-kwargs", "--default_chat_template_kwargs")
+        for arg in unknown
+    ):
+        raise ValueError(
+            "--default-chat-template-kwargs has no effect on a Dynamo worker, because "
+            "the Dynamo frontend renders the chat template. Set "
+            "--default-chat-template-kwargs on the frontend (python -m dynamo.frontend)."
+        )
+
     vllm_args = vllm_parser.parse_args(unknown)
     # Set the model name from the command line arguments
     # model is defined in AsyncEngineArgs, but when AsyncEngineArgs.from_cli_args is called,
@@ -325,6 +337,8 @@ def _unsupported_fpm_trace_role(dynamo_config: Config) -> Optional[str]:
         return "embedding"
     if dynamo_config.classify_worker:
         return "classify"
+    if dynamo_config.transcription_worker:
+        return "transcription"
     if dynamo_config.headless:
         return "headless"
     if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:
@@ -366,6 +380,14 @@ def update_engine_config_with_dynamo(
             # caching for pooling runners.
             logger.debug(
                 "Pooling-family worker: defaulting --enable-prefix-caching to False"
+            )
+            engine_config.enable_prefix_caching = False
+        elif dynamo_config.transcription_worker:
+            # Whisper is an encoder-decoder model. vLLM does not support
+            # prefix caching for cross-attention KV caches, and enabling it
+            # causes the first transcription request to terminate EngineCore.
+            logger.debug(
+                "Transcription worker: defaulting --enable-prefix-caching to False"
             )
             engine_config.enable_prefix_caching = False
         else:

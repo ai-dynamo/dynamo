@@ -12,9 +12,12 @@ matching `sglang` wheel as a build dependency, and compile the packaged proto
 instead.
 
 The contract was copied from SGLang upstream `main`
-`8cd3c494a3aa3ae56dfd76f51bab6912234914dc` plus sgl-project/sglang#45859,
-#45883 and #45996, which are not yet merged upstream.
-The upstream files' SHA-256s are:
+`8cd3c494a3aa3ae56dfd76f51bab6912234914dc`. `service.proto` is a local 3-way
+merge of that commit with two PRs that are not yet merged upstream:
+sgl-project/sglang#45859 (head `505a05ef69`) adds `GetModelInfoResponse`
+fields 10-11 and `GetServerInfoResponse` fields 13-15, and #46637 (head
+`4890941b7d`) adds `DeploymentInfo` field 20 and the `NodeRustListener`
+message. The local files' SHA-256s are:
 
 | File | SHA-256 |
 |------|---------|
@@ -26,7 +29,7 @@ The upstream files' SHA-256s are:
 | `sglang/api/v1/service.proto` | `bcfa79785b69ef6ec0091fe63e10cd01c577c094ba1a4bf6ee971e4f13f5d683` |
 | `sglang/json/v1/options.proto` | `d1aa73d1a5ee39b180ccc5967dae55d061a4e6e10f9a01d4c116d3a269b111fe` |
 
-The local files are unchanged copies, excluded from Dynamo's formatting and
-copyright-header checks. The
+The other files are unchanged upstream copies. All of them are excluded from
+Dynamo's formatting and copyright-header checks. The
 SGLang sidecar generates both client and server types and temporarily exposes
 them to the Mocker server.
