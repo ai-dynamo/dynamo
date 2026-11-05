@@ -33,6 +33,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aiperf-steppable-abi"
+version = "0.13.0"
+
+[[package]]
 name = "aisimulate-core"
 version = "0.13.0-dev.202610290000000087"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -65,6 +69,13 @@ dependencies = [
  "tracing",
  "uuid",
  "xxhash-rust",
+]
+
+[[package]]
+name = "aisimulate-placement-abi"
+version = "0.12.0-dynamo-bench"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -2991,6 +3002,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-placement-plugin"
+version = "1.7.0"
+dependencies = [
+ "aisimulate-core",
+ "aisimulate-placement-abi",
+ "dynamo-kv-router",
+ "dynamo-mocker",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "dynamo-protocols"
 version = "8.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3281,6 +3304,19 @@ dependencies = [
  "tonic 0.14.6",
  "tonic-health 0.13.1",
  "tonic-health 0.14.6",
+]
+
+[[package]]
+name = "dynamo-steppable-provider"
+version = "1.7.0"
+dependencies = [
+ "aiperf-steppable-abi",
+ "aisimulate-core",
+ "anyhow",
+ "dynamo-mocker",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
