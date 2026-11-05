@@ -20,6 +20,8 @@ use dynamo_backend_common::{
     MultimodalData, PreprocessedRequest, PromptTokensDetails, StopReason, TopLogprob, usage,
 };
 
+use dynamo_kv_router::zmq_wire::IMAGE_ROUTING_UUID_PREFIX;
+
 use crate::client::{self, ModelLimits};
 use crate::disagg;
 use crate::proto as pb;
@@ -49,7 +51,7 @@ pub(crate) fn build_generate_request_with_routing(
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(&request, mode, allow_dp_rank)?;
     let request_has_media = has_media(&request);
-    let media = media(&mut request, limits)?;
+    let media = media(&mut request, limits, mode)?;
 
     // A prefill worker only needs the context phase; TensorRT-LLM still requires
     // a positive budget, and one token is what the context phase produces.
@@ -309,6 +311,7 @@ fn media_kind(key: &str) -> Option<MediaKind> {
 fn media(
     request: &mut PreprocessedRequest,
     limits: Option<ModelLimits>,
+    mode: DisaggregationMode,
 ) -> Result<Vec<pb::MediaItem>, DynamoError> {
     reject_media_override("mm_processor_kwargs", request.mm_processor_kwargs.as_ref())?;
     reject_media_override("media_io_kwargs", request.media_io_kwargs.as_ref())?;
@@ -325,9 +328,18 @@ fn media(
         }
     }
 
-    let uuid_map = request.multi_modal_uuids.take();
+    let mut uuid_map = request.multi_modal_uuids.take();
     if let Some(uuid_map) = uuid_map.as_ref() {
         for (modality, uuids) in uuid_map {
+            if uuids
+                .iter()
+                .flatten()
+                .any(|uuid| uuid.starts_with(IMAGE_ROUTING_UUID_PREFIX))
+            {
+                return Err(client::invalid_argument(format!(
+                    "caller multimodal UUIDs must not use the reserved `{IMAGE_ROUTING_UUID_PREFIX}` prefix"
+                )));
+            }
             if media_kind(modality).is_none() && !uuids.is_empty() {
                 return Err(client::invalid_argument(format!(
                     "multimodal UUIDs for unsupported modality `{modality}` cannot be forwarded"
@@ -385,6 +397,56 @@ fn media(
             "media requests require --context-length to match the window reported by \
              TensorRT-LLM; the sidecar cannot enforce a different window after media expansion",
         ));
+    }
+    let image_count = media_map
+        .as_ref()
+        .and_then(|media| media.get(IMAGE_KEY))
+        .map_or(0, Vec::len);
+    if image_count > 0
+        && matches!(mode, DisaggregationMode::Aggregated)
+        && limits.is_some_and(|limits| limits.supports_image_routing)
+        && request
+            .mm_routing_info
+            .as_ref()
+            .is_some_and(|info| !info.routing_token_ids.is_empty() && info.expanded_prompt_len > 0)
+        && uuid_map
+            .as_ref()
+            .and_then(|uuids| uuids.get(IMAGE_KEY))
+            .is_none_or(|uuids| uuids.iter().all(Option::is_none))
+        && let Some(hashes) =
+            request
+                .extra_args
+                .as_ref()
+                .and_then(|extra| match extra.get("mm_hashes_by_modality") {
+                    Some(hashes) => hashes.get("image"),
+                    None if active_kinds.len() == 1 => extra.get("mm_hashes"),
+                    None => None,
+                })
+    {
+        let hashes = hashes
+            .as_array()
+            .ok_or_else(|| client::invalid_argument("image routing hashes must be an array"))?;
+        if hashes.len() != image_count {
+            return Err(client::invalid_argument(
+                "image routing hash count must match image count",
+            ));
+        }
+        let uuids = uuid_map
+            .get_or_insert_default()
+            .entry(IMAGE_KEY.to_string())
+            .or_insert_with(|| vec![None; image_count]);
+        for (uuid, hash) in uuids.iter_mut().zip(hashes) {
+            let hash = hash
+                .as_str()
+                .filter(|s| s.len() == 16 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                .ok_or_else(|| {
+                    client::invalid_argument("image routing hashes must be 16 hexadecimal digits")
+                })?;
+            *uuid = Some(format!(
+                "{IMAGE_ROUTING_UUID_PREFIX}{}",
+                hash.to_ascii_lowercase()
+            ));
+        }
     }
     let ordered_items: Vec<(MediaKind, usize)> = match request.multi_modal_order.take() {
         Some(order) => {
