@@ -121,6 +121,11 @@ fn is_agent_header(name: &str) -> bool {
                 | "x-openai-memgen-request"
                 | HEADER_OPENCODE_SESSION_ID
                 | HEADER_OPENCODE_PARENT_SESSION_ID
+                // RL data-group headers read by the `veridis_quo` plugin.
+                | "x-dynamo-group"
+                | "x-dynamo-group-size"
+                | "x-dynamo-env-s"
+                | "x-dynamo-weight-version"
         )
 }
 
