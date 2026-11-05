@@ -45,7 +45,7 @@ pub use registrar::{Lease, PoolRegistrar, PoolRegistration};
 pub use replicas::{ReplicaDirectory, RouterReplica, RouterReplicaEvent, RouterReplicaId};
 pub use sharing::{
     ExchangeRound, RegistrationExchange, RegistrationSharing, RegistrationSource,
-    SharedRegistration, SharedRegistrations,
+    SharedRegistration, SharedRegistrations, answer_timeout,
 };
 pub use watch::{Completeness, Directory, Snapshot, WatchEvent, WatchStream};
 

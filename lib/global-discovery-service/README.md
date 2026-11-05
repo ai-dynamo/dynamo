@@ -8,7 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 The Global Discovery Service serves the pool and router lists that Global Routers and Pool Relays read
 over HTTP. A Pool Relay registers its pool with `POST /pools` and renews it on a heartbeat. A Global
 Router reads `GET /pools` for the pools it can route to and `GET /routers` for its peer replicas.
-`GET /healthz` reports whether the service is ready: whether its backend has answered once.
+`GET /healthz` reports whether the service is ready: whether its backend has answered once and, with
+`--peer-service`, whether it has asked the other instances once.
 
 ## Pool discovery
 

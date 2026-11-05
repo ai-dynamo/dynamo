@@ -243,9 +243,10 @@ struct Args {
     /// be missing here, `GET /pools` says the list is not complete, so Global
     /// Routers keep pools that may have left: until this instance has asked
     /// the others and found itself in the list, for a lease after an instance
-    /// leaves, while one does not answer completely, and after a registration
-    /// lapses here, until every instance has answered again, since its
-    /// PoolRelay may have renewed it late with any of them.
+    /// leaves, once one has not answered completely for the lease minus two
+    /// heartbeat intervals, and after a registration lapses here, until every
+    /// instance has answered again, since its PoolRelay may have renewed it
+    /// late with any of them.
     #[arg(
         long,
         value_parser = NonEmptyStringValueParser::new(),
@@ -253,7 +254,9 @@ struct Args {
         conflicts_with = "tls_cert_path"
     )]
     peer_service: Option<String>,
-    /// Namespace of `--peer-service`. Defaults to this pod's namespace.
+    /// Namespace of `--peer-service`. Defaults to the Kubernetes client's
+    /// namespace: this pod's in the cluster, or the kubeconfig context's with
+    /// `KUBECONFIG`.
     #[arg(
         long,
         value_parser = NonEmptyStringValueParser::new(),
@@ -703,10 +706,13 @@ async fn mcs_backend(
             Some(sharing)
         }
         None => {
-            tracing::info!(
-                "no --peer-service: registrations stay in this instance, so only pools that \
-                 register here are listed"
-            );
+            // A shared store, such as DynamoDB, needs no sharing.
+            if exchange.is_some() {
+                tracing::info!(
+                    "no --peer-service: registrations stay in this instance, so only pools that \
+                     register here are listed"
+                );
+            }
             None
         }
     };

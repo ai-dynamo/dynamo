@@ -19,7 +19,7 @@ use std::time::Duration;
 use crate::pool_discovery::{
     Completeness, Directory, DiscoveryError, ExchangeRound, Lease, PoolEvent, PoolListing,
     PoolRegistrar, PoolRegistration, RegistrationExchange, RouterReplica, RouterReplicaEvent,
-    RouterReplicaId, Snapshot, WatchEvent, WatchStream,
+    RouterReplicaId, Snapshot, WatchEvent, WatchStream, answer_timeout,
 };
 use async_trait::async_trait;
 use dynamo_global_common::PoolKey;
@@ -72,13 +72,13 @@ struct Registered {
 
 impl Registered {
     /// When the pool's registration may have lapsed everywhere: at once for
-    /// one made here, but a copy lapses up to half a heartbeat interval, the
+    /// one made here, but a copy lapses up to [`answer_timeout`], the
     /// longest the other instance had to answer, before its original.
     fn lapsed_at(&self, lease: Lease) -> Instant {
         if self.local {
             self.expires_at
         } else {
-            self.expires_at + lease.heartbeat_interval() / 2
+            self.expires_at + answer_timeout(lease)
         }
     }
 }
@@ -774,9 +774,9 @@ mod tests {
         );
 
         // Answers to requests sent before the lapse settle nothing, and nor
-        // do ones sent within half a heartbeat interval after it: a copy
-        // lapses up to that much before its original, the longest an
-        // instance takes to answer.
+        // do ones sent within the answer timeout after it: a copy lapses up
+        // to that much before its original, the longest an instance takes to
+        // answer.
         for sent in [asked + Duration::from_secs(4), Instant::now()] {
             store.end_round(round(sent));
             assert_eq!(
@@ -787,7 +787,7 @@ mod tests {
         // A later round brings the renewed pool back, and since every
         // instance was asked after its original may have lapsed, the lists
         // are complete again.
-        tokio::time::advance(lease().heartbeat_interval() / 2).await;
+        tokio::time::advance(answer_timeout(lease())).await;
         store.adopt(registration("copied", "m1"), Duration::from_secs(15));
         store.end_round(round(Instant::now()));
         assert!(

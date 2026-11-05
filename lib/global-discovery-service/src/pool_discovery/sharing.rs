@@ -25,8 +25,8 @@ pub trait RegistrationExchange: Send + Sync {
 
     /// Keeps a copy of a registration another instance received, for the
     /// `remaining` time it had when that instance answered, counted from when
-    /// it was asked. That instance answers within half a heartbeat interval,
-    /// so the copy lapses at most that much before its original.
+    /// it was asked. That instance answers within [`answer_timeout`], so the
+    /// copy lapses at most that much before its original.
     fn adopt(&self, registration: PoolRegistration, remaining: Duration);
 
     /// Takes what a round of asking the other instances showed.
@@ -57,6 +57,12 @@ pub trait RegistrationSource: Send + Sync {
         &self,
         instance: &RouterReplica,
     ) -> Result<SharedRegistrations, DiscoveryError>;
+}
+
+/// How long an instance waits for another's answer: half a heartbeat
+/// interval. A copy therefore lapses at most this much before its original.
+pub fn answer_timeout(lease: Lease) -> Duration {
+    lease.heartbeat_interval() / 2
 }
 
 /// What a round of asking the other instances showed. Lists are `Estimated`

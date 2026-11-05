@@ -45,7 +45,7 @@
 //! reached keeps lists `Estimated` until it answers: the pools its PoolRelays
 //! registered may be missing here, and a complete list would let a Global
 //! Router drop them. Once it has not answered for a lease, that is logged as
-//! an error, and so is an instance that has not found itself for a lease.
+//! an error, and so is an instance that has not found itself for two leases.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -61,7 +61,7 @@ use uuid::Uuid;
 use crate::pool_discovery::{
     Completeness, DiscoveryError, ExchangeRound, Lease, RegistrationExchange, RegistrationSharing,
     RegistrationSource, ReplicaDirectory, RouterReplica, RouterReplicaId, SharedRegistration,
-    SharedRegistrations, Snapshot,
+    SharedRegistrations, Snapshot, answer_timeout,
 };
 
 /// The shortest lease that sharing allows, in heartbeat intervals: a copy
@@ -116,7 +116,7 @@ pub struct PeerSync {
     /// What this instance shares, and where it keeps the copies.
     sharing: Sharing,
     /// How often to ask each instance, and how long to wait for its reply:
-    /// half the heartbeat interval.
+    /// [`answer_timeout`].
     every: Duration,
 }
 
@@ -160,7 +160,7 @@ impl PeerSync {
             instances,
             source,
             sharing: sharing.clone(),
-            every: lease.heartbeat_interval() / 2,
+            every: answer_timeout(lease),
         };
         Ok((sync, sharing))
     }
@@ -293,7 +293,7 @@ struct Instance {
     other_lease: bool,
 }
 
-/// A problem that is logged once it has lasted a lease.
+/// A problem that is logged once it has lasted long enough.
 struct Problem {
     since: Instant,
     logged: bool,
@@ -308,9 +308,9 @@ impl Problem {
     }
 
     /// True once: the first time it is asked after the problem has lasted
-    /// `lease`.
-    fn lasted(&mut self, lease: Lease, now: Instant) -> bool {
-        let lasted = !self.logged && now.saturating_duration_since(self.since) >= lease.duration();
+    /// `after`.
+    fn lasted(&mut self, after: Duration, now: Instant) -> bool {
+        let lasted = !self.logged && now.saturating_duration_since(self.since) >= after;
         self.logged |= lasted;
         lasted
     }
@@ -350,7 +350,7 @@ impl Instances {
             );
             return;
         };
-        if problem.lasted(lease, now) {
+        if problem.lasted(lease.duration(), now) {
             tracing::error!(
                 peer = %peer.replica.0,
                 url = %peer.url,
@@ -450,8 +450,10 @@ impl Instances {
         }
     }
 
-    /// Logs, once a lease has passed, that this instance has not found itself
-    /// in the list of instances, and when it does again.
+    /// Logs, once two leases have passed, that this instance has not found
+    /// itself in the list of instances, and when it does again. Its own
+    /// endpoint reaches the list only after it is ready and MCS has copied it
+    /// back, which can take longer than a lease.
     fn note_found(&mut self, found_self: bool, lease: Lease, now: Instant) {
         if found_self {
             if self.unfound.take().is_some_and(|problem| problem.logged) {
@@ -460,7 +462,7 @@ impl Instances {
         } else if self
             .unfound
             .get_or_insert_with(|| Problem::new(now))
-            .lasted(lease, now)
+            .lasted(lease.duration() * 2, now)
         {
             tracing::error!(
                 "this discovery instance has not found itself in the list of instances, so pool \

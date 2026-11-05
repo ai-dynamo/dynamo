@@ -45,7 +45,7 @@ the `global-discovery-service` binary. For choosing and setting up a registratio
 | `--router-service <name>` | Required | The Global Router Service, exported through MCS. |
 | `--router-port-name <name>` | Required | The router Service's named port for state streams. |
 | `--peer-service <name>` | Unset | This service's own Service, exported through MCS. The instances then share the registrations they keep in memory. See [Sharing registrations between instances](#sharing-registrations-between-instances). |
-| `--peer-namespace <ns>` | The Pod's namespace | Namespace of `--peer-service`. |
+| `--peer-namespace <ns>` | The client's namespace | Namespace of `--peer-service`. Defaults to the Kubernetes client's namespace: the Pod's in the cluster, or the kubeconfig context's with `KUBECONFIG`. |
 | `--peer-port-name <name>` | `http` | The named port `--peer-service` serves HTTP on. |
 
 These modes join EndpointSlices that MCS imports with registrations from `POST /pools`. A pool is
@@ -74,8 +74,9 @@ has left. This needs:
 
 An instance becomes ready once it has asked the others. `GET /pools` reports `complete: false` while a
 registration made with another instance may be missing here. That holds until the instance has found
-itself in the import; for a lease after an instance leaves the import; while a listed instance does not
-answer completely; and after a registration lapses here, until every instance has answered again.
+itself in the import; for a lease after an instance leaves the import; once a listed instance has not
+answered completely for the lease minus two heartbeat intervals; and after a registration lapses here,
+until every instance has answered again.
 
 ### With `--registration-storage dynamodb`
 

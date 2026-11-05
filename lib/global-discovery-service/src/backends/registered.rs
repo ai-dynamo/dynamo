@@ -325,8 +325,8 @@ impl Join {
                      still shows a stale Ready endpoint, as when the pool's cluster loses contact \
                      with the MCS implementation, or its registration does not reach this \
                      instance: check that its PoolRelays call POST /pools with this key, and that \
-                     this instance shares registrations with the discovery instance in the pool's \
-                     cluster."
+                     this instance gets the registrations the other discovery instances receive, \
+                     through a shared DynamoDB table or --peer-service."
                 );
             } else {
                 tracing::warn!(

@@ -26,7 +26,7 @@ verify the service. For every flag and endpoint, see
 Use `memory` for a single-replica development or lab deployment, or, with
 [`--peer-service`](../../reference/components/global-discovery-service-configuration.md#sharing-registrations-between-instances),
 for instances in several clusters without AWS. Use `dynamodb` when the service must survive restarts
-without a gap in the pool list, run more than one replica, or span AWS regions.
+without a gap in the pool list, run more than one replica without MCS, or span AWS regions.
 
 ## Create the table
 
