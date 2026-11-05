@@ -37,14 +37,23 @@ MOONCAKE_TRACE_FIRST20 = """{"timestamp": 0, "input_length": 6755, "output_lengt
 """
 
 
+# AISimulate ships as the ``aisim`` distribution from 0.14.0 onward; earlier
+# releases used ``aisimulate``. The import name is ``aisimulate`` for both.
+_AISIMULATE_DISTRIBUTIONS = ("aisim", "aisimulate")
+
+
 def _require_aisimulate_distribution(*, allow_module_level: bool = False) -> None:
-    try:
-        distribution("aisimulate")
-    except PackageNotFoundError:
-        pytest.skip(
-            "Dynamo replay integration tests require the optional AISimulate distribution",
-            allow_module_level=allow_module_level,
-        )
+    for name in _AISIMULATE_DISTRIBUTIONS:
+        try:
+            distribution(name)
+            return
+        except PackageNotFoundError:
+            continue
+    pytest.skip(
+        "Dynamo replay integration tests require the optional AISimulate "
+        f"distribution (one of {', '.join(_AISIMULATE_DISTRIBUTIONS)})",
+        allow_module_level=allow_module_level,
+    )
 
 
 def _vllm_args_payload():
