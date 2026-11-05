@@ -125,8 +125,8 @@ spec:
 - `DYN_ENABLE_FRONTEND_ADMIN_API` and `DYN_FRONTEND_ADMIN_HOST` start the frontend admin
   listener on the pod's addresses, on port 8002 unless `DYN_FRONTEND_ADMIN_PORT` sets another.
   The Planner reads the port from each frontend pod and sets the router policies there; the
-  inference port does not serve `/router_policy`. The listener has no authentication; see
-  [Security](#security).
+  inference port does not serve `/router_policy`. The listener has no authentication: admit only
+  the Planner to its port before you enable it ([Security](#security) has a NetworkPolicy).
   - The host is `0.0.0.0` (IPv4), `::` (IPv6 and dual-stack pods), or the pod IP through
     `valueFrom: {fieldRef: {fieldPath: status.podIP}}`.
   - The other values must be literal, without `$(VAR)` references: the Planner reads them from
@@ -345,14 +345,48 @@ retune Requests.
 ## Security
 
 - **Frontend admin API.** The Planner calls `/router_policy` on each frontend's admin listener,
-  which has no authentication. [Configure the frontend](#configure-the-frontend) binds it to the
-  pod's addresses, so anything that reaches a frontend pod on the admin port (8002 by default) can
-  change its router policies. Admit only the Planner to that port, for example with a
-  NetworkPolicy, and do not expose it through a Service or an Ingress. While a frontend's admin
-  listener does not answer `/router_policy`, the Planner launches no windows (P12) and logs why.
+  which has no authentication. The same listener serves the busy-threshold API
+  (`/busy_threshold` and `/router_policy/busy_threshold`), and a threshold set there makes the
+  frontend reject requests. [Configure the frontend](#configure-the-frontend) binds the listener
+  to the pod's addresses, so anything that reaches a frontend pod on the admin port (8002 by
+  default) can change its router policies and its busy thresholds. Admit only the Planner to that
+  port, for example with the NetworkPolicy below, and do not expose it through a Service or an
+  Ingress. While a frontend's admin listener does not answer `/router_policy`, the Planner
+  launches no windows (P12) and logs why.
 - **Ownership.** Outside advisory mode the Planner owns the eight router policy parameters and
   reverts manual changes.
 - **Trace data.** See the privacy note in [Configure the frontend](#configure-the-frontend).
+
+For a DGD named `my-dgd`, this NetworkPolicy admits only its Planner pods to port 8002 of its
+frontend pods and keeps every other TCP port of the frontends open; with another
+`DYN_FRONTEND_ADMIN_PORT`, move the three port numbers. It takes effect only where the cluster's
+network plugin enforces NetworkPolicy, and needs Kubernetes 1.25 or later for `endPort`:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: my-dgd-frontend-admin
+spec:
+  podSelector:
+    matchLabels:
+      nvidia.com/dynamo-graph-deployment-name: my-dgd
+      nvidia.com/dynamo-component-type: frontend
+  policyTypes: [Ingress]
+  ingress:
+  # Every port but the admin port, from anywhere, as without the policy.
+  - ports:
+    - {protocol: TCP, port: 1, endPort: 8001}
+    - {protocol: TCP, port: 8003, endPort: 65535}
+  # The admin port, from the Planner only.
+  - from:
+    - podSelector:
+        matchLabels:
+          nvidia.com/dynamo-graph-deployment-name: my-dgd
+          nvidia.com/dynamo-component-type: planner
+    ports:
+    - {protocol: TCP, port: 8002}
+```
 
 ### RBAC
 

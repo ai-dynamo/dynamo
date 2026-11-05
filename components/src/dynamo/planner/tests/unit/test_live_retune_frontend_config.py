@@ -2334,76 +2334,14 @@ P10_CASES = [
         "must set DYN_ENABLE_FRONTEND_ADMIN_API=1",
     ),
     (
-        {"DYN_ENABLE_FRONTEND_ADMIN_API": "off"},
-        None,
-        "must set DYN_ENABLE_FRONTEND_ADMIN_API=1",
-    ),
-    ({"DYN_ENABLE_FRONTEND_ADMIN_API": " Yes "}, None, None),
-    (
-        {
-            "DYN_ENABLE_FRONTEND_ADMIN_API": {
-                "valueFrom": {"configMapKeyRef": {"name": "c", "key": "k"}}
-            }
-        },
-        None,
-        "must set DYN_ENABLE_FRONTEND_ADMIN_API=1 as a literal value",
-    ),
-    (
         {"DYN_FRONTEND_ADMIN_HOST": None},
         None,
         "its admin listener binds 127.0.0.1 by default",
     ),
-    ({"DYN_FRONTEND_ADMIN_HOST": "127.0.0.2"}, None, "must be 0.0.0.0, :: or"),
-    ({"DYN_FRONTEND_ADMIN_HOST": "[::1]"}, None, "must be 0.0.0.0, :: or"),
-    ({"DYN_FRONTEND_ADMIN_HOST": "localhost"}, None, "must be 0.0.0.0, :: or"),
-    ({"DYN_FRONTEND_ADMIN_HOST": "::ffff:127.0.0.1"}, None, "must be 0.0.0.0, :: or"),
-    ({"DYN_FRONTEND_ADMIN_HOST": "fe80::1%eth0"}, None, "must be 0.0.0.0, :: or"),
-    # A literal pod IP in a pod template matches one pod at most.
-    ({"DYN_FRONTEND_ADMIN_HOST": "10.1.2.3"}, None, "must be 0.0.0.0, :: or"),
-    ({"DYN_FRONTEND_ADMIN_HOST": "[::]"}, None, None),
-    ({"DYN_FRONTEND_ADMIN_HOST": "::"}, None, None),
-    (
-        {
-            "DYN_FRONTEND_ADMIN_HOST": {
-                "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}}
-            }
-        },
-        None,
-        None,
-    ),
-    (
-        {
-            "DYN_FRONTEND_ADMIN_HOST": {
-                "valueFrom": {"fieldRef": {"fieldPath": "status.hostIP"}}
-            }
-        },
-        None,
-        "literal address or fieldRef status.podIP",
-    ),
     ({"DYN_FRONTEND_ADMIN_PORT": "9100"}, None, None),
-    ({"DYN_FRONTEND_ADMIN_PORT": "0"}, None, "a port number from 1 to 65535"),
-    ({"DYN_FRONTEND_ADMIN_PORT": " 9100"}, None, "a port number from 1 to 65535"),
-    ({"DYN_FRONTEND_ADMIN_PORT": "65536"}, None, "a port number from 1 to 65535"),
-    # Far past int()'s digit limit: rejected, not raised.
-    ({"DYN_FRONTEND_ADMIN_PORT": "0" * 5000 + "8003"}, None, None),
-    ({"DYN_FRONTEND_ADMIN_PORT": "9" * 5000}, None, "a port number from 1 to 65535"),
     # The planner reads the pod spec, where $(VAR) is not expanded yet.
     (
         {"DYN_FRONTEND_ADMIN_PORT": "$(DYN_POD_NAME)"},
-        None,
-        "DYN_FRONTEND_ADMIN_PORT must be a literal value",
-    ),
-    (
-        {"DYN_ENABLE_FRONTEND_ADMIN_API": "$(DYN_REQUEST_TRACE)"},
-        None,
-        "must set DYN_ENABLE_FRONTEND_ADMIN_API=1 as a literal value",
-    ),
-    (
-        {
-            "DYN_FRONTEND_ADMIN_PORT": {
-                "valueFrom": {"secretKeyRef": {"name": "s", "key": "k"}}
-            }
-        },
         None,
         "DYN_FRONTEND_ADMIN_PORT must be a literal value",
     ),

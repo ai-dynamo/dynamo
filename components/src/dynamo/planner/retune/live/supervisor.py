@@ -784,17 +784,10 @@ class LiveRetuneSupervisor:
     def ready(self) -> bool:
         """Whether a due window may launch (spec, controller and health)."""
 
-        return (
-            self._spec_ok
-            and self._controller_ok
-            and self._evaluation.spec_replicas is not None
-            and self._canary_ok is True
-            and self._p12_ok()
-            and not self._settings.decommission
-        )
+        return not self.not_ready_reasons()
 
     def not_ready_reasons(self) -> list[str]:
-        """The ``ready()`` conditions that fail now, for the gate's log."""
+        """The launch conditions that fail now; ``ready()`` when none."""
 
         reasons: list[str] = []
         if not self._spec_ok:

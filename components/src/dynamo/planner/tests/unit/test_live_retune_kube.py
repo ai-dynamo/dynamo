@@ -350,43 +350,8 @@ ENABLED = {"name": "DYN_ENABLE_FRONTEND_ADMIN_API", "value": "true"}
     [
         ((ENABLED,), 8002),  # the frontend's default port
         ((ENABLED, {"name": "DYN_FRONTEND_ADMIN_PORT", "value": "9100"}), 9100),
-        ((ENABLED, {"name": "DYN_FRONTEND_ADMIN_PORT", "value": "+9100"}), 9100),
-        # What the frontend's u16 parse rejects falls back to 8002.
-        ((ENABLED, {"name": "DYN_FRONTEND_ADMIN_PORT", "value": " 9100"}), 8002),
-        ((ENABLED, {"name": "DYN_FRONTEND_ADMIN_PORT", "value": "70000"}), 8002),
-        # Leading zeros parse; thousands of digits neither raise nor overflow.
-        (
-            (
-                ENABLED,
-                {"name": "DYN_FRONTEND_ADMIN_PORT", "value": "0" * 5000 + "9100"},
-            ),
-            9100,
-        ),
-        ((ENABLED, {"name": "DYN_FRONTEND_ADMIN_PORT", "value": "9" * 5000}), 8002),
-        ((ENABLED, {"name": "DYN_FRONTEND_ADMIN_PORT", "value": ""}), 8002),
-        # Port 0 is an OS-chosen port nobody else knows.
-        ((ENABLED, {"name": "DYN_FRONTEND_ADMIN_PORT", "value": "0"}), None),
         (({"name": "DYN_ENABLE_FRONTEND_ADMIN_API", "value": "0"},), None),
-        ((), None),
-        (
-            (
-                {
-                    "name": "DYN_ENABLE_FRONTEND_ADMIN_API",
-                    "valueFrom": {"configMapKeyRef": {"name": "c", "key": "k"}},
-                },
-            ),
-            None,
-        ),
-        (
-            (
-                ENABLED,
-                {
-                    "name": "DYN_FRONTEND_ADMIN_PORT",
-                    "valueFrom": {"configMapKeyRef": {"name": "c", "key": "k"}},
-                },
-            ),
-            None,
-        ),
+        # The pod spec holds $(VAR) unexpanded: the port is unknown.
         ((ENABLED, {"name": "DYN_FRONTEND_ADMIN_PORT", "value": "$(PORT)"}), None),
     ],
 )

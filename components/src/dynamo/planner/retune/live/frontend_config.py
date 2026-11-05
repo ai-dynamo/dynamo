@@ -162,8 +162,7 @@ ENV_TRACE_SINKS = "DYN_REQUEST_TRACE_SINKS"
 ENV_TRACE_FORMAT = "DYN_REQUEST_TRACE_FILE_FORMAT"
 ENV_TRACE_RECORDS = "DYN_REQUEST_TRACE_RECORDS"
 ENV_TRACE_PATH = "DYN_REQUEST_TRACE_FILE_PATH"
-# lib/truthy is_truthy; lib/llm/src/request_trace/config.rs parse_file_format.
-_TRUTHY = frozenset({"1", "true", "on", "yes"})
+# lib/llm/src/request_trace/config.rs parse_file_format.
 _GZ_FORMATS = frozenset({"jsonl_gz", "jsonl.gz"})
 
 ENV_WORKER_SELECTION_POLICY = "DYN_ROUTER_WORKER_SELECTION_POLICY"
@@ -2140,7 +2139,7 @@ def _trace_recipe_errors(
         return str(entry.get("value") or "")
 
     trace = literal(ENV_TRACE)
-    if trace is None or trace.strip().lower() not in _TRUTHY:
+    if not is_truthy(trace):
         errors.append(f"P10: the frontend must set {ENV_TRACE}=1")
 
     sinks = _csv(literal(ENV_TRACE_SINKS))

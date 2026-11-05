@@ -357,8 +357,10 @@ class RouterActuator:
         # router_id -> signature of a write the router rejected with 422;
         # the same write is not retried until the target changes.
         self._rejected: dict[str, str] = {}
-        # pod uid -> consecutive rounds whose GET returned 404.
-        self._get_404_rounds: dict[str, int] = {}
+        # pod uid -> consecutive rounds without a reachable /router_policy: the
+        # GET returned 404, or the pod has no admin port (counted as at the
+        # limit at once).
+        self._admin_missing_rounds: dict[str, int] = {}
         self._last_pods: Optional[tuple[PodInfo, ...]] = None
         self._startup_maps: dict[str, dict[str, float]] = {}
         self.set_startup_maps(startup_maps)
@@ -493,7 +495,7 @@ class RouterActuator:
         }
         admin_api_disabled = any(
             count >= self._admin_disabled_rounds
-            for count in self._get_404_rounds.values()
+            for count in self._admin_missing_rounds.values()
         )
         if mismatches:
             logger.warning(
@@ -842,18 +844,20 @@ class RouterActuator:
         self, pods: Sequence[PodInfo], outcomes: Sequence[_PodOutcome]
     ) -> None:
         live_uids = {pod.uid for pod in pods}
-        for uid in [uid for uid in self._get_404_rounds if uid not in live_uids]:
-            del self._get_404_rounds[uid]
+        for uid in [uid for uid in self._admin_missing_rounds if uid not in live_uids]:
+            del self._admin_missing_rounds[uid]
         for outcome in outcomes:
             uid = outcome.pod.uid
             if outcome.pod.ip and outcome.pod.admin_port is None:
                 # The pod's env starts no admin listener the planner can read:
                 # no call was made, and none will answer until it changes.
-                self._get_404_rounds[uid] = self._admin_disabled_rounds
+                self._admin_missing_rounds[uid] = self._admin_disabled_rounds
             elif outcome.get_status == 404:
-                self._get_404_rounds[uid] = self._get_404_rounds.get(uid, 0) + 1
+                self._admin_missing_rounds[uid] = (
+                    self._admin_missing_rounds.get(uid, 0) + 1
+                )
             elif outcome.get_status is not None:
-                self._get_404_rounds.pop(uid, None)
+                self._admin_missing_rounds.pop(uid, None)
 
 
 # ---------------------------------------------------------------- helpers
