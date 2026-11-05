@@ -29,10 +29,13 @@
 //! behind one Service could not share, so an instance must find itself in the
 //! list, which its own reply shows. They read each other through a
 //! [`RegistrationSource`]: over plain HTTP, which like `POST /pools` assumes
-//! a trusted network. Each request names the instance that asks, so an
-//! instance whose list lags behind another's, as during an outage of the MCS
-//! implementation, learns of the instances that list it but that it does not
-//! list. One that does not list it either stays unknown to it.
+//! a trusted network. Each request names the instance that asks and says
+//! whether registrations were made with it, and each reply names the
+//! instances that recently asked while holding some. So an instance whose
+//! list lags behind, as during an outage of the MCS implementation, learns
+//! of an unlisted instance holding registrations when that one asks it, or
+//! asks an instance that it reads. Replies do not pass on what they were
+//! told, so one further away stays unknown to it.
 //!
 //! Lists are `Estimated` while registrations made with another instance may
 //! be missing here: until the first round ends; while this instance does not
@@ -40,13 +43,17 @@
 //! a lease after an instance leaves the list; once a listed instance has not
 //! answered completely for the lease minus two heartbeat intervals, a
 //! heartbeat interval before the copies from its last complete answer may
-//! lapse; while an instance that has not answered completely within that
-//! time asks this one, and for a lease and a heartbeat interval after it last
-//! did, since it may hold registrations that this one cannot read; and from
-//! when a registration lapses here, a copy or one made here,
-//! until every instance has answered completely again, since its PoolRelay
-//! may have renewed it late, with any of them, as it does after a failed
-//! heartbeat. The store keeps these times, so lists turn `Estimated` on time
+//! lapse; while an instance holding registrations made with it, that has
+//! not answered completely within that time, asks this one or an instance
+//! that it reads, and for about a lease and a heartbeat interval after it
+//! last did, since it may hold registrations that this one cannot read; and
+//! from when a registration lapses here, a copy or one made here, until
+//! every instance has answered completely again, since its PoolRelay may
+//! have renewed it late, with any of them, as it does after a failed
+//! heartbeat. A lapse waits one round more, so that an instance that no one
+//! lists and that took the registration over has said so, and a copy's
+//! another, since it can lapse up to one request's time before its original.
+//! The store keeps these times, so lists turn `Estimated` on time
 //! even if the rounds stop. An instance that stays listed but cannot be
 //! reached keeps lists `Estimated` until it answers: the pools its PoolRelays
 //! registered may be missing here, and a complete list would let a Global
@@ -66,9 +73,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::pool_discovery::{
-    Completeness, DiscoveryError, ExchangeRound, Lease, RegistrationExchange, RegistrationSharing,
-    RegistrationSource, ReplicaDirectory, RouterReplica, RouterReplicaId, SharedRegistration,
-    SharedRegistrations, Snapshot, answer_timeout,
+    Asker, Completeness, DiscoveryError, ExchangeRound, Lease, RecentAsker, RegistrationExchange,
+    RegistrationSharing, RegistrationSource, ReplicaDirectory, RouterReplica, RouterReplicaId,
+    SharedRegistration, SharedRegistrations, Snapshot, answer_timeout,
 };
 
 /// The shortest lease that sharing allows, in heartbeat intervals: a copy
@@ -84,27 +91,49 @@ pub struct Sharing {
     lease: Lease,
     registrations: Arc<dyn RegistrationExchange>,
     synced: Arc<AtomicBool>,
-    /// The other instances that asked this one, by the names their replies
-    /// carry, and when each last did.
+    /// The other instances that asked this one while holding registrations,
+    /// by the names their replies carry, and when each last did.
     askers: Arc<Mutex<HashMap<Uuid, Instant>>>,
 }
 
+/// How long an asker that holds registrations counts after it last asked: a
+/// registration renewed with it up to half a heartbeat interval after its
+/// last ask lapses within a lease, and its PoolRelay's registration with
+/// another instance reaches this one within another half.
+fn asker_kept(lease: Lease) -> Duration {
+    lease.duration() + lease.heartbeat_interval()
+}
+
 impl Sharing {
-    /// The instances that asked this one within a lease and a heartbeat
-    /// interval of `now`. Forgets the others. One that stopped asking may
-    /// have renewed a registration up to half a heartbeat interval after its
-    /// last ask. That lapses within a lease, and its PoolRelay's registration
-    /// with another instance reaches this one within another half.
-    fn askers(&self, lease: Lease, now: Instant) -> Vec<Uuid> {
-        let keep = lease.duration() + lease.heartbeat_interval();
+    /// The instances that asked this one while holding registrations, within
+    /// [`asker_kept`] of `now`, and when each last did. Forgets the others.
+    fn askers(&self, lease: Lease, now: Instant) -> Vec<(Uuid, Instant)> {
+        let kept = asker_kept(lease);
         let mut askers = self.askers.lock().unwrap_or_else(PoisonError::into_inner);
-        askers.retain(|_, asked| now.saturating_duration_since(*asked) < keep);
-        askers.keys().copied().collect()
+        askers.retain(|_, asked| now.saturating_duration_since(*asked) < kept);
+        askers
+            .iter()
+            .map(|(asker, asked)| (*asker, *asked))
+            .collect()
     }
 }
 
 impl RegistrationSharing for Sharing {
+    /// Also reports every instance that asked within [`asker_kept`] while
+    /// holding registrations, whether or not this one hears from it: a
+    /// reader drops those it hears from itself.
     fn reply(&self) -> SharedRegistrations {
+        let now = Instant::now();
+        let kept = asker_kept(self.lease);
+        let askers = self
+            .askers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(asker, asked)| (*asker, now.saturating_duration_since(*asked)))
+            .filter(|(_, ago)| *ago < kept)
+            .map(|(asker, ago)| RecentAsker::new(asker, ago))
+            .collect();
         SharedRegistrations {
             instance: self.instance,
             lease: self.lease,
@@ -115,15 +144,18 @@ impl RegistrationSharing for Sharing {
                 .into_iter()
                 .map(|(registration, remaining)| SharedRegistration::new(registration, remaining))
                 .collect(),
+            askers,
         }
     }
 
-    fn asked_by(&self, asker: Uuid) {
-        if asker != self.instance {
+    /// An asker that holds no registration holds nothing that this instance
+    /// may lack, so only one that holds some is noted.
+    fn asked_by(&self, asker: Asker) {
+        if asker.holding && asker.instance != self.instance {
             self.askers
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .insert(asker, Instant::now());
+                .insert(asker.instance, Instant::now());
         }
     }
 
@@ -230,11 +262,18 @@ impl PeerSync {
                 .iter()
                 .filter(|peer| !instances.is_own(&peer.replica))
                 .collect();
+            let asker = Asker {
+                instance: self.sharing.instance,
+                holding: self.sharing.registrations.holds_local_registration(),
+            };
             let replies = tokio::select! {
                 biased;
                 () = stop.cancelled() => return,
-                replies = join_all(others.iter().map(|peer| self.ask(peer))) => replies,
+                replies = join_all(others.iter().map(|peer| self.ask(peer, asker))) => replies,
             };
+            // After every reply arrived, so a time that a reply gives as an
+            // age is taken no earlier than it was.
+            let arrived = Instant::now();
             let mut answered = 0;
             for (peer, (sent, reply)) in others.into_iter().zip(replies) {
                 match reply {
@@ -245,6 +284,7 @@ impl PeerSync {
                     Ok(reply) => {
                         answered += 1;
                         instances.answered(peer, &reply, sent, lease);
+                        instances.note_reports(&reply, self.sharing.instance, arrived);
                         self.absorb(reply, sent);
                     }
                 }
@@ -261,12 +301,15 @@ impl PeerSync {
         }
     }
 
-    /// Asks `peer`, waiting at most `every`. Also returns when it was asked.
-    async fn ask(&self, peer: &RouterReplica) -> (Instant, anyhow::Result<SharedRegistrations>) {
+    /// Asks `peer` as `asker`, waiting at most `every`. Also returns when it
+    /// was asked.
+    async fn ask(
+        &self,
+        peer: &RouterReplica,
+        asker: Asker,
+    ) -> (Instant, anyhow::Result<SharedRegistrations>) {
         let sent = Instant::now();
-        let ask = self
-            .source
-            .shared_registrations(peer, self.sharing.instance);
+        let ask = self.source.shared_registrations(peer, asker);
         let reply = tokio::time::timeout(self.every, ask).await;
         let reply = match reply {
             Ok(reply) => reply.map_err(|error| match error {
@@ -323,8 +366,12 @@ struct Instances {
     /// The instances whose answers counted, by the names their replies
     /// carry, and when each was last asked for one.
     heard: HashMap<Uuid, Instant>,
-    /// Instances that ask this one without having answered it, and since
-    /// when.
+    /// Askers holding registrations that other instances report, and when
+    /// each last asked them, as near as this one can tell. Never reported
+    /// on, so a report does not echo between instances.
+    reported: HashMap<Uuid, Instant>,
+    /// Askers holding registrations that this one has not heard from, and
+    /// since when.
     unheard_askers: HashMap<Uuid, Problem>,
 }
 
@@ -452,7 +499,7 @@ impl Instances {
     fn end_round(
         &mut self,
         listed: &Snapshot<RouterReplica>,
-        askers: &[Uuid],
+        askers: &[(Uuid, Instant)],
         missing_after: Duration,
         lease: Lease,
         now: Instant,
@@ -505,36 +552,37 @@ impl Instances {
         }
     }
 
-    /// Whether any of the `askers` has not answered completely within
-    /// `missing_after` of `now`, as when this instance's list lags behind
-    /// theirs: it may hold registrations that this one cannot read. Logs each
-    /// such asker once it has lasted a lease, and forgets answers older than
-    /// a lease.
+    /// Whether any asker holding registrations, of this instance or
+    /// reported by one that answered it, has not answered this one completely
+    /// within `missing_after` of `now`: as when this instance's list lags
+    /// behind, it may hold registrations that this one cannot read. Logs each
+    /// such asker once it has lasted a lease, and forgets answers and reports
+    /// too old to matter.
     fn note_askers(
         &mut self,
-        askers: &[Uuid],
+        askers: &[(Uuid, Instant)],
         missing_after: Duration,
         lease: Lease,
         now: Instant,
     ) -> bool {
         self.heard
             .retain(|_, sent| now.saturating_duration_since(*sent) < lease.duration());
-        let heard = &self.heard;
+        let kept = asker_kept(lease);
+        self.reported
+            .retain(|_, asked| now.saturating_duration_since(*asked) < kept);
         let unheard: HashSet<Uuid> = askers
             .iter()
-            .copied()
-            .filter(|asker| {
-                heard
-                    .get(asker)
-                    .is_none_or(|sent| now >= *sent + missing_after)
-            })
+            .map(|(asker, _)| *asker)
+            .chain(self.reported.keys().copied())
+            .filter(|asker| !self.hears(asker, missing_after, now))
             .collect();
         self.unheard_askers.retain(|asker, problem| {
             let still = unheard.contains(asker);
             if !still && problem.logged {
                 tracing::info!(
                     asker = %asker,
-                    "another discovery instance that asked this one answers it"
+                    "a discovery instance that held registrations this one could not read is \
+                     heard from or gone"
                 );
             }
             still
@@ -547,14 +595,39 @@ impl Instances {
             if problem.lasted(lease.duration(), now) {
                 tracing::error!(
                     asker = %asker,
-                    "another discovery instance asks this one, but this one has no complete \
-                     answer from it, so pool lists stay incomplete: it may hold registrations that \
-                     this one cannot read, as when this cluster's import of the instances lags \
-                     behind"
+                    "a discovery instance that holds registrations asks this one, or one that \
+                     this one reads, but this one has no complete answer from it, so pool lists \
+                     stay incomplete: as when an import of the instances lags behind, it may hold \
+                     registrations that this one cannot read"
                 );
             }
         }
         !unheard.is_empty()
+    }
+
+    /// Whether `instance` answered this one completely within
+    /// `missing_after` of `now`.
+    fn hears(&self, instance: &Uuid, missing_after: Duration, now: Instant) -> bool {
+        self.heard
+            .get(instance)
+            .is_some_and(|sent| now < *sent + missing_after)
+    }
+
+    /// Notes the askers that `reply` reports, other than this instance,
+    /// `own`. Each last asked when the reply says, counted back from
+    /// `arrived`, which is after the reply arrived, so it is kept no less
+    /// long than the instance that reports it keeps it.
+    fn note_reports(&mut self, reply: &SharedRegistrations, own: Uuid, arrived: Instant) {
+        for recent in &reply.askers {
+            let (asker, ago) = recent.into_parts();
+            let Some(asked) = arrived.checked_sub(ago) else {
+                continue;
+            };
+            if asker != own {
+                let last = self.reported.entry(asker).or_insert(asked);
+                *last = (*last).max(asked);
+            }
+        }
     }
 
     /// Logs, once two leases have passed, that this instance has not found
@@ -683,7 +756,7 @@ mod tests {
         async fn shared_registrations(
             &self,
             instance: &RouterReplica,
-            asker: Uuid,
+            asker: Asker,
         ) -> Result<SharedRegistrations, DiscoveryError> {
             let node = self.0.lock().unwrap().get(&instance.replica).cloned();
             match node {
@@ -798,12 +871,17 @@ mod tests {
         assert_eq!(view(&b).await, "[m2] complete");
         // With no more heartbeats, the registration lapses at A at 3.25 s, and
         // the copy at B with it. Each list stays incomplete until every other
-        // instance has been asked after the pool may have lapsed there.
+        // instance has been asked after the pool may have lapsed there, and an
+        // instance that no one lists has had a round to say that it took the
+        // pool over: at A, until 4 s, and at B, where a copy may lapse half a
+        // heartbeat interval before its original, until 4.5 s.
         at(start, 3300).await;
         assert_eq!(view(&a).await, "[] incomplete");
         assert_eq!(view(&b).await, "[] incomplete");
         at(start, 4100).await;
         assert_eq!(view(&a).await, "[] complete");
+        assert_eq!(view(&b).await, "[] incomplete");
+        at(start, 4600).await;
         assert_eq!(view(&b).await, "[] complete");
     }
 
@@ -886,31 +964,27 @@ mod tests {
         assert_eq!(view(&b).await, "[] complete");
         // A restarts at 4.1 s under the same name. Its answers lack the
         // registrations its PoolRelays have not renewed yet until a lease
-        // after that, and the A that stopped may have renewed one after it
-        // last asked, at 4 s. So B's lists are incomplete from when A's last
-        // complete answer, at 4 s, no longer vouches for them, until a lease
-        // and a heartbeat interval after that last ask, at 8 s.
+        // after that, so B's lists are incomplete from when A's last complete
+        // answer, at 4 s, no longer vouches for them, until 7.5 s. The A that
+        // stopped held no registrations, so none can be missing because of it.
         at(start, 4100).await;
         a_stop.cancel();
         let (_, _, a_stop) = network.start("a", lease(), &["a", "b"]);
         at(start, 5100).await;
         assert_eq!(view(&b).await, "[] incomplete");
-        at(start, 7900).await;
+        at(start, 7400).await;
         assert_eq!(view(&b).await, "[] incomplete");
-        at(start, 8100).await;
+        at(start, 7600).await;
         assert_eq!(view(&b).await, "[] complete");
-        // A stops asking at 8.2 s, and leaves the list at 12.2 s: B's lists
-        // are incomplete from the next round, at 12.5 s, for a lease, until
-        // copies from A have lapsed.
-        at(start, 8200).await;
+        // A stops and leaves the list: B's lists are incomplete from the next
+        // round, at 8 s, for a lease, until copies from A have lapsed.
         a_stop.cancel();
-        at(start, 12200).await;
         b_list.names(&["b"]);
-        at(start, 12600).await;
+        at(start, 8100).await;
         assert_eq!(view(&b).await, "[] incomplete");
-        at(start, 15400).await;
+        at(start, 10900).await;
         assert_eq!(view(&b).await, "[] incomplete");
-        at(start, 15600).await;
+        at(start, 11100).await;
         assert_eq!(view(&b).await, "[] complete");
     }
 
@@ -995,6 +1069,98 @@ mod tests {
         assert_eq!(view(&b).await, "[] incomplete");
         at(start, 8200).await;
         assert_eq!(view(&b).await, "[m1] complete");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_instance_learns_of_one_that_asks_an_instance_it_reads() {
+        // A's cluster loses contact with MCS: its list freezes, showing A and
+        // an instance that has gone since. A2, started there since, is listed
+        // nowhere, and does not list B, started elsewhere since. A pool moves
+        // from A to A2, so only A hears from A2, and B learns of A2 from A's
+        // answers.
+        let network = Network::default();
+        let start = Instant::now();
+        let frozen = ["a", "gone"];
+        let (a, a_list, _) = network.start("a", lease(), &frozen);
+        let (a2, a2_list, _) = network.start("a2", lease(), &frozen);
+        let (b, b_list, _) = network.start("b", lease(), &["a", "b"]);
+        at(start, 100).await;
+        let _ = a.register(pool("m1")).await.unwrap();
+        for beat in 1..5 {
+            at(start, 1000 * beat + 100).await;
+            let _ = a2.register(pool("m1")).await.unwrap();
+        }
+        at(start, 4700).await;
+        assert_eq!(view(&b).await, "[] incomplete");
+        // A's cluster recovers first: A reads A2, but B still cannot.
+        for list in [&a_list, &a2_list] {
+            list.names(&["a", "a2"]);
+        }
+        for beat in 5..10 {
+            at(start, 1000 * beat + 100).await;
+            let _ = a2.register(pool("m1")).await.unwrap();
+        }
+        at(start, 9200).await;
+        assert_eq!(view(&b).await, "[] incomplete");
+        // Once B reads A2 too, it copies the pool from it.
+        for list in [&a_list, &a2_list, &b_list] {
+            list.names(&["a", "a2", "b"]);
+        }
+        at(start, 10200).await;
+        assert_eq!(view(&b).await, "[m1] complete");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_instance_that_holds_no_registrations_keeps_no_list_incomplete() {
+        // C asks B, which does not list it, as a test instance given the same
+        // Service might. While no PoolRelay registers with C, nothing can be
+        // missing because of it.
+        let network = Network::default();
+        let start = Instant::now();
+        let _ = network.start("a", lease(), &["a", "b"]);
+        let (b, _, _) = network.start("b", lease(), &["a", "b"]);
+        let (c, _, _) = network.start("c", lease(), &["b", "c"]);
+        at(start, 3600).await;
+        assert_eq!(view(&b).await, "[] complete");
+        // Once one does, B cannot read that registration.
+        let _ = c.register(pool("m1")).await.unwrap();
+        at(start, 4600).await;
+        assert_eq!(view(&b).await, "[] incomplete");
+        // The registration lapses at 6.6 s, after C last asked while holding
+        // it, at 6.5 s. C's later asks, holding nothing, neither renew that
+        // ask nor undo it: it counts until a lease and a heartbeat interval
+        // after it.
+        at(start, 10400).await;
+        assert_eq!(view(&b).await, "[] incomplete");
+        at(start, 10600).await;
+        assert_eq!(view(&b).await, "[] complete");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pool_taken_over_by_an_unlisted_instance_stays_listed_or_lists_incomplete() {
+        // A pool registers with B until 2.1 s, so its registration lapses at
+        // 5.1 s. Its PoolRelay renews just before that, at 5.07 s, with C,
+        // which B does not list and which held no registration until then, so
+        // C says that it holds one only when it next asks, at 5.55 s. B's
+        // lists must not be complete in between.
+        let network = Network::default();
+        let start = Instant::now();
+        let _ = network.start("a", lease(), &["a", "b"]);
+        let (b, _, _) = network.start("b", lease(), &["a", "b"]);
+        at(start, 50).await;
+        let (c, _, _) = network.start("c", lease(), &["b", "c"]);
+        for beat in 0..3 {
+            at(start, 1000 * beat + 100).await;
+            let _ = b.register(pool("m1")).await.unwrap();
+        }
+        at(start, 5000).await;
+        assert_eq!(view(&b).await, "[m1] complete");
+        at(start, 5070).await;
+        let _ = c.register(pool("m1")).await.unwrap();
+        at(start, 5520).await;
+        assert_eq!(view(&b).await, "[] incomplete");
+        at(start, 6100).await;
+        assert_eq!(view(&b).await, "[] incomplete");
     }
 
     /// MCS importing one Ready PoolRelay endpoint, for good.
@@ -1209,6 +1375,7 @@ mod tests {
             lease,
             complete,
             registrations: Vec::new(),
+            askers: Vec::new(),
         };
         let a = listed(Completeness::Exact, &["a"])
             .items
@@ -1234,10 +1401,11 @@ mod tests {
         // that asks without having answered may hold registrations that B
         // cannot read, and so may A once its answer no longer vouches.
         let asking = |askers: &[Uuid], ended: u64, instances: &mut Instances| {
+            let askers: Vec<(Uuid, Instant)> = askers.iter().map(|asker| (*asker, then)).collect();
             instances
                 .end_round(
                     &listed(Completeness::Exact, &["a", "b"]),
-                    askers,
+                    &askers,
                     missing_after(lease),
                     lease,
                     then + Duration::from_millis(ended),
@@ -1363,6 +1531,7 @@ mod tests {
         let (a, a_url, _, _, a_sharing) = serve(&stop).await;
         let (b, b_url, b_sync, b_list, b_sharing) = serve(&stop).await;
         let _ = a.register(pool("m1")).await.unwrap();
+        let _ = b.register(pool("m1")).await.unwrap();
         // B reads A, itself, and an address where nothing listens.
         let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let gone = Url::parse(&format!("http://{}/", closed.local_addr().unwrap())).unwrap();
@@ -1385,11 +1554,36 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(view(&b).await, "[m1] incomplete");
-        // B named itself when it asked A.
-        assert_eq!(
-            a_sharing.askers(lease(), Instant::now()),
-            [b_sharing.instance]
-        );
+        // B named itself when it asked A, and said that it holds a
+        // registration. One that holds nothing is not noted, and one that does
+        // not say counts as holding some.
+        let (idle, unsure) = (Uuid::new_v4(), Uuid::new_v4());
+        for query in [
+            format!("asker={idle}&holding=false"),
+            format!("asker={unsure}"),
+        ] {
+            let url = a_url.join(&format!("registrations?{query}")).unwrap();
+            assert!(reqwest::get(url).await.unwrap().status().is_success());
+        }
+        let mut expected = vec![b_sharing.instance, unsure];
+        expected.sort();
+        let mut askers: Vec<Uuid> = a_sharing
+            .askers(lease(), Instant::now())
+            .into_iter()
+            .map(|(asker, _)| asker)
+            .collect();
+        askers.sort();
+        assert_eq!(askers, expected);
+        // A's answers report them, as the other instances read them.
+        let url = a_url.join("registrations").unwrap();
+        let reply: SharedRegistrations = reqwest::get(url).await.unwrap().json().await.unwrap();
+        let mut reported: Vec<Uuid> = reply
+            .askers
+            .into_iter()
+            .map(|asker| asker.into_parts().0)
+            .collect();
+        reported.sort();
+        assert_eq!(reported, expected);
         stop.cancel();
     }
 }

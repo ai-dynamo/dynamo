@@ -23,7 +23,9 @@
 //!   any. A caller that knows no pools yet still uses a partial list.
 //! - `GET /registrations`: the registrations this instance's PoolRelays
 //!   made, for the other instances ([`crate::peers`]), which name themselves
-//!   in `asker`. Like `POST /pools`, it assumes a trusted network.
+//!   in `asker` and say in `holding` whether registrations were made with
+//!   them; and the instances that recently asked while holding some. Like
+//!   `POST /pools`, it assumes a trusted network.
 //! - `GET /healthz`: readiness. OK once the backend has answered, which with
 //!   DynamoDB follows the startup check of the table, and, for an instance
 //!   that shares registrations, once it has asked the others. A later failure
@@ -190,7 +192,7 @@ async fn shared_registrations(
 ) -> Response {
     match &shared.backend.sharing {
         Some(sharing) => {
-            if let Some(asker) = request.asker {
+            if let Some(asker) = request.asker() {
                 sharing.asked_by(asker);
             }
             Json(sharing.reply()).into_response()
