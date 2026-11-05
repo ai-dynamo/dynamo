@@ -25,7 +25,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.reasoning import ReasoningParser
-from vllm.renderers import ChatParams, merge_kwargs
+from vllm.renderers import ChatParams
 from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.renderers.hf import resolve_chat_template
 from vllm.sampling_params import SamplingParams
@@ -583,7 +583,6 @@ def _prepare_request(
     model_config: ModelConfig | None = None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
-    default_chat_template_kwargs: dict[str, Any] | None = None,
     default_thinking_mode: str | None = None,
     validated_request: ChatCompletionRequest | None = None,
     guidance_snapshots: dict[str, Any] | None = None,
@@ -657,14 +656,9 @@ def _prepare_request(
     raw_template_args = (
         request.get("chat_template_args") if isinstance(request, dict) else None
     )
-    # Reuse vLLM's merge so unset request values (None/"auto") keep the server
-    # default; copy the result since the default dict is shared across requests
-    # and we mutate reasoning_effort below.
+    # A copy, because reasoning_effort is written into it below.
     chat_template_kwargs = dict(
-        merge_kwargs(
-            default_chat_template_kwargs,
-            request_for_sampling.chat_template_kwargs or raw_template_args or {},
-        )
+        request_for_sampling.chat_template_kwargs or raw_template_args or {}
     )
     # reasoning_effort is a request-level thinking control. Put an explicit
     # value into the kwargs before applying the deployment default so the two
@@ -782,7 +776,6 @@ async def preprocess_chat_request(
     model_config: ModelConfig | None = None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
-    default_chat_template_kwargs: dict[str, Any] | None = None,
     default_thinking_mode: str | None = None,
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
@@ -817,7 +810,6 @@ async def preprocess_chat_request(
         model_config=model_config,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
         enable_auto_tool_choice=enable_auto_tool_choice,
-        default_chat_template_kwargs=default_chat_template_kwargs,
         default_thinking_mode=default_thinking_mode,
         validated_request=validated_request,
         guidance_snapshots=guidance_snapshots,

@@ -97,8 +97,11 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.32.0-ubuntu2404
-    vllm_omni_ref: "v0.32.0"
+    runtime_image_tag: v0.33.0
+    vllm_omni_ref: "v0.33.0rc1"
+    # Omni caps Transformers below 5.20; the vLLM 0.33 image ships 5.20.2.
+    transformers_version: "5.19.0"
+    tokenizers_version: "0.23.3"
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
