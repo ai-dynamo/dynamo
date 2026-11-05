@@ -126,6 +126,7 @@ async def test_wait_for_instance_by_runtime_data_times_out_without_match(
 async def test_wait_for_runtime_data_rejects_invalid_timeout(
     temp_file_store, timeout_s
 ):
+    """Both discovery waits reject invalid durations before watching workers."""
     resolver = _runtime()
     try:
         client = await resolver.endpoint(ENDPOINT_PATH).client()

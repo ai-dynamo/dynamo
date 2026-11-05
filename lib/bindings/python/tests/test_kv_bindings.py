@@ -260,6 +260,7 @@ def test_selection_service_cli_rejects_invalid_affinity_ttl(ttl):
 @pytest.mark.parametrize("ttl", [-1, float("nan"), float("inf"), 1e300])
 @pytest.mark.timeout(5)
 def test_selection_cache_config_rejects_invalid_ttl(ttl):
+    """Invalid TTLs raise ValueError rather than a Rust panic."""
     with pytest.raises(ValueError, match="not a valid duration"):
         SelectionCacheConfig(ttl_secs=ttl)
 
@@ -271,6 +272,7 @@ def test_selection_cache_config_rejects_invalid_ttl(ttl):
 @pytest.mark.parametrize("ttl", ["-1", "NaN", "inf", "1e300"])
 @pytest.mark.timeout(60)  # subprocess wait is capped at 15 s per case
 def test_selection_service_cli_rejects_invalid_selection_cache_ttl(ttl):
+    """The CLI reports invalid TTLs as configuration errors without panicking."""
     result = subprocess.run(
         [
             sys.executable,
