@@ -1263,7 +1263,9 @@ class ManagedDeployment:
             return []
 
     async def _dump_in_flight_restart_logs(
-        self, prev_log_tail_lines: int = 80
+        self,
+        prev_log_tail_lines: int = 80,
+        reports: Optional[List[str]] = None,
     ) -> List[str]:
         """Surface the previous-instance log tail for any DGD container that
         has restarted, while waiting for Ready or during failure cleanup.
@@ -1279,6 +1281,8 @@ class ManagedDeployment:
 
         Returns the list of human-readable warnings (one entry per newly
         observed restart) so callers can log them with proper formatting.
+        A caller that may cancel this call passes ``reports`` to keep the
+        warnings completed before the cancellation.
         """
         try:
             assert self._core_api is not None, "Kubernetes API not initialized"
@@ -1286,7 +1290,7 @@ class ManagedDeployment:
             pods = await self._core_api.list_namespaced_pod(
                 self.namespace, label_selector=label
             )
-            warnings: List[str] = []
+            warnings: List[str] = [] if reports is None else reports
             for pod in pods.items:
                 pod_name = pod.metadata.name if pod.metadata else "?"
                 statuses = (pod.status.container_statuses if pod.status else None) or []
@@ -1985,15 +1989,10 @@ class ManagedDeployment:
                     )
                 # Log restarts in the job log: a crash after Ready shows only as a
                 # 503 "model not ready", and failure files may not be uploaded.
+                restarts: List[str] = []
                 try:
                     async with asyncio.timeout(RESTART_REPORT_TIMEOUT):
-                        restarts = await self._dump_in_flight_restart_logs()
-                    if restarts:
-                        self._logger.warning(
-                            "Detected container restarts at test failure:"
-                        )
-                        for line in restarts:
-                            self._logger.warning(f"  {line}")
+                        await self._dump_in_flight_restart_logs(reports=restarts)
                 except asyncio.CancelledError as error:
                     pending_cancellation = pending_cancellation or error
                     self._logger.warning(
@@ -2004,6 +2003,12 @@ class ManagedDeployment:
                     self._logger.warning(
                         "Restart report failed; continuing cleanup: %s", error
                     )
+                # Restarts already marked as reported must reach the log even if
+                # a later pod's log request timed out.
+                if restarts:
+                    self._logger.warning("Detected container restarts at test failure:")
+                    for line in restarts:
+                        self._logger.warning("  %s", line)
             # Collect logs/metrics first; any PFs opened here will be tracked and stopped below.
             self._get_service_logs()
             events = await self._get_pod_events()
@@ -2023,9 +2028,13 @@ class ManagedDeployment:
                     self._logger.debug("Error stopping port forward: %s", e)
             self._active_port_forwards.clear()
         finally:
-            await self._delete_deployment(fail_on_timeout=False)
-        if pending_cancellation is not None:
-            raise pending_cancellation
+            try:
+                await self._delete_deployment(fail_on_timeout=False)
+            finally:
+                # Raise a retained cancellation even if a later cleanup step
+                # failed; _cleanup_preserving_error would swallow that failure.
+                if pending_cancellation is not None:
+                    raise pending_cancellation
 
     async def __aenter__(self):
         try:

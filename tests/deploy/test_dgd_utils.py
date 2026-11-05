@@ -362,25 +362,38 @@ def restarted_worker_deployment(tmp_path, list_pods: AsyncMock) -> ManagedDeploy
     return deployment
 
 
-def restarted_worker_pods() -> SimpleNamespace:
+def restarted_worker_pods(
+    pod_names: tuple[str, ...] = ("sglang-agg-0-decode-0",),
+) -> SimpleNamespace:
     terminated = SimpleNamespace(reason="Error", exit_code=139)
     container_status = SimpleNamespace(
         name="main",
         restart_count=1,
         last_state=SimpleNamespace(terminated=terminated),
     )
-    pod = SimpleNamespace(
-        metadata=SimpleNamespace(name="sglang-agg-0-decode-0"),
-        status=SimpleNamespace(container_statuses=[container_status]),
-    )
-    return SimpleNamespace(items=[pod])
+    pods = [
+        SimpleNamespace(
+            metadata=SimpleNamespace(name=name),
+            status=SimpleNamespace(container_statuses=[container_status]),
+        )
+        for name in pod_names
+    ]
+    return SimpleNamespace(items=pods)
 
 
 async def test_failed_cleanup_logs_worker_restart_after_ready(tmp_path, caplog) -> None:
     """A worker restart after Ready reaches the job log on test failure."""
-    deployment = restarted_worker_deployment(
-        tmp_path, AsyncMock(return_value=restarted_worker_pods())
-    )
+    events = []
+
+    async def list_pods(*args, **kwargs):
+        events.append("restart-report")
+        return restarted_worker_pods()
+
+    async def delete(*, fail_on_timeout=True):
+        events.append("delete")
+
+    deployment = restarted_worker_deployment(tmp_path, AsyncMock(side_effect=list_pods))
+    deployment._delete_deployment = AsyncMock(side_effect=delete)
 
     with caplog.at_level(logging.WARNING):
         await deployment._cleanup(failed=True)
@@ -390,6 +403,55 @@ async def test_failed_cleanup_logs_worker_restart_after_ready(tmp_path, caplog) 
     assert "sglang-agg-0-decode-0/main: in-flight restart count 1" in report
     assert "lastReason=Error lastExitCode=139" in report
     assert "worker crashed" in report
+    assert events == ["restart-report", "delete"]
+    deployment._delete_deployment.assert_awaited_once_with(fail_on_timeout=False)
+
+
+async def test_failed_cleanup_logs_restarts_reported_before_timeout(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    deployment = restarted_worker_deployment(
+        tmp_path,
+        AsyncMock(
+            return_value=restarted_worker_pods(
+                ("sglang-agg-0-decode-0", "sglang-agg-0-decode-1")
+            )
+        ),
+    )
+
+    async def read_log(*, name, **kwargs):
+        if name == "sglang-agg-0-decode-1":
+            await asyncio.Event().wait()
+        return "worker crashed\n"
+
+    deployment._core_api.read_namespaced_pod_log = read_log
+    monkeypatch.setattr(dgd_utils, "RESTART_REPORT_TIMEOUT", 0.01)
+
+    with caplog.at_level(logging.WARNING):
+        await deployment._cleanup(failed=True)
+
+    assert "Restart report failed; continuing cleanup" in caplog.text
+    assert "sglang-agg-0-decode-0/main: in-flight restart count 1" in caplog.text
+    assert "sglang-agg-0-decode-1/main" not in caplog.text
+    deployment._delete_deployment.assert_awaited_once_with(fail_on_timeout=False)
+
+
+async def test_cancelled_restart_report_survives_later_cleanup_failure(
+    tmp_path,
+) -> None:
+    async def list_pods(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    deployment = restarted_worker_deployment(tmp_path, AsyncMock(side_effect=list_pods))
+    deployment._get_service_logs = MagicMock(side_effect=RuntimeError("logs failed"))
+
+    # Cleanup errors are swallowed when a test error exists; cancellation is not.
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.01):
+            await deployment._cleanup_preserving_error(
+                ValueError("inference failed"), failed=True
+            )
+
     deployment._delete_deployment.assert_awaited_once_with(fail_on_timeout=False)
 
 
