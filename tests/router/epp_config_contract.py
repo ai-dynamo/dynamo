@@ -35,8 +35,14 @@ on one owned config-parity Item. ``shared_cache_type`` binds one ordinary
 owned HiCache client-construction Item. ``shared_cache_multiplier`` is a
 supported_candidate profile pending runtime evidence. ``kv_cache_block_size``
 is not-FE-honored Dynamic worker-card geometry: independent CLI 8/64 did
-not override card 32, and the card 16 control yielded 16. Remaining rows
-stay pending.
+not override card 32, and the card 16 control yielded 16.
+``serve_indexer``, ``router_mode``, and both prefill-admission threshold
+rows are source-backed ``unsupported_input`` on the stock Runtime EPP
+profile. ``min_initial_workers``, ``session_affinity_mode``, and
+``router_prefill_load_model`` are source-backed ``unsupported_capability``
+(min-worker env parses, but stock EPP bypasses the N-worker gate). Prefill
+abs/frac also bind three ordinary FE admin ``/busy_threshold`` boundary
+Items. Policy selectors and remaining native consumers stay pending.
 
 The EPP observer reads the post-parse INFO event from
 ``log_env_config``. It does not observe later Runtime EPP instance overrides
@@ -288,6 +294,122 @@ DECODE_THRESHOLD_PREFILL_ENVS = (
 )
 DECODE_THRESHOLD_PROFILES = ("default", "configured")
 DECODE_THRESHOLD_CONFIGURED = "0.25"
+SERVE_INDEXER_ROW = "serve_indexer"
+MIN_INITIAL_WORKERS_ROW = "min_initial_workers"
+ROUTER_MODE_ROW = "router_mode"
+SESSION_AFFINITY_MODE_ROW = "session_affinity_mode"
+PREFILL_ABS_THRESHOLD_ROW = "active_prefill_tokens_threshold"
+PREFILL_FRAC_THRESHOLD_ROW = "active_prefill_tokens_threshold_frac"
+PREFILL_LOAD_MODEL_ROW = "router_prefill_load_model"
+INPUT_STARTUP_SOURCE_OBSERVER = (
+    "input_startup_source_capability_contract+fe_parser_native_controls"
+)
+PREFILL_ADMISSION_OBSERVER = (
+    "fe_admin_get_busy_threshold+token_route_parity+"
+    "input_startup_source_capability_contract"
+)
+INPUT_STARTUP_SOURCE_TEST = "test_input_startup_capability_decisions"
+INPUT_STARTUP_SOURCE_ITEM = (
+    f"tests/router/test_epp_frontend_config_parity.py::{INPUT_STARTUP_SOURCE_TEST}"
+)
+PREFILL_ADMISSION_TEST = "test_prefill_admission_input_boundaries"
+PREFILL_ADMISSION_PROFILES = ("default", "absolute", "fractional")
+PREFILL_ADMISSION_ITEMS = tuple(
+    f"tests/router/test_epp_frontend_config_parity.py::"
+    f"{PREFILL_ADMISSION_TEST}[{profile}]"
+    for profile in PREFILL_ADMISSION_PROFILES
+)
+PREFILL_ABS_ENV = "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD"
+PREFILL_FRAC_ENV = "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC"
+PREFILL_ABS_SENTINEL = "8192"
+PREFILL_FRAC_SENTINEL = "0.75"
+ABSOLUTE_PREFILL_THRESHOLD_WARNING = (
+    "--active-prefill-tokens-threshold is deprecated and will be removed in v1.7; "
+    "use --active-prefill-tokens-threshold-frac"
+)
+NON_KV_WRAPPER_CLI = ("--router-mode", "round-robin")
+INPUT_STARTUP_SOURCE_ROWS = frozenset(
+    {
+        SERVE_INDEXER_ROW,
+        MIN_INITIAL_WORKERS_ROW,
+        ROUTER_MODE_ROW,
+        SESSION_AFFINITY_MODE_ROW,
+        PREFILL_LOAD_MODEL_ROW,
+    }
+)
+UNSUPPORTED_INPUT_ROWS = frozenset(
+    {
+        SERVE_INDEXER_ROW,
+        ROUTER_MODE_ROW,
+        PREFILL_ABS_THRESHOLD_ROW,
+        PREFILL_FRAC_THRESHOLD_ROW,
+    }
+)
+UNSUPPORTED_CAPABILITY_ROWS = frozenset(
+    {
+        MIN_INITIAL_WORKERS_ROW,
+        SESSION_AFFINITY_MODE_ROW,
+        PREFILL_LOAD_MODEL_ROW,
+    }
+)
+RUST_EPP = REPO_ROOT / "deploy/inference-gateway/ext-proc/src/epp.rs"
+RUST_WATCHER = REPO_ROOT / "lib/llm/src/discovery/watcher.rs"
+RUST_MODEL_MANAGER = REPO_ROOT / "lib/llm/src/discovery/model_manager.rs"
+RUST_PREFILL_ACTIVATION = (
+    REPO_ROOT / "lib/llm/src/kv_router/prefill_router/activation.rs"
+)
+RUST_KV_ROUTER = REPO_ROOT / "lib/llm/src/kv_router.rs"
+RUST_PREFILL_QUERY = REPO_ROOT / "lib/llm/src/kv_router/prefill_router/query.rs"
+RUST_EMBEDDED = REPO_ROOT / "lib/llm/src/kv_router/embedded.rs"
+RUST_INDEXER_INGRESS = REPO_ROOT / "lib/llm/src/kv_router/indexer/ingress.rs"
+RUST_INDEXER_REMOTE = REPO_ROOT / "lib/llm/src/kv_router/indexer/remote.rs"
+RUST_AIS_CALLBACK = REPO_ROOT / "lib/bindings/python/rust/llm/ais_callback.rs"
+RUST_POLICY_CONFIG = REPO_ROOT / "lib/kv-router/src/scheduling/policy_config.rs"
+RUST_QUEUE = REPO_ROOT / "lib/kv-router/src/scheduling/queue.rs"
+# Named support-boundary source digests: sha256 of comment-stripped
+# declaration+body for each decisive shared scope.
+SOURCE_SCOPE_DIGESTS: dict[str, str] = {
+    "epp_from_discovery": "fe9ffe7d2862b80c79b4d7150ceea4efd76b45463917adbd60bc77395ff197a5",
+    "epp_route_decode": "e80ec535ef961ec3b966e10602d5c5adefd54b9ea7dfeab39ae2bd5f32e30d03",
+    "managed_kv_router_for_with_policy": "480f353836bc5cbb248dfbfb7556a99dff7fbaa121a83d2101fc3c4793ecb8e9",
+    "kv_chooser_for_with_policy_and_client": "f099fc885a7fc79d7811caed7c37d770ad9cc885229f3e4276a275427e8a0925",
+    "prefill_router_new": "c6104e64711807f0ee9ce4bc589a110f2dc2f40956a2b8e87addbb9872f1c02b",
+    "embedded_selection_start": "9187ac406b6dc9a4d6a6819e657032332136c3a18a5c9c49f69daf4115a4f100",
+    "min_initial_workers_from_env": "73ba458edd8425a67b46dc97ef7d571f3bef9dd13641b9dee15ab7a050a4db2f",
+    "ensure_served_indexer_service": "a6972ad24be7ebb2a1d7cc7ca0bc4b36cf4f073f7fbd2efe14ad3b84512aede9",
+    "managed_kv_router_for_with_worker_role": "42c2a89cf5eb69d40f854fb3a21dc3cee5b8e5ce00db115a620955f21448c4cf",
+    "kv_router_new_with_worker_role_and_scheduler_load": "271eeb24f45fc969465323b5dec871bef4fd7db3d3f2c0e740dd8e5244d91fc9",
+    "prefill_router_new_with_selection_policy": "433ea1f40644175e4be7a39df1c48a0bfc8d01fa8f9d6ac28d1293908133b2ce",
+    "prefill_build_binding": "25365899cbf3cbf36ecddd31cc5938ee015ca6a4435c69b5c04f9f15fcb19e31",
+    "kv_router_config_from_lookup": "af0fecf97c0bd382e3b9c6230410850b1a0625256c08023a382ca36a0305dd34",
+    "router_settings_apply": "1e8b69e3e9ebb2c7774eda7a732ba76a1b065996d343ec793e2e78a6dd4f025e",
+    "reserve_prefill_worker": "2f3b89345bdd943696cf902c5462b7bb510546c8b43567915904362603c327be",
+}
+AIS_PERF_IDENTITY = MappingProxyType(
+    {
+        "backend": "vllm",
+        "system": "h200_sxm",
+        "backend_version": "current",
+        "tp": 1,
+        "model": "Qwen/Qwen3-0.6B",
+        "worker_type": "aggregated",
+    }
+)
+AIS_IDENTITY_ENV_FIELDS = (
+    "backend",
+    "system",
+    "backend_version",
+    "tp_size",
+    "model_path",
+    "moe_tp_size",
+    "moe_ep_size",
+    "attention_dp_size",
+    "nextn",
+    "nextn_accept_rates",
+    "mtp_seed",
+)
+PREFILL_LOAD_MODEL_NONE_WIRE = "none"
+PREFILL_LOAD_MODEL_AIS_WIRE = "aic"
 DECODE_LOAD_EVENT = "processed active load update"
 DECODE_LOAD_TARGET = "dynamo_llm::discovery::worker_monitor"
 DECODE_CONSUMER_LOG = "info,dynamo_llm::discovery::worker_monitor=debug"
@@ -539,6 +661,8 @@ STATUS_ALIAS = "alias"
 STATUS_KNOWN_GAP = "known_gap"
 STATUS_IGNORED_COMPAT = "ignored_compatibility"
 STATUS_NOT_FE_HONORED = "not_fe_honored"
+STATUS_UNSUPPORTED_INPUT = "unsupported_input"
+STATUS_UNSUPPORTED_CAPABILITY = "unsupported_capability"
 KNOWN_STATUSES = frozenset(
     {
         STATUS_PENDING,
@@ -547,6 +671,8 @@ KNOWN_STATUSES = frozenset(
         STATUS_KNOWN_GAP,
         STATUS_IGNORED_COMPAT,
         STATUS_NOT_FE_HONORED,
+        STATUS_UNSUPPORTED_INPUT,
+        STATUS_UNSUPPORTED_CAPABILITY,
     }
 )
 LOGGER = logging.getLogger(__name__)
@@ -1046,16 +1172,17 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         "Measured 25a gap: FE flattened decode busy from JSON vs EPP None.",
     ),
     SettingDecision(
-        "serve_indexer",
+        SERVE_INDEXER_ROW,
         ("--serve-indexer", "--no-serve-indexer"),
         ("DYN_SERVE_INDEXER",),
         ("serve_indexer",),
-        STATUS_PENDING,
-        None,
+        STATUS_UNSUPPORTED_INPUT,
+        INPUT_STARTUP_SOURCE_OBSERVER,
         (),
-        (),
-        "Frontend routing flag. Native to_json may include it; the EPP init "
-        "event does not. No live observer in this increment.",
+        (SERVE_INDEXER_ROW,),
+        "Stock Runtime EPP has no FE CLI/env serve_indexer surface. Shared "
+        "YAML router.serve_indexer and the native ensure_served_indexer_service "
+        "factory exist at source; this row does not claim exercised YAML serve.",
     ),
     SettingDecision(
         KV_CACHE_BLOCK_SIZE_ROW,
@@ -1095,31 +1222,33 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         (DECODE_THRESHOLD_ROW,),
         "Measured consumer gap: FE configured 0.25 vs EPP monitor None with "
         "default None control. Effective remote-load consumer scope, not a "
-        "proven admission-pressure boundary. Prefill thresholds stay pending.",
+        "proven admission-pressure boundary.",
     ),
     SettingDecision(
-        "active_prefill_tokens_threshold",
+        PREFILL_ABS_THRESHOLD_ROW,
         ("--active-prefill-tokens-threshold",),
-        ("DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",),
+        (PREFILL_ABS_ENV,),
         ("active_prefill_tokens_threshold",),
-        STATUS_PENDING,
-        None,
+        STATUS_UNSUPPORTED_INPUT,
+        PREFILL_ADMISSION_OBSERVER,
         (),
-        (),
-        "Deprecated RouterConfig admission field. Not in the EPP init event. "
-        "No live observer in this increment.",
+        (PREFILL_ABS_THRESHOLD_ROW,),
+        "FE attaches original LoadThresholdHandle from RouterConfig; stock "
+        "EPP managed_kv_router builds Default empty handles. Absolute FE "
+        "admin GET attachment is measured; saturation/rejection is not.",
     ),
     SettingDecision(
-        "active_prefill_tokens_threshold_frac",
+        PREFILL_FRAC_THRESHOLD_ROW,
         ("--active-prefill-tokens-threshold-frac",),
-        ("DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",),
+        (PREFILL_FRAC_ENV,),
         ("active_prefill_tokens_threshold_frac",),
-        STATUS_PENDING,
-        None,
+        STATUS_UNSUPPORTED_INPUT,
+        PREFILL_ADMISSION_OBSERVER,
         (),
-        (),
-        "RouterConfig admission field. Not in the EPP init event. No live "
-        "observer in this increment.",
+        (PREFILL_FRAC_THRESHOLD_ROW,),
+        "FE attaches original LoadThresholdHandle from RouterConfig; stock "
+        "EPP managed_kv_router builds Default empty handles. Fractional FE "
+        "admin GET attachment is measured; saturation/rejection is not.",
     ),
     SettingDecision(
         "admission_control",
@@ -1162,28 +1291,31 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         "CLI matrix or lineage/scoring/affinity.",
     ),
     SettingDecision(
-        "min_initial_workers",
+        MIN_INITIAL_WORKERS_ROW,
         ("--router-min-initial-workers",),
         ("DYN_ROUTER_MIN_INITIAL_WORKERS",),
         ("min_initial_workers",),
-        STATUS_PENDING,
-        None,
+        STATUS_UNSUPPORTED_CAPABILITY,
+        INPUT_STARTUP_SOURCE_OBSERVER,
         (),
-        (),
-        "Wrapper startup gate only. Not a KvRouterConfig to_json/init-event "
-        "field. Do not claim the wrapper value as sentinel coverage.",
+        (MIN_INITIAL_WORKERS_ROW,),
+        "Shared env parses non-negative usize (valid input), but stock Runtime "
+        "EPP forces skip_initial_worker_wait and bypasses the N-worker gate "
+        "while still waiting for nonempty runtime bootstrap. Not a "
+        "KvRouterConfig field.",
     ),
     SettingDecision(
-        "router_mode",
+        ROUTER_MODE_ROW,
         ("--router-mode",),
         ("DYN_ROUTER_MODE",),
         ("router_mode",),
-        STATUS_PENDING,
-        None,
+        STATUS_UNSUPPORTED_INPUT,
+        INPUT_STARTUP_SOURCE_OBSERVER,
         (),
-        (),
-        "Wrapper --router-mode kv selects KV construction. Not a "
-        "KvRouterConfig to_json/init-event field.",
+        (ROUTER_MODE_ROW,),
+        "FE non-KV mode selector is unsupported on the stock Runtime EPP KV "
+        "profile. Not a statement about standalone routers outside this "
+        "profile. Not a KvRouterConfig to_json/init-event field.",
     ),
     SettingDecision(
         "router_approximate_cache_policy",
@@ -1221,16 +1353,18 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         "Process-local; skipped from to_json. No live observer in this increment.",
     ),
     SettingDecision(
-        "router_prefill_load_model",
+        PREFILL_LOAD_MODEL_ROW,
         ("--router-prefill-load-model",),
         ("DYN_ROUTER_PREFILL_LOAD_MODEL",),
         ("router_prefill_load_model",),
-        STATUS_PENDING,
-        None,
+        STATUS_UNSUPPORTED_CAPABILITY,
+        INPUT_STARTUP_SOURCE_OBSERVER,
         (),
-        (),
-        "FE/EPP field exists. No profile exercises it. No live observer in "
-        "this increment.",
+        (PREFILL_LOAD_MODEL_ROW,),
+        "Enum/env/YAML parse and validation/recheck effects exist, but stock "
+        "Runtime EPP decode/prefill factories pass estimator None and do not "
+        "install a Ready AIS estimator. Not whole-enum ignored. FE AIS "
+        "runtime is not claimed. Native wire alias aic is legitimate.",
     ),
     SettingDecision(
         "session_affinity_ttl_secs",
@@ -1243,19 +1377,22 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         ("session_affinity_ttl_secs",),
         "Existing session_id Item enables nondefault TTL 300 versus default "
         "None, then FE-A/EPP-B raises SessionAffinityParityMismatch. Not a "
-        "300-second expiration sweep. session_affinity_mode stays pending.",
+        "300-second expiration sweep. Same-feature Hard/TTL300 evidence for "
+        "session_affinity_mode; Soft remains unmeasured.",
     ),
     SettingDecision(
-        "session_affinity_mode",
+        SESSION_AFFINITY_MODE_ROW,
         ("--router-session-affinity-mode",),
         ("DYN_ROUTER_SESSION_AFFINITY_MODE",),
         ("session_affinity_mode",),
-        STATUS_PENDING,
-        None,
+        STATUS_UNSUPPORTED_CAPABILITY,
+        INPUT_STARTUP_SOURCE_OBSERVER,
         (),
-        (),
-        "RouterConfig session field. Not in KvRouterConfig to_json or the EPP "
-        "init event. No live observer in this increment.",
+        (SESSION_AFFINITY_MODE_ROW,),
+        "Unsupported stock EPP session-affinity subconfiguration: no session "
+        "context on decode/prefill selection and fixed prefill TTL None/Hard. "
+        "Hard+TTL300 strict gap already binds SESSION_TTL_ITEM; Soft is not "
+        "measured.",
     ),
     SettingDecision(
         "router_tracking_hash",
@@ -1444,6 +1581,18 @@ def required_source_paths() -> tuple[Path, ...]:
         FRONTEND_ARGS,
         RUST_CONFIG,
         RUST_PYO3_ENTRYPOINT,
+        RUST_EPP,
+        RUST_WATCHER,
+        RUST_MODEL_MANAGER,
+        RUST_PREFILL_ACTIVATION,
+        RUST_KV_ROUTER,
+        RUST_PREFILL_QUERY,
+        RUST_EMBEDDED,
+        RUST_INDEXER_INGRESS,
+        RUST_INDEXER_REMOTE,
+        RUST_AIS_CALLBACK,
+        RUST_POLICY_CONFIG,
+        RUST_QUEUE,
         *RUST_TREES,
     )
 
@@ -1671,6 +1820,36 @@ def assert_decision_identifier_ownership() -> None:
                     f"{row.name} pending affected_fields "
                     f"{row.affected_fields} are not empty"
                 )
+        if row.status in {STATUS_UNSUPPORTED_INPUT, STATUS_UNSUPPORTED_CAPABILITY}:
+            if not isinstance(row.reason, str) or not row.reason.strip():
+                raise AssertionError(f"{row.name} unsupported reason is empty")
+            if row.profiles != ():
+                raise AssertionError(
+                    f"{row.name} unsupported profiles {row.profiles} are not empty"
+                )
+            if row.affected_fields != (row.name,):
+                raise AssertionError(
+                    f"{row.name} unsupported affected_fields "
+                    f"{row.affected_fields} != {(row.name,)!r}"
+                )
+            if row.observer is None:
+                raise AssertionError(f"{row.name} unsupported observer is None")
+        if (
+            row.status == STATUS_UNSUPPORTED_INPUT
+            and row.name not in UNSUPPORTED_INPUT_ROWS
+        ):
+            raise AssertionError(
+                f"{row.name} may not use {STATUS_UNSUPPORTED_INPUT}; only "
+                f"{sorted(UNSUPPORTED_INPUT_ROWS)} may"
+            )
+        if (
+            row.status == STATUS_UNSUPPORTED_CAPABILITY
+            and row.name not in UNSUPPORTED_CAPABILITY_ROWS
+        ):
+            raise AssertionError(
+                f"{row.name} may not use {STATUS_UNSUPPORTED_CAPABILITY}; only "
+                f"{sorted(UNSUPPORTED_CAPABILITY_ROWS)} may"
+            )
         if (
             row.status == STATUS_IGNORED_COMPAT
             and row.name not in IGNORED_COMPAT_CONTRACTS
@@ -1683,6 +1862,20 @@ def assert_decision_identifier_ownership() -> None:
             raise AssertionError(
                 f"{row.name} may not use {STATUS_NOT_FE_HONORED}; only "
                 f"{sorted(NOT_FE_HONORED_ROWS)} may"
+            )
+        if row.name in _SEVEN_ROW_BINDINGS:
+            wanted_observer = _SEVEN_ROW_BINDINGS[row.name]["observer"]
+            if row.observer != wanted_observer:
+                raise AssertionError(
+                    f"{row.name} observer={row.observer!r} != {wanted_observer!r}"
+                )
+        elif row.observer in {
+            INPUT_STARTUP_SOURCE_OBSERVER,
+            PREFILL_ADMISSION_OBSERVER,
+        }:
+            raise AssertionError(
+                f"{row.name} may not use {row.observer!r}; only closed seven-row "
+                f"names {sorted(_SEVEN_ROW_BINDINGS)} may"
             )
         if row.observer == REMOTE_INDEXER_OBSERVER and row.name != REMOTE_INDEXER_ROW:
             raise AssertionError(
@@ -2316,6 +2509,108 @@ def _assert_shared_cache_type_binding(
     _assert_ordinary_collected_item(SHARED_CACHE_TYPE_ITEM, item)
 
 
+# Closed seven-row binding oracle: status/observer/ids/items only.
+_SEVEN_ROW_BINDINGS: dict[str, dict[str, Any]] = {
+    SERVE_INDEXER_ROW: {
+        "status": STATUS_UNSUPPORTED_INPUT,
+        "observer": INPUT_STARTUP_SOURCE_OBSERVER,
+        "flags": ("--serve-indexer", "--no-serve-indexer"),
+        "env": ("DYN_SERVE_INDEXER",),
+        "schema_fields": ("serve_indexer",),
+        "items": (INPUT_STARTUP_SOURCE_ITEM,),
+        "require_session_ttl": False,
+    },
+    MIN_INITIAL_WORKERS_ROW: {
+        "status": STATUS_UNSUPPORTED_CAPABILITY,
+        "observer": INPUT_STARTUP_SOURCE_OBSERVER,
+        "flags": ("--router-min-initial-workers",),
+        "env": ("DYN_ROUTER_MIN_INITIAL_WORKERS",),
+        "schema_fields": ("min_initial_workers",),
+        "items": (INPUT_STARTUP_SOURCE_ITEM,),
+        "require_session_ttl": False,
+    },
+    ROUTER_MODE_ROW: {
+        "status": STATUS_UNSUPPORTED_INPUT,
+        "observer": INPUT_STARTUP_SOURCE_OBSERVER,
+        "flags": ("--router-mode",),
+        "env": ("DYN_ROUTER_MODE",),
+        "schema_fields": ("router_mode",),
+        "items": (INPUT_STARTUP_SOURCE_ITEM,),
+        "require_session_ttl": False,
+    },
+    SESSION_AFFINITY_MODE_ROW: {
+        "status": STATUS_UNSUPPORTED_CAPABILITY,
+        "observer": INPUT_STARTUP_SOURCE_OBSERVER,
+        "flags": ("--router-session-affinity-mode",),
+        "env": ("DYN_ROUTER_SESSION_AFFINITY_MODE",),
+        "schema_fields": ("session_affinity_mode",),
+        "items": (INPUT_STARTUP_SOURCE_ITEM,),
+        "require_session_ttl": True,
+    },
+    PREFILL_LOAD_MODEL_ROW: {
+        "status": STATUS_UNSUPPORTED_CAPABILITY,
+        "observer": INPUT_STARTUP_SOURCE_OBSERVER,
+        "flags": ("--router-prefill-load-model",),
+        "env": ("DYN_ROUTER_PREFILL_LOAD_MODEL",),
+        "schema_fields": ("router_prefill_load_model",),
+        "items": (INPUT_STARTUP_SOURCE_ITEM,),
+        "require_session_ttl": False,
+    },
+    PREFILL_ABS_THRESHOLD_ROW: {
+        "status": STATUS_UNSUPPORTED_INPUT,
+        "observer": PREFILL_ADMISSION_OBSERVER,
+        "flags": ("--active-prefill-tokens-threshold",),
+        "env": (PREFILL_ABS_ENV,),
+        "schema_fields": ("active_prefill_tokens_threshold",),
+        "items": (INPUT_STARTUP_SOURCE_ITEM, *PREFILL_ADMISSION_ITEMS),
+        "require_session_ttl": False,
+    },
+    PREFILL_FRAC_THRESHOLD_ROW: {
+        "status": STATUS_UNSUPPORTED_INPUT,
+        "observer": PREFILL_ADMISSION_OBSERVER,
+        "flags": ("--active-prefill-tokens-threshold-frac",),
+        "env": (PREFILL_FRAC_ENV,),
+        "schema_fields": ("active_prefill_tokens_threshold_frac",),
+        "items": (INPUT_STARTUP_SOURCE_ITEM, *PREFILL_ADMISSION_ITEMS),
+        "require_session_ttl": False,
+    },
+}
+
+
+def _assert_seven_row_binding(row: SettingDecision, items: Iterable[Any]) -> None:
+    spec = _SEVEN_ROW_BINDINGS.get(row.name)
+    if spec is None:
+        raise AssertionError(f"{row.name} is not in the closed seven-row binding oracle")
+    for field in ("status", "observer", "flags", "env", "schema_fields"):
+        got = getattr(row, field)
+        wanted = spec[field]
+        if got != wanted:
+            raise AssertionError(f"{row.name} {field} {got!r} != {wanted!r}")
+    if row.profiles != ():
+        raise AssertionError(f"{row.name} profiles {row.profiles} != ()")
+    if row.affected_fields != (row.name,):
+        raise AssertionError(
+            f"{row.name} affected_fields {row.affected_fields} != {(row.name,)!r}"
+        )
+    for item_id in spec["items"]:
+        item = _require_unique_nodeid_item(items, item_id)
+        _assert_ordinary_collected_item(item_id, item)
+    if spec["require_session_ttl"]:
+        ttl_item = _require_unique_nodeid_item(items, SESSION_TTL_ITEM)
+        skips = list(ttl_item.iter_markers(name="skip")) + list(
+            ttl_item.iter_markers(name="skipif")
+        )
+        marks = list(ttl_item.iter_markers(name="xfail"))
+        if skips or len(marks) != 1:
+            raise AssertionError(
+                f"{SESSION_TTL_ITEM} must collect exactly one xfail and no skip "
+                f"as same-feature Hard/TTL300 evidence, found xfail={len(marks)} "
+                f"skip={len(skips)}"
+            )
+        _assert_session_ttl_xfail_marker(marks[0])
+        assert_session_inputs_stack_uses_ttl_300()
+
+
 def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None:
     """Require observer/profile rows to name a collected parametrized test.
 
@@ -2344,7 +2639,12 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
     one unconditional strict xfail of SessionPrefixIndexConfigMismatch.
     shared_cache_type binds only its ordinary owned HiCache
     client-construction Item. kv_cache_block_size binds the three ordinary
-    Dynamic worker-card cross-input Items.
+    Dynamic worker-card cross-input Items. The five input/startup/capability
+    source rows bind only ordinary test_input_startup_capability_decisions;
+    session_affinity_mode additionally requires the existing SESSION_TTL_ITEM
+    Hard/TTL300 strict marker. Prefill abs/frac unsupported_input rows bind
+    that source Item plus the three ordinary
+    test_prefill_admission_input_boundaries profiles.
     """
     item_list = [_require_collected_item(item) for item in items]
     collected: dict[str, list[Any]] = {}
@@ -2435,6 +2735,9 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
             continue
         if row.name == SHARED_CACHE_TYPE_ROW:
             _assert_shared_cache_type_binding(row, item_list)
+            continue
+        if row.name in _SEVEN_ROW_BINDINGS:
+            _assert_seven_row_binding(row, item_list)
             continue
         unbound = [name for name in row.profiles if name not in collected]
         if row.observer != IMPLEMENTED_OBSERVER or not row.profiles or unbound:
@@ -3327,6 +3630,9 @@ def _capture_router_args_warnings(build):
 
 def _frontend_router_snapshot(
     extra_cli: tuple[str, ...] = (),
+    *,
+    require_kv: bool = True,
+    wrapper_cli: tuple[str, ...] | None = None,
 ) -> FrontendRouterSnapshot:
     from dynamo.common.configuration.groups.router_args import (
         _ROUTER_FIELDS,
@@ -3337,25 +3643,32 @@ def _frontend_router_snapshot(
 
     parser = argparse.ArgumentParser(add_help=False)
     FrontendArgGroup().add_arguments(parser)
-    namespace = parser.parse_args(list(WRAPPER_CLI) + list(extra_cli))
+    base_cli = WRAPPER_CLI if wrapper_cli is None else wrapper_cli
+    namespace = parser.parse_args(list(base_cli) + list(extra_cli))
     config = FrontendConfig.from_cli_args(namespace)
     config.validate()
     router = build_router_config(config)
-    if router is None or router.kv_router_config is None:
-        raise AssertionError("build_router_config did not produce KvRouterConfig")
-    if router.router_mode != RouterMode.KV:
-        raise AssertionError(f"native router_mode {router.router_mode!r} is not KV")
-    if config.router_mode != "kv":
-        raise AssertionError(f"config.router_mode {config.router_mode!r} is not kv")
+    if router is None:
+        raise AssertionError("build_router_config returned None")
+    # PyO3 RouterConfig::new uses unwrap_or_default for kv_router_config, so the
+    # Python attribute is never None even for non-KV modes. Observe the actual
+    # object/JSON; do not invent a None API.
+    kv_json = json.loads(router.kv_router_config.to_json())
+    kv_kwargs = dict(config.kv_router_kwargs())
+    if require_kv:
+        if router.router_mode != RouterMode.KV:
+            raise AssertionError(f"native router_mode {router.router_mode!r} is not KV")
+        if config.router_mode != "kv":
+            raise AssertionError(f"config.router_mode {config.router_mode!r} is not kv")
     return FrontendRouterSnapshot(
         dict(vars(namespace)),
         dict(vars(config)),
         config.router_mode,
         router.router_mode,
         dict(config.router_kwargs()),
-        json.loads(router.kv_router_config.to_json()),
+        kv_json,
         tuple(_ROUTER_FIELDS),
-        dict(config.kv_router_kwargs()),
+        kv_kwargs,
     )
 
 
@@ -3587,42 +3900,188 @@ def run_conditional_scalar_not_fe_honored(
         )
 
 
+def _unique_ast(nodes: list[Any], label: str) -> Any:
+    if len(nodes) != 1:
+        raise AssertionError(f"expected exactly one {label}, found {len(nodes)}")
+    return nodes[0]
+
+
+def _expr_eq(node: ast.AST | None, expr: str) -> bool:
+    if node is None:
+        return False
+    wanted = ast.parse(expr, mode="eval").body
+    return ast.dump(node, include_attributes=False) == ast.dump(
+        wanted, include_attributes=False
+    )
+
+
+def _kw(call: ast.Call, name: str) -> ast.AST | None:
+    return next((kw.value for kw in call.keywords if kw.arg == name), None)
+
+
 def assert_session_inputs_stack_uses_ttl_300() -> None:
+    """Finite Hard/TTL300 named-boundary AST check (not a dataflow proof)."""
+    hard_env = (
+        '{"DYN_ROUTER_SESSION_AFFINITY_TTL_SECS": str(self.session_affinity_ttl_secs), '
+        '"DYN_ROUTER_SESSION_AFFINITY_MODE": "hard"}'
+    )
     if not INPUTS_PARITY.is_file():
         raise AssertionError(f"missing session inputs thin test: {INPUTS_PARITY}")
-    tree = ast.parse(
+    inputs = ast.parse(
         INPUTS_PARITY.read_text(encoding="utf-8"), filename=str(INPUTS_PARITY)
     )
-    found = False
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef):
-            continue
-        if node.name != "test_epp_frontend_inputs_parity":
-            continue
-        for child in ast.walk(node):
-            if not isinstance(child, ast.Call):
-                continue
-            func = child.func
-            name = None
-            if isinstance(func, ast.Name):
-                name = func.id
-            elif isinstance(func, ast.Attribute):
-                name = func.attr
-            if name != "EppFrontendRoutingParityStack":
-                continue
-            for keyword in child.keywords:
-                if keyword.arg != "session_affinity_ttl_secs":
-                    continue
-                if (
-                    isinstance(keyword.value, ast.Constant)
-                    and keyword.value.value == SESSION_TTL_SECS
-                ):
-                    found = True
-    if not found:
+    func = _unique_ast(
+        [
+            n
+            for n in inputs.body
+            if isinstance(n, ast.FunctionDef)
+            and n.name == "test_epp_frontend_inputs_parity"
+        ],
+        "top-level test_epp_frontend_inputs_parity",
+    )
+    with_node = _unique_ast(
+        [n for n in func.body if isinstance(n, ast.With)], "direct function.body With"
+    )
+    if len(with_node.items) != 1:
+        raise AssertionError("session With must bind exactly one item")
+    item = with_node.items[0]
+    call = item.context_expr
+    if not isinstance(call, ast.Call) or not _expr_eq(
+        call.func, "EppFrontendRoutingParityStack"
+    ):
+        raise AssertionError("final With is not EppFrontendRoutingParityStack")
+    if not _expr_eq(_kw(call, "session_affinity_ttl_secs"), str(SESSION_TTL_SECS)):
         raise AssertionError(
-            "session_id stack no longer passes "
-            f"session_affinity_ttl_secs={SESSION_TTL_SECS}"
+            f"final With lost session_affinity_ttl_secs={SESSION_TTL_SECS}"
         )
+    if not isinstance(item.optional_vars, ast.Name):
+        raise AssertionError("session With lost bound stack name")
+    body = _unique_ast(with_node.body, "direct with-body statement")
+    if not isinstance(body, ast.Expr) or not isinstance(body.value, ast.Call):
+        raise AssertionError("with-body is not a call")
+    if not _expr_eq(body.value.func, "run_frontend_epp_session_id_parity"):
+        raise AssertionError("with-body is not run_frontend_epp_session_id_parity")
+    if not body.value.args or not _expr_eq(body.value.args[0], item.optional_vars.id):
+        raise AssertionError("session runner lost the bound stack variable")
+
+    parity_path = REPO_ROOT / "tests/router/epp_parity.py"
+    if not parity_path.is_file():
+        raise AssertionError(f"missing routing parity source: {parity_path}")
+    parity = ast.parse(
+        parity_path.read_text(encoding="utf-8"), filename=str(parity_path)
+    )
+    cls = _unique_ast(
+        [
+            n
+            for n in parity.body
+            if isinstance(n, ast.ClassDef)
+            and n.name == "EppFrontendRoutingParityStack"
+        ],
+        "top-level EppFrontendRoutingParityStack",
+    )
+    method = _unique_ast(
+        [
+            n
+            for n in cls.body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name == "open_consumer_pair"
+        ],
+        "open_consumer_pair",
+    )
+    try_node = _unique_ast(
+        [n for n in method.body if isinstance(n, ast.Try)],
+        "direct Try in open_consumer_pair.body",
+    )
+    ttl_if = _unique_ast(
+        [
+            n
+            for n in try_node.body
+            if isinstance(n, ast.If)
+            and _expr_eq(n.test, "self.session_affinity_ttl_secs is not None")
+        ],
+        "direct TTL If in try.body",
+    )
+    session_assign = _unique_ast(
+        [
+            n
+            for n in ttl_if.body
+            if isinstance(n, ast.Assign)
+            and len(n.targets) == 1
+            and isinstance(n.targets[0], ast.Name)
+            and n.targets[0].id == "session_env"
+        ],
+        "session_env assign in TTL If",
+    )
+    if not _expr_eq(session_assign.value, hard_env):
+        raise AssertionError("TTL If lost Hard/TTL session_env dict")
+    if not any(
+        isinstance(n, ast.Expr) and _expr_eq(n.value, "frontend_env.update(session_env)")
+        for n in ttl_if.body
+    ):
+        raise AssertionError("TTL If lost frontend_env.update(session_env)")
+    fe_assign = _unique_ast(
+        [
+            n
+            for n in try_node.body
+            if isinstance(n, ast.Assign)
+            and len(n.targets) == 1
+            and isinstance(n.targets[0], ast.Name)
+            and n.targets[0].id == "frontend"
+            and isinstance(n.value, ast.Call)
+            and _expr_eq(n.value.func, "FrontendRouterProcess")
+        ],
+        "direct FrontendRouterProcess assign in try.body",
+    )
+    if not isinstance(fe_assign.value, ast.Call):
+        raise AssertionError("FrontendRouterProcess assign value is not a call")
+    if not _expr_eq(_kw(fe_assign.value, "extra_env"), "frontend_env"):
+        raise AssertionError("FrontendRouterProcess lost extra_env=frontend_env")
+    if not _expr_eq(
+        _kw(fe_assign.value, "session_affinity_ttl_secs"),
+        "self.session_affinity_ttl_secs",
+    ):
+        raise AssertionError(
+            "FrontendRouterProcess lost "
+            "session_affinity_ttl_secs=self.session_affinity_ttl_secs"
+        )
+    epp_if = _unique_ast(
+        [
+            n
+            for n in try_node.body
+            if isinstance(n, ast.If) and _expr_eq(n.test, "include_epp")
+        ],
+        "direct if include_epp in try.body",
+    )
+    session_if = _unique_ast(
+        [
+            n
+            for n in epp_if.body
+            if isinstance(n, ast.If) and _expr_eq(n.test, "session_env is not None")
+        ],
+        "direct if session_env is not None in include_epp",
+    )
+    if not any(
+        isinstance(n, ast.Expr) and _expr_eq(n.value, "epp_env.update(session_env)")
+        for n in session_if.body
+    ):
+        raise AssertionError("session_env branch lost epp_env.update(session_env)")
+    epp_assign = _unique_ast(
+        [
+            n
+            for n in epp_if.body
+            if isinstance(n, ast.Assign)
+            and len(n.targets) == 1
+            and isinstance(n.targets[0], ast.Name)
+            and n.targets[0].id == "epp"
+            and isinstance(n.value, ast.Call)
+            and _expr_eq(n.value.func, "RuntimeEppProcess")
+        ],
+        "direct RuntimeEppProcess assign in include_epp",
+    )
+    if not isinstance(epp_assign.value, ast.Call) or not _expr_eq(
+        _kw(epp_assign.value, "extra_env"), "epp_env"
+    ):
+        raise AssertionError("RuntimeEppProcess lost extra_env=epp_env")
 
 
 def _assert_indexer_test_modules_are_cfg_gated() -> None:
@@ -4463,3 +4922,819 @@ def _assert_core_policy_gauges(
                 f"{role} pid={pid} port={port} {metric_name} did not "
                 f"observe selected {selected}"
             )
+
+
+def _split_rust_call_args(arg_text: str) -> list[str]:
+    """Split a known-call argument interior on zero-depth commas."""
+    args: list[str] = []
+    depth = 0
+    start = 0
+    for index, char in enumerate(arg_text):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+            if depth < 0:
+                raise AssertionError("call-arg delimiter underflow while splitting")
+        elif char == "," and depth == 0:
+            part = arg_text[start:index].strip()
+            if part:
+                args.append(part)
+            start = index + 1
+    if depth != 0:
+        raise AssertionError("call-arg delimiters unbalanced while splitting")
+    tail = arg_text[start:].strip()
+    if tail:
+        args.append(tail)
+    return args
+
+
+def _require_unique_callee_args(
+    scope: str,
+    text: str,
+    callee_prefix: re.Pattern[str],
+    label: str,
+    arity: int,
+) -> list[str]:
+    """Extract args for a unique callee prefix ending at '(' via balanced scan."""
+    matches = list(callee_prefix.finditer(text))
+    if len(matches) != 1:
+        raise AssertionError(
+            f"{label} in {scope} missing/duplicate: found {len(matches)}"
+        )
+    open_at = matches[0].end() - 1
+    if open_at < 0 or text[open_at] != "(":
+        raise AssertionError(f"{label} prefix must end at opening '('")
+    depth = 1
+    index = open_at + 1
+    while index < len(text) and depth:
+        char = text[index]
+        if char == '"':
+            raise AssertionError(
+                f"{label} in {scope} has unsupported quoted form; review call extraction"
+            )
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+            if depth < 0:
+                raise AssertionError(f"{label} in {scope} delimiter underflow")
+        index += 1
+    if depth != 0:
+        raise AssertionError(f"{label} in {scope} has unbalanced delimiters")
+    args = _split_rust_call_args(text[open_at + 1 : index - 1])
+    if len(args) != arity:
+        raise AssertionError(
+            f"{label} in {scope} arity {len(args)} != {arity}: {args!r}"
+        )
+    return args
+
+
+def _fn_decl_and_body(text: str, pattern: re.Pattern[str], label: str) -> str:
+    matches = list(pattern.finditer(text))
+    if len(matches) != 1:
+        raise AssertionError(
+            f"{label} declaration missing/duplicate/ambiguous: found {len(matches)}"
+        )
+    match = matches[0]
+    brace = match.end() - 1
+    if brace < 0 or text[brace] != "{":
+        raise AssertionError(f"{label} is not followed by a scoped body")
+    depth = 1
+    index = brace + 1
+    while index < len(text) and depth:
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth < 0:
+                raise AssertionError(f"{label} scoped body delimiter underflow")
+        index += 1
+    if depth:
+        raise AssertionError(f"{label} has an unbalanced scoped body")
+    return text[match.start() : index]
+
+
+@dataclass(frozen=True)
+class _SourceScope:
+    key: str
+    path: Path
+    pattern: re.Pattern[str]
+    label: str
+
+
+# Fifteen decisive shared scopes (declaration+body digest). Readable checks
+# below protect named support boundaries; not a formal proof of all future Rust.
+_INPUT_STARTUP_SCOPES: tuple[_SourceScope, ...] = (
+    _SourceScope(
+        "epp_from_discovery",
+        RUST_EPP,
+        re.compile(
+            r"pub(?:\(crate\))?\s+(?:async\s+)?fn\s+from_discovery\s*\([^;{]*?\)\s*"
+            r"(?:->[^;{]+)?\s*\{"
+        ),
+        "EPP Router::from_discovery",
+    ),
+    _SourceScope(
+        "epp_route_decode",
+        RUST_EPP,
+        re.compile(
+            r"pub(?:\(crate\))?\s+(?:async\s+)?fn\s+route_decode\s*\([^;{]*?\)\s*"
+            r"(?:->[^;{]+)?\s*\{"
+        ),
+        "EPP Router::route_decode",
+    ),
+    _SourceScope(
+        "managed_kv_router_for_with_policy",
+        RUST_MODEL_MANAGER,
+        re.compile(
+            r"pub\s+async\s+fn\s+managed_kv_router_for_with_policy\s*\([^;{]*?\)\s*"
+            r"(?:->[^;{]+)?\s*\{"
+        ),
+        "ModelManager::managed_kv_router_for_with_policy",
+    ),
+    _SourceScope(
+        "kv_chooser_for_with_policy_and_client",
+        RUST_MODEL_MANAGER,
+        re.compile(
+            r"pub\s+async\s+fn\s+kv_chooser_for_with_policy_and_client\s*\([^;{]*?\)\s*"
+            r"(?:->[^;{]+)?\s*\{"
+        ),
+        "ModelManager::kv_chooser_for_with_policy_and_client",
+    ),
+    _SourceScope(
+        "prefill_router_new",
+        RUST_PREFILL_ACTIVATION,
+        re.compile(r"pub\s+fn\s+new\s*\([^;{]*?\)\s*(?:->[^;{]+)?\s*\{"),
+        "PrefillRouter::new",
+    ),
+    _SourceScope(
+        "embedded_selection_start",
+        RUST_EMBEDDED,
+        re.compile(
+            r"pub(?:\(crate\))?\s+(?:async\s+)?fn\s+start\s*\([^;{]*?\)\s*"
+            r"(?:->[^;{]+)?\s*\{"
+        ),
+        "EmbeddedSelection::start",
+    ),
+    _SourceScope(
+        "min_initial_workers_from_env",
+        RUST_CONFIG,
+        re.compile(
+            r"pub\s+fn\s+min_initial_workers_from_env\s*\(\s*\)\s*"
+            r"->\s*anyhow::Result<usize>\s*\{"
+        ),
+        "min_initial_workers_from_env",
+    ),
+    _SourceScope(
+        "ensure_served_indexer_service",
+        RUST_INDEXER_REMOTE,
+        re.compile(
+            r"pub\s+async\s+fn\s+ensure_served_indexer_service\s*\([^;{]*?\)\s*"
+            r"(?:->[^;{]+)?\s*\{"
+        ),
+        "ensure_served_indexer_service",
+    ),
+    _SourceScope(
+        "managed_kv_router_for_with_worker_role",
+        RUST_MODEL_MANAGER,
+        re.compile(
+            r"pub\s+async\s+fn\s+managed_kv_router_for_with_worker_role\s*\([^;{]*?\)\s*"
+            r"->\s*anyhow::Result<crate::kv_router::ManagedKvRouter>\s*\{"
+        ),
+        "ModelManager::managed_kv_router_for_with_worker_role",
+    ),
+    _SourceScope(
+        "kv_router_new_with_worker_role_and_scheduler_load",
+        RUST_KV_ROUTER,
+        re.compile(
+            r"pub\(crate\)\s+async\s+fn\s+new_with_worker_role_and_scheduler_load\s*"
+            r"\([^;{]*?\)\s*->\s*Result<Self>\s*\{"
+        ),
+        "KvRouter::new_with_worker_role_and_scheduler_load",
+    ),
+    _SourceScope(
+        "prefill_router_new_with_selection_policy",
+        RUST_PREFILL_ACTIVATION,
+        re.compile(
+            r"pub\(crate\)\s+fn\s+new_with_selection_policy\s*\([^;{]*?\)\s*"
+            r"->\s*Arc<Self>\s*\{"
+        ),
+        "PrefillRouter::new_with_selection_policy",
+    ),
+    _SourceScope(
+        "prefill_build_binding",
+        RUST_PREFILL_ACTIVATION,
+        re.compile(r"async\s+fn\s+build_binding\s*\([^;{]*?\)\s*(?:->[^;{]+)?\s*\{"),
+        "PrefillRouter::build_binding",
+    ),
+    _SourceScope(
+        "kv_router_config_from_lookup",
+        RUST_CONFIG,
+        re.compile(
+            r"(?m)^fn\s+kv_router_config_from_lookup\s*\([^;{]*?\)\s*"
+            r"->\s*Result<KvRouterConfig,\s*String>\s*\{"
+        ),
+        "kv_router_config_from_lookup",
+    ),
+    _SourceScope(
+        "router_settings_apply",
+        RUST_POLICY_CONFIG,
+        re.compile(
+            r"pub\(super\)\s+fn\s+apply\s*\(\s*&self\s*,\s*config\s*:\s*&mut\s+"
+            r"super::config::KvRouterConfig\s*\)\s*->\s*Result<\(\),\s*String>\s*\{"
+        ),
+        "RouterSettings::apply",
+    ),
+    _SourceScope(
+        "reserve_prefill_worker",
+        RUST_PREFILL_QUERY,
+        re.compile(
+            r"pub\s+async\s+fn\s+reserve_prefill_worker\s*\([^;{]*?\)\s*"
+            r"->\s*Result<PrefillReservation>\s*\{"
+        ),
+        "PrefillRouter::reserve_prefill_worker",
+    ),
+)
+
+
+def _load_input_startup_scope_cache() -> tuple[dict[str, str], dict[Path, str]]:
+    """Read/extract/hash each decisive scope once; fail closed on digests."""
+    keys = [scope.key for scope in _INPUT_STARTUP_SCOPES]
+    if len(set(keys)) != len(keys):
+        raise AssertionError(f"duplicate _INPUT_STARTUP_SCOPES keys: {keys}")
+    scope_key_set = set(keys)
+    digest_key_set = set(SOURCE_SCOPE_DIGESTS)
+    unused = digest_key_set - scope_key_set
+    if unused:
+        raise AssertionError(f"unused SOURCE_SCOPE_DIGESTS keys: {sorted(unused)}")
+    if digest_key_set and digest_key_set != scope_key_set:
+        raise AssertionError(
+            "SOURCE_SCOPE_DIGESTS key set must equal scope keys; missing "
+            f"{sorted(scope_key_set - digest_key_set)}"
+        )
+    file_text: dict[Path, str] = {}
+    cached: dict[str, str] = {}
+    for scope in _INPUT_STARTUP_SCOPES:
+        if scope.path not in file_text:
+            if not scope.path.is_file():
+                raise AssertionError(
+                    f"missing fingerprint source {scope.label}: {scope.path}"
+                )
+            file_text[scope.path] = _strip_rust_comments(
+                scope.path.read_text(encoding="utf-8")
+            )
+        blob = _fn_decl_and_body(file_text[scope.path], scope.pattern, scope.label)
+        cached[scope.key] = blob
+        actual = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+        expected = SOURCE_SCOPE_DIGESTS.get(scope.key, "")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected or ""):
+            raise AssertionError(
+                f"SOURCE_SCOPE_DIGESTS[{scope.key!r}] unset; Root must paste "
+                f"sha256 of comment-stripped declaration+body for {scope.label}: "
+                f"actual={actual}"
+            )
+        if actual != expected:
+            raise AssertionError(
+                f"fingerprint mismatch for {scope.key}: scope={scope.label} "
+                f"actual={actual} expected={expected}"
+            )
+    return cached, file_text
+
+
+def _cached_stripped_file(path: Path, file_text: dict[Path, str]) -> str:
+    if path not in file_text:
+        if not path.is_file():
+            raise AssertionError(f"missing source file: {path}")
+        file_text[path] = _strip_rust_comments(path.read_text(encoding="utf-8"))
+    return file_text[path]
+
+
+
+def prefill_admission_consumer_env(profile_name: str) -> dict[str, str | None]:
+    if profile_name not in PREFILL_ADMISSION_PROFILES:
+        raise AssertionError(
+            f"unknown prefill admission profile {profile_name!r}; "
+            f"expected one of {PREFILL_ADMISSION_PROFILES}"
+        )
+    env: dict[str, str | None] = {
+        PREFILL_ABS_ENV: None,
+        PREFILL_FRAC_ENV: None,
+    }
+    if profile_name == "absolute":
+        env[PREFILL_ABS_ENV] = PREFILL_ABS_SENTINEL
+    elif profile_name == "fractional":
+        env[PREFILL_FRAC_ENV] = PREFILL_FRAC_SENTINEL
+    return env
+
+
+def expected_prefill_admission_handles(
+    profile_name: str,
+) -> tuple[None, int | None, float | None]:
+    """Return (decode, abs, frac) expected original FE admin handle values."""
+    if profile_name == "default":
+        return (None, None, None)
+    if profile_name == "absolute":
+        return (None, int(PREFILL_ABS_SENTINEL), None)
+    if profile_name == "fractional":
+        return (None, None, float(PREFILL_FRAC_SENTINEL))
+    raise AssertionError(f"unknown prefill admission profile {profile_name!r}")
+
+
+def clear_ais_identity_envs(monkeypatch) -> None:
+    monkeypatch.delenv("DYN_AIS_PERF_CONFIG", raising=False)
+    for field in AIS_IDENTITY_ENV_FIELDS:
+        monkeypatch.delenv("DYN_AIS_" + field.upper(), raising=False)
+        monkeypatch.delenv("DYN_AIC_" + field.upper(), raising=False)
+
+
+def _require_attr(mapping: Mapping[str, Any], name: str, expected: Any, label: str) -> None:
+    if name not in mapping:
+        raise AssertionError(f"{label} missing field {name!r}")
+    if mapping[name] != expected:
+        raise AssertionError(
+            f"{label} {name}={mapping[name]!r} != {expected!r}"
+        )
+
+
+def assert_input_startup_capability_source_contracts() -> None:
+    """Named support-boundary checks for the seven input/startup rows.
+
+    Digests and scoped call/field facts protect known factory and env/YAML
+    boundaries. This is conservative coverage of those named scopes, not a
+    formal proof against arbitrary future Rust.
+    """
+    assert_required_sources_exist()
+    cached, file_text = _load_input_startup_scope_cache()
+    none3 = ["None", "None", "None"]
+
+    from_discovery = cached["epp_from_discovery"]
+    if "skip_initial_worker_wait = true" not in from_discovery:
+        raise AssertionError("EPP from_discovery lost skip_initial_worker_wait=true")
+    if "wait_for(|m| !m.is_empty())" not in from_discovery and (
+        "wait_for(|m|!m.is_empty())" not in from_discovery
+    ):
+        raise AssertionError("EPP from_discovery lost nonempty runtime bootstrap wait")
+    prefill_args = _require_unique_callee_args(
+        "from_discovery",
+        from_discovery,
+        re.compile(r"PrefillRouter::new\s*\("),
+        "PrefillRouter::new call",
+        12,
+    )
+    if prefill_args[5:8] != [
+        "None",
+        "None",
+        "dynamo_llm::session_affinity::SessionAffinityMode::Hard",
+    ]:
+        raise AssertionError(
+            "EPP PrefillRouter::new estimator/TTL/mode "
+            f"{prefill_args[5:8]!r} != None/None/Hard"
+        )
+    managed_epp = _require_unique_callee_args(
+        "from_discovery",
+        from_discovery,
+        re.compile(r"managed_kv_router_for_with_worker_role\s*\("),
+        "managed_kv_router_for_with_worker_role call",
+        8,
+    )
+    if managed_epp[3] != "None":
+        raise AssertionError(
+            f"EPP decode factory estimator arg {managed_epp[3]!r} != None"
+        )
+
+    find_args = _require_unique_callee_args(
+        "route_decode",
+        cached["epp_route_decode"],
+        re.compile(r"find_best_match_details_with_policy_class\s*\("),
+        "find_best_match_details_with_policy_class call",
+        16,
+    )
+    if find_args[11:14] != none3:
+        raise AssertionError(
+            "route_decode session/expected/pin "
+            f"{find_args[11:14]!r} != None,None,None"
+        )
+
+    token_struct = _unique_scoped_rust_body(
+        _cached_stripped_file(RUST_EPP, file_text),
+        re.compile(r"struct\s+TokenizeResult\s*\{"),
+        "EPP TokenizeResult",
+    )
+    token_fields = tuple(
+        re.findall(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", token_struct)
+    )
+    wanted_token_fields = (
+        "tokens",
+        "cache_namespace",
+        "priority_jump",
+        "strict_priority",
+        "routing_constraints",
+        "tokens_safe_to_inject",
+    )
+    if token_fields != wanted_token_fields:
+        raise AssertionError(
+            f"TokenizeResult fields {token_fields!r} != {wanted_token_fields!r}"
+        )
+    if "DYN_SERVE_INDEXER" in from_discovery or "DYN_ROUTER_MODE" in from_discovery:
+        raise AssertionError("stock EPP from_discovery gained FE serve/mode env reads")
+
+    role_body = cached["managed_kv_router_for_with_worker_role"]
+    role_to_policy = _require_unique_callee_args(
+        "managed_role",
+        role_body,
+        re.compile(r"managed_kv_router_for_with_policy\s*\("),
+        "role→policy call",
+        9,
+    )
+    if role_to_policy[4] != "prefill_load_estimator":
+        raise AssertionError(
+            f"role wrapper estimator forward {role_to_policy[4]!r} "
+            "!= prefill_load_estimator"
+        )
+
+    policy_body = cached["managed_kv_router_for_with_policy"]
+    if "LoadThresholdHandle::new(Default::default())" not in policy_body:
+        raise AssertionError(
+            "managed_kv_router_for_with_policy lost Default LoadThresholdHandle"
+        )
+    policy_to_chooser = _require_unique_callee_args(
+        "managed_policy",
+        policy_body,
+        re.compile(r"kv_chooser_for_with_policy_and_client\s*\("),
+        "policy→chooser call",
+        11,
+    )
+    if policy_to_chooser[4] != "prefill_load_estimator":
+        raise AssertionError(
+            f"managed policy estimator forward {policy_to_chooser[4]!r} "
+            "!= prefill_load_estimator"
+        )
+
+    chooser = cached["kv_chooser_for_with_policy_and_client"]
+    chooser_to_new = _require_unique_callee_args(
+        "kv_chooser",
+        chooser,
+        re.compile(r"KvRouter::new_with_worker_role_and_scheduler_load\s*\("),
+        "chooser→KvRouter::new call",
+        16,
+    )
+    if chooser_to_new[7] != "prefill_load_estimator":
+        raise AssertionError(
+            f"chooser estimator forward {chooser_to_new[7]!r} "
+            "!= prefill_load_estimator"
+        )
+
+    pub_new = cached["prefill_router_new"]
+    delegated = _require_unique_callee_args(
+        "prefill_router_new",
+        pub_new,
+        re.compile(r"new_with_selection_policy\s*\("),
+        "PrefillRouter::new→new_with_selection_policy",
+        14,
+    )
+    if delegated[6:9] != [
+        "prefill_load_estimator",
+        "session_affinity_ttl_secs",
+        "session_affinity_mode",
+    ] or delegated[11] != "load_thresholds":
+        raise AssertionError(
+            "PrefillRouter::new lost estimator/TTL/mode/handle forwards: "
+            f"{delegated[6:9]!r}/{delegated[11]!r}"
+        )
+
+    selection = cached["prefill_router_new_with_selection_policy"]
+    for required in (
+        "prefill_load_estimator,",
+        "session_affinity_mode,",
+        "load_thresholds,",
+    ):
+        if required not in selection:
+            raise AssertionError(
+                f"new_with_selection_policy lost install site for {required!r}"
+            )
+
+    build_binding = cached["prefill_build_binding"]
+    binding_chooser = _require_unique_callee_args(
+        "build_binding",
+        build_binding,
+        re.compile(r"kv_chooser_for_with_policy_and_client\s*\("),
+        "build_binding→chooser call",
+        11,
+    )
+    if binding_chooser[4] != "context.prefill_load_estimator.clone()":
+        raise AssertionError(
+            f"build_binding estimator forward {binding_chooser[4]!r} "
+            "!= context.prefill_load_estimator.clone()"
+        )
+    if "context.session_affinity_mode" not in build_binding:
+        raise AssertionError("build_binding lost context.session_affinity_mode forward")
+
+    kv_new = cached["kv_router_new_with_worker_role_and_scheduler_load"]
+    if "min_initial_workers_from_env()" not in kv_new:
+        raise AssertionError("KvRouter::new lost min_initial_workers_from_env call")
+    if (
+        "if min_initial_workers > 0 && !kv_router_config.skip_initial_worker_wait {"
+        not in kv_new
+    ):
+        raise AssertionError("KvRouter::new lost min_initial_workers gate condition")
+    if "prefill_load_estimator: prefill_load_estimator.clone()" not in kv_new:
+        raise AssertionError(
+            "KvRouter::new lost EmbeddedSelectionArgs.prefill_load_estimator forward"
+        )
+
+    embedded = cached["embedded_selection_start"]
+    if "prefill_estimator: args.prefill_load_estimator" not in embedded:
+        raise AssertionError(
+            "EmbeddedSelection::start HostLoad no longer forwards prefill_estimator"
+        )
+
+    min_env = cached["min_initial_workers_from_env"]
+    if "DYN_ROUTER_MIN_INITIAL_WORKERS" not in min_env:
+        raise AssertionError("min_initial_workers_from_env lost env name")
+
+    lookup = cached["kv_router_config_from_lookup"]
+    if 'get_env("DYN_ROUTER_PREFILL_LOAD_MODEL")' not in lookup:
+        raise AssertionError("kv_router_config_from_lookup lost AIS env read")
+    for banned in (
+        "DYN_SERVE_INDEXER",
+        "DYN_ROUTER_MODE",
+        "DYN_ROUTER_SESSION_AFFINITY_MODE",
+    ):
+        if banned in lookup:
+            raise AssertionError(
+                f"kv_router_config_from_lookup gained FE-only env {banned}"
+            )
+    if "config.apply_policy_config()?" not in lookup:
+        raise AssertionError("kv_router_config_from_lookup lost final policy apply")
+    config_text = _cached_stripped_file(RUST_CONFIG, file_text)
+    try_env = _fn_decl_and_body(
+        config_text,
+        re.compile(
+            r"pub\s+fn\s+try_kv_router_config_from_dynamo_env\s*\(\s*\)\s*"
+            r"->\s*Result<KvRouterConfig,\s*String>\s*\{"
+        ),
+        "try_kv_router_config_from_dynamo_env",
+    )
+    if "kv_router_config_from_lookup(|key| env::var(key).ok())" not in try_env:
+        raise AssertionError(
+            "try_kv_router_config_from_dynamo_env lost lookup(|key| env::var) call"
+        )
+    if "requires router_track_prefill_tokens=true" not in config_text:
+        raise AssertionError("AIS validation requiring prefill tracking is gone")
+
+    apply_body = cached["router_settings_apply"]
+    if "serve_indexer" not in apply_body or "router_prefill_load_model" not in apply_body:
+        raise AssertionError("RouterSettings::apply lost serve_indexer/AIS whitelist")
+    for banned in ("router_mode", "min_initial_workers", "session_affinity_mode"):
+        if banned in apply_body:
+            raise AssertionError(
+                f"RouterSettings::apply unexpectedly allowlists {banned}"
+            )
+    if "unknown router setting:" not in apply_body:
+        raise AssertionError("RouterSettings::apply lost unknown-field rejection")
+
+    reserve = cached["reserve_prefill_worker"]
+    sig = re.search(
+        r"fn\s+reserve_prefill_worker\s*\((.*?)\)\s*->\s*Result<PrefillReservation>",
+        reserve,
+        re.DOTALL,
+    )
+    if sig is None:
+        raise AssertionError("reserve_prefill_worker signature not found")
+    reserve_params = _split_rust_call_args(sig.group(1))
+    if reserve_params and reserve_params[0] in {"&self", "&mut self", "self"}:
+        reserve_params = reserve_params[1:]
+    if len(reserve_params) != 10:
+        raise AssertionError(
+            f"reserve_prefill_worker arity excluding self is {len(reserve_params)} != 10"
+        )
+    for param in reserve_params:
+        name = param.split(":", 1)[0].strip().split()[-1]
+        if "session" in name:
+            raise AssertionError(
+                f"reserve_prefill_worker gained session carrier param {name!r}"
+            )
+    admitted = _require_unique_callee_args(
+        "reserve_prefill_worker",
+        reserve,
+        re.compile(r"find_best_match_details_with_policy_class_admitted\s*\("),
+        "admitted find_best_match call",
+        16,
+    )
+    if admitted[11:14] != none3:
+        raise AssertionError(
+            "reserve_prefill_worker session/expected/pin "
+            f"{admitted[11:14]!r} != None,None,None"
+        )
+
+    served = cached["ensure_served_indexer_service"]
+    if "bindings.insert(model_name.clone(), indexer)" not in served:
+        raise AssertionError("ensure_served_indexer_service lost bindings.insert")
+    if "ServedIndexerHandle" not in served:
+        raise AssertionError("ensure_served_indexer_service lost ServedIndexerHandle")
+
+    ingress = _fn_decl_and_body(
+        _cached_stripped_file(RUST_INDEXER_INGRESS, file_text),
+        re.compile(
+            r"pub\(crate\)\s+async\s+fn\s+start\s*\(\s*args\s*:\s*"
+            r"RuntimeIngressArgs<'_>\s*\)\s*->\s*Result<Arc<Self>>\s*\{"
+        ),
+        "RuntimeIngress::start",
+    )
+    if "if kv_router_config.serve_indexer {" not in ingress:
+        raise AssertionError("RuntimeIngress::start lost serve_indexer branch")
+    if "ensure_served_indexer_service(" not in ingress:
+        raise AssertionError("RuntimeIngress::start lost ensure_served_indexer_service")
+
+    prepare = _fn_decl_and_body(
+        _cached_stripped_file(RUST_WATCHER, file_text),
+        re.compile(
+            r"async\s+fn\s+prepare_worker_set\s*\([^;{]*?\)\s*(?:->[^;{]+)?\s*\{"
+        ),
+        "prepare_worker_set",
+    )
+    if (
+        "LoadThresholdHandle::new(router_config.load_threshold_config.clone())"
+        not in prepare
+    ):
+        raise AssertionError(
+            "prepare_worker_set lost original RouterConfig LoadThresholdHandle"
+        )
+
+    ais_text = _cached_stripped_file(RUST_AIS_CALLBACK, file_text)
+    build_model = _fn_decl_and_body(
+        ais_text,
+        re.compile(
+            r"(?m)^fn\s+build_model\s*\(\s*config\s*:\s*&serde_json::Value\s*\)\s*"
+            r"->\s*PyResult<RustAisCallback>\s*\{"
+        ),
+        "ais_callback::build_model",
+    )
+    if "ForwardPassPerfModel::best_available(config)" not in build_model:
+        raise AssertionError("build_model lost ForwardPassPerfModel::best_available")
+    if "readiness != ForwardPassPerfReadiness::Ready" not in build_model:
+        raise AssertionError("build_model lost Ready rejection")
+    create_est = _fn_decl_and_body(
+        ais_text,
+        re.compile(
+            r"pub\(super\)\s+fn\s+create_ais_prefill_load_estimator\s*\([^;{]*?\)\s*"
+            r"(?:->[^;{]+)?\s*\{"
+        ),
+        "create_ais_prefill_load_estimator",
+    )
+    if "build_model(config)" not in create_est:
+        raise AssertionError(
+            "create_ais_prefill_load_estimator lost build_model factory call"
+        )
+    select_engine = _fn_decl_and_body(
+        _cached_stripped_file(RUST_PYO3_ENTRYPOINT, file_text),
+        re.compile(
+            r"async\s+fn\s+select_engine\s*\([^;{]*?\)\s*(?:->[^;{]+)?\s*\{"
+        ),
+        "select_engine",
+    )
+    if "create_ais_prefill_load_estimator" not in select_engine:
+        raise AssertionError("select_engine lost create_ais_prefill_load_estimator")
+    if "RsEngineConfig::Dynamic" not in select_engine:
+        raise AssertionError("select_engine lost Dynamic AIS estimator supply path")
+
+    for path, label in (
+        (RUST_QUEUE, "queue::prefill_load_hint_for"),
+        (RUST_KV_ROUTER, "KvRouter::prefill_load_hint_for"),
+    ):
+        hint = _fn_decl_and_body(
+            _cached_stripped_file(path, file_text),
+            re.compile(r"fn\s+prefill_load_hint_for\s*\([^;{]*?\)\s*(?:->[^;{]+)?\s*\{"),
+            label,
+        )
+        if "None => None," not in hint and "None => None" not in hint:
+            raise AssertionError(f"{label} lost absent-estimator => no duration")
+
+    assert_session_inputs_stack_uses_ttl_300()
+
+
+
+def run_input_startup_capability_decisions(monkeypatch) -> None:
+    """Ordinary FE parser→validate→native controls for the seven decisions."""
+    from dynamo.common.configuration.groups.router_args import (
+        logger as router_logger,
+    )
+    from dynamo.llm import RouterMode
+
+    assert_input_startup_capability_source_contracts()
+    clear_known_manifest_router_envs(monkeypatch)
+    clear_ais_identity_envs(monkeypatch)
+
+    omitted = _frontend_router_snapshot()
+    _require_attr(omitted.config_attrs, "serve_indexer", False, "default config")
+    _require_attr(omitted.kv_router_kwargs, "serve_indexer", False, "default kwargs")
+    _require_attr(omitted.kv_json, "serve_indexer", False, "default native json")
+
+    false_snap = _frontend_router_snapshot(("--no-serve-indexer",))
+    _require_attr(false_snap.kv_router_kwargs, "serve_indexer", False, "false kwargs")
+    _require_attr(false_snap.kv_json, "serve_indexer", False, "false native json")
+    true_snap = _frontend_router_snapshot(("--serve-indexer",))
+    _require_attr(true_snap.kv_router_kwargs, "serve_indexer", True, "true kwargs")
+    _require_attr(true_snap.kv_json, "serve_indexer", True, "true native json")
+
+    min0 = _frontend_router_snapshot(("--router-min-initial-workers", "0"))
+    _require_attr(min0.config_attrs, "min_initial_workers", 0, "min0 config")
+    min2 = _frontend_router_snapshot(("--router-min-initial-workers", "2"))
+    _require_attr(min2.config_attrs, "min_initial_workers", 2, "min2 config")
+
+    kv_mode = _frontend_router_snapshot()
+    if kv_mode.router_mode != "kv" or kv_mode.native_router_mode != RouterMode.KV:
+        raise AssertionError(
+            f"KV mode control failed: {kv_mode.router_mode!r}/{kv_mode.native_router_mode!r}"
+        )
+    rr_mode = _frontend_router_snapshot(
+        require_kv=False, wrapper_cli=NON_KV_WRAPPER_CLI
+    )
+    if rr_mode.router_mode != "round-robin":
+        raise AssertionError(f"round-robin mode got {rr_mode.router_mode!r}")
+    if rr_mode.native_router_mode != RouterMode.RoundRobin:
+        raise AssertionError(f"native round-robin got {rr_mode.native_router_mode!r}")
+    if "session_affinity_mode" not in rr_mode.router_kwargs:
+        raise AssertionError("non-KV snapshot lost router_kwargs session_affinity_mode")
+
+    hard = _frontend_router_snapshot(("--router-session-affinity-mode", "hard"))
+    _require_attr(hard.config_attrs, "session_affinity_mode", "hard", "hard config")
+    _require_attr(hard.router_kwargs, "session_affinity_mode", "hard", "hard kwargs")
+    soft = _frontend_router_snapshot(("--router-session-affinity-mode", "soft"))
+    _require_attr(soft.config_attrs, "session_affinity_mode", "soft", "soft config")
+    _require_attr(soft.router_kwargs, "session_affinity_mode", "soft", "soft kwargs")
+
+    ais_json_arg = json.dumps(dict(AIS_PERF_IDENTITY), separators=(",", ":"))
+    ais = _frontend_router_snapshot(
+        (
+            "--router-prefill-load-model",
+            "ais",
+            "--router-track-prefill-tokens",
+            "--dyn-chat-processor",
+            "dynamo",
+            "--ais-perf-config",
+            ais_json_arg,
+        )
+    )
+    _require_attr(ais.config_attrs, "router_prefill_load_model", "ais", "AIS config")
+    _require_attr(
+        ais.kv_json,
+        "router_prefill_load_model",
+        PREFILL_LOAD_MODEL_AIS_WIRE,
+        "AIS native json",
+    )
+
+    none_model = _frontend_router_snapshot(("--router-prefill-load-model", "none"))
+    _require_attr(
+        none_model.config_attrs, "router_prefill_load_model", "none", "none config"
+    )
+    _require_attr(
+        none_model.kv_json,
+        "router_prefill_load_model",
+        PREFILL_LOAD_MODEL_NONE_WIRE,
+        "none native json",
+    )
+
+    abs_snap, abs_records = _capture_router_args_warnings(
+        lambda: _frontend_router_snapshot(
+            ("--active-prefill-tokens-threshold", PREFILL_ABS_SENTINEL)
+        )
+    )
+    _require_router_args_warning(
+        abs_records,
+        logger_name=router_logger.name,
+        message=ABSOLUTE_PREFILL_THRESHOLD_WARNING,
+    )
+    _require_attr(
+        abs_snap.config_attrs,
+        "active_prefill_tokens_threshold",
+        int(PREFILL_ABS_SENTINEL),
+        "abs config",
+    )
+    _require_attr(
+        abs_snap.router_kwargs,
+        "active_prefill_tokens_threshold",
+        int(PREFILL_ABS_SENTINEL),
+        "abs kwargs",
+    )
+    frac_snap, frac_records = _capture_router_args_warnings(
+        lambda: _frontend_router_snapshot(
+            ("--active-prefill-tokens-threshold-frac", PREFILL_FRAC_SENTINEL)
+        )
+    )
+    if frac_records:
+        got = [(record.name, record.getMessage()) for record in frac_records]
+        raise AssertionError(f"fractional threshold emitted unexpected warnings {got}")
+    _require_attr(
+        frac_snap.config_attrs,
+        "active_prefill_tokens_threshold_frac",
+        float(PREFILL_FRAC_SENTINEL),
+        "frac config",
+    )
+    _require_attr(
+        frac_snap.router_kwargs,
+        "active_prefill_tokens_threshold_frac",
+        float(PREFILL_FRAC_SENTINEL),
+        "frac kwargs",
+    )

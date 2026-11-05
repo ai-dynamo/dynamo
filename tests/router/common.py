@@ -5558,6 +5558,189 @@ def run_session_prefix_index_config_parity(
     )
 
 
+def run_prefill_admission_input_boundaries(
+    request,
+    tmp_path,
+    monkeypatch,
+    model_name: str,
+    stack_cls,
+    profile_name: str,
+) -> None:
+    """Observe FE original busy-threshold handles for default/abs/frac profiles.
+
+    Nondefault EPP route success is a fallback control only. This does not claim
+    saturation or admission-rejection measurement.
+    """
+    import aiohttp
+
+    from tests.router.epp_config_contract import (
+        PREFILL_ABS_ENV,
+        PREFILL_ADMISSION_PROFILES,
+        PREFILL_FRAC_ENV,
+        _plain_chat_token_case,
+        assert_input_startup_capability_source_contracts,
+        clear_ais_identity_envs,
+        clear_known_manifest_router_envs,
+        expected_prefill_admission_handles,
+        prefill_admission_consumer_env,
+    )
+    from tests.router.epp_parity import collect_frontend_generation_route
+
+    if profile_name not in PREFILL_ADMISSION_PROFILES:
+        raise AssertionError(
+            f"unknown prefill admission profile {profile_name!r}; "
+            f"expected one of {PREFILL_ADMISSION_PROFILES}"
+        )
+    assert_input_startup_capability_source_contracts()
+    clear_known_manifest_router_envs(monkeypatch)
+    clear_ais_identity_envs(monkeypatch)
+    monkeypatch.setenv("NO_COLOR", "1")
+    wanted_decode, wanted_abs, wanted_frac = expected_prefill_admission_handles(
+        profile_name
+    )
+    cases = _plain_chat_token_case(model_name)
+    admin_host = "127.0.0.1"
+
+    with reserved_ports(1, DynamoPortRange.FRONTEND) as (admin_port,):
+        consumer_env = prefill_admission_consumer_env(profile_name)
+        consumer_env["DYN_ENABLE_FRONTEND_ADMIN_API"] = "1"
+        consumer_env["DYN_FRONTEND_ADMIN_HOST"] = admin_host
+        consumer_env["DYN_FRONTEND_ADMIN_PORT"] = str(admin_port)
+        for name, value in consumer_env.items():
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        with stack_cls(
+            request,
+            tmp_path,
+            model_name,
+            consumer_env=consumer_env,
+            log_label=f"prefill-admission-{profile_name}",
+        ) as stack:
+            run_frontend_epp_token_parity(stack, cases, include_negative_control=False)
+            case = cases[0]
+            generation = collect_frontend_generation_route(
+                stack.frontend_url,
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id("fe-gen-prefill-admission"),
+            )
+            if stack.driver is None:
+                raise AssertionError("owned ext_proc driver was not saved")
+            epp_route = stack.driver.collect_route_observation(
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id("epp-route-prefill-admission"),
+            )
+            if not epp_route.token_ids:
+                raise AssertionError("EPP route token_ids are empty")
+            if (generation.worker_id, generation.dp_rank) != (
+                epp_route.worker_id,
+                epp_route.dp_rank,
+            ):
+                raise AssertionError(
+                    "frontend generation and EPP route worker/rank differ: "
+                    f"fe={generation.worker_id}/{generation.dp_rank} "
+                    f"epp={epp_route.worker_id}/{epp_route.dp_rank}"
+                )
+            if generation.dp_rank != 0:
+                raise AssertionError(
+                    f"controlled one-worker rank is {generation.dp_rank}, expected 0"
+                )
+            frontend_proc = stack.frontend_process
+            epp_proc = stack.epp_process
+            if frontend_proc is None or frontend_proc.proc is None:
+                raise AssertionError("owned frontend_process was not saved")
+            if epp_proc is None or epp_proc.proc is None:
+                raise AssertionError("owned epp_process was not saved")
+            if (
+                frontend_proc.proc.poll() is not None
+                or epp_proc.proc.poll() is not None
+            ):
+                raise AssertionError("owned frontend or EPP process is not live")
+            kube_api = stack.kube_api
+            if kube_api is not None and kube_api.failures:
+                raise AssertionError(
+                    "Loopback Kubernetes API recorded unexpected requests: "
+                    + "; ".join(kube_api.failures)
+                )
+            busy_url = f"http://{admin_host}:{admin_port}/busy_threshold"
+            timeout = aiohttp.ClientTimeout(total=10)
+
+            async def _get_thresholds() -> dict:
+                async with aiohttp.ClientSession(
+                    timeout=timeout, trust_env=False
+                ) as session:
+                    async with session.get(busy_url) as response:
+                        if response.status != 200:
+                            raise AssertionError(
+                                f"GET /busy_threshold failed with status {response.status}"
+                            )
+                        payload = await response.json()
+                        if not isinstance(payload, dict):
+                            raise AssertionError(
+                                f"GET /busy_threshold top-level is not a dict: {payload!r}"
+                            )
+                        return payload
+
+            data = asyncio.run(_get_thresholds())
+            if "thresholds" not in data:
+                raise AssertionError(
+                    f"GET /busy_threshold missing thresholds key: {data!r}"
+                )
+            thresholds = data["thresholds"]
+            if not isinstance(thresholds, list) or len(thresholds) != 1:
+                raise AssertionError(
+                    f"GET /busy_threshold expected exactly one model entry, got {data!r}"
+                )
+            entry = thresholds[0]
+            if not isinstance(entry, dict):
+                raise AssertionError(f"busy_threshold entry is not a dict: {entry!r}")
+            if "model" not in entry:
+                raise AssertionError(f"busy_threshold entry missing model: {entry!r}")
+            if entry["model"] != model_name:
+                raise AssertionError(
+                    f"busy_threshold model {entry['model']!r} != {model_name!r}"
+                )
+            required_keys = (
+                "active_decode_blocks_threshold",
+                "active_prefill_tokens_threshold",
+                "active_prefill_tokens_threshold_frac",
+            )
+            missing = [key for key in required_keys if key not in entry]
+            if missing:
+                raise AssertionError(
+                    f"busy_threshold entry missing keys {missing}: {entry!r}"
+                )
+            got_decode = entry["active_decode_blocks_threshold"]
+            got_abs = entry["active_prefill_tokens_threshold"]
+            got_frac = entry["active_prefill_tokens_threshold_frac"]
+            if (
+                got_decode != wanted_decode
+                or got_abs != wanted_abs
+                or got_frac != wanted_frac
+            ):
+                raise AssertionError(
+                    f"profile {profile_name} FE handles "
+                    f"decode/abs/frac={got_decode!r}/{got_abs!r}/{got_frac!r} != "
+                    f"{wanted_decode!r}/{wanted_abs!r}/{wanted_frac!r}"
+                )
+            logger.info(
+                "prefill admission profile=%s abs_env=%s frac_env=%s "
+                "admin=%s handles=%s/%s/%s fe_worker=%s/%s epp_ok=True",
+                profile_name,
+                consumer_env.get(PREFILL_ABS_ENV),
+                consumer_env.get(PREFILL_FRAC_ENV),
+                admin_port,
+                got_decode,
+                got_abs,
+                got_frac,
+                generation.worker_id,
+                generation.dp_rank,
+            )
+
+
 def frontend_epp_tools_token_parity_cases(model_name: str) -> list[TokenParityCase]:
     """Reusable actual-token scenarios for tool schema and tool-history rendering.
 

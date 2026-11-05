@@ -30,7 +30,10 @@ SessionPrefixIndexConfigMismatch after omitted/false/true and dual-invalid
 YAML controls on env-true/kv-false FE reject vs EPP accept. shared_cache_type
 is an ordinary owned HiCache client-construction test, not xfail. Dynamic
 block-size cross-input cases bind kv_cache_block_size as not-FE-honored
-Dynamic worker-card geometry, not CLI support.
+Dynamic worker-card geometry, not CLI support. Seven input/startup/capability
+rows use source-backed unsupported_input/unsupported_capability decisions
+with one ordinary source-capability Item; prefill abs/frac also bind three
+ordinary FE admin /busy_threshold boundary profiles.
 """
 
 import pytest
@@ -42,6 +45,7 @@ from tests.router.epp_config_contract import (
     ENFORCE_DISAGG_CASE_IDS,
     KEYED_TRACKING_PROFILE,
     KEYED_TRACKING_SIZE_ARMS,
+    PREFILL_ADMISSION_PROFILES,
     PROFILE_NAMES,
     ActiveDecodeThresholdConfigMismatch,
     ConditionalJsonConfigMismatch,
@@ -54,6 +58,7 @@ from tests.router.epp_config_contract import (
     run_effective_config_profile,
     run_ignored_admission_control,
     run_ignored_enforce_disagg,
+    run_input_startup_capability_decisions,
     run_overlap_refresh_effective_config,
     run_positional_search_not_fe_honored,
 )
@@ -337,4 +342,28 @@ def test_dynamic_block_size_consumer(
         EppFrontendRoutingParityStack,
         worker_block_size=worker_block_size,
         frontend_cli_block_size=frontend_cli_block_size,
+    )
+
+
+def test_input_startup_capability_decisions(monkeypatch):
+    """Source-backed unsupported input/capability decisions for seven settings."""
+    run_input_startup_capability_decisions(monkeypatch)
+
+
+@pytest.mark.parametrize("profile_name", list(PREFILL_ADMISSION_PROFILES))
+def test_prefill_admission_input_boundaries(
+    request, predownload_tokenizers, tmp_path, monkeypatch, profile_name
+):
+    """GET /busy_threshold original FE handles for default/abs8192/frac0.75."""
+    from tests.router.common import run_prefill_admission_input_boundaries
+    from tests.router.epp_parity import EppFrontendParityStack
+
+    _ = predownload_tokenizers
+    run_prefill_admission_input_boundaries(
+        request,
+        tmp_path,
+        monkeypatch,
+        ROUTER_MODEL_NAME,
+        EppFrontendParityStack,
+        profile_name,
     )
