@@ -54,7 +54,7 @@ func TestTerminalResult(t *testing.T) {
 	}{
 		{
 			name:  "success with a materialized candidate",
-			state: DesiredState{Phase: PhaseSucceeded, Candidates: []dgdcreconcile.DesiredCandidate{{ID: "a"}}},
+			state: DesiredState{Phase: PhaseSucceeded, Valid: 1, Candidates: []dgdcreconcile.DesiredCandidate{{ID: "a"}}},
 		},
 		{
 			name:      "producer failure keeps its diagnostics",
@@ -65,8 +65,8 @@ func TestTerminalResult(t *testing.T) {
 		{
 			name:      "success without a materialized candidate is a failure",
 			state:     DesiredState{Phase: PhaseSucceeded, Failed: 1, FirstFailure: "x: render failed"},
-			outcome:   &TerminalOutcome{Phase: PhaseFailed, Message: "no candidate was materialized: 1 candidate materialization failure", Error: "x: render failed"},
-			errorText: ErrRunFailed.Error() + ": no candidate was materialized: 1 candidate materialization failure: x: render failed",
+			outcome:   &TerminalOutcome{Phase: PhaseFailed, Message: "no candidate is valid: 1 candidate failure", Error: "x: render failed"},
+			errorText: ErrRunFailed.Error() + ": no candidate is valid: 1 candidate failure: x: render failed",
 		},
 	}
 	for _, test := range tests {

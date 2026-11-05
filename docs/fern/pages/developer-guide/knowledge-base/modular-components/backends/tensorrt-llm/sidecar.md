@@ -33,6 +33,19 @@ for the architecture.
 | KV routing | Yes |
 | Kubernetes multinode tensor parallelism (TP) and attention data parallelism (DP) | Yes |
 
+### Image Cache Identity
+
+With aggregated image-aware KV routing, the sidecar derives an image UUID from
+the full URL, including its query string. TensorRT-LLM combines that UUID with
+the image content for native cache identity. The same image at different signed
+URLs therefore gets separate native KV chains, unlike content-only identity.
+
+For rotating URLs, supply a stable `uuid` on each `image_url` content part to
+reuse native KV for unchanged image content. Caller UUIDs disable automatic image
+routing hints, so the router does not credit those image blocks for cache
+affinity. `--frontend-decoding` is not an alternative on this sidecar: it accepts
+media URLs and data URIs, and rejects decoded media.
+
 ## Launch Locally
 
 See [`lib/sidecar/trtllm/launch/`](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/trtllm/launch)

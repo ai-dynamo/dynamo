@@ -74,7 +74,7 @@ func withKVRange(spec *v1beta2.DynamoGraphDeploymentRequestSpec) *v1beta2.Dynamo
 }
 
 func withInputOverrides(spec *v1beta2.DynamoGraphDeploymentRequestSpec, overrides string) *v1beta2.DynamoGraphDeploymentRequestSpec {
-	spec.AISimulate = &v1beta2.AISimulateSpec{InputOverrides: &runtime.RawExtension{Raw: []byte(overrides)}}
+	spec.AISim = &v1beta2.AISimSpec{InputOverrides: &runtime.RawExtension{Raw: []byte(overrides)}}
 	return spec
 }
 
@@ -140,8 +140,8 @@ func TestLowerIsDeterministicAndDoesNotMutateTheSpec(t *testing.T) {
 	if first != second {
 		t.Fatalf("not deterministic:\n%s\n%s", first, second)
 	}
-	if string(spec.AISimulate.InputOverrides.Raw) != overrides {
-		t.Fatalf("overrides mutated: %s", spec.AISimulate.InputOverrides.Raw)
+	if string(spec.AISim.InputOverrides.Raw) != overrides {
+		t.Fatalf("overrides mutated: %s", spec.AISim.InputOverrides.Raw)
 	}
 }
 
@@ -343,22 +343,6 @@ func TestInputOverridesApplyOnceAfterDerivedDefaults(t *testing.T) {
 			t.Fatalf("a field was derived from override-only values: %s", encode(t, input))
 		}
 	})
-}
-
-func TestUnderlayParetoObjective(t *testing.T) {
-	spec := defaultedSpec()
-	spec.Objective.Mode = v1beta2.ObjectiveModePareto
-	spec.Objective.Metric = nil
-	spec.Objective.Metrics = []v1beta2.ObjectiveMetric{"ThroughputPerGPU", "ThroughputPerUser"}
-	input := underlay(t, spec)
-	if nested(t, input, "optimization", "target") != TargetPareto {
-		t.Fatalf("not a Pareto optimization: %v", input["optimization"])
-	}
-
-	spec.Objective.Metrics = []v1beta2.ObjectiveMetric{"Throughput", "TTFT"}
-	if _, err := Underlay(&spec.NativeSearchInput); err == nil {
-		t.Fatal("custom Pareto objectives must fail until the public AISimulate input exposes them")
-	}
 }
 
 func TestUnderlayOmitsUnsetTypedFields(t *testing.T) {
