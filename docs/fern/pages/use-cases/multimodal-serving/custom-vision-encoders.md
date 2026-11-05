@@ -29,6 +29,9 @@ flowchart LR
 | Video | Not supported | Not supported | Not supported |
 | Audio | Not supported | Not supported | Not supported |
 
+> [!IMPORTANT]
+> The custom encoder contract lets an implementation choose its compute device, but the included launchers (`agg_qwen3_5_native.sh` and `agg_custom.sh`) and example backends are currently wired for NVIDIA GPU through `CUDA_VISIBLE_DEVICES`. An Intel XPU custom-encoder launcher is not available.
+
 This matrix describes the custom-encoder integration, not the overall multimodal support of each backend. For feature requests, reach out in the `#sig-multimodal` channel on our [community Slack](https://ai-dynamo.slack.com/).
 
 ## How It Works

@@ -25,7 +25,13 @@
 
 import { Fragment } from "react";
 
-import { FEATURES, type FeatureCell } from "./releases.data";
+import {
+  FEATURES,
+  INTEL_FEATURES,
+  type Feature,
+  type FeatureCell,
+  type IntelFeature,
+} from "./releases.data";
 
 const HEAT_CSS = `
 .dynref-heat-legend {
@@ -82,6 +88,10 @@ const HEAT_CSS = `
     grid-template-columns: minmax(0, 1.6fr) repeat(3, minmax(64px, 1fr));
     gap: 6px;
     font-size: 13px;
+}
+
+.dynref-heat-grid--two {
+    grid-template-columns: minmax(0, 1.6fr) repeat(2, minmax(64px, 1fr));
 }
 
 .dynref-heat-colhead {
@@ -253,7 +263,14 @@ const BACKENDS = [
   { key: "vllm", label: "vLLM" },
 ] as const;
 
+const INTEL_BACKENDS = [
+  { key: "sglang", label: "SGLang" },
+  { key: "vllm", label: "vLLM" },
+] as const;
+
 type BackendKey = (typeof BACKENDS)[number]["key"];
+type Backend = { key: BackendKey; label: string };
+type FeatureRow = Feature | IntelFeature;
 
 const STATUS_LABEL: Record<FeatureCell["status"], string> = {
   yes: "Supported",
@@ -262,12 +279,22 @@ const STATUS_LABEL: Record<FeatureCell["status"], string> = {
   no: "Not supported",
 };
 
-function coverageScore(key: BackendKey): string {
-  const supported = FEATURES.filter((feature) => {
-    const status = feature[key].status;
+function featureCell(feature: FeatureRow, key: BackendKey): FeatureCell {
+  if (key === "trtllm") {
+    if (!("trtllm" in feature)) {
+      throw new Error("TensorRT-LLM cannot be rendered from an Intel feature row");
+    }
+    return feature.trtllm;
+  }
+  return feature[key];
+}
+
+function coverageScore(key: BackendKey, features: readonly FeatureRow[]): string {
+  const supported = features.filter((feature) => {
+    const status = featureCell(feature, key).status;
     return status === "yes" || status === "caveat";
   }).length;
-  return `${supported} / ${FEATURES.length}`;
+  return `${supported} / ${features.length}`;
 }
 
 function CheckGlyph() {
@@ -334,7 +361,15 @@ function StatusCellContent({ status }: { status: FeatureCell["status"] }) {
   return <span className="dynref-heat-dash">&mdash;</span>;
 }
 
-function StatusCell({ cell, feature, backend }: { cell: FeatureCell; feature: string; backend: string }) {
+function StatusCell({
+  cell,
+  feature,
+  backend,
+}: {
+  cell: FeatureCell;
+  feature: string;
+  backend: string;
+}) {
   const classes = [
     "dynref-heat-cell",
     `dynref-heat-cell--${cell.status}`,
@@ -366,7 +401,15 @@ function StatusCell({ cell, feature, backend }: { cell: FeatureCell; feature: st
   );
 }
 
-export function FeatureHeatmap() {
+export function FeatureHeatmap({
+  accelerator = "nvidia",
+}: {
+  accelerator?: "nvidia" | "intel";
+}) {
+  const features = accelerator === "intel" ? INTEL_FEATURES : FEATURES;
+  const backends: readonly Backend[] =
+    accelerator === "intel" ? INTEL_BACKENDS : BACKENDS;
+
   return (
     <div className="dynref-panel">
       <style dangerouslySetInnerHTML={{ __html: HEAT_CSS }} />
@@ -391,21 +434,27 @@ export function FeatureHeatmap() {
           </span>
         </div>
       </div>
-      <div className="dynref-heat-grid">
+      <div
+        className={`dynref-heat-grid${
+          backends.length === 2 ? " dynref-heat-grid--two" : ""
+        }`}
+      >
         <div />
-        {BACKENDS.map((backend) => (
+        {backends.map((backend) => (
           <div key={backend.key} className="dynref-heat-colhead">
             {backend.label}
-            <span className="dynref-heat-score dynref-mono">{coverageScore(backend.key)}</span>
+            <span className="dynref-heat-score dynref-mono">
+              {coverageScore(backend.key, features)}
+            </span>
           </div>
         ))}
-        {FEATURES.map((feature) => (
+        {features.map((feature) => (
           <Fragment key={feature.name}>
             <div className="dynref-heat-feature">{feature.name}</div>
-            {BACKENDS.map((backend) => (
+            {backends.map((backend) => (
               <StatusCell
                 key={backend.key}
-                cell={feature[backend.key]}
+                cell={featureCell(feature, backend.key)}
                 feature={feature.name}
                 backend={backend.label}
               />
@@ -413,7 +462,11 @@ export function FeatureHeatmap() {
           </Fragment>
         ))}
       </div>
-      <p className="dynref-grid-note">Hover a noted cell or focus it with the keyboard to view its compatibility note.</p>
+      <p className="dynref-grid-note">
+        Hover a noted cell or focus it with the keyboard to view its compatibility note.
+        {accelerator === "intel" &&
+          " Experimental marks a known implementation limitation or incomplete code path."}
+      </p>
     </div>
   );
 }

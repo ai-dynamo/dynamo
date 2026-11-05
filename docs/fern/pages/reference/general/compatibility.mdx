@@ -15,10 +15,10 @@ import { ReleaseSupportMatrix } from "@/components/ReleaseSupportMatrix";
 
 <CompatibilityHero />
 
-The card above covers one release at a time. To compare CUDA toolkit and minimum driver requirements across releases per backend, jump to the [Release Support Matrix](#release-support-matrix) at the bottom of this page. For extended driver compatibility beyond the listed minimums, including forward compatibility and `cuda-compat` packages, see the [CUDA Compatibility documentation](https://docs.nvidia.com/deploy/cuda-compatibility/latest/).
+The card above covers one release at a time. To compare CUDA toolkit and minimum driver requirements across releases per backend, jump to the [Release Support Matrix](#release-support-matrix) at the bottom of this page. For NVIDIA GPUs, extended driver compatibility beyond the listed minimums, including forward compatibility and `cuda-compat` packages, is covered in the [CUDA Compatibility documentation](https://docs.nvidia.com/deploy/cuda-compatibility/latest/).
 
 <Note>
-See [Release Artifacts](release-artifacts.mdx) for the full artifact inventory — container images, wheels, Helm charts, and crates — [Local Installation](../../cli/installation/install-dynamo.mdx) for host OS and architecture requirements, and [Model Early Access Builds](model-early-access-builds.mdx) for per-model early access container builds. For backend-specific runtime workarounds — including the local `docker run --network host` hang first reported on Amazon Linux 2023 — see [TensorRT-LLM Known Issues](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/known-issues.md).
+See [Release Artifacts](release-artifacts.mdx) for the full artifact inventory — container images, wheels, Helm charts, and crates — [Local Installation](../../cli/installation/install-dynamo.mdx) for host OS and architecture requirements, and [Model Early Access Builds](model-early-access-builds.mdx) for per-model early access container builds. For backend-specific runtime workarounds — including the local `docker run --network host` hang first reported on Amazon Linux 2023 — see [TensorRT-LLM Known Issues](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/known-issues.md). Intel GPU (XPU) runtime images and wheels are not published as release artifacts; build the SGLang or vLLM XPU runtime image from source (see [vLLM installation](../../developer-guide/knowledge-base/modular-components/backends/vllm/overview.md#installation)).
 </Note>
 
 ## Mixed-Version Compatibility
@@ -63,6 +63,9 @@ The frontend excludes incomplete or unready namespaces from routing. When multip
 Worker count is a capacity approximation, not a measurement of end-to-end serving capacity. Selection between WorkerSets also does not provide request stickiness.
 
 ## Feature Support
+
+<Tabs>
+  <Tab title="NVIDIA GPU">
 
 <FeatureHeatmap />
 
@@ -129,7 +132,7 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 | **KV Block Manager**      | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
 | **Multimodal**            | <span className="dynref-badge dynref-badge--green">✓</span> | Image only (URLs + pre-computed embeddings). Disagg: EP/D + E/P/D. With KV-aware routing, via dedicated MM Router Worker (requires KV event publishing) ([Source](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md)) |
 | **Request Migration**     | <span className="dynref-badge dynref-badge--green">✓</span> | Work in progress with multimodal                                                                                                                                                             |
-| **Request Cancellation**  | <span className="dynref-badge dynref-badge--amber">!</span> | Engine temporarily not notified of cancellations — resources for cancelled requests are not freed (known issue)                                                               |
+| **Request Cancellation**  | <span className="dynref-badge dynref-badge--amber dynref-badge--bang" aria-label="Caveat"></span> | Engine temporarily not notified of cancellations — resources for cancelled requests are not freed (known issue)                                                               |
 | **LoRA**                  | <span className="dynref-badge dynref-badge--gray">—</span> | Not supported                                                                                                                                                                 |
 | **Tool Calling**          | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
 | **Speculative Decoding**  | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
@@ -162,6 +165,15 @@ Pairwise feature-by-feature compatibility within each backend. Each cell reports
   </Tab>
 </Tabs>
 
+  </Tab>
+  <Tab title="Intel GPU">
+
+<FeatureHeatmap accelerator="intel" />
+
+Intel GPU statuses reflect the current XPU container builds, launch scripts, and implementation paths. Missing XPU-specific tests do not reduce support for accelerator-independent features.
+
+  </Tab>
+</Tabs>
 
 ## Release Support Matrix
 
