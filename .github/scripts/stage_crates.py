@@ -10,7 +10,7 @@ crate's intra-workspace deps are indexed before its dependents.
 
 The Artifactory reference token (ARTIFACTORY_TOKEN, the same one the wheel upload
 uses) is sent as a Bearer header for both the cargo registry and the idempotency
-HEAD check. The registry location is read from ARTIFACTORY_CARGO_INDEX (a secret,
+HEAD check. The registry location is read from ARTIFACTORY_CARGO_INDEX (configuration,
 e.g. sparse+https://<host>/artifactory/api/cargo/<repo>/index/) so it is not
 hardcoded in the workflow. Idempotent: crates already present are skipped.
 
@@ -19,18 +19,35 @@ workspace dependents are skipped with a reason, and the rest of the graph keeps
 staging; the exit code is nonzero when anything failed so the workflow can
 report loudly without blocking the release.
 
+External Git-patched dependencies can declare publication counterparts in the
+source Cargo.toml, independently of the normal source-build requirement:
+
+    [workspace.metadata.artifactory.dependencies.example-core]
+    version = "=1.2.0-rc.0"
+    registry = "example"
+    git-rev = "<the full revision in patch.crates-io.example-core>"
+
+ARTIFACTORY_CARGO_DEPENDENCY_REGISTRIES is non-secret JSON configuration mapping
+these aliases to sparse Cargo index URLs on the same Artifactory server as the
+publication registry. ARTIFACTORY_TOKEN must have read access to those indexes.
+Only this disposable staging checkout gets rewritten; ordinary builds keep their
+Git pins. The matching patch is removed so cargo check/package use the published
+counterpart too. Start retries from the committed source checkout.
+
 Non-publishable members (the python/c bindings, example binaries) are excluded by
 manifest-path; anything with `publish = false` is excluded too.
 """
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
 import subprocess
 import sys
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -109,7 +126,212 @@ def topo_order(pkgs: dict[str, dict]) -> list[str]:
     return order
 
 
-def write_cargo_config(root: Path, alias: str, index: str) -> None:
+def dependency_tables(document: dict) -> dict[str, dict]:
+    """Enumerate actual Cargo dependency tables, excluding package metadata."""
+    kinds = ("dependencies", "build-dependencies", "dev-dependencies")
+    tables = {kind: document.get(kind, {}) for kind in kinds}
+    tables["workspace.dependencies"] = document.get("workspace", {}).get(
+        "dependencies", {}
+    )
+    for target, fields in document.get("target", {}).items():
+        for spelling in (target, json.dumps(target), f"'{target}'"):
+            for kind in kinds:
+                tables[f"target.{spelling}.{kind}"] = fields.get(kind, {})
+    return tables
+
+
+def configure_dependency_registries(
+    root: Path, manifests: list[Path], metadata: dict, alias: str, index: str, env: dict
+) -> dict[str, str]:
+    """Apply reviewed publication references only to the staging checkout."""
+    configuration = metadata.get("artifactory", {})
+    if not isinstance(configuration, dict):
+        raise RuntimeError("workspace.metadata.artifactory must be a table")
+    references = configuration.get("dependencies", {})
+    if not isinstance(references, dict):
+        raise RuntimeError(
+            "workspace.metadata.artifactory.dependencies must be a table"
+        )
+    if not references:
+        return {}
+    try:
+        indexes = json.loads(env.get("ARTIFACTORY_CARGO_DEPENDENCY_REGISTRIES", "{}"))
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            "ARTIFACTORY_CARGO_DEPENDENCY_REGISTRIES must be a JSON object"
+        ) from error
+    if not isinstance(indexes, dict):
+        raise RuntimeError(
+            "ARTIFACTORY_CARGO_DEPENDENCY_REGISTRIES must be a JSON object"
+        )
+
+    source = tomllib.loads((root / "Cargo.toml").read_text())
+    patches = source.get("patch", {}).get("crates-io", {})
+    approved_base = index.removeprefix("sparse+").split("/api/cargo/", 1)[0]
+    registries: dict[str, str] = {}
+    for package, reference in references.items():
+        if not isinstance(reference, dict) or set(reference) != {
+            "version",
+            "registry",
+            "git-rev",
+        }:
+            raise RuntimeError(
+                f"{package}: expected version, registry, and git-rev publication fields"
+            )
+        version, registry, revision = (
+            reference[key] for key in ("version", "registry", "git-rev")
+        )
+        if not isinstance(version, str) or not re.fullmatch(
+            r"=\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version
+        ):
+            raise RuntimeError(
+                f"{package}: publication version must be an exact Cargo requirement"
+            )
+        if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise RuntimeError(f"{package}: git-rev must be a full commit SHA")
+        if not isinstance(registry, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_]*", registry
+        ):
+            raise RuntimeError(f"{package}: invalid dependency registry alias")
+        if registry in {alias, "crates_io"}:
+            raise RuntimeError(
+                f"{package}: dependency registry alias collides with a publish/default registry"
+            )
+        url = indexes.get(registry)
+        if not isinstance(url, str):
+            raise RuntimeError(
+                f"{package}: registry {registry} is missing from ARTIFACTORY_CARGO_DEPENDENCY_REGISTRIES"
+            )
+        parsed = urllib.parse.urlsplit(url.removeprefix("sparse+"))
+        if (
+            not url.startswith(f"sparse+{approved_base}/api/cargo/")
+            or not url.endswith("/index/")
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise RuntimeError(
+                f"{package}: dependency index must use the publication Artifactory origin and /api/cargo/<repo>/index/ path"
+            )
+        patch = patches.get(package)
+        if (
+            not isinstance(patch, dict)
+            or not patch.get("git")
+            or patch.get("rev") != revision
+            or patch.get("package", package) != package
+        ):
+            raise RuntimeError(
+                f"{package}: publication reference does not match the current Git source pin"
+            )
+        registries[registry] = url
+
+    # Existing staging rewrites use inline dependency declarations. Fail closed
+    # on other layouts rather than silently leaving a crates.io dependency.
+    assignment = re.compile(r"^(\s*)([A-Za-z0-9_-]+)\s*=\s*(\{.*\})(\s*(?:#.*)?)$")
+    edits: dict[Path, str] = {}
+    expected_documents: dict[Path, dict] = {}
+    rewritten, removed = set(), set()
+    for manifest in dict.fromkeys(manifests):
+        original = manifest.read_text()
+        document = tomllib.loads(original)
+        sections = dependency_tables(document)
+        expected = copy.deepcopy(document)
+        tables = {id(table): table for table in dependency_tables(expected).values()}
+        for table in tables.values():
+            for name, attributes in list(table.items()):
+                if isinstance(attributes, str):
+                    attributes = {"version": attributes}
+                package = attributes.get("package", name)
+                if package in references and not attributes.get("workspace"):
+                    if any(
+                        key in attributes
+                        for key in ("git", "rev", "branch", "tag", "path", "registry")
+                    ):
+                        raise RuntimeError(
+                            f"{manifest}: {name} must use the reviewed crates.io Git patch"
+                        )
+                    attributes.update(
+                        {
+                            key: references[package][key]
+                            for key in ("version", "registry")
+                        }
+                    )
+                    table[name] = attributes
+        if manifest == root / "Cargo.toml":
+            for package in references:
+                del expected["patch"]["crates-io"][package]
+        expected_documents[manifest] = expected
+        section = ""
+        lines = []
+        for line in original.splitlines(keepends=True):
+            header = re.match(r"^\s*\[([^\]]+)\]\s*$", line)
+            if header:
+                section = header.group(1)
+            match = assignment.match(line.rstrip("\n"))
+            if (
+                match
+                and manifest == root / "Cargo.toml"
+                and section == "patch.crates-io"
+                and match[2] in references
+            ):
+                removed.add(match[2])
+                continue
+            if match and section in sections:
+                attributes = tomllib.loads(f"dependency = {match[3]}")["dependency"]
+                package = attributes.get("package", match[2])
+                if package in references and "workspace" not in attributes:
+                    if any(
+                        key in attributes
+                        for key in ("git", "rev", "branch", "tag", "path", "registry")
+                    ):
+                        raise RuntimeError(
+                            f"{manifest}: {match[2]} must use the reviewed crates.io Git patch"
+                        )
+                    attributes.update(
+                        {
+                            key: references[package][key]
+                            for key in ("version", "registry")
+                        }
+                    )
+                    fields = ", ".join(
+                        f"{key} = {json.dumps(value)}"
+                        for key, value in attributes.items()
+                    )
+                    line = f"{match[1]}{match[2]} = {{ {fields} }}{match[4]}\n"
+                    rewritten.add(package)
+            lines.append(line)
+        edits[manifest] = "".join(lines)
+    if rewritten != set(references) or removed != set(references):
+        raise RuntimeError(
+            "external publication references require matching inline dependencies and Git patches"
+        )
+    for manifest, text in edits.items():
+        # The line rewrite must change exactly the approved dependency fields,
+        # never metadata or strings that resemble Cargo declarations.
+        if tomllib.loads(text) != expected_documents[manifest]:
+            raise RuntimeError(
+                f"{manifest}: unsupported declaration layout for publication references"
+            )
+    for manifest, text in edits.items():
+        manifest.write_text(text)
+    for registry in registries:
+        env[
+            f"CARGO_REGISTRIES_{registry.upper()}_TOKEN"
+        ] = f"Bearer {env['ARTIFACTORY_TOKEN']}"
+    for package, reference in references.items():
+        print(
+            f"publication dependency: {package} {reference['version']} via {reference['registry']}"
+        )
+    return registries
+
+
+def write_cargo_config(
+    root: Path,
+    alias: str,
+    index: str,
+    dependency_registries: dict[str, str] | None = None,
+) -> None:
     # Append to the workspace .cargo/config.toml -- it carries required build
     # settings (rustflags, PCRE2_SYS_STATIC) that an overwrite would drop.
     # The marker makes re-runs idempotent (no duplicated tables).
@@ -128,7 +350,12 @@ def write_cargo_config(root: Path, alias: str, index: str) -> None:
         )
     cfg.write_text(
         f"{text}\n{marker}\n"
-        f'[registries]\n{alias} = {{ index = "{index}" }}\n\n'
+        f'[registries]\n{alias} = {{ index = "{index}" }}\n'
+        + "".join(
+            f"{name} = {{ index = {json.dumps(url)} }}\n"
+            for name, url in sorted((dependency_registries or {}).items())
+        )
+        + "\n"
         f'[registry]\ndefault = "{alias}"\n'
         'global-credential-providers = ["cargo:token"]\n'
     )
@@ -356,8 +583,7 @@ def main() -> int:
         )
         return 1
 
-    # Reuse the wheel-upload token; keep the registry location out of the workflow
-    # via the ARTIFACTORY_CARGO_INDEX secret.
+    # Reuse the wheel-upload token; registry locations are supplied by the workflow.
     token = os.environ.get("ARTIFACTORY_TOKEN", "")
     index = os.environ.get("ARTIFACTORY_CARGO_INDEX", "")
     if not token or not index:
@@ -496,7 +722,20 @@ def main() -> int:
             )
             return 1
 
-    write_cargo_config(root, args.registry, index)
+    env = dict(os.environ)
+    try:
+        dependency_registries = configure_dependency_registries(
+            root,
+            [root / "Cargo.toml", *member_manifests],
+            meta.get("metadata") or {},
+            args.registry,
+            index,
+            env,
+        )
+    except RuntimeError as error:
+        print(f"::error::{error}", file=sys.stderr)
+        return 1
+    write_cargo_config(root, args.registry, index, dependency_registries)
     inject_registry(
         [root / "Cargo.toml", *(Path(pkgs[n]["manifest_path"]) for n in order)],
         order,
@@ -508,7 +747,6 @@ def main() -> int:
     # older release branches still carry e.g. aiconfigurator-core).
     strip_git_deps(root, [Path(pkgs[n]["manifest_path"]) for n in order])
 
-    env = dict(os.environ)
     env[f"CARGO_REGISTRIES_{args.registry.upper()}_TOKEN"] = f"Bearer {token}"
     env["RUSTFLAGS"] = f"{env.get('RUSTFLAGS', '')} --cfg tokio_unstable".strip()
     # Only the upload PUT runs on PUBLISH_TOOLCHAIN (--no-verify skips compilation);

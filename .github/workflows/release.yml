@@ -1692,7 +1692,8 @@ jobs:
         id: publish_crates
         env:
           ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
-          ARTIFACTORY_CARGO_INDEX: ${{ secrets.ARTIFACTORY_CARGO_INDEX }}
+          ARTIFACTORY_CARGO_INDEX: ${{ vars.ARTIFACTORY_CARGO_INDEX || secrets.ARTIFACTORY_CARGO_INDEX }}
+          ARTIFACTORY_CARGO_DEPENDENCY_REGISTRIES: ${{ vars.ARTIFACTORY_CARGO_DEPENDENCY_REGISTRIES }}
           EXPECT_VERSION: ${{ needs.prepare-release.outputs.crate_version }}
           # Same rc-suffixed value: stage_crates.py rewrites every publishable crate's
           # version to this before publishing, so re-stages don't collide on the
@@ -1722,6 +1723,7 @@ jobs:
             -e CARGO_TARGET_DIR=/tmp/cargo-target \
             -e ARTIFACTORY_TOKEN \
             -e ARTIFACTORY_CARGO_INDEX \
+            -e ARTIFACTORY_CARGO_DEPENDENCY_REGISTRIES \
             -e EXPECT_VERSION \
             -e STAGE_VERSION \
             -e CRATE_SUBSET \
