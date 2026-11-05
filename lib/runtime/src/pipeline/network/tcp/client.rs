@@ -288,7 +288,9 @@ impl TcpClient {
                 .instrument(reader_span),
         );
 
-        Ok(StreamReceiver { rx: bytes_rx })
+        Ok(StreamReceiver {
+            rx: bytes_rx.into(),
+        })
     }
 }
 
@@ -812,6 +814,7 @@ mod tests {
     async fn upstream_cancellation_event_is_parented_to_worker_request_span() {
         let captured = Arc::new(CancellationEventCapture::default());
         // Do not install a global LogTracer: other tests initialize logging.
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _subscriber = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(CancellationEventLayer(captured.clone())),
         );

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -51,7 +53,7 @@ func newLPXHandoffSource(t *testing.T, fixture string) *v1beta1.DynamoGraphDeplo
 func newLPXHandoffFixture(t *testing.T, fixture string) (*v1alpha1.LPXGraphDeployment, *v1beta1.DynamoGraphDeployment, client.Client) {
 	t.Helper()
 	source := newLPXHandoffSource(t, fixture)
-	kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+	kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues).
 		WithRESTMapper(groveScaleRESTMapper()).
 		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}, &v1alpha1.LPXGraphDeployment{}).
 		WithObjects(source).Build()
@@ -707,7 +709,7 @@ func TestGroveProgramWithoutLPXDoesNotReadLPXChild(t *testing.T) {
 		}}},
 	}
 	childReads := 0
-	kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(source).
+	kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues).WithObjects(source).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 				if _, child := obj.(*v1alpha1.LPXGraphDeployment); child {
@@ -746,7 +748,7 @@ func TestLPXHandoffWaitsForSharedResourceReconciliation(t *testing.T) {
 
 	t.Log("Preserve the child revision and component status while reporting the shared-resource error")
 	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
-	require.ErrorContains(t, err, "RBAC manager not initialized")
+	require.ErrorContains(t, err, "planner ClusterRole name is required")
 	require.Equal(t, v1beta1.DGDStateFailed, result.Status.State)
 	stored := &v1alpha1.LPXGraphDeployment{}
 	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(child), stored))

@@ -494,6 +494,11 @@ impl FromStr for SharedCacheType {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RouterQueuePolicy {
+    /// Earliest due time first, then enqueue order. A request's due time is its explicit
+    /// deadline, else its router ingress plus its class's `slo_ttft_ms`; a request with
+    /// neither sorts after every request with one. Strict priority and priority jumps do
+    /// not reorder it. Policy-class YAML defaults to it.
+    Edf,
     #[default]
     Fcfs,
     Lcfs,
@@ -503,6 +508,7 @@ pub enum RouterQueuePolicy {
 impl fmt::Display for RouterQueuePolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Edf => f.write_str("edf"),
             Self::Fcfs => f.write_str("fcfs"),
             Self::Lcfs => f.write_str("lcfs"),
             Self::Wspt => f.write_str("wspt"),
@@ -595,11 +601,12 @@ impl FromStr for RouterQueuePolicy {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "edf" => Ok(Self::Edf),
             "fcfs" => Ok(Self::Fcfs),
             "lcfs" => Ok(Self::Lcfs),
             "wspt" => Ok(Self::Wspt),
             _ => Err(format!(
-                "unknown queue policy: {s:?}, expected 'fcfs', 'lcfs', or 'wspt'"
+                "unknown queue policy: {s:?}, expected 'edf', 'fcfs', 'lcfs', or 'wspt'"
             )),
         }
     }
@@ -1247,7 +1254,7 @@ impl KvRouterConfig {
     pub fn worker_selection_config(
         &self,
     ) -> Result<
-        Option<&super::policy_config::WorkerSelectionConfig>,
+        Option<&crate::plugins::worker_selection::WorkerSelectionConfig>,
         super::policy_config::RouterPolicyConfigError,
     > {
         Ok(self
@@ -1259,7 +1266,7 @@ impl KvRouterConfig {
     pub fn request_classifier_config(
         &self,
     ) -> Result<
-        Option<&super::policy_config::RequestClassifierConfig>,
+        Option<&crate::plugins::request_classifier::RequestClassifierConfig>,
         super::policy_config::RouterPolicyConfigError,
     > {
         Ok(self
@@ -1512,6 +1519,14 @@ impl KvRouterConfig {
 
     pub fn predict_on_route_enabled(&self) -> bool {
         self.router_predicted_ttl_secs.is_some()
+    }
+
+    /// Whether the KV index built from this config can retain the block chain
+    /// that KV fetch hints need: a local, event-driven primary with no
+    /// predict-on-route side indexer. Offline replay, which cannot build that
+    /// index, relies on this matching `Indexer::supports_kv_transfer_chain_retention`.
+    pub fn supports_kv_transfer_chain_retention(&self) -> bool {
+        self.use_kv_events && !self.use_remote_indexer && !self.predict_on_route_enabled()
     }
 
     pub fn queueing_enabled(
@@ -1787,6 +1802,48 @@ mod tests {
     }
 
     #[test]
+    fn router_wide_queue_policy_keeps_its_fcfs_default_and_accepts_edf() {
+        // Policy-class YAML defaults to EDF; the router-wide policy, which configures only the
+        // synthetic class, keeps its FCFS default and its wire value.
+        assert_eq!(RouterQueuePolicy::default(), RouterQueuePolicy::Fcfs);
+        let default_wire = serde_json::to_value(KvRouterConfig::default()).unwrap();
+        assert_eq!(default_wire["router_queue_policy"], "fcfs");
+        for (spelling, policy) in [
+            ("edf", RouterQueuePolicy::Edf),
+            ("fcfs", RouterQueuePolicy::Fcfs),
+            ("lcfs", RouterQueuePolicy::Lcfs),
+            ("wspt", RouterQueuePolicy::Wspt),
+        ] {
+            assert_eq!(spelling.parse::<RouterQueuePolicy>().unwrap(), policy);
+            assert_eq!(policy.to_string(), spelling);
+            let wire = serde_json::to_value(KvRouterConfig {
+                router_queue_policy: policy,
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(wire["router_queue_policy"], spelling);
+            assert_eq!(
+                serde_json::from_value::<KvRouterConfig>(wire)
+                    .unwrap()
+                    .router_queue_policy,
+                policy
+            );
+        }
+
+        // An explicit router-wide EDF selects it for the synthetic class.
+        let config = config_from_values(&[("DYN_ROUTER_QUEUE_POLICY", "edf")]);
+        assert_eq!(config.router_queue_policy, RouterQueuePolicy::Edf);
+        assert_eq!(
+            config
+                .policy_profile(None)
+                .unwrap()
+                .default_class()
+                .queue_policy,
+            RouterQueuePolicy::Edf
+        );
+    }
+
+    #[test]
     fn dynamo_env_config_parses_canonical_settings() {
         let config = config_from_values(&[
             ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.25"),
@@ -1939,7 +1996,7 @@ mod tests {
         assert!(error.contains("expected 'ttl' or 'lru'"));
 
         let error = try_config_from_values(&[("DYN_ROUTER_QUEUE_POLICY", "random")]).unwrap_err();
-        assert!(error.contains("expected 'fcfs', 'lcfs', or 'wspt'"));
+        assert!(error.contains("expected 'edf', 'fcfs', 'lcfs', or 'wspt'"));
 
         let error = try_config_from_values(&[("DYN_SHARED_CACHE_TYPE", "rdma")]).unwrap_err();
         assert!(error.contains("expected 'none' or 'hicache'"));
@@ -2202,7 +2259,7 @@ mod tests {
         let policy_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             policy_file.path(),
-            "default_policy_family: default\nuncached_isl_buckets:\n  - min_tokens: 0\n    bucket: all\npolicy_classes:\n  - name: default\n    policy_family: default\n    cache_bucket: all\n    quantum: 1\n",
+            "policy_classes:\n  - name: default\n    quantum: 1\n",
         )
         .unwrap();
         let encoded = serde_json::json!({
@@ -2530,7 +2587,7 @@ worker_selection:
         let policy_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             policy_file.path(),
-            "default_policy_family: stable\nuncached_isl_buckets:\n  - min_tokens: 0\n    bucket: all\npolicy_classes:\n  - name: stable\n    policy_family: stable\n    cache_bucket: all\n    quantum: 7\n",
+            "policy_classes:\n  - name: stable\n    quantum: 7\n",
         )
         .unwrap();
         let config = KvRouterConfig {
@@ -2629,25 +2686,13 @@ worker_selection:
         std::fs::write(
             &path,
             r#"
-default_policy_family: root
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: root
-    policy_family: root
-    cache_bucket: all
     quantum: 1
 models:
   replay-model:
-    default_policy_family: selected
-    uncached_isl_buckets:
-      - min_tokens: 0
-        bucket: all
     policy_classes:
       - name: selected
-        policy_family: selected
-        cache_bucket: all
         quantum: 9
 "#,
         )

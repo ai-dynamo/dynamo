@@ -97,7 +97,35 @@ def _agg_deployment() -> BackendDeploymentSpec:
     )
 
 
-def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
+def _disagg_deployment() -> BackendDeploymentSpec:
+    return BackendDeploymentSpec(
+        deployment_mode="disagg",
+        backend="vllm",
+        backend_version="0.11.0",
+        prefill_engine_args={
+            "worker_type": "prefill",
+            "timing_model": {"type": "polynomial"},
+        },
+        decode_engine_args={
+            "worker_type": "decode",
+            "timing_model": {"type": "polynomial"},
+        },
+        num_prefill_workers=1,
+        num_decode_workers=2,
+    )
+
+
+@pytest.mark.parametrize(
+    ("deployment", "workers"),
+    [
+        (_agg_deployment(), {"num_workers": 3}),
+        (_disagg_deployment(), {"num_prefill_workers": 1, "num_decode_workers": 2}),
+    ],
+    ids=["agg", "disagg"],
+)
+def test_trace_runner_preserves_current_replay_arguments(
+    monkeypatch, deployment, workers
+) -> None:
     seen = {}
 
     def fake_run_trace_replay(**kwargs):
@@ -113,7 +141,7 @@ def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
     monkeypatch.setattr(simulation, "KvRouterConfig", _FakeRouterConfig)
     monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
     spec = ReplaySpec(
-        backend_deployment=_agg_deployment(),
+        backend_deployment=deployment,
         workload={
             "trace_path": "tiny.jsonl",
             "trace_format": "dynamo",
@@ -159,7 +187,8 @@ def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
 
     assert seen["trace_files"] == "tiny.jsonl"
     assert seen["trace_format"] == "dynamo"
-    assert seen["num_workers"] == 3
+    assert {name: seen[name] for name in workers} == workers
+    assert seen["_deterministic"] is True
     assert seen["router_mode"] == "kv_router"
     assert seen["planner_config"] == {"mode": "agg"}
     assert seen["arrival_speedup_ratio"] == 2.0

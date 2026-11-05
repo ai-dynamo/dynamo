@@ -15,6 +15,7 @@ import (
 	extensions "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -40,15 +41,17 @@ func PrepareHistory(ctx context.Context, c client.Client, snapshots map[string][
 	originals := map[string]extensions.CustomResourceDefinitionSpec{}
 	namespaces := []string{}
 	restoreCRDs := func(ctx context.Context) error {
-		var errs []error
+		errs := make([]error, 0, len(originals))
 		for name, spec := range originals {
-			var current extensions.CustomResourceDefinition
-			if err := c.Get(ctx, client.ObjectKey{Name: name}, &current); err != nil {
-				errs = append(errs, err)
-				continue
-			}
-			current.Spec = *spec.DeepCopy()
-			errs = append(errs, c.Update(ctx, &current))
+			// The API server rewrites CRD status after each spec change, which races this read.
+			errs = append(errs, retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				var current extensions.CustomResourceDefinition
+				if err := c.Get(ctx, client.ObjectKey{Name: name}, &current); err != nil {
+					return err
+				}
+				current.Spec = *spec.DeepCopy()
+				return c.Update(ctx, &current)
+			}))
 		}
 		return errors.Join(errs...)
 	}

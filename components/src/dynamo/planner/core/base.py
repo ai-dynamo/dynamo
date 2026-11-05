@@ -12,24 +12,25 @@ diagnostics, tick orchestration, and delegates deployment/metrics I/O to a
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import time
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional, Protocol
 
 import aiohttp.web
 from prometheus_client import start_http_server
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.control_api import (
     _MinimumEndpointUnavailableError,
     _MinimumEndpointValidationError,
     _start_control_api,
 )
 from dynamo.planner.core import util
-from dynamo.planner.core.budget import minimum_power_footprint_fits
 from dynamo.planner.core.engine_protocol import (
     EngineProtocol,
     ReconfigurableEngineProtocol,
@@ -52,16 +53,95 @@ from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
 from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
 from dynamo.planner.offline.trace_data import extract_traffic_observations_from_trace
-from dynamo.planner.reconfiguration import PlannerReconfiguration
+from dynamo.planner.reconfiguration import (
+    PlannerReconfiguration,
+    live_retune_sla_errors,
+    runtime_candidate_errors,
+    runtime_configuration_errors,
+)
+from dynamo.planner.retune.live.contracts import KubeError, KubeNotFound
+from dynamo.planner.retune.live.kube import KubernetesRetuneKube
+from dynamo.planner.retune.live.state import find_retune_leases
 from dynamo.runtime import DistributedRuntime
 
 if TYPE_CHECKING:
+    from dynamo.planner.core.types import RetuneInputs
     from dynamo.planner.monitoring.worker_info import WorkerInfo
     from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
+    from dynamo.planner.plugins.orchestrator.engine_adapter import RetuneHooks
 
 logger = logging.getLogger(__name__)
 
+
+def _live_retune_bootstrap() -> Any:
+    """The live retune stack, loaded only by a planner that runs it.
+
+    It pulls in the DGDR sweep executor and the replay stack behind it;
+    a planner with retune config loads it at startup, one without only
+    when a removed live retune left its Leases behind.
+    """
+
+    return importlib.import_module("dynamo.planner.retune.live.bootstrap")
+
+
+def _log_legacy_retune_failure(task: asyncio.Task[None]) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        logger.error(
+            "Live retune legacy clean-up check failed", exc_info=task.exception()
+        )
+
+
+class LiveRetuneHandle(Protocol):
+    """What ``retune.live.bootstrap.build_live_retune`` returns to the base.
+
+    ``retune_inputs`` is ``None`` while the frontend's startup router config
+    does not satisfy the retune premises (the engine then starts with retune
+    disabled). ``start`` runs after the engine is bootstrapped and may call
+    back ``replace_live_retune``; ``on_effects`` sees every tick's effects
+    (it must be cheap and never block); ``stop`` runs before the engine shuts
+    down: it aborts the sweep, waits for the sweep thread and releases
+    leadership.
+    """
+
+    def retune_inputs(self) -> Optional[RetuneInputs]:
+        ...
+
+    def hooks(self) -> RetuneHooks:
+        ...
+
+    async def start(self, host: NativePlannerBase) -> None:
+        ...
+
+    async def stop(self) -> None:
+        ...
+
+    def on_effects(self, effects: PlannerEffects) -> None:
+        ...
+
+
+class RetuneCleanupHandle(Protocol):
+    """What ``retune.live.bootstrap.build_legacy_cleanup`` returns.
+
+    A planner without retune config whose DGD still has the Leases of a
+    removed live retune rolls back the routers that retune deployed, then
+    deletes its Requests and Leases; ``start`` begins that clean-up and
+    ``stop`` releases leadership.
+    """
+
+    async def start(self, host: NativePlannerBase) -> None:
+        ...
+
+    async def stop(self) -> None:
+        ...
+
+
 _CONFIG_LOCK_TIMEOUT_SECONDS = 10.0
+# The background check for a removed live retune reads two Leases, then,
+# only if one exists, the DGD; each Kubernetes call is bounded by this.
+_LEGACY_RETUNE_CALL_TIMEOUT_SECONDS = 10.0
+# The check runs once per start; a transient API error is retried once after
+# this long (403 and 404 are not).
+_LEGACY_RETUNE_RETRY_SECONDS = 15.0
 # A tick waits briefly for the common fast submission path, then leaves the
 # task running. It is deliberately not cancelled: a remote request may have
 # been accepted even when its response has not arrived, so retrying could
@@ -128,6 +208,13 @@ class NativePlannerBase:
         config: PlannerConfig,
         environment: PlannerEnvironment,
     ) -> None:
+        if config.retune is not None and config.retune.executor == "local":
+            # Local sweeps replay in this process; a live planner retunes
+            # through DGDR v1beta2 Requests only.
+            raise ValueError(
+                "planner.retune is replay-only with executor 'local'; "
+                "use executor: dgdr"
+            )
         self.runtime = runtime
         self.config = config
         self.environment = environment
@@ -169,6 +256,13 @@ class NativePlannerBase:
         self._environment_initialized = False
         self._engine: Optional[EngineProtocol] = None
         self._last_worker_counts: Optional[WorkerCounts] = None
+        # Live retune (``retune.executor: dgdr``): built in _async_init.
+        self._live_retune: Optional[LiveRetuneHandle] = None
+        # Without retune config, a Kubernetes planner checks in the background
+        # whether a removed live retune left its Leases, and cleans up after it.
+        self._legacy_retune_task: Optional[asyncio.Task[None]] = None
+        self._legacy_retune_cleanup: Optional[RetuneCleanupHandle] = None
+        self._retune_lease_found = asyncio.Event()
 
     async def _async_init(self) -> None:
         # Shutdown is safe for a partially initialized environment and is
@@ -178,8 +272,18 @@ class NativePlannerBase:
             await self.environment.initialize()
             self._validate_min_endpoint_budgets_at_startup()
 
+            if self.config.retune is not None:
+                # Before the first _ensure_engine (regression bootstrap builds
+                # the engine): the engine takes the live retune inputs/hooks.
+                self._live_retune = await self._build_live_retune()
+                self._retune_lease_found.set()
+
             await self._bootstrap_regression()
             await self._bootstrap_engine_plugins_if_needed()
+
+            if self._live_retune is not None:
+                await self._live_retune.start(self)
+            self._start_legacy_retune_check()
 
             if self.config.enable_runtime_reconfiguration:
                 if self.runtime is None:
@@ -189,8 +293,9 @@ class NativePlannerBase:
 
             if self.config.advisory:
                 logger.info(
-                    "[ADVISORY] Planner started in advisory mode; "
-                    "scaling decisions will be logged but NOT executed."
+                    "[ADVISORY] Planner started in advisory mode; scaling "
+                    "decisions will be logged but NOT executed, and the "
+                    "deployment is never changed."
                 )
 
             if self.config.live_dashboard_port:
@@ -214,6 +319,124 @@ class NativePlannerBase:
         except BaseException:
             await self._shutdown_runtime()
             raise
+
+    @property
+    def may_hold_retune_lease(self) -> bool:
+        """Whether live retune, or the clean-up of a removed one, may hold
+        the retune leadership Lease (known once ``_async_init`` returned)."""
+
+        return self._live_retune is not None or self._legacy_retune_task is not None
+
+    @property
+    def retune_lease_found(self) -> asyncio.Event:
+        """Set once this planner may hold a retune Lease: at start with live
+        retune configured, or when the clean-up check of a removed one finds
+        a Lease. ``__main__`` installs its SIGTERM handler then."""
+
+        return self._retune_lease_found
+
+    async def _build_live_retune(self) -> LiveRetuneHandle:
+        return await _live_retune_bootstrap().build_live_retune(self)
+
+    def _kubernetes_connector(self) -> Optional[KubernetesConnector]:
+        # Only some environments have a deployment controller.
+        controller = getattr(self.environment, "controller", None)
+        return controller if isinstance(controller, KubernetesConnector) else None
+
+    def _start_legacy_retune_check(self) -> None:
+        """Look for a removed live retune in the background.
+
+        Only a Kubernetes planner without retune config. Startup never waits
+        for it, and it never fails the planner.
+        """
+
+        connector = self._kubernetes_connector()
+        if self.config.retune is not None or connector is None:
+            return
+        task = asyncio.create_task(
+            self._legacy_retune_check(connector), name="planner-retune-legacy-check"
+        )
+        task.add_done_callback(_log_legacy_retune_failure)
+        self._legacy_retune_task = task
+
+    async def _legacy_retune_check(self, connector: KubernetesConnector) -> None:
+        """Clean up after a live retune whose config was removed.
+
+        Reads the DGD's two retune Leases; only when one exists does it load
+        the live retune stack, which rolls back the routers that retune
+        deployed and then deletes its Requests and Leases. Without Lease RBAC
+        (the default chart) the read answers 403, logged at debug. Any other
+        API error but a 404 is retried once.
+        """
+
+        kube = KubernetesRetuneKube.from_kube_api(connector.kube_api)
+        cleanup: Optional[RetuneCleanupHandle] = None
+        for retry in (True, False):
+            try:
+                cleanup = await self._find_legacy_retune(
+                    kube, connector.parent_dgd_name
+                )
+                break
+            except KubeError as error:
+                # ``status`` is set by the Kubernetes client wrapper only.
+                if getattr(error, "status", None) == 403:
+                    logger.debug("Live retune legacy clean-up check skipped: %s", error)
+                    return
+                if not retry or isinstance(error, KubeNotFound):
+                    logger.info("Live retune legacy clean-up skipped: %s", error)
+                    return
+                logger.info(
+                    "Live retune legacy clean-up check failed; retrying in %.0f s: %s",
+                    _LEGACY_RETUNE_RETRY_SECONDS,
+                    error,
+                )
+                await asyncio.sleep(_LEGACY_RETUNE_RETRY_SECONDS)
+        if cleanup is None:
+            return
+        self._legacy_retune_cleanup = cleanup
+        await cleanup.start(self)
+
+    async def _find_legacy_retune(
+        self, kube: KubernetesRetuneKube, dgd_name: str
+    ) -> Optional[RetuneCleanupHandle]:
+        """The clean-up of a removed live retune; ``None`` without its Leases."""
+
+        leases = await asyncio.to_thread(
+            find_retune_leases,
+            kube,
+            dgd_name,
+            timeout_s=_LEGACY_RETUNE_CALL_TIMEOUT_SECONDS,
+        )
+        if not leases:
+            return None
+        # The clean-up takes the leadership Lease: stop cleanly on SIGTERM.
+        self._retune_lease_found.set()
+        return await _live_retune_bootstrap().build_legacy_cleanup(
+            self, kube, timeout_s=_LEGACY_RETUNE_CALL_TIMEOUT_SECONDS
+        )
+
+    async def replace_live_retune(
+        self,
+        inputs: Optional[RetuneInputs],
+        *,
+        generation: int,
+    ) -> None:
+        """Swap the engine's live retune controller (supervisor callback).
+
+        Serialized with ticks by the config lock, so no tick runs a
+        half-replaced controller. ``inputs=None`` disables retune; a
+        construction error propagates to the caller with retune disabled.
+        """
+
+        from dynamo.planner.plugins.orchestrator.engine_adapter import (
+            OrchestratorEngineAdapter,
+        )
+
+        async with self._config_lock:
+            engine = self._engine
+            if not isinstance(engine, OrchestratorEngineAdapter):
+                raise RuntimeError("live retune requires the orchestrator engine")
+            engine.replace_retune(inputs, generation=generation, now_s=time.time())
 
     async def _shutdown_runtime(self) -> None:
         """Release initialized planner resources after normal or failed startup."""
@@ -242,6 +465,29 @@ class NativePlannerBase:
                 await dashboard_runner.cleanup()
             except Exception:
                 logger.exception("Failed to stop planner live dashboard")
+
+        # Before the engine: the supervisor aborts the retune sweep, waits
+        # for the engine's sweep thread and then releases leadership.
+        live_retune = self._live_retune
+        self._live_retune = None
+        if live_retune is not None:
+            try:
+                await live_retune.stop()
+            except Exception:
+                logger.exception("Failed to stop planner live retune")
+
+        legacy_retune_task = self._legacy_retune_task
+        self._legacy_retune_task = None
+        if legacy_retune_task is not None:
+            legacy_retune_task.cancel()
+            await asyncio.wait([legacy_retune_task])
+        legacy_retune_cleanup = self._legacy_retune_cleanup
+        self._legacy_retune_cleanup = None
+        if legacy_retune_cleanup is not None:
+            try:
+                await legacy_retune_cleanup.stop()
+            except Exception:
+                logger.exception("Failed to stop the live retune legacy clean-up")
 
         engine = self._engine
         self._engine = None
@@ -281,67 +527,14 @@ class NativePlannerBase:
         max_gpu_budget: int,
     ) -> list[str]:
         capabilities = self._build_worker_capabilities()
-        errors: list[str] = []
-
-        if (
-            min_gpu_budget >= 0
-            and max_gpu_budget >= 0
-            and min_gpu_budget > max_gpu_budget
-        ):
-            errors.append(
-                f"min_gpu_budget={min_gpu_budget} exceeds "
-                f"max_gpu_budget={max_gpu_budget}"
-            )
-
-        required_gpus = 0
-        if prefill_min_endpoint is not None and capabilities.prefill is not None:
-            p_gpu = capabilities.prefill.resolved_gpu_cost_per_replica
-            if p_gpu is not None:
-                required_gpus += prefill_min_endpoint * p_gpu
-        if decode_min_endpoint is not None and capabilities.decode is not None:
-            d_gpu = capabilities.decode.resolved_gpu_cost_per_replica
-            if d_gpu is not None:
-                required_gpus += decode_min_endpoint * d_gpu
-        if max_gpu_budget >= 0 and required_gpus > max_gpu_budget:
-            errors.append(
-                "minimum endpoint footprint requires "
-                f"{required_gpus} GPUs, exceeding max_gpu_budget="
-                f"{max_gpu_budget}"
-            )
-
-        power_budget = self.config.total_gpu_power_limit
-        if power_budget is not None:
-            p_watts = (
-                capabilities.prefill.power_watts_per_replica
-                if capabilities.prefill is not None
-                else None
-            )
-            d_watts = (
-                capabilities.decode.power_watts_per_replica
-                if capabilities.decode is not None
-                else None
-            )
-            power_known = (prefill_min_endpoint is None or p_watts is not None) and (
-                decode_min_endpoint is None or d_watts is not None
-            )
-            prefill_floor = prefill_min_endpoint or 0
-            decode_floor = decode_min_endpoint or 0
-            if power_known and not minimum_power_footprint_fits(
-                total_budget=power_budget,
-                prefill_min_endpoint=prefill_floor,
-                decode_min_endpoint=decode_floor,
-                p_watts=p_watts,
-                d_watts=d_watts,
-            ):
-                required_watts = prefill_floor * (p_watts or 0) + decode_floor * (
-                    d_watts or 0
-                )
-                errors.append(
-                    "minimum endpoint footprint requires "
-                    f"{required_watts}W, exceeding total_gpu_power_limit="
-                    f"{power_budget}W"
-                )
-        return errors
+        return runtime_configuration_errors(
+            prefill_min_endpoint,
+            decode_min_endpoint,
+            min_gpu_budget,
+            max_gpu_budget,
+            self.config.total_gpu_power_limit,
+            capabilities,
+        )
 
     def _validate_min_endpoint_budgets_at_startup(self) -> None:
         prefill_min_endpoint, decode_min_endpoint = self.config.active_min_endpoints()
@@ -390,10 +583,9 @@ class NativePlannerBase:
             return self._min_endpoint_response()
 
     def validate_runtime_candidate(self, candidate: PlannerConfig) -> None:
-        p_min, d_min = candidate.active_min_endpoints()
-        errors = self._runtime_configuration_errors(
-            p_min, d_min, candidate.min_gpu_budget, candidate.max_gpu_budget
-        )
+        errors = runtime_candidate_errors(candidate, self._build_worker_capabilities())
+        if self._live_retune is not None:
+            errors.extend(live_retune_sla_errors(self.config, candidate))
         if errors:
             raise ValueError("; ".join(errors))
         self._reconfigurable_engine()
@@ -415,9 +607,23 @@ class NativePlannerBase:
         self._config_generation += 1
         self.prometheus_metrics.sla_target_ttft_ms.set(self.config.ttft_ms)
         self.prometheus_metrics.sla_target_itl_ms.set(self.config.itl_ms)
+        self._sync_fpm_max_age()
         logger.info(
             "Activated planner configuration revision %d", self._config_generation
         )
+
+    def _sync_fpm_max_age(self) -> None:
+        """Keep the live FPM freshness window at three load intervals after a
+        runtime change of ``load_adjustment_interval_seconds``; the
+        subscribers keep their samples."""
+        provider = getattr(self.environment, "fpm_provider", None)
+        setter = getattr(provider, "set_max_fpm_age_seconds", None)
+        if not callable(setter):
+            return
+        age = self.config.fpm_max_age_seconds
+        if getattr(provider, "max_fpm_age_seconds", None) != age:
+            setter(age)
+            logger.info("FPM freshness window is now %.1fs", age)
 
     @asynccontextmanager
     async def _bounded_config_lock(self) -> AsyncIterator[None]:
@@ -517,6 +723,7 @@ class NativePlannerBase:
             OrchestratorEngineAdapter,
         )
 
+        live_retune = self._live_retune
         self._engine = OrchestratorEngineAdapter(
             self.config,
             self._build_worker_capabilities(),
@@ -525,6 +732,10 @@ class NativePlannerBase:
                 require_prefill=self.require_prefill,
                 require_decode=self.require_decode,
             ),
+            retune_inputs=(
+                None if live_retune is None else live_retune.retune_inputs()
+            ),
+            retune_hooks=None if live_retune is None else live_retune.hooks(),
         )
         return self._engine
 
@@ -684,6 +895,7 @@ class NativePlannerBase:
         traffic = None
         worker_counts = None
         fpm_obs = None
+        batch = None
 
         if tick.need_traffic_metrics:
             if tick.use_full_traffic_metrics:
@@ -692,15 +904,40 @@ class NativePlannerBase:
                 traffic = await self._collect_kv_hit_rate_observation(
                     tick.traffic_metrics_duration_s
                 )
-        if tick.need_worker_states:
-            worker_counts = await self._collect_worker_counts()
         if tick.need_worker_fpm:
             fpm_obs = self._collect_fpm()
+        if tick.need_batch_scheduling:
+            try:
+                batch = await self.environment.collect_batch_scheduling()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Batch scheduling observation failed; continuing fail-closed"
+                )
+        if tick.need_worker_states:
+            capacity_available = True
+            if tick.need_batch_scheduling:
+                try:
+                    await self.environment.refresh_replica_state()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    capacity_available = False
+                    logger.exception(
+                        "Post-batch worker-state refresh failed; continuing "
+                        "with capacity missing"
+                    )
+            if capacity_available:
+                worker_counts = await self._collect_worker_counts()
+        if tick.need_batch_scheduling:
+            now = time.time()
         return TickInput(
             now_s=now,
             traffic=traffic,
             worker_counts=worker_counts,
             fpm_observations=fpm_obs,
+            batch=batch,
         )
 
     async def _observe_tick(
@@ -722,6 +959,13 @@ class NativePlannerBase:
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         pass
+
+    async def _apply_submitted_effects(self, effects: PlannerEffects) -> None:
+        """Apply one admitted drain-and-scaling decision in safety order."""
+
+        if effects.batch_drain_limits and not self.config.advisory:
+            await self.environment.apply_batch_drain_limits(effects.batch_drain_limits)
+        await self._apply_effects(effects)
 
     def _effect_submission_done(self, task: asyncio.Task[None]) -> None:
         if self._effect_submission_task is not task:
@@ -807,7 +1051,7 @@ class NativePlannerBase:
                 # Creating the remote task is the admission point. PATCH uses
                 # the same outer lock, so no update can linearize between the
                 # generation check and admission.
-                task = asyncio.create_task(self._apply_effects(effects))
+                task = asyncio.create_task(self._apply_submitted_effects(effects))
                 self._effect_submission_task = task
                 task.add_done_callback(self._effect_submission_done)
 
@@ -1029,6 +1273,7 @@ class NativePlannerBase:
             tick.run_load_scaling
             or tick.run_throughput_scaling
             or effects.scale_to is not None
+            or bool(effects.batch_drain_limits)
             or bool(diag.audit_events)
             or bool(diag.short_circuit_reason)
         )
@@ -1050,6 +1295,14 @@ class NativePlannerBase:
         async with self._config_lock:
             config_generation = self._config_generation
             effects = await engine.tick(tick, tick_input)
+        if self._live_retune is not None:
+            # Retune decisions go to the live supervisor's outbox, which
+            # persists them before actuating routers; _apply_effects never
+            # sees router parameters.
+            try:
+                self._live_retune.on_effects(effects)
+            except Exception:
+                logger.exception("Live retune failed to take the tick's effects")
         await self._submit_effects(effects, config_generation)
         emit_diagnostics = self._should_emit_tick_diagnostics(tick, effects)
         if emit_diagnostics:
@@ -1075,14 +1328,23 @@ class NativePlannerBase:
     async def run(self) -> None:
         engine = self._ensure_engine()
         next_tick = engine.initial_tick(time.time())
-        poll_interval = self.config.load_adjustment_interval_seconds / 10
-        gpu_shape_retry_interval = min(
-            max(poll_interval, _GPU_SHAPE_RETRY_MIN_SECONDS),
-            _GPU_SHAPE_RETRY_MAX_SECONDS,
-        )
+        tick_generation = self._config_generation
 
         try:
             while True:
+                if tick_generation != self._config_generation:
+                    # An activation since the pending tick was planned may
+                    # change which loops it runs and what it pulls.
+                    tick_generation = self._config_generation
+                    if isinstance(engine, ReconfigurableEngineProtocol):
+                        next_tick = engine.next_scheduled_tick()
+                # Read every iteration: a runtime reconfiguration may change
+                # the load interval.
+                poll_interval = self.config.load_adjustment_interval_seconds / 10
+                gpu_shape_retry_interval = min(
+                    max(poll_interval, _GPU_SHAPE_RETRY_MIN_SECONDS),
+                    _GPU_SHAPE_RETRY_MAX_SECONDS,
+                )
                 now = time.time()
                 if now < next_tick.at_s:
                     await asyncio.sleep(min(next_tick.at_s - now, poll_interval))

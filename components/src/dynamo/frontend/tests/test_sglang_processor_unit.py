@@ -884,6 +884,10 @@ class TestMapFinishReason:  # FRONTEND.5 — finish_reason remap (frontend layer
         """Unknown reasons pass through unchanged."""
         assert _map_finish_reason("tool_calls") == "tool_calls"
 
+    def test_structured_error_returns_none(self):
+        """A non-string finish_reason is not used as a map key."""
+        assert _map_finish_reason({"error": "kv transfer failed"}) is None
+
 
 # ---------------------------------------------------------------------------
 # convert_tools
@@ -892,6 +896,70 @@ class TestMapFinishReason:  # FRONTEND.5 — finish_reason remap (frontend layer
 
 class TestConvertTools:  # FRONTEND.3 — OpenAI tool schema → SGLang Tool/Function
     """Test OpenAI tool dict to SGLang Tool conversion."""
+
+    @pytest.mark.parametrize(
+        "function_flag, tool_flag, expected",
+        [
+            (None, None, None),
+            (True, None, True),
+            (False, None, False),
+            (None, True, True),
+            (None, False, False),
+            (False, True, False),
+            (True, False, True),
+        ],
+    )
+    def test_defer_loading_reaches_template(self, function_flag, tool_flag, expected):
+        tool = {"type": "function", "function": {"name": "lookup"}}
+        if function_flag is not None:
+            tool["function"]["defer_loading"] = function_flag
+        if tool_flag is not None:
+            tool["defer_loading"] = tool_flag
+        original = copy.deepcopy(tool)
+        dumped = convert_tools([tool])[0].model_dump()
+        assert dumped["function"].get("defer_loading") is expected
+        assert ("defer_loading" in dumped["function"]) == (expected is not None)
+        assert tool == original
+
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_named_choice_renders_deferred_tool_eagerly(self, nested):
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                },
+            },
+        }
+        if nested:
+            tool["function"]["defer_loading"] = True
+        else:
+            tool["defer_loading"] = True
+        sglang_tools = convert_tools(
+            [tool, {"type": "function", "function": {"name": "other"}}]
+        )
+        original = [value.model_dump() for value in sglang_tools]
+        selected = sglang_prepost_module._filter_template_tools(
+            {"tool_choice": {"type": "function", "function": {"name": "lookup"}}},
+            sglang_tools=sglang_tools,
+            exclude_tools_when_tool_choice_none=True,
+        )
+        assert len(selected) == 1
+        assert selected[0]["function"]["name"] == "lookup"
+        assert "defer_loading" not in selected[0]
+        assert "defer_loading" not in selected[0]["function"]
+        assert selected[0]["function"]["parameters"] == tool["function"]["parameters"]
+        assert [value.model_dump() for value in sglang_tools] == original
+        for choice in ("auto", "required"):
+            visible = sglang_prepost_module._filter_template_tools(
+                {"tool_choice": choice},
+                sglang_tools=sglang_tools,
+                exclude_tools_when_tool_choice_none=True,
+            )
+            assert len(visible) == 2
+            assert visible[0]["function"]["defer_loading"] is True
 
     def test_none_returns_none(self):
         assert convert_tools(None) is None
@@ -4693,7 +4761,9 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert chunks[1]["nvext"]["stop_reason"] == "END"
         assert "prompt_logprobs" not in chunks[1]["choices"][0]
 
-    def _run_logprob_stream(self, items, request=None):
+    def _run_logprob_stream(
+        self, items, request=None, eos_token_ids=None, prompt_ids=()
+    ):
         if request is None:
             request = {"model": "test-model", "logprobs": True}
         processor = SglangProcessor(
@@ -4708,18 +4778,60 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             tokenizer=self.ByteTokenizer(),
             tool_call_parser=None,
             reasoning_parser=None,
+            eos_token_ids=eos_token_ids,
         )
 
         async def collect():
             return [
                 item["data"]
                 async for item in processor._generate_and_stream(
-                    "req-logprobs", request, {}, [], post
+                    "req-logprobs", request, {}, list(prompt_ids), post
                 )
                 if "data" in item
             ]
 
         return asyncio.run(collect())
+
+    def test_hidden_eos_keeps_score_and_requested_ids(self):
+        """All 48 generated tokens keep a score and ID; only EOS text stays hidden."""
+        eos = 0
+        generated = [*b"x" * 47, eos]
+        logprobs = [-float(position) for position in range(1, len(generated) + 1)]
+        items = [
+            {"token_ids": [token_id], "log_probs": [logprob]}
+            for token_id, logprob in zip(generated, logprobs)
+        ]
+        items[-1]["finish_reason"] = "stop"
+
+        chunks = self._run_logprob_stream(
+            items,
+            request={
+                "model": "test-model",
+                "logprobs": True,
+                "nvext": {"extra_fields": ["completion_token_ids", "prompt_token_ids"]},
+            },
+            eos_token_ids=[eos],
+            prompt_ids=[1, 2, 3],
+        )
+
+        choices = [chunk["choices"][0] for chunk in chunks]
+        content = "".join(choice["delta"].get("content", "") for choice in choices)
+        assert content == "x" * 47
+        assert choices[-1]["finish_reason"] == "stop"
+        scores = [
+            entry["logprob"]
+            for choice in choices
+            for entry in choice["logprobs"]["content"]
+        ]
+        assert scores == logprobs
+        completion_ids = [
+            token_id
+            for chunk in chunks
+            for token_id in chunk["nvext"]["completion_token_ids"]
+        ]
+        assert completion_ids == generated
+        prompt_ids = [chunk["nvext"].get("prompt_token_ids") for chunk in chunks]
+        assert prompt_ids == [None] * (len(chunks) - 1) + [[1, 2, 3]]
 
     @pytest.mark.parametrize(
         "prompt_count,logprobs,top_logprobs,expected_top_count",
@@ -5373,10 +5485,10 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert chunk["nvext"]["stop_reason"] == "END"
         assert "stop_reason" not in chunk["choices"][0]
 
-    def _run_stream(self, tokenizer, items):
+    def _run_stream(self, tokenizer, items, engine=None):
         processor = SglangProcessor(
             tokenizer=tokenizer,
-            routed_engine=FakeRoutedEngine(items=items),
+            routed_engine=engine or FakeRoutedEngine(items=items),
             tool_call_parser_name=None,
             reasoning_parser_name=None,
             eos_token_ids=None,
@@ -5422,6 +5534,41 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             "event": "error",
             "comment": ["backend disconnected"],
         }
+
+    @pytest.mark.parametrize(
+        "finish_reason",
+        [{"error": "kv transfer failed"}, "error: kv transfer failed"],
+    )
+    @pytest.mark.parametrize("after_output", [False, True])
+    def test_finish_reason_error_ends_stream_with_error_envelope(
+        self, after_output, finish_reason
+    ):
+        """An error finish_reason ends the stream with one error frame."""
+        prefix = [{"token_ids": [ord("A")]}] if after_output else []
+        engine = FakeRoutedEngine(
+            items=[
+                *prefix,
+                {"token_ids": [], "finish_reason": finish_reason},
+                {"token_ids": [ord("B")], "finish_reason": None},
+            ]
+        )
+        items = self._run_stream(self.ByteTokenizer(), [], engine=engine)
+        assert len(items) == len(prefix) + 1
+        if after_output:
+            assert items[0]["choices"][0]["delta"]["content"] == "A"
+            assert items[0]["choices"][0]["finish_reason"] is None
+        assert items[-1] == {
+            "_dynamo_annotated": True,
+            "event": "error",
+            "comment": ["kv transfer failed"],
+        }
+        assert not any(
+            choice.get("finish_reason") == "error"
+            for item in items
+            for choice in item.get("choices", [])
+        )
+        # The chunk after the error was never read from the routed stream.
+        assert engine.yielded == len(prefix) + 1
 
     @pytest.mark.parametrize("after_output", [False, True])
     def test_routed_validation_exception_preserves_type_and_message(self, after_output):
@@ -6291,3 +6438,84 @@ class TestThinkingControlParity:  # FRONTEND.10
             reasoning_parser_name=None,
         )
         assert result.request.get("chat_template_kwargs", {}) == case.expected
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    "native,choice,exclude",
+    [
+        (False, "auto", True),
+        (True, "auto", True),
+        (True, "none", True),
+        (True, "none", False),
+    ],
+    ids=["legacy", "native", "excluded", "retained"],
+)
+def test_preprocess_preserves_responses_native_tools(native, choice, exclude):
+    seen = []
+    template = (
+        "{% set deferred_render_mode = deferred_render_mode | default('tool_name_only') %}"
+        if native
+        else ""
+    ) + "TOOL_USE {{ tools | tojson }}"
+    default = "DEFAULT {{ tools | tojson }}"
+
+    class CapturingTokenizer:
+        chat_template = template
+
+        def get_chat_template(self, chat_template=None, tools=None):
+            return chat_template or (template if tools else default)
+
+        def apply_chat_template(self, messages, **kwargs):
+            seen.append(
+                (
+                    kwargs.get("tools"),
+                    kwargs.get("chat_template")
+                    or self.get_chat_template(tools=kwargs.get("tools")),
+                )
+            )
+            return [1]
+
+    function = {"name": "read", "parameters": {"type": "object"}}
+    catalog = [
+        {
+            "type": "namespace",
+            "name": "fs",
+            "description": "Files",
+            "defer_loading": True,
+            "tools": [function],
+        }
+    ]
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Read a file"}],
+        "tool_choice": choice,
+        "tools": [{"type": "function", "function": function}],
+    }
+    request["responses_native_tools"] = {
+        "tools": [{"type": "function", "function": {**function, "name": "fs.read"}}],
+        "template_tools": catalog,
+        "messages": request["messages"],
+        "tool_choice": choice,
+    }
+    result = preprocess_chat_request(
+        request,
+        tokenizer=CapturingTokenizer(),
+        tool_call_parser_name=None,
+        reasoning_parser_name=None,
+        exclude_tools_when_tool_choice_none=exclude,
+    )
+    excluded = choice == "none" and exclude
+    assert result.request["tools"][0]["function"]["name"] == (
+        "fs.read" if native and not excluded else "read"
+    )
+    rendered_tools, selected_template = seen[0]
+    assert selected_template == (default if excluded else template)
+    if excluded:
+        assert rendered_tools is None
+    elif native:
+        assert rendered_tools == catalog
+    else:
+        assert rendered_tools[0]["type"] == "function"
+        assert rendered_tools[0]["function"]["name"] == "read"
+    assert request["tools"][0]["function"]["name"] == "read"
