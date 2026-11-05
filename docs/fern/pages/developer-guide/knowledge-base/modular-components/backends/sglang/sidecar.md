@@ -12,7 +12,8 @@ subtitle: Run Dynamo beside SGLang's Rust server through native gRPC.
 > experimental. Manifests, flags, and behavior may change without notice.
 
 `dynamo-sglang-sidecar` connects a Dynamo worker to SGLang's Rust server
-(`SGLANG_RUST_SERVER=1`) through its native gRPC service, `sglang.api.v1`. See
+(`SGLANG_RUST_SERVER=1`, SGLang v0.5.23 or later) through its native gRPC
+service, `sglang.api.v1`. See
 [Sidecar Backends](../../../concepts/system-architecture/sidecar-backends.md)
 for the architecture.
 
@@ -72,9 +73,7 @@ kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 Multinode deployments require complete `leader` and `worker` role PodTemplates. Set
 `backendFramework: sglang` as the examples do; the operator does not infer a backend from
 a native engine launch. The templates own the native engine commands and
-sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and
-[attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). Attention-DP requires SGLang 0.5.22 or later and a Dynamo sidecar
-with matching attention-DP metadata support. Engine-failure KV recovery remains
+sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml). Engine-failure KV recovery remains
 incomplete and is tracked in [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
 
 The examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which exist only in

@@ -147,8 +147,8 @@ impl NodeMetadata {
             "dist_init_addr must be a TCP address"
         );
         validate_endpoint(&url)?;
-        // Derive the group key from the shared rendezvous address, not from
-        // the local source or gRPC address.
+        // Match the in-process group key using the shared rendezvous address,
+        // not the local source or gRPC address.
         resolve_rendezvous(move || address.socket_addrs(|| None), deadline)
             .await
             .and_then(worker_group_id_from_addresses)
@@ -342,14 +342,14 @@ pub struct Pool {
 }
 
 impl Pool {
+    // bootstrap=false: Pool::connect's only call site is LLMEngine::start
+    // (lib/sidecar/sglang/src/engine.rs), after the tracing subscriber is
+    // installed. See connect()'s own doc comment.
     pub async fn connect(
         uri: &GrpcEndpoint,
         cfg: &GrpcTransportConfig,
         deadline: Instant,
     ) -> Result<Self, DynamoError> {
-        // bootstrap=false: a pool is connected only from LLMEngine::start,
-        // after the tracing subscriber is installed. See connect()'s own doc
-        // comment.
         let pool = connect_pool(uri, *cfg, deadline, false).await?;
         let clients = (0..pool.len())
             .map(|_| client_from_channel(pool.next_channel()))
@@ -390,7 +390,7 @@ impl Pool {
 /// GetServerInfo, GetModelInfo and ListModels, mapped to typed discovery.
 /// An engine that answers any of them UNIMPLEMENTED does not serve the
 /// contract: SGLang's Python server serves none of them, and a Rust server
-/// that predates sgl-project/sglang#42118 lacks ListModels.
+/// older than v0.5.23 lacks ListModels.
 pub(crate) async fn discover(
     client: &mut Client,
     deadline: Instant,
@@ -475,9 +475,8 @@ pub async fn abort(client: &mut Client, rid: &str, timeout: Duration) -> Result<
         .map(|response| response.into_inner().success)
 }
 
-/// The Abort RPC on one connection. SGLang's Rust server has no HTTP
-/// `/abort_request`; this RPC also cancels requests opened through native
-/// HTTP `/generate`.
+/// The Abort RPC on one connection. It also cancels requests opened through
+/// native HTTP `/generate`.
 #[derive(Clone)]
 pub(crate) struct AbortRpc(Client);
 
@@ -549,9 +548,7 @@ fn deadline_result<T>(
 fn contract_mismatch(rpc: &str, service: &str) -> DynamoError {
     invalid_arg(format!(
         "the SGLang engine does not serve {service}/{rpc} (UNIMPLEMENTED); \
-         start SGLang with SGLANG_RUST_SERVER=1; the sidecar requires an SGLang build \
-         with sgl-project/sglang#42118 and the api.v1 sidecar changes listed in \
-         lib/sidecar/sglang/README.md"
+         start SGLang v0.5.23 or later with SGLANG_RUST_SERVER=1"
     ))
 }
 

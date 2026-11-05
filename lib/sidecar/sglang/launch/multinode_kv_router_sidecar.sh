@@ -30,7 +30,7 @@ if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
     echo "PD:       SGLANG_BOOTSTRAP_HOST=<reachable prefill leader IP> on prefill node 0;"
     echo "          prefill serves its bootstrap registry on SGLANG_HTTP_PORT"
     echo "Ports:    SGLANG_HTTP_PORT=30000, SGLANG_GRPC_PORT=30001, SGLANG_KV_EVENT_PORT=5557"
-    echo "          SGLANG_DISAGGREGATION_BOOTSTRAP_PORT=8998 (decode default), DYN_SYSTEM_PORT=8081"
+    echo "          DYN_SYSTEM_PORT=8081"
     echo "          DYN_HTTP_PORT=8000 is the separately launched frontend's port."
     echo "Other:    SGLANG_PYTHON=python3, SGLANG_HOST=0.0.0.0, SGLANG_PAGE_SIZE=64"
     echo "          CUDA_VISIBLE_DEVICES is inherited. Extra arguments go to SGLang only."
@@ -83,11 +83,6 @@ case "$ROLE" in
     aggregated) ;;
     prefill|decode)
         ENGINE_ROLE_ARGS=(--disaggregation-mode "$ROLE" --disaggregation-transfer-backend nixl)
-        # The Rust server serves prefill's bootstrap on its HTTP port.
-        if [[ "$ROLE" == decode ]]; then
-            ENGINE_ROLE_ARGS+=(--disaggregation-bootstrap-port
-                "${SGLANG_DISAGGREGATION_BOOTSTRAP_PORT:-8998}")
-        fi
         if [[ "$ROLE" == prefill && "$NODE_RANK" == 0 ]]; then
             : "${SGLANG_BOOTSTRAP_HOST:?Set SGLANG_BOOTSTRAP_HOST to the reachable prefill leader address}"
             SIDECAR_ARGS+=(--bootstrap-host "$SGLANG_BOOTSTRAP_HOST")

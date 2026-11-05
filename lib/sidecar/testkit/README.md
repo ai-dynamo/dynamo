@@ -317,5 +317,4 @@ assertions through the existing sidecar E2E jobs. No separate GPU test executabl
 or native-test build artifact is needed.
 
 The SGLang launch scripts run SGLang's Rust server (`SGLANG_RUST_SERVER=1`), so
-the SGLang configs need an SGLang build that serves the `sglang.api.v1` contract
-vendored in `sglang/proto/`.
+the SGLang configs need SGLang v0.5.23 or later.
