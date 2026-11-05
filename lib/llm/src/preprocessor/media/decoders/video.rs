@@ -380,7 +380,15 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
         .map_err(memfile_error)?;
     let fd_path = format!("/proc/self/fd/{}", mem_file.as_raw_fd());
     let mut input = ffmpeg_next::format::input(&fd_path).map_err(video_open_error)?;
-    let (stream_index, stream_time_base, stream_duration, source_fps, total_frames, parameters) = {
+    let (
+        stream_index,
+        stream_time_base,
+        stream_start_time,
+        stream_duration,
+        source_fps,
+        total_frames,
+        parameters,
+    ) = {
         let input_stream = input
             .streams()
             .best(ffmpeg_next::media::Type::Video)
@@ -394,6 +402,7 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
         (
             input_stream.index(),
             stream_time_base,
+            input_stream.start_time(),
             input_stream.duration(),
             (frame_rate.numerator() as f32 / frame_rate.denominator() as f32) as f64,
             input_stream.frames().max(0) as u64,
@@ -401,8 +410,17 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
         )
     };
     let source_timing = if stream_duration > 0 {
+        // A known duration says nothing about where the stream starts. Use the
+        // selected stream's own start (not the container's, which is the
+        // minimum over all streams) so frame timestamps are clip-relative, as
+        // in the packet-derived branch.
+        let start_time_secs = if stream_start_time == ffmpeg_next::ffi::AV_NOPTS_VALUE {
+            0.0
+        } else {
+            Time::new(Some(stream_start_time), stream_time_base).as_secs() as f64
+        };
         SourceVideoTiming {
-            start_time_secs: 0.0,
+            start_time_secs,
             duration_secs: Time::new(Some(stream_duration), stream_time_base).as_secs() as f64,
         }
     } else {
@@ -798,6 +816,46 @@ mod tests {
         assert_eq!(metadata.sampled_timestamps.len(), 3);
         for (actual, expected) in metadata.sampled_timestamps.iter().zip([0.0, 1.5, 2.5]) {
             assert!((actual - expected).abs() < 0.01);
+        }
+    }
+
+    /// Same clip as `webm_nonzero_start_6.webm`, but in MP4, which reports a
+    /// positive stream duration (3 s) and so takes the known-duration branch
+    /// instead of the packet scan. The stream starts at PTS 5 s. Regenerate with
+    /// `ffmpeg -i webm_nonzero_start_6.webm -map 0:v:0 -c copy -copyts mp4_nonzero_start_6.mp4`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_decode_video_samples_relative_to_known_duration_nonzero_start() {
+        let path = format!(
+            "{}/tests/data/media/mp4_nonzero_start_6.mp4",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bytes =
+            std::fs::read(&path).unwrap_or_else(|_| panic!("Failed to read test video: {}", path));
+        let decoder = VideoDecoder {
+            num_frames: Some(3),
+            ..Default::default()
+        };
+
+        let decoded = decoder
+            .decode(EncodedMediaData {
+                bytes,
+                b64_encoded: false,
+            })
+            .unwrap();
+
+        assert_eq!(decoded.tensor_info.shape, vec![3, 224, 224, 3]);
+        let Some(DecodedMediaMetadata::Video(metadata)) = decoded.tensor_info.metadata else {
+            panic!("missing video metadata");
+        };
+        assert!((metadata.source_duration - 3.0).abs() < 0.01);
+        assert_eq!(metadata.sampled_timestamps.len(), 3);
+        for (actual, expected) in metadata.sampled_timestamps.iter().zip([0.0, 1.5, 2.5]) {
+            assert!(
+                (actual - expected).abs() < 0.01,
+                "sampled_timestamps = {:?}",
+                metadata.sampled_timestamps
+            );
         }
     }
 
