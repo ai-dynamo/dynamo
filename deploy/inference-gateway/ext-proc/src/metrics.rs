@@ -412,7 +412,7 @@ impl Metrics {
     /// The process-wide instance backing `/metrics`.
     pub fn global() -> &'static Arc<Self> {
         static GLOBAL: LazyLock<Arc<Metrics>> =
-            LazyLock::new(|| Arc::new(Metrics::with_registry(Registry::new())));
+            LazyLock::new(|| Arc::new(Metrics::with_registry(REGISTRY.clone())));
         &GLOBAL
     }
 
@@ -990,5 +990,21 @@ mod tests {
         ] {
             assert!(body.contains(expected), "missing {expected} in:\n{body}");
         }
+    }
+
+    /// Regression test: the process-wide recorder must register on the registry
+    /// the `/metrics` handler encodes, not on a private one that never reaches a
+    /// scrape.
+    #[test]
+    fn global_metrics_are_exposed_by_the_scrape_registry() {
+        Metrics::global().start_request().finish(Outcome::ResponseEos);
+
+        let (status, body) = encode(&REGISTRY);
+        assert_eq!(status, StatusCode::OK);
+        let body = String::from_utf8(body).expect("utf8");
+        assert!(
+            body.contains("# TYPE dynamo_epp_requests_total counter"),
+            "the process-wide recorder is missing from the scrape registry:\n{body}"
+        );
     }
 }
