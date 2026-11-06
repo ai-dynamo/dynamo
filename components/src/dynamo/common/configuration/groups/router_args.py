@@ -316,6 +316,7 @@ class RouterArgGroup(ArgGroup):
                 ),
                 arg_type=int,
                 dest="session_affinity_max_entries",
+                env=self.env,
             )
         add_argument(
             g,
