@@ -13,8 +13,11 @@ For text-to-speech deployments and launch scripts, see [Audio Generation](audio-
 <ExampleSelector
   variants={[
     {"id": "kubernetes-vllm-nemotron-speech-agg-yaml", "target": "kubernetes:vllm", "label": "Nemotron Speech · agg.yaml", "description": "Cascaded ASR, LLM, and TTS pipeline"},
+    {"id": "kubernetes-vllm-agg-asr-yaml", "target": "kubernetes:vllm", "label": "agg_asr.yaml", "description": "Qwen3-ASR Speech Recognition"},
+    {"id": "kubernetes-vllm-agg-asr-realtime-yaml", "target": "kubernetes:vllm", "label": "agg_asr_realtime.yaml", "description": "Qwen3-ASR Realtime Transcription"},
+    {"id": "local-vllm-agg-asr-sh", "target": "local:vllm", "label": "agg_asr.sh", "description": "Qwen3-ASR Speech Recognition"},
+    {"id": "local-vllm-agg-asr-realtime-sh", "target": "local:vllm", "label": "agg_asr_realtime.sh", "description": "Qwen3-ASR Realtime Transcription"},
     {"id": "local-vllm-agg-omni-realtime-sh", "target": "local:vllm", "label": "agg_omni_realtime.sh", "description": "Realtime Speech-to-Speech"},
-    {"id": "local-vllm-agg-realtime-transcription-sh", "target": "local:vllm", "label": "agg_realtime_transcription.sh", "description": "Qwen3-ASR Realtime Transcription"},
     {"id": "local-vllm-agg-transcription-sh", "target": "local:vllm", "label": "agg_transcription.sh", "description": "Whisper Speech-to-Text Transcription"}
   ]}
 >
@@ -32,6 +35,67 @@ Published Dynamo 1.5.0 runtime images are not compatible; use compatible source-
 
 </div>
 
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-asr-yaml">
+
+**Prerequisites:** [Speech Recognition on Kubernetes](../../use-cases/speech/voice-pipelines.md#speech-recognition-on-kubernetes)
+
+Serves `/v1/chat/completions` with an `audio_url` content part. To accept audio at a rate other
+than 16 kHz, run both components from an image with PyAV, as described in
+[Image Requirements](../../use-cases/speech/voice-pipelines.md#image-requirements).
+
+[Source: `agg_asr.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_asr.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/agg_asr.yaml" title="agg_asr.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-asr-realtime-yaml">
+
+**Prerequisites:** [Speech Recognition on Kubernetes](../../use-cases/speech/voice-pipelines.md#speech-recognition-on-kubernetes)
+
+Streams transcription over the `/v1/realtime` WebSocket; deploy `agg_asr.yaml` for
+`/v1/chat/completions`. The worker resamples audio with `scipy`, which the vLLM runtime image does
+not include, so run it from an image with `scipy` installed, as described in
+[Image Requirements](../../use-cases/speech/voice-pipelines.md#image-requirements).
+
+[Source: `agg_asr_realtime.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_asr_realtime.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/agg_asr_realtime.yaml" title="agg_asr_realtime.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-asr-sh">
+
+Serves `/v1/chat/completions` with an `audio_url` content part through the vLLM chat processor.
+Pass `--model` to serve another Qwen3-ASR checkpoint. See
+[Speech Recognition (ASR)](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#speech-recognition-asr)
+for the request and output formats.
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_asr.sh)
+```
+
+[Source: `agg_asr.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_asr.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_asr.sh" title="agg_asr.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-asr-realtime-sh">
+
+**Experimental.** Validated with English audio. To serve another realtime-capable model, pass
+`--model` and `--hf-overrides` with its realtime architecture.
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_asr_realtime.sh)
+```
+
+[Source: `agg_asr_realtime.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_asr_realtime.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_asr_realtime.sh" title="agg_asr_realtime.sh" language="bash" maxLines={0} />
+
+</div>
+
 <div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-realtime-sh">
 
 ```bash
@@ -41,21 +105,6 @@ Published Dynamo 1.5.0 runtime images are not compatible; use compatible source-
 [Source: `agg_omni_realtime.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_realtime.sh)
 
 <Code src="../../../../../examples/backends/vllm/launch/agg_omni_realtime.sh" title="agg_omni_realtime.sh" language="bash" maxLines={0} />
-
-</div>
-
-<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-realtime-transcription-sh">
-
-**Experimental.** Validated with English audio. To serve another realtime-capable model, pass
-`--model` and `--hf-overrides` with its realtime architecture.
-
-```bash
-(cd examples/backends/vllm && bash launch/agg_realtime_transcription.sh)
-```
-
-[Source: `agg_realtime_transcription.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_realtime_transcription.sh)
-
-<Code src="../../../../../examples/backends/vllm/launch/agg_realtime_transcription.sh" title="agg_realtime_transcription.sh" language="bash" maxLines={0} />
 
 </div>
 

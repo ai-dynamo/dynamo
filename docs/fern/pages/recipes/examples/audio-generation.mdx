@@ -9,7 +9,7 @@ hide-toc: true
 import { ExampleSelector } from "@/components/ExampleSelector";
 
 Generate speech with `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`. See
-[Text-to-Audio](../../use-cases/diffusion/workflows/text-to-audio.md) for requests, or
+[Text-to-Speech](../../use-cases/speech/text-to-speech.md) for requests, or
 [Audio and Realtime Serving](audio.mdx) for transcription and speech-to-speech.
 
 `agg_omni_audio.yaml` was functionally validated on October 12, 2026 with one H100 GPU and Dynamo
@@ -40,7 +40,7 @@ remote code before enabling `--trust-remote-code`.
 
 Run it in a Dynamo 1.5.1 or later runtime; Dynamo 1.4.2 returned only an initial silent chunk. It
 also serves Nemotron Audex with `--model nvidia/Nemotron-Labs-Audex-2B`; see
-[Text-to-Audio](../../use-cases/diffusion/workflows/text-to-audio.md) for the 30B-A3B stage configuration
+[Text-to-Speech](../../use-cases/speech/text-to-speech.md) for the 30B-A3B stage configuration
 and the Audex request contract.
 
 ```bash
