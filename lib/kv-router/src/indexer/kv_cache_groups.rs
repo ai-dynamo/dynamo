@@ -283,10 +283,22 @@ struct OwnerRegistry {
     cache_owners: FxHashMap<ResidencyOwnerKey, ResidencyOwner>,
 }
 
+/// Immutable owner layout captured for one query. Keep this token associated
+/// with the same owner when validating membership or seeding legacy lookups.
 #[derive(Debug, Clone, Copy)]
-struct CapturedLayout {
+pub struct CapturedLayout {
     layout: CheckpointLayout,
     generation: u64,
+}
+
+impl CapturedLayout {
+    pub fn layout(self) -> CheckpointLayout {
+        self.layout
+    }
+
+    pub fn is_eligible_generation(self, generation: u64) -> bool {
+        self.generation == generation && self.layout.complete_layout
+    }
 }
 
 impl Default for CapturedLayout {
@@ -312,17 +324,36 @@ pub struct CheckpointReadView {
 }
 
 impl CheckpointReadView {
-    pub fn track_owner(&mut self, owner: ResidencyOwner) -> Option<CheckpointLayout> {
+    /// Reuses any prior legacy capture, including an unknown owner. Otherwise
+    /// loads the registry's immutable layout without allocating a query entry.
+    /// The caller must retain the result to preserve its first observation.
+    pub fn capture_layout(&self, owner: ResidencyOwner) -> Option<CapturedLayout> {
         if let Some(&captured) = self.layouts.get(&owner) {
-            return captured.map(|captured| captured.layout);
+            return captured;
         }
-        let layout = self
-            .registry
+        self.registry
             .layouts
             .get(&owner)
-            .map(|snapshot| **snapshot.load());
-        self.layouts.insert(owner, layout);
-        layout.map(|captured| captured.layout)
+            .map(|snapshot| **snapshot.load())
+    }
+
+    /// Seeds a legacy lookup with the caller's first capture for this same
+    /// owner. An existing capture, including `None`, is never replaced.
+    pub fn remember_layout(&mut self, owner: ResidencyOwner, captured: Option<CapturedLayout>) {
+        self.layouts.entry(owner).or_insert(captured);
+    }
+
+    pub fn track_owner(&mut self, owner: ResidencyOwner) -> Option<CheckpointLayout> {
+        let registry = &self.registry;
+        self.layouts
+            .entry(owner)
+            .or_insert_with(|| {
+                registry
+                    .layouts
+                    .get(&owner)
+                    .map(|snapshot| **snapshot.load())
+            })
+            .map(CapturedLayout::layout)
     }
 
     pub fn layout(&self, owner: ResidencyOwner) -> Option<CheckpointLayout> {
@@ -355,8 +386,8 @@ impl CheckpointReadView {
     }
 
     /// Returns a live hint for any owner in this tier, without retaining a shard.
-    /// This is not proof of owner or generation eligibility. Before granting
-    /// credit, pass the returned revision to `for_each_owner_at_revision`.
+    /// This is not proof of owner or generation eligibility. A revision visitor
+    /// must validate this hint and the owner's captured layout before credit.
     #[inline]
     pub fn checkpoint_hint_revision(
         &self,
@@ -371,15 +402,17 @@ impl CheckpointReadView {
             .then_some(membership.revision)
     }
 
-    /// Visits eligible owners only if this hash still has the observed revision.
-    /// A store, removal, or lifecycle change after the hint cannot introduce
-    /// credit. The shard guard is scoped to this call and is never cached.
-    pub fn for_each_owner_at_revision(
+    /// Visits raw membership facts only while this hash has the exact observed
+    /// revision. A fact alone grants no credit: the caller must match the owner
+    /// to its first captured layout and validate generation and completeness
+    /// with `CapturedLayout::is_eligible_generation` before granting credit.
+    /// The immutable shard guard is scoped to this call and is never cached.
+    pub fn for_each_membership_at_revision(
         &self,
         hash: ExternalSequenceBlockHash,
         tier: StorageTier,
         revision: u64,
-        mut visit: impl FnMut(ResidencyOwner),
+        mut visit: impl FnMut(ResidencyOwner, u64),
     ) {
         if revision == 0 {
             return;
@@ -394,13 +427,31 @@ impl CheckpointReadView {
             return;
         }
         for &(owner, generation) in &membership.owners[tier_index(tier)] {
-            let Some(Some(captured)) = self.layouts.get(&owner) else {
-                continue;
-            };
-            if captured.generation == generation && captured.layout.complete_layout {
+            visit(owner, generation);
+        }
+    }
+
+    /// Visits eligible owners only if this hash still has the observed revision.
+    /// A store, removal, or lifecycle change after the hint cannot introduce
+    /// credit. Eligibility uses layouts already captured by this view.
+    pub fn for_each_owner_at_revision(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        tier: StorageTier,
+        revision: u64,
+        mut visit: impl FnMut(ResidencyOwner),
+    ) {
+        self.for_each_membership_at_revision(hash, tier, revision, |owner, generation| {
+            if self
+                .layouts
+                .get(&owner)
+                .copied()
+                .flatten()
+                .is_some_and(|captured| captured.is_eligible_generation(generation))
+            {
                 visit(owner);
             }
-        }
+        });
     }
 
     pub fn owners_at(
@@ -861,6 +912,168 @@ mod tests {
         let mut owners = Vec::new();
         view.for_each_owner_at_revision(hash, tier, revision, |owner| owners.push(owner));
         owners
+    }
+
+    #[test]
+    fn uncached_layouts_seed_legacy_lookups_without_recapturing_new_lifecycles() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let owner = ResidencyOwner::worker(worker);
+        let hash = ExternalSequenceBlockHash(11);
+        for lifecycle in 0..3 {
+            let table = KvCacheGroupResidency::new();
+            table.declare_layout(owner, &[0], 1);
+            table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
+            let mut view = table.read_view();
+            let captured = view.capture_layout(owner).unwrap();
+            assert!(captured.layout().complete_layout);
+            assert!(view.layouts.is_empty());
+            match lifecycle {
+                0 => table.clear_worker(worker),
+                1 => table.declare_layout(owner, &[3], 1),
+                _ => {
+                    table.remove_worker_rank(worker);
+                    table.declare_layout(owner, &[0], 1);
+                }
+            }
+            let group = if lifecycle == 1 { 3 } else { 0 };
+            table.apply(&checkpoint(
+                worker,
+                StorageTier::Device,
+                group,
+                hash.0,
+                Some(1),
+            ));
+            let fresh = table.read_view().capture_layout(owner).unwrap();
+            assert_ne!(captured.generation, fresh.generation);
+            assert!(!captured.is_eligible_generation(fresh.generation));
+
+            view.remember_layout(owner, Some(captured));
+            view.remember_layout(owner, Some(fresh));
+            assert_eq!(
+                view.capture_layout(owner).unwrap().generation,
+                captured.generation
+            );
+            assert_eq!(view.track_owner(owner), Some(captured.layout()));
+            assert!(view.owners_at(hash, StorageTier::Device).next().is_none());
+            let revision = view
+                .checkpoint_hint_revision(hash, StorageTier::Device)
+                .unwrap();
+            assert!(owners_at_revision(&view, hash, StorageTier::Device, revision).is_empty());
+        }
+    }
+
+    #[test]
+    fn layout_capture_reuses_prior_legacy_some_and_none() {
+        let table = KvCacheGroupResidency::new();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let owner = ResidencyOwner::worker(worker);
+        table.declare_layout(owner, &[0], 1);
+        let mut legacy = table.read_view();
+        legacy.track_owner(owner);
+        let original = legacy.capture_layout(owner).unwrap();
+        table.clear_worker(worker);
+        let current = table.read_view().capture_layout(owner).unwrap();
+        assert_ne!(original.generation, current.generation);
+        assert_eq!(
+            legacy.capture_layout(owner).unwrap().generation,
+            original.generation
+        );
+        legacy.remember_layout(owner, Some(current));
+        assert_eq!(
+            legacy.capture_layout(owner).unwrap().generation,
+            original.generation
+        );
+
+        let unknown_worker = WorkerWithDpRank::new(8, 0);
+        let unknown_owner = ResidencyOwner::worker(unknown_worker);
+        let mut unknown = table.read_view();
+        let captured = unknown.capture_layout(unknown_owner);
+        assert!(captured.is_none());
+        assert!(unknown.layouts.is_empty());
+        table.declare_layout(unknown_owner, &[0], 1);
+        table.apply(&checkpoint(
+            unknown_worker,
+            StorageTier::Device,
+            0,
+            11,
+            Some(1),
+        ));
+        unknown.remember_layout(unknown_owner, captured);
+        unknown.remember_layout(
+            unknown_owner,
+            table.read_view().capture_layout(unknown_owner),
+        );
+        assert!(unknown.layouts.contains_key(&unknown_owner));
+        assert!(unknown.capture_layout(unknown_owner).is_none());
+        assert!(unknown.track_owner(unknown_owner).is_none());
+        let hash = ExternalSequenceBlockHash(11);
+        let revision = unknown
+            .checkpoint_hint_revision(hash, StorageTier::Device)
+            .unwrap();
+        assert!(owners_at_revision(&unknown, hash, StorageTier::Device, revision).is_empty());
+    }
+
+    #[test]
+    fn raw_revision_facts_need_captured_owner_and_complete_generation() {
+        let table = KvCacheGroupResidency::new();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let owner = ResidencyOwner::worker(worker);
+        let hash = ExternalSequenceBlockHash(11);
+        let unknown = table.read_view();
+        let unknown_capture = unknown.capture_layout(owner);
+        table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
+        let revision = unknown
+            .checkpoint_hint_revision(hash, StorageTier::Device)
+            .unwrap();
+        let mut facts = Vec::new();
+        unknown.for_each_membership_at_revision(
+            hash,
+            StorageTier::Device,
+            revision,
+            |fact_owner, generation| facts.push((fact_owner, generation)),
+        );
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].0, owner);
+        assert!(!unknown_capture.is_some_and(|token| token.is_eligible_generation(facts[0].1)));
+        assert!(owners_at_revision(&unknown, hash, StorageTier::Device, revision).is_empty());
+        assert!(unknown.layouts.is_empty());
+        assert!(unknown.shards.get().is_none());
+
+        let current = table.read_view();
+        let captured = current.capture_layout(owner).unwrap();
+        assert!(captured.is_eligible_generation(facts[0].1));
+        let incomplete = WorkerWithDpRank::new(8, 0);
+        table.apply(&checkpoint(
+            incomplete,
+            StorageTier::Device,
+            0,
+            hash.0,
+            None,
+        ));
+        let incomplete = table
+            .read_view()
+            .capture_layout(ResidencyOwner::worker(incomplete))
+            .unwrap();
+        assert!(!incomplete.layout().complete_layout);
+        assert!(!incomplete.is_eligible_generation(incomplete.generation));
+
+        table.clear_worker(worker);
+        table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
+        let revision = current
+            .checkpoint_hint_revision(hash, StorageTier::Device)
+            .unwrap();
+        let mut credit = Vec::new();
+        current.for_each_membership_at_revision(
+            hash,
+            StorageTier::Device,
+            revision,
+            |fact_owner, generation| {
+                if fact_owner == owner && captured.is_eligible_generation(generation) {
+                    credit.push(fact_owner);
+                }
+            },
+        );
+        assert!(credit.is_empty());
     }
 
     #[test]
