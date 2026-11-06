@@ -150,7 +150,7 @@ spec:
 | `load_adjustment_interval_seconds` | int | `5` | FPM 调优更新和基于负载的扩缩容决策之间的秒数。即使只启用了吞吐量扩缩容，实时 FPM 观测也会按此间隔输入到性能模型中。必须短于 `throughput_adjustment_interval_seconds`。 |
 | `max_num_fpm_samples` | int | `64` | 为在线调优或回归保留的 FPM 观测最大数量。 |
 | `fpm_sample_bucket_size` | int | `16` | 用于观测淘汰的 bucket 数量（必须是完全平方数）。 |
-| `load_scaling_down_sensitivity` | int | `80` | 缩容敏感度 0-100（0=永不，100=激进）。 |
+| `load_scaling_down_sensitivity` | int | `80` | SLA 模式下的缩容敏感度 0-100（100=激进）。0 会阻止基于性能模型的缩容，但完全空闲的池仍会每次减少一个副本，直到端点下限（至少 1）。仅在 `optimization_target` 为 `sla` 时生效。 |
 | `load_min_observations` | int | `5` | 做出扩缩容决策前所需的最少观测数。 |
 
 ### 通用设置
