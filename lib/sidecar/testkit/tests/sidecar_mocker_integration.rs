@@ -581,7 +581,7 @@ async fn vllm_teardown_terminates_handlers_with_clients_alive() {
         teardown_with_live_clients::<vllm_fixture::Fixture>(),
     )
     .await;
-    let error = failure(outputs, &tokens, BackendError::Unknown);
+    let error = failure(outputs, &tokens, BackendError::Disconnected);
     assert!(error.to_string().contains("GenerateStream"));
 }
 
@@ -691,7 +691,7 @@ async fn sglang_teardown_terminates_handlers_with_clients_alive() {
         teardown_with_live_clients::<support::sglang::Fixture>(),
     )
     .await;
-    let error = failure(outputs, &tokens, BackendError::Unknown);
+    let error = failure(outputs, &tokens, BackendError::Disconnected);
     assert!(error.to_string().contains("Generate"));
 }
 
@@ -702,7 +702,7 @@ async fn lpx_teardown_terminates_handlers_with_clients_alive() {
         teardown_with_live_clients::<support::lpx::Fixture>(),
     )
     .await;
-    let error = failure(outputs, &tokens, BackendError::Unknown);
+    let error = failure(outputs, &tokens, BackendError::Disconnected);
     assert!(error.to_string().contains("Generate"));
 }
 
@@ -832,7 +832,7 @@ async fn trtllm_teardown_terminates_handlers_with_clients_alive() {
         teardown_with_live_clients::<support::trtllm::Fixture>(),
     )
     .await;
-    let error = failure(outputs, &tokens, BackendError::Unknown);
+    let error = failure(outputs, &tokens, BackendError::Disconnected);
     assert!(error.to_string().contains("Generate"));
 }
 
@@ -904,6 +904,34 @@ async fn trtllm_malformed_terminal_fails_then_recovers() {
         finish(&mut fixture, &engine).await;
     })
     .await;
+}
+
+/// TensorRT-LLM reporting `liveness` NOT_SERVING after startup resolves
+/// `engine_lost`; the process test covers a dropped connection.
+#[tokio::test]
+async fn trtllm_engine_lost_on_liveness_not_serving() {
+    let mut fixture =
+        support::trtllm::Fixture::start(Controller::default(), FixtureConfig::default()).await;
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    let lost = engine.engine_lost();
+    tokio::pin!(lost);
+    tokio::time::timeout(std::time::Duration::from_millis(300), &mut lost)
+        .await
+        .expect_err("a SERVING engine is not lost");
+    fixture.set_liveness_serving(false).await;
+    let error = bounded("engine lost on liveness NOT_SERVING", lost).await;
+    assert_eq!(
+        error.error_type(),
+        dynamo_backend_common::ErrorType::Backend(BackendError::EngineShutdown)
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("TensorRT-LLM engine lost: liveness reported NOT_SERVING"),
+        "{error}"
+    );
+    finish(&mut fixture, &engine).await;
 }
 
 fn http_request() -> PreprocessedRequest {
@@ -1344,6 +1372,31 @@ async fn sglang_visible_stop_tokens_preserve_tool_delimiters() {
         finish(&mut fixture, &engine).await;
     })
     .await;
+}
+
+/// SGLang ending `WatchEngineState` after startup resolves `engine_lost`, but
+/// `healthy=false` and a pause do not, since SGLang can clear both; the
+/// process test covers a dropped connection.
+#[tokio::test]
+async fn sglang_engine_lost_on_state_stream_end() {
+    let mut fixture =
+        sglang_fixture::Fixture::start(Controller::default(), FixtureConfig::default()).await;
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    let lost = engine.engine_lost();
+    tokio::pin!(lost);
+    fixture.set_engine_state(false, true);
+    tokio::time::timeout(std::time::Duration::from_millis(300), &mut lost)
+        .await
+        .expect_err("an unhealthy or paused engine is not lost");
+    fixture.end_engine_state();
+    let error = bounded("engine lost on stream end", lost).await;
+    assert_eq!(
+        error.error_type(),
+        dynamo_backend_common::ErrorType::Backend(BackendError::EngineShutdown)
+    );
+    assert!(error.to_string().contains("SGLang engine lost"), "{error}");
+    finish(&mut fixture, &engine).await;
 }
 
 // An LPX engine withholds the matched stop token, and the sidecar returns a

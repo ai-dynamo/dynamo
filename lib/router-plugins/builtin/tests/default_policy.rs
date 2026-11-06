@@ -1,13 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 mod support;
-use dynamo_custom_policy_builtin::{DefaultWorkerSelector, default_policy, default_registry};
-use dynamo_kv_router::protocols::WorkerWithDpRank;
-use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerInputView, WorkerInputs, WorkerPicker,
-    WorkerSelectionContext, WorkerSelectionInput, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError, WorkerSelector, WorkerType,
+use dynamo_kv_router::plugins::worker_selection::{
+    WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
 };
+use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_kv_router::scheduling::WorkerIdSet;
+use dynamo_kv_router::{
+    KvRouterConfig, RoutingPartitionRef, WorkerSelectionInput, WorkerSelectionPolicyError,
+    WorkerSelector, WorkerType,
+};
+use dynamo_router_policies::{DefaultWorkerSelector, default_policy, default_registry};
 use std::collections::{HashMap, HashSet};
 use support::*;
 
@@ -130,7 +133,7 @@ fn runtime_parameters_cannot_enable_worker_signals_missing_at_startup() {
         ),
         (KvRouterConfig::default(), WorkerType::Decode),
     ] {
-        let mut policy = dynamo_custom_policy_builtin::default_factory()(
+        let mut policy = dynamo_router_policies::default_factory()(
             &config,
             role,
             RoutingPartitionRef::new("model", "default"),
@@ -222,7 +225,7 @@ fn runtime_cache_tier_weights_change_selection_without_device_credit() {
                 }),
                 ..Default::default()
             };
-            let mut policy = dynamo_custom_policy_builtin::default_factory()(
+            let mut policy = dynamo_router_policies::default_factory()(
                 &config,
                 role,
                 RoutingPartitionRef::new("model", "default"),
@@ -363,7 +366,7 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
 #[test]
 fn sparse_eligibility_preserves_seeded_scoring_and_sampling() {
     let allowed = HashSet::from([1, 3, 5, 1000]);
-    let available = HashSet::from([1, 5, 7, 1001]);
+    let available = WorkerIdSet::from_iter([1, 5, 7, 1001]);
     for temperature in [0.0, 0.7] {
         for equal_costs in [false, true] {
             for (has_allowed, has_available) in [(true, false), (false, true), (true, true)] {
@@ -463,7 +466,8 @@ fn unseeded_sampling_matches_reference_with_the_same_random_draw() {
         for temperature in [0.1, 0.7, 1.0, 2.0] {
             for equal_costs in [false, true] {
                 let (workers, mut request) = fixture(count, 2048);
-                let available = is_sparse.then(|| HashSet::from([1, count as u64 - 1, 1000]));
+                let available =
+                    is_sparse.then(|| WorkerIdSet::from_iter([1, count as u64 - 1, 1000]));
                 if is_sparse {
                     request.allowed_worker_ids = Some(HashSet::from([1, count as u64 - 1]));
                 }
@@ -716,7 +720,7 @@ fn named_default_parameters_resolve_and_reject_invalid_values() {
             ..Default::default()
         };
         let mut registry = default_registry();
-        dynamo_custom_policy_builtin::register(&mut registry).unwrap();
+        dynamo_router_policies::register(&mut registry).unwrap();
         assert_eq!(registry.resolve(&config).is_ok(), succeeds);
     }
 }
@@ -756,7 +760,7 @@ fn yaml_parameters_override_legacy_config_and_omissions_inherit_it() {
             .insert(*worker, if worker.worker_id == 0 { 10 } else { 0 });
     }
     let mut registry = default_registry();
-    dynamo_custom_policy_builtin::register(&mut registry).unwrap();
+    dynamo_router_policies::register(&mut registry).unwrap();
     for (parameters, expected_worker, expects_cache) in [
         ("{}", 0, true),
         (
@@ -820,7 +824,7 @@ fn shared_cache_credit_defaults_and_legacy_precedence_apply_to_selection() {
     request.shared_cache_hits = Some(hits);
 
     let mut registry = default_registry();
-    dynamo_custom_policy_builtin::register(&mut registry).unwrap();
+    dynamo_router_policies::register(&mut registry).unwrap();
     for (cache_type, legacy, parameters, expected_worker) in [
         ("none", None, "{}", 0),
         ("hicache", None, "{}", 1),
@@ -930,7 +934,7 @@ fn selector_controls_share_runtime_state_and_clones_start_fresh() {
 
 #[test]
 fn startup_policy_parameters_match_the_default_factory_for_every_role() {
-    use dynamo_custom_policy_builtin::startup_policy_parameters;
+    use dynamo_router_policies::startup_policy_parameters;
 
     for conditional_disagg_enabled in [false, true] {
         for config in [
@@ -962,7 +966,7 @@ fn startup_policy_parameters_match_the_default_factory_for_every_role() {
                 WorkerType::Prefill,
                 WorkerType::Decode,
             ] {
-                let policy = dynamo_custom_policy_builtin::default_factory()(
+                let policy = dynamo_router_policies::default_factory()(
                     &config,
                     role,
                     RoutingPartitionRef::new("model", "default"),

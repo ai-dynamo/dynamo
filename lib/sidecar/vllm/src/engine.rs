@@ -246,8 +246,11 @@ impl VllmSidecarEngine {
         let mut engine = Self::new(endpoint, model.clone(), mode, transport);
         engine.engine_gates_reasoning =
             model.reports_proto_0_6() && model.reasoning_parser().is_some();
-        // Off by default until vLLM's gRPC server uses xgrammar (vllm-project/vllm#61892).
-        let structural_tag = args.sidecar.common.structural_tag(false);
+        // TODO: Remove this version check and default to `true` once the sidecar drops vLLM < 0.33.
+        let structural_tag = args
+            .sidecar
+            .common
+            .structural_tag(model.compiles_structural_tags());
         let config = WorkerConfig {
             runtime: args.sidecar.common.runtime,
             namespace: args.sidecar.common.namespace,
@@ -1007,8 +1010,8 @@ impl LLMEngine for VllmSidecarEngine {
                         break;
                     }
                     Ok(None) => {
-                        yield Err(client::protocol_error(
-                            "GenerateStream ended before a terminal response",
+                        yield Err(client::stream_incomplete(
+                            "vLLM GenerateStream ended before a terminal response",
                         ));
                         break;
                     }
@@ -1021,7 +1024,7 @@ impl LLMEngine for VllmSidecarEngine {
                         break;
                     }
                     Err(status) => {
-                        yield Err(client::status_to_dynamo("GenerateStream", status));
+                        yield Err(client::stream_status_to_dynamo("GenerateStream", status));
                         break;
                     }
                 }
@@ -1692,6 +1695,34 @@ mod tests {
                     result.err()
                 ),
             }
+        }
+    }
+
+    #[test]
+    fn structural_tags_default_on_from_vllm_0_33() {
+        for (flags, engine_version, expected) in [
+            (&[][..], "0.33.0", true),
+            (&[][..], "0.33.0rc1.dev649+gc3fd4ff44", true),
+            (&[][..], "0.32.0", false),
+            (&[][..], "", false),
+            (&["--dyn-structural-tag"][..], "0.32.0", true),
+            (&["--dyn-structural-tag", "false"][..], "0.33.0", false),
+        ] {
+            let args = Args::try_parse_from(
+                ["sidecar", "--grpc-endpoint", "127.0.0.1:12345"]
+                    .iter()
+                    .chain(flags),
+            )
+            .unwrap();
+            let mut server = server_info();
+            server.engine_version = engine_version.to_string();
+            let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
+            let (_, config) = VllmSidecarEngine::from_discovered(args, model, None).unwrap();
+            assert_eq!(
+                config.structural_tag.is_some(),
+                expected,
+                "{flags:?} {engine_version:?}"
+            );
         }
     }
 

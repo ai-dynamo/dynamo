@@ -10,7 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, value::RawValue};
 
 /// Retain the ingress buffer and small admission fields. Borrowed raw fields
@@ -89,6 +89,62 @@ impl<T: DeserializeOwned> ValidatedRequest<T> {
     /// Best-effort labels; validation and typed parsing run inside the handler's metrics guard.
     pub(super) fn identity(&self) -> (String, bool) {
         (self.model.clone(), self.stream)
+    }
+
+    /// Inspect native image tags without decoding or copying their source payloads.
+    /// URL sources are valid admission inputs even though the typed converter is base64-only.
+    pub(super) fn media_content_type(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<Option<&'static str>, String> {
+        validate(self.fields.as_ref().map_err(Clone::clone)?, headers)?;
+        #[derive(Deserialize)]
+        struct Messages<'a> {
+            #[serde(rename = "model", borrow)]
+            _model: std::borrow::Cow<'a, str>,
+            #[serde(rename = "max_tokens")]
+            _max_tokens: std::num::NonZeroU32,
+            #[serde(borrow)]
+            messages: Vec<Message<'a>>,
+        }
+        #[derive(Deserialize)]
+        struct Message<'a> {
+            #[serde(rename = "role")]
+            _role: crate::protocols::anthropic::types::AnthropicRole,
+            #[serde(borrow)]
+            content: &'a RawValue,
+        }
+        #[derive(Deserialize)]
+        struct Block<'a> {
+            #[serde(rename = "type", borrow)]
+            kind: Option<std::borrow::Cow<'a, str>>,
+            #[serde(borrow)]
+            content: Option<&'a RawValue>,
+        }
+
+        let Ok(request) = serde_json::from_slice::<Messages<'_>>(&self.body) else {
+            return Ok(None); // The typed parser reports malformed requests.
+        };
+        for message in request.messages {
+            let Ok(blocks) = serde_json::from_str::<Vec<Block<'_>>>(message.content.get()) else {
+                continue;
+            };
+            for block in blocks {
+                if block.kind.as_deref() == Some("image") {
+                    return Ok(Some("image_url"));
+                }
+                if block.kind.as_deref() == Some("tool_result")
+                    && let Some(content) = block.content
+                    && let Ok(blocks) = serde_json::from_str::<Vec<Block<'_>>>(content.get())
+                    && blocks
+                        .iter()
+                        .any(|block| block.kind.as_deref() == Some("image"))
+                {
+                    return Ok(Some("image_url"));
+                }
+            }
+        }
+        Ok(None)
     }
 
     pub(super) fn into_request(self, headers: &HeaderMap) -> Result<T, String> {

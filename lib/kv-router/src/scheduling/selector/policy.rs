@@ -229,6 +229,11 @@ impl WorkerSelectionPolicy {
     /// it has no filters, no scorers and no runtime config, and its picker declares at
     /// most [`WorkerInputs::ACTIVE_REQUESTS`]. Any other policy comes back unchanged.
     ///
+    /// Passing this check doesn't make a policy run hosted: for now the hosts call it only
+    /// for the `--router-mode` types (random, round-robin, least-loaded), in
+    /// the routing host and as `PushRouter`'s instance selectors. A picker-only type named
+    /// in a policy file still runs on the KV path.
+    ///
     /// The picker then serves every request for its role, so each factory call must build
     /// a fresh one. Pins and session affinity are applied by the host before selection, so
     /// [`Self::with_exclusive_affinity`] has no effect there.
@@ -425,7 +430,7 @@ impl CandidatePreparer {
         &self,
         input: WorkerSelectionInput<'_, C>,
     ) -> Option<PreparedCandidates> {
-        let (workers, request, eligibility, block_size) = input.into_configured().ok()?;
+        let (workers, request, eligibility, block_size) = input.into_configured();
         let input = MaterializedSelectionInput::new(request, block_size);
         let row_inputs = self.inputs.without(WorkerInputs::LOAD);
         let materialize_preferred_taint = self.inputs.contains(WorkerInputs::PREFERRED_TAINT);
@@ -447,6 +452,7 @@ impl CandidatePreparer {
             };
             let mut row = input.row(worker, preferred_taint_multiplier, row_inputs);
             row.inputs = self.inputs;
+            row.dp_size = config.data_parallel_size();
             input.track_kept_candidate(worker);
             rows.push(row);
             if defer_transfer {
@@ -477,17 +483,46 @@ impl PreparedCandidates {
     }
 }
 
-/// Score prepared rows after filling the load inputs that depend on bookings.
+/// Drop the rows of workers whose every rank is full, keeping the rest in order, and recount
+/// the best eligible cached prefix if a dropped row held it.
+fn drop_full_worker_rows(
+    input: &MaterializedSelectionInput<'_>,
+    eligibility: RoutingEligibility<'_>,
+    rows: &mut Vec<CandidateData>,
+) {
+    let prepared_max = input.max_raw_cached_tokens().filter(|&max| max > 0);
+    let mut dropped_held_max = false;
+    rows.retain(|row| {
+        let full = eligibility.is_worker_full(row.worker.worker_id, row.dp_size);
+        if full && let Some(max) = prepared_max {
+            dropped_held_max |= input
+                .request
+                .raw_cached_tokens_for(row.worker, input.context.block_size)
+                == max;
+        }
+        !full
+    });
+    if dropped_held_max {
+        input.recount_kept_candidates(rows.iter().map(|row| row.worker));
+    }
+}
+
+/// Score prepared rows after filling the load inputs that depend on bookings. Returns
+/// whether any row is left once full workers' rows are dropped.
 pub(super) fn collect_prepared_candidates<C: WorkerConfigLike>(
     state: &mut ComposedPolicyState,
     input: &MaterializedSelectionInput<'_>,
     workers: &HashMap<WorkerId, C>,
+    eligibility: RoutingEligibility<'_>,
     mut prepared: PreparedCandidates,
 ) -> Result<bool, KvSchedulerError> {
     input.restore_prepared(
         prepared.max_raw_cached_tokens,
         prepared.kv_transfer_sources.take(),
     );
+    if eligibility.skips_full_workers() {
+        drop_full_worker_rows(input, eligibility, &mut prepared.rows);
+    }
     let ComposedPolicyState {
         scorers,
         scorer_picker_inputs,
@@ -520,12 +555,13 @@ pub(super) fn collect_prepared_candidates<C: WorkerConfigLike>(
             load_inputs,
         );
     }
+    let has_eligible_worker = !candidates.is_empty();
     if scorers.is_empty() {
         // Picker-only policies keep no scorer rows.
         unscored_candidates.clear();
     }
     state.score_candidates(&input.context, &input.cache_snapshot, workers)?;
-    Ok(true)
+    Ok(has_eligible_worker)
 }
 
 // Out of line so rows that need no fetch input keep the loop body small.

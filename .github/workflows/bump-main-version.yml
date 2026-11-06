@@ -34,7 +34,7 @@ jobs:
   start-on-main:
     name: Start the bump on main
     if: github.event_name == 'push' && github.event.created
-    runs-on: ubuntu-slim
+    runs-on: test-runner
     timeout-minutes: 5
     permissions:
       actions: write   # gh workflow run
@@ -109,7 +109,7 @@ jobs:
   bump:
     name: Bump main after branch cut
     needs: [authorize]
-    runs-on: ubuntu-24.04  # needs gh, which prod-default-small-v2 lacks
+    runs-on: test-runner
     timeout-minutes: 10
     environment: automated-release
     permissions:
@@ -318,7 +318,7 @@ jobs:
     name: Notify Slack
     needs: [start-on-main, authorize, bump]
     if: failure()
-    runs-on: ubuntu-slim
+    runs-on: test-runner
     timeout-minutes: 5
     steps:
       - name: Tag ops_support
