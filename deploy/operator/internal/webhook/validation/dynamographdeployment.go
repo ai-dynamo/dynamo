@@ -403,17 +403,9 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				if k8sptr.Deref(component.MinAvailable, 1) != 1 {
 					allErrs = append(allErrs, field.Forbidden(componentPath.Child("minAvailable"), "draft minAvailable must be omitted or 1; the shared target owns minimum availability"))
 				}
-			} else {
+			} else if replicas != 1 {
 				// Draft replicas count models; the target stands for the one shared engine.
-				if replicas != 1 {
-					allErrs = append(allErrs, field.Invalid(componentPath.Child("replicas"), replicas, "shared target replicas must be one"))
-				}
-
-				// The target's conductor launches the shared speculative runtime; an agent sidecar serves only a single model.
-				if component.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil {
-					allErrs = append(allErrs, field.Forbidden(componentPath.Child("roles"), fmt.Sprintf(
-						"a shared draft and target pair requires the target's conductor role; the agent %q sidecar serves only a single model", consts.RuntimeContainerName)))
-				}
+				allErrs = append(allErrs, field.Invalid(componentPath.Child("replicas"), replicas, "shared target replicas must be one"))
 			}
 		}
 

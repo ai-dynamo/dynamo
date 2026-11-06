@@ -9,8 +9,13 @@ import os
 import socket
 from typing import Any, Dict, Optional
 
+from vllm.config import SpeculativeConfig
 from vllm.distributed.kv_events import KVEventsConfig
-from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.arg_utils import (
+    AsyncEngineArgs,
+    is_cloud_storage,
+    maybe_override_with_speculators,
+)
 
 try:
     from vllm.utils import FlexibleArgumentParser
@@ -416,6 +421,8 @@ def update_engine_config_with_dynamo(
     kv_cfg = create_kv_events_config(engine_config)
     defaults["kv_events_config"] = kv_cfg
     dynamo_config.use_kv_events = kv_cfg is not None and kv_cfg.enable_kv_cache_events
+    if dynamo_config.use_kv_events:
+        _keep_legacy_block_hashes(engine_config)
 
     logger.info(
         f"Using kv_events_config for publishing vLLM kv events over zmq: {kv_cfg} "
@@ -629,6 +636,39 @@ def create_kv_events_config(
         return c
 
     return None
+
+
+def _keep_legacy_block_hashes(engine_config: AsyncEngineArgs) -> None:
+    """Default vLLM's EAGLE/MTP lookahead block hashes off for KV event publishers:
+    Dynamo's KV indexers hash only each block's own tokens."""
+    # vLLM 0.32 (CPU and XPU images); remove once they ship 0.33.
+    if "disable_lookahead_block_hashes" not in SpeculativeConfig.__dataclass_fields__:
+        return
+    spec = engine_config.speculative_config
+    if (
+        spec is None
+        and engine_config.spec_method is None
+        and not _is_speculators_checkpoint(engine_config)
+    ):
+        return
+    engine_config.speculative_config = {
+        "disable_lookahead_block_hashes": True,
+        **(spec or {}),
+    }
+
+
+def _is_speculators_checkpoint(engine_config: AsyncEngineArgs) -> bool:
+    """Whether vLLM will derive a speculative config from the model checkpoint."""
+    if is_cloud_storage(engine_config.model):
+        return False
+    _, _, spec = maybe_override_with_speculators(
+        model=engine_config.model,
+        tokenizer=engine_config.tokenizer,
+        trust_remote_code=engine_config.trust_remote_code,
+        revision=engine_config.revision,
+        hf_token=engine_config.hf_token,
+    )
+    return spec is not None
 
 
 def _set_state_agent_topic(
