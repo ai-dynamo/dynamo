@@ -115,7 +115,7 @@ NIM for a cascaded voice agent; see
 [Voice Pipelines](voice-pipelines.md).
 
 Follow the
-[deployment and smoke-test instructions](https://github.com/ai-dynamo/dynamo/tree/main/examples/nemotron_speech_cascaded_pipeline#deploy-on-kubernetes)
+[deployment and smoke-test instructions](nemotron-speech-pipeline.md#deploy-on-kubernetes)
 in the example. It requires compatible source-built Dynamo images, so check its
 runtime-image requirements before you deploy.
 
