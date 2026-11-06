@@ -866,6 +866,10 @@ fn host_typed(
         )),
     )
     .context("shared native lowering hosts the production plans")?;
+    // Complete metric records and backend facts remain retained. Repeated
+    // prompt bodies/token arrays and per-token diagnostic JSON are explicitly
+    // omitted from dispatch evidence; counts and BLAKE3 witnesses name inputs.
+    handle.use_compact_dispatch_evidence()?;
     let prefill_timing: Arc<dyn TimingModel> = prefill.timing.clone();
     let decode_timing: Arc<dyn TimingModel> = decode.timing.clone();
     let composition = KvReplayComposition::disaggregated(
@@ -1429,6 +1433,32 @@ fn calibrated_hosted_artifacts_reconcile_every_request() -> Result<()> {
         CONCURRENCY as usize,
     )?;
     let (mut backend, typed) = host_typed(&run, &prefill, &decode)?;
+    for row in &typed.dispatch.requests {
+        ensure!(
+            row["capture"]["mode"] == json!("compact"),
+            "compact evidence must be explicitly labelled"
+        );
+        ensure!(
+            row["request"].get("body").is_none()
+                && row.get("wire").is_none()
+                && row.get("input_token_ids").is_none(),
+            "compact evidence retained a full context copy"
+        );
+        ensure!(
+            row["capture"]["wire_blake3"]
+                .as_str()
+                .is_some_and(|value| value.len() == 64),
+            "compact evidence must identify actual wire bytes"
+        );
+        ensure!(
+            row["observations"]
+                .as_array()
+                .context("observations")?
+                .iter()
+                .all(|event| event["event"] != json!("output_token_ids")),
+            "compact evidence retained per-token diagnostic JSON"
+        );
+    }
     let reconciliation = reconcile_hosted::reconcile(&backend, &typed)?;
     ensure!(
         reconciliation.backend_requests == 4,
