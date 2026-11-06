@@ -1388,6 +1388,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "aiperf-report-io"
+version = "0.14.0"
+dependencies = [
+ "aiperf-clock",
+ "aiperf-exchange-model",
+ "aiperf-fsio",
+ "anyhow",
+ "blake3",
+ "libc",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "aiperf-report-model"
 version = "0.14.0"
 dependencies = [
@@ -1686,6 +1704,7 @@ dependencies = [
  "aiperf-engine-kernel",
  "aiperf-engine-phase",
  "aiperf-exchange-model",
+ "aiperf-export",
  "aiperf-graph",
  "aiperf-graph-model",
  "aiperf-metrics",
@@ -1694,6 +1713,8 @@ dependencies = [
  "aiperf-protocol",
  "aiperf-records",
  "aiperf-registry",
+ "aiperf-report-io",
+ "aiperf-report-model",
  "aiperf-request-execution",
  "aiperf-rng",
  "aiperf-segment-store",
@@ -2216,6 +2237,7 @@ dependencies = [
  "cfg-if",
  "constant_time_eq",
  "cpufeatures 0.3.1",
+ "rayon-core",
 ]
 
 [[package]]
@@ -2908,18 +2930,22 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 name = "dynamo-aiperf-workload-proof"
 version = "0.0.0"
 dependencies = [
+ "aiperf-agentx",
  "aiperf-clock-runtime",
  "aiperf-config",
  "aiperf-engine-input",
  "aiperf-protocol",
+ "aiperf-report-model",
  "aiperf-rng",
  "aiperf-timing",
  "aisim-aiperf-workload-runner",
  "aisim-core",
  "anyhow",
+ "blake3",
  "dynamo-mocker",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "uuid",
 ]
