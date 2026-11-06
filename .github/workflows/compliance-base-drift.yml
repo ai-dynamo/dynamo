@@ -18,10 +18,11 @@
 name: Compliance — Base-Image Drift
 
 on:
-  pull_request:
-    paths:
-      - 'container/compliance/base_sboms/**'
-      - '.github/workflows/compliance-base-drift.yml'
+  # PRs invoke this workflow from pr.yaml only after a maintainer has approved
+  # the exact SHA and copy-pr-bot has updated pull-request/<number>. The drift
+  # check needs authenticated access to private kimi_k31 ECR images, so it
+  # must not run directly on the untrusted pull_request event.
+  workflow_call:
   push:
     branches:
       - main
@@ -44,12 +45,18 @@ concurrency:
 
 jobs:
   check-drift:
-    runs-on: ubuntu-24.04
+    runs-on: prod-builder-v3
     steps:
       - name: Checkout
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
         with:
           persist-credentials: false
+
+      - name: Log in to ECR
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
 
       - name: Verify buildx is available
         run: docker buildx version

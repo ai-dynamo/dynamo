@@ -8,8 +8,8 @@
 ##################################
 
 {% if platform == "multi" %}
-FROM --platform=linux/amd64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS vllm_runtime_amd64
-FROM --platform=linux/arm64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS vllm_runtime_arm64
+FROM --platform=linux/amd64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG_AMD64} AS vllm_runtime_amd64
+FROM --platform=linux/arm64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG_ARM64} AS vllm_runtime_arm64
 FROM vllm_runtime_${TARGETARCH} AS pre_runtime
 {% else %}
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
@@ -18,6 +18,7 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% set has_transformers_pin = context.vllm[device_key].transformers_version is defined -%}
 ARG PYTHON_VERSION
 ARG ENABLE_GPU_MEMORY_SERVICE
+ARG ENABLE_VLLM_OMNI
 ARG VLLM_OMNI_REF
 {% if has_transformers_pin -%}
 ARG TRANSFORMERS_VERSION
@@ -59,7 +60,7 @@ ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/l
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 {% else %}
-# Expose libnixl.so from the upstream nixl-cu${CUDA_MAJOR} PyPI wheel through a
+# Expose libnixl.so from the pinned nixl-cu${CUDA_MAJOR} PyPI wheel through a
 # stable prefix so non-Python consumers use the same NIXL copy that Python imports.
 # This keeps Rust nixl-sys dlopen("libnixl.so") from falling into stub mode in
 # processes that do not import the nixl Python package first.
@@ -68,11 +69,6 @@ ENV NIXL_PREFIX=/opt/dynamo/nixl \
     NIXL_LIB_DIR=/opt/dynamo/nixl \
     NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
 COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
-RUN install_nixl_from_wheel \
-    --cuda-major "${CUDA_MAJOR}" \
-    --site-packages "${SITE_PACKAGES}" \
-    --prefix "${NIXL_PREFIX}" \
-    --skip-headers
 ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:${LD_LIBRARY_PATH:-}
 {% endif %}
 
@@ -88,6 +84,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 {% include "templates/verify_ca_certificates.Dockerfile" %}
 
 ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
+
+{% if device == "cuda" %}
+# Match the runtime wheels to NIXL_REF, which also selects the build headers.
+# A newer vLLM connector can require a newer NIXL than its base image ships.
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install --system --no-deps --only-binary=:all: \
+        "nixl==${NIXL_REF#v}" "nixl-cu${CUDA_MAJOR}==${NIXL_REF#v}" && \
+    install_nixl_from_wheel \
+        --cuda-major "${CUDA_MAJOR}" \
+        --site-packages "${SITE_PACKAGES}" \
+        --prefix "${NIXL_PREFIX}" \
+        --skip-headers
+{% endif %}
 
 {% if device == "cuda" %}
 # Bring base-image OS packages up to the current patch releases published in
@@ -136,7 +146,7 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
 
 {% if device != "cuda" %}
 # Copy UCX and NIXL from wheel_builder for CPU/XPU devices
-# (CUDA devices use NIXL from upstream vLLM wheels)
+# (CUDA devices use the pinned PyPI wheels)
 COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
 COPY --chown=dynamo:0 --from=wheel_builder ${NIXL_PREFIX} ${NIXL_PREFIX}
 {% if device == "xpu" %}
@@ -265,16 +275,18 @@ RUN set -eux; \
     ldconfig -p | grep -q 'libturbojpeg.so.0'; \
     rm -rf /var/lib/apt/lists/*
 
-# Layer the released vLLM-Omni package matching the pinned upstream ref while
-# constraining packages already solved in the upstream vLLM image.
+# Layer vLLM-Omni only for bases whose dependency stack supports it. The CUDA
+# private base opts out so its validated Transformers version is preserved.
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
     --mount=type=bind,source=./container/deps/vllm/protected_overrides.txt,target=/tmp/vllm_omni_protected_overrides.txt \
     --mount=type=bind,source=./container/deps/vllm/install_vllm_omni.sh,target=/tmp/install_vllm_omni.sh \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
-    export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
-    bash /tmp/install_vllm_omni.sh
+    if [ "${ENABLE_VLLM_OMNI}" = "true" ]; then \
+        export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
+        bash /tmp/install_vllm_omni.sh; \
+    fi
 
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu

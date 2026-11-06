@@ -97,16 +97,19 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.32.0-ubuntu2404
+    # Public Kimi K3.1 release images: CUDA 13.0 on AMD64; CUDA 13.4 on ARM64
+    # for Vera Rubin. Builds select the pin for their target architecture.
+    runtime_image_tag: kimi-k31@sha256:904520f3fefc32414abcedf6ba8dadc9c5978db1bcdaf40f58d6b9036ef30a99
+    runtime_image_tag_arm64: kimi-k31-cu134@sha256:5c22aa1cd946b511dfd1bd871ee531c5ee893379fa1d3bfbbab6b8a8de250a89
+    # Kimi's NixlConnector requires >=1.5.0 for strided descriptors.
+    nixl_ref: v1.5.0
+    # Preserve the model image's Transformers stack instead of installing Omni.
+    enable_vllm_omni: "false"
     vllm_omni_ref: "v0.32.0rc1"
-    # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
-    # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
-    # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
-    # adds over the clean NVIDIA CUDA floor (uv/rust stack, framework, codecs)
-    # rather than hiding it. Per-arch stem; the licenses stage appends
-    # -${TARGETARCH}.cdx.json. (GPL media codecs from vllm-openai are purged in
-    # the runtime image — see the codec-purge follow-up.)
-    baseline_sbom: cuda@2ab6381d
+    # Keep the CUDA 13.0 build toolchain: its Rust CUDA bindings reject 13.4,
+    # while the wheels load CUDA dynamically. Per-arch SBOM aliases select the
+    # NVIDIA CUDA 13.0.3 / 13.4.1 base floor; model additions remain attributed.
+    baseline_sbom: kimi-k31-vllm
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu
@@ -125,6 +128,7 @@ vllm:
     transformers_version: "5.14.1"
     tokenizers_version: "0.22.2"
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
+  enable_vllm_omni: "true"
   vllm_omni_ref: "v0.31.0rc1"
   nixl_ref: v1.4.1
   max_jobs: "10"
@@ -140,18 +144,13 @@ sglang:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.5.22-cu130-runtime
-    # Baseline is the TRUE base of the third-party lmsysorg/sglang image,
-    # nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04 (Docker Hub; CUDA_VERSION=13.0.3,
-    # ubuntu24.04), NOT a self-baseline of lmsysorg/sglang.
-    # lmsysorg/sglang is built FROM this nvidia/cuda cudnn-devel base, so this
-    # attributes everything sglang adds over the clean NVIDIA CUDA+cuDNN floor
-    # (framework, python stack, system libs) rather than hiding it. Per-arch stem;
-    # the licenses stage appends -${TARGETARCH}.cdx.json. SGLang's codec-bearing
-    # Python wheels are purged in sglang_runtime.Dockerfile; only the in-tree VP9
-    # ffmpeg is copied in. The CUDA Dynamo Rust wheel links against that same
-    # codec-limited build for frontend video decoding; XPU remains codec-free.
-    baseline_sbom: cuda@0230b7f2
+    # Public Kimi K3.1 release images. The CUDA 13.4 tag is ARM64-only (Rubin);
+    # AMD64 uses the CUDA 13.0 image. BuildKit selects the matching stage.
+    runtime_image_tag: dev-kimi-k31-pro@sha256:67fc77d1cbe67de27ca54d874c82757a4844743fea899ea7d0df547e30c2c391
+    runtime_image_tag_arm64: dev-kimi-k31-pro-cu134@sha256:a42079a8d1299b94824eab821de5f261c016797434cf69dc1fb3b15bdfddfc0e
+    # Per-arch aliases select only NVIDIA's floor: CUDA 13.0.3 + cuDNN devel
+    # on AMD64, CUDA 13.4.1 base on ARM64. All SGLang additions stay attributed.
+    baseline_sbom: kimi-k31-sglang
   xpu:
     # oneAPI 2026.0 is required by the SGLang XPU pins below: torch 2.13.0+xpu
     # links intel-sycl-rt 2026.0.0 (libsycl.so.9), and sgl-kernel-xpu's SYCL

@@ -337,7 +337,10 @@ mod tests {
                         "required": ["a", "b"],
                     })),
                     strict: None,
+                    defer_loading: None,
                 },
+                custom: None,
+                defer_loading: None,
             },
             ChatCompletionTool {
                 r#type: ChatCompletionToolType::Function,
@@ -353,7 +356,10 @@ mod tests {
                         "required": ["location", "unit"],
                     })),
                     strict: None,
+                    defer_loading: None,
                 },
+                custom: None,
+                defer_loading: None,
             },
         ]
     }
@@ -366,7 +372,10 @@ mod tests {
                 description: Some("Get the current server time.".to_string()),
                 parameters: Some(parameters),
                 strict: None,
+                defer_loading: None,
             },
+            custom: None,
+            defer_loading: None,
         }]
     }
 

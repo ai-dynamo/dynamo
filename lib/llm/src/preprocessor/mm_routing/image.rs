@@ -381,6 +381,16 @@ fn resolve_model_token_with_config(
         return Some(ResolvedModelToken { token_id });
     }
 
+    // K3.1 uses K3's placeholder field, but the pinned ModelRegistry does not
+    // recognize its model_type when the checkpoint path has no K3 name hint.
+    if config.get("model_type").and_then(serde_json::Value::as_str) == Some("kimi_k31") {
+        return config
+            .get("media_placeholder_token_id")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|id| u32::try_from(id).ok())
+            .map(|token_id| ResolvedModelToken { token_id });
+    }
+
     // Try the HuggingFace fast tokenizer first; fall back to a no-op
     // tokenizer when `tokenizer.json` is missing (Kimi-K2.5 ships only
     // `tiktoken.model`, for example). Specs that read the placeholder
@@ -905,26 +915,58 @@ mod tests {
 
     #[test]
     fn routing_tokens_classify_kimi_k3_via_selected_vision_processor() {
+        for model_type in ["kimi_k3", "kimi_k31"] {
+            let model_dir = tempfile::tempdir().unwrap();
+            write_model_config(model_dir.path(), model_type);
+            std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
+            let counter = ImageRoutingProcessor::try_new(
+                "/models/internal-checkpoint",
+                Some(model_type),
+                model_dir.path(),
+            )
+            .unwrap();
+
+            assert_eq!(counter.routing_prompt_kind(), Some(ImagePromptKind::KimiK3));
+            let resolved = resolve_routing_tokens(
+                "/models/internal-checkpoint",
+                model_dir.path(),
+                Some(&counter),
+            );
+
+            assert_eq!(resolved.image_token_id, Some(163605));
+            assert_eq!(resolved.chat_placeholder_token_id, Some(163605));
+            assert_eq!(resolved.image_prompt_kind, Some(ImagePromptKind::KimiK3));
+            assert_eq!(
+                resolve_exact_routing_image_token_id(
+                    "/models/internal-checkpoint",
+                    model_dir.path()
+                ),
+                Some(163605)
+            );
+        }
+    }
+
+    #[test]
+    fn kimi_k31_rejects_invalid_placeholder_ids() {
         let model_dir = tempfile::tempdir().unwrap();
-        write_model_config(model_dir.path(), "kimi_k3");
-        std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
-        let counter = ImageRoutingProcessor::try_new(
-            "/models/internal-checkpoint",
-            Some("kimi_k3"),
-            model_dir.path(),
-        )
-        .unwrap();
-
-        assert_eq!(counter.routing_prompt_kind(), Some(ImagePromptKind::KimiK3));
-        let resolved = resolve_routing_tokens(
-            "/models/internal-checkpoint",
-            model_dir.path(),
-            Some(&counter),
-        );
-
-        assert_eq!(resolved.image_token_id, Some(163605));
-        assert_eq!(resolved.chat_placeholder_token_id, Some(163605));
-        assert_eq!(resolved.image_prompt_kind, Some(ImagePromptKind::KimiK3));
+        for token_id in [
+            serde_json::Value::Null,
+            serde_json::json!(-1),
+            serde_json::json!(4294967296u64),
+        ] {
+            let config = serde_json::json!({
+                "model_type": "kimi_k31",
+                "media_placeholder_token_id": token_id,
+            });
+            assert!(
+                resolve_model_token_with_config(
+                    "/models/internal-checkpoint",
+                    model_dir.path(),
+                    &config
+                )
+                .is_none()
+            );
+        }
     }
 
     #[test]

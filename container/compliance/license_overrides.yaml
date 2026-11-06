@@ -24,6 +24,33 @@
 # the policy gate will reject it.
 
 overrides:
+  # Public SGLang runtime: the binary libevent packages contain libraries and
+  # notices, not the source tree's GPL m4/libtool.m4 and m4/acx_pthread.m4 build
+  # scripts. Preserve the permissive runtime-source licenses in their NOTICES.
+  - ecosystem: dpkg
+    name: libevent-2.1-7t64
+    license: BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT
+    source: "Ubuntu libevent 2.1.12-stable /usr/share/doc/libevent-2.1-7t64/copyright and dpkg-query -L; https://libevent.org/"
+  - ecosystem: dpkg
+    name: libevent-extra-2.1-7t64
+    license: BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT
+    source: "Ubuntu libevent 2.1.12-stable /usr/share/doc/libevent-extra-2.1-7t64/copyright and dpkg-query -L; https://libevent.org/"
+  - ecosystem: dpkg
+    name: libevent-openssl-2.1-7t64
+    license: BSD-2-Clause AND BSD-3-Clause AND ISC AND MIT
+    source: "Ubuntu libevent 2.1.12-stable /usr/share/doc/libevent-openssl-2.1-7t64/copyright and dpkg-query -L; https://libevent.org/"
+  - ecosystem: dpkg
+    name: libpython3-dev
+    license: PSF-2.0
+    source: "Ubuntu python3-defaults /usr/share/doc/libpython3-dev/copyright includes the PSF license; https://docs.python.org/3/license.html"
+  - ecosystem: dpkg
+    name: nsight-systems-cli
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "Nsight Systems CLI metapackage; installed /opt/nvidia/nsight-systems-cli/2026.4.1/EULA.txt; https://docs.nvidia.com/nsight-systems/UserGuide/index.html#end-user-license-agreement"
+  - ecosystem: dpkg
+    name: nsight-systems-cli-2026.4.1
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "Installed /opt/nvidia/nsight-systems-cli/2026.4.1/EULA.txt; same Nsight EULA as the earlier versioned CLI entries; https://docs.nvidia.com/nsight-systems/UserGuide/index.html#end-user-license-agreement"
   # --- NVIDIA CUDA Python wheels ---
   # Most ship via pypi.nvidia.com; the wheel METADATA's License field is empty
   # or contains marketing prose. The actual EULA is bundled in the wheel
@@ -34,6 +61,11 @@ overrides:
     name: nvidia-cuda-cupti
     license: LicenseRef-NVIDIA-Proprietary
     source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: cupti-python
+    license: LicenseRef-NVIDIA-SOFTWARE-LICENSE
+    source: "NVIDIA Software License Agreement — https://docs.nvidia.com/cupti-python/nvidia-cupti-python-license.html"
 
   - ecosystem: python
     name: nvidia-cuda-nvrtc
@@ -472,6 +504,26 @@ overrides:
   # --- Additional NVIDIA dpkg meta-packages ---
   - { ecosystem: dpkg, name: cuda-command-line-tools-12-9,      license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: cuda-command-line-tools-13-0,      license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+
+  # --- CUDA 13.4 apt packages (vLLM runtime base is CUDA 13.4.1) ---
+  # dpkg metadata for these reports GPL-3.0-only; they ship under the NVIDIA CUDA
+  # Toolkit EULA, same as the -13-0 and -12-9 entries above.
+  - { ecosystem: dpkg, name: cuda-crt-13-4,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cudart-13-4,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cudart-dev-13-4,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-culibos-dev-13-4,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cuobjdump-13-4,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-driver-dev-13-4,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvcc-13-4,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvrtc-13-4,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvrtc-dev-13-4,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-toolkit-13-4-config-common,  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcublas-13-4,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcublas-dev-13-4,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcurand-13-4,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcurand-dev-13-4,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvptxcompiler-13-4,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvvm-13-4,                     license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
 
   # --- sglang Rust ecosystem additions ---
   # sgl-model-gateway is sglang's Rust serving gateway crate, packaged inside
@@ -1050,3 +1102,222 @@ overrides:
   - { ecosystem: python, name: instanttensor, license: "Apache-2.0", source: "https://github.com/scitix/InstantTensor/blob/v0.1.9/LICENSE" }
   - { ecosystem: python, name: sigstore-models, license: "MIT", source: "https://github.com/astral-sh/sigstore-models/blob/v0.0.6/LICENSE" }
   - { ecosystem: rust, name: tsp-asn1, license: "Apache-2.0", source: "https://github.com/trailofbits/rfc3161-client/blob/v1.0.8/LICENSE" }
+
+  # --- CUDA 13.4 apt packages (kimi_k31 day-0, SGLang cu134 base: nvidia/cuda 13.4.1 cudnn-devel) ---
+  # Same NVIDIA CUDA apt-repo packages, under the CUDA Toolkit EULA, as the earlier-version entries above. Their
+  # dpkg copyright files carry GPL-3.0 text or no license, so the policy gate rejected them.
+  - ecosystem: dpkg
+    name: cuda-command-line-tools-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as cuda-command-line-tools-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: cuda-compat-orin-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; NVIDIA CUDA apt-repo package (developer.download.nvidia.com/compute/cuda/repos), no earlier-version entry to mirror"
+
+  - ecosystem: dpkg
+    name: cuda-compiler-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; NVIDIA CUDA apt-repo package (developer.download.nvidia.com/compute/cuda/repos), no earlier-version entry to mirror"
+
+  - ecosystem: dpkg
+    name: cuda-ctadvisor-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; NVIDIA CUDA apt-repo package (developer.download.nvidia.com/compute/cuda/repos), no earlier-version entry to mirror"
+
+  - ecosystem: dpkg
+    name: cuda-cupti-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as cuda-cupti-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: cuda-cupti-dev-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as cuda-cupti-dev-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: cuda-cuxxfilt-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; NVIDIA CUDA apt-repo package (developer.download.nvidia.com/compute/cuda/repos), no earlier-version entry to mirror"
+
+  - ecosystem: dpkg
+    name: cuda-gdb-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as cuda-gdb-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: cuda-libraries-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; NVIDIA CUDA apt-repo package (developer.download.nvidia.com/compute/cuda/repos), no earlier-version entry to mirror"
+
+  - ecosystem: dpkg
+    name: cuda-libraries-dev-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; NVIDIA CUDA apt-repo package (developer.download.nvidia.com/compute/cuda/repos), no earlier-version entry to mirror"
+
+  - ecosystem: dpkg
+    name: cuda-minimal-build-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; NVIDIA CUDA apt-repo package (developer.download.nvidia.com/compute/cuda/repos), no earlier-version entry to mirror"
+
+  - ecosystem: dpkg
+    name: cuda-nsight-compute-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; NVIDIA CUDA apt-repo package (developer.download.nvidia.com/compute/cuda/repos), no earlier-version entry to mirror"
+
+  - ecosystem: dpkg
+    name: cuda-nvdisasm-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as cuda-nvdisasm-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: cuda-nvml-dev-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as cuda-nvml-dev-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: cuda-nvprune-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as cuda-nvprune-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: cuda-nvtx-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as cuda-nvtx-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: cuda-profiler-api-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as cuda-profiler-api-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: cuda-sandbox-dev-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; NVIDIA CUDA apt-repo package (developer.download.nvidia.com/compute/cuda/repos), no earlier-version entry to mirror"
+
+  - ecosystem: dpkg
+    name: cuda-sanitizer-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as cuda-sanitizer-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: cuda-tileiras-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; NVIDIA CUDA apt-repo package (developer.download.nvidia.com/compute/cuda/repos), no earlier-version entry to mirror"
+
+  - ecosystem: dpkg
+    name: libcudla-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; NVIDIA CUDA apt-repo package (developer.download.nvidia.com/compute/cuda/repos), no earlier-version entry to mirror"
+
+  - ecosystem: dpkg
+    name: libcudla-dev-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; NVIDIA CUDA apt-repo package (developer.download.nvidia.com/compute/cuda/repos), no earlier-version entry to mirror"
+
+  - ecosystem: dpkg
+    name: libcufft-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as libcufft-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: libcufft-dev-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as libcufft-dev-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: libcufile-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as libcufile-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: libcufile-dev-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as libcufile-dev-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: libcuobjclient-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; NVIDIA CUDA apt-repo package (developer.download.nvidia.com/compute/cuda/repos), no earlier-version entry to mirror"
+
+  - ecosystem: dpkg
+    name: libcuobjclient-dev-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; NVIDIA CUDA apt-repo package (developer.download.nvidia.com/compute/cuda/repos), no earlier-version entry to mirror"
+
+  - ecosystem: dpkg
+    name: libcusolver-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as libcusolver-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: libcusolver-dev-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as libcusolver-dev-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: libcusparse-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as libcusparse-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: libcusparse-dev-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as libcusparse-dev-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: libnpp-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as libnpp-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: libnpp-dev-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as libnpp-dev-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: libnvfatbin-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as libnvfatbin-13-0 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: libnvfatbin-dev-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; NVIDIA CUDA apt-repo package (developer.download.nvidia.com/compute/cuda/repos), no earlier-version entry to mirror"
+
+  - ecosystem: dpkg
+    name: libnvjitlink-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as libnvjitlink-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: libnvjitlink-dev-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as libnvjitlink-dev-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: libnvjpeg-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as libnvjpeg-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: libnvjpeg-dev-13-4
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as libnvjpeg-dev-12-9 (already overridden), newer CUDA version"
+
+  - ecosystem: dpkg
+    name: nsight-compute-2026.3.0
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html; same package as nsight-compute-2025.3.1 (already overridden), newer CUDA version"
+
+  # --- MiniMax MSA (installed in the lmsysorg/sglang cu134 nightly) ---
+  - ecosystem: python
+    name: minimax-msa
+    license: MIT
+    source: "https://github.com/MiniMax-AI/MSA/blob/main/LICENSE (MIT; verified via the GitHub license API; minimax-msa is defined by pyproject.toml at the repo root at commit 1e7bf76f26a5f53cfc2d4d297e1ec2e40955e431)"
+
+  - ecosystem: python
+    name: sglang-msa-mono
+    license: MIT
+    source: "https://github.com/MiniMax-AI/MSA/blob/main/LICENSE (MIT; verified via the GitHub license API; sglang-msa-mono is defined by integrations/sglang/pyproject.toml at commit 1e7bf76f26a5f53cfc2d4d297e1ec2e40955e431)"

@@ -28,11 +28,10 @@ to preserve and republish a new upstream field.
 import importlib
 
 import pytest
-from packaging.version import Version
 
 # Import vllm first to ensure it's properly loaded before accessing submodules.
 # This works around potential issues with pytest's import machinery.
-_vllm = importlib.import_module("vllm")
+importlib.import_module("vllm")
 _kv_events = importlib.import_module("vllm.distributed.kv_events")
 
 # Re-export the classes we need for tests
@@ -86,6 +85,7 @@ class TestVllmKvEventsApi:
         12. locality (per-tier storage locality; optional for older vLLM)
         13. ownership (secondary offloading tier; added in vLLM 0.29)
         14. session_id (request session; added in vLLM 0.30)
+        15. lookahead_token_ids (optional hash metadata; ignored by Rust)
 
         If vLLM adds/removes/reorders fields, this test will fail.
         """
@@ -107,10 +107,12 @@ class TestVllmKvEventsApi:
             expected_fields.append("kv_cache_spec_sliding_window")
         if _has_locality(BlockStored):
             expected_fields.append("locality")
-        if Version(_vllm.__version__).release >= (0, 29):
+        if "ownership" in BlockStored.__struct_fields__:
             expected_fields.append("ownership")
-        if Version(_vllm.__version__).release >= (0, 30):
+        if "session_id" in BlockStored.__struct_fields__:
             expected_fields.append("session_id")
+        if "lookahead_token_ids" in BlockStored.__struct_fields__:
+            expected_fields.append("lookahead_token_ids")
         expected_fields = tuple(expected_fields)
 
         actual_fields = BlockStored.__struct_fields__
@@ -138,7 +140,7 @@ class TestVllmKvEventsApi:
             expected_fields.append("kv_cache_spec_sliding_window")
         if _has_locality(BlockRemoved):
             expected_fields.append("locality")
-        if Version(_vllm.__version__).release >= (0, 29):
+        if "ownership" in BlockRemoved.__struct_fields__:
             expected_fields.append("ownership")
         expected_fields = tuple(expected_fields)
 
@@ -220,12 +222,15 @@ class TestVllmKvEventsApi:
             event_kwargs["kv_cache_spec_sliding_window"] = 128
         if _has_locality(BlockStored):
             event_kwargs["locality"] = "LOCAL"
-        if Version(_vllm.__version__).release >= (0, 30):
+        if "session_id" in BlockStored.__struct_fields__:
             event_kwargs["session_id"] = "session-1"
+        if "lookahead_token_ids" in BlockStored.__struct_fields__:
+            event_kwargs["lookahead_token_ids"] = [[5, 6], [7, 8]]
         event = BlockStored(**event_kwargs)
 
         encoded = msgspec.msgpack.encode(event)
         decoded = msgspec.msgpack.decode(encoded)
+        assert msgspec.msgpack.decode(encoded, type=BlockStored) == event
 
         assert isinstance(decoded, dict), f"Expected dict, got {type(decoded)}"
         assert decoded["type"] == "BlockStored"
@@ -245,8 +250,10 @@ class TestVllmKvEventsApi:
             assert decoded["kv_cache_spec_sliding_window"] == 128
         if _has_locality(BlockStored):
             assert decoded["locality"] == "LOCAL"
-        if Version(_vllm.__version__).release >= (0, 30):
+        if "session_id" in BlockStored.__struct_fields__:
             assert decoded["session_id"] == "session-1"
+        if "lookahead_token_ids" in BlockStored.__struct_fields__:
+            assert decoded["lookahead_token_ids"] == [[5, 6], [7, 8]]
 
     def test_block_stored_tuple_extra_keys_serialization_format(self):
         """Verify multimodal tuple extra_keys keep the vLLM 0.19 wire shape."""

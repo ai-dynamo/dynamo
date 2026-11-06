@@ -464,6 +464,7 @@ mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: None,
             }),
+            custom: None,
         };
         let args_chunk = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
             index: 0,
@@ -473,6 +474,7 @@ mod tests {
                 name: None,
                 arguments: Some("{\"city\":\"Tokyo\"}".to_string()),
             }),
+            custom: None,
         };
         let chunks = vec![
             create_reasoning_chunk("I should inspect the weather. ".to_string(), 0),
@@ -527,6 +529,7 @@ mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: None,
             }),
+            custom: None,
         };
         let arguments = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
             index: 0,
@@ -536,6 +539,7 @@ mod tests {
                 name: None,
                 arguments: Some("{\"city\":\"Tokyo\"}".to_string()),
             }),
+            custom: None,
         };
         vec![
             create_tool_call_chunk(name, None),

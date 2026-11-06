@@ -1,0 +1,363 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Build the Kimi-K3.1 SGLang image (docker/k31.Dockerfile of the radixark/sglang-k31 fork) in CI.
+#
+# Why this exists: the fork's source lives in a private GitLab that GitHub runners cannot reach.
+# The source is therefore delivered out of band as a tarball (a full checkout INCLUDING .git:
+# the recipe's `pip install -e python` derives the version from it) in S3 or behind a URL, and
+# this workflow builds the image from it on our own builders. The result is an ordinary ECR image
+# that container/context.yaml can pin as the sglang runtime base, so the post-merge pipeline
+# builds the Dynamo layer on top and runs the inline compliance stages (legal / sboms / sources).
+#
+# Producing the tarball: ~/bin/package-sglang-source.sh (clone, checkout <ref>, tar, sha256, upload).
+#
+# What the recipe does (it lives in the tarball, this workflow does not re-implement it): overlays the
+# fork on an lmsysorg/sglang nightly, builds the Rust TreeCore and FlashMLA ops, rebuilds the FlashInfer
+# DynBlock modules and Dynamo 1.6.0, then runs docker/k31-image/verify_image.py, which FAILS the build
+# if any of them fell back. The recipe asserts that the nightly's commit is an ancestor of the source.
+#
+# Use base_tag=nightly-cu134 for Rubin (VR / SM107), a nightly-dev-YYYYMMDD-<sha> tag for GB300.
+# The base is pinned to a digest, and each requested architecture must exist in it.
+#
+# Output: <ECR_REGISTRY>/<ECR_REPOSITORY>:sglang-k31-<base>-<date>-<sha8>[<suffix>] (multi-arch when
+# more than one platform is built) and the exact context.yaml lines to pin it, in the run summary.
+# dry_run (default true) stops after the plan, so the inputs, base digest and tag can be checked first.
+
+name: Build SGLang K3.1 image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'Source tarball: s3://bucket/key (fetched with the runner AWS role, preferred) or an https URL (a presigned URL is visible in this run''s inputs: use a short expiry)'
+        required: true
+        type: string
+      source_sha256:
+        description: 'sha256 of the tarball (the build refuses a mismatch)'
+        required: true
+        type: string
+      base_tag:
+        description: 'lmsysorg/sglang tag to build on: nightly-cu134 (Rubin) or nightly-dev-YYYYMMDD-<sha> (GB300)'
+        required: true
+        type: string
+        default: nightly-cu134
+      platforms:
+        description: 'Architectures to build (the cu134 nightly is arm64 only)'
+        required: false
+        type: choice
+        options: [arm64, amd64, both]
+        default: arm64
+      tag_suffix:
+        description: 'Suffix for the ECR tag, to keep variants apart (e.g. -vr)'
+        required: false
+        type: string
+        default: ''
+      mode:
+        description: 'recipe: the fork''s docker/k31.Dockerfile (written for the cu130 nightly: it reinstalls Torch 2.14.1 and builds the native parts). overlay: copy the fork''s source over the base''s own SGLang tree and re-run its `pip install --no-deps -e python`, keeping the base''s Torch/CUDA (needed for the cu134 nightly); the Rust TreeCore and FlashMLA ops are not built (the server falls back to slower paths)'
+        required: false
+        type: choice
+        options: [recipe, overlay]
+        default: recipe
+      install_rust:
+        description: 'Build a derived base with a Rust toolchain first (the cu134 nightly has none, and the recipe compiles the Rust TreeCore)'
+        required: false
+        type: boolean
+        default: false
+      rust_toolchain:
+        description: 'Rust toolchain for the derived base (the sglang rust/ workspace pins 1.92)'
+        required: false
+        type: string
+        default: '1.92'
+      base_env:
+        description: 'Extra ENV for the derived base, one KEY=VALUE per line (experiments, e.g. LIBTORCH_BYPASS_VERSION_CHECK=1)'
+        required: false
+        type: string
+        default: ''
+      flashmla_jobs:
+        description: 'Parallel nvcc jobs for flashmla_ops (12 peaks at ~23 GB RAM on arm64)'
+        required: false
+        type: string
+        default: '12'
+      dry_run:
+        description: 'Only plan: validate the inputs and resolve the base and the tag, build nothing'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-sglang-k31${{ inputs.tag_suffix }}
+  cancel-in-progress: false
+
+env:
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
+
+jobs:
+  plan:
+    name: plan
+    runs-on: prod-builder-v3
+    timeout-minutes: 30
+    outputs:
+      src_sha: ${{ steps.plan.outputs.src_sha }}
+      base: ${{ steps.plan.outputs.base }}
+      tag: ${{ steps.plan.outputs.tag }}
+      archs: ${{ steps.plan.outputs.archs }}
+    env:
+      SOURCE: ${{ inputs.source }}
+      SOURCE_SHA256: ${{ inputs.source_sha256 }}
+      BASE_TAG: ${{ inputs.base_tag }}
+      PLATFORMS: ${{ inputs.platforms }}
+      TAG_SUFFIX: ${{ inputs.tag_suffix }}
+    steps:
+      - name: Plan
+        id: plan
+        run: |
+          set -euo pipefail
+          # A presigned URL carries its credential in the query string.
+          case "${SOURCE}" in https://*) echo "::add-mask::${SOURCE}" ;; esac
+          [[ "${SOURCE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::source_sha256 must be 64 lowercase hex characters"; exit 1; }
+          [[ "${BASE_TAG}" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::base_tag has unexpected characters"; exit 1; }
+          [[ "${TAG_SUFFIX}" =~ ^[A-Za-z0-9._-]*$ ]] || { echo "::error::tag_suffix has unexpected characters"; exit 1; }
+
+          case "${PLATFORMS}" in
+            arm64) ARCHS='["arm64"]' ;;
+            amd64) ARCHS='["amd64"]' ;;
+            both)  ARCHS='["amd64","arm64"]' ;;
+            *) echo "::error::unsupported platforms '${PLATFORMS}'"; exit 1 ;;
+          esac
+
+          work="$(mktemp -d)"
+          case "${SOURCE}" in
+            s3://*)    aws s3 cp --only-show-errors "${SOURCE}" "${work}/src.tar.gz" ;;
+            https://*) curl -fsSL --retry 3 --retry-delay 2 -o "${work}/src.tar.gz" "${SOURCE}" ;;
+            *) echo "::error::source must be an s3:// URI or an https URL"; exit 1 ;;
+          esac
+          echo "${SOURCE_SHA256}  ${work}/src.tar.gz" | sha256sum -c -
+          mkdir "${work}/src" && tar -xzf "${work}/src.tar.gz" -C "${work}/src" --strip-components=1
+          [ -f "${work}/src/docker/k31.Dockerfile" ] || { echo "::error::docker/k31.Dockerfile is not in the tarball"; exit 1; }
+          [ -d "${work}/src/.git" ] || { echo "::error::the tarball has no .git (the recipe needs it for the version)"; exit 1; }
+          git config --global --add safe.directory "${work}/src"
+          src_sha="$(git -C "${work}/src" rev-parse HEAD)"
+          git -C "${work}/src" log -1 --format='source: %h %s'
+
+          # Pin the base to its digest, and make sure every requested architecture is in it. The tag is either
+          # a multi-arch index (the image config is then keyed by platform) or a single-platform image such as
+          # the arm64-only cu134 nightly (the config itself carries "architecture").
+          image="lmsysorg/sglang:${BASE_TAG}"
+          digest="$(docker buildx imagetools inspect "${image}" --format '{{json .Manifest}}' | jq -r '.digest')"
+          have="$(docker buildx imagetools inspect "${image}" --format '{{json .Image}}' \
+            | jq -r 'if has("architecture") then .architecture else (keys | map(sub("^linux/"; "")) | unique | join(" ")) end')"
+          for a in $(jq -r '.[]' <<<"${ARCHS}"); do
+            case " ${have} " in
+              *" ${a} "*) ;;
+              *) echo "::error::${image} has no ${a} image (it publishes: ${have:-nothing})"; exit 1 ;;
+            esac
+          done
+
+          slug="$(tr -c 'A-Za-z0-9._-' '-' <<<"${BASE_TAG}" | sed 's/-*$//')"
+          tag="sglang-k31-${slug}-$(date -u +%Y%m%d)-${src_sha:0:8}${TAG_SUFFIX}"
+          {
+            echo "src_sha=${src_sha}"
+            echo "base=${image}@${digest}"
+            echo "tag=${tag}"
+            echo "archs=${ARCHS}"
+          } >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Plan"
+            echo "- source commit: \`${src_sha}\`"
+            echo "- base: \`${image}@${digest}\`"
+            echo "- platforms: \`${PLATFORMS}\`"
+            echo "- ECR tag: \`${ECR_REGISTRY}/${ECR_REPOSITORY}:${tag}\`"
+            echo "- dry_run: \`${{ inputs.dry_run }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          rm -rf "${work}"
+
+  build:
+    name: build ${{ matrix.arch }}
+    needs: plan
+    if: ${{ inputs.dry_run != true }}
+    runs-on: prod-builder-v3
+    timeout-minutes: 480
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(needs.plan.outputs.archs) }}
+    env:
+      SOURCE: ${{ inputs.source }}
+      SOURCE_SHA256: ${{ inputs.source_sha256 }}
+      SRC_SHA: ${{ needs.plan.outputs.src_sha }}
+      BASE: ${{ needs.plan.outputs.base }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      ARCH: ${{ matrix.arch }}
+      FLASHMLA_JOBS: ${{ inputs.flashmla_jobs }}
+      MODE: ${{ inputs.mode }}
+      INSTALL_RUST: ${{ inputs.install_rust }}
+      RUST_TOOLCHAIN: ${{ inputs.rust_toolchain }}
+      BASE_ENV: ${{ inputs.base_env }}
+    steps:
+      - name: Checkout (for the local actions)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Log in to ECR
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+
+      # The runners have no local Docker daemon: builds go through a BuildKit builder. Use the shared remote
+      # BuildKit workers, routed by flavor exactly like the SGLang image builds in CI (an isolated Kubernetes
+      # builder is not permitted for the runner service account). The recipe peaks near 23 GB of RAM on arm64.
+      - name: Initialize BuildKit builder (${{ matrix.arch }})
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: sglang-k31-${{ github.run_id }}-${{ matrix.arch }}
+          flavor: sglang
+          arch: linux/${{ matrix.arch }}
+          cuda_version: '13.0'
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+
+      - name: Fetch and verify the source
+        run: |
+          set -euo pipefail
+          case "${SOURCE}" in https://*) echo "::add-mask::${SOURCE}" ;; esac
+          case "${SOURCE}" in
+            s3://*)    aws s3 cp --only-show-errors "${SOURCE}" src.tar.gz ;;
+            https://*) curl -fsSL --retry 3 --retry-delay 2 -o src.tar.gz "${SOURCE}" ;;
+          esac
+          echo "${SOURCE_SHA256}  src.tar.gz" | sha256sum -c -
+          mkdir k31-src && tar -xzf src.tar.gz -C k31-src --strip-components=1
+          rm -f src.tar.gz
+          git config --global --add safe.directory "${PWD}/k31-src"
+          [ "$(git -C k31-src rev-parse HEAD)" = "${SRC_SHA}" ] || { echo "::error::the tarball's HEAD changed between plan and build"; exit 1; }
+
+      - name: Build the derived base (Rust toolchain / extra ENV)
+        id: derived
+        if: ${{ inputs.install_rust == true || inputs.base_env != '' }}
+        run: |
+          set -euo pipefail
+          derived="${ECR_REGISTRY}/${ECR_REPOSITORY}:${TAG}-derived-base-${ARCH}"
+          mkdir derived-base
+          {
+            echo "FROM ${BASE}"
+            if [ "${INSTALL_RUST}" = true ]; then
+              echo 'ENV RUSTUP_HOME=/root/.rustup CARGO_HOME=/root/.cargo PATH=/root/.cargo/bin:${PATH}'
+              echo "RUN curl --proto '=https' --tlsv1.2 --retry 3 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain ${RUST_TOOLCHAIN} && rustc --version && cargo --version"
+            fi
+            while IFS= read -r kv; do [ -z "${kv}" ] || echo "ENV ${kv}"; done <<<"${BASE_ENV}"
+          } > derived-base/Dockerfile
+          cat derived-base/Dockerfile
+          docker buildx build --progress=plain --platform "linux/${ARCH}" --tag "${derived}" --push derived-base
+          digest="$(docker buildx imagetools inspect "${derived}" --format '{{json .Manifest}}' | jq -r '.digest')"
+          echo "base=${derived%:*}@${digest}" >> "${GITHUB_OUTPUT}"
+          echo "- derived base: \`${derived%:*}@${digest}\`" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Build and push the ${{ matrix.arch }} image
+        env:
+          BASE_EFFECTIVE: ${{ steps.derived.outputs.base || needs.plan.outputs.base }}
+        run: |
+          set -euo pipefail
+          image="${ECR_REGISTRY}/${ECR_REPOSITORY}:${TAG}-${ARCH}"
+          cache="${ECR_REGISTRY}/${ECR_REPOSITORY}:cache-sglang-k31-${MODE}-${ARCH}"
+          if [ "${MODE}" = overlay ]; then
+            # Same install the cu134 base uses for its own SGLang tree (pip install --no-deps -e python): no
+            # dependency changes, so the base's Torch and CUDA libraries stay. The Rust extensions are skipped
+            # (the cu134 base has no Rust toolchain and tch is pinned to Torch 2.11).
+            mkdir overlay-build
+            cat > overlay-build/Dockerfile <<'DOCKERFILE'
+          ARG BASE_IMAGE
+          FROM ${BASE_IMAGE}
+          RUN python3 -c "import torch; print(torch.__version__)" > /tmp/torch-before
+          RUN rm -rf /sgl-workspace/sglang
+          COPY . /sgl-workspace/sglang
+          WORKDIR /sgl-workspace/sglang
+          ENV SGLANG_BUILD_RUST_EXTS=none
+          RUN git config --global --add safe.directory /sgl-workspace/sglang \
+              && git rev-parse HEAD > .k31-source-commit \
+              && python3 -m pip install --no-deps -e python
+          RUN python3 -c "import torch, sglang; b = open('/tmp/torch-before').read().strip(); assert torch.__version__ == b, (torch.__version__, b); print('sglang', sglang.__version__, 'torch', torch.__version__)" \
+              && rm /tmp/torch-before
+          DOCKERFILE
+            sed -i 's/^          //' overlay-build/Dockerfile
+            # Same ignore rules as the recipe (keeps .git, which setuptools-scm needs for the version).
+            cp k31-src/docker/k31.Dockerfile.dockerignore overlay-build/Dockerfile.dockerignore
+            dockerfile=overlay-build/Dockerfile
+          else
+            # docker/k31.Dockerfile.dockerignore is picked up automatically (it sits next to the Dockerfile).
+            dockerfile=k31-src/docker/k31.Dockerfile
+          fi
+          docker buildx build --progress=plain --platform "linux/${ARCH}" \
+            -f "${dockerfile}" \
+            --build-arg "BASE_IMAGE=${BASE_EFFECTIVE}" \
+            --build-arg "FLASHMLA_JOBS=${FLASHMLA_JOBS}" \
+            --label "ai.sglang.build.commit=${SRC_SHA}" \
+            --label "kimi_k31.sglang-k31.source-commit=${SRC_SHA}" \
+            --label "kimi_k31.sglang-k31.mode=${MODE}" \
+            --label "kimi_k31.sglang-k31.base=${BASE}" \
+            --label "kimi_k31.sglang-k31.build-base=${BASE_EFFECTIVE}" \
+            --label "org.opencontainers.image.revision=${SRC_SHA}" \
+            --cache-from "type=registry,ref=${cache}" \
+            --cache-to "type=registry,ref=${cache},mode=max,image-manifest=true,oci-mediatypes=true" \
+            --tag "${image}" \
+            --push \
+            k31-src 2>&1 | tee "build-${ARCH}.log"
+
+      - name: Remove the builder
+        if: always()
+        shell: bash
+        run: docker buildx rm "sglang-k31-${{ github.run_id }}-${{ matrix.arch }}" || true
+
+      - name: Upload the build log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: build-sglang-k31-${{ matrix.arch }}-log
+          path: build-${{ matrix.arch }}.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+  publish:
+    name: publish
+    needs: [plan, build]
+    runs-on: prod-builder-v3
+    timeout-minutes: 30
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+      SRC_SHA: ${{ needs.plan.outputs.src_sha }}
+      BASE: ${{ needs.plan.outputs.base }}
+      ARCHS: ${{ needs.plan.outputs.archs }}
+    steps:
+      - name: Checkout (for the local actions)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Log in to ECR
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+
+      - name: Merge the per-architecture images into one tag
+        run: |
+          set -euo pipefail
+          repo="${ECR_REGISTRY}/${ECR_REPOSITORY}"
+          sources=()
+          for a in $(jq -r '.[]' <<<"${ARCHS}"); do sources+=("${repo}:${TAG}-${a}"); done
+          docker buildx imagetools create --tag "${repo}:${TAG}" "${sources[@]}"
+          docker buildx imagetools inspect "${repo}:${TAG}"
+          digest="$(docker buildx imagetools inspect "${repo}:${TAG}" --format '{{json .Manifest}}' | jq -r '.digest')"
+          {
+            echo "### Published"
+            echo "- image: \`${repo}:${TAG}\` (digest \`${digest}\`)"
+            echo "- source commit: \`${SRC_SHA}\`"
+            echo "- base: \`${BASE}\`"
+            echo
+            echo "Pin it in \`container/context.yaml\` (sglang → cuda13.0) with:"
+            echo '```yaml'
+            echo "    runtime_image: ${repo}"
+            echo "    runtime_image_tag: ${TAG}@${digest}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"

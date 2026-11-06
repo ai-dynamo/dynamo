@@ -604,6 +604,7 @@ mod tests {
                 description: None,
                 parameters: None,
                 strict,
+                defer_loading: None,
             };
             validate_strict_function(&function, false).unwrap();
             function.parameters = Some(json!({}));
@@ -618,6 +619,7 @@ mod tests {
                 description: None,
                 parameters: Some(json!({})),
                 strict: Some(true),
+                defer_loading: None,
             },
             true,
         )
@@ -633,6 +635,7 @@ mod tests {
                 description: None,
                 parameters: Some(json!({"type": "object"})),
                 strict: Some(true),
+                defer_loading: None,
             },
             false,
         )
@@ -650,6 +653,7 @@ mod tests {
                 description: None,
                 parameters: Some(json!({"type": "object"})),
                 strict: Some(true),
+                defer_loading: None,
             },
             false,
         )
