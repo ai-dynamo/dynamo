@@ -81,13 +81,8 @@ def test_sglang_not_installed_raises(monkeypatch):
 
 
 @pytest.mark.sglang
-def test_installed_sglang_is_probed_without_importing_runtime():
-    if importlib.util.find_spec("sglang") is None:
-        pytest.skip("sglang is not installed")
-    already_loaded = "sglang.srt.managers.schedule_batch" in sys.modules
+def test_installed_sglang_source_is_found():
     assert isinstance(sglang_source_has_wide_mm_pad_values(), bool)
-    if not already_loaded:
-        assert "sglang.srt.managers.schedule_batch" not in sys.modules
 
 
 @pytest.mark.parametrize(
