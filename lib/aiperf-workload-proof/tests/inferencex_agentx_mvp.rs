@@ -119,6 +119,19 @@ mod calibrated;
 #[path = "support/reconcile_hosted.rs"]
 mod reconcile_hosted;
 
+fn init_debug_tracing() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(
+                "warn,aisim_aiperf_workload_runner=debug,aiperf_engine_phase::agentic_replay=debug,aiperf_timing::runner=debug"
+            ));
+        let _ = tracing_subscriber::fmt().with_env_filter(filter)
+            .with_ansi(false).with_target(true).with_thread_ids(true)
+            .with_writer(std::io::stderr).try_init();
+    });
+}
+
 /// `aiperf_agentx::scenario::AGENTX_SCENARIO`.
 const AGENTX_SCENARIO: &str = "inferencex-agentx-mvp";
 /// `aiperf_agentx::scenario::inferencex_agentx_mvp()` corpus alias.
@@ -858,6 +871,7 @@ fn host_typed(
     decode: &calibrated::RoleSetup,
     compact_evidence: bool,
 ) -> Result<(ReplayReport, HostedTypedReport)> {
+    init_debug_tracing();
     eprintln!("MVP stage: preparing complete shared workload");
     let (participant, handle) = native_hosted(
         run,
