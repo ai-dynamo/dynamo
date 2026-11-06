@@ -1973,6 +1973,7 @@ async def test_embedding_worker_registration_and_cleanup(
 
     register_vllm_model.assert_awaited_once()
     assert register_vllm_model.await_args.args[0] == expected_model_input
+    factory.setup_metrics_collection.assert_called_once_with(config, endpoint, ANY)
     assert cleanup_order == ["handler", "client", "resource"]
     assert shutdown_endpoints == [endpoint]
 

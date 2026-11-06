@@ -229,6 +229,13 @@ def _child_environment(
     else:
         env.pop(_LISTENER_FDS_ENV, None)
     env["PYTHONUNBUFFERED"] = "1"
+    # Each process exports only its own vllm:* metrics on its own system port.
+    # A child that inherits the parent's PROMETHEUS_MULTIPROC_DIR starts
+    # prometheus_client in multiprocess mode, so setup_metrics_collection serves
+    # its series twice (in-memory and .db) and the parent re-exports the child's
+    # .db series under its own labels. Without it, the child's setup_vllm_engine
+    # creates and cleans up a private directory, as the parent does.
+    env.pop("PROMETHEUS_MULTIPROC_DIR", None)
 
     # Each Dynamo runtime process needs its own system-status listener, but the
     # port must stay predictable: Prometheus scrapes a fixed containerPort and

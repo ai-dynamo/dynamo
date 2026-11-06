@@ -96,6 +96,24 @@ def test_child_environment_omits_system_port_when_parent_has_none(monkeypatch):
     assert "DYN_SYSTEM_PORT" not in env
 
 
+def test_child_environment_drops_prometheus_multiproc_dir(monkeypatch, tmp_path):
+    """A child must not share the parent's multiprocess metrics directory.
+
+    Otherwise each system port serves the child's vllm:* series under the
+    wrong worker's labels or twice.
+    """
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
+    env = processes._child_environment(
+        process_count=2,
+        process_index=1,
+        addresses_json='{"process_count": 2}',
+        parent_pid=123,
+    )
+
+    assert "PROMETHEUS_MULTIPROC_DIR" not in env
+    assert os.environ["PROMETHEUS_MULTIPROC_DIR"] == str(tmp_path)
+
+
 def test_decode_child_addresses_validates_parent_count(monkeypatch):
     monkeypatch.setenv(processes._INDEX_ENV, "1")
     monkeypatch.setenv(
