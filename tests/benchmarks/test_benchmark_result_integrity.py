@@ -303,11 +303,12 @@ def test_multi_model_ignores_supplemental_phase_exports(tmp_path):
     assert result.status == "ok"
 
 
-
 @pytest.mark.unit
 def test_local_revalidation_does_not_depend_on_run_metadata(tmp_path):
     deploy = DeployDimension("mocker", "hf")
-    spec = RunSpec(deploy, AiperfDimension(1, 16, num_requests=100000), deploy.deploy_key, "fake")
+    spec = RunSpec(
+        deploy, AiperfDimension(1, 16, num_requests=100000), deploy.deploy_key, "fake"
+    )
     folder = tmp_path / "aiperf"
     folder.mkdir()
     write_artifacts(folder, 3, "healthy")
