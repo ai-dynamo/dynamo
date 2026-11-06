@@ -1142,7 +1142,7 @@ fn canonical_weka_agentx_with_matched_options() -> Result<()> {
     let cuts: Value = serde_json::from_slice(&std::fs::read(cuts_file)?)?;
     let tree_idle_cap_seconds = 1e12; // Finite, beyond this profile: no per-tree cap in MVP.
     let imported_at = std::time::Instant::now();
-    let graph = load_weka_agentic_graph_with_options(
+    let (graph, _timestamp_basis) = load_weka_agentic_graph_with_options(
         &corpus,
         None,
         WekaImportOptions {
