@@ -287,9 +287,11 @@ fn installed_entrypoint_capture_matches_native_replayer_for_same_captured_reques
         });
     }
 
-    let rank = deployment.engine.rank.clone();
-    let mut args = MockerConfig::default();
-    args.engine.engine = rank;
+    // Build through the owning launch parser, as the actual provider does, so the
+    // fixed timing model also selects PerfModel::Fixed for the router's cost model
+    // (MockerConfig::default() would keep the default polynomial PerfModel).
+    let args = MockerConfig::from_value(json!({ "engine": deployment.engine.rank }))
+        .expect("captured engine rank is not a valid mocker launch config");
     let composition = CanonicalSelectorComposition(KvReplayComposition::disaggregated(
         args.clone(), args, deployment.prefill_workers, deployment.decode_workers,
         deployment.router_config, None, None));
