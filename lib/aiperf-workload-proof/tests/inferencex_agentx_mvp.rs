@@ -1417,8 +1417,12 @@ fn polynomial_comparison_bounded_shared_workload() -> Result<()> {
         Replayer::new(prepared.spec, prepared.factory).context("native polynomial/RR composition")
     })?;
     ensure!(
-        backend.per_request.len() == 4,
-        "bounded comparison must execute all four shared requests"
+        backend.per_request.len() == 4
+            && backend.per_request.iter().all(|row| {
+                row.terminal_status == aisimulate_core::replay::ReplayTerminalStatus::Completed
+                    && row.output_length == 2
+            }),
+        "bounded comparison must complete all four shared requests with their two output tokens"
     );
     let _ = reconcile_hosted::reconcile(&backend, &typed)?;
     Ok(())
