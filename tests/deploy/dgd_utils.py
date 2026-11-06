@@ -68,6 +68,12 @@ PORT_FORWARD_REQUEST_RETRY_LIMIT = 1
 DISCOVERY_SNAPSHOT_TIMEOUT = 15
 DISCOVERY_RESOURCE_TIMEOUT = 3
 _KR8S_VCLUSTER_CONNECTION_ERRORS = (httpx.TransportError, kr8s.APITimeoutError)
+# A drop mid-response surfaces as ClientPayloadError, which is not a
+# ClientConnectionError.
+_AIOHTTP_VCLUSTER_CONNECTION_ERRORS = (
+    aiohttp.ClientConnectionError,
+    aiohttp.ClientPayloadError,
+)
 
 
 def validate_chat_response(
@@ -523,16 +529,27 @@ class ServiceSpec:
         "--kv-block-size": "--block-size",  # TensorRT-LLM
         "--disaggregation-mode": "--disaggregation-mode",
     }
+    # Each engine's --disaggregation-mode values, by the mocker's: SGLang spells
+    # aggregated "null", TensorRT-LLM "prefill_and_decode".
+    _MOCKER_DISAGGREGATION_MODES = {
+        "agg": "agg",
+        "null": "agg",
+        "pd": "agg",
+        "prefill_and_decode": "agg",
+        "prefill": "prefill",
+        "decode": "decode",
+    }
 
     def use_mocker(self, image: str, model: str) -> None:
         """Replace this worker's engine with a mocker from ``image``.
 
         The mocker simulates the engine it replaces (``dynamo.vllm``,
         ``dynamo.sglang`` or ``dynamo.trtllm``), serves ``model``, and keeps the
-        engine's KV block size and ``--disaggregation-mode``, in either
-        ``--flag value`` or ``--flag=value`` form, so the router sees the same
-        block size and worker role. Removes the container's GPU request.
-        v1beta1 only.
+        engine's KV block size and ``--disaggregation-mode`` (in the mocker's
+        spelling), in either ``--flag value`` or ``--flag=value`` form, so the
+        router sees the same block size and worker role. Raises for a mode the
+        mocker cannot simulate, such as ``encode``. Removes the container's GPU
+        request. v1beta1 only.
         """
         if self._schema != SCHEMA_V1BETA1:
             raise NotImplementedError("use_mocker supports v1beta1 manifests only")
@@ -559,6 +576,13 @@ class ServiceSpec:
                 if i + 1 == len(engine_args):
                     continue
                 value = engine_args[i + 1]
+            if flag == "--disaggregation-mode":
+                if value not in self._MOCKER_DISAGGREGATION_MODES:
+                    raise ValueError(
+                        f"{self._name}: the mocker cannot simulate "
+                        f"--disaggregation-mode {value}"
+                    )
+                value = self._MOCKER_DISAGGREGATION_MODES[value]
             mocker_args += [self._MOCKER_FLAGS[flag], value]
         container.update(
             image=image, command=["python3", "-m", "dynamo.mocker"], args=mocker_args
@@ -1523,7 +1547,7 @@ class ManagedDeployment:
                     plural="dynamographdeployments",
                     body=self.deployment_spec.spec(),
                 ),
-                (aiohttp.ClientConnectionError,),
+                _AIOHTTP_VCLUSTER_CONNECTION_ERRORS,
                 self._logger,
             )
             self._logger.info(self.deployment_spec.spec())
@@ -1784,7 +1808,7 @@ class ManagedDeployment:
                     name=self._deployment_name,
                     body=client.V1DeleteOptions(propagation_policy="Foreground"),
                 ),
-                (aiohttp.ClientConnectionError,),
+                _AIOHTTP_VCLUSTER_CONNECTION_ERRORS,
                 self._logger,
             )
         except exceptions.ApiException as error:
@@ -1810,7 +1834,7 @@ class ManagedDeployment:
                         plural="dynamographdeployments",
                         name=self._deployment_name,
                     ),
-                    (aiohttp.ClientConnectionError,),
+                    _AIOHTTP_VCLUSTER_CONNECTION_ERRORS,
                     self._logger,
                 )
             except exceptions.ApiException as error:
@@ -1828,7 +1852,7 @@ class ManagedDeployment:
                         f"{self._deployment_name}"
                     ),
                 ),
-                (aiohttp.ClientConnectionError,),
+                _AIOHTTP_VCLUSTER_CONNECTION_ERRORS,
                 self._logger,
             )
             if not exists and not pods.items:

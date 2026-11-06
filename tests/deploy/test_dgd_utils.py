@@ -4,6 +4,7 @@
 """Unit tests for schema-aware DynamoGraphDeployment helpers."""
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
@@ -16,7 +17,7 @@ import yaml
 from kubernetes_asyncio.client.exceptions import ApiException
 
 from tests.deploy import dgd_utils
-from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
+from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment, ServiceSpec
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
@@ -47,6 +48,94 @@ def test_logging_config_reads_existing_v1beta1_env(tmp_path) -> None:
     deployment_spec = DeploymentSpec(str(manifest_path))
 
     assert deployment_spec.get_logging_config()["jsonl_enabled"] is True
+
+
+GAIE_EXAMPLES = sorted(
+    path
+    for path in (Path(__file__).resolve().parents[2] / "examples" / "backends").glob(
+        "*/deploy/gaie/*.yaml"
+    )
+    if yaml.safe_load(path.read_text()).get("kind") == "DynamoGraphDeployment"
+)
+
+
+@pytest.mark.parametrize(
+    "manifest", GAIE_EXAMPLES, ids=lambda path: f"{path.parts[-4]}-{path.stem}"
+)
+def test_use_mocker_keeps_each_gaie_example_role_and_block_size(manifest) -> None:
+    """Each worker's mocker keeps its role and the KV block size its EPP uses."""
+    spec = DeploymentSpec(str(manifest))
+    epp_env = {env["name"]: str(env.get("value")) for env in spec["Epp"].envs}
+    workers = [service for service in spec.services if service.name != "Epp"]
+    assert workers
+    for worker in workers:
+        worker.use_mocker("frontend:tag", "Qwen/Qwen3-0.6B")
+        container = worker._main_container()
+        args = container["args"]
+        assert container["command"] == ["python3", "-m", "dynamo.mocker"]
+        assert args[args.index("--engine-type") + 1] == manifest.parts[-4]
+        assert (
+            args[args.index("--block-size") + 1] == epp_env["DYN_KV_CACHE_BLOCK_SIZE"]
+        )
+        mode = "agg"
+        if "--disaggregation-mode" in args:
+            mode = args[args.index("--disaggregation-mode") + 1]
+        assert mode == (worker.name if worker.name in ("prefill", "decode") else "agg")
+        resources = container.get("resources", {}).values()
+        assert all("nvidia.com/gpu" not in bucket for bucket in resources)
+
+
+def engine_worker(tmp_path, engine: str, args: list[str]) -> ServiceSpec:
+    manifest = {
+        "apiVersion": "nvidia.com/v1beta1",
+        "kind": "DynamoGraphDeployment",
+        "metadata": {"name": "mocker-test"},
+        "spec": {
+            "components": [
+                {
+                    "name": "worker",
+                    "podTemplate": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "command": ["python3", "-m", f"dynamo.{engine}"],
+                                    "args": args,
+                                }
+                            ]
+                        }
+                    },
+                }
+            ]
+        },
+    }
+    manifest_path = tmp_path / "deploy.yaml"
+    manifest_path.write_text(yaml.safe_dump(manifest))
+    return DeploymentSpec(str(manifest_path))["worker"]
+
+
+@pytest.mark.parametrize(
+    "engine,args,mode",
+    [
+        ("sglang", ["--disaggregation-mode", "null"], "agg"),
+        ("trtllm", ["--disaggregation-mode=prefill_and_decode"], "agg"),
+        ("trtllm", ["--disaggregation-mode=decode"], "decode"),
+    ],
+)
+def test_use_mocker_translates_disaggregation_mode(
+    tmp_path, engine, args, mode
+) -> None:
+    """Pass each engine's spelling of a worker role in the mocker's spelling."""
+    worker = engine_worker(tmp_path, engine, args)
+    worker.use_mocker("frontend:tag", "Qwen/Qwen3-0.6B")
+    mocker_args = worker._main_container()["args"]
+    assert mocker_args[mocker_args.index("--disaggregation-mode") + 1] == mode
+
+
+def test_use_mocker_rejects_a_mode_the_mocker_cannot_simulate(tmp_path) -> None:
+    worker = engine_worker(tmp_path, "trtllm", ["--disaggregation-mode", "encode"])
+    with pytest.raises(ValueError, match="encode"):
+        worker.use_mocker("frontend:tag", "Qwen/Qwen3-0.6B")
 
 
 @pytest.mark.parametrize(
@@ -98,26 +187,33 @@ async def test_delete_deployment_retries_vcluster_connection_failure(
 
 
 @pytest.mark.parametrize(
-    "retry_outcome",
-    [None, ApiException(status=409, reason="Conflict")],
-    ids=["created", "already-created"],
+    "dropped,retry_outcome",
+    [
+        (
+            aiohttp.ClientConnectorError(
+                MagicMock(host="127.0.0.1", port=8443, ssl=True),
+                ConnectionRefusedError(111, "vCluster tunnel unavailable"),
+            ),
+            None,
+        ),
+        # The API server created the DGD before the response was lost.
+        (aiohttp.ServerDisconnectedError(), ApiException(status=409)),
+        (
+            aiohttp.ClientPayloadError("Response payload is not completed"),
+            ApiException(status=409),
+        ),
+    ],
+    ids=["refused", "disconnected-after-create", "cut-off-after-create"],
 )
 async def test_create_deployment_retries_vcluster_connection_failure(
-    monkeypatch, tmp_path, retry_outcome
+    monkeypatch, tmp_path, dropped, retry_outcome
 ) -> None:
     """Retry a create the tunnel dropped, including one the API server applied."""
     deployment = managed_deployment(tmp_path)
     deployment.deployment_spec.spec = MagicMock(return_value={})
-    connection_key = MagicMock(host="127.0.0.1", port=8443, ssl=True)
     deployment._custom_api = MagicMock()
     deployment._custom_api.create_namespaced_custom_object = AsyncMock(
-        side_effect=[
-            aiohttp.ClientConnectorError(
-                connection_key,
-                ConnectionRefusedError(111, "vCluster tunnel unavailable"),
-            ),
-            retry_outcome,
-        ]
+        side_effect=[dropped, retry_outcome]
     )
     sleep = AsyncMock()
     monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)

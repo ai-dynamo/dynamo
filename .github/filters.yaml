@@ -385,12 +385,16 @@ gaie:
   # The operator, which renders the EPP and its InferencePool, and its chart.
   - 'deploy/operator/**'
   - 'deploy/helm/charts/platform/components/operator/**'
-  # The test and the helpers it runs on.
+  # The test, the helpers it calls, and the test dependencies they pin.
   - 'tests/conftest.py'
   - 'tests/deploy/conftest.py'
   - 'tests/deploy/dgd_utils.py'
+  - 'tests/deploy/response_checks.py'
   - 'tests/deploy/test_dgd.py'
   - 'tests/deploy/vcluster_utils.py'
+  - 'tests/utils/client.py'
+  - 'tests/utils/router_nvext.py'
+  - 'container/deps/requirements.test.txt'
   # Engine gRPC APIs served by the mocker, which the EPP does not link.
   - '!lib/mocker/servers/**'
   - '!**/*.md'

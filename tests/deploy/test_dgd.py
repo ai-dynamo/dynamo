@@ -451,34 +451,31 @@ async def test_gaie_deployment(
     pool_ref["name"] = f"{deployment_spec.name}-pool"
     httproute_yaml = yaml.safe_dump(httproute_spec)
 
+    def kubectl_httproute(verb: str, *flags: str) -> None:
+        """Run ``kubectl <verb>`` on the HTTPRoute, retrying if the tunnel drops."""
+
+        def run() -> None:
+            result = kubectl(
+                verb, *flags, "-n", namespace, "-f", "-", input_=httproute_yaml
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"kubectl {verb} failed: {result.stderr}")
+            logger.info(f"HTTPRoute {verb}: {result.stdout.strip()}")
+
+        retry_vcluster_api(
+            f"running kubectl {verb} on the HTTPRoute", run, (RuntimeError,), logger
+        )
+
     def delete_httproute() -> None:
         """Delete the HTTPRoute, which deleting the DGD leaves on the Gateway."""
-        result = kubectl(
-            "delete",
-            "--ignore-not-found",
-            "-n",
-            namespace,
-            "-f",
-            "-",
-            input_=httproute_yaml,
-        )
-        if result.returncode != 0:
-            logger.warning(f"Failed to delete HTTPRoute: {result.stderr}")
-
-    def apply_httproute() -> None:
-        """Apply the HTTPRoute, raising on failure so a dropped tunnel is retried."""
-        result = kubectl("apply", "-n", namespace, "-f", "-", input_=httproute_yaml)
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to apply HTTPRoute: {result.stderr}")
-        logger.info(f"HTTPRoute apply stdout: {result.stdout}")
-        if result.stderr:
-            logger.warning(f"HTTPRoute apply stderr: {result.stderr}")
+        try:
+            kubectl_httproute("delete", "--ignore-not-found")
+        except RuntimeError as error:
+            logger.warning(f"Failed to delete HTTPRoute: {error}")
 
     logger.info("Applying GAIE HTTPRoute...")
     request.addfinalizer(delete_httproute)
-    retry_vcluster_api(
-        "applying the HTTPRoute", apply_httproute, (RuntimeError,), logger
-    )
+    kubectl_httproute("apply")
 
     # Debug: verify namespace state before creating DGD
     logger.info(f"Namespace: {namespace}")
@@ -512,6 +509,8 @@ async def test_gaie_deployment(
         frontend_service_name="Epp",
         # Half the test's timeout, so a stuck rollout fails with pod status.
         readiness_timeout=300,
+        # A crash-looping EPP or mocker fails the case instead of waiting it out.
+        fail_fast_startup=True,
     ) as deployment:
         # Debug: check what DGDs exist after creation
         dgd_check = kubectl("get", "dynamographdeployments", "-n", namespace)
