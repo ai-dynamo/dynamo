@@ -56,10 +56,14 @@ Backend workers expose `dynamo_component_*` only when `DYN_SYSTEM_PORT` is set (
 
 Emitted by `python -m dynamo.frontend` at `/metrics` on the HTTP port (`--http-port`, default `8000`). The frontend serves its [router](#router-metrics) and [runtime](#every-process) metrics on the same port and does not use `DYN_SYSTEM_PORT`. Frontend metrics carry no automatic labels.
 
-- `--metrics-prefix` (`DYN_METRICS_PREFIX`) replaces the `dynamo_frontend` prefix of the `dynamo_frontend_*` metrics, except `dynamo_frontend_stage_*`, `dynamo_frontend_tokenize_seconds`, `dynamo_frontend_template_seconds`, `dynamo_frontend_detokenize_*`, `dynamo_frontend_tokenizer_cache_*`, `dynamo_frontend_worker_*`, `dynamo_frontend_router_*`, `dynamo_frontend_lora_*`, and `dynamo_frontend_event_loop_*`, which keep their names.
+- `--metrics-prefix` (`DYN_METRICS_PREFIX`) replaces the `dynamo_frontend` prefix of the `dynamo_frontend_*` metrics, except `dynamo_frontend_stage_*`, `dynamo_frontend_tokenize_seconds`, `dynamo_frontend_template_seconds`, `dynamo_frontend_detokenize_*`, `dynamo_frontend_tokenizer_cache_*`, `dynamo_frontend_worker_*`, `dynamo_frontend_router_*`, `dynamo_frontend_lora_*`, `dynamo_frontend_event_loop_*`, and `dynamo_frontend_metrics_start_time_seconds`, which keep their names.
 - With `--kserve-grpc-server`, the frontend serves metrics on `DYN_GRPC_METRICS_PORT` (default `8788`) instead. The model configuration, migration, router, and routing overhead metrics are not exposed in that mode.
 
 A detailed entry that does not name its labels carries only a `model` label. For endpoints that canonicalize aliases, that label holds the primary served model name — the first `--served-model-name` value — so a request sent to an alias is counted under the primary. A name the frontend has not registered is counted under `unknown_model`.
+
+<ParamField path="dynamo_frontend_metrics_start_time_seconds" type="gauge">
+  **Experimental.** Unix timestamp in seconds when the HTTP frontend first initializes its metrics in this process. One series per frontend scrape target, with no labels; all HTTP registries in the process expose the same fixed value. Planner uses it alongside request counters to detect a new exporter lifetime and reset its rate baseline. This is not the OS process start time or a model readiness signal. Not exposed by the KServe gRPC metrics endpoint.
+</ParamField>
 
 <ParamField path="dynamo_frontend_active_requests" type="gauge">
   Requests currently being handled by the frontend, from HTTP handler entry until the response stream completes. The top-level in-flight count with no stage breakdown.
@@ -625,7 +629,7 @@ Emitted by every process that routes requests: the frontend, which serves them o
 </ParamField>
 
 <ParamField path="dynamo_component_router_non_max_overlap_selections_total" type="counter">
-  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. Labeled by `worker_type` (`prefill`).
+  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. [Explicitly pinned requests](../../developer-guide/knowledge-base/modular-components/router/worker-filtering.md#candidate-eligibility) (direct routing or an explicit worker target) and equal-overlap ties are excluded. Session-affinity selections are compared against the best eligible worker when the selection policy has no worker filters of its own (the default); otherwise they are excluded like pinned requests. Labeled by `worker_type` (`prefill`).
 </ParamField>
 
 <ParamField path="dynamo_component_router_overlap_blocks_lost" type="histogram">
@@ -647,7 +651,7 @@ The cache reuse funnel shows how much of the incoming prompt could be reused, an
 | **F3 — Selected worker's match** | Prefix the router estimates is cached on the worker it chooses. | `dynamo_component_router_kv_selected_cached_prefix_tokens_total` |
 | **F4 — Reported reuse** | Tokens the worker reports reusing. Missing reports count as zero. | `dynamo_component_router_kv_worker_reused_tokens_total` |
 
-F2, F3, and F4 are counters labeled by `router_id`, `model`, and `phase`. They need no enable flag.
+F2, F3, and F4 are counters labeled by `router_id`, `model`, and `phase`. They are populated only with `--router-mode kv` and need no additional enable flag. Incoming tokens (F0) are recorded in every router mode.
 
 Compare token increases over the same time window and matching KV-routing traffic. Use a long enough window: the steps are recorded at different times, and F4 depends on worker reports arriving after routing. Short windows may therefore compare different requests. Divide each step by F0 to express it as a percentage of incoming tokens.
 
@@ -690,7 +694,7 @@ vLLM, SGLang, and TensorRT-LLM workers report F4 on the final response chunk of 
 
 ### Router Queue Metrics
 
-These metrics have series once a KV router starts, whether or not queueing is enabled; the queue metrics stay at zero unless queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`. With policy-family or cache-bucket configuration, `policy_class` is the resolved physical queue.
+These metrics have series once a KV router starts, whether or not queueing is enabled; the queue metrics stay at zero unless queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`, the resolved class: a request that names no class is reported as the default class, and a request whose class, after any request-classifier override, is unknown fails before it is queued, so these queue metrics do not count it.
 
 <ParamField path="dynamo_frontend_router_queue_pending_requests" type="gauge">
   Requests pending in the router scheduler queue.
@@ -713,7 +717,7 @@ These metrics have series once a KV router starts, whether or not queueing is en
 </ParamField>
 
 <ParamField path="dynamo_frontend_router_admission_rejected_total" type="counter">
-  Attempts rejected because their deadline passed (`reason="due_time_passed"`). The `predicted_miss` reason is reserved and always 0.
+  Scheduling attempts rejected before admission, counted once each and labeled by `reason`: `due_time_passed` when the request's explicit deadline, or the budget of an `edf` class with `controlled_delay`, passes before admission, or `queue_size_exceeded` when a class queue request or token limit rejects it. An attempt whose response receiver is already closed when the router checks it, because the client went away, is not counted; a receiver that closes after that check can still be counted. `predicted_miss` is reserved and stays zero. A `queue_size_exceeded` rejection is also counted, by limit, in `dynamo_frontend_router_queue_backpressure_total` when the frontend's selection call returns that queue rejection; a cancellation can drop the call before it returns, so the two counts can differ. They describe the same rejections: do not add them together.
 </ParamField>
 
 ### KV Indexer Metrics

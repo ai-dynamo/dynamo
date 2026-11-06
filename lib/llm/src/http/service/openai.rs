@@ -29,6 +29,7 @@ use dynamo_runtime::telemetry::{
     LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleStage, LifecycleTerminal, LifecycleTrace, TerminalOutcome,
 };
 use dynamo_runtime::{
+    dynamo_nvtx_mark, dynamo_nvtx_range,
     engine::AsyncEngineContext,
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
@@ -230,7 +231,8 @@ fn terminal_outcome_for_error_type(error_type: ErrorType) -> TerminalOutcome {
         | ErrorType::NotFound
         | ErrorType::Overload
         | ErrorType::Unavailable
-        | ErrorType::NotImplemented => TerminalOutcome::Rejected,
+        | ErrorType::NotImplemented
+        | ErrorType::UnsupportedModality => TerminalOutcome::Rejected,
         ErrorType::Cancelled => TerminalOutcome::Cancelled,
         ErrorType::ResponseTimeout => TerminalOutcome::TimedOut,
         ErrorType::Internal | ErrorType::None => TerminalOutcome::Failed,
@@ -387,6 +389,110 @@ pub(super) fn metric_error_type_for_class(class: dynamo_runtime::error::ErrorCla
         }
         _ => ErrorType::Internal,
     }
+}
+
+pub(super) struct MediaRefusal {
+    pub(super) status: StatusCode,
+    pub(super) message: String,
+}
+
+/// Refusal for a chat request that carries image, video, or audio content in
+/// any message, current turn or history, when `--reject-media` is set. Callers
+/// run this before routing, so no worker sees the request and a streaming
+/// client receives the status instead of a 200 followed by an error event.
+pub(super) fn media_refusal(
+    state: &service_v2::State,
+    request: &NvCreateChatCompletionRequest,
+) -> Option<MediaRefusal> {
+    media_refusal_for_content_type(state, || {
+        crate::preprocessor::request_media_content_types(&request.inner.messages)
+            .first()
+            .copied()
+    })
+}
+
+/// Keep classification lazy so disabled frontends do not scan request content.
+pub(super) fn media_refusal_for_content_type(
+    state: &service_v2::State,
+    content_type: impl FnOnce() -> Option<&'static str>,
+) -> Option<MediaRefusal> {
+    let config = state.media_rejection();
+    if !config.enabled() {
+        return None;
+    }
+    let content_type = content_type()?;
+    let status =
+        StatusCode::from_u16(config.status_code()).unwrap_or(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let modality = match content_type {
+        "input_audio" => "audio",
+        other => other.trim_end_matches("_url"),
+    };
+    let message = format!(
+        "Model does not accept {modality} input; received unsupported content type '{content_type}'."
+    );
+    tracing::debug!(status = %status, "Media refused: {message}");
+    Some(MediaRefusal { status, message })
+}
+
+/// OpenAI-shaped [`media_refusal`] for the Chat Completions and Responses
+/// handlers. Labeled `unsupported_modality` in metrics whatever the status, so
+/// a refusal sent with a capacity status is not counted as capacity shedding.
+fn reject_media_if_configured(
+    state: &service_v2::State,
+    request: &NvCreateChatCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    reject_media(media_refusal(state, request))
+}
+
+fn reject_media(refusal: Option<MediaRefusal>) -> Result<(), ErrorResponse> {
+    let Some(MediaRefusal { status, message }) = refusal else {
+        return Ok(());
+    };
+    record_local_failure(ErrorClass::UnsupportedMedia);
+    Err((
+        status,
+        Json(ErrorMessage {
+            message,
+            error_type: status
+                .canonical_reason()
+                .unwrap_or("UnknownError")
+                .to_string(),
+            code: status.as_u16(),
+            details: None,
+            metric_error_type: Some(ErrorType::UnsupportedModality),
+        }),
+    ))
+}
+
+/// Inspect the native input, including image references and non-user history,
+/// before the Responses-to-chat conversion loses or rejects media.
+fn responses_media_content_type(request: &NvCreateResponse) -> Option<&'static str> {
+    use dynamo_protocols::types::responses::{
+        EasyInputContent, FunctionCallOutput, InputContent, InputItem, InputParam, Item,
+        MessageItem,
+    };
+
+    let InputParam::Items(items) = &request.inner.input else {
+        return None;
+    };
+    items.iter().find_map(|item| {
+        let parts = match item {
+            InputItem::EasyMessage(message) => match &message.content {
+                EasyInputContent::ContentList(parts) => parts,
+                EasyInputContent::Text(_) => return None,
+            },
+            InputItem::Item(Item::Message(MessageItem::Input(message))) => &message.content,
+            InputItem::Item(Item::FunctionCallOutput(output)) => match &output.output {
+                FunctionCallOutput::Content(parts) => parts,
+                FunctionCallOutput::Text(_) => return None,
+            },
+            _ => return None,
+        };
+        parts.iter().find_map(|part| match part {
+            InputContent::InputImage(_) => Some("image_url"),
+            _ => None,
+        })
+    })
 }
 
 /// Extract ErrorType from ErrorResponse for metrics
@@ -1018,21 +1124,20 @@ fn unprocessable_error_message(body: &[u8]) -> (String, bool) {
     }
 }
 
-// Problem: Currently we are using JSON from axum as the request validator. Whenever there is an invalid JSON, it will return a 422.
-// But all the downstream apps that relies on openai based APIs, expects to get 400 for all these cases otherwise they fail badly
-// Solution: Intercept the response from handlers and convert ANY 422 status codes to 400 with the actual error message.
+/// OpenAI clients expect 400 for Axum extraction failures, but handler errors own their status.
 pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> Response {
     let response = next.run(request).await;
 
     if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
-        let (_parts, body) = response.into_parts();
+        let (parts, body) = response.into_parts();
         let body_bytes = axum::body::to_bytes(body, get_body_limit())
             .await
             .unwrap_or_default();
         let (error_message, already_recorded) = unprocessable_error_message(&body_bytes);
-        if !already_recorded {
-            record_local_failure(ErrorClass::InvalidRequest);
+        if already_recorded {
+            return Response::from_parts(parts, Body::from(body_bytes));
         }
+        record_local_failure(ErrorClass::InvalidRequest);
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorMessage {
@@ -1304,6 +1409,9 @@ async fn completions_single(
     mut request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
+    // Handler body only; for a streaming request the SSE stream outlives this range.
+    let _nvtx = dynamo_nvtx_range!("frontend.http.completions.handler");
+
     let request_id = request.id().to_string();
 
     // todo - decide on default
@@ -1335,6 +1443,7 @@ async fn completions_single(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     // todo - error handling should be more robust
+    let nvtx_lookup = dynamo_nvtx_range!("frontend.http.completions.engine_lookup");
     let (engine, parsing_options) = state
         .manager()
         .get_completions_engine_with_parsing(&model)
@@ -1343,6 +1452,7 @@ async fn completions_single(
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
+    drop(nvtx_lookup);
 
     let mut response_collector = inflight_guard.response_collector();
     inflight_guard.request_metrics().attach_to(&mut request);
@@ -1351,6 +1461,8 @@ async fn completions_single(
     let annotations = request.annotations();
 
     // issue the generate call on the engine
+    // Covers preprocessing, routing and the wire handoff to the worker.
+    let nvtx_generate = dynamo_nvtx_range!("frontend.http.completions.generate");
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
@@ -1361,6 +1473,7 @@ async fn completions_single(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
+    drop(nvtx_generate);
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -1413,6 +1526,10 @@ async fn completions_single(
                 )
             })
             .map(move |mut response| {
+                // Frontend-side SSE conversion for one chunk. The gaps between
+                // consecutive ranges cover both worker time and the frontend's
+                // own unannotated receive/decode path.
+                let _nvtx_chunk = dynamo_nvtx_range!("frontend.http.completions.sse_chunk");
                 // `echo` rides the chunk as typed metadata up to this boundary.
                 if let Some(data) = response.data.as_mut() {
                     data.fold_echo();
@@ -1475,6 +1592,8 @@ async fn completions_single(
                 error_response
             })?;
 
+        // Spans the whole fold, so it includes worker time.
+        let _nvtx_aggregate = dynamo_nvtx_range!("frontend.http.completions.aggregate");
         let response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
             .await
             .map_err(|e| {
@@ -1611,6 +1730,10 @@ async fn completions_batch(
     use dynamo_protocols::types::Prompt;
     use futures::stream::{self, StreamExt};
 
+    // Same range names as completions_single, so a capture aggregates single and
+    // batch requests together. For a streaming request the SSE stream outlives this range.
+    let _nvtx = dynamo_nvtx_range!("frontend.http.completions.handler");
+
     let request_id = request.id().to_string();
     let streaming = request.inner.stream.unwrap_or(false);
     // Resolve alias → primary served name (see completions_single).
@@ -1632,6 +1755,7 @@ async fn completions_batch(
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
+    let nvtx_lookup = dynamo_nvtx_range!("frontend.http.completions.engine_lookup");
     let (engine, parsing_options) = state
         .manager()
         .get_completions_engine_with_parsing(&model)
@@ -1640,6 +1764,7 @@ async fn completions_batch(
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
+    drop(nvtx_lookup);
 
     let mut response_collector = inflight_guard.response_collector();
 
@@ -1681,7 +1806,9 @@ async fn completions_batch(
             .request_metrics()
             .attach_to(&mut single_request_context);
 
-        // Generate stream for this prompt
+        // Generate stream for this prompt. One range per prompt: each covers that
+        // prompt's preprocessing, routing and wire handoff.
+        let nvtx_generate = dynamo_nvtx_range!("frontend.http.completions.generate");
         let stream = engine.generate(single_request_context).await.map_err(|e| {
             if super::metrics::request_was_rejected(e.as_ref()) {
                 state
@@ -1692,6 +1819,7 @@ async fn completions_batch(
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
+        drop(nvtx_generate);
 
         parent_ctx.link_child(stream.context());
 
@@ -1778,6 +1906,8 @@ async fn completions_batch(
                 )
             })
             .map(move |mut response| {
+                // Frontend-side SSE conversion for one chunk of the merged stream.
+                let _nvtx_chunk = dynamo_nvtx_range!("frontend.http.completions.sse_chunk");
                 // `echo` rides the chunk as typed metadata up to this boundary.
                 if let Some(data) = response.data.as_mut() {
                     data.fold_echo();
@@ -1826,6 +1956,8 @@ async fn completions_batch(
             );
         });
 
+        // Spans the whole fold across every prompt, so it includes worker time.
+        let _nvtx_aggregate = dynamo_nvtx_range!("frontend.http.completions.aggregate");
         let response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
             .await
             .map_err(|e| {
@@ -3342,6 +3474,51 @@ fn push_dispatch_event(
     }
 }
 
+/// True when the engine generated tokens for this streaming chunk, which is where
+/// the TTFT marker belongs.
+///
+/// Prefers `llm_metrics.chunk_tokens`, the count the TTFT metric uses, because a
+/// chunk can carry generated tokens while its parsed delta is empty: multi-byte
+/// token assembly and the Nemotron `force_nonempty_content` deferral both do this.
+/// Falls back to inspecting the delta when the backend does not report metrics,
+/// since a marker that silently never fires is worse than one placed by inspection.
+fn chunk_has_generated_tokens(resp: &NvCreateChatCompletionStreamResponse) -> bool {
+    match &resp.llm_metrics {
+        Some(metrics) => metrics.chunk_tokens > 0,
+        None => carries_generated_token(resp),
+    }
+}
+
+/// True when a streaming chunk's delta carries generated model output.
+///
+/// Deliberately narrower than `!is_empty_stream_response`: that predicate exists
+/// to decide what is worth forwarding to the client, so it counts a role-only
+/// opening delta (`{"role": "assistant"}`) as non-empty. Such a delta carries no
+/// generated token, and treating it as one would place the TTFT marker before the
+/// model had produced anything.
+fn carries_generated_token(resp: &NvCreateChatCompletionStreamResponse) -> bool {
+    resp.inner.choices.iter().any(|choice| {
+        let ChatCompletionStreamResponseDelta {
+            content,
+            function_call,
+            tool_calls,
+            role: _,
+            refusal,
+            reasoning_content,
+        } = &choice.delta;
+        let content_nonempty = match content {
+            None => false,
+            Some(ChatCompletionMessageContent::Text(t)) => !t.is_empty(),
+            Some(ChatCompletionMessageContent::Parts(p)) => !p.is_empty(),
+        };
+        content_nonempty
+            || reasoning_content.as_ref().is_some_and(|r| !r.is_empty())
+            || refusal.as_ref().is_some_and(|r| !r.is_empty())
+            || tool_calls.as_ref().is_some_and(|t| !t.is_empty())
+            || function_call.is_some()
+    })
+}
+
 /// Empty stream chunk produced by multi-byte token assembly (e.g. emoji).
 fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool {
     if resp.nvext.is_some() {
@@ -3525,6 +3702,11 @@ async fn chat_completions(
     request_lifecycle: tracing::Span,
     terminal: LifecycleTerminal,
 ) -> Result<Response, ErrorResponse> {
+    // Covers the handler body only: template resolution, validation, engine
+    // dispatch and response commit. For a streaming request the SSE stream
+    // outlives this range, and each chunk is annotated separately below.
+    let _nvtx = dynamo_nvtx_range!("frontend.http.chat.handler");
+
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
@@ -3561,6 +3743,10 @@ async fn chat_completions(
         &request_id,
     );
 
+    let nvtx_validate = dynamo_nvtx_range!("frontend.http.chat.validate");
+    state
+        .chat_template_defaults()
+        .apply_to_request(&mut request);
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -3601,11 +3787,19 @@ async fn chat_completions(
         return Err(err_response);
     }
 
+    if let Err(err_response) = reject_media_if_configured(&state, &request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
     // Selected once: the Beam request normalization below reads this engine's parsing
     // options and dispatch uses this same engine, so the two cannot disagree on the
     // worker set when one served name fronts Beam and non-Beam pools.
+    // The lookup sits inside validation, so this range nests in
+    // frontend.http.chat.validate, whose duration includes it.
+    let nvtx_lookup = dynamo_nvtx_range!("frontend.http.chat.engine_lookup");
     let (engine, parsing_options) = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
@@ -3614,18 +3808,12 @@ async fn chat_completions(
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
+    drop(nvtx_lookup);
 
-    // Beam route, before generic validation (which rejects what these normalize): a
-    // `strict` tool whose schema is outside OpenAI's strict subset is served as
-    // non-strict instead of rejected, and a legacy `builtin_tools` declaration is
-    // promoted into `tools` (see `tool_choice::relax_noncompliant_strict_tools_for_beam`
-    // and `tool_choice::declare_legacy_builtin_tools_for_beam`).
+    // Beam route, before generic validation (which rejects what this normalizes): a
+    // legacy `builtin_tools` declaration is promoted into `tools` (see
+    // `tool_choice::declare_legacy_builtin_tools_for_beam`).
     crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
-        &mut request,
-        parsing_options.tool_call_parser.as_deref(),
-        parsing_options.reasoning_parser.as_deref(),
-    );
-    crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
         &mut request,
         parsing_options.tool_call_parser.as_deref(),
         parsing_options.reasoning_parser.as_deref(),
@@ -3636,6 +3824,7 @@ async fn chat_completions(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
+    drop(nvtx_validate);
 
     // Create HTTP queue guard after template resolution so labels are correct
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
@@ -3681,6 +3870,9 @@ async fn chat_completions(
     let annotations = request.annotations();
 
     // issue the generate call on the engine
+    // Covers preprocessing, routing and the wire handoff to the worker — everything
+    // between the validated request and a live response stream.
+    let nvtx_generate = dynamo_nvtx_range!("frontend.http.chat.generate");
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
@@ -3691,6 +3883,7 @@ async fn chat_completions(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
+    drop(nvtx_generate);
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -3753,8 +3946,16 @@ async fn chat_completions(
         let stream = async_stream::stream! {
             let mut stream = Box::pin(stream);
             let mut events: Vec<Result<Event, axum::Error>> = Vec::with_capacity(4);
+            // Starts false when NVTX is off, so the first-token check below never
+            // runs; with the feature compiled out this is a constant.
+            let mut first_chunk = dynamo_runtime::nvtx::enabled();
 
             while let Some(mut response) = stream.next().await {
+                // Frontend-side SSE conversion for one chunk. The gaps *between*
+                // consecutive `sse_chunk` ranges cover both the worker producing
+                // the next token and the frontend's own receive/decode path,
+                // which is not annotated — do not read them as pure worker time.
+                let nvtx_chunk = dynamo_nvtx_range!("frontend.http.chat.sse_chunk");
                 events.clear();
                 let semantic_error =
                     set_stream_semantic_error(&response, &producer_error_signal);
@@ -3779,6 +3980,16 @@ async fn chat_completions(
 
                 if let Some(data) = response.data.as_mut() {
                     deduplicate_stream_roles(data, &mut emitted_roles);
+                }
+
+                // Marked here, before the empty-chunk filter below: a chunk can carry
+                // generated tokens with an empty delta, and the TTFT metric counts it
+                // in that branch. Not at the top of the loop either: the stream is
+                // prefixed with annotation events (`data: None`) and opens with a
+                // role-only delta, neither of which is a generated token.
+                if first_chunk && response.data.as_ref().is_some_and(chunk_has_generated_tokens) {
+                    dynamo_nvtx_mark!("frontend.http.chat.first_chunk");
+                    first_chunk = false;
                 }
 
                 // Drop empty chunks from multi-byte token assembly.
@@ -3839,6 +4050,10 @@ async fn chat_completions(
                         events.push(Err(e));
                     }
                 }
+
+                // Ends before the yields: everything past this point is the
+                // consumer's time, not the frontend's.
+                drop(nvtx_chunk);
 
                 events.reverse();
                 while let Some(event) = events.pop() {
@@ -3919,6 +4134,9 @@ async fn chat_completions(
                 error_response
             })?;
 
+        // Spans the whole fold, so it includes worker time; the per-token frontend
+        // cost on this path is not separable from the wait for the next token.
+        let _nvtx_aggregate = dynamo_nvtx_range!("frontend.http.chat.aggregate");
         let mut response =
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
                 .await
@@ -4274,6 +4492,13 @@ async fn responses(
         return Err(err_response);
     }
 
+    if let Err(err_response) = reject_media(media_refusal_for_content_type(&state, || {
+        responses_media_content_type(&request)
+    })) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
     let loaded_tools: Vec<_> =
@@ -4343,6 +4568,9 @@ async fn responses(
     // that the stream converter needs for faithful response reconstruction.
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
+    state
+        .chat_template_defaults()
+        .apply_to_request(&mut chat_request);
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -6634,6 +6862,18 @@ mod tests {
             &muse_tool_parser_only,
             Some(&chat_template_args)
         ));
+
+        // `reasoning_effort: "none"` reaches here as `thinking_mode: "disabled"`;
+        // M3 may still run its parser, so the fallback stays on.
+        let minimax_m3 = ParsingOptions::new(None, Some("minimax_m3".into()));
+        chat_template_args.insert(
+            "thinking_mode".to_string(),
+            serde_json::Value::String("disabled".to_string()),
+        );
+        assert!(request_stream_can_defer_all_output(
+            &minimax_m3,
+            Some(&chat_template_args)
+        ));
     }
 
     #[test]
@@ -6901,6 +7141,104 @@ mod tests {
         state.start_draining();
         let response = check_ready(&state).unwrap_err();
         assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    fn media_rejection_state(enabled: bool, status_code: u16) -> Arc<service_v2::State> {
+        service_v2::HttpService::builder()
+            .media_rejection(
+                crate::frontend_config::MediaRejectionConfig::new(enabled, status_code).unwrap(),
+            )
+            .build()
+            .unwrap()
+            .state_clone()
+    }
+
+    fn chat_request_from_json(value: serde_json::Value) -> NvCreateChatCompletionRequest {
+        serde_json::from_value(value).expect("valid chat request")
+    }
+
+    fn chat_request_with_history_image() -> NvCreateChatCompletionRequest {
+        chat_request_from_json(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "look"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+                ]},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "now continue"}
+            ]
+        }))
+    }
+
+    #[test]
+    fn test_reject_media_refuses_history_image_with_configured_status() {
+        let state = media_rejection_state(true, 429);
+
+        let (status, Json(body)) =
+            reject_media_if_configured(&state, &chat_request_with_history_image()).unwrap_err();
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body.code, 429);
+        assert_eq!(
+            body.message,
+            "Model does not accept image input; received unsupported content type 'image_url'."
+        );
+        assert_eq!(
+            extract_error_type_from_response(&(status, Json(body))),
+            ErrorType::UnsupportedModality
+        );
+    }
+
+    #[test]
+    fn test_reject_media_default_status_is_unsupported_media_type() {
+        let state = media_rejection_state(
+            true,
+            crate::frontend_config::DEFAULT_REJECT_MEDIA_STATUS_CODE,
+        );
+
+        let (status, Json(body)) =
+            reject_media_if_configured(&state, &chat_request_with_history_image()).unwrap_err();
+
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(body.error_type, "Unsupported Media Type");
+    }
+
+    #[test]
+    fn test_reject_media_refuses_media_in_tool_message() {
+        let state = media_rejection_state(true, 415);
+        let request = chat_request_from_json(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "take a screenshot"},
+                {"role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": {"name": "screenshot", "arguments": "{}"}
+                }]},
+                {"role": "tool", "tool_call_id": "call_1", "content": [
+                    {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}
+                ]}
+            ]
+        }));
+
+        let refusal = media_refusal(&state, &request).expect("tool image is refused");
+        assert!(refusal.message.contains("'image_url'"));
+    }
+
+    #[test]
+    fn test_reject_media_allows_text_only_and_disabled() {
+        let text_only = chat_request_from_json(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                {"role": "assistant", "content": "hello"},
+                {"role": "user", "content": "bye"}
+            ]
+        }));
+        assert!(reject_media_if_configured(&media_rejection_state(true, 429), &text_only).is_ok());
+
+        let disabled = media_rejection_state(false, 429);
+        assert!(reject_media_if_configured(&disabled, &chat_request_with_history_image()).is_ok());
     }
 
     #[test]
@@ -9107,6 +9445,7 @@ mod tests {
                 prompt_logprobs: None,
                 llm_metrics: None,
                 tool_call_completion: Vec::new(),
+                model_eos: Vec::new(),
             }),
             id: Some("msg-1".to_string()),
             event: None,
@@ -9764,6 +10103,7 @@ mod tests {
                 prompt_logprobs: None,
                 llm_metrics: None,
                 tool_call_completion: Vec::new(),
+                model_eos: Vec::new(),
             }),
             id: Some("msg-1".to_string()),
             event: None,
@@ -9857,6 +10197,7 @@ mod tests {
                 prompt_logprobs: None,
                 llm_metrics: None,
                 tool_call_completion: Vec::new(),
+                model_eos: Vec::new(),
             }),
             id: Some("msg-1".to_string()),
             event: None,
@@ -10271,6 +10612,7 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         };
         Annotated {
             id: Some("test-id".to_string()),
@@ -10914,7 +11256,124 @@ mod tests {
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         }
+    }
+
+    /// The TTFT marker must not fire on stream scaffolding. The role-only case is
+    /// the one that matters: `is_empty_stream_response` reports it as non-empty
+    /// (it is forwarded to the client), so a marker gated on "forwardable" would
+    /// land before the model produced a token.
+    #[test]
+    fn test_carries_generated_token() {
+        assert!(
+            !carries_generated_token(&make_delta(
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(Role::Assistant),
+                None,
+                None
+            )),
+            "role-only opening delta carries no token",
+        );
+        assert!(
+            !carries_generated_token(&make_delta(None, None, None, None, None, None, None, None)),
+            "all-None delta carries no token",
+        );
+        assert!(
+            !carries_generated_token(&make_delta(
+                Some(""),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )),
+            "empty text from multi-byte token assembly carries no token",
+        );
+        assert!(
+            carries_generated_token(&make_delta(
+                Some("hi"),
+                None,
+                None,
+                None,
+                None,
+                Some(Role::Assistant),
+                None,
+                None
+            )),
+            "content alongside the role is a token",
+        );
+        assert!(
+            carries_generated_token(&make_delta(
+                None,
+                Some("thinking"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )),
+            "reasoning content is generated output",
+        );
+        assert!(
+            carries_generated_token(&make_delta(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("refused"),
+                None
+            )),
+            "a refusal is generated output",
+        );
+    }
+
+    /// Reported token counts win over the delta: a chunk whose content was
+    /// deferred still marks first token, and one the engine reports as tokenless
+    /// does not.
+    #[test]
+    fn test_chunk_has_generated_tokens() {
+        use crate::protocols::common::metrics::LLMMetricAnnotation;
+
+        let with_chunk_tokens = |content: Option<&str>, chunk_tokens: usize| {
+            let mut resp = make_delta(content, None, None, None, None, None, None, None);
+            resp.llm_metrics = Some(LLMMetricAnnotation {
+                chunk_tokens,
+                ..Default::default()
+            });
+            resp
+        };
+
+        assert!(
+            chunk_has_generated_tokens(&with_chunk_tokens(None, 3)),
+            "deferred content with reported tokens is the first token",
+        );
+        assert!(
+            !chunk_has_generated_tokens(&with_chunk_tokens(Some("hi"), 0)),
+            "reported zero tokens overrides visible content",
+        );
+        assert!(
+            chunk_has_generated_tokens(&make_delta(
+                Some("hi"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )),
+            "without metrics, falls back to inspecting the delta",
+        );
     }
 
     #[test]
