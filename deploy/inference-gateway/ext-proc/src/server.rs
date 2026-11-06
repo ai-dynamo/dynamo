@@ -84,6 +84,11 @@ struct RequestContext {
 
     /// Incomplete trailing SSE bytes awaiting the next chunk / EOS.
     sse_usage_buf: Vec<u8>,
+    /// `sse_usage_buf` holds only the tail of a line that outgrew it.
+    sse_usage_truncated: bool,
+
+    /// Finds the first response bytes that carry engine output.
+    output_start: OutputStartScanner,
 }
 
 impl RequestContext {
@@ -113,6 +118,8 @@ impl RequestContext {
             resp_trailer_resp: None,
             parsed_usage: None,
             sse_usage_buf: Vec::new(),
+            sse_usage_truncated: false,
+            output_start: OutputStartScanner::default(),
         }
     }
 
@@ -427,23 +434,30 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     }
 }
 
-/// Extract [`ResponseUsage`] from a JSON `usage` object.
+/// Extract [`ResponseUsage`] from a JSON `usage` object. A Responses body names
+/// its fields `input_tokens` / `output_tokens`, and a streamed one carries
+/// `usage` under `response` in its `response.completed` event.
 fn usage_from_json(value: &serde_json::Value) -> Option<ResponseUsage> {
-    let usage = value.get("usage")?;
+    let usage = value
+        .get("usage")
+        .or_else(|| value.get("response")?.get("usage"))?;
     if usage.is_null() {
         return None;
     }
+    let tokens = |chat: &str, responses: &str| {
+        usage
+            .get(chat)
+            .or_else(|| usage.get(responses))
+            .and_then(serde_json::Value::as_u64)
+    };
     let cached_tokens = usage
         .get("prompt_tokens_details")
+        .or_else(|| usage.get("input_tokens_details"))
         .and_then(|d| d.get("cached_tokens"))
         .and_then(serde_json::Value::as_u64);
     Some(ResponseUsage {
-        prompt_tokens: usage
-            .get("prompt_tokens")
-            .and_then(serde_json::Value::as_u64),
-        completion_tokens: usage
-            .get("completion_tokens")
-            .and_then(serde_json::Value::as_u64),
+        prompt_tokens: tokens("prompt_tokens", "input_tokens"),
+        completion_tokens: tokens("completion_tokens", "output_tokens"),
         total_tokens: usage
             .get("total_tokens")
             .and_then(serde_json::Value::as_u64),
@@ -464,16 +478,13 @@ fn ingest_streaming_usage(ctx: &mut RequestContext, chunk: &[u8], end_of_stream:
             update_streaming_usage(ctx, chunk);
         } else {
             ctx.sse_usage_buf.extend_from_slice(chunk);
-            if let Some(usage) = parse_streaming_usage(&ctx.sse_usage_buf) {
-                ctx.parsed_usage = Some(usage);
-            }
-            ctx.sse_usage_buf.clear();
+            parse_buffered_usage(ctx);
         }
         return;
     }
 
     let Some(complete_len) = chunk.iter().rposition(|&b| b == b'\n').map(|i| i + 1) else {
-        buffer_incomplete_sse(&mut ctx.sse_usage_buf, chunk);
+        buffer_incomplete_sse(ctx, chunk);
         return;
     };
 
@@ -481,12 +492,47 @@ fn ingest_streaming_usage(ctx: &mut RequestContext, chunk: &[u8], end_of_stream:
         update_streaming_usage(ctx, &chunk[..complete_len]);
     } else {
         ctx.sse_usage_buf.extend_from_slice(&chunk[..complete_len]);
-        if let Some(usage) = parse_streaming_usage(&ctx.sse_usage_buf) {
-            ctx.parsed_usage = Some(usage);
-        }
-        ctx.sse_usage_buf.clear();
+        parse_buffered_usage(ctx);
     }
-    buffer_incomplete_sse(&mut ctx.sse_usage_buf, &chunk[complete_len..]);
+    buffer_incomplete_sse(ctx, &chunk[complete_len..]);
+}
+
+/// Parse `usage` from the buffered bytes, which now end at a line boundary or
+/// the end of the stream, and empty the buffer.
+fn parse_buffered_usage(ctx: &mut RequestContext) {
+    let buf = &ctx.sse_usage_buf;
+    let usage = if ctx.sse_usage_truncated {
+        // The buffer starts partway into a line whose head was dropped.
+        let fragment_len = buf
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(buf.len(), |i| i + 1);
+        let (fragment, rest) = buf.split_at(fragment_len);
+        parse_streaming_usage(rest).or_else(|| usage_from_line_tail(fragment))
+    } else {
+        parse_streaming_usage(buf)
+    };
+    if let Some(usage) = usage {
+        ctx.parsed_usage = Some(usage);
+    }
+    ctx.sse_usage_buf.clear();
+    ctx.sse_usage_truncated = false;
+}
+
+/// `usage` from the end of an SSE line whose start was dropped. A Responses
+/// `response.completed` line repeats the whole response, so it can outgrow the
+/// buffer, and its `usage` comes after the output.
+fn usage_from_line_tail(fragment: &[u8]) -> Option<ResponseUsage> {
+    const USAGE_KEY: &[u8] = b"\"usage\":";
+    let start = fragment
+        .windows(USAGE_KEY.len())
+        .rposition(|window| window == USAGE_KEY)?
+        + USAGE_KEY.len();
+    let usage = serde_json::Deserializer::from_slice(&fragment[start..])
+        .into_iter::<serde_json::Value>()
+        .next()?
+        .ok()?;
+    usage_from_json(&serde_json::json!({ "usage": usage }))
 }
 
 fn update_streaming_usage(ctx: &mut RequestContext, complete: &[u8]) {
@@ -495,16 +541,24 @@ fn update_streaming_usage(ctx: &mut RequestContext, complete: &[u8]) {
     }
 }
 
-/// Append an incomplete SSE line, bounding memory. A `usage` event is small, so
-/// a partial line larger than the cap can't be one; drop it (self-corrects once
-/// the next newline lands).
-fn buffer_incomplete_sse(buf: &mut Vec<u8>, bytes: &[u8]) {
+/// Append an incomplete SSE line, bounding memory. A partial line larger than
+/// the cap keeps only its tail: a chat `usage` event is small, and a Responses
+/// `response.completed` line carries its `usage` near the end.
+fn buffer_incomplete_sse(ctx: &mut RequestContext, bytes: &[u8]) {
     const MAX_SSE_USAGE_BUF: usize = 64 * 1024;
-    if buf.len() + bytes.len() > MAX_SSE_USAGE_BUF {
-        buf.clear();
+    let buf = &mut ctx.sse_usage_buf;
+    if buf.len() + bytes.len() <= MAX_SSE_USAGE_BUF {
+        buf.extend_from_slice(bytes);
         return;
     }
-    buf.extend_from_slice(bytes);
+    ctx.sse_usage_truncated = true;
+    if bytes.len() >= MAX_SSE_USAGE_BUF {
+        buf.clear();
+        buf.extend_from_slice(&bytes[bytes.len() - MAX_SSE_USAGE_BUF..]);
+    } else {
+        buf.extend_from_slice(bytes);
+        buf.drain(..buf.len() - MAX_SSE_USAGE_BUF);
+    }
 }
 
 /// Parse `usage` from complete SSE `data:` lines (last wins).
@@ -535,6 +589,86 @@ fn parse_streaming_usage(chunk: &[u8]) -> Option<ResponseUsage> {
         }
     }
     latest
+}
+
+/// Finds where engine output starts in a response body.
+///
+/// A streamed `/v1/responses` body opens with `response.created` and
+/// `response.in_progress` events, which the Frontend sends before it reads any
+/// engine output. Every other body (chat and completions streams, unary JSON)
+/// carries output in its first non-empty chunk. Fed each chunk in order, this
+/// skips those two events and SSE comments, wherever the chunks split them, and
+/// reports the first chunk that holds anything else.
+#[derive(Debug, Default)]
+struct OutputStartScanner {
+    /// Inside an SSE event (up to its blank line) whose `event:` is a lifecycle event.
+    in_lifecycle_event: bool,
+    /// The previous chunk ended without a newline, so the next one continues its line.
+    mid_line: bool,
+    /// Inside a lifecycle event: the unfinished line so far is blank (at most a `\r`).
+    partial_blank: bool,
+    /// Outside a lifecycle event: the unfinished line so far. Only a line that can
+    /// still turn out blank, a comment or a lifecycle `event:` line is held, so this
+    /// stays a few dozen bytes.
+    partial_line: Vec<u8>,
+}
+
+impl OutputStartScanner {
+    const LIFECYCLE_EVENTS: [&'static [u8]; 2] = [b"response.created", b"response.in_progress"];
+    const LIFECYCLE_LINES: [&'static [u8]; 4] = [
+        b"event: response.created",
+        b"event: response.in_progress",
+        b"event:response.created",
+        b"event:response.in_progress",
+    ];
+
+    /// Whether `chunk` carries anything other than SSE comments and
+    /// Responses lifecycle events.
+    fn has_output(&mut self, chunk: &[u8]) -> bool {
+        for segment in chunk.split_inclusive(|&b| b == b'\n') {
+            let complete = segment.ends_with(b"\n");
+            let continues_line = std::mem::replace(&mut self.mid_line, !complete);
+            if self.in_lifecycle_event {
+                // The event ends at its blank line; everything before it is its own data.
+                let blank =
+                    (!continues_line || self.partial_blank) && Self::line(segment).is_empty();
+                if !complete {
+                    self.partial_blank = blank;
+                }
+                if complete && blank {
+                    self.in_lifecycle_event = false;
+                }
+                continue;
+            }
+            self.partial_line.extend_from_slice(segment);
+            let line = Self::line(&self.partial_line);
+            let comment = line.starts_with(b":");
+            if complete {
+                if line.is_empty() || comment {
+                } else if Self::is_lifecycle_event(line) {
+                    self.in_lifecycle_event = true;
+                } else {
+                    return true;
+                }
+                self.partial_line.clear();
+            } else if comment {
+                self.partial_line.truncate(1);
+            } else if !Self::LIFECYCLE_LINES.iter().any(|l| l.starts_with(line)) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_lifecycle_event(line: &[u8]) -> bool {
+        line.strip_prefix(b"event:")
+            .is_some_and(|name| Self::LIFECYCLE_EVENTS.contains(&name.trim_ascii()))
+    }
+
+    fn line(segment: &[u8]) -> &[u8] {
+        let line = segment.strip_suffix(b"\n").unwrap_or(segment);
+        line.strip_suffix(b"\r").unwrap_or(line)
+    }
 }
 
 #[tonic::async_trait]
@@ -662,17 +796,18 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             ExtProcServer::<P>::handle_response_headers(&mut ctx, hdr);
                         }
                         Some(processing_request::Request::ResponseBody(ref body)) => {
-                            // Signal prefill completion on the first non-empty
-                            // response body chunk (the first generated token).
-                            // In streaming mode the upstream flushes HTTP
-                            // response headers before producing any token, so
-                            // signaling on ResponseHeaders would release prefill
-                            // bookkeeping before decode actually starts. The
-                            // first non-empty body chunk is the earliest signal
-                            // that prefill produced output and decode is underway.
+                            // Signal prefill completion on the first response
+                            // body bytes that carry engine output (the first
+                            // generated token). In streaming mode the upstream
+                            // flushes HTTP response headers before producing any
+                            // token, so signaling on ResponseHeaders would release
+                            // prefill bookkeeping before decode actually starts.
+                            // A Responses stream also opens with lifecycle events
+                            // sent before any engine output; see
+                            // `OutputStartScanner`.
                             if ctx.body_routed
                                 && !ctx.prefill_complete_signaled
-                                && !body.body.is_empty()
+                                && ctx.output_start.has_output(&body.body)
                             {
                                 ctx.prefill_complete_signaled = true;
                                 // Hand back the picker's own booking id (falls
@@ -806,7 +941,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 /// **Response direction.** `response_body_mode` defaults to `NONE` in Envoy,
 /// which delivers no `ResponseBody` messages at all. Three behaviours depend
 /// on receiving them, and all three fail silently under `NONE`:
-///   * `on_prefill_complete` fires on the first non-empty body chunk, so
+///   * `on_prefill_complete` fires on the first body chunk with engine output, so
 ///     disaggregated prefill bookkeeping would stay held for the whole stream.
 ///   * Token usage (`cached_tokens`) is parsed out of the terminal chunk.
 ///   * Model-name rewriting mutates body bytes on their way to the client.
@@ -1181,6 +1316,28 @@ mod tests {
         assert_eq!(usage.cached_tokens, Some(4));
     }
 
+    /// Responses reports `input_tokens` / `output_tokens`, at the top level of a
+    /// unary body and under `response` in a stream's `response.completed` event.
+    #[test]
+    fn parse_responses_usage() {
+        let body = br#"{"object": "response", "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "input_tokens_details": {"cached_tokens": 64}}}"#;
+        let usage = parse_unary_usage(body).expect("usage present");
+        assert_eq!(usage.prompt_tokens, Some(100));
+        assert_eq!(usage.completion_tokens, Some(20));
+        assert_eq!(usage.total_tokens, Some(120));
+        assert_eq!(usage.cached_tokens, Some(64));
+
+        let chunk = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"usage\":null}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":8,\"output_tokens\":2,\"total_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":4}}}}\n\n"
+        );
+        let usage = parse_streaming_usage(chunk.as_bytes()).expect("usage present");
+        assert_eq!(usage.prompt_tokens, Some(8));
+        assert_eq!(usage.cached_tokens, Some(4));
+    }
+
     #[test]
     fn parse_streaming_usage_none_without_usage_event() {
         let chunk = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
@@ -1256,6 +1413,27 @@ mod tests {
         ingest_streaming_usage(&mut ctx, tail.as_bytes(), true);
         let usage = ctx.parsed_usage.expect("usage after oversized run");
         assert_eq!(usage.cached_tokens, Some(4));
+    }
+
+    /// `response.completed` repeats the whole response, so its line can outgrow
+    /// the buffer; its `usage` comes near the end and must still be read.
+    #[test]
+    fn ingest_streaming_usage_reads_usage_from_oversized_responses_line() {
+        let text = "y".repeat(200 * 1024);
+        let event = format!(
+            "event: response.completed\ndata: {{\"type\":\"response.completed\",\"response\":{{\"output\":[{{\"text\":\"{text}\"}}],\"usage\":{{\"input_tokens\":8,\"output_tokens\":2,\"total_tokens\":10,\"input_tokens_details\":{{\"cached_tokens\":4}}}},\"store\":false}}}}\n\n"
+        );
+        for end_of_stream in [false, true] {
+            let mut ctx = RequestContext::new();
+            let chunks: Vec<&[u8]> = event.as_bytes().chunks(16 * 1024).collect();
+            for (i, chunk) in chunks.iter().enumerate() {
+                ingest_streaming_usage(&mut ctx, chunk, end_of_stream && i + 1 == chunks.len());
+                assert!(ctx.sse_usage_buf.len() <= 64 * 1024);
+            }
+            let usage = ctx.parsed_usage.expect("usage from the oversized line");
+            assert_eq!(usage.prompt_tokens, Some(8));
+            assert_eq!(usage.cached_tokens, Some(4));
+        }
     }
 
     /// RAII probe that records, on drop, that a `pick` future was torn down. A
@@ -1544,6 +1722,120 @@ mod tests {
             .expect("on_prefill_complete should fire");
             assert_eq!(tracker.prefill_complete.load(Ordering::SeqCst), 1);
         }
+    }
+
+    const RESPONSES_LIFECYCLE: &[u8] = b"event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0}\n\nevent: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"sequence_number\":1}\n\n";
+    const RESPONSES_OUTPUT: &[u8] = b"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":2}\n\n";
+
+    /// `stream()` with its response body replaced by `chunks`, the last of which
+    /// ends the stream.
+    fn stream_with_response_body(chunks: &[&[u8]]) -> Vec<ProcessingRequest> {
+        let mut requests: Vec<ProcessingRequest> = stream().into_iter().take(3).collect();
+        for (i, chunk) in chunks.iter().enumerate() {
+            requests.push(ProcessingRequest {
+                request: Some(ProcReq::ResponseBody(HttpBody {
+                    body: chunk.to_vec(),
+                    end_of_stream: i + 1 == chunks.len(),
+                })),
+                ..Default::default()
+            });
+        }
+        requests
+    }
+
+    /// A Responses stream opens with `response.created` and `response.in_progress`
+    /// before the engine produces anything, so those events must not release prefill.
+    #[tokio::test]
+    async fn test_responses_lifecycle_events_do_not_mark_prefill_complete() {
+        let t = Arc::new(Tracker::agg());
+        let requests = stream_with_response_body(&[RESPONSES_LIFECYCLE, b""]);
+        run_stream(&mut connect(t.clone()).await, requests).await;
+        assert_eq!(t.prefill_complete.load(Ordering::SeqCst), 0);
+        assert_eq!(t.free.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn output_start_scanner_skips_only_responses_lifecycle_events() {
+        let first_output = |chunks: &[&[u8]]| {
+            let mut scanner = OutputStartScanner::default();
+            chunks.iter().position(|chunk| scanner.has_output(chunk))
+        };
+        // Chat, completions and unary bodies carry output in their first chunk.
+        assert_eq!(first_output(&[b"data: {\"choices\":[]}\n\n"]), Some(0));
+        assert_eq!(first_output(&[b"{"]), Some(0));
+        assert_eq!(first_output(&[b""]), None);
+        // Lifecycle events, together or one per chunk, then output.
+        assert_eq!(
+            first_output(&[RESPONSES_LIFECYCLE, RESPONSES_OUTPUT]),
+            Some(1)
+        );
+        let (created, in_progress) = RESPONSES_LIFECYCLE.split_at(
+            RESPONSES_LIFECYCLE
+                .windows(2)
+                .position(|w| w == b"\n\n")
+                .unwrap()
+                + 2,
+        );
+        assert_eq!(
+            first_output(&[created, in_progress, RESPONSES_OUTPUT]),
+            Some(2)
+        );
+        // A lifecycle event split mid-data, and its blank line split at `\r\n`.
+        assert_eq!(
+            first_output(&[
+                b"event: response.created\ndata: {\"type\":\"resp",
+                b"onse.created\"}\r",
+                b"\n\r",
+                b"\n",
+                RESPONSES_OUTPUT,
+            ]),
+            Some(4)
+        );
+        // Output in the same chunk as the lifecycle events, and SSE comments.
+        assert_eq!(
+            first_output(&[b":\n\n", &[RESPONSES_LIFECYCLE, RESPONSES_OUTPUT].concat()]),
+            Some(1)
+        );
+        // A stream split anywhere, even inside an `event:` line, signals at the
+        // first chunk whose output bytes can no longer be a lifecycle event.
+        let stream = [RESPONSES_LIFECYCLE, RESPONSES_OUTPUT].concat();
+        for split in 1..stream.len() {
+            let (head, tail) = stream.split_at(split);
+            let output_in_head = head.get(RESPONSES_LIFECYCLE.len()..).unwrap_or_default();
+            let decided_in_head = !output_in_head.is_empty()
+                && !OutputStartScanner::LIFECYCLE_LINES
+                    .iter()
+                    .any(|line| line.starts_with(output_in_head));
+            let expected = if decided_in_head { 0 } else { 1 };
+            assert_eq!(
+                first_output(&[head, tail]),
+                Some(expected),
+                "split at {split}"
+            );
+        }
+        let bytes: Vec<&[u8]> = stream.chunks(1).collect();
+        assert!(first_output(&bytes).is_some_and(|i| i >= RESPONSES_LIFECYCLE.len()));
+        // Other `in_progress` events come from engine output and count.
+        assert_eq!(
+            first_output(&[b"event: response.file_search_call.in_progress\ndata: {}\n\n"]),
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_responses_output_after_lifecycle_marks_prefill_complete_once() {
+        let t = Arc::new(Tracker::agg());
+        let requests =
+            stream_with_response_body(&[RESPONSES_LIFECYCLE, RESPONSES_OUTPUT, RESPONSES_OUTPUT]);
+        run_stream(&mut connect(t.clone()).await, requests).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while t.prefill_complete.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("on_prefill_complete should fire");
+        assert_eq!(t.prefill_complete.load(Ordering::SeqCst), 1);
     }
 
     /// free_request: on_request_complete() fires when the stream ends.
