@@ -111,7 +111,7 @@ impl WorkerSelectionPolicy {
     ) -> Self {
         let picker_declared_inputs = picker.required_worker_inputs();
         // Fetch inputs are filled once every row is built, so only scorers receive them.
-        let picker_inputs = picker_declared_inputs.without(WorkerInputs::KV_TRANSFER);
+        let picker_inputs = picker_declared_inputs.without(WorkerInputs::KV_COPY);
         // Freeze each declaration once; callbacks must not inherit another component's access.
         // Active-request counts are a picker lookup, so filters and scorers never receive them.
         let filters: Vec<_> = filters
@@ -120,7 +120,7 @@ impl WorkerSelectionPolicy {
                 (
                     filter
                         .required_worker_inputs()
-                        .without(WorkerInputs::KV_TRANSFER | WorkerInputs::ACTIVE_REQUESTS),
+                        .without(WorkerInputs::KV_COPY | WorkerInputs::ACTIVE_REQUESTS),
                     filter,
                 )
             })
@@ -277,7 +277,7 @@ impl WorkerSelectionPolicy {
         }
     }
 
-    /// The union of every component's declared inputs; only scorers keep `KV_TRANSFER`.
+    /// The union of every component's declared inputs; only scorers keep `KV_COPY`.
     pub(crate) fn input_requirements(&self) -> WorkerInputs {
         match &self.state {
             #[cfg(any(test, feature = "bench"))]
@@ -435,8 +435,8 @@ impl CandidatePreparer {
         let input = MaterializedSelectionInput::new(request, block_size);
         let row_inputs = self.inputs.without(WorkerInputs::LOAD);
         let materialize_preferred_taint = self.inputs.contains(WorkerInputs::PREFERRED_TAINT);
-        let defer_transfer = request.kv_transfer_candidates.is_some()
-            && self.inputs.contains(WorkerInputs::KV_TRANSFER);
+        let defer_transfer =
+            request.kv_transfer_candidates.is_some() && self.inputs.contains(WorkerInputs::KV_COPY);
         let mut rows = self
             .row_buffers
             .pop()
@@ -558,11 +558,9 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
     state.cache_inputs.clear();
     state.load_inputs.clear();
     state.transfer_targets.clear();
-    // Only scorers declare KV_TRANSFER; their inputs are filled once every row is built.
+    // Only scorers declare KV_COPY; their inputs are filled once every row is built.
     let defer_transfer = request.kv_transfer_candidates.is_some()
-        && state
-            .scorer_picker_inputs
-            .contains(WorkerInputs::KV_TRANSFER);
+        && state.scorer_picker_inputs.contains(WorkerInputs::KV_COPY);
     if state.filters.is_empty() {
         let materialize_preferred_taint = eligibility.pinned_worker().is_none()
             && state
@@ -1071,7 +1069,7 @@ mod tests {
             ) -> Result<(), WorkerSelectionPolicyError> {
                 for (candidate, cost) in candidates.iter().zip(costs) {
                     let transfer = candidate
-                        .kv_transfer()
+                        .kv_copy()
                         .map(|transfer| transfer.source_prefix_blocks());
                     self.seen
                         .lock()
@@ -1087,7 +1085,7 @@ mod tests {
 
         impl WorkerFilter for TransferFilter {
             fn required_worker_inputs(&self) -> WorkerInputs {
-                WorkerInputs::KV_TRANSFER
+                WorkerInputs::KV_COPY
             }
 
             fn keep(
@@ -1096,7 +1094,7 @@ mod tests {
                 candidate: WorkerCandidate<'_>,
             ) -> Result<bool, WorkerSelectionPolicyError> {
                 // Only scorers receive fetch inputs.
-                assert_eq!(candidate.kv_transfer(), None);
+                assert_eq!(candidate.kv_copy(), None);
                 Ok(true)
             }
         }
@@ -1114,7 +1112,7 @@ mod tests {
                 vec![Box::new(TransferFilter)],
                 vec![
                     Box::new(TransferScorer {
-                        inputs: WorkerInputs::KV_TRANSFER,
+                        inputs: WorkerInputs::KV_COPY,
                         seen: declared.clone(),
                     }),
                     Box::new(TransferScorer {
@@ -1291,7 +1289,7 @@ mod tests {
                 WorkerInputs::CACHE
                     | WorkerInputs::LOAD
                     | WorkerInputs::PREFERRED_TAINT
-                    | WorkerInputs::KV_TRANSFER
+                    | WorkerInputs::KV_COPY
             }
 
             fn score(
@@ -1304,7 +1302,7 @@ mod tests {
                     let load = candidate.load().unwrap();
                     let cache = candidate.cache().unwrap();
                     let fetchable = candidate
-                        .kv_transfer()
+                        .kv_copy()
                         .and_then(|transfer| transfer.source_prefix_blocks())
                         .unwrap_or(0);
                     *cost = (load.decode_cost_blocks() + load.active_prefill_tokens() as f64

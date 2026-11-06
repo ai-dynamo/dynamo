@@ -10,8 +10,7 @@ use dynamo_kv_router::plugins::worker_selection::{
 };
 
 /// Resolve optional terms once so disabled weights add neither branches nor conversions to
-/// each worker score. The remote-hit specialization (shared-cache ranges and fetchable KV
-/// prefixes) also omits range traversal code.
+/// each worker score. The shared-cache specialization also omits range traversal code.
 pub(super) fn build(
     config: &PolicyParameters,
     worker_label: &'static str,
@@ -24,6 +23,35 @@ pub(super) fn build(
         (false, true) => Box::new(DefaultScorer::<false, true>::new(config, worker_label)),
         (true, false) => Box::new(DefaultScorer::<true, false>::new(config, worker_label)),
         (true, true) => Box::new(DefaultScorer::<true, true>::new(config, worker_label)),
+    }
+}
+
+/// [`build`] for the `kvcr` preset: the same cost plus credit for the blocks a worker could copy
+/// from a peer, at the shared-cache multiplier.
+pub(super) fn build_kvcr(
+    config: &PolicyParameters,
+    worker_label: &'static str,
+) -> Box<dyn WorkerScorer> {
+    match (
+        config.decode_active_request_weight != 0.0,
+        config.shared_cache_multiplier != 0.0,
+    ) {
+        (false, false) => Box::new(CopyCreditScorer(DefaultScorer::<false, false>::new(
+            config,
+            worker_label,
+        ))),
+        (false, true) => Box::new(CopyCreditScorer(DefaultScorer::<false, true>::new(
+            config,
+            worker_label,
+        ))),
+        (true, false) => Box::new(CopyCreditScorer(DefaultScorer::<true, false>::new(
+            config,
+            worker_label,
+        ))),
+        (true, true) => Box::new(CopyCreditScorer(DefaultScorer::<true, true>::new(
+            config,
+            worker_label,
+        ))),
     }
 }
 
@@ -47,8 +75,6 @@ struct PreparedRequest {
     overlap_credit: f64,
     needs_decay: bool,
     needs_decode_subtraction: bool,
-    // The host supplies fetch inputs for every candidate or for none.
-    has_kv_transfer: bool,
 }
 
 /// Division by a power-of-two integer has an exact reciprocal. Both inputs to this helper
@@ -111,10 +137,6 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             overlap_credit: self.overlap_score_credit,
             needs_decay: context.tracks_prefill_tokens() && self.overlap_score_credit_decay > 0.0,
             needs_decode_subtraction: self.is_decode && !context.tracks_prefill_tokens(),
-            has_kv_transfer: SHARED_CREDIT
-                && candidates
-                    .get(0)
-                    .is_some_and(|candidate| candidate.kv_transfer().is_some()),
         };
         if prepared.needs_decay {
             let mut minimum = usize::MAX;
@@ -129,11 +151,13 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
         Ok(prepared)
     }
 
+    /// `copyable` counts toward the shared-cache credit; the default passes zero.
     fn score_worker(
         &self,
         prepared: &PreparedRequest,
         context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
+        copyable: f64,
     ) -> Result<f64, WorkerSelectionPolicyError> {
         let load = candidate
             .load()
@@ -149,21 +173,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                 let shared = cache
                     .shared_hits()
                     .map_or(0, |hits| hits.hits_beyond(device.round().max(0.0) as u32));
-                // Blocks a KV fetch would add beyond everything this worker holds.
-                let fetchable = if prepared.has_kv_transfer {
-                    candidate
-                        .kv_transfer()
-                        .and_then(|transfer| transfer.source_prefix_blocks())
-                        .map_or(0.0, |source| {
-                            let local = cache.device_overlap_blocks()
-                                + cache.host_overlap_blocks()
-                                + cache.disk_overlap_blocks();
-                            (f64::from(source) - local).max(0.0)
-                        })
-                } else {
-                    0.0
-                };
-                self.shared_cache_multiplier * (shared as f64 + fetchable)
+                self.shared_cache_multiplier * (shared as f64 + copyable)
             } else {
                 // Preserve signed zero when the configured weight is -0.0.
                 self.shared_cache_multiplier
@@ -215,10 +225,8 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
 {
     fn required_worker_inputs(&self) -> WorkerInputs {
         let inputs = WorkerInputs::LOAD | WorkerInputs::PREFERRED_TAINT;
-        if SHARED_CREDIT {
-            // The host builds fetch sources per selection only for policies that ask.
-            inputs | WorkerInputs::CACHE | WorkerInputs::KV_TRANSFER
-        } else if self.overlap_score_credit != 0.0
+        if SHARED_CREDIT
+            || self.overlap_score_credit != 0.0
             || self.host_cache_hit_weight != 0.0
             || self.disk_cache_hit_weight != 0.0
         {
@@ -236,10 +244,65 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
     ) -> Result<(), WorkerSelectionPolicyError> {
         let prepared = self.prepare(context, candidates)?;
         for (candidate, cost) in candidates.iter().zip(costs) {
-            *cost = self.score_worker(&prepared, context, candidate)?;
+            *cost = self.score_worker(&prepared, context, candidate, 0.0)?;
         }
         Ok(())
     }
+}
+
+/// The default cost, with the blocks a worker could copy from its offered source counted toward
+/// the shared-cache credit. It reads [`WorkerInputs::KV_COPY`], so the router commits the selected
+/// worker to that copy, only when the multiplier gives copies credit.
+struct CopyCreditScorer<const REQUEST_COST: bool, const SHARED_CREDIT: bool>(
+    DefaultScorer<REQUEST_COST, SHARED_CREDIT>,
+);
+
+impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
+    for CopyCreditScorer<REQUEST_COST, SHARED_CREDIT>
+{
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        let inputs = self.0.required_worker_inputs();
+        if SHARED_CREDIT {
+            inputs | WorkerInputs::KV_COPY
+        } else {
+            inputs
+        }
+    }
+
+    fn score(
+        &self,
+        context: &WorkerSelectionContext<'_>,
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        let prepared = self.0.prepare(context, candidates)?;
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            let copyable = if SHARED_CREDIT {
+                copyable_blocks(candidate)
+            } else {
+                0.0
+            };
+            *cost = self
+                .0
+                .score_worker(&prepared, context, candidate, copyable)?;
+        }
+        Ok(())
+    }
+}
+
+/// Blocks a copy would add beyond everything this worker already holds.
+fn copyable_blocks(candidate: WorkerCandidate<'_>) -> f64 {
+    let (Some(cache), Some(source)) = (
+        candidate.cache(),
+        candidate
+            .kv_copy()
+            .and_then(|copy| copy.source_prefix_blocks()),
+    ) else {
+        return 0.0;
+    };
+    let local =
+        cache.device_overlap_blocks() + cache.host_overlap_blocks() + cache.disk_overlap_blocks();
+    (f64::from(source) - local).max(0.0)
 }
 
 #[cfg(test)]

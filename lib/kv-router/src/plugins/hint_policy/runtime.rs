@@ -22,7 +22,7 @@ pub(crate) struct HintPolicySlot {
     pub(crate) policy: Arc<dyn HintPolicy>,
     /// Declares [`Commitments::KV_COPY`]: it sends the copy the selection committed to.
     pub(crate) consumes_kv_copy: bool,
-    /// Reads [`WorkerInputs::KV_TRANSFER`]: it receives the booked worker's copy source.
+    /// Reads [`WorkerInputs::KV_COPY`]: it receives the booked worker's copy source.
     pub(crate) reads_copy_source: bool,
 }
 
@@ -33,7 +33,7 @@ impl HintPolicySlot {
             consumes_kv_copy: policy.commitments().contains(Commitments::KV_COPY),
             reads_copy_source: policy
                 .required_worker_inputs()
-                .contains(WorkerInputs::KV_TRANSFER),
+                .contains(WorkerInputs::KV_COPY),
             name,
             policy,
         }

@@ -5,8 +5,7 @@
 //! that worker-selection components and request classifiers read.
 
 use crate::plugins::worker_selection::{
-    WorkerCandidates, WorkerCapacity, WorkerInfo, WorkerInputs, WorkerLoadInput,
-    WorkerTransferInput,
+    WorkerCandidates, WorkerCapacity, WorkerCopyInput, WorkerInfo, WorkerInputs, WorkerLoadInput,
 };
 use crate::protocols::{SharedCacheHits, WorkerWithDpRank};
 
@@ -16,7 +15,7 @@ pub(crate) struct CandidateData {
     pub(crate) inputs: WorkerInputs,
     pub(crate) cache: WorkerCacheData,
     pub(crate) load: WorkerLoadInput,
-    pub(crate) transfer: Option<WorkerTransferInput>,
+    pub(crate) transfer: Option<WorkerCopyInput>,
     pub(crate) preferred_taint_multiplier: Option<f64>,
 }
 

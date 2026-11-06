@@ -13,107 +13,56 @@
 //! qualifies.
 
 use std::collections::HashMap;
-use std::collections::hash_map::{DefaultHasher, Entry};
-use std::hash::{Hash, Hasher};
-use std::sync::OnceLock;
+use std::collections::hash_map::Entry;
+use std::hash::Hash;
+use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use super::{KvTransferCandidateSource, KvTransferCandidates};
 use crate::protocols::{
-    ExternalSequenceBlockHash, KvTransferEnforcement, RouterHintSourceMetadata, WorkerConfigLike,
+    ExternalSequenceBlockHash, ResidencyOwnerKey, ResidencyRoutingSnapshot, WorkerConfigLike,
     WorkerId, WorkerWithDpRank,
 };
 
-/// Hash a label once, when its config or snapshot is published, so matching
-/// sources to targets per request compares integers instead of strings.
-fn label_key(label: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    label.hash(&mut hasher);
-    hasher.finish()
+/// A copy source: a worker rank, or a cache owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum KvTransferCandidateSource {
+    Worker(WorkerWithDpRank),
+    CacheOwner(ResidencyOwnerKey),
 }
 
-/// Sorted, so keys built from equal labels compare equal.
-fn topology_keys(topology: &HashMap<String, String>) -> Vec<(u64, u64)> {
-    let mut keys: Vec<_> = topology
-        .iter()
-        .map(|(domain, value)| (label_key(domain), label_key(value)))
-        .collect();
-    keys.sort_unstable();
-    keys
+impl From<WorkerWithDpRank> for KvTransferCandidateSource {
+    fn from(worker: WorkerWithDpRank) -> Self {
+        Self::Worker(worker)
+    }
 }
 
-/// A worker's router-hint identity, with its labels hashed.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct WorkerKvTransferKeys {
-    /// Hint worker type; `None` when the worker cannot consume hints.
-    worker_type: Option<u64>,
-    /// DP ranks with a source control endpoint, ascending.
-    source_ranks: Vec<u32>,
-    /// `(domain, value)` topology labels.
-    topology: Vec<(u64, u64)>,
-    /// The `kv_transfer_domain` this worker fetches within, and its value for it.
-    transfer_domain: Option<u64>,
-    transfer_island: Option<u64>,
-    preferred: bool,
+/// One source's contiguous coverage of request blocks `[start, end)`.
+/// A destination can use it only when its actual local prefix reaches `start`.
+/// `start` may be clamped to the first destination frontier that needs the source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvTransferSourceInterval {
+    pub source: KvTransferCandidateSource,
+    pub start: usize,
+    pub end: usize,
 }
 
-impl WorkerKvTransferKeys {
-    pub fn new<C: WorkerConfigLike + ?Sized>(config: &C) -> Self {
-        let start = config.data_parallel_start_rank();
-        let mut worker_type = None;
-        let mut source_ranks = Vec::new();
-        for rank in start..start.saturating_add(config.data_parallel_size()) {
-            let Some(metadata) = config.kv_hint_transfer_metadata_for_dp_rank(rank) else {
-                continue;
-            };
-            worker_type.get_or_insert_with(|| label_key(metadata.worker_type));
-            if metadata
-                .source_control_endpoint
-                .is_some_and(|endpoint| !endpoint.is_empty())
-            {
-                source_ranks.push(rank);
-            }
-        }
-        let topology = config
-            .topology_domains()
-            .map(topology_keys)
-            .unwrap_or_default();
-        let transfer_domain = config.kv_transfer_domain().map(label_key);
-        let transfer_island = transfer_domain.and_then(|domain| island(&topology, domain));
-        Self {
-            worker_type,
-            source_ranks,
-            topology,
-            transfer_domain,
-            transfer_island,
-            preferred: config.kv_transfer_enforcement() == Some(KvTransferEnforcement::Preferred),
-        }
-    }
-
-    fn is_source(&self, dp_rank: u32) -> bool {
-        self.source_ranks.binary_search(&dp_rank).is_ok()
-    }
-
-    /// What a selection needs to find this worker's source; `None` when the
-    /// worker cannot consume hints.
-    pub fn target(&self) -> Option<KvTransferTarget> {
-        Some(KvTransferTarget {
-            worker_type: self.worker_type?,
-            transfer_domain: self.transfer_domain,
-            transfer_island: self.transfer_island,
-            preferred: self.preferred,
-        })
-    }
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KvTransferCandidates {
+    pub block_hashes: Vec<ExternalSequenceBlockHash>,
+    pub owner_prefix_blocks: Vec<(KvTransferCandidateSource, usize)>,
+    /// Suffix-only coverage that can extend an original device+host prefix.
+    pub source_intervals: Vec<KvTransferSourceInterval>,
+    pub routing_snapshot: Option<Arc<ResidencyRoutingSnapshot>>,
 }
 
 /// The hashed labels that choose a target worker's source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KvTransferTarget {
-    worker_type: u64,
-    transfer_domain: Option<u64>,
-    transfer_island: Option<u64>,
-    preferred: bool,
+    pub(super) worker_type: u64,
+    pub(super) transfer_domain: Option<u64>,
+    pub(super) transfer_island: Option<u64>,
+    pub(super) preferred: bool,
 }
 
 /// The targets a [`KvTransferSourceSummary`] answers, so it groups only the
@@ -180,45 +129,10 @@ impl KvTransferScope {
     }
 }
 
-fn island(topology: &[(u64, u64)], domain: u64) -> Option<u64> {
+pub(super) fn island(topology: &[(u64, u64)], domain: u64) -> Option<u64> {
     topology
         .iter()
         .find_map(|&(label, value)| (label == domain).then_some(value))
-}
-
-/// [`WorkerKvTransferKeys`] derived from a worker config on first use. The
-/// config's other fields decide equality, and it must not change afterwards.
-#[derive(Clone, Debug, Default)]
-pub struct WorkerKvTransferKeysCache(OnceLock<WorkerKvTransferKeys>);
-
-impl WorkerKvTransferKeysCache {
-    pub fn get_or_init<C: WorkerConfigLike + ?Sized>(&self, config: &C) -> &WorkerKvTransferKeys {
-        self.0.get_or_init(|| WorkerKvTransferKeys::new(config))
-    }
-}
-
-impl PartialEq for WorkerKvTransferKeysCache {
-    fn eq(&self, _other: &Self) -> bool {
-        true
-    }
-}
-
-/// A cache owner's router-hint identity, hashed when its routing snapshot is built.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CacheOwnerKvTransferKeys {
-    worker_type: u64,
-    is_source: bool,
-    topology: Vec<(u64, u64)>,
-}
-
-impl CacheOwnerKvTransferKeys {
-    pub fn new(metadata: &RouterHintSourceMetadata) -> Self {
-        Self {
-            worker_type: label_key(&metadata.worker_type),
-            is_source: !metadata.source_control_endpoint.is_empty(),
-            topology: topology_keys(&metadata.topology_domains),
-        }
-    }
 }
 
 /// The source a target fetches from, and the resulting prefix length in blocks.
@@ -261,6 +175,12 @@ impl KvCopySource {
     /// The worker or cache owner the blocks come from.
     pub fn source(&self) -> KvTransferCandidateSource {
         self.choice.source
+    }
+
+    /// The root-aligned prefix, in blocks, the source holds.
+    #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
+    pub(crate) fn source_prefix_blocks(&self) -> usize {
+        self.choice.prefix_blocks
     }
 
     /// Blocks the copy adds beyond the target's device and host-pinned prefix; at least one.
@@ -613,16 +533,13 @@ impl KvTransferSourceSummary {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
     use crate::identity::{
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
     use crate::protocols::{
-        ExternalSequenceBlockHash, KvHintTransferWorkerMetadata, ResidencyOwner,
-        ResidencyProjection, ResidencyRoutingSnapshot,
+        KvHintTransferWorkerMetadata, ResidencyOwner, ResidencyProjection, RouterHintSourceMetadata,
     };
 
     struct Worker;

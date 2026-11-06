@@ -3,32 +3,30 @@
 
 //! Typed KV-cache hints attached to selected backend requests.
 
+mod advertise;
 mod sources;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocols::{
-    ExternalSequenceBlockHash, ResidencyOwnerKey, ResidencyRoutingSnapshot, WorkerWithDpRank,
-};
+use crate::protocols::ExternalSequenceBlockHash;
 
+#[cfg_attr(not(feature = "standalone-selection"), allow(unused_imports))]
+pub(crate) use advertise::hint_capable_partition;
+pub use advertise::{
+    CacheOwnerKvTransferKeys, KV_HINT_TRANSFER_CAPABILITY_KEY,
+    KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, ResolvedRouterHintSource, RouterHintSourceMetadata,
+    WorkerKvTransferKeys, WorkerKvTransferKeysCache,
+};
 #[cfg_attr(not(feature = "standalone-selection"), allow(unused_imports))]
 pub(crate) use sources::kv_copy_locations;
 pub use sources::{
-    CacheOwnerKvTransferKeys, KvCopyLocations, KvCopySource, KvTransferScope,
-    KvTransferSourceChoice, KvTransferSourceSummary, KvTransferTarget, WorkerKvTransferKeys,
-    WorkerKvTransferKeysCache,
+    KvCopyLocations, KvCopySource, KvTransferCandidateSource, KvTransferCandidates,
+    KvTransferScope, KvTransferSourceChoice, KvTransferSourceInterval, KvTransferSourceSummary,
+    KvTransferTarget,
 };
-
-/// The selected worker can consume a `TRANSFER` hint with the v1 payload.
-// TODO: Rename these constants and wire values with the matching KVCC names.
-pub const KV_HINT_TRANSFER_CAPABILITY_KEY: &str = "router_hint";
-
-/// Worker runtime-data keys used to build transfer hints.
-pub const KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY: &str = "router_hint_worker_type";
-pub const KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str =
-    "router_hint_source_control_endpoints";
 
 const KV_HINT_PROTOCOL_VERSION: &str = "0.1";
 /// Upper bound on the actions one hint carries.
@@ -163,37 +161,6 @@ impl KvHint {
 pub struct KvHintActionLimitError {
     present: usize,
     added: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum KvTransferCandidateSource {
-    Worker(WorkerWithDpRank),
-    CacheOwner(ResidencyOwnerKey),
-}
-
-impl From<WorkerWithDpRank> for KvTransferCandidateSource {
-    fn from(worker: WorkerWithDpRank) -> Self {
-        Self::Worker(worker)
-    }
-}
-
-/// One source's contiguous coverage of request blocks `[start, end)`.
-/// A destination can use it only when its actual local prefix reaches `start`.
-/// `start` may be clamped to the first destination frontier that needs the source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KvTransferSourceInterval {
-    pub source: KvTransferCandidateSource,
-    pub start: usize,
-    pub end: usize,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct KvTransferCandidates {
-    pub block_hashes: Vec<ExternalSequenceBlockHash>,
-    pub owner_prefix_blocks: Vec<(KvTransferCandidateSource, usize)>,
-    /// Suffix-only coverage that can extend an original device+host prefix.
-    pub source_intervals: Vec<KvTransferSourceInterval>,
-    pub routing_snapshot: Option<Arc<ResidencyRoutingSnapshot>>,
 }
 
 #[cfg(test)]

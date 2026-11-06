@@ -71,15 +71,22 @@ impl<'a> WorkerCandidate<'a> {
     }
 
     /// This worker's KV copy offer, only for a scorer that declared
-    /// KV_TRANSFER; filters and pickers do not receive it. None also means the
+    /// KV_COPY; filters and pickers do not receive it. None also means the
     /// host has no copy data for this request: no worker in the partition
     /// advertises `router_hint`, or the indexer cannot retain the matched block chain.
-    pub fn kv_transfer(self) -> Option<WorkerTransferInput> {
-        if self.inputs.contains(WorkerInputs::KV_TRANSFER) {
+    pub fn kv_copy(self) -> Option<WorkerCopyInput> {
+        if self.inputs.contains(WorkerInputs::KV_COPY) {
             self.data.transfer
         } else {
             None
         }
+    }
+
+    /// Previous name of [`Self::kv_copy`].
+    // TODO(v1.9): Remove this alias.
+    #[deprecated(since = "1.7.0", note = "use `WorkerCandidate::kv_copy`")]
+    pub fn kv_transfer(self) -> Option<WorkerCopyInput> {
+        self.kv_copy()
     }
 
     /// Preferred-taint cost multiplier, only when this component declared PREFERRED_TAINT.
@@ -195,8 +202,17 @@ impl WorkerInputs {
     /// | --- | --- | --- | --- | --- |
     /// | `CACHE`, `LOAD`, `PREFERRED_TAINT` | Yes | Yes | Yes | Starts resources only |
     /// | `ACTIVE_REQUESTS` | No | No | Yes | No |
-    /// | `KV_TRANSFER` | No | Yes | No | The booked worker's copy source |
-    pub const KV_TRANSFER: Self = Self(1 << 6);
+    /// | `KV_COPY` | No | Yes | No | The booked worker's copy source |
+    ///
+    /// A scorer that reads it commits the selected worker to its offer: the copy becomes the
+    /// booking's committed copy, which the role's [`Commitments::KV_COPY`] hint policy sends.
+    ///
+    /// [`Commitments::KV_COPY`]: super::Commitments::KV_COPY
+    pub const KV_COPY: Self = Self(1 << 6);
+    /// Previous name of [`Self::KV_COPY`].
+    // TODO(v1.9): Remove this alias.
+    #[deprecated(since = "1.7.0", note = "use `WorkerInputs::KV_COPY`")]
+    pub const KV_TRANSFER: Self = Self::KV_COPY;
     #[cfg(any(test, feature = "bench"))]
     pub(crate) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
 
@@ -205,10 +221,10 @@ impl WorkerInputs {
     }
 
     /// Whether a policy reads the KV index: its overlaps (`CACHE`) or the
-    /// prefixes workers could fetch (`KV_TRANSFER`). Each component still reads
+    /// prefixes workers could copy (`KV_COPY`). Each component still reads
     /// only the inputs it declares.
     pub const fn reads_kv_index(self) -> bool {
-        self.contains(Self::CACHE) || self.contains(Self::KV_TRANSFER)
+        self.contains(Self::CACHE) || self.contains(Self::KV_COPY)
     }
 
     pub(crate) fn without(self, other: Self) -> Self {
@@ -376,10 +392,16 @@ impl WorkerInfo {
     }
 }
 
+/// A worker's KV copy offer, read through [`WorkerCandidate::kv_copy`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct WorkerTransferInput {
+pub struct WorkerCopyInput {
     pub(crate) source_prefix_blocks: Option<u32>,
 }
+
+/// Previous name of [`WorkerCopyInput`].
+// TODO(v1.9): Remove this alias.
+#[deprecated(since = "1.7.0", note = "use `WorkerCopyInput`")]
+pub type WorkerTransferInput = WorkerCopyInput;
 
 /// Borrowed, index-aligned view of one custom picker's requested worker inputs.
 ///
@@ -548,7 +570,7 @@ impl WorkerLoadInput {
     }
 }
 
-impl WorkerTransferInput {
+impl WorkerCopyInput {
     /// Root-aligned prefix, in blocks, held by the source this worker would
     /// fetch from, and so the prefix it holds after the fetch. None when no
     /// eligible source holds more than this worker's device and host-pinned

@@ -31,7 +31,7 @@ use crate::kv_hints::{
 use crate::plugins::worker_selection::{
     RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
-use crate::plugins::worker_selection::{WorkerCapacity, WorkerInfo, WorkerTransferInput};
+use crate::plugins::worker_selection::{WorkerCapacity, WorkerCopyInput, WorkerInfo};
 pub use policy::WorkerSelectionPolicy;
 pub(crate) use policy::{CandidatePreparer, PreparedCandidates};
 use policy::{
@@ -230,7 +230,7 @@ impl<'a> MaterializedSelectionInput<'a> {
             return;
         };
         for (row, &target) in rows.iter_mut().zip(targets) {
-            row.transfer = Some(WorkerTransferInput {
+            row.transfer = Some(WorkerCopyInput {
                 source_prefix_blocks: target
                     .and_then(|(target, local)| sources.source_for(row.worker, target, local))
                     .map(source_prefix_blocks),

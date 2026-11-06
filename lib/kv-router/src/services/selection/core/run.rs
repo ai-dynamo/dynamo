@@ -559,6 +559,17 @@ impl SelectionCore {
                     routing_hashes,
                     session_id,
                     session_context,
+                    // The replayed booking must send the copy this selection committed to.
+                    kv_copy: entry
+                        .responsibilities
+                        .commit_kv_copy
+                        .then(|| {
+                            response
+                                .kv_copy_source
+                                .zip(response.kv_transfer_candidates.as_ref())
+                        })
+                        .flatten()
+                        .map(|(copy, candidates)| PendingKvCopy::new(copy, candidates)),
                 },
                 Instant::now(),
             );

@@ -7,31 +7,23 @@ use super::*;
 use crate::kv_hints::{KvCopyLocations, KvCopySource, kv_copy_locations};
 use crate::plugins::hint_policy::runtime::{BookedCopy, HintInputs, compose_kv_hint};
 
-/// Whether any worker in the published partition snapshot advertises a router
-/// hint worker type (worker-level metadata, so one rank suffices).
-pub(super) fn hint_capable_partition(configs: &HashMap<WorkerId, SelectionWorkerConfig>) -> bool {
-    configs.values().any(|config| {
-        config
-            .router_hint_worker_type
-            .as_deref()
-            .is_some_and(|worker_type| !worker_type.is_empty())
-    })
-}
-
 /// One booking's facts the hint stage reads.
 pub(super) struct BookingHint<'a> {
     pub(super) request_id: &'a str,
     pub(super) worker: WorkerWithDpRank,
     pub(super) isl_tokens: usize,
     pub(super) session_context: Option<&'a SessionContext>,
-    /// The booked worker's best copy source, when selection found one.
+    /// The booked worker's best copy source, when selection found one. When the partition's
+    /// selection commits copies, this is the selected worker's offer, and the booking commits to
+    /// it.
     pub(super) kv_copy_source: Option<KvCopySource>,
     /// The request's retained block chain and cache-owner snapshot.
     pub(super) kv_transfer_candidates: Option<&'a KvTransferCandidates>,
 }
 
 /// Compose a booking's KV hint before the booking is handed off: the router's own fetch from the
-/// booked worker's copy source, then the partition's hint policies.
+/// booked worker's copy source when the selection committed none, then the partition's hint
+/// policies.
 ///
 /// Fails, so the caller releases the booking, when a committed copy goes unsent.
 pub(super) fn booking_hint(
@@ -51,13 +43,20 @@ pub(super) fn booking_hint(
         .get(&booking.worker.worker_id)
         .and_then(|config| config.kv_hint_transfer_metadata_for_dp_rank(booking.worker.dp_rank))
         .is_some();
-    let kv_copy_source = booking.kv_copy_source.map(|copy| {
+    let booked_copy = booking.kv_copy_source.map(|copy| {
         let locations = booking
             .kv_transfer_candidates
             .and_then(|candidates| kv_copy_locations(&*workers, candidates, &copy));
         BookedCopy::new(copy, locations)
     });
-    // The router's own fetch, from the booked worker's copy source.
+    // A selection that reads copy offers commits the booked worker to its offer, which the
+    // role's copy consumer sends. Otherwise the copy source is best effort.
+    let (committed_kv_copy, kv_copy_source) = if entry.responsibilities.commit_kv_copy {
+        (booked_copy, None)
+    } else {
+        (None, booked_copy)
+    };
+    // The router's own fetch, from the booked worker's uncommitted copy source.
     let router_fetch = kv_copy_source
         .as_ref()
         .and_then(BookedCopy::locations)
@@ -69,7 +68,7 @@ pub(super) fn booking_hint(
         block_size: entry.block_size,
         worker_accepts_hints,
         session_context: booking.session_context,
-        committed_kv_copy: None,
+        committed_kv_copy,
         kv_copy_source,
     };
     compose_kv_hint(policies, &inputs, router_fetch)

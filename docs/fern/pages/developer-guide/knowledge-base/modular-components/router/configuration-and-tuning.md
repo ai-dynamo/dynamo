@@ -108,6 +108,7 @@ link no catalog and reject a configured policy type at startup.
 |---|---|
 | `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
 | `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
+| `kvcr` | The default cost model plus credit for the blocks a worker could copy from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), weighted by `shared_cache_multiplier`. With a multiplier above `0`, the selected worker is committed to the copy its cost assumed, and a [hint policy](#hint-policies) for the same role must send it; startup fails without one. Takes the same parameters as `dynamo-default-cost-fn`. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [ThunderAgent Program Scheduler](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
 | `dynamo-sticky-min-load` | Session-sticky least-loaded placement. A session's first request goes to the eligible worker with the fewest active requests; later requests carrying the same `X-Dynamo-Session-ID` return to that worker until it leaves the candidate set. Ignores cache overlap and load once a session is bound. Requests without a session ID go to the least-loaded worker. Inspired by SMG's `manual` policy with `assignment_mode: min_load`. |
@@ -153,7 +154,7 @@ worker_selection:
         router_temperature: 0.0
 ```
 
-Explicit parameters take precedence over router flags and environment variables. Omitted parameters inherit their existing values or defaults. The default policy uses `shared_cache_multiplier: 0.5` when shared cache is enabled; an explicit `0` disables shared-cache credit. The same multiplier credits the blocks a worker could fetch from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), such as from KVCR. Without shared cache it defaults to `0`, so set it to enable that credit. Select the instance for each stage you want to tune; stages omitted from `worker_selection` keep the default selector.
+Explicit parameters take precedence over router flags and environment variables. Omitted parameters inherit their existing values or defaults. The default policy uses `shared_cache_multiplier: 0.5` when shared cache is enabled; an explicit `0` disables shared-cache credit. The default policy does not credit the blocks a worker could fetch from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints); select `kvcr`, which applies the same multiplier to them. Without shared cache the multiplier defaults to `0`, so set it to enable that credit. Select the instance for each stage you want to tune; stages omitted from `worker_selection` keep the default selector.
 
 > [!WARNING]
 > The flags below and their environment variables are deprecated for removal in v1.7. They still work and emit a warning. Move their values into the policy’s `parameters` mapping.
@@ -287,7 +288,7 @@ hint_policies:
 - **A role that `hint_policies` doesn't list runs the default hint policies,** if the router image supplies any. Listing the role, even as an empty list, replaces them. Default hint policies are passive: they start no resources and don't change how the role is routed.
 - **Configured hint policies run only on the KV path,** because the router composes hints when it books a worker. Startup fails when a role with configured hint policies runs under a non-KV `--router-mode`. To use a routing mode's policy with hint policies, run `--router-mode kv` and name the routing type, such as `round-robin`, under `worker_selection` for that role.
 - **The router composes one hint per booking** and numbers its actions `a1`, `a2`, and so on. It sends the hint only to workers that advertise `router_hint`. A policy that fails drops only its own actions. A hint carries at most 32 actions.
-- **At most one hint policy per role may send the KV copies a worker-selection policy commits to.** Startup fails when two do. A hint policy that reads KV copy sources needs a local, event-driven KV index; startup fails without one.
+- **Exactly one hint policy per role sends the KV copies a worker-selection policy, such as `kvcr`, commits to.** Startup fails when a role's selection commits copies and none of its hint policies sends them, or when two do. If that hint policy sends nothing for a committed copy, the booking fails and is released. Copy offers and copy sources need a local, event-driven KV index; startup fails without one.
 
 ### Policy-Class Queues
 
@@ -702,8 +703,9 @@ term does not prevent restoring its startup value later.
 Any nonzero device, host, disk, or shared-cache scoring weight requires cache inputs. A
 router that started with those inputs can set device credit to zero while keeping another
 cache tier's scoring weight active. A cache-free router rejects attempts to enable any of
-these weights, without advancing its revision. A nonzero shared-cache multiplier also requires
-KV fetch inputs, so a router that started with a zero multiplier rejects raising it.
+these weights, without advancing its revision. Under `kvcr`, a nonzero shared-cache multiplier
+also requires KV copy inputs, so a router that started `kvcr` with a zero multiplier rejects
+raising it.
 
 Legacy load-only configurations inherit zero effective cache-scoring weights when device
 credit is zero; explicit policy parameters can enable individual tiers at startup. Plain

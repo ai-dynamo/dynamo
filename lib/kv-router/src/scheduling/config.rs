@@ -613,7 +613,6 @@ struct RouterConfigOverrideSerde {
     router_temperature: Option<f64>,
     assume_kv_reuse: Option<bool>,
     track_prefill_tokens: Option<bool>,
-    shared_cache_multiplier: Option<f64>,
 }
 
 /// Override configuration for router settings that can be specified per-request
@@ -639,10 +638,6 @@ pub struct RouterConfigOverride {
 
     #[builder(default)]
     pub track_prefill_tokens: Option<bool>,
-
-    /// Per-request override of `shared_cache_multiplier`.
-    #[builder(default)]
-    pub shared_cache_multiplier: Option<f64>,
 }
 
 impl RouterConfigOverride {
@@ -655,9 +650,6 @@ impl RouterConfigOverride {
         }
         if let Some(value) = self.router_temperature {
             validate_finite_non_negative("router_temperature", value)?;
-        }
-        if let Some(value) = self.shared_cache_multiplier {
-            validate_range("shared_cache_multiplier", value, 0.0, 1.0)?;
         }
         Ok(())
     }
@@ -684,7 +676,6 @@ impl TryFrom<RouterConfigOverrideSerde> for RouterConfigOverride {
             router_temperature: compat.router_temperature,
             assume_kv_reuse: compat.assume_kv_reuse,
             track_prefill_tokens: compat.track_prefill_tokens,
-            shared_cache_multiplier: compat.shared_cache_multiplier,
         };
         config.validate()?;
         Ok(config)
@@ -2837,29 +2828,6 @@ models:
     }
 
     #[test]
-    fn test_router_config_override_rejects_out_of_range_shared_cache_multiplier() {
-        let too_small = RouterConfigOverride {
-            overlap_score_credit: None,
-            prefill_load_scale: None,
-            router_temperature: None,
-            assume_kv_reuse: None,
-            track_prefill_tokens: None,
-            shared_cache_multiplier: Some(-0.1),
-        };
-        let too_large = RouterConfigOverride {
-            overlap_score_credit: None,
-            prefill_load_scale: None,
-            router_temperature: None,
-            assume_kv_reuse: None,
-            track_prefill_tokens: None,
-            shared_cache_multiplier: Some(1.1),
-        };
-
-        assert!(too_small.validate().is_err());
-        assert!(too_large.validate().is_err());
-    }
-
-    #[test]
     fn test_router_config_override_accepts_credit_above_one() {
         let amplified = RouterConfigOverride {
             overlap_score_credit: Some(1.1),
@@ -2867,7 +2835,6 @@ models:
             router_temperature: None,
             assume_kv_reuse: None,
             track_prefill_tokens: None,
-            shared_cache_multiplier: None,
         };
 
         assert!(amplified.validate().is_ok());
@@ -2878,7 +2845,6 @@ models:
                 router_temperature: None,
                 assume_kv_reuse: None,
                 track_prefill_tokens: None,
-                shared_cache_multiplier: None,
             };
             assert!(invalid.validate().is_err());
         }

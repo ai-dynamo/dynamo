@@ -16,10 +16,11 @@ pub use runtime::{
 
 pub use commitments::{Commitments, KvCopyLocations, KvCopySource};
 pub use context::WorkerSelectionContext;
+#[allow(deprecated)]
+pub use inputs::WorkerTransferInput;
 pub use inputs::{
     ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
-    WorkerCapacity, WorkerInfo, WorkerInputView, WorkerInputs, WorkerLoadInput,
-    WorkerTransferInput,
+    WorkerCapacity, WorkerCopyInput, WorkerInfo, WorkerInputView, WorkerInputs, WorkerLoadInput,
 };
 
 pub use super::registry::{

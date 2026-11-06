@@ -12,7 +12,7 @@ use dynamo_kv_router::{KvRouterConfig, KvSchedulerError, WorkerSelectionInput, W
 use parking_lot::Mutex;
 use std::sync::Arc;
 
-use super::runtime_policy;
+use super::{Preset, runtime_policy};
 
 /// Synchronous adapter for direct callers and replay. Scheduler actors use `default_policy`
 /// directly and do not acquire this adapter's mutex.
@@ -22,13 +22,19 @@ use super::runtime_policy;
 /// stream.
 pub struct DefaultWorkerSelector {
     kv_router_config: KvRouterConfig,
+    preset: Preset,
     worker_type: &'static str,
     policy: Arc<Mutex<WorkerSelectionPolicy>>,
     rng: Option<Arc<Mutex<fastrand::Rng>>>,
 }
 impl DefaultWorkerSelector {
     pub fn new(config: Option<KvRouterConfig>, worker_type: &'static str) -> Self {
-        Self::with_rng(config.unwrap_or_default(), worker_type, None)
+        Self::with_rng(
+            config.unwrap_or_default(),
+            Preset::Default,
+            worker_type,
+            None,
+        )
     }
     /// Construct a reproducible selector. Clones share its random stream.
     pub fn new_seeded(
@@ -38,12 +44,27 @@ impl DefaultWorkerSelector {
     ) -> Self {
         Self::with_rng(
             config.unwrap_or_default(),
+            Preset::Default,
+            worker_type,
+            Some(Arc::new(Mutex::new(fastrand::Rng::with_seed(seed)))),
+        )
+    }
+    /// Construct a reproducible selector for the `kvcr` preset (see [`super::kvcr_policy`]).
+    pub fn kvcr_seeded(
+        config: Option<KvRouterConfig>,
+        worker_type: &'static str,
+        seed: u64,
+    ) -> Self {
+        Self::with_rng(
+            config.unwrap_or_default(),
+            Preset::Kvcr,
             worker_type,
             Some(Arc::new(Mutex::new(fastrand::Rng::with_seed(seed)))),
         )
     }
     fn with_rng(
         config: KvRouterConfig,
+        preset: Preset,
         worker_type: &'static str,
         rng: Option<Arc<Mutex<fastrand::Rng>>>,
     ) -> Self {
@@ -51,10 +72,12 @@ impl DefaultWorkerSelector {
             policy: Arc::new(Mutex::new(runtime_policy(
                 config.clone(),
                 super::PolicyParameters::from(&config),
+                preset,
                 worker_type,
                 rng.clone(),
             ))),
             kv_router_config: config,
+            preset,
             worker_type,
             rng,
         }
@@ -75,6 +98,7 @@ impl Clone for DefaultWorkerSelector {
     fn clone(&self) -> Self {
         Self::with_rng(
             self.kv_router_config.clone(),
+            self.preset,
             self.worker_type,
             self.rng.clone(),
         )
