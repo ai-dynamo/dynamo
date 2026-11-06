@@ -91,6 +91,83 @@ def test_nixl_prefill_request_shape():
     }
 
 
+def _bidir_config(enabled):
+    config = _config("NixlConnector")
+    config.kv_transfer_config.get_from_extra_config = (
+        lambda key, default: enabled if key == "bidirectional_kv_xfer" else default
+    )
+    return config
+
+
+def test_nixl_prefill_preserves_native_decoder_coordinates_without_mutation():
+    incoming = {
+        "do_remote_decode": False,
+        "do_remote_prefill": True,
+        "remote_engine_id": "decoder-engine",
+        "remote_request_id": "previous-turn",
+        "remote_block_ids": [[0, 2], [4]],
+        "remote_num_tokens": 128,
+        "remote_blocks_expiry_time": 12345.25,
+        "native_extension": {"future": [1]},
+    }
+    params = NixlConnectorProtocol(
+        _bidir_config(True)
+    ).prefill_request_kv_transfer_params(incoming)
+    assert params["do_remote_decode"] is True
+    assert params["do_remote_prefill"] is False
+    for key in incoming.keys() - {"do_remote_decode", "do_remote_prefill"}:
+        assert params[key] == incoming[key]
+    params["remote_block_ids"][0].append(9)
+    params["native_extension"]["future"].append(2)
+    assert incoming["remote_block_ids"] == [[0, 2], [4]]
+    assert incoming["native_extension"] == {"future": [1]}
+    assert incoming["do_remote_decode"] is False
+    assert incoming["do_remote_prefill"] is True
+
+
+@pytest.mark.parametrize(
+    "incoming",
+    [
+        None,
+        {},
+        {"remote_block_ids": None, "remote_num_tokens": 0},
+        {"remote_block_ids": [[], []], "remote_num_tokens": 0},
+    ],
+)
+def test_nixl_native_cold_request_does_not_require_bidirectional_config(incoming):
+    params = NixlConnectorProtocol(
+        _bidir_config(False)
+    ).prefill_request_kv_transfer_params(incoming)
+    assert params["do_remote_decode"] is True
+    assert params["do_remote_prefill"] is False
+    assert params["remote_engine_id"] is None
+
+
+@pytest.mark.parametrize("config", [_bidir_config(False), _config(None)])
+def test_nixl_native_decoder_source_requires_bidirectional_config(config):
+    with pytest.raises(ValueError, match="bidirectional_kv_xfer"):
+        NixlConnectorProtocol(config).prefill_request_kv_transfer_params(
+            {"remote_block_ids": [[0]], "remote_num_tokens": 64}
+        )
+
+
+def test_native_decoder_source_rejected_for_cache_mediated_connector():
+    protocol = LMCacheMPConnectorProtocol(_config("LMCacheMPConnector"))
+    with pytest.raises(ValueError, match="requires NixlConnector"):
+        protocol.prefill_request_kv_transfer_params({"remote_block_ids": [[0]]})
+    assert protocol.prefill_request_kv_transfer_params({"remote_block_ids": None}) == {}
+
+
+def test_native_decoder_source_rejected_for_mooncake_connector(fake_mooncake):
+    protocol = MooncakeConnectorProtocol(_config("MooncakeConnector"))
+    with pytest.raises(ValueError, match="requires NixlConnector"):
+        protocol.prefill_request_kv_transfer_params({"remote_block_ids": [[0]]})
+    assert (
+        protocol.prefill_request_kv_transfer_params({"remote_block_ids": None})
+        == protocol.prefill_request_kv_transfer_params()
+    )
+
+
 def test_nixl_decode_passes_through_engine_response():
     """Decode params come straight off the engine response — NIXL is pull-based."""
     proto = NixlConnectorProtocol(_config("NixlConnector"))
