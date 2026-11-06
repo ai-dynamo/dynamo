@@ -97,7 +97,8 @@ spec:
                 capabilities:
                   add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
               command: [vllm-rs]
-              # Dynamo parses tool calls and reasoning, so the engine parsers stay off.
+              # The 1.6.1 sidecar refuses an engine reasoning parser. Set `--reasoning-parser qwen3` with
+              # Dynamo 1.7.0 and vLLM 0.32.1 or later (vllm-proto 0.6), which pass the reasoning gate.
               args:
                 - serve
                 - $(MODEL_NAME)
@@ -110,7 +111,7 @@ spec:
                 - --max-model-len
                 - "262144"
                 - --limit-mm-per-prompt
-                - '{"image":1,"video":0}'
+                - '{"video":0}'
                 - --tool-call-parser
                 - none
                 - --reasoning-parser
