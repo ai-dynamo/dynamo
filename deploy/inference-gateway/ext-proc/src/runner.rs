@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+use dynamo_kv_router::services::selection::RouterPluginRegistry;
 use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -129,7 +129,7 @@ fn create_tls_acceptor() -> Result<TlsAcceptor> {
 }
 
 /// Run EPP until it exits.
-pub async fn run(policy_registry: Option<WorkerSelectionPolicyRegistry>) -> Result<()> {
+pub async fn run(policy_registry: Option<RouterPluginRegistry>) -> Result<()> {
     init_tracing();
     let mode = EppMode::from_env()?;
     if !matches!(mode, EppMode::Standalone)
@@ -201,7 +201,7 @@ impl BackgroundTasks {
     }
 }
 
-async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry) -> Result<()> {
+async fn run_inner(mode: EppMode, policy_registry: RouterPluginRegistry) -> Result<()> {
     let standalone = matches!(mode, EppMode::Standalone);
 
     let config = Config::from_env();
@@ -565,7 +565,7 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use dynamo_kv_router::WorkerSelectionPolicyFactory;
+    use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
     use dynamo_kv_router::services::selection::WorkerSelectionPolicyProviderError;
     use tokio::sync::Mutex;
 
@@ -619,9 +619,9 @@ mod tests {
 
     #[tokio::test]
     async fn linked_policy_registry_requires_standalone_mode() {
-        let mut registry = WorkerSelectionPolicyRegistry::default();
+        let mut registry = RouterPluginRegistry::default();
         registry
-            .register(
+            .register_worker_selection(
                 "test",
                 Arc::new(
                     |_| -> std::result::Result<

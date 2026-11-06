@@ -334,7 +334,7 @@ async fn postprocessor_parsing_stream_replays_unit_test_fixture() {
 
 #[tokio::test]
 async fn postprocessor_parsing_stream_replays_interval_20_fixture() {
-    let preprocessor = build_preprocessor(Some("qwen"), Some("hermes"));
+    let preprocessor = build_preprocessor(Some("qwen3"), Some("hermes"));
     let (mut request, _expected_stream_json, input_chunks) =
         parse_fixture(&fixture_path("stream_interval_20.jsonl"));
 
@@ -494,6 +494,7 @@ fn mock_content_chunk(content: &str) -> NvCreateChatCompletionStreamResponse {
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -540,6 +541,7 @@ fn mock_multi_choice_content_chunk(
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -583,6 +585,7 @@ fn mock_reasoning_only_chunk(reasoning: &str) -> NvCreateChatCompletionStreamRes
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -621,6 +624,7 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -652,6 +656,7 @@ fn mock_usage_only_chunk() -> NvCreateChatCompletionStreamResponse {
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -695,6 +700,7 @@ fn mock_multi_choice_final_chunk(indices: &[u32]) -> NvCreateChatCompletionStrea
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 

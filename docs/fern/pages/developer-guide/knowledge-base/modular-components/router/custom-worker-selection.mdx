@@ -56,7 +56,7 @@ Use `dynamo_kv_router::plugins` for plugin registration and these modules for pl
 
 Dynamo owns scheduler queues, eligibility checks, reservations, lifecycle synchronization, and the default selector implementation. Low-level host interfaces such as `WorkerSelector` are used to connect Dynamo components; external plugins use `WorkerSelectionPolicy`.
 
-Existing plugin imports and the `WorkerSelectionPolicyRegistry` name remain available through compatibility re-exports until version 1.7. They refer to the same types and traits, so existing policies can register into `RouterPluginRegistry` without adapters. Migrate imports to `plugins::worker_selection`, rename the registry to `RouterPluginRegistry`, and use `register_worker_selection` for worker policies. The compatibility exports, registry alias, worker-only `register` method, and frontend `worker_selection_policy_factory` setter are scheduled for removal in 1.7.
+Version 1.7 removed the compatibility import paths for these contracts, such as `dynamo_kv_router::WorkerFilter` and `dynamo_kv_router::scheduling::RequestClassifier`, along with the `WorkerSelectionPolicyRegistry` alias, the worker-only `RouterPluginRegistry::register` method, and the frontend `worker_selection_policy_factory` setter. Import from `plugins::worker_selection` and `plugins::request_classifier`, use `RouterPluginRegistry`, and register worker policies with `register_worker_selection`. The types and traits are unchanged.
 
 ## Build the Policy
 
@@ -399,7 +399,7 @@ Routing cache resources start only if a component requests `CACHE` or a scorer r
 | `input_trigger()` | Optional `UserMessage`, `ToolResult`, or `Other` request trigger |
 | `agent_headers()` | Opaque coding-agent header names mapped to ordered lists of string values |
 
-`agent_headers()` exposes the request's ingress observations. Names are lowercase; values retain their original text, including unknown values and malformed embedded JSON. The map is shared across request and policy-context clones without copying header strings, needs no `WorkerInputs` group, and is not interpreted by the default policy. Missing keys mean no observation was captured. Plugins own any parsing, normalization, and decisions based on this untrusted data. For the captured families, size limits, and rolling-upgrade behavior, see [Agent Harnesses](../../../../use-cases/agents/agent-harnesses.mdx#agent-headers) and [Agent Tracing](../../../../use-cases/agents/agent-tracing.md#dynamo-request_end-record).
+`agent_headers()` exposes the request's ingress observations. Names are lowercase; values retain their original text, including unknown values and malformed embedded JSON. The map is shared across request and policy-context clones without copying header strings, needs no `WorkerInputs` group, and is not interpreted by the default policy. Missing keys mean no observation was captured. Plugins own any parsing, normalization, and decisions based on this untrusted data. For the captured families, size limits, and rolling-upgrade behavior, see [Connect an Agent Harness](../../../../use-cases/agents/session-ids.mdx#agent-headers) and [Trace an Agent Run](../../../../use-cases/agents/agent-tracing.md#dynamo-request_end-record).
 
 The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/README.md) use `input_trigger()` to give tool-result turns a cache-local picker path.
 

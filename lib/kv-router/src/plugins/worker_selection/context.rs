@@ -25,6 +25,7 @@ pub struct WorkerSelectionContext<'a> {
     pub(crate) track_prefill_tokens: bool,
     pub(crate) pinned_worker: Option<WorkerWithDpRank>,
     pub(crate) router_temperature_override: Option<f64>,
+    pub(crate) preview: bool,
 }
 
 impl WorkerSelectionContext<'_> {
@@ -89,5 +90,16 @@ impl WorkerSelectionContext<'_> {
     /// Return the request-level router temperature override, if present.
     pub fn router_temperature_override(&self) -> Option<f64> {
         self.router_temperature_override
+    }
+
+    /// Whether this selection only previews a worker, as a peek does, without routing the
+    /// request to it. A picker that keeps state between selections, such as a rotation
+    /// cursor, should read that state without advancing it. Always `false` when the router
+    /// routes with KV state.
+    // TODO(v1.8): document once custom pickers can run on the hosted path; until then only the
+    // builtin router-mode plugins receive previews.
+    #[doc(hidden)]
+    pub fn is_preview(&self) -> bool {
+        self.preview
     }
 }
