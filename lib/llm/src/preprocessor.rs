@@ -1742,6 +1742,7 @@ fn attach_request_context_metadata(
 struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
+    normalize_developer_role: bool,
     continue_final_message: bool,
     named_tool: Option<&'a str>,
     final_message_start_tag: Option<&'a crate::preprocessor::prompt::FinalMessageTags>,
@@ -1757,6 +1758,15 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
 
     fn messages(&self) -> minijinja::value::Value {
         let mut json = serde_json::to_value(self.inner.messages()).unwrap_or_default();
+        if self.normalize_developer_role
+            && let Some(messages) = json.as_array_mut()
+        {
+            for message in messages {
+                if message.get("role").and_then(serde_json::Value::as_str) == Some("developer") {
+                    message["role"] = serde_json::json!("system");
+                }
+            }
+        }
         if self.normalize_tool_call_args
             && let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json)
         {
@@ -3908,6 +3918,13 @@ impl OpenAIPreprocessor {
             .map(|(prompt, _)| prompt)
     }
 
+    fn uses_glm_parser(&self) -> bool {
+        crate::protocols::openai::chat_completions::unified_parser::configured_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) == Some(crate::protocols::openai::chat_completions::unified_parser::GLM47_UNIFIED_FAMILY)
+    }
+
     fn apply_template_and_prefill<
         R: OAIChatLikeRequest
             + AnnotationsProvider
@@ -3965,7 +3982,9 @@ impl OpenAIPreprocessor {
         } else {
             None
         };
+        let normalize_developer_role = self.uses_glm_parser();
         let formatted_prompt = if self.normalize_tool_call_args
+            || normalize_developer_role
             || continue_final
             || rendering.is_some()
             || named_tool.is_some()
@@ -3973,6 +3992,7 @@ impl OpenAIPreprocessor {
             self.apply_template_inner(&NormalizedArgsRequest {
                 inner: request,
                 normalize_tool_call_args: self.normalize_tool_call_args,
+                normalize_developer_role,
                 continue_final_message: continue_final,
                 named_tool: named_tool.as_deref(),
                 final_message_start_tag: final_message_start_tag.as_ref(),
@@ -4004,6 +4024,20 @@ impl OpenAIPreprocessor {
             }
             None => (None, None),
         };
+        // GLM templates that ignore the toggle must not silently accept thinking-off.
+        if self.uses_glm_parser()
+            && Self::normalize_thinking_aliases(
+                request.chat_template_args(),
+                self.runtime_config.reasoning_parser.as_deref(),
+            ) == Some(false)
+            && !formatted_prompt
+                .as_ref()
+                .is_some_and(|prompt| prompt.as_str().trim_end().ends_with("</think>"))
+        {
+            return Err(invalid_argument_error(
+                "The selected GLM chat template does not render a closed reasoning prefill for thinking-off. Remove the reasoning-off setting or use a template that supports it.",
+            ));
+        }
         let mut prefill = Self::prompt_reasoning_prefill_at_boundary(
             self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
@@ -7496,6 +7530,8 @@ impl OpenAIPreprocessor {
             return match family {
                 // GPT-OSS cannot disable reasoning; unsupported aliases must not expose it as answer text.
                 "gpt_oss" => false,
+                // Keep unexpected generated reasoning out of answer text even in thinking-off mode.
+                "glm47" => false,
                 "gemma4" => thinking != Some(true) && !Self::is_gemma4_tool_parser(tool_parser),
                 // Spark's template cannot disable reasoning, so keep generated
                 // reasoning separate instead of folding it into visible content.
@@ -9527,6 +9563,142 @@ mod tests {
         FinishReason, Role,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn glm_developer_messages_reach_the_rendered_prompt_in_order() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test", "messages": [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "developer", "content": "DEV_ONE"},
+                {"role": "user", "content": "USER"},
+                {"role": "developer", "content": "DEV_TWO"}
+            ]
+        }))
+        .unwrap();
+        let original = serde_json::to_value(&request).unwrap();
+        const TEMPLATE: &str = "{% for m in messages %}{% if m.role == 'system' or m.role == 'user' %}[{{ m.role }}:{{ m.content }}]{% endif %}{% endfor %}";
+        for (tool, reasoning, expected) in [
+            (
+                Some("glm47"),
+                Some("glm45"),
+                "[system:SYSTEM][system:DEV_ONE][user:USER][system:DEV_TWO]",
+            ),
+            (
+                None,
+                Some("glm45"),
+                "[system:SYSTEM][system:DEV_ONE][user:USER][system:DEV_TWO]",
+            ),
+            (Some("qwen3"), Some("qwen3"), "[system:SYSTEM][user:USER]"),
+        ] {
+            let mut preprocessor = extra_args_media_copy_tests::test_preprocessor();
+            preprocessor.formatter = test_prompt_formatter(TEMPLATE);
+            preprocessor.tool_call_parser = tool.map(str::to_owned);
+            preprocessor.runtime_config.reasoning_parser = reasoning.map(str::to_owned);
+            let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert_eq!(
+                rendered.as_str(),
+                expected,
+                "tool={tool:?} reasoning={reasoning:?}"
+            );
+            assert_eq!(serde_json::to_value(&request).unwrap(), original);
+        }
+    }
+
+    #[tokio::test]
+    async fn glm_thinking_off_requires_closed_prefill_and_preserves_output_channels() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::glm_thinking_off_requires_closed_prefill_and_preserves_output_channels"
+            ),
+            &[(env_llm::DYN_PARSER_VERSION, "2")],
+        ) {
+            return;
+        }
+        const CLOSED: &str = "{% if thinking is defined and not thinking %}<|assistant|>\n<think></think>\n{% else %}<|assistant|>\n<think>{% endif %}";
+        for tool in [Some("glm47"), None] {
+            let mut preprocessor = extra_args_media_copy_tests::test_preprocessor();
+            preprocessor.formatter = test_prompt_formatter(CLOSED);
+            preprocessor.tool_call_parser = tool.map(str::to_owned);
+            preprocessor.runtime_config.reasoning_parser = Some("glm45".into());
+            for controls in [
+                serde_json::json!({"chat_template_kwargs": {"thinking": false}}),
+                serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}}),
+                serde_json::json!({"chat_template_kwargs": {"thinking_mode": "disabled"}}),
+                serde_json::json!({"thinking": {"type": "disabled"}}),
+                serde_json::json!({"reasoning_effort": "none"}),
+            ] {
+                let mut body = serde_json::json!({"model": "test", "messages": [{"role": "user", "content": "hello"}]});
+                body.as_object_mut()
+                    .unwrap()
+                    .extend(controls.as_object().unwrap().clone());
+                let mut request: NvCreateChatCompletionRequest =
+                    serde_json::from_value(body).unwrap();
+                request.normalize_reasoning_template_args().unwrap();
+                let (_, prefill) = preprocessor.apply_template_and_prefill(&request).unwrap();
+                assert!(!prefill.unified, "{controls}");
+                for ignored_template in ["<|assistant|>\n<think>", "<|assistant|>\n"] {
+                    preprocessor.formatter = test_prompt_formatter(ignored_template);
+                    let error = preprocessor.apply_template(&request).unwrap_err();
+                    assert_eq!(
+                        error.downcast_ref::<DynamoError>().unwrap().error_type(),
+                        ErrorType::InvalidArgument
+                    );
+                    assert!(error.to_string().contains("closed reasoning prefill"));
+                }
+                preprocessor.formatter = test_prompt_formatter(CLOSED);
+                let reasoning_disabled = OpenAIPreprocessor::request_disables_reasoning_with_family(
+                    &request,
+                    tool,
+                    Some("glm45"),
+                    None,
+                    Some("glm47"),
+                );
+                assert!(!reasoning_disabled);
+                let batch = crate::protocols::openai::chat_completions::unified_parser::parse_complete_with_policy(
+                    "glm47", "<think>private thought</think>answer", &crate::protocols::openai::GuidedToolConstraint::None, &[],
+                    crate::protocols::openai::chat_completions::unified_parser::UnifiedRequestPolicy {
+                        reasoning_disabled, ..Default::default()
+                    },
+                ).unwrap();
+                assert_eq!(
+                    (batch.text.as_str(), batch.reasoning.as_str()),
+                    ("answer", "private thought")
+                );
+                let chunks = ["<think>private", " thought</think>answer"]
+                    .into_iter()
+                    .map(|text| {
+                        let mut chunk = chat_stream_chunk(0, None);
+                        let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+                        choice.delta.content =
+                            Some(ChatCompletionMessageContent::Text(text.into()));
+                        chunk
+                    });
+                let output = preprocessor
+                    .postprocessor_parsing_stream(
+                        futures::stream::iter(chunks),
+                        &request,
+                        prefill,
+                        false,
+                    )
+                    .unwrap()
+                    .collect::<Vec<_>>()
+                    .await;
+                assert_eq!(
+                    gpt_oss_stream_text(&output),
+                    ("answer".into(), "private thought".into()),
+                    "{controls}"
+                );
+            }
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test", "messages": [{"role": "user", "content": "hello"}]
+                }))
+                .unwrap();
+            let (_, prefill) = preprocessor.apply_template_and_prefill(&request).unwrap();
+            assert!(prefill.unified);
+        }
+    }
 
     #[test]
     fn video_routing_startup_does_not_claim_active_routing() {
@@ -16326,6 +16498,7 @@ responses_tools: None,
             named_tool: None,
             inner: &request,
             normalize_tool_call_args: true,
+            normalize_developer_role: false,
             continue_final_message: true,
             final_message_start_tag: None,
             rendering: None,
@@ -16371,6 +16544,7 @@ responses_tools: None,
                     named_tool: None,
                     inner: request,
                     normalize_tool_call_args: false,
+                    normalize_developer_role: false,
                     continue_final_message: true,
                     final_message_start_tag: None,
                     rendering: None,

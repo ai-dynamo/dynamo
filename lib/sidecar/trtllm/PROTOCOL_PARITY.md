@@ -101,6 +101,27 @@ error details are preferred. OpenEngine v1 does not expose structured overflow
 fields, so the frontend also recognizes the current TensorRT-LLM bounded-input
 error messages; unrelated invalid arguments are not classified as overflow.
 
+## GLM instruction and reasoning controls
+
+For the GLM parser profile (`glm47` tool parsing or `glm45` reasoning parsing),
+Chat Completions developer messages are rendered as system messages. Their
+content and position are preserved, and the original request is unchanged.
+This matches the legacy GLM template's available roles; other model families
+retain their own role handling. Responses already converts developer input to
+system messages before chat conversion.
+
+Thinking-off controls are normalized before rendering. A GLM thinking-off
+request requires a rendered prompt ending in a closed `</think>` prefill.
+A template that ignores the setting, still opens reasoning, or cannot establish
+that closed prefill produces an actionable invalid-argument error before
+tokenization and engine dispatch. This includes normalized
+`thinking: {"type":"disabled"}`, `reasoning_effort: "none"`, and the
+`thinking`, `enable_thinking`, and `thinking_mode` template aliases.
+GLM reasoning parsing stays active even with thinking off, so any generated
+reasoning markers still identify reasoning rather than answer text. Template
+selection and model compliance remain deployment/model responsibilities; this
+adapter does not suppress reasoning by relabeling it as an answer.
+
 ## Deployment boundaries
 
 The compatibility target is the stateless disaggregated serving profile.
