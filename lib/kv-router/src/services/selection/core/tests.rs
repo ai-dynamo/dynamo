@@ -4807,6 +4807,43 @@ mod hint_policies {
     }
 
     #[tokio::test]
+    async fn a_reservation_sends_the_copy_its_selection_committed() {
+        let (core, _entry, tokens) = hint_policy_fixture(
+            hints_with(vec![(
+                "copy",
+                HintPolicyConstructor::shared(CopySender { silent: false }),
+            )]),
+            copy_policy(),
+            hint_capable,
+        )
+        .await;
+        let mut select = select_request();
+        select.selection_id = Some("two-phase".to_string());
+        select.prompt = prompt_of(&tokens);
+        // Worker 2 can copy both blocks from worker 1, so the scorer picks it and commits it.
+        let selected = core.select(select).await.expect("select");
+        assert_eq!(selected.worker_id, 2);
+
+        let reserved = core
+            .create_reservation(replay_reservation("two-phase"))
+            .await
+            .expect("reservation");
+        assert_eq!(reserved.worker_id, 2);
+        let hint = reserved.kv_hint.expect("the copy committed at select");
+        let actions: Vec<_> = hint
+            .actions
+            .iter()
+            .map(|action| format!("{}:{}", action.action_id, action.action_type))
+            .collect();
+        assert_eq!(actions, ["a1:test.copy"]);
+        assert_eq!(
+            hint.actions[0].payload["source"],
+            serde_json::json!("tcp://worker-1:9000")
+        );
+        assert_eq!(hint.actions[0].payload["blocks"], serde_json::json!(2));
+    }
+
+    #[tokio::test]
     async fn a_committed_copy_whose_source_left_books_without_it() {
         let (core, _entry, tokens) = hint_policy_fixture(
             hints_with(vec![(
