@@ -1128,6 +1128,7 @@ pub(crate) fn calibrated_control() -> Result<()> {
                 "prefill": {
                     "timing": prefill.diagnostics,
                     "native_kv_geometry": prefill.geometry,
+                    "model_config": prefill.model_config,
                     "kv_transfer": {
                         "bytes_per_token": prefill.transfer.bytes_per_token,
                         "bandwidth_decimal_gb_s": prefill.transfer.bandwidth_gbps,
@@ -1138,6 +1139,7 @@ pub(crate) fn calibrated_control() -> Result<()> {
                 "decode": {
                     "timing": decode.diagnostics,
                     "native_kv_geometry": decode.geometry,
+                    "model_config": decode.model_config,
                     "kv_transfer": {
                         "bytes_per_token": decode.transfer.bytes_per_token,
                         "bandwidth_decimal_gb_s": decode.transfer.bandwidth_gbps,
