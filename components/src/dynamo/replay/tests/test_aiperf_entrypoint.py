@@ -121,17 +121,40 @@ def test_installed_entrypoint_runs_aiperf_workload_on_2p2d_kv_deployment() -> No
             "prefill and decode worker counts must be positive",
         ),
         (
-            json.dumps({**_DEPLOYMENT_2P2D, "engine": {"prefill": {"prefill_context_parallel_size": 2}}}),
+            json.dumps(
+                {
+                    **_DEPLOYMENT_2P2D,
+                    "engine": {"prefill": {"prefill_context_parallel_size": 2}},
+                }
+            ),
             _SEED_HEX,
             "unsupported prefill role configuration",
         ),
         (
-            json.dumps({**_DEPLOYMENT_2P2D, "engine": {"decode": {"prefill_context_parallel_size": 2}}}),
+            json.dumps(
+                {
+                    **_DEPLOYMENT_2P2D,
+                    "engine": {"decode": {"prefill_context_parallel_size": 2}},
+                }
+            ),
             _SEED_HEX,
             "unsupported decode role configuration",
         ),
         (
-            json.dumps({**_DEPLOYMENT_2P2D, "engine": {"rank": {"timing_model": {"type": "external", "provider": "ais", "config": {}}}}}),
+            json.dumps(
+                {
+                    **_DEPLOYMENT_2P2D,
+                    "engine": {
+                        "rank": {
+                            "timing_model": {
+                                "type": "external",
+                                "provider": "ais",
+                                "config": {},
+                            }
+                        }
+                    },
+                }
+            ),
             _SEED_HEX,
             "native workload configuration or execution failed",
         ),
