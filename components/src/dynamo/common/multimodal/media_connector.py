@@ -49,6 +49,7 @@ def _get_shared_image_loader() -> ImageLoader:
 
 # Lazy registration — only register if vLLM is available.
 try:
+    from urllib3.util import parse_url
     from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 
     @MEDIA_CONNECTOR_REGISTRY.register("dynamo")
@@ -73,6 +74,11 @@ try:
             image_mode: str = "RGB",
         ) -> Image.Image:
             """Async image fetch via dynamo's ImageLoader with LRU cache."""
+            # ImageLoader bypasses the parent's download, so apply vLLM's
+            # --allowed-media-domains here, as it does for audio and video.
+            url_spec = parse_url(image_url)
+            if url_spec.scheme and url_spec.scheme.lower().startswith("http"):
+                self._assert_url_in_allowed_media_domains(url_spec)
             try:
                 img = await self._image_loader.load_image(image_url)
             except (UrlValidationError, HttpStatusError, HttpConfigurationError):

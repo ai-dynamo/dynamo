@@ -2186,6 +2186,13 @@ class WorkerFactory:
             endpoint=generate_endpoint,
             embedding_worker=True,
         )
+        # Chat-style embedding input loads media in this worker. Use dynamo's
+        # media connector, as the frontend does, so DYN_MM_ALLOW_REMOTE_URLS
+        # applies here too: vLLM's default ``http`` connector fetches any URL.
+        # Set it before the engine starts, since vLLM can cache env reads.
+        os.environ["VLLM_MEDIA_CONNECTOR"] = "dynamo"
+        import dynamo.common.multimodal.media_connector  # noqa: F401
+
         (
             engine_client,
             vllm_config,
