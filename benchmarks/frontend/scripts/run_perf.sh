@@ -927,17 +927,37 @@ fi
 # BEGIN metadata-producer
 # ─── Step 8: Save config ────────────────────────────────────────────────────
 python3 - "$OUTPUT_DIR/config.json" \
-    timestamp "$TIMESTAMP" benchmark_exit_status "$BENCHMARK_STATUS" \
-    requested_num_requests "${NUM_REQUESTS:-}" model "$MODEL" model_name "$MODEL_NAME" \
-    num_models "$NUM_MODELS" num_workers_per_model "$NUM_WORKERS" num_workers_total "$NUM_WORKERS_TOTAL" \
-    speedup_ratio "$SPEEDUP_RATIO" data_parallel_size "$DATA_PARALLEL_SIZE" \
-    request_plane "$REQUEST_PLANE" event_plane "$EVENT_PLANE" frontend_port "$FRONTEND_PORT" \
-    tokenizer_backend "${TOKENIZER_BACKEND:-hf}" concurrency "$CONCURRENCY" \
-    num_requests "${_EFFECTIVE_REQUESTS:-null}" benchmark_duration "${BENCHMARK_DURATION:-null}" \
-    request_rate "${REQUEST_RATE:-null}" isl "$ISL" osl "$OSL" capture_duration "$CAPTURE_DURATION" \
-    frontend_pid "$FRONTEND_PID" has_nsys "$HAS_NSYS" has_perf "$HAS_PERF" has_bpf "$HAS_BPF" \
-    skip_bpf "$SKIP_BPF" skip_nsys "$SKIP_NSYS" skip_flamegraph "$SKIP_FLAMEGRAPH" \
-    tcpdump "$ENABLE_TCPDUMP" tcpdump_port "$TCPDUMP_PORT" nsys_path "${NSYS_PATH:-auto}" \
+    timestamp "$TIMESTAMP" \
+    benchmark_exit_status "$BENCHMARK_STATUS" \
+    requested_num_requests "${NUM_REQUESTS:-}" \
+    model "$MODEL" \
+    model_name "$MODEL_NAME" \
+    num_models "$NUM_MODELS" \
+    num_workers_per_model "$NUM_WORKERS" \
+    num_workers_total "$NUM_WORKERS_TOTAL" \
+    speedup_ratio "$SPEEDUP_RATIO" \
+    data_parallel_size "$DATA_PARALLEL_SIZE" \
+    request_plane "$REQUEST_PLANE" \
+    event_plane "$EVENT_PLANE" \
+    frontend_port "$FRONTEND_PORT" \
+    tokenizer_backend "${TOKENIZER_BACKEND:-hf}" \
+    concurrency "$CONCURRENCY" \
+    num_requests "${_EFFECTIVE_REQUESTS:-null}" \
+    benchmark_duration "${BENCHMARK_DURATION:-null}" \
+    request_rate "${REQUEST_RATE:-null}" \
+    isl "$ISL" \
+    osl "$OSL" \
+    capture_duration "$CAPTURE_DURATION" \
+    frontend_pid "$FRONTEND_PID" \
+    has_nsys "$HAS_NSYS" \
+    has_perf "$HAS_PERF" \
+    has_bpf "$HAS_BPF" \
+    skip_bpf "$SKIP_BPF" \
+    skip_nsys "$SKIP_NSYS" \
+    skip_flamegraph "$SKIP_FLAMEGRAPH" \
+    tcpdump "$ENABLE_TCPDUMP" \
+    tcpdump_port "$TCPDUMP_PORT" \
+    nsys_path "${NSYS_PATH:-auto}" \
     -- "${MODEL_NAMES[@]}" <<'PY'
 import json
 import math
