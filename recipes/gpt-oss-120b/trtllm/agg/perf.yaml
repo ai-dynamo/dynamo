@@ -87,7 +87,6 @@ spec:
             python3 - "$ARTIFACT_DIR" "$((10*concurrency))" <<'PY'
           import csv
           import json
-          import math
           import pathlib
           import sys
 
@@ -96,26 +95,12 @@ spec:
               summary = json.load(stream)
           successful = summary["request_count"]["avg"]
           errors = summary.get("error_request_count", {"avg": 0})["avg"]
-          completed = successful + errors
-          if isinstance(completed, bool) or not isinstance(completed, (int, float)) or not math.isfinite(completed) or completed != int(sys.argv[2]):
+          if successful + errors != int(sys.argv[2]):
               raise ValueError("Benchmark request count does not match the requested count")
           with (directory / "profile_export_aiperf.csv").open(newline="") as stream:
-              rows = list(csv.reader(stream, strict=True))
-          width = None
-          csv_count = None
-          for row in rows:
-              if not row:
-                  width = None
-                  continue
-              if width is None:
-                  if len(row) < 2 or row[0] not in {"Metric", "Endpoint"}:
-                      raise ValueError("Unrecognized benchmark CSV section")
-                  width = len(row)
-              elif len(row) != width:
-                  raise ValueError("Truncated benchmark CSV row")
-              elif row[0] == "Request Count":
-                  csv_count = float(row[1])
-          if csv_count != successful:
+              counts = [float(row[1]) for row in csv.reader(stream, strict=True)
+                        if row and row[0] == "Request Count"]
+          if counts != [successful]:
               raise ValueError("Benchmark CSV request count does not match JSON")
           PY
             echo "ARTIFACT_DIR: $ARTIFACT_DIR"

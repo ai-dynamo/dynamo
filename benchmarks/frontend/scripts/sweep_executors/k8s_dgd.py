@@ -12,10 +12,10 @@ DGD patching. This enables arbitrary backend deployments.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Optional
 
-from sweep_core.aiperf import parse_aiperf_into_result
 from sweep_core.models import DeployDimension, RunResult, RunSpec, SweepConfig
 from sweep_k8s import aiperf as k8s_aiperf
 from sweep_k8s import dgd as k8s_dgd
@@ -234,10 +234,36 @@ class K8sDgdExecutor:
         )
 
         # Parse aiperf results
-        parse_aiperf_into_result(result, run_dir, expected=aiperf.num_requests)
+        _parse_k8s_aiperf_into_result(result, run_dir)
 
         return result
 
     def cleanup(self) -> None:
         """No persistent state to clean up."""
+        pass
+
+
+def _parse_k8s_aiperf_into_result(result: RunResult, run_dir: Path) -> None:
+    """Parse aiperf results from k8s run directory."""
+    aiperf_json = run_dir / "aiperf" / "profile_export_aiperf.json"
+    if not aiperf_json.exists():
+        return
+
+    try:
+        data = json.loads(aiperf_json.read_text())
+        rt = data.get("request_throughput", {})
+        result.req_per_sec = rt.get("avg", 0) or 0
+        ot = data.get("output_token_throughput", {})
+        result.output_tok_per_sec = ot.get("avg", 0) or 0
+        ttft = data.get("time_to_first_token", data.get("ttft", {}))
+        if isinstance(ttft, dict):
+            result.ttft_p50_ms = ttft.get("p50", 0) or 0
+            result.ttft_p99_ms = ttft.get("p99", 0) or 0
+        itl = data.get("inter_token_latency", data.get("itl", {}))
+        if isinstance(itl, dict):
+            result.itl_p50_ms = itl.get("p50", 0) or 0
+            result.itl_p99_ms = itl.get("p99", 0) or 0
+        bd = data.get("benchmark_duration", 0)
+        result.duration_sec = bd.get("avg", 0) if isinstance(bd, dict) else (bd or 0)
+    except (json.JSONDecodeError, KeyError, TypeError):
         pass

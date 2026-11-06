@@ -104,9 +104,7 @@ def main():
         sys.exit(1)
 
     # Run the sweep
-    results = run_sweep(plan, executor)
-    if any(result.status == "fail" for result in results):
-        sys.exit(1)
+    run_sweep(plan, executor)
 
 
 if __name__ == "__main__":

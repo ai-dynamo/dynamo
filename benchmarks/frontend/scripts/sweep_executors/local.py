@@ -9,6 +9,7 @@ lifecycle (mocker + frontend), observability captures, and aiperf load.
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import socket
@@ -17,7 +18,6 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from sweep_core.aiperf import parse_aiperf_into_result
 from sweep_core.models import DeployDimension, RunResult, RunSpec, SweepConfig
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -132,7 +132,7 @@ class LocalExecutor:
             print(f"    ERROR: {e}")
 
         # Parse aiperf results
-        parse_aiperf_into_result(result, run_dir)
+        _parse_aiperf_into_result(result, run_dir)
 
         return result
 
@@ -142,6 +142,53 @@ class LocalExecutor:
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def _parse_aiperf_json(json_path: Path) -> dict:
+    """Parse aiperf profile_export_aiperf.json."""
+    if not json_path.exists():
+        return {}
+    try:
+        data = json.loads(json_path.read_text())
+        result = {}
+        rt = data.get("request_throughput", {})
+        result["req_per_sec"] = rt.get("avg", 0)
+        ot = data.get("output_token_throughput", {})
+        result["output_tok_per_sec"] = ot.get("avg", 0)
+        ttft = data.get("time_to_first_token", data.get("ttft", {}))
+        if isinstance(ttft, dict):
+            result["ttft_p50_ms"] = ttft.get("p50", 0) or 0
+            result["ttft_p99_ms"] = ttft.get("p99", 0) or 0
+        itl = data.get("inter_token_latency", data.get("itl", {}))
+        if isinstance(itl, dict):
+            result["itl_p50_ms"] = itl.get("p50", 0) or 0
+            result["itl_p99_ms"] = itl.get("p99", 0) or 0
+        bd = data.get("benchmark_duration", 0)
+        result["duration_sec"] = bd.get("avg", 0) if isinstance(bd, dict) else (bd or 0)
+        return result
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return {}
+
+
+def _parse_aiperf_into_result(result: RunResult, run_dir: Path) -> None:
+    """Parse aiperf results from the run directory into the RunResult."""
+    aiperf_json = run_dir / "aiperf" / "profile_export_aiperf.json"
+    if not aiperf_json.exists():
+        # Multi-model: results are in aiperf/<model-name>/
+        for candidate in sorted(
+            (run_dir / "aiperf").glob("*/profile_export_aiperf.json")
+        ):
+            aiperf_json = candidate
+            break
+    metrics = _parse_aiperf_json(aiperf_json)
+    if metrics:
+        result.req_per_sec = metrics.get("req_per_sec", 0)
+        result.output_tok_per_sec = metrics.get("output_tok_per_sec", 0)
+        result.ttft_p50_ms = metrics.get("ttft_p50_ms", 0)
+        result.ttft_p99_ms = metrics.get("ttft_p99_ms", 0)
+        result.itl_p50_ms = metrics.get("itl_p50_ms", 0)
+        result.itl_p99_ms = metrics.get("itl_p99_ms", 0)
+        result.duration_sec = metrics.get("duration_sec", 0)
 
 
 def _port_free(port: int) -> bool:

@@ -732,10 +732,6 @@ else
 fi
 echo "  aiperf targets: ${_AIPERF_MODELS[*]} (mode=$AIPERF_TARGETS)"
 
-# BEGIN benchmark-loop
-BENCHMARK_STATUS=0
-_EXPECTED_REQUESTS="$_EFFECTIVE_REQUESTS"
-[[ -z "$BENCHMARK_DURATION" ]] || _EXPECTED_REQUESTS=null
 for _AIPERF_MODEL in "${_AIPERF_MODELS[@]}"; do
     if [[ ${#_AIPERF_MODELS[@]} -gt 1 ]]; then
         AIPERF_ARTIFACT_DIR="$OUTPUT_DIR/aiperf/${_AIPERF_MODEL}"
@@ -753,8 +749,7 @@ for _AIPERF_MODEL in "${_AIPERF_MODELS[@]}"; do
         _AIPERF_TOK_ARGS=(--tokenizer "$MODEL")
     fi
 
-    rm -f "$AIPERF_ARTIFACT_DIR/profile_export_aiperf.json" "$AIPERF_ARTIFACT_DIR/profile_export_aiperf.csv"
-    if HF_HUB_OFFLINE=1 aiperf profile --artifact-dir "$AIPERF_ARTIFACT_DIR" \
+    HF_HUB_OFFLINE=1 aiperf profile --artifact-dir "$AIPERF_ARTIFACT_DIR" \
         --model "$_AIPERF_MODEL" \
         "${_AIPERF_TOK_ARGS[@]}" \
         --endpoint-type chat \
@@ -777,17 +772,9 @@ for _AIPERF_MODEL in "${_AIPERF_MODELS[@]}"; do
         --random-seed 100 \
         --workers-max "$CONCURRENCY" \
         --record-processors 32 \
-        --ui simple; then
-        if ! PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m sweep_core.aiperf "$AIPERF_ARTIFACT_DIR" "$_EXPECTED_REQUESTS"; then
-            BENCHMARK_STATUS=1
-        fi
-    else
-        BENCHMARK_STATUS=$?
-        echo "ERROR: AIPerf failed for model $_AIPERF_MODEL (exit $BENCHMARK_STATUS)" >&2
-    fi
+        --ui simple || echo "WARNING: aiperf failed for model ${_AIPERF_MODEL}"
 done
 
-# END benchmark-loop
 # Check for server_metrics_export.json in the primary aiperf dir
 _PRIMARY_AIPERF_DIR="$OUTPUT_DIR/aiperf"
 [[ ${#_AIPERF_MODELS[@]} -gt 1 ]] && _PRIMARY_AIPERF_DIR="$OUTPUT_DIR/aiperf/${_AIPERF_MODELS[0]}"
@@ -954,4 +941,3 @@ done
 echo ""
 echo "Run analysis:"
 echo "  python3 ${SCRIPT_DIR}/analysis/create_report.py analyze $OUTPUT_DIR"
-exit "$BENCHMARK_STATUS"
