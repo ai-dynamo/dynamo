@@ -31,7 +31,8 @@ ARTIFACTORY_CARGO_DEPENDENCY_REGISTRIES is non-secret JSON configuration mapping
 these aliases to sparse Cargo index URLs on the same Artifactory server as the
 publication registry. ARTIFACTORY_TOKEN must have read access to those indexes.
 
-For AISim on release/1.7.0, create a repository variable in ai-dynamo/dynamo:
+To make the AISim registry available to release branches, create a repository
+variable in ai-dynamo/dynamo:
 Settings > Secrets and variables > Actions > Variables > New repository variable.
 Name: ARTIFACTORY_CARGO_DEPENDENCY_REGISTRIES
 Value (a JSON object, not a quoted JSON string):
@@ -39,9 +40,11 @@ Value (a JSON object, not a quoted JSON string):
     {"aisim":"sparse+https://artifactory.nvidia.com/artifactory/api/cargo/sw-dynamo-aisimulate-cargo-local/index/"}
 
 The key "aisim" matches registry = "aisim" in the source Cargo.toml's
-workspace.metadata.artifactory.dependencies. That metadata selects the exact
-aisim-core version (=0.14.0-rc.0); versions and crate download paths do not belong
-in this variable. Keep the sparse+ prefix and trailing /index/.
+workspace.metadata.artifactory.dependencies. Only a source revision containing
+that metadata selects a publication version; the registry mapping does not pin
+or override any dependency on main. Keep release-specific version and Git
+revision selections on the release branch. Versions and crate download paths do
+not belong in this variable. Keep the sparse+ prefix and trailing /index/.
 
 Store credentials only in the existing ARTIFACTORY_TOKEN secret, which needs
 read access to the dependency repository as well as publication access to the
