@@ -68,20 +68,26 @@ def _frame_text() -> str:
 
 
 @_requires_aiperf_frame
-def test_installed_entrypoint_runs_aiperf_workload_on_2p2d_kv_deployment() -> None:
+@pytest.mark.parametrize("topology,placement", [
+    ("disaggregated", "kv_router"),
+    ("disaggregated", "round_robin"),
+    ("aggregated", "round_robin"),
+])
+def test_installed_entrypoint_runs_aiperf_workload_on_2p2d_kv_deployment(topology: str, placement: str) -> None:
     assert type(resolve_runner_factory("dynamo")) is DynamoReplayRunnerFactory
+    deployment = {**_DEPLOYMENT_2P2D, "topology": topology, "placement": placement, "workers": 2}
     envelope = _installed_runner().run_aiperf_workload(
         _frame_text(),
-        json.dumps(_DEPLOYMENT_2P2D),
+        json.dumps(deployment),
         identity_seed_hex=_SEED_HEX,
     )
 
     if output := os.environ.get("AIPERF_ENTRYPOINT_CAPTURE_DIR"):
-        directory = Path(output)
+        directory = Path(output) / f"{topology}-{placement}"
         directory.mkdir(parents=True, exist_ok=False)
         (directory / "run-request.json").write_text(_frame_text(), encoding="utf-8")
         (directory / "deployment.json").write_text(
-            json.dumps(_DEPLOYMENT_2P2D), encoding="utf-8"
+            json.dumps(deployment), encoding="utf-8"
         )
         (directory / "result.json").write_text(
             json.dumps(envelope, ensure_ascii=False), encoding="utf-8"
@@ -101,8 +107,11 @@ def test_installed_entrypoint_runs_aiperf_workload_on_2p2d_kv_deployment() -> No
     for record in records:
         assert record["terminal_status"] == "completed"
         pools = [route["pool"] for route in record["routing_history"]]
-        assert pools.count("prefill") == 1, record["routing_history"]
-        assert pools.count("decode") == 1, record["routing_history"]
+        if topology == "disaggregated":
+            assert pools.count("prefill") == 1, record["routing_history"]
+            assert pools.count("decode") == 1, record["routing_history"]
+        else:
+            assert pools == ["agg"], record["routing_history"]
 
 
 @_requires_aiperf_frame

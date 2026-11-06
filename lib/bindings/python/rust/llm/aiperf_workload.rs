@@ -8,15 +8,39 @@ use std::rc::Rc;
 
 use aisimulate_core::replay::{
     ReplayComposition, ReplayDeterminism, ReplayEngineConfig, ReplayEngineFactory,
-    loadgen::SteppableDisagg,
+    loadgen::{SteppableAgg, SteppableDisagg, SteppableReplay},
 };
 use dynamo_mocker::placement::{KvReplayComposition, MockerConfig};
 use pyo3::{exceptions::PyValueError, prelude::*};
 use serde::Deserialize;
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DeploymentTopology {
+    Aggregated,
+    #[default]
+    Disaggregated,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DeploymentPlacement {
+    RoundRobin,
+    #[default]
+    KvRouter,
+}
+
+fn one_worker() -> usize { 1 }
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeploymentConfig {
+    #[serde(default)]
+    topology: DeploymentTopology,
+    #[serde(default)]
+    placement: DeploymentPlacement,
+    #[serde(default = "one_worker")]
+    workers: usize,
     engine: ReplayEngineConfig,
     prefill_workers: usize,
     decode_workers: usize,
@@ -75,22 +99,38 @@ pub fn run_mocker_aiperf_workload(
         };
         let prefill = role_config(deployment.engine.prefill.as_ref()).context("unsupported prefill role configuration")?;
         let decode = role_config(deployment.engine.decode.as_ref()).context("unsupported decode role configuration")?;
-        let mut composition = KvReplayComposition::disaggregated(
-            prefill, decode, deployment.prefill_workers, deployment.decode_workers,
-            deployment.router_config, None, None,
-        );
-        composition.set_determinism(ReplayDeterminism::CanonicalV1)?;
-        let model = SteppableDisagg::<_, dynamo_mocker::placement::RouterEventObservation,
-            dynamo_mocker::placement::KvReplayMetadata>::with_placements(
-            deployment.engine, &ReplayEngineFactory::new(),
-            deployment.prefill_workers, deployment.decode_workers,
-            |pdp, pt, ddp, dt| composition.create_disaggregated_placements(pdp, pt, ddp, dt),
-        )?;
+        let model: Box<dyn SteppableReplay> = match (deployment.topology, deployment.placement) {
+            (DeploymentTopology::Aggregated, DeploymentPlacement::RoundRobin) => {
+                anyhow::ensure!(deployment.workers > 0, "aggregate worker count must be positive");
+                anyhow::ensure!(deployment.router_config.is_none(), "router configuration requires KV placement");
+                Box::new(SteppableAgg::new(deployment.engine, &ReplayEngineFactory::new(), deployment.workers)?)
+            }
+            (DeploymentTopology::Disaggregated, DeploymentPlacement::RoundRobin) => {
+                anyhow::ensure!(deployment.router_config.is_none(), "router configuration requires KV placement");
+                Box::new(SteppableDisagg::new(deployment.engine, &ReplayEngineFactory::new(), deployment.prefill_workers, deployment.decode_workers)?)
+            }
+            (DeploymentTopology::Disaggregated, DeploymentPlacement::KvRouter) => {
+                let mut composition = KvReplayComposition::disaggregated(
+                    prefill, decode, deployment.prefill_workers, deployment.decode_workers,
+                    deployment.router_config, None, None,
+                );
+                composition.set_determinism(ReplayDeterminism::CanonicalV1)?;
+                Box::new(SteppableDisagg::<_, dynamo_mocker::placement::RouterEventObservation,
+                    dynamo_mocker::placement::KvReplayMetadata>::with_placements(
+                    deployment.engine, &ReplayEngineFactory::new(),
+                    deployment.prefill_workers, deployment.decode_workers,
+                    |pdp, pt, ddp, dt| composition.create_disaggregated_placements(pdp, pt, ddp, dt),
+                )?)
+            }
+            (DeploymentTopology::Aggregated, DeploymentPlacement::KvRouter) => {
+                anyhow::bail!("aggregate KV placement binding is not implemented")
+            }
+        };
         let report = aisim_aiperf_workload_runner::execute_with_deployment(
             &request.run,
             aiperf_clock_runtime::cancellation::RunCancellation::new(),
             Rc::new(aiperf_timing::RecordingPhaseObserver::default()),
-            Box::new(model), deployment.admission_capacity, seed,
+            model, deployment.admission_capacity, seed,
         )?;
         Ok(serde_json::to_string(&report)?)
     }).map_err(|error| {
