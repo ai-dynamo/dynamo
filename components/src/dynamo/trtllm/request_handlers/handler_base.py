@@ -90,10 +90,8 @@ logger = logging.getLogger(__name__)
 
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 
-# TRT-LLM's _torch/pyexecutor/guided_decoder.py prefixes any per-request
-# guided-decoder failure with this text; RequestError carries no type field.
-# It is a grammar rejection (bad schema or regex) only before the first output
-# token: later failures, like a rejected sampled token, are engine-side.
+# TRT-LLM's guided_decoder.py prefixes per-request failures with this (RequestError
+# has no type field). It means a grammar rejection only before the first output token.
 GUIDED_DECODING_ERROR_PREFIX = "Guided decoding error:"
 
 
@@ -1614,9 +1612,8 @@ class HandlerBase(BaseGenerativeHandler):
                 error_msg.startswith(GUIDED_DECODING_ERROR_PREFIX)
                 and not output_tokens_per_choice
             ):
-                # The engine rejected this request's grammar (schema or regex)
-                # before producing output, so surface it as 400. Later guided
-                # decoding failures, like other RequestErrors, keep the error chunk.
+                # Grammar rejected before any output: a client error (400).
+                # Later guided decoding failures keep the error chunk.
                 raise InvalidArgument(error_msg) from e
             yield {
                 "finish_reason": {"error": error_msg},
