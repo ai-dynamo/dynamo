@@ -316,14 +316,7 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
 
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
-
-            try:
-                from vllm.entrypoints.common.cli_args import FrontendArgs
-            except ModuleNotFoundError as exc:
-                if exc.name != "vllm.entrypoints.common.cli_args":
-                    raise
-                # vLLM 0.32 (CPU and XPU images); remove once they ship 0.33.
-                from vllm.entrypoints.launchers.cli_args import FrontendArgs
+            from vllm.entrypoints.common.cli_args import FrontendArgs
         except ModuleNotFoundError:
             logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
             sys.exit(1)

@@ -246,11 +246,7 @@ impl VllmSidecarEngine {
         let mut engine = Self::new(endpoint, model.clone(), mode, transport);
         engine.engine_gates_reasoning =
             model.reports_proto_0_6() && model.reasoning_parser().is_some();
-        // TODO: Remove this version check and default to `true` once the sidecar drops vLLM < 0.33.
-        let structural_tag = args
-            .sidecar
-            .common
-            .structural_tag(model.compiles_structural_tags());
+        let structural_tag = args.sidecar.common.structural_tag(true);
         let config = WorkerConfig {
             runtime: args.sidecar.common.runtime,
             namespace: args.sidecar.common.namespace,
@@ -1699,13 +1695,10 @@ mod tests {
     }
 
     #[test]
-    fn structural_tags_default_on_from_vllm_0_33() {
+    fn structural_tags_default_on() {
         for (flags, engine_version, expected) in [
             (&[][..], "0.33.0", true),
-            (&[][..], "0.33.0rc1.dev649+gc3fd4ff44", true),
-            (&[][..], "0.32.0", false),
-            (&[][..], "", false),
-            (&["--dyn-structural-tag"][..], "0.32.0", true),
+            (&[][..], "", true),
             (&["--dyn-structural-tag", "false"][..], "0.33.0", false),
         ] {
             let args = Args::try_parse_from(
