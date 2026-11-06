@@ -4361,6 +4361,7 @@ async fn responses(
             .collect();
     let mut response_params = ResponseParams {
         preserve_tool_spelling: false,
+        emit_backend_reasoning: false,
         tool_names: Some(crate::protocols::openai::responses::ToolNameMap::new(
             &loaded_tools,
             Some(&request.inner.input),
@@ -4460,6 +4461,15 @@ async fn responses(
             response
         })?;
     }
+
+    // Match the Kimi/GLM Responses contract without exposing other models' private channels.
+    response_params.emit_backend_reasoning = matches!(
+        parsing_options.tool_call_parser.as_deref(),
+        Some("kimi_k3" | "kimi-k3" | "glm47")
+    ) || matches!(
+        parsing_options.reasoning_parser.as_deref(),
+        Some("kimi_k3" | "kimi-k3" | "glm45")
+    );
 
     let mut request = context.map(|mut _req| chat_request);
     if response_params.max_output_tokens.is_none() {

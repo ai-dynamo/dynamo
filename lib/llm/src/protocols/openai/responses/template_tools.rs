@@ -127,36 +127,7 @@ pub(crate) fn effective_response_tools(
             }
         }
     }
-    validate_custom_formats(&tools)?;
     Ok(tools)
-}
-
-fn validate_custom_formats(tools: &[RequestTool]) -> anyhow::Result<()> {
-    // Custom freeform text is supported; constrained grammars need a backend
-    // enforcement path and must not be silently advertised as honored.
-    for tool in tools {
-        let formats: Vec<_> = match &tool.inner {
-            Tool::Custom(custom) => vec![&custom.format],
-            Tool::Namespace(ns) => ns
-                .tools
-                .iter()
-                .filter_map(|member| match member {
-                    NamespaceToolParamTool::Custom(custom) => Some(&custom.format),
-                    _ => None,
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
-        for format in formats {
-            if serde_json::to_value(format)?["type"] != "text" {
-                return Err(ResponsesConversionError::UnsupportedContent(
-                    "Custom tool grammar formats are not supported".into(),
-                )
-                .into());
-            }
-        }
-    }
-    Ok(())
 }
 
 fn namespace_member_name(member: &NamespaceToolParamTool) -> &str {

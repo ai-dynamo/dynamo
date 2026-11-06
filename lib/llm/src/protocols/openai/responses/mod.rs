@@ -1397,6 +1397,8 @@ pub struct ResponseParams {
     pub tool_names: Option<ToolNameMap>,
     /// Preserve a Kimi model's bare spelling across namespaced tool replay.
     pub preserve_tool_spelling: bool,
+    /// Retain raw backend reasoning for the Kimi/GLM Responses contract.
+    pub emit_backend_reasoning: bool,
     pub model: Option<String>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
@@ -1452,8 +1454,9 @@ impl ResponseParams {
             .is_some_and(|include| include.contains(&IncludeEnum::ReasoningEncryptedContent))
     }
 
-    fn reasoning_summary_requested(&self) -> bool {
-        self.reasoning_encrypted_content_requested()
+    fn reasoning_output_enabled(&self) -> bool {
+        self.emit_backend_reasoning
+            || self.reasoning_encrypted_content_requested()
             || self
                 .reasoning
                 .as_ref()
@@ -1574,7 +1577,7 @@ pub fn chat_completion_to_response(
         // Reasoning precedes tool calls so output order matches the decoded turn.
         if let Some(reasoning_text) = choice.message.reasoning_content
             && !reasoning_text.is_empty()
-            && params.reasoning_summary_requested()
+            && params.reasoning_output_enabled()
         {
             output.push(OutputItem::Reasoning(ReasoningItem {
                 id: Some(format!("rs_{}", Uuid::new_v4().simple())),
@@ -1712,7 +1715,7 @@ pub fn chat_completion_to_response(
                             OutputStatus::Completed,
                             &mut open,
                         );
-                        if params.reasoning_summary_requested() && !reasoning.is_empty() {
+                        if params.reasoning_output_enabled() && !reasoning.is_empty() {
                             output.push(OutputItem::Reasoning(ReasoningItem {
                                 id: Some(format!("rs_{}", Uuid::new_v4().simple())),
                                 summary: vec![],
@@ -4738,20 +4741,35 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_text_requires_explicit_request() {
-        let unrequested = chat_completion_to_response(
+    fn test_reasoning_text_is_preserved_without_explicit_request() {
+        let hidden = chat_completion_to_response(
             make_chat_resp_with_reasoning("private reasoning"),
             &ResponseParams::default(),
             None,
         )
         .unwrap();
         assert!(
-            unrequested
+            hidden
                 .inner
                 .output
                 .iter()
                 .all(|item| !matches!(item, OutputItem::Reasoning(_)))
         );
+        let unrequested = chat_completion_to_response(
+            make_chat_resp_with_reasoning("backend reasoning"),
+            &ResponseParams {
+                emit_backend_reasoning: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        let OutputItem::Reasoning(reasoning) = &unrequested.inner.output[0] else {
+            panic!("expected backend reasoning before the answer");
+        };
+        assert_eq!(reasoning_text(reasoning), "backend reasoning");
+        assert!(reasoning.summary.is_empty());
+        assert!(reasoning.encrypted_content.is_none());
 
         let params = requested_reasoning_params();
         let requested =

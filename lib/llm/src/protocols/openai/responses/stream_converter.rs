@@ -577,7 +577,7 @@ impl ResponseStreamConverter {
             if let Some(reasoning) = delta.reasoning_content.as_deref()
                 && !reasoning.is_empty()
                 && !self.message_started
-                && self.params.reasoning_summary_requested()
+                && self.params.reasoning_output_enabled()
             {
                 self.append_reasoning_delta(reasoning, events);
             }
@@ -2521,13 +2521,38 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_without_requested_summary_emits_no_events() {
-        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+    fn test_reasoning_without_requested_summary_preserves_raw_content() {
+        let mut hidden = ResponseStreamConverter::new("test-model".into(), default_params());
+        assert!(
+            hidden
+                .process_chunk(&reasoning_chunk("private reasoning"))
+                .is_empty()
+        );
+        assert!(hidden.completed_output().is_empty());
+        let mut conv = ResponseStreamConverter::new(
+            "test-model".into(),
+            ResponseParams {
+                emit_backend_reasoning: true,
+                ..default_params()
+            },
+        );
 
-        let events = conv.process_chunk(&reasoning_chunk("private reasoning"));
+        let events = conv.process_chunk(&reasoning_chunk("backend reasoning"));
 
-        assert!(events.is_empty());
-        assert!(conv.completed_output().is_empty());
+        assert_eq!(
+            event_types(&events),
+            vec![
+                "response.output_item.added".to_string(),
+                "response.content_part.added".to_string(),
+                "response.reasoning_text.delta".to_string(),
+            ]
+        );
+        let output = conv.completed_output();
+        let OutputItem::Reasoning(reasoning) = &output[0] else {
+            panic!("expected backend reasoning output");
+        };
+        assert_eq!(reasoning_text(reasoning), "backend reasoning");
+        assert!(reasoning.encrypted_content.is_none());
     }
 
     #[test]

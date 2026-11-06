@@ -30,6 +30,10 @@ No protobuf wire definitions change.
 - Session aliases `x-claude-session-id`, `x-correlation-id`, `x-session-affinity`
   and `x-multi-turn-session-id` are accepted as fallbacks after existing explicit
   Dynamo/agent headers.
+- Backend-provided reasoning is retained in Responses output and reasoning-text
+  events for Kimi/GLM parser profiles even when no summary/include was requested.
+  Other profiles retain their existing opt-in policy. The adapter does not invent
+  reasoning or change the worker's reasoning configuration.
 - Requested `reasoning.encrypted_content` contains `trtllm-reasoning-v1:` followed
   by standard base64 of the exact UTF-8 reasoning. This is **not encryption**.
   Readable content takes precedence on replay; owned encoded payloads are decoded
@@ -43,6 +47,22 @@ No protobuf wire definitions change.
   wrote the bare name. Native replay preserves that spelling. When an older
   client dropped the namespace of a qualified call, a unique declared namespace
   is restored; ambiguous declarations are not guessed.
+
+## Custom-tool format compatibility
+
+Responses accepts `text`, `grammar`/`lark`, and `grammar`/`regex` custom-tool
+formats, including namespace members and client tool-search results. As in the
+reference TRTLLM branch, custom tools are described to the model with one
+freeform `input` string. Grammar descriptors are retained for response echoing
+but are advisory: this adapter does not enforce their language during decoding.
+Existing function-tool and response-format guided decoding remains independent.
+Chat Completions keeps its existing custom-format admission policy.
+
+For an older frontend returning `Custom tool grammar formats are not supported`,
+a client can temporarily replace the custom tool's format with
+`{"type":"text"}`. This deliberately requests freeform input; clients that require
+a grammar guarantee must validate the generated input themselves or use an
+endpoint that enforces that grammar.
 
 ## Generation boundary across gRPC
 
@@ -108,6 +128,13 @@ cargo test --locked -p dynamo-llm --no-default-features --features mm-routing --
   backend::tests::parser_stops_are_visible_while_user_stops_stay_hidden
 cargo fmt --all -- --check
 ```
+
+The custom-format regression covers text, regex and Lark declarations, both
+top-level and namespaced, over unary and streaming HTTP. The existing
+`custom_allowed_tools_accept_text_and_grammar_formats` case checks the same
+formats with custom `allowed_tools`. Captured-request replay additionally checks
+`additional_tools` loading, metadata echo and custom-input preservation using a
+scripted backend; it does not execute or enforce the declared grammar.
 
 The sidecar suite exercises actual local gRPC client/server transport with a fake
 engine, including parser-stop delivery and hidden-token retention behavior.
