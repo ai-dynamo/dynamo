@@ -1739,6 +1739,22 @@ impl HttpServiceConfigBuilder {
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
         ];
+        if admin_api_enabled {
+            system_routes.push(super::busy_threshold::busy_threshold_router(
+                state.clone(),
+                None,
+            ));
+            system_routes.push(super::reset_prefix_cache::reset_prefix_cache_router(
+                state.clone(),
+                config.runtime.clone(),
+                None,
+            ));
+        } else {
+            tracing::info!(
+                env = env_llm::DYN_DISABLE_FRONTEND_ADMIN_API,
+                "frontend admin API disabled — busy_threshold routes not registered"
+            );
+        }
         for extension in &config.frontend_route_extensions {
             let route_set = extension(FrontendExtensionContext::new(state.clone()))?;
             system_routes.push(route_set.into_parts());
