@@ -856,6 +856,7 @@ fn host_typed(
     run: &BenchmarkRun,
     prefill: &calibrated::RoleSetup,
     decode: &calibrated::RoleSetup,
+    compact_evidence: bool,
 ) -> Result<(ReplayReport, HostedTypedReport)> {
     eprintln!("MVP stage: preparing complete shared workload");
     let (participant, handle) = native_hosted(
@@ -870,7 +871,9 @@ fn host_typed(
     // Complete metric records and backend facts remain retained. Repeated
     // prompt bodies/token arrays and per-token diagnostic JSON are explicitly
     // omitted from dispatch evidence; counts and BLAKE3 witnesses name inputs.
-    handle.use_compact_dispatch_evidence()?;
+    if compact_evidence {
+        handle.use_compact_dispatch_evidence()?;
+    }
     let prefill_timing: Arc<dyn TimingModel> = prefill.timing.clone();
     let decode_timing: Arc<dyn TimingModel> = decode.timing.clone();
     let composition = KvReplayComposition::disaggregated(
@@ -1331,7 +1334,7 @@ fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> 
     let artifact_dir = create_new_artifact_dir(&artifact_path)?;
     eprintln!("MVP stage: exact input and calibrated physical roles verified");
 
-    let (backend, typed) = host_typed(&run, &prefill, &decode)?;
+    let (backend, typed) = host_typed(&run, &prefill, &decode, true)?;
     // Retain complete physical evidence before any acceptance assertion can
     // fail, so a population or metric defect never erases the run's output.
     write_raw_backend_artifact(
@@ -1407,7 +1410,7 @@ fn calibrated_hosted_rejections_reconcile_every_request() -> Result<()> {
     )?;
     prefill.rank.max_model_len = Some(16);
     decode.rank.max_model_len = Some(16);
-    let (backend, typed) = host_typed(&run, &prefill, &decode)?;
+    let (backend, typed) = host_typed(&run, &prefill, &decode, true)?;
     ensure!(
         !backend.per_request.is_empty(),
         "rejection control is empty"
@@ -1460,7 +1463,30 @@ fn calibrated_hosted_artifacts_reconcile_every_request() -> Result<()> {
         ForwardPassWorkerType::Decode,
         CONCURRENCY as usize,
     )?;
-    let (mut backend, typed) = host_typed(&run, &prefill, &decode)?;
+    let (mut backend, typed) = host_typed(&run, &prefill, &decode, true)?;
+    let (complete_backend, complete_typed) = host_typed(&run, &prefill, &decode, false)?;
+    ensure!(
+        serde_json::to_value(&backend)? == serde_json::to_value(&complete_backend)?,
+        "compact capture changed physical replay facts"
+    );
+    ensure!(
+        serde_json::to_value(&typed.phased)? == serde_json::to_value(&complete_typed.phased)?,
+        "compact capture changed native phase results"
+    );
+    let compact_records: Vec<_> = typed
+        .records
+        .iter()
+        .flat_map(|phase| &phase.records)
+        .collect();
+    let complete_records: Vec<_> = complete_typed
+        .records
+        .iter()
+        .flat_map(|phase| &phase.records)
+        .collect();
+    ensure!(
+        compact_records == complete_records,
+        "compact capture changed native record facts"
+    );
     for row in &typed.dispatch.requests {
         ensure!(
             row["capture"]["mode"] == json!("compact"),
