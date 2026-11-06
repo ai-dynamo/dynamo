@@ -20,9 +20,16 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 ///   jemalloc upgrade.
 /// - `narenas:16`: the default is four arenas per CPU in the affinity mask, each holding
 ///   partly used slabs for every size class.
+#[cfg(not(target_os = "macos"))]
 #[unsafe(export_name = "_rjem_malloc_conf")]
 pub static MALLOC_CONF: &[u8; 72] =
     b"background_thread:true,dirty_decay_ms:10000,muzzy_decay_ms:0,narenas:16\0";
+
+/// jemalloc has no background-thread support on macOS, and `background_thread:true` there stops
+/// initialization halfway, which leaves every allocation on a global lock.
+#[cfg(target_os = "macos")]
+#[unsafe(export_name = "_rjem_malloc_conf")]
+pub static MALLOC_CONF: &[u8; 49] = b"dirty_decay_ms:10000,muzzy_decay_ms:0,narenas:16\0";
 
 #[cfg(test)]
 mod tests {
@@ -30,6 +37,7 @@ mod tests {
 
     #[test]
     fn exported_malloc_conf_is_applied() {
+        #[cfg(not(target_os = "macos"))]
         assert!(opt::background_thread::read().unwrap());
         assert_eq!(opt::narenas::read().unwrap(), 16);
         // SAFETY: both options are `ssize_t` in jemalloc.
