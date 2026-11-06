@@ -710,6 +710,44 @@ async def test_uuid_only_image_slots_require_opt_in(loader: ImageLoader) -> None
         await loader.load_image_batch([{"UuidOnly": "cached-image"}])
 
 
+@pytest.mark.parametrize(
+    ("bad_item", "frontend_decoding", "error", "match"),
+    [
+        ({}, False, ValueError, "index 1"),
+        ({"UuidOnly": "cached-image"}, False, ValueError, "preserve_uuid_slots=True"),
+        (
+            {"Decoded": {"shape": [1, 1, 3]}},
+            False,
+            ValueError,
+            "Could not load decoded media from frontend",
+        ),
+        (
+            {"Decoded": {"shape": [1, 1, 3]}},
+            True,
+            RuntimeError,
+            "NIXL connector is not initialized",
+        ),
+    ],
+)
+async def test_batch_rejects_later_invalid_item_before_loading(
+    loader: ImageLoader, bad_item, frontend_decoding, error, match
+) -> None:
+    # Set the flag directly: constructing with frontend decoding on would
+    # initialize a real NIXL connector.
+    loader._enable_frontend_decoding = frontend_decoding
+    loader._nixl_connector = None
+    loader.load_image = AsyncMock()  # type: ignore[method-assign]
+    loader._read_and_convert_nixl_image = AsyncMock()  # type: ignore[method-assign]
+
+    with pytest.raises(error, match=match):
+        await loader.load_image_batch(
+            [{URL_VARIANT_KEY: "https://example.com/one.png"}, bad_item]
+        )
+
+    loader.load_image.assert_not_called()
+    loader._read_and_convert_nixl_image.assert_not_called()
+
+
 async def test_batch_propagates_cancellation(loader: ImageLoader) -> None:
     loader.load_image = AsyncMock(  # type: ignore[method-assign]
         side_effect=asyncio.CancelledError
