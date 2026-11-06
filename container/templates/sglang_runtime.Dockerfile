@@ -243,22 +243,8 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
 {% endif %}
 
 {% if device == "cuda" %}
-# MiniMax MSA kernels (minimax-msa), imported by SGLang's msa_plan.py for
-# MiniMax-M3.1. The -cu130-runtime base omits them; this mirrors the MSA step in
-# upstream SGLang's docker/Dockerfile.cu134 at the same commit. The kernels are
-# CUDA/C++ sources JIT-built on first use against the CUTLASS submodule, which
-# is found relative to the checkout, so the install is editable and the tree
-# stays at /sgl-workspace/minimax-msa. JIT output goes to the user's ~/.cache,
-# never into the tree, so no chown is needed. Installed after the other pip
-# steps in this stage so nothing overwrites its generic top-level packages
-# (inference, datas, msa_v1). Unlike upstream's cu134 image, the
-# integrations/sglang plugin (sglang-msa-mono) is deliberately not installed: it
-# imports sglang.srt.monokernels, which SGLang 0.5.23 lacks. Revisit on the next
-# SGLang bump.
-#
-# On CUDA < 13.4 SGLang skips the QMUL4 kernels and uses the Q8K8 fallbacks,
-# which still import from inference.*; the two imports checked below are the
-# ones msa_plan.py needs.
+# MiniMax MSA kernels for msa_plan.py; editable so the JIT finds CUTLASS in the tree. Kept
+# last so nothing overwrites inference/datas/msa_v1. No sglang-msa-mono: needs sglang.srt.monokernels.
 ARG MSA_COMMIT
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     set -eu; \

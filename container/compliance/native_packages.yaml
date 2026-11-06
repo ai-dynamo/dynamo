@@ -103,9 +103,8 @@ packages:
       - trtllm-runtime
       - trtllm-runtime-efa
 
-  # CUTLASS headers — git submodule of the MiniMax MSA checkout at
-  # /sgl-workspace/minimax-msa (sglang_runtime.Dockerfile). Shipped as source;
-  # MSA JIT-compiles its kernels against them on first use.
+  # CUTLASS headers — submodule of the MiniMax MSA checkout at /sgl-workspace/minimax-msa,
+  # shipped as source; MSA JIT-compiles its kernels against them on first use.
   - name: CUTLASS
     version: dc45f979ae336a235da1676b311f35efeb30149a
     license: BSD-3-Clause
