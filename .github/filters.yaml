@@ -364,11 +364,10 @@ dgdr:
 gaie:
   - 'deploy/inference-gateway/ext-proc/**'
   - 'deploy/inference-gateway/scripts/**'
-  # The workspace files and the crates the test exercises. The EPP also links
-  # lib/global-*, lib/kv-hashing, lib/rl and lib/truthy, which do not run it.
+  # The workspace build flags and the crates the test exercises. The EPP also
+  # links lib/global-*, lib/kv-hashing, lib/rl and lib/truthy, which do not run
+  # it; Cargo.toml and Cargo.lock are left out because those crates change them.
   - '.cargo/config.toml'
-  - 'Cargo.toml'
-  - 'Cargo.lock'
   - 'lib/kv-router/**'
   - 'lib/llm/**'
   - 'lib/memory/**'
