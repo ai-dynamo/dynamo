@@ -235,6 +235,7 @@ Every target runs one aggregated worker on four GPUs, serves a 1,048,576-token c
 ## Notes
 
 - On the TensorRT-LLM targets, a request that needs an attention kernel the engine did not compile at startup compiles it on the spot, which stalls the worker and its GPUs for one to two minutes. Dynamo's health check can time out during the stall and restart the worker, which discards the compiled kernel; set `DYN_HEALTH_CHECK_ENABLED=false` on the Worker to let the compilation finish.
+- The TensorRT-LLM targets need the `1.6.0-minimax-m3.1-flash-dev.1` image that their `deploy.yaml` names. That image is a snapshot built on a pre-release TensorRT-LLM. The general Dynamo TensorRT-LLM runtime images, including the 1.7.0 image (TensorRT-LLM 1.4.0rc2), cannot load this checkpoint: the worker exits while loading expert weights with `assert w1_weight is not None and w3_weight is not None`. The checkpoint's quantization config declares MXFP8 dense layers and NVFP4 experts (`moe_quant_algo`), and those TensorRT-LLM releases read the whole checkpoint as MXFP8. The upstream change that reads the NVFP4 expert config is [NVIDIA/TensorRT-LLM#20847](https://github.com/NVIDIA/TensorRT-LLM/pull/20847), which no TensorRT-LLM release includes yet. Keep the image in `deploy.yaml` until a Dynamo TensorRT-LLM runtime built on a TensorRT-LLM release with that change is available.
 - The checkpoint ships a DSpark draft model, which these profiles do not enable.
 
 ## Source
