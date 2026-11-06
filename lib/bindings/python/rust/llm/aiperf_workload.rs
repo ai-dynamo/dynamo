@@ -4,6 +4,7 @@
 //! Native workload composition selected by Dynamo's existing Python runner entrypoint.
 
 use std::rc::Rc;
+use anyhow::Context;
 
 use aisimulate_core::replay::{
     ReplayComposition, ReplayDeterminism, ReplayEngineConfig, ReplayEngineFactory,
@@ -45,20 +46,29 @@ pub fn run_mocker_aiperf_workload(
             .map_err(|_| PyValueError::new_err("invalid identity seed"))?;
     }
     py.allow_threads(move || -> anyhow::Result<String> {
-        let request = aiperf_protocol::runner_v2::decode_run_request_v2(run_request_json.as_bytes())?;
-        let deployment: DeploymentConfig = serde_json::from_str(&deployment_config_json)?;
+        let request = aiperf_protocol::runner_v2::decode_run_request_v2(run_request_json.as_bytes())
+            .context("invalid native run request")?;
+        let deployment: DeploymentConfig = serde_json::from_str(&deployment_config_json)
+            .context("invalid deployment configuration")?;
         anyhow::ensure!(deployment.prefill_workers > 0 && deployment.decode_workers > 0,
             "prefill and decode worker counts must be positive");
-        let mut prefill = MockerConfig::default();
-        prefill.engine.engine = deployment.engine.prefill.as_ref()
-            .map_or_else(|| deployment.engine.rank.clone(), |role| role.rank.clone());
-        prefill.engine.dp_size = deployment.engine.prefill.as_ref()
-            .map_or(deployment.engine.dp_size, |role| role.dp_size);
-        let mut decode = MockerConfig::default();
-        decode.engine.engine = deployment.engine.decode.as_ref()
-            .map_or_else(|| deployment.engine.rank.clone(), |role| role.rank.clone());
-        decode.engine.dp_size = deployment.engine.decode.as_ref()
-            .map_or(deployment.engine.dp_size, |role| role.dp_size);
+        let role_config = |role: Option<&aisimulate_core::replay::ReplayRoleConfig>| -> anyhow::Result<MockerConfig> {
+            let rank = role.map_or(&deployment.engine.rank, |role| &role.rank);
+            let tp = role.map_or(deployment.engine.tensor_parallel_size, |role| role.tensor_parallel_size);
+            let cp = role.map_or(deployment.engine.prefill_context_parallel_size, |role| role.prefill_context_parallel_size);
+            anyhow::ensure!(cp == 1, "prefill context parallelism is not represented by this provider launch contract");
+            let launch = aisimulate_core::engine::EngineLaunchConfig {
+                engine: rank.clone(),
+                dp_size: role.map_or(deployment.engine.dp_size, |role| role.dp_size),
+                tensor_parallel_size: usize::try_from(tp)?,
+                num_gpu_blocks_is_explicit: role.and_then(|role| role.num_gpu_blocks_is_explicit)
+                    .or(deployment.engine.num_gpu_blocks_is_explicit).unwrap_or(false),
+                ..Default::default()
+            };
+            MockerConfig::from_value(serde_json::to_value(launch)?)
+        };
+        let prefill = role_config(deployment.engine.prefill.as_ref()).context("unsupported prefill role configuration")?;
+        let decode = role_config(deployment.engine.decode.as_ref()).context("unsupported decode role configuration")?;
         let mut composition = KvReplayComposition::disaggregated(
             prefill, decode, deployment.prefill_workers, deployment.decode_workers,
             deployment.router_config, None, None,
@@ -77,5 +87,16 @@ pub fn run_mocker_aiperf_workload(
             Box::new(model), deployment.admission_capacity, seed,
         )?;
         Ok(serde_json::to_string(&report)?)
-    }).map_err(|_error| PyValueError::new_err("native workload configuration or execution failed"))
+    }).map_err(|error| {
+        // Only static outer-stage labels cross this boundary; nested source
+        // diagnostics may contain private prompts, paths or endpoint credentials.
+        let stage = error.to_string();
+        let safe = match stage.as_str() {
+            "invalid native run request" | "invalid deployment configuration"
+            | "unsupported prefill role configuration" | "unsupported decode role configuration"
+            | "prefill and decode worker counts must be positive" => stage,
+            _ => "native workload configuration or execution failed".into(),
+        };
+        PyValueError::new_err(safe)
+    })
 }

@@ -1690,6 +1690,7 @@ fn parse_weka_import_options(
     );
     Ok(WekaImportOptions {
         nested_timestamp_basis,
+        ..Default::default()
     })
 }
 

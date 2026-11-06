@@ -465,16 +465,16 @@ def test_installed_entrypoint_runs_aiperf_workload_on_2p2d_kv_deployment() -> No
 @pytest.mark.parametrize(
     ("deployment", "seed", "message"),
     [
-        ("{not json", _SEED_HEX, "native workload configuration or execution failed"),
+        ("{not json", _SEED_HEX, "invalid deployment configuration"),
         (
             json.dumps({**_DEPLOYMENT_2P2D, "unknown_field": 1}),
             _SEED_HEX,
-            "native workload configuration or execution failed",
+            "invalid deployment configuration",
         ),
         (
             json.dumps({**_DEPLOYMENT_2P2D, "decode_workers": 0}),
             _SEED_HEX,
-            "native workload configuration or execution failed",
+            "prefill and decode worker counts must be positive",
         ),
         (json.dumps(_DEPLOYMENT_2P2D), "07" * 31, "64 hexadecimal digits"),
         (json.dumps(_DEPLOYMENT_2P2D), "zz" * 32, "64 hexadecimal digits"),
