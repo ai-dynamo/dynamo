@@ -310,6 +310,18 @@ impl WorkerSelectionPolicy {
         self.exclusive_affinity
     }
 
+    /// Whether the policy can reject workers that routing eligibility accepts.
+    ///
+    /// The host measures affinity selections against the best eligible worker only when
+    /// this is `false`, so cache metrics never count a worker the policy would reject.
+    pub fn applies_worker_filters(&self) -> bool {
+        match &self.state {
+            #[cfg(any(test, feature = "testing", feature = "bench"))]
+            WorkerSelectionPolicyState::Reference(..) => false,
+            WorkerSelectionPolicyState::Composed(state) => !state.borrow().filters.is_empty(),
+        }
+    }
+
     /// A preparer for this policy's rows, when its rows depend only on the request and
     /// worker configuration until load inputs are filled. Filters are policy callbacks, so a
     /// policy with filters builds its rows at selection.

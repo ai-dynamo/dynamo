@@ -309,6 +309,8 @@ pub struct SelectionLogFields {
     pub logit: f64,
     /// Whether the request pinned the selected worker and rank.
     pub pinned: bool,
+    /// Whether the selected worker matches the request's session affinity target.
+    pub session_affinity: bool,
     /// Host-pinned overlap reported for the selected rank, in blocks.
     pub host_pinned_blocks: usize,
     /// Disk overlap reported for the selected rank, in blocks.

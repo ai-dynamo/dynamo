@@ -1096,6 +1096,17 @@ fn best_eligible_cache_reuse_skips_filtered_workers() {
         ))
         .unwrap();
 
+    assert!(<WorkerSelectionPolicy as WorkerSelector<
+        TaintedWorkerConfig,
+    >>::applies_worker_filters(&policy));
+    assert!(!<WorkerSelectionPolicy as WorkerSelector<
+        TaintedWorkerConfig,
+    >>::applies_worker_filters(&WorkerSelectionPolicy::new(
+        SelectionConfig::default(),
+        "test",
+        vec![Box::new(ZeroScorer)],
+        Box::new(FirstPicker),
+    )));
     assert_eq!(selected.worker, kept);
     // The rejected worker's 96 cached tokens must not count as available reuse.
     assert_eq!(selected.max_raw_cached_tokens, Some(16));

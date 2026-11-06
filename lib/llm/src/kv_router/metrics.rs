@@ -25,8 +25,8 @@
 //!   Populated by `RoutingHost::generate()` and its `RequestGuard` as it observes
 //!   the streaming response (TTFT on first token, ITL per output block,
 //!   ISL/OSL/kv_hit_rate at routing and completion).
-//!   - Frontend, builtin modes without affinity or LoRA filtering: populated by `RoutingHost`;
-//!     modes that still bypass the host remain registered as zeros
+//!   - Frontend, builtin modes (with or without session affinity): request-level metrics
+//!     populated by `RoutingHost`; KV metrics stay at zero (no KV index)
 //!   - Frontend, KV mode (aggregated and disaggregated): available on default port
 //!     8000 via the `drt_metrics` bridge, populated per-request
 //!   - Standalone router (`python -m dynamo.router`): available on `DYN_SYSTEM_PORT`
@@ -43,7 +43,7 @@
 //! (`dynamo_component_inflight_requests`, `dynamo_component_requests_total`, etc.)
 //! via the system status server when `DYN_SYSTEM_PORT` is explicitly set.
 //!
-//! See also: `docs/observability/metrics.md` (Router Metrics section).
+//! See also: `docs/fern/pages/reference/observability/metrics-catalog.mdx` (Router metrics section).
 
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
