@@ -111,6 +111,3 @@ name = "selection_core"
 harness = false
 required-features = ["standalone-selection", "bench"]
 
-[[bench]]
-name = "recurrent_presence"
-harness = false

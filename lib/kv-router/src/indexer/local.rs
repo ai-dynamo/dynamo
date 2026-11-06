@@ -876,15 +876,13 @@ mod tests {
             restored.apply(&event);
         }
         assert_eq!(restored.groups_for(worker).len(), 2);
-        assert_eq!(
-            restored.reusable_blocks_on_tier(
-                ResidencyOwner::worker(worker),
-                &[ExternalSequenceBlockHash(333)],
-                1,
-                StorageTier::HostPinned,
-                0
-            ),
-            Some(0)
+        let mut view = restored.read_view();
+        let owner = ResidencyOwner::worker(worker);
+        view.track_owner(owner);
+        assert!(
+            view.owners_at(ExternalSequenceBlockHash(333), StorageTier::HostPinned)
+                .next()
+                .is_none()
         );
         let clear = RouterEvent::with_cache_owner(
             0,
@@ -898,15 +896,13 @@ mod tests {
         );
         restored.clear_event(&clear);
         assert_eq!(restored.groups_for(worker).len(), 2);
-        assert_eq!(
-            restored.reusable_blocks_on_tier(
-                ResidencyOwner::cache_owner(cache_owner_id()),
-                &[ExternalSequenceBlockHash(333)],
-                1,
-                StorageTier::HostPinned,
-                0
-            ),
-            Some(0)
+        let mut view = restored.read_view();
+        let owner = ResidencyOwner::cache_owner(cache_owner_id());
+        view.track_owner(owner);
+        assert!(
+            view.owners_at(ExternalSequenceBlockHash(333), StorageTier::HostPinned)
+                .next()
+                .is_none()
         );
     }
 

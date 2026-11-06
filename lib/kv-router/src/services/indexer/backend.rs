@@ -1133,13 +1133,12 @@ mod tests {
         {
             let _ = primary.flush().await;
             assert!(lower_tier.group_residency().is_active());
-            assert_eq!(
-                lower_tier.group_residency().reusable_blocks(
-                    worker,
-                    &[ExternalSequenceBlockHash(77)],
-                    1
-                ),
-                Some(1)
+            let mut view = lower_tier.group_residency().read_view();
+            let owner = crate::protocols::ResidencyOwner::worker(worker);
+            view.track_owner(owner);
+            assert!(
+                view.owners_at(ExternalSequenceBlockHash(77), StorageTier::Device)
+                    .any(|known| known == owner)
             );
         }
         // The attention tree never saw the hash.
@@ -1155,13 +1154,12 @@ mod tests {
             .unwrap();
         if let Indexer::Single { lower_tier, .. } = &indexer {
             assert!(lower_tier.group_residency().is_active());
-            assert_eq!(
-                lower_tier.group_residency().reusable_blocks(
-                    worker,
-                    &[ExternalSequenceBlockHash(77)],
-                    1
-                ),
-                Some(0)
+            let mut view = lower_tier.group_residency().read_view();
+            let owner = crate::protocols::ResidencyOwner::worker(worker);
+            view.track_owner(owner);
+            assert!(
+                view.owners_at(ExternalSequenceBlockHash(77), StorageTier::Device)
+                    .all(|known| known != owner)
             );
         }
     }

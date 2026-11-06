@@ -2111,17 +2111,17 @@ fn vllm_checkpoint_only_payload_reaches_presence_and_removes_without_tokens() {
     assert!(!store.targets_primary().unwrap());
     let presence = KvCacheGroupResidency::new();
     presence.apply(&store);
-    let chain = [ExternalSequenceBlockHash(333)];
-    assert_eq!(
-        presence.reusable_blocks_on_tier(
-            store.residency_owner().unwrap(),
-            &chain,
-            1,
+    let has_checkpoint = || {
+        let mut view = presence.read_view();
+        let owner = store.residency_owner().unwrap();
+        view.track_owner(owner);
+        view.owners_at(
+            ExternalSequenceBlockHash(333),
             crate::protocols::StorageTier::HostPinned,
-            0
-        ),
-        Some(1)
-    );
+        )
+        .any(|known| known == owner)
+    };
+    assert!(has_checkpoint());
     let remove: RawKvEvent = from_slice(&rmp_serde::to_vec_named(&serde_json::json!({"type":"BlockRemoved", "block_hashes":[333], "medium":"CPU", "group_idx":0})).unwrap()).unwrap();
     let remove = normalizer
         .normalize(remove, 2, worker)
@@ -2129,16 +2129,7 @@ fn vllm_checkpoint_only_payload_reaches_presence_and_removes_without_tokens() {
         .into_router_event()
         .unwrap();
     presence.apply(&remove);
-    assert_eq!(
-        presence.reusable_blocks_on_tier(
-            store.residency_owner().unwrap(),
-            &chain,
-            1,
-            crate::protocols::StorageTier::HostPinned,
-            0
-        ),
-        Some(0)
-    );
+    assert!(!has_checkpoint());
 }
 
 #[test]
