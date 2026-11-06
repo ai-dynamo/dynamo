@@ -23,6 +23,12 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from tests.router.epp_native_process import (
+    NativeRouterFailure,
+    NativeRouterOwner,
+    _constraint_payload,
+)
+
 logger = logging.getLogger(__name__)
 
 NATIVE_CONSUMER_ROWS: tuple[str, ...] = (
@@ -1219,10 +1225,12 @@ def _require_hosting_provider_native_policy(stack) -> dict[str, float]:
             "native hosting provider router_temperature must be 0.0, "
             f"got {parameters['router_temperature']}"
         )
-    config = stack.provider_router_config
-    if config is None:
-        raise AssertionError("routing parity stack has no provider_router_config")
-    raw = json.loads(config.to_json())
+    encoded = stack.provider_config_json
+    if not isinstance(encoded, str) or not encoded:
+        raise AssertionError(
+            "routing parity stack has no child provider config JSON"
+        )
+    raw = json.loads(encoded)
     if "router_prefill_load_model" not in raw:
         raise AssertionError("native provider JSON missing router_prefill_load_model")
     if raw["router_prefill_load_model"] != "none":
@@ -1532,23 +1540,23 @@ def _owner_potential_loads(
     """Read potential loads from the actual booking owner (provider or peer)."""
     if owner == "provider":
         return stack.provider_potential_loads(tokens, timeout_s=timeout_s)
-    router = owner["router"]
-    if router is None:
+    peer_owner = owner.get("owner")
+    if peer_owner is None:
         raise AssertionError(
-            "peer router reference was cleared before get_potential_loads"
+            "peer router owner was cleared before get_potential_loads"
         )
-
-    async def _loads():
-        try:
-            return await asyncio.wait_for(
-                router.get_potential_loads(tokens), timeout=timeout_s
-            )
-        except asyncio.TimeoutError as exc:
+    try:
+        return peer_owner.call(
+            "get_potential_loads",
+            {"token_ids": list(tokens), "cache_namespace": None},
+            timeout_s,
+        )
+    except NativeRouterFailure as exc:
+        if exc.timed_out:
             raise AssertionError(
                 f"owner get_potential_loads outlived the {timeout_s}s budget"
             ) from exc
-
-    return stack.run_until_complete(_loads())
+        raise
 
 
 def _wait_for_zero_active(
@@ -2179,6 +2187,124 @@ def _free_owned_bookings(
         raise RuntimeError(f"failed freeing owned bookings: {detail}")
 
 
+_WARM_PREP_ATTEMPTS = 8
+
+
+def _prepare_warm_dataplane(
+    stack,
+    *,
+    cold: Mapping[str, Any],
+    probe_tokens: list[int],
+    accounting_tokens: list[int],
+    worker_a: int,
+    worker_b: int,
+    block_size: int,
+    preferred_multiplier: float,
+    owned_bookings: list[dict[str, Any]],
+    owner: Any,
+    book_worker: int,
+    divert_worker: int,
+    required_taint: str,
+    case_name: str,
+    deadline: float,
+) -> list[dict[str, Any]]:
+    """Bounded fresh probes. Only WorkerSelectionPending repeats."""
+    from tests.router.helper import unique_request_id
+
+    attempts: list[dict[str, Any]] = []
+    for attempt in range(1, _WARM_PREP_ATTEMPTS + 1):
+        _remaining(deadline, f"{case_name}-prep-{attempt}")
+        request_id = unique_request_id(f"{case_name}-prep-{attempt}")
+        admit = _admit_booking(
+            stack,
+            owner=owner,
+            request_id=request_id,
+            tokens=_synthetic_tokens(
+                BACKLOG_TOKENS, salt=hash(case_name) % 1000 + attempt
+            ),
+            required_taint=required_taint,
+            expected_worker=book_worker,
+            owned_bookings=owned_bookings,
+            case_name=f"{case_name}-prep-{attempt}",
+            deadline=deadline,
+        )
+        loads = _require_sender_booking_loads(
+            stack,
+            accounting_tokens,
+            owner=owner,
+            worker_a=worker_a,
+            worker_b=worker_b,
+            backlog_tokens=BACKLOG_TOKENS,
+            booked_worker=book_worker,
+            case_name=f"{case_name}-prep-{attempt}-loads",
+            timeout_s=_remaining(deadline, f"{case_name}-prep-{attempt}-loads"),
+        )
+        if book_worker == worker_a:
+            _assert_strict_preferred_margin(
+                load_a=loads["booked"],
+                load_b=loads["idle"],
+                accounting_isl=len(accounting_tokens),
+                block_size=block_size,
+                preferred_multiplier=preferred_multiplier,
+                expect_b_wins=True,
+                case_name=f"{case_name}-prep-{attempt}-margin",
+            )
+        pending: str | None = None
+        observed: dict[str, Any] | None = None
+        try:
+            observed = _observe_query_routes(
+                stack,
+                cold,
+                expected_worker=divert_worker,
+                case_name=f"{case_name}-prep-{attempt}",
+                shared_tokens=probe_tokens,
+                deadline=deadline,
+            )
+        except WorkerSelectionPending as exc:
+            pending = f"{type(exc).__name__}: {exc}"
+        _free_booking(
+            stack,
+            owned_bookings,
+            request_id=request_id,
+            timeout_s=_remaining(deadline, f"{case_name}-prep-{attempt}-free"),
+        )
+        _wait_for_zero_active(
+            stack,
+            accounting_tokens,
+            owner=owner,
+            worker_a=worker_a,
+            worker_b=worker_b,
+            case_name=f"{case_name}-prep-{attempt}-zero",
+            deadline=deadline,
+        )
+        restored = _wait_for_preferred_worker(
+            stack,
+            cold,
+            expected_worker=worker_a,
+            case_name=f"{case_name}-prep-{attempt}-restore",
+            shared_tokens=probe_tokens,
+            deadline=deadline,
+        )
+        attempts.append(
+            {
+                "attempt": attempt,
+                "request_id": request_id,
+                "admit": admit,
+                "loads": loads,
+                "observation": observed,
+                "pending": pending,
+                "zero": "sender-active-zero",
+                "restored": restored,
+            }
+        )
+        if pending is None:
+            return attempts
+    raise AssertionError(
+        f"{case_name}: data-plane preparation stayed pending for "
+        f"{_WARM_PREP_ATTEMPTS} attempts within the original deadline: {attempts}"
+    )
+
+
 def _warm_handshake(
     stack,
     *,
@@ -2201,6 +2327,23 @@ def _warm_handshake(
 
     owner = "provider" if sender == "provider" else sender
     divert_worker = worker_b if book_worker == worker_a else worker_a
+    preparation = _prepare_warm_dataplane(
+        stack,
+        cold=cold,
+        probe_tokens=probe_tokens,
+        accounting_tokens=accounting_tokens,
+        worker_a=worker_a,
+        worker_b=worker_b,
+        block_size=block_size,
+        preferred_multiplier=preferred_multiplier,
+        owned_bookings=owned_bookings,
+        owner=owner,
+        book_worker=book_worker,
+        divert_worker=divert_worker,
+        required_taint=required_taint,
+        case_name=case_name,
+        deadline=deadline,
+    )
     warm_id = unique_request_id(f"{case_name}-id")
     admit = _admit_booking(
         stack,
@@ -2271,6 +2414,7 @@ def _warm_handshake(
         "loads": loads,
         "diverted": diverted,
         "restored": restored,
+        "preparation": preparation,
     }
 
 
@@ -2633,19 +2777,17 @@ def _open_owned_peer_publisher(
     exit_stack: ExitStack,
     deadline: float,
 ) -> dict[str, Any]:
-    """Second independently owned native KvRouter peer on the same workers."""
-    from dynamo.llm import KvRouter, KvRouterConfig
-    from tests.router.common import _create_kv_router_with_timeout
-    from tests.router.epp_parity import loopback_process_env, scoped_process_env
-    from tests.router.helper import get_runtime
+    """Second spawn-owned native KvRouter peer on the same workers."""
+    from tests.router.epp_parity import (
+        KV_INDEXER_QUERY_ENDPOINT,
+        KV_INDEXER_RECORD_ENDPOINT,
+        loopback_process_env,
+    )
     from tests.utils.constants import DynamoPortRange
     from tests.utils.port_utils import reserved_ports
 
     if stack.kube_api is None or stack.kubeconfig is None or stack.namespace is None:
         raise AssertionError("routing parity stack has not started")
-    if stack._loop is None:  # noqa: SLF001 - reuse stack event loop by contract
-        raise AssertionError("routing parity stack has no event loop")
-    remaining = _remaining(deadline, "peer-open")
     ports = exit_stack.enter_context(reserved_ports(1, DynamoPortRange.ROUTER.value))
     peer_metrics_port = ports[0]
     stack.kube_api.add_ready_container(
@@ -2654,110 +2796,106 @@ def _open_owned_peer_publisher(
         container_name=PEER_CONTAINER_NAME,
         http_port=peer_metrics_port,
     )
-
     peer_env = loopback_process_env(
         stack.kubeconfig, stack.identity, PEER_CONTAINER_NAME
     )
     # Load-only peer: credit 0 / serve false — do not spread hosting provider credit1.
     peer_env.update(native_peer_env_overrides())
     peer_env["DYN_SYSTEM_PORT"] = str(peer_metrics_port)
-
+    config_kwargs = {
+        "use_kv_events": stack.indexer_mode != "approximate",
+        "serve_indexer": False,
+        "use_remote_indexer": True,
+        **native_peer_config_overrides(),
+        "shared_cache_type": "none",
+        "conditional_disagg_enabled": False,
+        "router_tracking_hash": "public-xxh3-v1",
+        "router_policy_config": None,
+        "router_prefill_policy": None,
+        "router_decode_policy": None,
+        "router_queue_threshold": None,
+    }
+    construct_budget = _remaining(deadline, "peer-kvrouter")
+    owner = NativeRouterOwner.spawn(
+        role="peer",
+        exit_stack=exit_stack,
+        env=peer_env,
+        config_kwargs=config_kwargs,
+        namespace=stack.namespace,
+        component=stack.component_name,
+        block_size=stack.worker_block_size,
+        num_workers=2,
+        construct_timeout_s=construct_budget,
+        worker_pids=[],
+        query_endpoint=KV_INDEXER_QUERY_ENDPOINT,
+        record_endpoint=KV_INDEXER_RECORD_ENDPOINT,
+    )
+    started = owner.call("initialize", {}, construct_budget)
+    if not isinstance(started, dict) or not isinstance(started.get("config_json"), str):
+        raise AssertionError("peer native child did not return its serialized config")
+    resolved = json.loads(started["config_json"])
+    if resolved.get("router_replica_sync") is not True:
+        raise AssertionError(
+            "peer publisher KvRouterConfig must keep router_replica_sync=true"
+        )
+    if resolved.get("router_prefill_load_model") != "none":
+        raise AssertionError(
+            "peer publisher router_prefill_load_model must be exactly 'none'"
+        )
+    if resolved.get("overlap_score_credit") != CREDIT_ZERO:
+        raise AssertionError(
+            "peer publisher overlap_score_credit must stay 0.0 (load-only), "
+            f"got {resolved.get('overlap_score_credit')!r}"
+        )
+    if resolved.get("serve_indexer", False) is not False:
+        raise AssertionError(
+            "peer publisher serve_indexer must be false, "
+            f"got {resolved.get('serve_indexer')!r}"
+        )
     holder: dict[str, Any] = {
-        "runtime": None,
-        "router": None,
-        "config": None,
+        "owner": owner,
+        "config_json": started["config_json"],
         "metrics_port": peer_metrics_port,
         "container_name": PEER_CONTAINER_NAME,
         "tmp_path": str(tmp_path),
     }
-
-    async def create_runtime():
-        return get_runtime(
-            store_backend="kubernetes",
-            request_plane="tcp",
-            event_plane="zmq",
-        )
-
-    with scoped_process_env(peer_env):
-        runtime = stack.run_until_complete(
-            asyncio.wait_for(create_runtime(), timeout=remaining)
-        )
-        holder["runtime"] = runtime
-
-        def _shutdown_runtime() -> None:
-            current = holder.get("runtime")
-            holder["runtime"] = None
-            if current is not None:
-                current.shutdown()
-
-        # LIFO: clear router ref first (registered later), then shutdown runtime.
-        exit_stack.callback(_shutdown_runtime)
-        generate_path = f"{stack.namespace}.{stack.component_name}.generate"
-        endpoint = runtime.endpoint(generate_path)
-        config_kwargs = {
-            "use_kv_events": stack.indexer_mode != "approximate",
-            "serve_indexer": False,
-            "use_remote_indexer": True,
-            **native_peer_config_overrides(),
-            "shared_cache_type": "none",
-            "conditional_disagg_enabled": False,
-            "router_tracking_hash": "public-xxh3-v1",
-            "router_policy_config": None,
-            "router_prefill_policy": None,
-            "router_decode_policy": None,
-            "router_queue_threshold": None,
-        }
-        peer_config = KvRouterConfig(**config_kwargs)
-        resolved = json.loads(peer_config.to_json())
-        if resolved.get("router_replica_sync") is not True:
-            raise AssertionError(
-                "peer publisher KvRouterConfig must keep router_replica_sync=true"
-            )
-        if resolved.get("router_prefill_load_model") != "none":
-            raise AssertionError(
-                "peer publisher router_prefill_load_model must be exactly 'none'"
-            )
-        if resolved.get("overlap_score_credit") != CREDIT_ZERO:
-            raise AssertionError(
-                "peer publisher overlap_score_credit must stay 0.0 (load-only), "
-                f"got {resolved.get('overlap_score_credit')!r}"
-            )
-        if resolved.get("serve_indexer", False) is not False:
-            raise AssertionError(
-                "peer publisher serve_indexer must be false, "
-                f"got {resolved.get('serve_indexer')!r}"
-            )
-        construct_budget = max(1, int(_remaining(deadline, "peer-kvrouter")))
-        router = _create_kv_router_with_timeout(
-            router_factory=lambda: KvRouter(
-                endpoint=endpoint,
-                block_size=stack.worker_block_size,
-                kv_router_config=peer_config,
-            ),
-            num_workers=2,
-            engine_workers=stack.mocker_a,
-            timeout=construct_budget,
-        )
-        holder["router"] = router
-        holder["config"] = peer_config
-
-        def _clear_router() -> None:
-            holder["router"] = None
-
-        exit_stack.callback(_clear_router)
-
     logger.info(
-        "opened native peer publisher container=%s system_port=%s",
+        "opened native peer publisher container=%s system_port=%s child_pid=%s",
         PEER_CONTAINER_NAME,
         peer_metrics_port,
+        owner.pid,
     )
     return holder
 
 
 def _close_peer(peer_stack: ExitStack, peer_holder: dict[str, Any] | None) -> None:
-    if peer_holder is not None:
-        peer_holder["router"] = None
     peer_stack.close()
+    if peer_holder is None:
+        return
+    owner = peer_holder.get("owner")
+    if owner is not None and owner.alive:
+        raise AssertionError(
+            f"peer native owner pid={owner.pid} exitcode={owner.exitcode} "
+            "still alive after close"
+        )
+
+
+def _peer_operation(
+    peer: Mapping[str, Any],
+    op: str,
+    payload: dict[str, Any],
+    timeout_s: float,
+    label: str,
+):
+    owner = peer.get("owner")
+    if owner is None:
+        raise AssertionError(f"peer router owner was cleared before {label}")
+    try:
+        return owner.call(op, payload, timeout_s)
+    except NativeRouterFailure as exc:
+        if exc.timed_out:
+            raise AssertionError(f"{label} outlived the {timeout_s}s budget") from exc
+        raise
 
 
 def _peer_best_worker(
@@ -2769,40 +2907,39 @@ def _peer_best_worker(
     routing_constraints,
     timeout_s: float,
 ):
-    router = peer["router"]
-    if router is None:
-        raise AssertionError("peer router reference was cleared before best_worker")
-
-    async def _best():
-        try:
-            return await asyncio.wait_for(
-                router.best_worker(
-                    token_ids,
-                    request_id=request_id,
-                    update_indexer=False,
-                    routing_constraints=routing_constraints,
-                ),
-                timeout=timeout_s,
-            )
-        except asyncio.TimeoutError as exc:
-            raise AssertionError(
-                f"peer best_worker outlived the {timeout_s}s budget"
-            ) from exc
-
-    return stack.run_until_complete(_best())
+    del stack
+    mode = "omit"
+    fields = None
+    if routing_constraints is None:
+        mode = "none"
+    else:
+        mode = "value"
+        fields = _constraint_payload(routing_constraints)
+    return _peer_operation(
+        peer,
+        "best_worker",
+        {
+            "token_ids": list(token_ids),
+            "kwargs": {
+                "request_id": request_id,
+                "update_indexer": False,
+            },
+            "constraints_mode": mode,
+            "constraints": fields,
+        },
+        timeout_s,
+        "peer best_worker",
+    )
 
 
 def _peer_free(
     stack, peer: Mapping[str, Any], request_id: str, *, timeout_s: float
 ) -> None:
-    router = peer["router"]
-    if router is None:
-        raise AssertionError("peer router reference was cleared before free")
-
-    async def _free() -> None:
-        try:
-            await asyncio.wait_for(router.free(request_id), timeout=timeout_s)
-        except asyncio.TimeoutError as exc:
-            raise AssertionError(f"peer free outlived the {timeout_s}s budget") from exc
-
-    stack.run_until_complete(_free())
+    del stack
+    _peer_operation(
+        peer,
+        "free",
+        {"request_id": request_id},
+        timeout_s,
+        "peer free",
+    )

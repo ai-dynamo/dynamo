@@ -43,6 +43,11 @@ import requests
 from filelock import FileLock
 from grpc_tools import protoc
 
+from tests.router.epp_native_process import (
+    NativeRouterFailure,
+    NativeRouterOwner,
+    _constraint_payload,
+)
 from tests.router.helper import generate_random_suffix
 from tests.router.mocker_process import MockerProcess
 from tests.router.router_process import (
@@ -2761,6 +2766,31 @@ def scoped_process_env(overlay: Mapping[str, str | None]) -> Iterator[None]:
                 os.environ[name] = old
 
 
+def _routing_constraint_mode(kwargs: dict[str, Any]) -> tuple[str, Any]:
+    if "routing_constraints" not in kwargs:
+        return "omit", None
+    constraints = kwargs.pop("routing_constraints")
+    if constraints is None:
+        return "none", None
+    return "value", _constraint_payload(constraints)
+
+
+def _overlap_payload(
+    token_ids: list[int], cache_namespace: str | None
+) -> dict[str, Any]:
+    return {
+        "token_ids": list(token_ids),
+        "include_shared": False,
+        "cache_namespace": cache_namespace,
+    }
+
+
+def _load_payload(
+    token_ids: list[int], cache_namespace: str | None
+) -> dict[str, Any]:
+    return {"token_ids": list(token_ids), "cache_namespace": cache_namespace}
+
+
 def provider_query_metric_name() -> str:
     from dynamo.prometheus_names import name_prefix, work_handler
 
@@ -3386,9 +3416,9 @@ class EppFrontendRoutingParityStack:
         self.worker_ids: dict[str, int] = {}
         self.worker_configs: dict[int, dict[str, Any]] = {}
         self.provider_instance_id: int | None = None
-        self.provider_runtime = None
         self.provider_router = None
-        self.provider_router_config = None
+        self._provider_owner: NativeRouterOwner | None = None
+        self.provider_config_json: str | None = None
         self.policy_parameters: dict[str, float] = {}
         self.driver: ExtProcParityDriver | None = None
         self._loop = None
@@ -3492,10 +3522,6 @@ class EppFrontendRoutingParityStack:
 
     def _start(self, mocker_cls) -> EppFrontendRoutingParityStack:
         import asyncio
-
-        from dynamo.llm import KvRouter, KvRouterConfig
-        from tests.router.common import _create_kv_router_with_timeout
-        from tests.router.helper import get_runtime, poll_for_worker_instances
 
         try:
             asyncio.get_running_loop()
@@ -3622,75 +3648,96 @@ class EppFrontendRoutingParityStack:
         provider_env["DYN_SYSTEM_PORT"] = str(provider_metrics_port)
         self._loop = asyncio.new_event_loop()
         self._stack.callback(self._close_loop)
-
-        async def create_provider_runtime():
-            return get_runtime(
-                store_backend="kubernetes",
-                request_plane="tcp",
-                event_plane="zmq",
+        config_kwargs: dict[str, Any] = {
+            "use_kv_events": use_kv_events,
+            "serve_indexer": True,
+            "use_remote_indexer": False,
+            "router_temperature": 0.0,
+            "router_replica_sync": False,
+            "router_track_prefill_tokens": True,
+            "router_track_output_blocks": False,
+            "overlap_score_credit": 1.0,
+            "overlap_score_credit_decay": 0.0,
+            "prefill_load_scale": 1.0,
+            "shared_cache_type": "none",
+            "conditional_disagg_enabled": False,
+            "router_tracking_hash": "public-xxh3-v1",
+            "router_policy_config": None,
+            "router_prefill_policy": None,
+            "router_decode_policy": None,
+            "router_queue_threshold": None,
+            "router_prefill_load_model": "none",
+        }
+        if self.provider_config_overrides is not None:
+            config_kwargs.update(self.provider_config_overrides)
+        owner = NativeRouterOwner.spawn(
+            role="provider",
+            exit_stack=self._stack,
+            env=provider_env,
+            config_kwargs=config_kwargs,
+            namespace=self.namespace,
+            component=self.component_name,
+            block_size=self.worker_block_size,
+            num_workers=2,
+            construct_timeout_s=120.0,
+            worker_pids=[],
+            query_endpoint=KV_INDEXER_QUERY_ENDPOINT,
+            record_endpoint=KV_INDEXER_RECORD_ENDPOINT,
+        )
+        self._provider_owner = owner
+        # Not a parent PyO3 router. None still means the child was not retained.
+        self.provider_router = owner
+        self._stack.callback(self._release_provider_owner)
+        started = owner.call("initialize", {}, 120.0)
+        if not isinstance(started, dict) or not isinstance(
+            started.get("config_json"), str
+        ):
+            raise AssertionError(
+                "native provider child did not return its serialized config"
             )
-
-        with scoped_process_env(provider_env):
-            self.provider_runtime = self._loop.run_until_complete(
-                create_provider_runtime()
+        parameters = started.get("policy_parameters")
+        if not isinstance(parameters, dict):
+            raise AssertionError(
+                "native provider child did not return policy_parameters"
             )
-            self._stack.callback(self._shutdown_provider)
-            generate_path = f"{self.namespace}.{self.component_name}.generate"
-            endpoint = self.provider_runtime.endpoint(generate_path)
-            config_kwargs: dict[str, Any] = {
-                "use_kv_events": use_kv_events,
-                "serve_indexer": True,
-                "use_remote_indexer": False,
-                "router_temperature": 0.0,
-                "router_replica_sync": False,
-                "router_track_prefill_tokens": True,
-                "router_track_output_blocks": False,
-                "overlap_score_credit": 1.0,
-                "overlap_score_credit_decay": 0.0,
-                "prefill_load_scale": 1.0,
-                "shared_cache_type": "none",
-                "conditional_disagg_enabled": False,
-                "router_tracking_hash": "public-xxh3-v1",
-                "router_policy_config": None,
-                "router_prefill_policy": None,
-                "router_decode_policy": None,
-                "router_queue_threshold": None,
-                "router_prefill_load_model": "none",
-            }
-            if self.provider_config_overrides is not None:
-                config_kwargs.update(self.provider_config_overrides)
-            self.provider_router_config = KvRouterConfig(**config_kwargs)
-            self.policy_parameters = self.provider_router_config.policy_parameters(
-                "aggregated"
-            )
-            self.provider_router = _create_kv_router_with_timeout(
-                router_factory=lambda: KvRouter(
-                    endpoint=endpoint,
-                    block_size=self.worker_block_size,
-                    kv_router_config=self.provider_router_config,
-                ),
-                num_workers=2,
-                engine_workers=self.mocker_a,
-            )
+        self.provider_config_json = started["config_json"]
+        self.policy_parameters = parameters
 
         async def wait_for_catalog() -> dict[str, int]:
-            generate_ids = await poll_for_worker_instances(
-                endpoint, 2, max_wait_time=120
-            )
-            query_endpoint = self.provider_runtime.endpoint(
-                f"{self.namespace}.{self.component_name}.{KV_INDEXER_QUERY_ENDPOINT}"
-            )
-            query_client = await query_endpoint.client()
-            record_endpoint = self.provider_runtime.endpoint(
-                f"{self.namespace}.{self.component_name}."
-                "kv_indexer_record_routing_decision"
-            )
-            record_client = await record_endpoint.client()
+            generate_deadline = time.monotonic() + 120
+            generate_ids: list[int] = []
+            while time.monotonic() < generate_deadline:
+                remaining = generate_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                snapshot = await owner.call_async("catalog", {}, remaining)
+                generate_ids = list(snapshot["generate_ids"])
+                if len(generate_ids) >= 2:
+                    break
+                await asyncio.sleep(0.25)
+            else:
+                raise AssertionError(
+                    "Timeout waiting for workers. Found "
+                    f"{len(generate_ids)} instance(s), expected 2"
+                )
+            if len(generate_ids) < 2:
+                raise AssertionError(
+                    "Timeout waiting for workers. Found "
+                    f"{len(generate_ids)} instance(s), expected 2"
+                )
             deadline = time.monotonic() + PROCESS_TIMEOUT_S
             catalog: dict[int, dict[str, Any]] = {}
             query_instances: list[Any] = []
+            record_instances: list[Any] = []
+            record_ids: set[int] = set()
             models: dict[int, dict[str, Any]] = {}
             while time.monotonic() < deadline:
+                remaining = deadline - time.monotonic()
+                snapshot = await owner.call_async("catalog", {}, remaining)
+                generate_ids = list(snapshot["generate_ids"])
+                query_instances = list(snapshot["query"])
+                record_ids = set(snapshot["record_ids"])
+                record_instances = list(snapshot["record"])
                 listed = self.kube_api.listed_metadata()
                 catalog = catalog_generate_instances(
                     listed,
@@ -3709,15 +3756,12 @@ class EppFrontendRoutingParityStack:
                     namespace=self.namespace,
                     component=self.component_name,
                 )
-                query_instances = list(query_client.instances())
-                record_ids = set(record_client.instance_ids())
                 models = catalog_worker_model_configs(
                     listed,
                     namespace=self.namespace,
                     component=self.component_name,
                 )
                 if self.indexer_mode == INDEXER_MODE_APPROXIMATE:
-                    record_instances = list(record_client.instances())
                     record_ready = False
                     if (
                         len(record_instances) == 1
@@ -3727,13 +3771,15 @@ class EppFrontendRoutingParityStack:
                         record = record_instances[0]
                         query = query_instances[0]
                         record_ready = (
-                            record.instance_id == query.instance_id
-                            and set(record_catalog) == {record.instance_id}
-                            and record.namespace == query.namespace == self.namespace
-                            and record.component
-                            == query.component
+                            record["instance_id"] == query["instance_id"]
+                            and set(record_catalog) == {record["instance_id"]}
+                            and record["namespace"]
+                            == query["namespace"]
+                            == self.namespace
+                            and record["component"]
+                            == query["component"]
                             == self.component_name
-                            and record.endpoint == KV_INDEXER_RECORD_ENDPOINT
+                            and record["endpoint"] == KV_INDEXER_RECORD_ENDPOINT
                         )
                 else:
                     record_ready = not record_ids and not record_catalog
@@ -3764,60 +3810,59 @@ class EppFrontendRoutingParityStack:
                 raise TimeoutError(
                     "generate workers or served kv_indexer_query did not register: "
                     f"generate={generate_ids} catalog={sorted(catalog)} "
-                    f"query={[inst.instance_id for inst in query_instances]} "
-                    f"record={record_client.instance_ids()} models={models}"
+                    f"query={[inst['instance_id'] for inst in query_instances]} "
+                    f"record={sorted(record_ids)} models={models}"
                 )
             if len(query_instances) != 1:
                 raise AssertionError(
                     "served kv_indexer_query must be exactly one discovered "
-                    f"instance, got {[inst.instance_id for inst in query_instances]}"
+                    f"instance, got {[inst['instance_id'] for inst in query_instances]}"
                 )
             provider = query_instances[0]
             if (
-                provider.namespace != self.namespace
-                or provider.component != self.component_name
-                or provider.endpoint != KV_INDEXER_QUERY_ENDPOINT
+                provider["namespace"] != self.namespace
+                or provider["component"] != self.component_name
+                or provider["endpoint"] != KV_INDEXER_QUERY_ENDPOINT
             ):
                 raise AssertionError(
                     "kv_indexer_query instance metadata does not match the "
                     f"served provider: {provider}"
                 )
-            self.provider_instance_id = provider.instance_id
+            self.provider_instance_id = provider["instance_id"]
             if self.provider_instance_id in catalog:
                 raise AssertionError(
                     "provider kv_indexer_query instance must not be a generate "
                     f"target: {self.provider_instance_id}"
                 )
             if self.indexer_mode == INDEXER_MODE_APPROXIMATE:
-                record_instances = list(record_client.instances())
                 if len(record_instances) != 1:
                     raise AssertionError(
                         "served kv_indexer_record_routing_decision must be "
                         "exactly one discovered instance, got "
-                        f"{[inst.instance_id for inst in record_instances]}"
+                        f"{[inst['instance_id'] for inst in record_instances]}"
                     )
                 record = record_instances[0]
                 if (
-                    record.instance_id != provider.instance_id
-                    or record.namespace != provider.namespace
-                    or record.component != provider.component
-                    or record.endpoint != KV_INDEXER_RECORD_ENDPOINT
+                    record["instance_id"] != provider["instance_id"]
+                    or record["namespace"] != provider["namespace"]
+                    or record["component"] != provider["component"]
+                    or record["endpoint"] != KV_INDEXER_RECORD_ENDPOINT
                 ):
                     raise AssertionError(
                         "kv_indexer_record_routing_decision instance does not "
                         "match the served query provider identity/"
                         f"namespace/component: record={record} query={provider}"
                     )
-                if set(record_catalog) != {record.instance_id}:
+                if set(record_catalog) != {record["instance_id"]}:
                     raise AssertionError(
                         "record catalog instance IDs do not match the actual "
                         f"record client: catalog={sorted(record_catalog)} "
-                        f"record={record.instance_id}"
+                        f"record={record['instance_id']}"
                     )
-                if record.instance_id in catalog:
+                if record["instance_id"] in catalog:
                     raise AssertionError(
                         "provider record instance must not be a generate "
-                        f"target: {record.instance_id}"
+                        f"target: {record['instance_id']}"
                     )
             self.worker_configs = {
                 worker_id: models[worker_id] for worker_id in catalog
@@ -3998,26 +4043,15 @@ class EppFrontendRoutingParityStack:
         )
 
     def dump_provider_events(self, *, timeout_s: float | None = None) -> str:
-        if self.provider_router is None:
-            raise RuntimeError("routing parity stack has not started")
-
-        async def _dump():
-            if timeout_s is None:
-                return await self.provider_router.dump_events()
-            budget = _require_positive_timeout_s(
-                timeout_s, label="dump_provider_events"
-            )
-            try:
-                return await asyncio.wait_for(
-                    self.provider_router.dump_events(),
-                    timeout=budget,
-                )
-            except asyncio.TimeoutError as exc:
-                raise AssertionError(
-                    f"provider dump_events outlived the {budget}s budget"
-                ) from exc
-
-        return self.run_until_complete(_dump())
+        budget = (
+            PROCESS_TIMEOUT_S
+            if timeout_s is None
+            else _require_positive_timeout_s(timeout_s, label="dump_provider_events")
+        )
+        raw = self._provider_call("dump_events", {}, budget, "provider dump_events")
+        if not isinstance(raw, str):
+            raise AssertionError("provider dump_events did not return the native JSON string")
+        return raw
 
     def provider_best_worker(
         self,
@@ -4026,21 +4060,17 @@ class EppFrontendRoutingParityStack:
         timeout_s: float = READINESS_DEADLINE_S,
         **kwargs,
     ):
-        if self.provider_router is None:
-            raise RuntimeError("routing parity stack has not started")
-
-        async def _best():
-            try:
-                return await asyncio.wait_for(
-                    self.provider_router.best_worker(token_ids, **kwargs),
-                    timeout=timeout_s,
-                )
-            except asyncio.TimeoutError as exc:
-                raise AssertionError(
-                    f"provider best_worker outlived the {timeout_s}s budget"
-                ) from exc
-
-        return self.run_until_complete(_best())
+        budget = _require_positive_timeout_s(timeout_s, label="provider_best_worker")
+        mode, fields = _routing_constraint_mode(kwargs)
+        payload = {
+            "token_ids": list(token_ids),
+            "kwargs": kwargs,
+            "constraints_mode": mode,
+            "constraints": fields,
+        }
+        return self._provider_call(
+            "best_worker", payload, budget, "provider best_worker"
+        )
 
     def provider_overlap_scores(
         self,
@@ -4049,25 +4079,30 @@ class EppFrontendRoutingParityStack:
         cache_namespace: str | None = None,
         timeout_s: float = READINESS_DEADLINE_S,
     ):
-        if self.provider_router is None:
-            raise RuntimeError("routing parity stack has not started")
+        budget = _require_positive_timeout_s(
+            timeout_s, label="provider_overlap_scores"
+        )
+        return self._provider_call(
+            "get_overlap_scores",
+            _overlap_payload(token_ids, cache_namespace),
+            budget,
+            "provider get_overlap_scores",
+        )
 
-        async def _scores():
-            try:
-                return await asyncio.wait_for(
-                    self.provider_router.get_overlap_scores(
-                        token_ids,
-                        include_shared=False,
-                        cache_namespace=cache_namespace,
-                    ),
-                    timeout=timeout_s,
-                )
-            except asyncio.TimeoutError as exc:
-                raise AssertionError(
-                    f"provider get_overlap_scores outlived the {timeout_s}s budget"
-                ) from exc
-
-        return self.run_until_complete(_scores())
+    async def provider_overlap_async(
+        self,
+        token_ids: list[int],
+        *,
+        cache_namespace: str | None = None,
+        timeout_s: float,
+    ):
+        budget = _require_positive_timeout_s(timeout_s, label="provider_overlap_async")
+        return await self._provider_call_async(
+            "get_overlap_scores",
+            _overlap_payload(token_ids, cache_namespace),
+            budget,
+            "provider get_overlap_scores",
+        )
 
     def provider_potential_loads(
         self,
@@ -4076,23 +4111,57 @@ class EppFrontendRoutingParityStack:
         cache_namespace: str | None = None,
         timeout_s: float = READINESS_DEADLINE_S,
     ):
-        if self.provider_router is None:
-            raise RuntimeError("routing parity stack has not started")
+        budget = _require_positive_timeout_s(
+            timeout_s, label="provider_potential_loads"
+        )
+        return self._provider_call(
+            "get_potential_loads",
+            _load_payload(token_ids, cache_namespace),
+            budget,
+            "provider get_potential_loads",
+        )
 
-        async def _loads():
-            try:
-                return await asyncio.wait_for(
-                    self.provider_router.get_potential_loads(
-                        token_ids, cache_namespace=cache_namespace
-                    ),
-                    timeout=timeout_s,
-                )
-            except asyncio.TimeoutError as exc:
-                raise AssertionError(
-                    f"provider get_potential_loads outlived the {timeout_s}s budget"
-                ) from exc
+    async def provider_potential_loads_async(
+        self,
+        token_ids: list[int],
+        *,
+        cache_namespace: str | None = None,
+        timeout_s: float,
+    ):
+        budget = _require_positive_timeout_s(
+            timeout_s, label="provider_potential_loads_async"
+        )
+        return await self._provider_call_async(
+            "get_potential_loads",
+            _load_payload(token_ids, cache_namespace),
+            budget,
+            "provider get_potential_loads",
+        )
 
-        return self.run_until_complete(_loads())
+    async def provider_generate(
+        self,
+        *,
+        model_name: str,
+        token_ids: list[int],
+        stop_conditions: dict[str, Any],
+        worker_id: int,
+        dp_rank: int,
+        timeout_s: float,
+    ):
+        """Send one complete helper request to the owned child. No parent retry."""
+        budget = _require_positive_timeout_s(timeout_s, label="provider_generate")
+        return await self._provider_call_async(
+            "generate_complete",
+            {
+                "model_name": model_name,
+                "token_ids": list(token_ids),
+                "stop_conditions": stop_conditions,
+                "worker_id": worker_id,
+                "dp_rank": dp_rank,
+            },
+            budget,
+            "provider generate",
+        )
 
     def provider_free(
         self,
@@ -4100,22 +4169,45 @@ class EppFrontendRoutingParityStack:
         *,
         timeout_s: float = READINESS_DEADLINE_S,
     ) -> None:
-        if self.provider_router is None:
-            raise RuntimeError("routing parity stack has not started")
         budget = _require_positive_timeout_s(timeout_s, label="provider_free")
+        self._provider_call(
+            "free",
+            {"request_id": request_id},
+            budget,
+            "provider free",
+        )
 
-        async def _free() -> None:
-            try:
-                await asyncio.wait_for(
-                    self.provider_router.free(request_id),
-                    timeout=budget,
-                )
-            except asyncio.TimeoutError as exc:
+    def _provider_call(self, op: str, payload: Any, timeout_s: float, label: str) -> Any:
+        owner = self._provider_owner
+        if owner is None:
+            raise RuntimeError("routing parity stack has not started")
+        try:
+            return owner.call(op, payload, timeout_s)
+        except NativeRouterFailure as exc:
+            if exc.timed_out:
                 raise AssertionError(
-                    f"provider free outlived the {budget}s budget"
+                    f"{label} outlived the {timeout_s}s budget"
                 ) from exc
+            raise
 
-        self.run_until_complete(_free())
+    async def _provider_call_async(
+        self, op: str, payload: Any, timeout_s: float, label: str
+    ) -> Any:
+        owner = self._provider_owner
+        if owner is None:
+            raise RuntimeError("routing parity stack has not started")
+        try:
+            return await owner.call_async(op, payload, timeout_s)
+        except NativeRouterFailure as exc:
+            if exc.timed_out:
+                raise AssertionError(
+                    f"{label} outlived the {timeout_s}s budget"
+                ) from exc
+            raise
+
+    def _release_provider_owner(self) -> None:
+        self.provider_router = None
+        self._provider_owner = None
 
     def __exit__(self, exc_type, exc, tb) -> None:
         consumer_error: BaseException | None = None
@@ -4162,16 +4254,6 @@ class EppFrontendRoutingParityStack:
         if cause is not None:
             raise cleanup_error from cause
         raise cleanup_error
-
-    def _shutdown_provider(self) -> None:
-        router = self.provider_router
-        self.provider_router = None
-        if router is not None:
-            del router
-        runtime = self.provider_runtime
-        self.provider_runtime = None
-        if runtime is not None:
-            runtime.shutdown()
 
     def _close_loop(self) -> None:
         loop = self._loop

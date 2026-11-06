@@ -6109,7 +6109,12 @@ def _require_cache_sensitive_policy(stack) -> dict[str, float]:
             "aggregated router_temperature must be 0 for deterministic first "
             f"selection, got {parameters['router_temperature']}"
         )
-    config = json.loads(stack.provider_router_config.to_json())
+    encoded = stack.provider_config_json
+    if not isinstance(encoded, str) or not encoded:
+        raise AssertionError(
+            "served KvRouter config JSON was not returned by the native child"
+        )
+    config = json.loads(encoded)
     if config["router_track_prefill_tokens"] is not True:
         raise AssertionError(
             "served KvRouter must retain router_track_prefill_tokens for "
@@ -6278,9 +6283,7 @@ def observe_owned_frontend_model_block_size(
 
             async def _provider_block_size() -> Any:
                 return await asyncio.wait_for(
-                    stack.provider_router.get_overlap_scores(
-                        tokens, include_shared=False
-                    ),
+                    stack.provider_overlap_async(tokens, timeout_s=remaining),
                     timeout=remaining,
                 )
 
@@ -6361,13 +6364,13 @@ def _prepare_first_selection_snapshot(
                 probe = [random.randint(1, 10000) for _ in range(2 * worker_block_size)]
                 try:
                     await asyncio.wait_for(
-                        send_request_via_python_kv_router(
-                            kv_python_router=stack.provider_router,
+                        stack.provider_generate(
                             model_name=stack.model_name,
                             token_ids=probe,
                             stop_conditions={"ignore_eos": True, "max_tokens": 2},
                             worker_id=worker_id,
                             dp_rank=0,
+                            timeout_s=remaining,
                         ),
                         timeout=remaining,
                     )
@@ -6390,8 +6393,8 @@ def _prepare_first_selection_snapshot(
                         break
                     try:
                         scores = await asyncio.wait_for(
-                            stack.provider_router.get_overlap_scores(
-                                probe, include_shared=False
+                            stack.provider_overlap_async(
+                                probe, timeout_s=query_budget
                             ),
                             timeout=query_budget,
                         )
@@ -6457,13 +6460,13 @@ def _prepare_first_selection_snapshot(
             target = stack.worker_ids[case.label]
             try:
                 await asyncio.wait_for(
-                    send_request_via_python_kv_router(
-                        kv_python_router=stack.provider_router,
+                    stack.provider_generate(
                         model_name=stack.model_name,
                         token_ids=tokens,
                         stop_conditions={"ignore_eos": True, "max_tokens": 2},
                         worker_id=target,
                         dp_rank=0,
+                        timeout_s=remaining,
                     ),
                     timeout=remaining,
                 )
@@ -6489,9 +6492,7 @@ def _prepare_first_selection_snapshot(
                 tokens = token_ids_by_label[case.label]
                 try:
                     scores = await asyncio.wait_for(
-                        stack.provider_router.get_overlap_scores(
-                            tokens, include_shared=False
-                        ),
+                        stack.provider_overlap_async(tokens, timeout_s=remaining),
                         timeout=remaining,
                     )
                 except asyncio.TimeoutError as exc:
@@ -6522,7 +6523,9 @@ def _prepare_first_selection_snapshot(
                     break
                 try:
                     loads = await asyncio.wait_for(
-                        stack.provider_router.get_potential_loads(tokens),
+                        stack.provider_potential_loads_async(
+                            tokens, timeout_s=remaining
+                        ),
                         timeout=remaining,
                     )
                 except asyncio.TimeoutError as exc:

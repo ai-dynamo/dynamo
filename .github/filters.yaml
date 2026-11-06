@@ -489,6 +489,7 @@ frontend:
   - 'tests/router/epp_parity.py'
   - 'tests/router/epp_config_contract.py'
   - 'tests/router/epp_native_consumers.py'
+  - 'tests/router/epp_native_process.py'
   - 'tests/router/epp_selector_catalog.py'
   - 'tests/router/helper.py'
   - 'tests/router/common.py'
