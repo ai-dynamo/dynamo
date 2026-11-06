@@ -484,3 +484,161 @@ async def test_diffusion_rejects_out_of_range_id_before_the_engine():
 
     assert error.value.code == 400
     engine.async_generate.assert_not_awaited()
+
+
+# Out-of-vocabulary stop IDs: below zero, one past the vocabulary, and the
+# DYN-5471 reproduction.
+STOP_IDS_OUT_OF_VOCAB = [-1, MAX_TOKEN_ID + 1, 1_000_000_000]
+
+
+def _stop_token_request(stop_token_ids, hidden=()):
+    request = _token_request([1, 2])
+    request["stop_conditions"].update(
+        min_tokens=1,
+        stop_token_ids=stop_token_ids,
+        stop_token_ids_hidden=list(hidden),
+    )
+    return request
+
+
+def _openai_request(**stop_fields):
+    return {
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 4,
+        "min_tokens": 1,
+        **stop_fields,
+    }
+
+
+def _openai_decode_handler_for_generate(engine):
+    handler = _decode_handler_for_generate(engine)
+    return _with_token_input(handler, engine=engine, tokenizer=_ChatTokenizer())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_id", STOP_IDS_OUT_OF_VOCAB)
+async def test_decode_rejects_out_of_vocab_stop_id_before_the_engine(stop_id):
+    engine = SimpleNamespace(async_generate=AsyncMock(side_effect=_Reached))
+    handler = _decode_handler_for_generate(engine)
+
+    with pytest.raises(HttpError, match=r"stop_token_ids\[1\]") as error:
+        await anext(handler.generate(_stop_token_request([0, stop_id]), _context()))
+
+    assert error.value.code == 400
+    engine.async_generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_decode_passes_boundary_stop_ids_to_the_engine():
+    engine = SimpleNamespace(async_generate=AsyncMock(side_effect=_Reached))
+    handler = _decode_handler_for_generate(engine)
+
+    with pytest.raises(_Reached):
+        await anext(
+            handler.generate(_stop_token_request([0, MAX_TOKEN_ID]), _context())
+        )
+
+    sampling_params = engine.async_generate.await_args.kwargs["sampling_params"]
+    assert sorted(sampling_params["stop_token_ids"]) == [0, MAX_TOKEN_ID]
+    assert sampling_params["min_new_tokens"] == 1
+
+
+@pytest.mark.asyncio
+async def test_decode_does_not_check_hidden_model_card_stop_ids():
+    engine = SimpleNamespace(async_generate=AsyncMock(side_effect=_Reached))
+    handler = _decode_handler_for_generate(engine)
+
+    with pytest.raises(_Reached):
+        await anext(
+            handler.generate(
+                _stop_token_request([1], hidden=[MAX_TOKEN_ID + 1]), _context()
+            )
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["stop", "stop_token_ids"])
+@pytest.mark.parametrize("stop_id", STOP_IDS_OUT_OF_VOCAB)
+async def test_sglang_tokenizer_rejects_out_of_vocab_stop_id_before_the_engine(
+    field, stop_id
+):
+    engine = SimpleNamespace(async_generate=AsyncMock(side_effect=_Reached))
+    handler = _openai_decode_handler_for_generate(engine)
+
+    with pytest.raises(HttpError, match=rf"\b{field}\[1\]") as error:
+        await anext(
+            handler.generate(_openai_request(**{field: [0, stop_id]}), _context())
+        )
+
+    assert error.value.code == 400
+    engine.async_generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["stop", "stop_token_ids"])
+async def test_sglang_tokenizer_passes_boundary_stop_ids_to_the_engine(field):
+    engine = SimpleNamespace(async_generate=AsyncMock(side_effect=_Reached))
+    handler = _openai_decode_handler_for_generate(engine)
+
+    with pytest.raises(_Reached):
+        await anext(
+            handler.generate(_openai_request(**{field: [0, MAX_TOKEN_ID]}), _context())
+        )
+
+    sampling_params = engine.async_generate.await_args.kwargs["sampling_params"]
+    assert sampling_params["stop_token_ids"] == [0, MAX_TOKEN_ID]
+    assert sampling_params["min_new_tokens"] == 1
+
+
+def _native_engine():
+    def generate_request(request, raw_request):
+        raise _Reached
+
+    return SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(generate_request=generate_request)
+    )
+
+
+def _native_stop_request(sampling_params):
+    return {
+        "token_ids": [[1, 2], [3]] if isinstance(sampling_params, list) else [1, 2],
+        "extra_args": {"sglang_tito": {"sampling_params": sampling_params}},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sampling_params", "label"),
+    [
+        (
+            {"min_new_tokens": 1, "stop_token_ids": [1_000_000_000]},
+            r"sampling_params\.stop_token_ids\[0\]",
+        ),
+        (
+            [
+                {"min_new_tokens": 1, "stop_token_ids": [0]},
+                {"min_new_tokens": 1, "stop_token_ids": [-1]},
+            ],
+            r"sampling_params\[1\]\.stop_token_ids\[0\]",
+        ),
+    ],
+    ids=["single", "batch"],
+)
+async def test_native_generate_rejects_out_of_vocab_stop_id_before_the_engine(
+    sampling_params, label
+):
+    handler = _decode_handler_for_generate(_native_engine())
+
+    with pytest.raises(HttpError, match=label) as error:
+        await anext(handler.generate(_native_stop_request(sampling_params), _context()))
+
+    assert error.value.code == 400
+
+
+@pytest.mark.asyncio
+async def test_native_generate_passes_boundary_stop_ids_to_the_engine():
+    handler = _decode_handler_for_generate(_native_engine())
+    sampling_params = {"min_new_tokens": 1, "stop_token_ids": [0, MAX_TOKEN_ID]}
+
+    with pytest.raises(_Reached):
+        await anext(handler.generate(_native_stop_request(sampling_params), _context()))
