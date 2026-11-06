@@ -1296,6 +1296,80 @@ fn image_encoder_handoff_requires_negotiated_roles() {
 }
 
 #[test]
+fn encode_validates_consumer_guides_without_forwarding_them() {
+    let mut source = request();
+    add_images(&mut source, ["https://example.com/image.png"]);
+    let mut limits = image_limits(4096).unwrap();
+    limits.encoder_only = true;
+    let encoded = build_generate_request(
+        source.clone(),
+        "e",
+        "model",
+        Some(limits),
+        DisaggregationMode::Encode,
+    )
+    .unwrap();
+    assert!(encoded.guided.is_none());
+
+    source
+        .sampling_options
+        .guided_decoding
+        .as_mut()
+        .unwrap()
+        .choice = Some(vec!["yes".into(), "no".into()]);
+    for mode in [DisaggregationMode::Encode, AGG, PREFILL] {
+        let error =
+            build_generate_request(source.clone(), "req", "model", Some(limits), mode).unwrap_err();
+        assert!(error.to_string().contains("`choice` is not supported"));
+    }
+}
+
+#[test]
+fn encoder_consumers_require_handoffs_only_for_unstaged_media() {
+    let mut limits = image_limits(4096).unwrap();
+    limits.encoder_consumer = true;
+    limits.requires_encoder_cache = true;
+    for mode in [AGG, PREFILL, DisaggregationMode::Decode] {
+        let mut source = request();
+        assert!(
+            build_generate_request(source.clone(), "text", "model", Some(limits), mode).is_ok()
+        );
+        add_images(&mut source, ["https://example.com/image.png"]);
+        let optional_limits = ModelLimits {
+            requires_encoder_cache: false,
+            ..limits
+        };
+        let inline = build_generate_request(
+            source.clone(),
+            "inline",
+            "model",
+            Some(optional_limits),
+            mode,
+        )
+        .unwrap();
+        assert!(inline.encoder.is_none());
+        assert_eq!(inline.media.len(), 1);
+        let error = build_generate_request(source.clone(), "image", "model", Some(limits), mode)
+            .unwrap_err();
+        assert!(error.to_string().contains("media without encoder_result"));
+        assert!(matches!(
+            error.error_type(),
+            dynamo_backend_common::ErrorType::Backend(_)
+        ));
+
+        if mode.is_decode() {
+            source.prefill_result = Some(dynamo_backend_common::PrefillResult {
+                disaggregated_params: crate::disagg::session_to_json(fake_session()).unwrap(),
+                prompt_tokens_details: None,
+            });
+            let decoded = build_generate_request(source, "d", "model", Some(limits), mode).unwrap();
+            assert!(decoded.encoder.is_none());
+            assert_eq!(decoded.kv.unwrap().session, Some(fake_session()));
+        }
+    }
+}
+
+#[test]
 fn nixl_encoder_reference_is_forwarded_without_interpreting_engine_metadata() {
     let mut source = request();
     add_images(&mut source, ["https://example.com/image.png"]);

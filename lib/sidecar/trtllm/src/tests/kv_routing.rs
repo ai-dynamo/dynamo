@@ -419,7 +419,83 @@ async fn leader_monitor_rejects_restarted_native_engine() {
 }
 
 #[tokio::test]
-async fn follower_shutdown_cancels_initial_reconnect() {
+async fn encoder_publishes_leader_identity_without_kv_telemetry() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let service = FakeTrtllm::default();
+        *service.encoder_role.lock().await = Some("encode".into());
+        service.kv_routing.store(true, Ordering::SeqCst);
+        service.dp_size.store(2, Ordering::SeqCst);
+        service.hang_load.store(true, Ordering::SeqCst);
+        *service.kv_sources_error.lock().await = Some(tonic::Code::InvalidArgument);
+        let node = crate::node::NodeMetadata {
+            version: 1,
+            engine_id: "encoder-engine".into(),
+            node_id: "leader".into(),
+            leader: true,
+            node_count: 2,
+            kv_block_size: 0,
+            local_dp_ranks: vec![],
+            source_owners: Default::default(),
+        };
+        *service.node_metadata.lock().await = Some(node.clone());
+        let server = FakeServer::start(service).await;
+        let encoder = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Encode);
+        let config = encoder.start(0).await.expect("start encoder leader");
+        assert_eq!(
+            config.runtime_data[crate::node::NODE_METADATA_KEY],
+            serde_json::to_value(node).unwrap()
+        );
+        assert!(encoder.kv_event_sources().await.unwrap().is_empty());
+        assert_eq!(
+            server.service.metadata_errors_served.load(Ordering::SeqCst),
+            0
+        );
+        let registration = config.llm.unwrap();
+        assert_eq!(registration.data_parallel_size, Some(2));
+        assert_eq!(registration.data_parallel_start_rank, Some(0));
+        assert!(registration.kv_cache_block_size.is_none());
+        assert!(registration.total_kv_blocks.is_none());
+        encoder.cleanup().await.unwrap();
+    })
+    .await
+    .expect("encoder startup must skip KV telemetry RPCs");
+}
+
+#[tokio::test]
+async fn encoder_follower_cannot_start_direct_inference() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let service = FakeTrtllm::default();
+        *service.encoder_role.lock().await = Some("encode".into());
+        service.kv_routing.store(true, Ordering::SeqCst);
+        *service.node_metadata.lock().await = Some(crate::node::NodeMetadata {
+            version: 1,
+            engine_id: "encoder-engine".into(),
+            node_id: "follower".into(),
+            leader: false,
+            node_count: 2,
+            kv_block_size: 0,
+            local_dp_ranks: vec![],
+            source_owners: Default::default(),
+        });
+        let server = FakeServer::start(service).await;
+        let encoder = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Encode);
+        let error = encoder
+            .start(0)
+            .await
+            .expect_err("followers cannot register inference");
+        assert!(
+            error
+                .to_string()
+                .contains("Follower endpoint cannot serve inference")
+        );
+        assert!(server.service.requests.lock().await.is_empty());
+    })
+    .await
+    .expect("follower startup must fail promptly");
+}
+
+#[tokio::test]
+async fn follower_accepts_consumer_route_flag_and_cancels_initial_reconnect() {
     use clap::Parser;
     use dynamo_runtime::distributed::DistributedConfig;
     use dynamo_runtime::{DistributedRuntime, Runtime};
@@ -434,6 +510,7 @@ async fn follower_shutdown_cancels_initial_reconnect() {
         &format!("http://{address}"),
         "--model-path",
         "model-source",
+        "--route-to-encoder",
     ])
     .unwrap();
     let drt = DistributedRuntime::new(

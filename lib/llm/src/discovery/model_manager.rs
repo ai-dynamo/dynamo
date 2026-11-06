@@ -2701,15 +2701,21 @@ impl ModelManager {
             .collect::<Vec<_>>();
         let unique_encode = (encode_providers.len() == 1).then(|| encode_providers[0].clone());
         let capable_prefill = (prefill_providers.len() == 1)
-            && worker_sets.iter().any(|worker_set| {
-                worker_set.card().worker_type == Some(WorkerType::Prefill)
-                    && Self::supports_encoder_result_handoff(worker_set.card())
-            });
+            && Self::supports_encoder_result_handoff(&prefill_providers[0].card);
+        let required_prefill =
+            capable_prefill && Self::requires_encoder_result(&prefill_providers[0].card);
 
         for worker_set in &worker_sets {
             let Some(router) = &worker_set.encoder_router else {
                 continue;
             };
+            // Consumer policy remains authoritative even without an Encode
+            // endpoint. Vision-disabled consumers cannot fall back inline.
+            router.set_required(
+                Self::requires_encoder_result(worker_set.card())
+                    || (worker_set.card().worker_type == Some(WorkerType::Decode)
+                        && required_prefill),
+            );
             let routing_enabled = match worker_set.card().worker_type {
                 Some(WorkerType::Decode) => capable_prefill && decode_consumers.len() == 1,
                 Some(WorkerType::Prefill) => false,
@@ -2724,6 +2730,14 @@ impl ModelManager {
                     .map(super::WorkerSetTarget::Committed),
             );
         }
+    }
+
+    fn requires_encoder_result(card: &ModelDeploymentCard) -> bool {
+        card.runtime_config
+            .runtime_data
+            .get(crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
     }
 
     // -- Worker monitoring --
@@ -4472,6 +4486,12 @@ mod tests {
             card.runtime_config
                 .set_engine_specific("encoder_result_handoff", true)
                 .unwrap();
+            card.runtime_config
+                .set_engine_specific(
+                    crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT,
+                    true,
+                )
+                .unwrap();
         }
         card
     }
@@ -4527,6 +4547,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aggregated_encoder_requirement_survives_missing_encoder_target() {
+        let manager = ModelManager::new();
+        let mut card = ModelDeploymentCard::with_name_only("required-encoder-model");
+        card.worker_type = Some(WorkerType::Aggregated);
+        card.model_type = crate::model_type::ModelType::Chat;
+        card.runtime_config
+            .set_engine_specific("encoder_result_handoff", true)
+            .unwrap();
+        card.runtime_config
+            .set_engine_specific(
+                crate::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT,
+                true,
+            )
+            .unwrap();
+        let router = crate::kv_router::EncoderRouter::disabled();
+        let mut workers = WorkerSet::new(
+            "required-encoder".into(),
+            card.mdcsum().to_string(),
+            card.clone(),
+        );
+        workers.encoder_router = Some(router.clone());
+        manager
+            .commit_discovery_group(
+                "required-consumer",
+                "required-consumer",
+                workers,
+                vec![("required-consumer".into(), card)],
+                Vec::new(),
+            )
+            .unwrap();
+        assert!(router.is_required());
+        assert_eq!(router.target_endpoint_id(), None);
+        manager.remove_discovery_group("required-consumer").unwrap();
+        // An older pipeline snapshot must retain fail-closed policy after removal.
+        assert!(router.is_required());
+    }
+
+    #[tokio::test]
     async fn committed_topology_converges_for_every_epd_startup_order() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
@@ -4577,6 +4635,13 @@ mod tests {
                         Vec::new(),
                     )
                     .unwrap();
+                if let Some(router) = &encoder_router {
+                    assert_eq!(
+                        router.is_required(),
+                        order[..=step].contains(&WorkerType::Prefill),
+                        "Prefill consumer policy must be enforced even before Encode discovery"
+                    );
+                }
                 if step < 2 {
                     assert!(
                         !manager

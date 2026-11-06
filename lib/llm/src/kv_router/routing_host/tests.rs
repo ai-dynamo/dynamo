@@ -4256,7 +4256,27 @@ async fn builtin_stopped_decode_request_reaches_the_worker_on_every_dispatch_pat
     }
 }
 
-/// The carve-out must stay narrow. Nothing without staged KV blocks may reach a
+#[tokio::test]
+#[serial_test::serial]
+async fn stopped_encoder_handoffs_reach_their_consumers() {
+    for phase in [RequestPhase::Aggregated, RequestPhase::Prefill] {
+        let (host, dispatch, worker_id, runtime) = builtin_host_with_recorded_dispatch(
+            &format!("encoder-cleanup-{phase:?}"),
+            RouterMode::RoundRobin,
+        )
+        .await;
+        let request = stopped_request_in_phase(phase, "encoder-cleanup", None, false).await;
+        let (mut input, context) = request.into_parts();
+        input.encoder_result = Some(serde_json::json!({"opaque": "handoff"}));
+        let mut stream = host.generate(context.map(|_| input)).await.unwrap();
+        while stream.next().await.is_some() {}
+        assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
+        drop(host);
+        runtime.shutdown();
+    }
+}
+
+/// The carve-out must stay narrow. Nothing without a staged handoff may reach a
 /// worker after the client has gone — including a decode request, which is what
 /// the conditional-disaggregation bypass produces: `RequestPhase::Decode`
 /// without a remote prefill behind it, so nothing to release.

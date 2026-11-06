@@ -10,6 +10,12 @@ Dynamo sidecar builds. Older runtimes without the advertised encoder capabilitie
 cannot run these topologies. Image handoffs support TP/PP/CP=1; video and audio
 encoder handoffs are not supported.
 
+Dynamo supports native NIXL encoder handoff only. Startup requires the engine to
+advertise NIXL as its single encoder transfer backend. Shared-safetensors handoff
+remains an upstream helper for local experiments and is outside this Dynamo
+integration. Use matching proposal builds with encoder-result release support;
+the baseline OpenEngine package pins do not supply these capabilities.
+
 | Topology | Encoder output consumer | KV transfer |
 | --- | --- | --- |
 | E+PD | Combined prefill/decode worker | No inter-worker KV transfer |
@@ -30,7 +36,11 @@ prompt length.
 ## Single-host launch
 
 Use the TensorRT-LLM environment for `TRTLLM_PYTHON` and the Dynamo environment for
-the frontend and sidecars. Set `MODEL_REVISION` to the checkpoint's immutable commit:
+the frontend and sidecars. Set `MODEL_REVISION` to the checkpoint's full immutable
+40-character commit SHA. The launcher resolves that snapshot once through
+`huggingface_hub` in the TensorRT-LLM environment, then passes its local path to
+every engine and sidecar. This keeps weights, tokenizer, configuration and chat
+template on one revision. The public served model name remains `MODEL`.
 
 ```bash
 export MODEL=Qwen/Qwen3-VL-2B-Instruct
@@ -59,11 +69,28 @@ Use `--help` for port and device overrides. Managed launches use numbered
 `DYN_ENGINE_GRPC_PORT1/2/3` and `DYN_SYSTEM_PORT1/2/3` for E, P/PD, and D.
 Ordinary text requests bypass the encoder.
 
+When `CUDA_VISIBLE_DEVICES` is inherited, every role defaults to its first entry,
+including GPU UUIDs and MIG device IDs. This keeps a managed single-GPU launch
+inside its allocation. Use `ENCODER_GPU`, `PD_GPU`, `PREFILL_GPU` and `DECODE_GPU`
+to assign separate devices from an allocation; these are physical CUDA device
+identifiers, not indices into the inherited list. Without an inherited allocation,
+E and PD default to device 0; separate P and D default to 1 and 2.
+
+`ENCODER_BIND_HOST` selects the encoder engine's interface. Its local sidecar
+connects to the same host by default; wildcard binds `0.0.0.0` and `::` map to
+loopback destinations `127.0.0.1` and `::1`. Set `ENCODER_CONNECT_HOST` when the
+sidecar needs a different destination. `ENCODER_ADVERTISE_HOST` is the control
+address used by consumers and defaults to that connect host; set a reachable
+address explicitly when consumers run on another host.
+
 ## Cross-host placement
 
 The scripts above launch every process locally. For separate hosts, launch each
 engine and sidecar on its assigned host with shared Dynamo discovery and a
-consistent served model name. Give the engines the same immutable model revision.
+consistent served model name. Resolve the same immutable model revision on each
+host and pass the resulting local path to both engine and sidecar. Set the
+engine's `--served_model_name` to the common served name so host-specific cache
+paths do not change model discovery.
 For E+P+D, start the frontend with `--no-router-conditional-disagg` on every host
 that runs a frontend.
 

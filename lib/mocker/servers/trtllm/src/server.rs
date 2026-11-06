@@ -747,6 +747,9 @@ impl pb::control_server::Control for TrtllmMockerService {
             Some(pb::abort_request::Target::KvSession(_)) => {
                 return unsupported("Abort by KV session");
             }
+            Some(pb::abort_request::Target::EncoderCache(_)) => {
+                return unsupported("Abort by encoder cache");
+            }
             Some(pb::abort_request::Target::AllRequests(_)) => {
                 // Collect first: holding shard guards across the awaits below
                 // would block every task touching the same shard.

@@ -28,8 +28,8 @@ pub(crate) async fn relay(
     cancel: CancellationToken,
 ) -> Result<()> {
     ensure!(
-        !args.sidecar.common.route_to_encoder && !args.sidecar.common.enable_rl,
-        "Telemetry-only sidecars cannot register encoder or RL routes"
+        !args.sidecar.common.enable_rl,
+        "Telemetry-only sidecars cannot register RL routes"
     );
     let transport = args.sidecar.grpc.config();
     let supervision = RoutingSupervision::PRODUCTION;

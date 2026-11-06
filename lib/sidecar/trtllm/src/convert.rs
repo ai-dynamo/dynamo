@@ -86,11 +86,8 @@ pub(crate) fn build_generate_request_with_routing(
         DisaggregationMode::Aggregated | DisaggregationMode::Encode => None,
     };
     let conditions = stop_conditions(&request);
-    let guided = if mode.is_encode() {
-        None
-    } else {
-        guided_decoding(&request)?
-    };
+    let guided = guided_decoding(&request)?;
+    let guided = if mode.is_encode() { None } else { guided };
     let session_id = request
         .agent_context
         .as_ref()
@@ -998,7 +995,9 @@ impl ResponseState {
                     serde_json::json!(cache.transfer_backend),
                 );
                 result.insert("opaque_state".into(), serde_json::json!(cache.opaque_state));
-                Ok(Some(LLMEngineOutput::encode_terminal(result)))
+                let mut output = LLMEngineOutput::encode_terminal(result);
+                output.extra_args = Some(serde_json::json!({"encoder_result_release": true}));
+                Ok(Some(output))
             }
             pb::generate_response::Event::Token(token) => self.convert_token(token),
             pb::generate_response::Event::Finished(finished) => {
@@ -1374,6 +1373,28 @@ fn validate_encoder_cache(cache: &pb::EncoderCacheRef) -> Result<(), DynamoError
     Ok(())
 }
 
+pub(crate) fn encoder_cache_from_result(
+    result: &serde_json::Value,
+) -> Result<pb::EncoderCacheRef, DynamoError> {
+    if result
+        .get("opaque_state")
+        .and_then(serde_json::Value::as_array)
+        .is_none_or(|bytes| bytes.len() > 64 * 1024)
+    {
+        return Err(client::invalid_argument(
+            "invalid or oversized encoder_result",
+        ));
+    }
+    let handoff: EncoderHandoff = serde::Deserialize::deserialize(result)
+        .map_err(|error| client::invalid_argument(format!("invalid encoder_result: {error}")))?;
+    let cache = pb::EncoderCacheRef {
+        transfer_backend: handoff.transfer_backend,
+        opaque_state: handoff.opaque_state,
+    };
+    validate_encoder_cache(&cache)?;
+    Ok(cache)
+}
+
 fn encoder_options(
     request: &PreprocessedRequest,
     limits: Option<ModelLimits>,
@@ -1405,6 +1426,14 @@ fn encoder_options(
         }));
     }
     let Some(result) = request.encoder_result.as_ref() else {
+        if limits.is_some_and(|limits| limits.requires_encoder_cache)
+            && has_media(request)
+            && !(mode.is_decode() && request.prefill_result.is_some())
+        {
+            return Err(client::engine_error(
+                "encoder cache consumer received media without encoder_result; check encoder availability and --route-to-encoder",
+            ));
+        }
         return Ok(None);
     };
     if mode.is_decode() && request.prefill_result.is_some() {
@@ -1421,22 +1450,7 @@ fn encoder_options(
             "encoder_result requires an aggregated or prefill worker and a capable consumer",
         ));
     }
-    if result
-        .get("opaque_state")
-        .and_then(serde_json::Value::as_array)
-        .is_none_or(|bytes| bytes.len() > 64 * 1024)
-    {
-        return Err(client::invalid_argument(
-            "invalid or oversized encoder_result",
-        ));
-    }
-    let handoff: EncoderHandoff = serde::Deserialize::deserialize(result)
-        .map_err(|error| client::invalid_argument(format!("invalid encoder_result: {error}")))?;
-    let cache = pb::EncoderCacheRef {
-        transfer_backend: handoff.transfer_backend,
-        opaque_state: handoff.opaque_state,
-    };
-    validate_encoder_cache(&cache)?;
+    let cache = encoder_cache_from_result(result)?;
     if !limits.is_some_and(|limits| match cache.transfer_backend.as_str() {
         ENCODER_BACKEND => limits.encoder_shared_safetensors,
         "trtllm-nixl-encoder-v1" => limits.encoder_nixl,

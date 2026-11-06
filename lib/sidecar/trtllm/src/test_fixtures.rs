@@ -49,6 +49,33 @@ pub(crate) fn request() -> PreprocessedRequest {
         .expect("request")
 }
 
+pub(crate) fn encoder_model_info(role: &str) -> pb::ModelInfo {
+    pb::ModelInfo {
+        model_id: "model-source".into(),
+        served_model_name: "served-model".into(),
+        max_context_length: Some(4096),
+        supports_multimodal: Some(true),
+        encoder: Some(pb::EncoderCapabilities {
+            schema_version: 1,
+            encoder_only: role == "encode",
+            accepts_cache: role == "consume",
+            transfer_backends: vec!["trtllm-nixl-encoder-v1".into()],
+        }),
+        extra: Some(
+            dynamo_sidecar_common::json_to_struct(
+                json!({
+                    "trtllm_supported_modalities": ["image"],
+                    "trtllm_encoder_cache_release": true,
+                    "trtllm_requires_encoder_cache": role == "consume",
+                }),
+                "test",
+            )
+            .unwrap(),
+        ),
+        ..Default::default()
+    }
+}
+
 /// Engine limits as `Control.GetModelInfo` would report them, with no
 /// separate output cap.
 pub(crate) fn limits(context_length: u32) -> Option<ModelLimits> {

@@ -614,8 +614,12 @@ fn encoder_ready_is_a_tokenless_terminal_with_an_opaque_handoff() {
     assert_eq!(result.finish_reason, Some(FinishReason::Stop));
     assert!(result.token_ids.is_empty());
     assert_eq!(
-        result.encoder_result.unwrap()["opaque_state"],
-        serde_json::json!([1, 2, 3])
+        result.extra_args.unwrap(),
+        serde_json::json!({"encoder_result_release": true})
+    );
+    assert_eq!(
+        result.encoder_result.unwrap(),
+        serde_json::json!({"transfer_backend": ENCODER_BACKEND, "opaque_state": [1, 2, 3]})
     );
     let mut ordinary = ResponseState::new(&request(), AGG);
     assert!(ordinary.convert(response).is_err());

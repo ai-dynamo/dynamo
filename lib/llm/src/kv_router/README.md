@@ -104,7 +104,7 @@ hops.
 | Aggregated | `RoutingHost` of the aggregated set | KV or builtin | Yes (KV) | Owns the request's classifier lifecycle. |
 | Decode | `RoutingHost` of the decode set | KV with the decode profile written by `PrefillRouter` | Yes (KV) | Owns the request's classifier lifecycle. |
 | Prefill | `PrefillRouter` → prefill `RoutingHost` | KV or builtin; a prefill card that declares `router_config` overrides the decode set's mode | Yes (KV) | Never starts the classifier; a prefill retry must leave a parked decode lifecycle alone. |
-| Encode | `EncoderRouter` | Round-robin `PushRouter`; no `KvRouter` | No | On failure, falls back to inline encoding downstream. |
+| Encode | `EncoderRouter` | Round-robin `PushRouter`; no `KvRouter` | No | Optional consumers fall back inline; consumers declaring `requires_encoder_result` fail closed. |
 
 ### Prefill hop
 
@@ -203,6 +203,13 @@ newer booking that reused the same request id and worker.
   that the staged blocks will sit until they expire.
 - A request that took the conditional bypass reached decode without staged KV, so it cancels
   normally.
+- Encoder handoffs retain the original downstream request context. When the producer advertises
+  `encoder_result_release` on its terminal output, the encoder hop owns a cleanup guard. It sends
+  a separate `release_encoder_result` request with the unchanged opaque payload back to that
+  exact producer on downstream dispatch failure, stream error, terminal completion, or stream
+  drop. Cleanup has a fresh controller and a two-second deadline; it never reselects another
+  encoder or carries generation sampling constraints or KV state. Producer release is idempotent
+  after consumption. Backends that do not advertise this extension retain their existing behavior.
 
 ## Prefill activation
 
@@ -218,3 +225,11 @@ exactly one prefill worker set and one decode worker set. The encoder target fol
 `encoder_result_handoff` rules there. In Direct mode the prefill hop requires
 `routing.prefill_worker_id`. See [`../discovery/AGENTS.md`](../discovery/AGENTS.md) for worker-set
 admission and succession.
+
+Encoder routing policy also comes from the committed consumer card. A consumer declaring
+`requires_encoder_result` cannot encode inline: image requests fail when the encoder is absent,
+activating, or returns an error, and video/audio requests fail before the encoder hop. Text
+requests bypass the encoder. Decode pipelines inherit this requirement from the unique capable
+Prefill target even before an Encode target exists. Consumers without the declaration retain
+optional inline fallback. Dynamo's native TensorRT-LLM handoff requires a single NIXL backend;
+shared-safetensors helpers are outside this integration.

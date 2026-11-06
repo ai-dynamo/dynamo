@@ -82,6 +82,7 @@ pub(crate) struct ModelLimits {
     pub(crate) supported_media: Option<SupportedMedia>,
     pub(crate) encoder_only: bool,
     pub(crate) encoder_consumer: bool,
+    pub(crate) requires_encoder_cache: bool,
     pub(crate) encoder_nixl: bool,
     pub(crate) encoder_shared_safetensors: bool,
     pub(crate) supports_image_routing: bool,
@@ -269,6 +270,8 @@ impl TrtllmClient {
                 }
             }
         }
+        let (encoder_only, encoder_consumer) =
+            encoder_roles(&info, supported_media).map_err(tonic::Status::failed_precondition)?;
         Ok(ModelInfo {
             limits: ModelLimits {
                 context_length: info.max_context_length.filter(|len| *len > 0),
@@ -276,8 +279,9 @@ impl TrtllmClient {
                 max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
                 supported_inputs,
                 supported_media: Some(supported_media),
-                encoder_only: supported_media.image && encoder_role(&info, "encode"),
-                encoder_consumer: supported_media.image && encoder_role(&info, "consume"),
+                encoder_only,
+                encoder_consumer,
+                requires_encoder_cache: has_model_flag(&info, "trtllm_requires_encoder_cache"),
                 encoder_nixl: encoder_backend(&info, "trtllm-nixl-encoder-v1"),
                 encoder_shared_safetensors: encoder_backend(&info, "trtllm-shared-safetensors-v1"),
                 supports_image_routing: supported_media.image && has_image_routing_v1(&info),
@@ -407,10 +411,23 @@ impl TrtllmClient {
     }
 
     pub(crate) async fn abort(&self, request_id: String) -> Result<(), DynamoError> {
+        self.abort_target(pb::abort_request::Target::RequestId(request_id))
+            .await
+    }
+
+    pub(crate) async fn release_encoder_cache(
+        &self,
+        cache: pb::EncoderCacheRef,
+    ) -> Result<(), DynamoError> {
+        self.abort_target(pb::abort_request::Target::EncoderCache(cache))
+            .await
+    }
+
+    async fn abort_target(&self, target: pb::abort_request::Target) -> Result<(), DynamoError> {
         let response = tokio::time::timeout(
             RPC_TIMEOUT,
             self.control().abort(pb::AbortRequest {
-                target: Some(pb::abort_request::Target::RequestId(request_id)),
+                target: Some(target),
             }),
         )
         .await
@@ -447,6 +464,7 @@ fn is_terminal_discovery_error(status: &tonic::Status) -> bool {
     matches!(
         status.code(),
         tonic::Code::InvalidArgument
+            | tonic::Code::FailedPrecondition
             | tonic::Code::NotFound
             | tonic::Code::Unimplemented
             | tonic::Code::Unauthenticated
@@ -517,22 +535,45 @@ fn encoder_backend(info: &pb::ModelInfo, backend: &str) -> bool {
     })
 }
 
-fn encoder_role(info: &pb::ModelInfo, role: &str) -> bool {
+fn encoder_roles(
+    info: &pb::ModelInfo,
+    media: SupportedMedia,
+) -> Result<(bool, bool), &'static str> {
+    if has_model_flag(info, "trtllm_requires_encoder_cache")
+        && !info
+            .encoder
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.accepts_cache)
+    {
+        return Err(
+            "TensorRT-LLM requires encoder caches without advertising a compatible encoder consumer",
+        );
+    }
     let Some(capabilities) = info.encoder.as_ref() else {
-        return false;
+        return Ok((false, false));
     };
-    capabilities.schema_version == 1
-        && capabilities.transfer_backends.iter().any(|backend| {
-            matches!(
-                backend.as_str(),
-                "trtllm-shared-safetensors-v1" | "trtllm-nixl-encoder-v1"
-            )
-        })
-        && match role {
-            "encode" => capabilities.encoder_only && !capabilities.accepts_cache,
-            "consume" => capabilities.accepts_cache && !capabilities.encoder_only,
-            _ => false,
-        }
+    if !capabilities.encoder_only && !capabilities.accepts_cache {
+        return Ok((false, false));
+    }
+    if capabilities.encoder_only == capabilities.accepts_cache
+        || capabilities.schema_version != 1
+        || !media.image
+        || capabilities.transfer_backends.as_slice() != ["trtllm-nixl-encoder-v1"]
+        || !has_model_flag(info, "trtllm_encoder_cache_release")
+    {
+        return Err(
+            "incompatible TensorRT-LLM encoder role: require schema v1, image support, exactly one encoder role, only the trtllm-nixl-encoder-v1 transfer backend, and trtllm_encoder_cache_release=true",
+        );
+    }
+    Ok((capabilities.encoder_only, capabilities.accepts_cache))
+}
+
+fn has_model_flag(info: &pb::ModelInfo, key: &str) -> bool {
+    info.extra
+        .as_ref()
+        .and_then(|extra| extra.fields.get(key))
+        .and_then(|value| value.kind.as_ref())
+        .is_some_and(|kind| matches!(kind, prost_types::value::Kind::BoolValue(true)))
 }
 
 #[cfg(test)]
@@ -540,28 +581,55 @@ mod encoder_capability_tests {
     use super::*;
 
     #[test]
-    fn negotiation_rejects_missing_unknown_and_ambiguous_capabilities() {
+    fn advertised_encoder_roles_fail_closed_when_negotiation_fails() {
         let mut info = pb::ModelInfo::default();
-        assert!(!encoder_role(&info, "encode"));
-        info.encoder = Some(pb::EncoderCapabilities {
-            schema_version: 1,
-            encoder_only: true,
-            accepts_cache: false,
-            transfer_backends: vec!["trtllm-shared-safetensors-v1".into()],
-        });
-        assert!(encoder_role(&info, "encode"));
+        let media = SupportedMedia {
+            image: true,
+            ..Default::default()
+        };
+        assert_eq!(encoder_roles(&info, media).unwrap(), (false, false));
+        info = crate::test_fixtures::encoder_model_info("encode");
+        info.extra
+            .as_mut()
+            .unwrap()
+            .fields
+            .remove("trtllm_encoder_cache_release");
+        assert!(encoder_roles(&info, media).is_err());
+        info = crate::test_fixtures::encoder_model_info("encode");
+        assert_eq!(encoder_roles(&info, media).unwrap(), (true, false));
+        info.encoder.as_mut().unwrap().transfer_backends =
+            vec!["trtllm-shared-safetensors-v1".into()];
+        assert!(encoder_roles(&info, media).is_err());
         info.encoder.as_mut().unwrap().transfer_backends = vec!["trtllm-nixl-encoder-v1".into()];
-        assert!(encoder_role(&info, "encode"));
-        assert!(!encoder_role(&info, "consume"));
+        assert_eq!(encoder_roles(&info, media).unwrap(), (true, false));
+        assert!(encoder_roles(&info, SupportedMedia::default()).is_err());
         info.encoder.as_mut().unwrap().accepts_cache = true;
-        assert!(!encoder_role(&info, "encode"));
-        assert!(!encoder_role(&info, "consume"));
+        assert!(encoder_roles(&info, media).is_err());
         info.encoder.as_mut().unwrap().encoder_only = false;
-        assert!(encoder_role(&info, "consume"));
+        assert_eq!(encoder_roles(&info, media).unwrap(), (false, true));
         info.encoder.as_mut().unwrap().schema_version = 2;
-        assert!(!encoder_role(&info, "consume"));
+        assert!(encoder_roles(&info, media).is_err());
         info.encoder.as_mut().unwrap().schema_version = 1;
+        info.encoder.as_mut().unwrap().transfer_backends = vec![
+            "trtllm-nixl-encoder-v1".into(),
+            "trtllm-shared-safetensors-v1".into(),
+        ];
+        assert!(encoder_roles(&info, media).is_err());
         info.encoder.as_mut().unwrap().transfer_backends = vec!["unknown".into()];
-        assert!(!encoder_role(&info, "consume"));
+        assert!(encoder_roles(&info, media).is_err());
+    }
+
+    #[test]
+    fn mandatory_encoder_cache_requires_a_negotiated_consumer() {
+        let mut info = crate::test_fixtures::encoder_model_info("consume");
+        let media = SupportedMedia {
+            image: true,
+            ..Default::default()
+        };
+        assert_eq!(encoder_roles(&info, media).unwrap(), (false, true));
+        info.encoder = None;
+        assert!(encoder_roles(&info, media).is_err());
+        info.encoder = Some(pb::EncoderCapabilities::default());
+        assert!(encoder_roles(&info, media).is_err());
     }
 }
