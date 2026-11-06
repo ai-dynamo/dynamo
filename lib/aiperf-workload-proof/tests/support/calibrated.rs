@@ -52,9 +52,8 @@ use dynamo_mocker::common::perf_model::{AisCallback, PerfModel};
 use dynamo_mocker::placement::{KvReplayComposition, MockerConfig};
 use serde_json::{Value, json};
 
-// Shared with the runner's own tests; reused in place rather than copied.
-#[path = "../../../../../../../aisimulate/.worktrees/aiperf-owned-runner-proof/crates/tests/aiperf-workload-runner/tests/support/run_fixture.rs"]
-mod run_fixture;
+// The attaching test target owns the fixture module so it is loaded once.
+use crate::run_fixture;
 
 pub(crate) const DEFAULT_MODEL: &str = "Qwen/Qwen3-8B";
 pub(crate) const SYSTEM: &str = "h100_sxm";

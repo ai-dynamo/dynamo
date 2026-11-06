@@ -7,6 +7,9 @@
 
 #![cfg(feature = "calibrated-proof")]
 
+#[path = "../../../../../../aisimulate/.worktrees/aiperf-owned-runner-proof/crates/tests/aiperf-workload-runner/tests/support/run_fixture.rs"]
+mod run_fixture;
+
 #[path = "support/calibrated.rs"]
 mod calibrated;
 
