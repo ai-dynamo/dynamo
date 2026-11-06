@@ -151,9 +151,13 @@ Profiling and weight-update routes use the `/engine/control/` prefix. The four g
 
 Workers expose `pause_generation`, `continue_generation`, `release_memory_occupation`, and `resume_memory_occupation` by default, without `--engine-route`. Each route calls the SGLang tokenizer-manager method of the same name. An `--engine-route` or `DYN_SGLANG_ENGINE_ROUTES` descriptor with the same path replaces the default route.
 
+Start SGLang with `--enable-memory-saver`. Without it, `release_memory_occupation` returns but frees no GPU memory.
+
+Releasing memory discards the model weights unless SGLang keeps a copy. With an empty `tags` list, release and resume cover the weights, the KV cache, and CUDA graphs. To keep the weights, start SGLang with `--enable-weights-cpu-backup`. Otherwise, load the weights again with an `/engine/control/update_weights_from_*` route after you resume memory and before you continue generation.
+
 Call the routes in this order:
 
-1. **Pause generation.** `pause_generation` pauses SGLang and removes the worker from discovery, so the router stops sending it new requests.
+1. **Pause generation.** `pause_generation` pauses SGLang and removes the worker from discovery, so the router stops sending it new requests. Use `"mode": "retract"`. It moves running requests back to SGLang's waiting queue. SGLang releases memory only when no request is running, so do not use an `in_place` pause here.
 2. **Release memory.** `release_memory_occupation` frees GPU memory. The worker stays out of discovery.
 3. **Resume memory.** `resume_memory_occupation` restores GPU memory. The worker stays out of discovery.
 4. **Continue generation.** `continue_generation` resumes SGLang and registers the worker in discovery again.
@@ -165,17 +169,17 @@ Send the requests to the worker's system server, set by `DYN_SYSTEM_PORT`:
 ```bash
 WORKER_URL=http://localhost:8081
 
-curl -X POST "$WORKER_URL/engine/pause_generation" \
-  -H 'Content-Type: application/json' -d '{"mode": "retract"}'
-curl -X POST "$WORKER_URL/engine/release_memory_occupation" \
-  -H 'Content-Type: application/json' -d '{}'
-curl -X POST "$WORKER_URL/engine/resume_memory_occupation" \
-  -H 'Content-Type: application/json' -d '{}'
-curl -X POST "$WORKER_URL/engine/continue_generation" \
+curl --fail-with-body -X POST "$WORKER_URL/engine/pause_generation" \
+  -H 'Content-Type: application/json' -d '{"mode": "retract"}' &&
+curl --fail-with-body -X POST "$WORKER_URL/engine/release_memory_occupation" \
+  -H 'Content-Type: application/json' -d '{}' &&
+curl --fail-with-body -X POST "$WORKER_URL/engine/resume_memory_occupation" \
+  -H 'Content-Type: application/json' -d '{}' &&
+curl --fail-with-body -X POST "$WORKER_URL/engine/continue_generation" \
   -H 'Content-Type: application/json' -d '{}'
 ```
 
-The request bodies follow the SGLang request schemas for the installed SGLang version. For example, the release and resume bodies accept SGLang's optional `tags` list, such as `{"tags": ["weights", "kv_cache"]}`.
+The request bodies follow the SGLang request schemas for the installed SGLang version. For example, the release and resume bodies accept SGLang's optional `tags` list, such as `{"tags": ["weights", "kv_cache"]}`. `--fail-with-body` makes curl exit with an error on an HTTP error status, and `&&` stops the sequence there. A failed resume leaves the worker paused and out of discovery.
 
 ### Configurable SGLang Method Routes
 
