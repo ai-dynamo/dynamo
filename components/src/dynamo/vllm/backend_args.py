@@ -6,6 +6,7 @@
 import argparse
 import json
 import logging
+import math
 import os
 import warnings
 from typing import List, Optional, Union
@@ -25,6 +26,7 @@ from dynamo.common.utils.nixl_telemetry import nixl_prometheus_base_port
 from . import __version__
 from .benchmark_points import (
     BENCHMARK_MODES,
+    FPM_POWER_MIN_WINDOW_S,
     BenchmarkMode,
     BenchmarkPoints,
     load_benchmark_points_file,
@@ -594,6 +596,21 @@ class DynamoVllmArgGroup(ArgGroup):
                 "to at least twice this cap keeps every swept rung warmable."
             ),
         )
+        add_argument(
+            g,
+            flag_name="--benchmark-power-window-s",
+            env_var="DYN_BENCHMARK_POWER_WINDOW_S",
+            default=0.0,
+            arg_type=float,
+            help=(
+                "Minimum power window per benchmark point, in seconds (default: "
+                "0, disabled). After a point's latency sample, the point repeats "
+                "in synchronized iterations until this much time has elapsed, and "
+                "the NVML energy counter of every GPU of the rank is read at the "
+                "window's edges. The latency sample is collected as without the "
+                f"window. Must be 0 or at least {FPM_POWER_MIN_WINDOW_S}."
+            ),
+        )
 
 
 # @dataclass()
@@ -649,6 +666,7 @@ class DynamoVllmConfig(ConfigBase):
     benchmark_output_path: str = "/tmp/benchmark_results.json"
     benchmark_timeout: int = 900
     benchmark_max_batch_size: Optional[int] = None
+    benchmark_power_window_s: float = 0.0
     prefill_max_new_token_samples: int = 64
     prefill_max_kv_read_token_samples: int = 16
     decode_max_kv_read_token_samples: int = 128
@@ -807,6 +825,15 @@ class DynamoVllmConfig(ConfigBase):
             raise ValueError("--benchmark-warmup-iterations must be non-negative")
         if self.benchmark_timeout <= 0:
             raise ValueError("--benchmark-timeout must be positive")
+        power_window_s = self.benchmark_power_window_s
+        if power_window_s != 0 and not (
+            math.isfinite(power_window_s) and power_window_s >= FPM_POWER_MIN_WINDOW_S
+        ):
+            # A shorter window could never be reported as a measurement.
+            raise ValueError(
+                "--benchmark-power-window-s must be 0 (disabled) or at least "
+                f"{FPM_POWER_MIN_WINDOW_S}"
+            )
         # Fail at startup rather than at manifest-writing time: a repeat count
         # of zero produces a manifest with no prefill rows, and the run that
         # reads it back looks like one that simply had nothing to measure.

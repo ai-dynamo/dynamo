@@ -516,6 +516,7 @@ def update_engine_config_with_dynamo(
             "timeout": dynamo_config.benchmark_timeout,
             "max_batch_size": dynamo_config.benchmark_max_batch_size,
             "collect_imbalanced": dynamo_config.benchmark_collect_imbalanced,
+            "power_window_s": dynamo_config.benchmark_power_window_s,
             # Not a BenchmarkConfig field (the scheduler drops unknown keys): it
             # tells the launcher whether the model workers load a Dynamo
             # extension class, the only kind it can call by name.

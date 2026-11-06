@@ -503,6 +503,12 @@ follow_imports = "skip"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# nvidia-ml-py ships no type stubs; the vLLM self-benchmark power window reads
+# the NVML energy counters through it.
+module = ["pynvml"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 # OpenCV is optional and absent from the lint environment.
 module = ["cv2", "cv2.*"]
 follow_imports = "skip"

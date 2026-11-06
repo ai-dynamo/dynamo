@@ -18,6 +18,13 @@ RANDOM_KDA_WORKER = "dynamo.vllm.benchmark_worker.BenchmarkWorker"
 RANDOM_KDA_BOUND = 0.01
 RANDOM_KDA_POLICY = "uniform-request-layer-rank-v1"
 
+# Shortest power window that may be reported as measured, in seconds. The
+# NVML energy counter updates in steps, so a window must be long enough for
+# those steps to be negligible: max(1.0, 20 x the counter update interval).
+# Calibrated 2026-11-06 under steady matmul load on driver 615.71.10: H200 and
+# B200 both update every 100 ms (median), so the minimum is 2.0 s.
+FPM_POWER_MIN_WINDOW_S = 2.0
+
 
 class _PointCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
