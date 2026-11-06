@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Benchmark wrappers must not turn failed or incomplete exports into success."""
 
-import json
 import os
 import subprocess
 import sys
