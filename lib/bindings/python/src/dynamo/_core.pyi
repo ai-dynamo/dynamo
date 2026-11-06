@@ -2576,6 +2576,7 @@ def run_mocker_synthetic_trace_replay(
     shared_prefix_ratio: float = 0.0,
     num_prefix_groups: int = 0,
     inter_turn_delay_ms: float = 0.0,
+    accumulate_session_deltas: bool = False,
     model_name: Optional[str] = None,
     sla_ttft_ms: Optional[float] = None,
     sla_itl_ms: Optional[float] = None,
