@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Metrics review
 
 Review the metrics, log events, and trace spans that the proposed change adds or modifies, and
-check them against the [metrics guidelines](../../.ai/metrics-guidelines.md). The guidelines own
+check them against the [metrics guidelines](metrics-guidelines.md). The guidelines own
 the rules; cite their IDs, such as **N2**, in every finding. Read the diff and enough surrounding
 code to establish each metric's exported name, type, labels, and the code that registers and
 updates it. Apply the checks to any area of the repository that the change touches.

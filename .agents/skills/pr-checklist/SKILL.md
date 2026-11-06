@@ -57,7 +57,7 @@ Exclude tests, documentation, comments, and whitespace from this count, as they 
 - Rust: the `graham-code-review` skill
 - Python: [Python guidelines](../../../.ai/python-guidelines.md)
 - Tests: [pytest guidelines](../../../.ai/pytest-guidelines.md) and [test model size guardrails](../../../.ai/test-model-size-guardrails.md)
-- Metrics, logs, and traces: [metrics guidelines](../../../.ai/metrics-guidelines.md) and the [metrics review prompt](../../../.github/review-prompts/metrics.md)
+- Metrics, logs, and traces: [metrics guidelines](../../../.ai/metrics-guidelines.md) and the [metrics review prompt](../../../.ai/metrics-review.md)
 - Docs, examples, and recipes: the `dynamo-docs` skill
 - Any directory: its nearest `AGENTS.md`
 

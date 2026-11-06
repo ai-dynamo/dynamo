@@ -56,7 +56,8 @@ unconditional requirement for unrelated changes.
 
 ## Metrics review prompt
 
-The [metrics](metrics.md) prompt is not a codeowner prompt. It applies the
+The [metrics](../../.ai/metrics-review.md) prompt lives with the agent guidelines in
+`.ai/` because it applies across codeowner areas and review tools. It applies the
 [metrics guidelines](../../.ai/metrics-guidelines.md) to the metrics, log events, and
 trace spans that a change adds or modifies, in any area of the repository. Its checks
 come from that written policy rather than from review history, and each one cites the
