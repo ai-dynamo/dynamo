@@ -8,8 +8,8 @@ use serde::Deserialize;
 
 use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
 use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
-use dynamo_multimodal::BlockExtraInfo;
 
 use super::error::SelectionError;
 

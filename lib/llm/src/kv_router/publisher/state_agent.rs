@@ -2112,7 +2112,7 @@ mod tests {
                 let RawKvEvent::BlockStored { token_ids, .. } = event else {
                     panic!("expected store");
                 };
-                token_ids.fill(dynamo_multimodal::MM_PAD_SHIFT_VALUE as u32);
+                token_ids.fill(dynamo_kv_hashing::multimodal::MM_PAD_SHIFT_VALUE as u32);
             }
             let normalized = normalize_raw_batch(
                 events,

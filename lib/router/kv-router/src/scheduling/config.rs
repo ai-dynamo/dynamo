@@ -1487,8 +1487,8 @@ mod tests {
     }
 
     use super::*;
+    use dynamo_kv_hashing::multimodal::{BlockExtraInfo, BlockMmObjectInfo};
     use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
-    use dynamo_multimodal::{BlockExtraInfo, BlockMmObjectInfo};
     use dynamo_router_protocol::identity::RoutingPartitionRef;
     use std::collections::HashMap;
 

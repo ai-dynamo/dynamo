@@ -8,8 +8,8 @@
 
 use crate::kv_hints::{KvTransferSourceChoice, WorkerKvTransferKeys, WorkerKvTransferKeysExt};
 use dynamo_kv_events::event::RouterEvent;
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 use dynamo_kv_hints::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
-use dynamo_multimodal::BlockExtraInfo;
 use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 use dynamo_tokens::Token;
 use serde::{Deserialize, Serialize};

@@ -397,7 +397,7 @@ async fn image_routing_requests(model: &str, block_size: u32) -> Vec<Preprocesse
             .await
             .expect("preprocess the image through the production frontend");
         let reference = routing_reference(&request);
-        let pad = dynamo_multimodal::pad_value_for_mm_hash(
+        let pad = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(
             u64::from_str_radix(&reference.mm_hash, 16).unwrap(),
         );
         let last_image = reference

@@ -6,7 +6,7 @@ use serde::Deserializer;
 use serde::Serialize;
 use serde::de::IgnoredAny;
 
-use dynamo_multimodal::BlockExtraInfo;
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]

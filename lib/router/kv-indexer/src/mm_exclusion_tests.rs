@@ -15,8 +15,8 @@ use dynamo_kv_events::placement::PlacementEvent;
 use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_events::zmq_wire::{RawKvEvent, ZmqEventNormalizer, decode_event_batch};
 use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
-use dynamo_multimodal::pad_value_for_mm_hash;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 use crate::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;

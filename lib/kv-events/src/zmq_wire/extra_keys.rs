@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_multimodal::{BlockExtraInfo, BlockMmObjectInfo, parse_mm_hash_from_extra_key};
+use dynamo_kv_hashing::multimodal::{
+    BlockExtraInfo, BlockMmObjectInfo, parse_mm_hash_from_extra_key,
+};
 
 use super::types::ExtraKeyItem;
 

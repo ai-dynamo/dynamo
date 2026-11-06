@@ -19,7 +19,7 @@
 
 use rustc_hash::FxHashSet;
 
-use dynamo_multimodal::MM_PAD_SHIFT_VALUE;
+use dynamo_kv_hashing::multimodal::MM_PAD_SHIFT_VALUE;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 use crate::event::KvCacheEventData;

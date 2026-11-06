@@ -4,9 +4,9 @@
 use std::collections::HashSet;
 
 use dynamo_admission::host::QueueRejection;
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 use dynamo_kv_hints::KvHint;
 use dynamo_kv_indexer::host::RoutingDecisionHashes;
-use dynamo_multimodal::BlockExtraInfo;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 use dynamo_scheduler::host::{

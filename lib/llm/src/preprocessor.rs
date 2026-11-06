@@ -1215,7 +1215,7 @@ fn append_mm_routing_replacement(
     image: MmImageEntry,
     num_image_tokens: usize,
 ) -> Result<()> {
-    let fill_token = dynamo_multimodal::pad_value_for_mm_hash(image.mm_hash);
+    let fill_token = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(image.mm_hash);
 
     append_mm_routing_replacement_with_fill(
         expanded,
@@ -1283,10 +1283,10 @@ fn apply_tracked_mm_replacements(
 ) -> Result<(
     Vec<TokenIdType>,
     usize,
-    Vec<Option<dynamo_multimodal::BlockExtraInfo>>,
+    Vec<Option<dynamo_kv_hashing::multimodal::BlockExtraInfo>>,
 )> {
     use dynamo_kv_events::zmq_wire::{normalize_mm_placeholder_runs, normalize_mm_token_runs};
-    use dynamo_multimodal::{BlockExtraInfo, BlockMmObjectInfo};
+    use dynamo_kv_hashing::multimodal::{BlockExtraInfo, BlockMmObjectInfo};
 
     anyhow::ensure!(block_size > 0, "MM routing block size must be positive");
     anyhow::ensure!(
@@ -5042,7 +5042,8 @@ impl OpenAIPreprocessor {
                         target_tokens,
                         replacement_tokens,
                     } => {
-                        let fill_token = dynamo_multimodal::pad_value_for_mm_hash(*mm_hash);
+                        let fill_token =
+                            dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(*mm_hash);
                         TrackedMmRoutingReplacement {
                             mm_hash: *mm_hash,
                             target_tokens: target_tokens.clone(),
@@ -13651,7 +13652,7 @@ responses_tools: None,
             width: 320,
             height: 240,
         };
-        let fill = dynamo_multimodal::pad_value_for_mm_hash(image.mm_hash);
+        let fill = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(image.mm_hash);
         let dimension_ids: Vec<TokenIdType> = "image 320x240"
             .bytes()
             .map(|byte| 1000 + u32::from(byte))
@@ -13680,7 +13681,7 @@ responses_tools: None,
             width: 320,
             height: 240,
         };
-        let fill = dynamo_multimodal::pad_value_for_mm_hash(image.mm_hash);
+        let fill = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(image.mm_hash);
         let mut expanded = vec![7];
 
         append_mm_routing_replacement(
@@ -13715,7 +13716,7 @@ responses_tools: None,
             width: 224,
             height: 224,
         };
-        let fill = dynamo_multimodal::pad_value_for_mm_hash(image.mm_hash);
+        let fill = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(image.mm_hash);
         let mut expanded = vec![7];
 
         append_mm_routing_replacement(&mut expanded, &tokenizer, layout, image, 3).unwrap();
@@ -13909,8 +13910,8 @@ responses_tools: None,
                 height: 480,
             },
         ];
-        let first_fill = dynamo_multimodal::pad_value_for_mm_hash(images[0].mm_hash);
-        let second_fill = dynamo_multimodal::pad_value_for_mm_hash(images[1].mm_hash);
+        let first_fill = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(images[0].mm_hash);
+        let second_fill = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(images[1].mm_hash);
 
         let (expanded, prompt_len) = expand_mm_routing_tokens(
             &tokenizer,
@@ -20227,7 +20228,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn tracked_video_boundary_uses_native_metadata_only_when_needed() {
-        use dynamo_multimodal::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let video_token_id = 100;
         let mm_hash = 41;
@@ -20260,7 +20261,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn tracked_video_boundary_matches_token_only_worker_contract() {
-        use dynamo_multimodal::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let video_token_id = 100;
         let mm_hash = 41;
@@ -20321,7 +20322,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn tracked_mixed_boundary_preserves_worker_hash_fallback() {
-        use dynamo_multimodal::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let image_token_id = 99;
         let video_token_id = 100;
@@ -20389,7 +20390,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn tracked_mixed_token_only_boundary_preserves_canonical_pads() {
-        use dynamo_multimodal::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let image_token_id = 99;
         let video_token_id = 100;
@@ -20433,7 +20434,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn tracked_replacements_preserve_image_video_image_order() {
-        use dynamo_multimodal::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let image_token_id = 99;
         let video_token_id = 100;
@@ -20513,7 +20514,7 @@ responses_tools: None,
     #[cfg(feature = "mm-routing")]
     #[test]
     fn shared_placeholder_video_matches_legacy_worker_normalization() {
-        use dynamo_multimodal::pad_value_for_mm_hash;
+        use dynamo_kv_hashing::multimodal::pad_value_for_mm_hash;
 
         let mm_hash = 41;
         let pad = pad_value_for_mm_hash(mm_hash);

@@ -13,7 +13,6 @@ members = [
     "lib/kv-hashing",
     "lib/mocker",
     "lib/kv-events",
-    "lib/multimodal",
     "lib/router/admission",
     "lib/router/kv-hints",
     "lib/router/kv-indexer",
@@ -96,7 +95,6 @@ dynamo-admission = { path = "lib/router/admission", version = "1.7.0" }
 dynamo-kv-events = { path = "lib/kv-events", version = "1.7.0" }
 dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.7.0" }
 dynamo-kv-hints = { path = "lib/router/kv-hints", version = "1.7.0" }
-dynamo-multimodal = { path = "lib/multimodal", version = "1.7.0" }
 dynamo-kv-indexer = { path = "lib/router/kv-indexer", version = "1.7.0" }
 dynamo-global-common = { path = "lib/global-common", version = "1.7.0" }
 dynamo-global-router = { path = "lib/global-router", version = "1.7.0" }

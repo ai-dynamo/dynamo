@@ -100,7 +100,6 @@ dynamo-admission = { path = "../../router/admission" }
 dynamo-kv-events = { path = "../../kv-events" }
 dynamo-kv-hashing = { path = "../../kv-hashing" }
 dynamo-kv-indexer = { path = "../../router/kv-indexer" }
-dynamo-multimodal = { path = "../../multimodal" }
 dynamo-router-protocol = { path = "../../router/protocol" }
 dynamo-scheduler = { path = "../../router/scheduler" }
 dynamo-worker-selection = { path = "../../router/worker-selection" }

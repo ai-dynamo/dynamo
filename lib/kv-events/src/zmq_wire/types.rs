@@ -4,7 +4,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-use dynamo_multimodal::BlockExtraInfo;
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 
 use super::filter::{KvCacheEventMetadata, KvCacheSpecKind};
 

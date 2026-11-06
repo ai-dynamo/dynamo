@@ -47,7 +47,6 @@ tracing = { workspace = true }
 xxhash-rust = { workspace = true }
 
 [dev-dependencies]
-dynamo-multimodal = { workspace = true }
 dynamo-router-protocol = { workspace = true, features = ["testing"] }
 criterion = "0.5"
 rmp-serde = { workspace = true }

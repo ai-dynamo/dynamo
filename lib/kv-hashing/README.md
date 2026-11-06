@@ -4,6 +4,8 @@ Universal `Request → Vec<PositionalLineageHash>` contract for KV cache identit
 
 This crate is **pure computation**: a library, not a service. No async, no transports, no traits over runtime/scheduler config, no event types. Those concerns belong in higher layers.
 
+The `multimodal` module is the multimodal identity both ends of the wire compute: the per-block and per-request metadata (`BlockMmObjectInfo`, `BlockExtraInfo`, `RequestExtraInfo` and its `to_block_level` split), the pad and identifier rules (`hash_mm_identifier`, `pad_value_for_mm_hash`, `MM_PAD_SHIFT_VALUE`, `MM_PAD_HASH_MASK`, pinned to SGLang's `MultimodalItem._compute_pad_value`), and the vLLM `extra_keys` marker (`mark_mm_hash_for_extra_key`, `parse_mm_hash_from_extra_key`); `routing` folds `BlockExtraInfo` into the block hash, `dynamo-kv-events` parses the marker back out of vLLM extra keys, and consumers name the module in full (`dynamo_kv_hashing::multimodal::BlockExtraInfo`) since the crate root re-exports none of it.
+
 ---
 
 ## 1. The three-representation problem

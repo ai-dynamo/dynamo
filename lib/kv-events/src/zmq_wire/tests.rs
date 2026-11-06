@@ -11,8 +11,8 @@ use crate::event::KvCacheEventData;
 use crate::placement::{PlacementEvent, PlacementOwner};
 use crate::residency::StorageTier;
 use dynamo_kv_hashing::ExternalSequenceBlockHash;
+use dynamo_kv_hashing::multimodal::{BlockExtraInfo, BlockMmObjectInfo};
 use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
-use dynamo_multimodal::{BlockExtraInfo, BlockMmObjectInfo};
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 use super::filter::KvCacheSpecKind;
@@ -31,8 +31,8 @@ fn trtllm_digest_first_images_match_frontend_hashes_across_blocks() {
         "trtllm_image_routing": {"version": 1, "token_id_offset": 1000}
     });
     let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
-    let a = dynamo_multimodal::pad_value_for_mm_hash(0x0123456789abcdef);
-    let b = dynamo_multimodal::pad_value_for_mm_hash(0xfedcba9876543210);
+    let a = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(0x0123456789abcdef);
+    let b = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(0xfedcba9876543210);
     let expected =
         compute_block_hash_for_seq(&[1, a, a, a, a, 9, b, b], 4, BlockHashOptions::default());
     let placement = ZmqEventNormalizer::new(4)
@@ -157,7 +157,7 @@ fn trtllm_mapped_integer_continuation_uses_sibling_keys() {
     assert!(parent_block_hash.is_some());
     assert_eq!(
         token_ids,
-        vec![dynamo_multimodal::pad_value_for_mm_hash(0x0123456789abcdef); 2]
+        vec![dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(0x0123456789abcdef); 2]
     );
 }
 

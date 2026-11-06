@@ -253,7 +253,7 @@ mod tests {
     use zeroize::Zeroize;
 
     use super::*;
-    use dynamo_multimodal::{BlockExtraInfo, BlockMmObjectInfo};
+    use dynamo_kv_hashing::multimodal::{BlockExtraInfo, BlockMmObjectInfo};
 
     /// A keyed configuration from raw key bytes, no file involved; the first element keeps the
     /// `(_guard, config)` destructuring the vector tests share with the flat-config tests.

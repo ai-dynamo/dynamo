@@ -14,7 +14,6 @@ description = "vLLM client format for Dynamo /generate"
 [dependencies]
 dynamo-kv-events = { workspace = true }
 dynamo-kv-hashing = { workspace = true }
-dynamo-multimodal = { workspace = true }
 tracing = { workspace = true }
 dynamo-llm = { workspace = true }
 anyhow = { workspace = true }

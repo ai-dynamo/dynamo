@@ -6,12 +6,12 @@
 //! Engines publish [`ExternalSequenceBlockHash`](crate::ExternalSequenceBlockHash)
 //! values they computed themselves; the router recomputes the same identities from the request's
 //! tokens with these functions so the two sides agree. The seed and the way a block's multimodal
-//! metadata (`dynamo_multimodal::BlockExtraInfo`) folds into its bytes are part of that contract;
-//! the pad and identifier rules are `dynamo_multimodal`'s. Nothing in this module reads
-//! configuration or performs IO.
+//! metadata ([`crate::multimodal::BlockExtraInfo`]) folds into its bytes are part of that
+//! contract; the pad and identifier rules are [`crate::multimodal`]'s. Nothing in this module
+//! reads configuration or performs IO.
 
 use crate::block_hash::LocalBlockHash;
-use dynamo_multimodal::BlockExtraInfo;
+use crate::multimodal::BlockExtraInfo;
 use dynamo_tokens::{SequenceHash, compute_hash_v2, compute_next_sequence_hash};
 use xxhash_rust::xxh3;
 
@@ -394,7 +394,7 @@ impl TokensWithHashes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_multimodal::BlockMmObjectInfo;
+    use crate::multimodal::BlockMmObjectInfo;
     use rstest::rstest;
 
     #[rstest]

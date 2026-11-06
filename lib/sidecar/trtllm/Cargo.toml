@@ -53,6 +53,5 @@ tonic-build = { workspace = true }
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 dynamo-kv-hashing = { workspace = true }
-dynamo-multimodal = { workspace = true }
 dynamo-router-protocol = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }

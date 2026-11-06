@@ -19,12 +19,12 @@ use crate::plugins::worker_selection::SelectionConfig;
 use crate::plugins::{RouterPluginRegistry, WorkerSelectionPolicyProviderError};
 use crate::tracking_hash::tracking_hash_context;
 use dynamo_kv_events::residency::StorageTier;
+use dynamo_kv_hashing::multimodal::{BlockExtraInfo, BlockMmObjectInfo};
 use dynamo_kv_hashing::routing::{
     BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 use dynamo_kv_indexer::overlap::OverlapScores;
 use dynamo_kv_indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
-use dynamo_multimodal::{BlockExtraInfo, BlockMmObjectInfo};
 use dynamo_router_protocol::identity::RoutingPartitionRef;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{

@@ -22,11 +22,11 @@ use crate::{
     },
 };
 use dynamo_admission::host::AbortCause;
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 use dynamo_kv_hashing::routing::{
     BlockHashOptions, compute_block_hash_for_seq, compute_next_seq_hash,
 };
 use dynamo_kv_indexer::host::{ApproximateAcquireMode, ApproximateLruBlock, RoutingDecisionHashes};
-use dynamo_multimodal::BlockExtraInfo;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     error::DynamoError,
@@ -1064,8 +1064,8 @@ mod output_block_tests {
 #[cfg(test)]
 mod output_hash_tests {
     use super::*;
+    use dynamo_kv_hashing::multimodal::BlockMmObjectInfo;
     use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
-    use dynamo_multimodal::BlockMmObjectInfo;
 
     fn direct_blocks(
         tokens: &[u32],

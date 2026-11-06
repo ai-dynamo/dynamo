@@ -18,8 +18,8 @@ use crate::overlap_summary::MooncakeOverlapSummary;
 use crate::protocols::{RoutingConstraints, WorkerConfigLike};
 pub use crate::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
 use crate::{PotentialLoad, SessionContext, WorkerSelectionInputTrigger};
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 use dynamo_kv_hints::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
-use dynamo_multimodal::BlockExtraInfo;
 use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 use dynamo_session_affinity::WorkerAffinityTarget;
 

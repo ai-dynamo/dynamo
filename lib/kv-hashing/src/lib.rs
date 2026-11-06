@@ -18,11 +18,15 @@
 //!
 //! The block hash identities the router and engines exchange, [`LocalBlockHash`] and
 //! [`ExternalSequenceBlockHash`], live here beside the functions that compute them.
+//! The multimodal identity both ends of the wire compute (per-block and per-request
+//! metadata, the pad and identifier rules, the vLLM extra-key marker) is the [`multimodal`]
+//! module; consumers name it in full, the root re-exports none of it.
 
 mod block;
 mod block_hash;
 mod compute;
 mod error;
+pub mod multimodal;
 mod request;
 pub mod routing;
 mod salt;

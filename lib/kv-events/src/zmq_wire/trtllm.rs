@@ -155,5 +155,5 @@ fn key_pad(key: &MediaKey) -> Option<u32> {
         return None;
     }
     let hash = u64::from_str_radix(hash, 16).ok()?;
-    Some(dynamo_multimodal::pad_value_for_mm_hash(hash))
+    Some(dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(hash))
 }

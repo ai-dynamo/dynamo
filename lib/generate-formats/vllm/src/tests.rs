@@ -127,14 +127,18 @@ fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
     });
     let preprocessed = project(&raw, &routing_metadata(4, false, None));
 
-    let hash_a =
-        dynamo_multimodal::hash_mm_identifier(&preprocessed_mm_identifier("image", b"opaque-a"))
-            .expect("content-derived hash");
-    let hash_b =
-        dynamo_multimodal::hash_mm_identifier(&preprocessed_mm_identifier("image", b"opaque-b"))
-            .expect("content-derived hash");
-    let pad_a = dynamo_multimodal::pad_value_for_mm_hash(hash_a);
-    let pad_b = dynamo_multimodal::pad_value_for_mm_hash(hash_b);
+    let hash_a = dynamo_kv_hashing::multimodal::hash_mm_identifier(&preprocessed_mm_identifier(
+        "image",
+        b"opaque-a",
+    ))
+    .expect("content-derived hash");
+    let hash_b = dynamo_kv_hashing::multimodal::hash_mm_identifier(&preprocessed_mm_identifier(
+        "image",
+        b"opaque-b",
+    ))
+    .expect("content-derived hash");
+    let pad_a = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(hash_a);
+    let pad_b = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(hash_b);
     let mm = preprocessed
         .mm_routing_info
         .as_ref()
@@ -255,10 +259,11 @@ fn sparse_and_ambiguous_multimodal_layouts_are_handled() {
     let routing = generate_mm_routing_info(&request, 5)
         .expect("valid sparse MM routing metadata")
         .expect("MM routing projection");
-    let mm_hash =
-        dynamo_multimodal::hash_mm_identifier(&preprocessed_mm_identifier("image", b"sparse"))
-            .expect("content-derived identifier");
-    let pad = dynamo_multimodal::pad_value_for_mm_hash(mm_hash);
+    let mm_hash = dynamo_kv_hashing::multimodal::hash_mm_identifier(&preprocessed_mm_identifier(
+        "image", b"sparse",
+    ))
+    .expect("content-derived identifier");
+    let pad = dynamo_kv_hashing::multimodal::pad_value_for_mm_hash(mm_hash);
     assert_eq!(routing.info.routing_token_ids, vec![10, pad, 42, pad, 20]);
 
     for (name, token_ids, features, expected_error) in [

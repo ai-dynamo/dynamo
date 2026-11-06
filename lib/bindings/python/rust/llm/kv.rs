@@ -25,6 +25,7 @@ use clap::Parser;
 use dynamo_kv_events::event::{
     KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, RouterEvent,
 };
+use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 use dynamo_kv_hashing::routing::{BlockHashOptions, TokensWithHashes, compute_block_hash_for_seq};
 use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_kv_router::config::KvRouterConfig;
@@ -40,7 +41,6 @@ use dynamo_kv_router::services::selection::{
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
-use dynamo_multimodal::BlockExtraInfo;
 #[cfg(feature = "select-service")]
 use dynamo_router_protocol::WorkerType;
 use dynamo_router_protocol::worker::{DpRank, WorkerId};

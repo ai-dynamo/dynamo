@@ -56,7 +56,6 @@ areas:
   - components/src/dynamo/router/
   - components/src/dynamo/thunderagent_router/
   - lib/kv-events/
-  - lib/multimodal/
   - lib/kv-events/src/zmq_wire/
   - lib/router/
   - lib/router/admission/
@@ -1109,10 +1108,11 @@ shared:
   owners:
   - router
   - multimodal
-- glob: lib/multimodal/
+- glob: lib/kv-hashing/src/multimodal/
   owners:
   - router
   - multimodal
+  - kv-memory
 - glob: lib/kvbm-config/src/messenger.rs
   owners:
   - kv-memory
