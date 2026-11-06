@@ -262,6 +262,8 @@ pub struct IndexerQueryRequest {
     /// `false`, preserving the full tiered response.
     #[serde(default)]
     pub device_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_reusable_blocks: Option<usize>,
 }
 
 /// Wire-friendly overlap scores for JSON serialization.
@@ -333,6 +335,9 @@ impl From<WireLowerTierMatchDetails> for super::lower_tier::LowerTierMatchDetail
 pub struct WireTieredMatchDetails {
     pub device: WireOverlapScores,
     pub lower_tier: Vec<(StorageTier, WireLowerTierMatchDetails)>,
+    /// Confirmed device resume caps, including zero for known hybrid workers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hybrid_resume_caps: Vec<(WorkerWithDpRank, u32)>,
 }
 
 /// Response from a served KV indexer query.
@@ -450,6 +455,8 @@ pub struct MatchDetails {
     pub last_matched_hashes: FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>,
     /// Optional root-aligned device candidates used to build compact KV transfer hints.
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
+    /// Confirmed device resume caps, including zero for known hybrid workers.
+    pub hybrid_resume_caps: FxHashMap<WorkerWithDpRank, u32>,
 }
 
 impl MatchDetails {

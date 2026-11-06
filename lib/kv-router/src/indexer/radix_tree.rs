@@ -13,7 +13,7 @@ use std::{
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use super::compressed_radix::{NodeState, append_dump_events};
-use super::{EventWarningKind, MatchDetails, PreBoundEventCounters};
+use super::{EventWarningKind, MatchDetails, MatchObserver, PreBoundEventCounters};
 use crate::protocols::*;
 
 pub(crate) type SharedRadixBlock = Rc<RefCell<RadixBlock>>;
@@ -153,6 +153,31 @@ impl RadixTree {
         early_exit: bool,
         retain_kv_transfer_chain: bool,
     ) -> MatchDetails {
+        self.find_match_details_observing(sequence, early_exit, retain_kv_transfer_chain, None)
+    }
+
+    pub fn find_match_details_with_observer(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+        early_exit: bool,
+        retain_kv_transfer_chain: bool,
+        observer: &mut dyn MatchObserver,
+    ) -> MatchDetails {
+        self.find_match_details_observing(
+            sequence,
+            early_exit,
+            retain_kv_transfer_chain,
+            Some(observer),
+        )
+    }
+
+    fn find_match_details_observing(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+        early_exit: bool,
+        retain_kv_transfer_chain: bool,
+        mut observer: Option<&mut dyn MatchObserver>,
+    ) -> MatchDetails {
         let mut details = MatchDetails::new();
         if sequence.is_empty() {
             return details;
@@ -173,14 +198,38 @@ impl RadixTree {
             };
             let node = node.borrow();
             let walk_len = node.state.edge.len().min(sequence.len() - seq_pos);
-            let edge_match_len = node
-                .state
-                .edge
-                .iter()
-                .take(walk_len)
-                .zip(&sequence[seq_pos..])
-                .take_while(|((local_hash, _), query_hash)| local_hash == *query_hash)
-                .count();
+            let edge_match_len = if let Some(observer) = observer.as_deref_mut() {
+                if first_node {
+                    observer.reserve_workers(
+                        node.state.full_edge_workers.len() + node.state.worker_cutoffs.len(),
+                    );
+                    for &worker in &node.state.full_edge_workers {
+                        observer.observe_worker(worker);
+                    }
+                    for &worker in node.state.worker_cutoffs.keys() {
+                        observer.observe_worker(worker);
+                    }
+                }
+                let mut matched = 0;
+                for (offset, &(local_hash, external_hash)) in
+                    node.state.edge.iter().take(walk_len).enumerate()
+                {
+                    if local_hash != sequence[seq_pos + offset] {
+                        break;
+                    }
+                    observer.observe_block(seq_pos + offset + 1, external_hash);
+                    matched += 1;
+                }
+                matched
+            } else {
+                node.state
+                    .edge
+                    .iter()
+                    .take(walk_len)
+                    .zip(&sequence[seq_pos..])
+                    .take_while(|((local_hash, _), query_hash)| local_hash == *query_hash)
+                    .count()
+            };
 
             if edge_match_len == 0 {
                 break;

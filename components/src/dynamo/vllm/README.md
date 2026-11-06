@@ -47,3 +47,13 @@ reuse requires all recurrent groups at a common checkpoint in the restoring tier
 Only published checkpoint events create presence: reaching an attention boundary
 does not imply an SSM checkpoint was retained, including during decode under
 sparse checkpoint-retention policies.
+
+The router maintains complete-group membership when events arrive. During an
+attention lookup it checks those memberships at each matched logical block; it
+does not scan backward through every boundary for each worker. The original
+attention matches remain available while a feasible GPU checkpoint seeds the
+continuous host, disk, and external-tier walks. After those walks and prediction
+merges, one evaluator selects the final resume boundary and splits credit across
+the tiers. Transfer hints also require a checkpoint belonging to their exact
+source and restoring tier. Remote replies carry device resume caps so a caller's
+prediction overlay cannot restore rejected hybrid credit.

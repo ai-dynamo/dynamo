@@ -111,3 +111,6 @@ name = "selection_core"
 harness = false
 required-features = ["standalone-selection", "bench"]
 
+[[example]]
+name = "hybrid_lookup"
+required-features = ["standalone-indexer"]

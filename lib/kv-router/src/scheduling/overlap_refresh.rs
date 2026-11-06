@@ -73,6 +73,14 @@ pub trait OverlapScoresRefresh: Send + Sync {
         block_hashes: &[LocalBlockHash],
         retain_kv_transfer_chain: bool,
     ) -> Option<RefreshedOverlap>;
+    async fn refresh_with_limit(
+        &self,
+        block_hashes: &[LocalBlockHash],
+        retain_kv_transfer_chain: bool,
+        _max_reusable_blocks: Option<usize>,
+    ) -> Option<RefreshedOverlap> {
+        self.refresh(block_hashes, retain_kv_transfer_chain).await
+    }
 }
 
 pub struct TieredOverlapRefresher<P> {
@@ -98,6 +106,16 @@ impl<P: TieredMatchProvider> OverlapScoresRefresh for TieredOverlapRefresher<P> 
         block_hashes: &[LocalBlockHash],
         retain_kv_transfer_chain: bool,
     ) -> Option<RefreshedOverlap> {
+        self.refresh_with_limit(block_hashes, retain_kv_transfer_chain, None)
+            .await
+    }
+
+    async fn refresh_with_limit(
+        &self,
+        block_hashes: &[LocalBlockHash],
+        retain_kv_transfer_chain: bool,
+        max_reusable_blocks: Option<usize>,
+    ) -> Option<RefreshedOverlap> {
         if block_hashes.is_empty() {
             return None;
         }
@@ -107,6 +125,7 @@ impl<P: TieredMatchProvider> OverlapScoresRefresh for TieredOverlapRefresher<P> 
                 block_hashes,
                 LowerTierQueryOptions {
                     retain_kv_transfer_chain,
+                    max_reusable_blocks,
                 },
             )
             .await
@@ -201,6 +220,7 @@ pub async fn refresh_overlap<RF: OverlapScoresRefresh + ?Sized>(
     refresh_after: Option<Duration>,
     block_hashes: Option<&[LocalBlockHash]>,
     retain_kv_transfer_chain: bool,
+    max_reusable_blocks: Option<usize>,
     enqueue_at: tokio::time::Instant,
     now: tokio::time::Instant,
 ) -> Option<RefreshedOverlap> {
@@ -214,7 +234,7 @@ pub async fn refresh_overlap<RF: OverlapScoresRefresh + ?Sized>(
         return None;
     }
     refresher?
-        .refresh(block_hashes?, retain_kv_transfer_chain)
+        .refresh_with_limit(block_hashes?, retain_kv_transfer_chain, max_reusable_blocks)
         .await
 }
 
@@ -331,6 +351,7 @@ mod tests {
                 Some(Duration::from_secs(10)),
                 Some(&hashes),
                 false,
+                None,
                 enqueue_at,
                 now,
             )

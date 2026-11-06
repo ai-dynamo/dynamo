@@ -123,6 +123,7 @@ mod tests {
                 overlap_scores: device,
                 last_matched_hashes: Default::default(),
                 kv_transfer_candidates: None,
+                hybrid_resume_caps: Default::default(),
             },
             lower_tier: HashMap::from([(StorageTier::HostPinned, host), (StorageTier::Disk, disk)]),
         };

@@ -5,13 +5,15 @@
 //! from confirmed primary matches, and the predict-on-route side overlay.
 
 use crate::indexer::{
-    KvIndexer, KvRouterError, LowerTierIndexers, LowerTierQueryOptions, MatchDetails,
-    TieredMatchDetails, query_lower_tiers_with_options,
+    KvCacheGroupResidency, KvIndexer, KvRouterError, LowerTierIndexers, LowerTierQueryOptions,
+    MatchDetails, TieredMatchDetails, query_lower_tiers_with_hybrid,
+    query_lower_tiers_with_options,
 };
 use crate::protocols::{LocalBlockHash, OverlapScores};
 use crate::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
 
 use super::backend::{Indexer, RemotePrimary, SideIndexer};
+use crate::indexer::hybrid_prefix::{HybridPrefixEvaluator, cap_side_overlay};
 
 /// Block hashes for one lookup, borrowed when the caller keeps them and owned
 /// when it does not, so a borrowed query is copied only at the one boundary
@@ -46,6 +48,7 @@ pub(super) struct LookupPipeline<'a> {
     primary: PrimaryLookup<'a>,
     lower_tier: Option<&'a LowerTierIndexers>,
     side: Option<&'a SideIndexer>,
+    recurrent_layouts: Option<&'a KvCacheGroupResidency>,
 }
 
 #[derive(Clone, Copy)]
@@ -68,6 +71,7 @@ impl Indexer {
                 primary: PrimaryLookup::KvIndexer(primary),
                 lower_tier: Some(lower_tier),
                 side: approx.as_ref(),
+                recurrent_layouts: Some(lower_tier.group_residency()),
             },
             Self::Concurrent {
                 primary,
@@ -78,18 +82,24 @@ impl Indexer {
                 primary: PrimaryLookup::Concurrent(primary.as_ref()),
                 lower_tier: Some(lower_tier),
                 side: approx.as_ref(),
+                recurrent_layouts: Some(lower_tier.group_residency()),
             },
             Self::Remote {
-                primary, approx, ..
+                primary,
+                approx,
+                recurrent_layouts,
+                ..
             } => LookupPipeline {
                 primary: PrimaryLookup::Remote(primary.as_ref()),
                 lower_tier: None,
                 side: approx.as_ref(),
+                recurrent_layouts: Some(recurrent_layouts),
             },
             Self::None => LookupPipeline {
                 primary: PrimaryLookup::None,
                 lower_tier: None,
                 side: None,
+                recurrent_layouts: None,
             },
         }
     }
@@ -165,88 +175,205 @@ impl Indexer {
     }
 }
 
+impl Indexer {
+    pub async fn find_primary_match_details_with_limit(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+        max_blocks: Option<usize>,
+    ) -> Result<MatchDetails, KvRouterError> {
+        self.lookup_pipeline()
+            .primary_device(&HashInput::Owned(sequence), false, max_blocks, false)
+            .await
+    }
+    pub async fn find_primary_matches_by_tier_with_limit(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+        max_blocks: Option<usize>,
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        self.lookup_pipeline()
+            .local_tiered(
+                &HashInput::Owned(sequence),
+                LowerTierQueryOptions {
+                    retain_kv_transfer_chain: false,
+                    max_reusable_blocks: max_blocks,
+                },
+                false,
+            )
+            .await
+    }
+}
+
 impl<'a> LookupPipeline<'a> {
+    fn group_residency(&self) -> Option<&'a KvCacheGroupResidency> {
+        self.recurrent_layouts
+            .filter(|residency| residency.is_active())
+    }
+
+    async fn merge_side(&self, primary: MatchDetails, sequence: HashInput<'_>) -> MatchDetails {
+        if self.side.is_none() {
+            return primary;
+        }
+        let needs_cap = self.group_residency().is_some() || !primary.hybrid_resume_caps.is_empty();
+        if !needs_cap {
+            return merge_side_or_warn(self.side, primary, sequence).await;
+        }
+        let confirmed = primary.overlap_scores.scores.clone();
+        let mut merged = merge_side_or_warn(self.side, primary, sequence).await;
+        cap_side_overlay(self.group_residency(), &mut merged, &confirmed);
+        merged
+    }
+
     async fn find_match_details(
         &self,
         sequence: HashInput<'_>,
     ) -> Result<MatchDetails, KvRouterError> {
-        if self.side.is_none() {
-            return self.find_primary_match_details(sequence).await;
+        if self.side.is_none() && self.group_residency().is_none() {
+            return self.primary.find_match_details_owned(sequence).await;
         }
+        self.primary_device(&sequence, false, None, true).await
+    }
 
-        let primary_details = self.primary.find_match_details_retained(&sequence).await?;
-        Ok(merge_side_or_warn(self.side, primary_details, sequence).await)
+    async fn primary_device(
+        &self,
+        sequence: &HashInput<'_>,
+        retain: bool,
+        max_blocks: Option<usize>,
+        with_side: bool,
+    ) -> Result<MatchDetails, KvRouterError> {
+        let residency = self.group_residency().filter(|_| self.lower_tier.is_some());
+        let mut details = if let Some(residency) = residency {
+            let evaluator = HybridPrefixEvaluator::new(residency, max_blocks);
+            let (mut raw, mut evaluator) = self
+                .primary
+                .find_observed(sequence, retain, evaluator)
+                .await?;
+            evaluator.prepare_device(&raw);
+            if with_side {
+                raw = merge_side_or_warn(self.side, raw, HashInput::Borrowed(sequence.as_slice()))
+                    .await;
+            }
+            evaluator.finish(&mut raw, &mut Default::default(), &Default::default());
+            raw
+        } else {
+            let raw = self
+                .primary
+                .find_match_details_retained_with_options(sequence, retain, max_blocks)
+                .await?;
+            if with_side {
+                self.merge_side(raw, HashInput::Borrowed(sequence.as_slice()))
+                    .await
+            } else {
+                raw
+            }
+        };
+        if !retain {
+            details.kv_transfer_candidates = None;
+        }
+        Ok(details)
     }
 
     async fn find_primary_match_details(
         &self,
         sequence: HashInput<'_>,
     ) -> Result<MatchDetails, KvRouterError> {
-        self.primary.find_match_details(sequence).await
+        if self.group_residency().is_none() {
+            return self.primary.find_match_details_owned(sequence).await;
+        }
+        self.primary_device(&sequence, false, None, false).await
+    }
+
+    async fn local_tiered(
+        &self,
+        sequence: &HashInput<'_>,
+        options: LowerTierQueryOptions,
+        with_side: bool,
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        let Some(lower_tier) = self.lower_tier else {
+            return Ok(TieredMatchDetails::default());
+        };
+        let (mut device, lower) = if let Some(residency) = self.group_residency() {
+            let evaluator = HybridPrefixEvaluator::new(residency, options.max_reusable_blocks);
+            let (mut raw, mut evaluator) = self
+                .primary
+                .find_observed(sequence, options.retain_kv_transfer_chain, evaluator)
+                .await?;
+            let (mut lower, snapshot) = if lower_tier.is_empty() {
+                evaluator.prepare_device(&raw);
+                (Default::default(), None)
+            } else {
+                let anchor = evaluator.query_anchor(&raw);
+                let snapshot = lower_tier.routing_snapshot();
+                let lower = query_lower_tiers_with_hybrid(
+                    lower_tier,
+                    sequence.as_slice(),
+                    &anchor,
+                    options,
+                    snapshot.clone(),
+                    &mut evaluator,
+                );
+                (lower, Some(snapshot))
+            };
+            if with_side {
+                raw = merge_side_or_warn(self.side, raw, HashInput::Borrowed(sequence.as_slice()))
+                    .await;
+            }
+            evaluator.finish(
+                &mut raw,
+                &mut lower,
+                snapshot.as_deref().unwrap_or(&Default::default()),
+            );
+            (raw, lower)
+        } else {
+            let mut raw = self
+                .primary
+                .find_match_details_retained_with_options(
+                    sequence,
+                    options.retain_kv_transfer_chain,
+                    options.max_reusable_blocks,
+                )
+                .await?;
+            let lower =
+                query_lower_tiers_with_options(lower_tier, sequence.as_slice(), &raw, options);
+            if with_side {
+                raw = self
+                    .merge_side(raw, HashInput::Borrowed(sequence.as_slice()))
+                    .await;
+            }
+            (raw, lower)
+        };
+        if !options.retain_kv_transfer_chain {
+            device.kv_transfer_candidates = None;
+        }
+        Ok(TieredMatchDetails {
+            device,
+            lower_tier: lower,
+        })
     }
 
     async fn find_matches_by_tier(
         &self,
         sequence: HashInput<'_>,
-        lower_tier_options: LowerTierQueryOptions,
+        options: LowerTierQueryOptions,
     ) -> Result<TieredMatchDetails, KvRouterError> {
-        match self.primary {
+        let mut tiered = match self.primary {
             PrimaryLookup::KvIndexer(_) | PrimaryLookup::Concurrent(_) => {
-                let Some(lower_tier) = self.lower_tier else {
-                    return Ok(TieredMatchDetails::default());
-                };
-                // Seed lower-tier continuations from confirmed primary matches
-                // only. Predict-on-route side scores are unconfirmed; using
-                // them as lower-tier anchors would over-credit host/disk cache
-                // hits and break the score/hash lockstep `query_lower_tiers_with_options`
-                // expects.
-                let primary_device = self
-                    .primary
-                    .find_match_details_retained_with_options(
-                        &sequence,
-                        lower_tier_options.retain_kv_transfer_chain,
-                    )
-                    .await?;
-                let lt = query_lower_tiers_with_options(
-                    lower_tier,
-                    sequence.as_slice(),
-                    &primary_device,
-                    lower_tier_options,
-                );
-                let device = merge_side_or_warn(self.side, primary_device, sequence).await;
-
-                Ok(TieredMatchDetails {
-                    device,
-                    lower_tier: lt,
-                })
+                return self.local_tiered(&sequence, options, true).await;
             }
-            PrimaryLookup::Remote(primary) => {
-                if lower_tier_options.retain_kv_transfer_chain {
-                    tracing::warn!(
-                        "KV transfer chain retention is not supported with remote primary indexer; proceeding without KV transfer hints"
-                    );
-                }
-                let Some(side) = self.side else {
-                    return primary
-                        .find_matches_by_tier(sequence.into_owned_at_boundary(), false)
-                        .await
-                        .map_err(|e| {
-                            tracing::warn!(error = %e, "Remote indexer tiered query failed");
-                            KvRouterError::IndexerOffline
-                        });
-                };
-                let mut tiered = primary
-                    .find_matches_by_tier(sequence.clone_for_boundary(), false)
-                    .await
-                    .map_err(|e| {
-                        tracing::warn!(error = %e, "Remote indexer tiered query failed");
-                        KvRouterError::IndexerOffline
-                    })?;
-                tiered.device = merge_side_or_warn(Some(side), tiered.device, sequence).await;
-                Ok(tiered)
-            }
-            PrimaryLookup::None => Ok(TieredMatchDetails::default()),
-        }
+            PrimaryLookup::Remote(primary) => primary
+                .find_matches_by_tier_with_limit(
+                    sequence.clone_for_boundary(),
+                    false,
+                    options.max_reusable_blocks,
+                )
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "Remote indexer tiered query failed");
+                    KvRouterError::IndexerOffline
+                })?,
+            PrimaryLookup::None => return Ok(TieredMatchDetails::default()),
+        };
+        tiered.device = self.merge_side(tiered.device, sequence).await;
+        Ok(tiered)
     }
 
     async fn find_primary_matches_by_tier(
@@ -255,26 +382,14 @@ impl<'a> LookupPipeline<'a> {
     ) -> Result<TieredMatchDetails, KvRouterError> {
         match self.primary {
             PrimaryLookup::KvIndexer(_) | PrimaryLookup::Concurrent(_) => {
-                let Some(lower_tier) = self.lower_tier else {
-                    return Ok(TieredMatchDetails::default());
-                };
-                let device = self.primary.find_match_details_retained(&sequence).await?;
-                let lt = query_lower_tiers_with_options(
-                    lower_tier,
-                    sequence.as_slice(),
-                    &device,
-                    LowerTierQueryOptions::default(),
-                );
-                Ok(TieredMatchDetails {
-                    device,
-                    lower_tier: lt,
-                })
+                self.local_tiered(&sequence, LowerTierQueryOptions::default(), false)
+                    .await
             }
             PrimaryLookup::Remote(primary) => primary
                 .find_matches_by_tier(sequence.into_owned_at_boundary(), false)
                 .await
-                .map_err(|e| {
-                    tracing::warn!(error = %e, "Remote indexer tiered query failed");
+                .map_err(|error| {
+                    tracing::warn!(%error, "Remote indexer tiered query failed");
                     KvRouterError::IndexerOffline
                 }),
             PrimaryLookup::None => Ok(TieredMatchDetails::default()),
@@ -283,47 +398,62 @@ impl<'a> LookupPipeline<'a> {
 }
 
 impl<'a> PrimaryLookup<'a> {
-    async fn find_match_details(
+    async fn find_observed(
+        &self,
+        sequence: &HashInput<'_>,
+        retain: bool,
+        mut evaluator: HybridPrefixEvaluator,
+    ) -> Result<(MatchDetails, HybridPrefixEvaluator), KvRouterError> {
+        match self {
+            Self::KvIndexer(primary) => {
+                primary
+                    .find_match_details_with_observer(
+                        sequence.clone_for_boundary(),
+                        retain,
+                        evaluator,
+                    )
+                    .await
+            }
+            Self::Concurrent(primary) => {
+                let details = primary.backend().find_match_details_impl_with_observer(
+                    sequence.as_slice(),
+                    false,
+                    retain,
+                    &mut evaluator,
+                );
+                Ok((details, evaluator))
+            }
+            _ => unreachable!("only local primaries collect checkpoint evidence"),
+        }
+    }
+
+    async fn find_match_details_owned(
         &self,
         sequence: HashInput<'_>,
     ) -> Result<MatchDetails, KvRouterError> {
-        let primary_details = match self {
+        match self {
             Self::KvIndexer(primary) => {
                 primary
                     .find_match_details(sequence.into_owned_at_boundary())
-                    .await?
-            }
-            Self::Concurrent(primary) => primary
-                .backend()
-                .find_match_details_impl(sequence.as_slice(), false),
-            Self::Remote(primary) => {
-                let tiered = primary
-                    .find_matches_by_tier(sequence.into_owned_at_boundary(), true)
                     .await
-                    .map_err(|e| {
-                        tracing::warn!(error = %e, "Remote indexer query failed");
-                        KvRouterError::IndexerOffline
-                    })?;
-                tiered.device
             }
-            Self::None => return Ok(MatchDetails::new()),
-        };
-
-        Ok(primary_details)
-    }
-
-    async fn find_match_details_retained(
-        &self,
-        sequence: &HashInput<'_>,
-    ) -> Result<MatchDetails, KvRouterError> {
-        self.find_match_details_retained_with_options(sequence, false)
-            .await
+            Self::Concurrent(primary) => Ok(primary
+                .backend()
+                .find_match_details_impl(sequence.as_slice(), false)),
+            Self::Remote(primary) => primary
+                .find_matches_by_tier(sequence.into_owned_at_boundary(), true)
+                .await
+                .map(|tiered| tiered.device)
+                .map_err(|_| KvRouterError::IndexerOffline),
+            Self::None => Ok(MatchDetails::default()),
+        }
     }
 
     async fn find_match_details_retained_with_options(
         &self,
         sequence: &HashInput<'_>,
         retain_kv_transfer_chain: bool,
+        max_blocks: Option<usize>,
     ) -> Result<MatchDetails, KvRouterError> {
         let primary_details = match self {
             Self::KvIndexer(primary) => {
@@ -341,7 +471,11 @@ impl<'a> PrimaryLookup<'a> {
             ),
             Self::Remote(primary) => {
                 let tiered = primary
-                    .find_matches_by_tier(sequence.clone_for_boundary(), true)
+                    .find_matches_by_tier_with_limit(
+                        sequence.clone_for_boundary(),
+                        true,
+                        max_blocks,
+                    )
                     .await
                     .map_err(|e| {
                         tracing::warn!(error = %e, "Remote indexer query failed");
@@ -428,6 +562,7 @@ mod tests {
     use crate::indexer::{LowerTierIndexers, LowerTierQueryOptions};
     use crate::services::indexer::backend::Indexer;
     use crate::services::indexer::backend::test_util::store_event;
+    use crate::test_utils::recurrent_store as checkpoint;
     use crate::{
         ConcurrentRadixTreeCompressed, ThreadPoolIndexer,
         approx::PruneConfig,
@@ -522,6 +657,262 @@ mod tests {
             }
             Indexer::Remote { .. } | Indexer::None => {}
         }
+    }
+
+    #[tokio::test]
+    async fn device_only_hints_match_with_and_without_an_allocated_empty_lower_tier() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let sequence: Vec<_> = [11, 12, 13].into_iter().map(LocalBlockHash).collect();
+        let chain = compute_seq_hash_for_block(&sequence);
+        for concurrent in [false, true] {
+            for allocated in [false, true] {
+                let indexer = if concurrent {
+                    make_test_concurrent_indexer()
+                } else {
+                    make_test_indexer()
+                };
+                indexer.declare_recurrent_groups(worker, &[0]);
+                indexer
+                    .try_apply_event(store_event(
+                        7,
+                        0,
+                        1,
+                        &[],
+                        &[11, 12, 13],
+                        StorageTier::Device,
+                    ))
+                    .await
+                    .unwrap();
+                indexer
+                    .try_apply_event(checkpoint(worker, StorageTier::Device, chain[1], 0, 1))
+                    .await
+                    .unwrap();
+                if allocated {
+                    match &indexer {
+                        Indexer::Single { lower_tier, .. }
+                        | Indexer::Concurrent { lower_tier, .. } => {
+                            lower_tier.get_or_create(StorageTier::HostPinned);
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                flush_indexer(&indexer).await;
+
+                let result = indexer
+                    .find_matches_by_tier_with_options(
+                        sequence.clone(),
+                        LowerTierQueryOptions {
+                            retain_kv_transfer_chain: true,
+                            max_reusable_blocks: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(result.device.overlap_scores.scores.get(&worker), Some(&2));
+                assert_eq!(result.device.hybrid_resume_caps.get(&worker), Some(&2));
+                assert_eq!(
+                    result.device.last_matched_hashes.get(&worker),
+                    Some(&crate::protocols::ExternalSequenceBlockHash(chain[1]))
+                );
+                assert!(
+                    result
+                        .lower_tier
+                        .values()
+                        .all(|details| details.hits.values().all(|hits| *hits == 0))
+                );
+                let hints = result.kv_transfer_candidates().unwrap();
+                assert_eq!(
+                    hints.block_hashes,
+                    chain[..2]
+                        .iter()
+                        .copied()
+                        .map(crate::protocols::ExternalSequenceBlockHash)
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(hints.owner_prefix_blocks, vec![(worker.into(), 2)]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn hybrid_cumulative_cut_uses_one_boundary_for_host_and_disk() {
+        for disk_fills_gap in [false, true] {
+            let indexer = make_test_indexer();
+            let worker = WorkerWithDpRank::new(7, 0);
+            let sequence: Vec<_> = [11, 12, 13, 14, 15]
+                .into_iter()
+                .map(LocalBlockHash)
+                .collect();
+            let chain = compute_seq_hash_for_block(&sequence);
+            indexer
+                .try_apply_event(store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device))
+                .await
+                .unwrap();
+            indexer
+                .try_apply_event(store_event(
+                    7,
+                    0,
+                    2,
+                    &[11, 12],
+                    &[13, 14],
+                    StorageTier::HostPinned,
+                ))
+                .await
+                .unwrap();
+            indexer
+                .try_apply_event(store_event(
+                    7,
+                    0,
+                    3,
+                    &[11, 12, 13, 14],
+                    &[15],
+                    StorageTier::Disk,
+                ))
+                .await
+                .unwrap();
+            for (tier, pos) in [
+                (StorageTier::Device, 1),
+                (StorageTier::HostPinned, 2),
+                (StorageTier::Disk, 4),
+            ] {
+                indexer
+                    .try_apply_event(checkpoint(
+                        worker,
+                        tier,
+                        if tier == StorageTier::Disk && !disk_fills_gap {
+                            0xdead
+                        } else {
+                            chain[pos]
+                        },
+                        0,
+                        1,
+                    ))
+                    .await
+                    .unwrap();
+            }
+            flush_indexer(&indexer).await;
+            let result = indexer
+                .find_tiered_matches_with_options(
+                    sequence,
+                    LowerTierQueryOptions {
+                        retain_kv_transfer_chain: true,
+                        max_reusable_blocks: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let candidates = result
+                .kv_transfer_candidates()
+                .expect("host hints retained");
+            assert!(
+                candidates
+                    .owner_prefix_blocks
+                    .iter()
+                    .all(|(_, blocks)| *blocks <= 3),
+                "host-only hints need a host checkpoint"
+            );
+            assert!(
+                candidates
+                    .source_intervals
+                    .iter()
+                    .all(|interval| interval.end <= 3)
+            );
+            assert_eq!(result.device.overlap_scores.scores[&worker], 2);
+            assert_eq!(
+                result.lower_tier[&StorageTier::HostPinned].hits[&worker],
+                if disk_fills_gap { 2 } else { 1 }
+            );
+            assert_eq!(
+                result.lower_tier[&StorageTier::Disk]
+                    .hits
+                    .get(&worker)
+                    .copied()
+                    .unwrap_or(0),
+                if disk_fills_gap { 1 } else { 0 }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cpu_checkpoint_does_not_grant_device_credit_and_prompt_limit_survives_wrappers() {
+        let indexer = make_test_indexer();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let sequence: Vec<_> = [11, 12, 13].into_iter().map(LocalBlockHash).collect();
+        let chain = compute_seq_hash_for_block(&sequence);
+        for tier in [StorageTier::Device, StorageTier::HostPinned] {
+            indexer
+                .try_apply_event(store_event(7, 0, 1, &[], &[11, 12, 13], tier))
+                .await
+                .unwrap();
+        }
+        indexer.declare_recurrent_groups(worker, &[0, 1, 2]);
+        for group in [0, 1, 2] {
+            for hash in [chain[1], chain[2]] {
+                indexer
+                    .try_apply_event(checkpoint(worker, StorageTier::HostPinned, hash, group, 3))
+                    .await
+                    .unwrap();
+            }
+        }
+        flush_indexer(&indexer).await;
+        let uncapped = indexer.find_tiered_matches(sequence.clone()).await.unwrap();
+        assert!(!uncapped.device.overlap_scores.scores.contains_key(&worker));
+        assert_eq!(
+            uncapped.lower_tier[&StorageTier::HostPinned].hits[&worker],
+            3
+        );
+        for retain in [false, true] {
+            let result = indexer
+                .find_tiered_matches_with_options(
+                    sequence.clone(),
+                    LowerTierQueryOptions {
+                        retain_kv_transfer_chain: retain,
+                        max_reusable_blocks: Some(2),
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(!result.device.overlap_scores.scores.contains_key(&worker));
+            assert_eq!(result.lower_tier[&StorageTier::HostPinned].hits[&worker], 2);
+            if let Some(candidates) = result.kv_transfer_candidates() {
+                assert!(
+                    candidates
+                        .owner_prefix_blocks
+                        .iter()
+                        .all(|(_, blocks)| *blocks <= 2)
+                );
+                assert!(
+                    candidates
+                        .source_intervals
+                        .iter()
+                        .all(|interval| interval.end <= 2)
+                );
+            }
+        }
+        indexer.reset_worker_dp_rank_and_wait(7, 0).await.unwrap();
+        indexer
+            .try_apply_event(store_event(
+                7,
+                0,
+                9,
+                &[],
+                &[11, 12, 13],
+                StorageTier::Device,
+            ))
+            .await
+            .unwrap();
+        flush_indexer(&indexer).await;
+        assert!(
+            !indexer
+                .find_tiered_matches(sequence)
+                .await
+                .unwrap()
+                .device
+                .overlap_scores
+                .scores
+                .contains_key(&worker),
+            "reset must preserve an empty hybrid layout"
+        );
     }
 
     async fn assert_rank_reset_is_acknowledged(indexer: Indexer) {
@@ -876,6 +1267,184 @@ mod tests {
         );
     }
 
+    /// Predicted attention cannot lift confirmed recurrent credit.
+    #[tokio::test]
+    async fn side_merge_does_not_lift_hybrid_worker_above_its_checkpoint() {
+        let primary = Arc::new(ThreadPoolIndexer::new(
+            ConcurrentRadixTreeCompressed::new(),
+            2,
+            4,
+        ));
+        let side = Arc::new(ThreadPoolIndexer::new_with_pruning(
+            ConcurrentRadixTreeCompressed::new(),
+            1,
+            4,
+            PruneConfig {
+                ttl: Duration::from_secs(60),
+            },
+        ));
+        let side_for_flush = side.clone();
+        let indexer = Indexer::Concurrent {
+            primary,
+            lower_tier: LowerTierIndexers::new(2, 4),
+            approx: Some(super::SideIndexer::Concurrent(side)),
+            primary_records_routing_decisions: false,
+            session_updates: None,
+        };
+        let hybrid = WorkerWithDpRank::new(10, 0);
+        let local = [11_u64, 12, 13];
+        indexer
+            .try_apply_event(store_event(10, 0, 1, &[], &local, StorageTier::Device))
+            .await
+            .unwrap();
+        let block_hashes: Vec<LocalBlockHash> = local.iter().copied().map(LocalBlockHash).collect();
+        let chain = compute_seq_hash_for_block(&block_hashes);
+        indexer
+            .try_apply_event(checkpoint(hybrid, StorageTier::Device, chain[0], 1, 1))
+            .await
+            .unwrap();
+        indexer
+            .record_hashed_routing_decision(hybrid, block_hashes.clone(), chain.clone())
+            .await
+            .unwrap();
+        flush_indexer(&indexer).await;
+        side_for_flush.flush().await;
+
+        let tiered = indexer
+            .find_matches_by_tier(block_hashes.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            tiered.device.overlap_scores.scores.get(&hybrid).copied(),
+            Some(1)
+        );
+        assert!(tiered.device.kv_transfer_candidates.is_none());
+        let details = indexer
+            .find_match_details(block_hashes.clone())
+            .await
+            .unwrap();
+        assert_eq!(details.overlap_scores.scores.get(&hybrid).copied(), Some(1));
+        let scores = indexer.find_matches(block_hashes).await.unwrap();
+        assert_eq!(scores.scores.get(&hybrid).copied(), Some(1));
+    }
+
+    /// Off-prefix checkpoints cannot revive a predicted match.
+    #[tokio::test]
+    async fn side_merge_does_not_revive_hybrid_worker_without_state_on_prefix() {
+        let primary = Arc::new(ThreadPoolIndexer::new(
+            ConcurrentRadixTreeCompressed::new(),
+            2,
+            4,
+        ));
+        let side = Arc::new(ThreadPoolIndexer::new_with_pruning(
+            ConcurrentRadixTreeCompressed::new(),
+            1,
+            4,
+            PruneConfig {
+                ttl: Duration::from_secs(60),
+            },
+        ));
+        let side_for_flush = side.clone();
+        let indexer = Indexer::Concurrent {
+            primary,
+            lower_tier: LowerTierIndexers::new(2, 4),
+            approx: Some(super::SideIndexer::Concurrent(side)),
+            primary_records_routing_decisions: false,
+            session_updates: None,
+        };
+        let hybrid = WorkerWithDpRank::new(10, 0);
+        let local = [11_u64, 12, 13];
+        indexer
+            .try_apply_event(store_event(10, 0, 1, &[], &local, StorageTier::Device))
+            .await
+            .unwrap();
+        indexer
+            .try_apply_event(checkpoint(hybrid, StorageTier::Device, 0xdead_beef, 1, 1))
+            .await
+            .unwrap();
+        let block_hashes: Vec<LocalBlockHash> = local.iter().copied().map(LocalBlockHash).collect();
+        let chain = compute_seq_hash_for_block(&block_hashes);
+        indexer
+            .record_hashed_routing_decision(hybrid, block_hashes.clone(), chain)
+            .await
+            .unwrap();
+        flush_indexer(&indexer).await;
+        side_for_flush.flush().await;
+
+        let tiered = indexer
+            .find_matches_by_tier(block_hashes.clone())
+            .await
+            .unwrap();
+        assert!(
+            !tiered.device.overlap_scores.scores.contains_key(&hybrid),
+            "tiered: {:?}",
+            tiered.device.overlap_scores.scores
+        );
+        let details = indexer
+            .find_match_details(block_hashes.clone())
+            .await
+            .unwrap();
+        assert!(!details.overlap_scores.scores.contains_key(&hybrid));
+        let scores = indexer.find_matches(block_hashes).await.unwrap();
+        assert!(!scores.scores.contains_key(&hybrid));
+    }
+
+    /// Every lower-tier extension needs a usable checkpoint.
+    #[tokio::test]
+    async fn lower_tier_cut_covers_every_tier() {
+        for tier in [
+            StorageTier::HostPinned,
+            StorageTier::Disk,
+            StorageTier::External,
+        ] {
+            let indexer = make_test_indexer();
+            let worker = WorkerWithDpRank::new(7, 0);
+            indexer
+                .try_apply_event(store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device))
+                .await
+                .unwrap();
+            indexer
+                .try_apply_event(store_event(7, 0, 2, &[11, 12], &[13, 14], tier))
+                .await
+                .unwrap();
+            let sequence: Vec<LocalBlockHash> = [11_u64, 12, 13, 14]
+                .into_iter()
+                .map(LocalBlockHash)
+                .collect();
+            let chain = compute_seq_hash_for_block(&sequence);
+            indexer
+                .try_apply_event(checkpoint(worker, StorageTier::Device, chain[1], 1, 1))
+                .await
+                .unwrap();
+            flush_indexer(&indexer).await;
+
+            let matches = indexer.find_matches_by_tier(sequence).await.unwrap();
+            assert_eq!(
+                matches.device.overlap_scores.scores.get(&worker),
+                Some(&2),
+                "{tier:?}: device match ends at the state"
+            );
+            let tier_details = matches.lower_tier.get(&tier).expect("tier queried");
+            assert_eq!(
+                tier_details.hits.get(&worker).copied().unwrap_or(0),
+                0,
+                "{tier:?}: no state past block 2, so no tier hit is credited"
+            );
+            assert_eq!(
+                tier_details
+                    .next_continuations
+                    .get(&worker)
+                    .map(|c| c.start_pos),
+                Some(2),
+                "{tier:?}: continuation cut back to the state boundary"
+            );
+            assert!(
+                tier_details.kv_transfer_extensions.is_none(),
+                "{tier:?}: extensions retained for the cut only"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn side_only_worker_scored_but_not_used_as_lower_tier_anchor() {
         // Build an Indexer::Concurrent with a real side indexer so
@@ -1172,6 +1741,185 @@ mod tests {
                 .and_then(|tier| tier.hits.get(&disk_only_worker)),
             Some(&1)
         );
+    }
+
+    #[tokio::test]
+    async fn remote_wire_caps_survive_local_predictions_without_a_local_hybrid_layout() {
+        use super::super::backend::{RemotePrimary, SideIndexer};
+        use crate::indexer::{
+            KvCacheGroupResidency, LowerTierMatchDetails, MatchDetails, TieredMatchDetails,
+            WireTieredMatchDetails,
+        };
+
+        type QueryLimit = (bool, Option<usize>);
+
+        struct WireRemote {
+            wire: WireTieredMatchDetails,
+            limits: Arc<std::sync::Mutex<Vec<QueryLimit>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl RemotePrimary for WireRemote {
+            async fn find_matches_by_tier(
+                &self,
+                _hashes: Vec<LocalBlockHash>,
+                device_only: bool,
+            ) -> anyhow::Result<TieredMatchDetails> {
+                // Exercise the transport representation rather than passing the
+                // native caps directly from the server to the caller.
+                let encoded = serde_json::to_vec(&self.wire)?;
+                let wire: WireTieredMatchDetails = serde_json::from_slice(&encoded)?;
+                let mut details: TieredMatchDetails = wire.into();
+                if device_only {
+                    details.lower_tier.clear();
+                }
+                Ok(details)
+            }
+
+            async fn find_matches_by_tier_with_limit(
+                &self,
+                hashes: Vec<LocalBlockHash>,
+                device_only: bool,
+                max_reusable_blocks: Option<usize>,
+            ) -> anyhow::Result<TieredMatchDetails> {
+                self.limits
+                    .lock()
+                    .unwrap()
+                    .push((device_only, max_reusable_blocks));
+                self.find_matches_by_tier(hashes, device_only).await
+            }
+
+            async fn record_routing_decision(
+                &self,
+                _worker: WorkerWithDpRank,
+                _hashes: RoutingDecisionHashes,
+            ) -> anyhow::Result<()> {
+                anyhow::bail!("predictions belong in the caller's side indexer")
+            }
+
+            fn use_kv_events(&self) -> bool {
+                true
+            }
+        }
+
+        let capped = WorkerWithDpRank::new(7, 0);
+        let zero = WorkerWithDpRank::new(8, 0);
+        let dense = WorkerWithDpRank::new(9, 0);
+        let mut device = MatchDetails::default();
+        device.overlap_scores.scores.insert(capped, 1);
+        device.hybrid_resume_caps.extend([(capped, 1), (zero, 0)]);
+        let mut host = LowerTierMatchDetails::default();
+        host.hits.extend([(capped, 2), (zero, 3)]);
+        let served = TieredMatchDetails {
+            device,
+            lower_tier: [(StorageTier::HostPinned, host)].into_iter().collect(),
+        };
+        let remote_wire = WireTieredMatchDetails::from(&served);
+        let local_layouts = Arc::new(KvCacheGroupResidency::new());
+        assert!(!local_layouts.is_active());
+        let limits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let indexer = Indexer::Remote {
+            primary: Arc::new(WireRemote {
+                wire: remote_wire,
+                limits: limits.clone(),
+            }),
+            approx: Some(SideIndexer::new(
+                Duration::from_secs(60),
+                4,
+                1,
+                Arc::new(KvIndexerMetrics::new_unregistered()),
+                CancellationToken::new(),
+            )),
+            primary_records_routing_decisions: false,
+            recurrent_layouts: local_layouts,
+        };
+        let sequence = vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(13)];
+        for worker in [capped, zero, dense] {
+            indexer
+                .record_routing_decision_hashes(
+                    worker,
+                    RoutingDecisionHashes::from_local_hashes(sequence.clone()),
+                )
+                .await
+                .unwrap();
+        }
+        if let Indexer::Remote {
+            approx: Some(SideIndexer::KvIndexer(side)),
+            ..
+        } = &indexer
+        {
+            side.flush().await;
+        }
+
+        let result = indexer
+            .find_matches_by_tier(sequence.clone())
+            .await
+            .unwrap();
+        assert_eq!(result.device.overlap_scores.scores.get(&capped), Some(&1));
+        assert!(!result.device.overlap_scores.scores.contains_key(&zero));
+        assert_eq!(result.device.overlap_scores.scores.get(&dense), Some(&3));
+        assert_eq!(result.device.hybrid_resume_caps.get(&zero), Some(&0));
+        assert_eq!(
+            result.lower_tier[&StorageTier::HostPinned]
+                .hits
+                .get(&capped),
+            Some(&2)
+        );
+        assert_eq!(
+            result.lower_tier[&StorageTier::HostPinned].hits.get(&zero),
+            Some(&3)
+        );
+
+        let device_only = indexer.find_match_details(sequence.clone()).await.unwrap();
+        assert_eq!(device_only.overlap_scores.scores.get(&capped), Some(&1));
+        assert!(!device_only.overlap_scores.scores.contains_key(&zero));
+        assert_eq!(device_only.overlap_scores.scores.get(&dense), Some(&3));
+
+        let limited_device = indexer
+            .find_primary_match_details_with_limit(sequence.clone(), Some(2))
+            .await
+            .unwrap();
+        assert_eq!(limited_device.overlap_scores.scores.get(&capped), Some(&1));
+        let limited_tiers = indexer
+            .find_matches_by_tier_with_options(
+                sequence,
+                LowerTierQueryOptions {
+                    max_reusable_blocks: Some(3),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            limited_tiers.lower_tier[&StorageTier::HostPinned]
+                .hits
+                .get(&capped),
+            Some(&2)
+        );
+        assert_eq!(
+            *limits.lock().unwrap(),
+            [
+                (false, None),
+                (true, None),
+                (true, Some(2)),
+                (false, Some(3))
+            ]
+        );
+    }
+
+    #[test]
+    fn old_tiered_wire_response_defaults_to_no_hybrid_caps() {
+        use crate::indexer::{TieredMatchDetails, WireTieredMatchDetails};
+
+        let mut old_wire = serde_json::to_value(WireTieredMatchDetails::default()).unwrap();
+        old_wire
+            .as_object_mut()
+            .unwrap()
+            .remove("hybrid_resume_caps");
+        let decoded: WireTieredMatchDetails = serde_json::from_value(old_wire).unwrap();
+        assert!(decoded.hybrid_resume_caps.is_empty());
+        let native: TieredMatchDetails = decoded.into();
+        assert!(native.device.hybrid_resume_caps.is_empty());
     }
 
     /// Regression test: when a worker has blocks in both device and lower-tier

@@ -62,11 +62,13 @@ fn warn_on_unit_block_size(indexer_type: &'static str, kv_block_size: u32) {
         );
     }
 }
+pub(crate) mod hybrid_prefix;
 mod kv_cache_groups;
 mod kv_indexer;
 mod local;
 mod lower_tier;
 mod lower_tier_indexers;
+mod match_observer;
 mod metrics;
 #[cfg(feature = "bench")]
 mod observation;
@@ -94,6 +96,7 @@ pub use kv_indexer::*;
 pub use local::*;
 pub use lower_tier::*;
 pub use lower_tier_indexers::*;
+pub use match_observer::MatchObserver;
 pub use metrics::*;
 #[cfg(feature = "bench")]
 pub use observation::*;

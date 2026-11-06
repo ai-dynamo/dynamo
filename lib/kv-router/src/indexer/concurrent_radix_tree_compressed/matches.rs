@@ -36,6 +36,25 @@ impl ConcurrentRadixTreeCompressed {
         )
     }
 
+    pub fn find_match_details_impl_with_observer(
+        &self,
+        sequence: &[LocalBlockHash],
+        early_exit: bool,
+        retain_kv_transfer_chain: bool,
+        observer: &mut dyn MatchObserver,
+    ) -> MatchDetails {
+        let next_child = sequence
+            .first()
+            .and_then(|&local_hash| self.root.child_snapshot(local_hash));
+        self.find_details_from_seq_observing(
+            next_child,
+            SliceHashSequence(sequence),
+            early_exit,
+            retain_kv_transfer_chain,
+            Some(observer),
+        )
+    }
+
     #[cfg_attr(feature = "profile", inline(never))]
     pub(super) fn find_details_from_seq<S: HashSequence>(
         &self,
@@ -43,6 +62,23 @@ impl ConcurrentRadixTreeCompressed {
         sequence: S,
         early_exit: bool,
         retain_kv_transfer_chain: bool,
+    ) -> MatchDetails {
+        self.find_details_from_seq_observing(
+            next_child,
+            sequence,
+            early_exit,
+            retain_kv_transfer_chain,
+            None,
+        )
+    }
+
+    fn find_details_from_seq_observing<S: HashSequence>(
+        &self,
+        next_child: Option<SharedNode>,
+        sequence: S,
+        early_exit: bool,
+        retain_kv_transfer_chain: bool,
+        observer: Option<&mut dyn MatchObserver>,
     ) -> MatchDetails {
         let mut details = MatchDetails::new();
         if sequence.len() == 0 {
@@ -56,6 +92,7 @@ impl ConcurrentRadixTreeCompressed {
                 overlap_scores: ref mut scores,
                 ref mut last_matched_hashes,
                 kv_transfer_candidates: _,
+                hybrid_resume_caps: _,
             } = details;
             Self::walk_match_path(
                 next_child,
@@ -64,6 +101,7 @@ impl ConcurrentRadixTreeCompressed {
                 scores,
                 Some(last_matched_hashes),
                 kv_transfer_chain.as_mut(),
+                observer,
             )
         };
 
@@ -84,6 +122,7 @@ impl ConcurrentRadixTreeCompressed {
             &mut FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>,
         >,
         mut kv_transfer_chain: Option<&mut Vec<ExternalSequenceBlockHash>>,
+        mut observer: Option<&mut dyn MatchObserver>,
     ) -> MatchWalkResult {
         let mut active = WorkerSet::default();
         let mut matched_depth: u32 = 0;
@@ -113,6 +152,9 @@ impl ConcurrentRadixTreeCompressed {
                 scores,
                 last_matched_hashes: last_matched_hashes.as_deref_mut(),
                 kv_transfer_chain: kv_transfer_chain.as_deref_mut(),
+                observer: observer
+                    .as_mut()
+                    .map(|observer| &mut **observer as &mut dyn MatchObserver),
             });
             let edge_len = outcome.edge_len;
             let edge_match_len = outcome.edge_match_len;
@@ -178,8 +220,15 @@ impl ConcurrentRadixTreeCompressed {
             .first()
             .and_then(|&local_hash| self.root.child_snapshot(local_hash));
         let sequence = SliceHashSequence(sequence);
-        let walk_result =
-            Self::walk_match_path(next_child, &sequence, early_exit, &mut scores, None, None);
+        let walk_result = Self::walk_match_path(
+            next_child,
+            &sequence,
+            early_exit,
+            &mut scores,
+            None,
+            None,
+            None,
+        );
         Self::record_surviving_scores(&mut scores, &walk_result);
         scores
     }

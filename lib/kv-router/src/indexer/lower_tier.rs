@@ -26,7 +26,8 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use super::WorkerObservationState;
 use super::concurrent_radix_tree_compressed::mix_worker;
 use super::{
-    EventKind, KvIndexerMetrics, KvRouterError, SyncIndexer, WorkerLookupStats, WorkerTask,
+    EventKind, KvIndexerMetrics, KvRouterError, MatchObserver, SyncIndexer, WorkerLookupStats,
+    WorkerTask,
 };
 use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates, KvTransferSourceInterval};
 use crate::protocols::{
@@ -118,6 +119,7 @@ impl FetchSources {
         local_frontier: bool,
         covered_by_root: impl Fn(KvTransferCandidateSource) -> bool,
         extensions: &mut KvTransferExtensions,
+        observer: &mut Option<&mut dyn MatchObserver>,
         view: OwnerView<'_>,
         snapshot: &ResidencyRoutingSnapshot,
     ) {
@@ -157,7 +159,19 @@ impl FetchSources {
                 // The original root walk already credits these sources and
                 // carries the hash chain as far as they can serve.
                 if !covered_by_root(source) {
-                    self.active.entry(source).or_insert(pos);
+                    self.active.entry(source).or_insert_with(|| {
+                        if let Some(observer) = observer.as_mut() {
+                            match source {
+                                KvTransferCandidateSource::Worker(worker) => {
+                                    observer.observe_worker(worker)
+                                }
+                                KvTransferCandidateSource::CacheOwner(key) => {
+                                    observer.observe_cache_owner(key)
+                                }
+                            }
+                        }
+                        pos
+                    });
                 }
             });
         }
@@ -1196,6 +1210,31 @@ impl LowerTierIndexer {
     where
         S: BuildHasher,
     {
+        self.query_match_details_observed(
+            local_hashes,
+            continuations,
+            retain_kv_transfer_extensions,
+            snapshot,
+            None,
+        )
+    }
+
+    pub(crate) fn query_match_details_observed<S>(
+        &self,
+        local_hashes: &[LocalBlockHash],
+        continuations: &std::collections::HashMap<WorkerWithDpRank, LowerTierContinuation, S>,
+        retain_kv_transfer_extensions: bool,
+        snapshot: &ResidencyRoutingSnapshot,
+        mut observer: Option<&mut dyn MatchObserver>,
+    ) -> LowerTierMatchDetails
+    where
+        S: BuildHasher,
+    {
+        if let Some(observer) = observer.as_mut() {
+            for worker in continuations.keys() {
+                observer.observe_worker(*worker);
+            }
+        }
         let owners = self.owners.snapshot.load();
         let view = OwnerView::new(&owners, snapshot.projection());
         let mut kv_transfer_extensions =
@@ -1229,6 +1268,11 @@ impl LowerTierIndexer {
 
             if retain_kv_transfer_extensions && let Some(&first_hash) = local_hashes.first() {
                 let sources = self.root_router_hint_sources(first_hash, snapshot);
+                if let Some(observer) = observer.as_mut() {
+                    for source in &sources {
+                        observer.observe_cache_owner(*source);
+                    }
+                }
                 if !sources.is_empty() {
                     let idx = match pos_index.get(&0) {
                         Some(&idx) => idx,
@@ -1278,6 +1322,7 @@ impl LowerTierIndexer {
                     &mut overflow,
                     &mut final_states,
                     kv_transfer_extensions.as_mut(),
+                    &mut observer,
                     view,
                     snapshot,
                 );
@@ -1486,6 +1531,7 @@ fn advance_state_to_breakpoint(
     overflow: &mut FrontierBuckets,
     final_states: &mut FinalStates,
     mut kv_transfer_extensions: Option<&mut KvTransferExtensions>,
+    observer: &mut Option<&mut dyn MatchObserver>,
     view: OwnerView<'_>,
     snapshot: &ResidencyRoutingSnapshot,
 ) {
@@ -1522,6 +1568,7 @@ fn advance_state_to_breakpoint(
                 overflow,
                 final_states,
                 kv_transfer_extensions,
+                observer,
                 view,
                 snapshot,
             );
@@ -1616,6 +1663,7 @@ fn advance_state_to_breakpoint(
                     }
                 },
                 extensions,
+                observer,
                 view,
                 snapshot,
             );
@@ -1628,6 +1676,9 @@ fn advance_state_to_breakpoint(
         }
 
         let child_hash = edge.child_hash();
+        if let Some(observer) = observer.as_mut() {
+            observer.observe_block(cur_pos + 1, child_hash);
+        }
         if let Some(extensions) = kv_transfer_extensions.as_deref_mut()
             && !extensions.record_block(cur_pos, child_hash)
         {
@@ -1678,6 +1729,7 @@ fn advance_scalar(
     overflow: &mut FrontierBuckets,
     final_states: &mut FinalStates,
     mut kv_transfer_extensions: Option<&mut KvTransferExtensions>,
+    observer: &mut Option<&mut dyn MatchObserver>,
     view: OwnerView<'_>,
     snapshot: &ResidencyRoutingSnapshot,
 ) {
@@ -1720,6 +1772,7 @@ fn advance_scalar(
                     KvTransferCandidateSource::CacheOwner(owner) => hint_source == Some(owner),
                 },
                 extensions,
+                observer,
                 view,
                 snapshot,
             );
@@ -1729,6 +1782,9 @@ fn advance_scalar(
         }
 
         let child_hash = owners.child_hash();
+        if let Some(observer) = observer.as_mut() {
+            observer.observe_block(cur_pos + 1, child_hash);
+        }
         if let Some(extensions) = kv_transfer_extensions.as_deref_mut()
             && !extensions.record_block(cur_pos, child_hash)
         {

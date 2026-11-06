@@ -634,11 +634,32 @@ impl Node {
         let walk_len = edge_len.min(input.sequence.len() - input.seq_pos);
 
         let mut edge_match_len = 1;
-        for i in 1..walk_len {
-            if state.edge[i].0 != input.sequence.at(input.seq_pos + i) {
-                break;
+        if let Some(observer) = input.observer.as_deref_mut() {
+            if input.first_node {
+                observer
+                    .reserve_workers(state.full_edge_workers.len() + state.worker_cutoffs.len());
+                for &worker in &state.full_edge_workers {
+                    observer.observe_worker(worker);
+                }
+                for &worker in state.worker_cutoffs.keys() {
+                    observer.observe_worker(worker);
+                }
             }
-            edge_match_len += 1;
+            observer.observe_block(input.seq_pos + 1, state.edge[0].1);
+            for i in 1..walk_len {
+                if state.edge[i].0 != input.sequence.at(input.seq_pos + i) {
+                    break;
+                }
+                observer.observe_block(input.seq_pos + i + 1, state.edge[i].1);
+                edge_match_len += 1;
+            }
+        } else {
+            for i in 1..walk_len {
+                if state.edge[i].0 != input.sequence.at(input.seq_pos + i) {
+                    break;
+                }
+                edge_match_len += 1;
+            }
         }
 
         let edge_hash_at = |depth: usize| -> ExternalSequenceBlockHash {
