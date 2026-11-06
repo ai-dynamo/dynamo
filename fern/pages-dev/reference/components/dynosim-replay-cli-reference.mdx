@@ -129,7 +129,8 @@ evaluation:
 - Omitting the entire section creates 100 independent synthetic requests at concurrency 10, with
   1,024 input tokens and 128 output tokens per request.
 - `source.type: synthetic` creates independent requests with `input_tokens` and `output_tokens`.
-- `source.type: synthetic-session` creates ordered multi-turn sessions.
+- `source.type: synthetic-session` creates ordered multi-turn sessions. Each later turn's prompt
+  starts with the session's earlier prompts and outputs.
 - `source.type: trace` reads one or more paths. Supported formats include `mooncake`,
   `mooncake-delta`, `agentic_mooncake`, `weka`, `applied_compute_agentic`, and `dynamo`.
 - `load.type: concurrency` keeps a fixed number of requests or sessions active.
