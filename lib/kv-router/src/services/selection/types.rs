@@ -794,9 +794,9 @@ pub struct SelectResponse {
     /// selections (`SelectRequest::advisory`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_load: Option<SelectionWorkerLoad>,
-    /// The KV hint composed for a booking: the router's own fetch, then the
-    /// actions of the role's hint policies. Present only for bookings to a
-    /// worker that advertises `router_hint`, when some action was composed.
+    /// The KV hint for a booking: the role's hint policies' actions in the
+    /// router's envelope. Present only for bookings to a worker that
+    /// advertises `router_hint`, when some policy returned an action.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_hint: Option<KvHint>,
 }

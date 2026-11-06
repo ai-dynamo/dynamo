@@ -8,8 +8,8 @@
 //! after booking and outside the scheduler actor, with the booked worker. Worker choice stays
 //! with the configured worker-selection policy; hint policies never change it.
 //!
-//! The router composes one [`crate::kv_hints::KvHint`] per booking: its own fetch, if any, then
-//! the policy that declares [`Commitments::KV_COPY`], then every other policy in configured
+//! The router puts one [`crate::kv_hints::KvHint`] per booking around the policies' actions: the
+//! policy that declares [`Commitments::KV_COPY`] first, then every other policy in configured
 //! order. It numbers the actions and never reads their payloads. Only workers that advertise
 //! `router_hint` receive hints. Hosts own eligibility, booking, and delivery. Policies never
 //! reserve capacity, and the engine may still ignore or miss any action.
