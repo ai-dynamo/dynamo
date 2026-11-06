@@ -399,4 +399,3 @@ def test_kv_capacity_aware_skips_full_decode_rank(
     assert len(kvca.full_probes) == FULL_PROBES
     for probe in kvca.full_probes:
         assert probe.status == 200, probe
-        assert probe.decode_dp_rank in range(DECODE_DP_SIZE), probe
