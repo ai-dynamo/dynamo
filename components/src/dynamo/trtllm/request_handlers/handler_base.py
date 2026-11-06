@@ -62,6 +62,7 @@ from dynamo.trtllm.conversation_affinity import (
 )
 from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.engine_monitor import exit_worker_on_fatal_error
+from dynamo.trtllm.errors import guided_decoding_error_to_invalid_argument
 from dynamo.trtllm.health_check import HEALTH_CHECK_CACHE_SALT
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
@@ -89,10 +90,6 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
-
-# TRT-LLM's guided_decoder.py prefixes per-request failures with this (RequestError
-# has no type field). It means a grammar rejection only before the first output token.
-GUIDED_DECODING_ERROR_PREFIX = "Guided decoding error:"
 
 
 @functools.lru_cache(maxsize=1)
@@ -1607,14 +1604,11 @@ class HandlerBase(BaseGenerativeHandler):
         # 2. Per-request errors - send to client, don't shutdown
         except RequestError as e:
             error_msg = str(e)
-            logging.warning(f"Request {request_id} error: {error_msg}")
-            if (
-                error_msg.startswith(GUIDED_DECODING_ERROR_PREFIX)
-                and not output_tokens_per_choice
-            ):
-                # Grammar rejected before any output: a client error (400).
-                # Later guided decoding failures keep the error chunk.
-                raise InvalidArgument(error_msg) from e
+            logging.warning("Request %s error: %s", request_id, error_msg)
+            if not output_tokens_per_choice:
+                client_error = guided_decoding_error_to_invalid_argument(error_msg)
+                if client_error is not None:
+                    raise client_error from e
             yield {
                 "finish_reason": {"error": error_msg},
                 "token_ids": [],

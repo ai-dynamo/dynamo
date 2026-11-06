@@ -1241,8 +1241,30 @@ class TestGenerateLocally:
     @pytest.mark.core
     @pytest.mark.parametrize(
         "error",
-        [ValueError("invalid executor result"), RequestError("request failed")],
-        ids=["fatal-error", "request-error"],
+        [
+            ValueError("invalid executor result"),
+            RequestError("request failed"),
+            RequestError("Guided decoding error: CUDA error: illegal memory access"),
+            RequestError(
+                "Guided decoding error: Request 7 failed to accept last new token: 42."
+            ),
+            RequestError(
+                "Guided decoding error: [12:00:00] json_schema_converter.cc:1: "
+                "Internal compiler failure"
+            ),
+            RequestError(
+                "Guided decoding error: [12:00:00] regex_converter.cc:1: "
+                "Internal matcher failure"
+            ),
+        ],
+        ids=[
+            "fatal-error",
+            "request-error",
+            "guided-internal-error",
+            "guided-token-error",
+            "schema-internal-error",
+            "regex-internal-error",
+        ],
     )
     async def test_error_during_iteration_keeps_existing_handling(self, error):
         """During iteration, a RequestError other than a guided-decoding
@@ -1282,15 +1304,23 @@ class TestGenerateLocally:
 
     @pytest.mark.asyncio
     @pytest.mark.core
+    @pytest.mark.parametrize(
+        "error_msg",
+        [
+            'Guided decoding error: [12:00:00] json_schema_converter.cc:1: Unsupported type "invalid_type"',
+            "Guided decoding error: [12:00:00] regex_converter.cc:100: Regex parsing error at position 11: Unclosed '['",
+            'Guided decoding error: [12:00:00] /project/xgrammar/cpp/json_schema_converter.cc:902: Unsupported type "invalid_type"\nStack trace:\n...',
+            "Guided decoding error: [12:00:00] /project/xgrammar/cpp/regex_converter.cc:100: Regex parsing error at position 11: Unclosed '['\nStack trace:\n...",
+        ],
+        ids=["invalid-schema", "malformed-regex", "schema-path", "regex-path"],
+    )
     async def test_guided_decoding_error_during_iteration_raises_invalid_argument(
         self,
+        error_msg,
     ):
         """A grammar rejection from the engine is a client error, not a shutdown."""
         handler = self._make_handler()
-        error = RequestError(
-            "Guided decoding error: [12:00:00] json_schema_converter.cc:1: "
-            'Unsupported type "invalid_type"'
-        )
+        error = RequestError(error_msg)
         generation_result = MagicMock()
         generation_result.abort = MagicMock()
 
@@ -1317,12 +1347,21 @@ class TestGenerateLocally:
 
     @pytest.mark.asyncio
     @pytest.mark.core
-    async def test_guided_decoding_error_after_output_keeps_error_chunk(self):
+    @pytest.mark.parametrize(
+        "error_msg",
+        [
+            "Guided decoding error: Request 7 failed to accept last new token: 42.",
+            'Guided decoding error: [12:00:00] json_schema_converter.cc:1: Unsupported type "invalid_type"',
+            "Guided decoding error: [12:00:00] regex_converter.cc:100: Regex parsing error at position 11: Unclosed '['",
+        ],
+        ids=["token-error", "schema-error", "regex-error"],
+    )
+    async def test_guided_decoding_error_after_output_keeps_error_chunk(
+        self, error_msg
+    ):
         """After a token is emitted, a guided decoding error is engine-side."""
         handler = self._make_handler()
-        error = RequestError(
-            "Guided decoding error: Request 7 failed to accept last new token: 42."
-        )
+        error = RequestError(error_msg)
         output = MagicMock()
         output.token_ids = [42]
         output.finish_reason = None
