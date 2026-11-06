@@ -77,7 +77,8 @@ struct Entry {
 /// Scoped by `(RoutingPartitionId, selection_id)`.
 type CacheKey = (RoutingPartitionId, String);
 
-/// Approximate resident bytes: sequence hashes plus id and scope strings.
+/// Approximate resident bytes: sequence hashes plus id, scope, and session strings,
+/// including the agent headers the entry keeps alive past the request.
 fn entry_bytes(key: &CacheKey, selection: &PendingSelection) -> usize {
     selection.sequence_hashes.len() * std::mem::size_of::<SequenceHash>()
         + selection.routing_hashes.as_ref().map_or(0, |hashes| {
@@ -88,10 +89,17 @@ fn entry_bytes(key: &CacheKey, selection: &PendingSelection) -> usize {
         + key.0.routing_group.len()
         + selection.lora_name.as_deref().map_or(0, str::len)
         + selection.session_id.as_deref().map_or(0, str::len)
-        + selection
-            .session_context
-            .as_ref()
-            .map_or(0, |session| session.session_id().len())
+        + selection.session_context.as_ref().map_or(0, |session| {
+            session.session_id().len()
+                + session.parent_session_id().map_or(0, str::len)
+                + session
+                    .agent_headers()
+                    .iter()
+                    .map(|(name, values)| {
+                        name.len() + values.iter().map(String::len).sum::<usize>()
+                    })
+                    .sum::<usize>()
+        })
 }
 
 struct State {
@@ -370,6 +378,21 @@ mod tests {
         assert!(cache.peek(&key(), "a", now).is_none());
         assert!(cache.peek(&key(), "b", now).is_some());
         assert!(cache.peek(&key(), "c", now).is_some());
+    }
+
+    #[test]
+    fn byte_budget_counts_agent_headers() {
+        // The headers alone exceed the budget, so the entry evicts itself.
+        let per = entry_bytes(&(key(), "a".to_string()), &pending(1));
+        let cache = cache_with(1024, 2 * per);
+        let headers = BTreeMap::from([("x-agent".to_string(), vec!["v".repeat(2 * per)])]);
+        let mut selection = pending(1);
+        selection.session_context = Some(
+            SessionContext::new("s".to_string(), None, None, None)
+                .with_agent_headers(Arc::new(headers)),
+        );
+        cache.insert("a".to_string(), selection, Instant::now());
+        assert_eq!(cache.len(), 0);
     }
 
     #[test]
