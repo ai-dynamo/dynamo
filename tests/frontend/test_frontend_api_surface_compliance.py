@@ -75,13 +75,12 @@ BUN_VERSION = "1.3.12"
 NODE_VERSION = "20.19.0"
 OPENRESPONSES_REPO = "https://github.com/openresponses/openresponses.git"
 OPENRESPONSES_SHA = "fa29df5"
-# 2048, not 512: when the small compliance model has a bad sampling day it
-# can ramble to whatever cap is set and come back status=incomplete /
-# {"reason": "max_output_tokens"} — an assertion failure that has nothing to
-# do with API compliance (observed on the "System Prompt" case). The real
-# de-flaking is the temperature=0 default injected below; the larger cap is
-# headroom so a long-but-terminating greedy answer still completes. Worst
-# case stays under a minute per response.
+# A guard, not headroom: a degenerate generation from the small compliance
+# model rambles to whatever cap is set and comes back status=incomplete /
+# {"reason": "max_output_tokens"}, which fails completedStatus for reasons
+# unrelated to API compliance. Greedy decoding alone did not stop that on the
+# "System Prompt" case (DYN-5486), so _patch_openresponses_suite also bounds
+# that case's prompt. Worst case stays under a minute per response.
 OPENRESPONSES_MAX_OUTPUT_TOKENS = 2048
 CLAUDE_SUBAGENT_NAME = "dynamo-subagent-smoke"
 CLAUDE_SUBAGENT_TIMEOUT_S = 45
@@ -337,8 +336,8 @@ def _patch_openresponses_suite(install_dir: Path) -> None:
     """Bound upstream compliance generations so CI failures are deterministic."""
     target = install_dir / "src" / "lib" / "compliance-tests.ts"
     text = target.read_text()
-    old = "    body: JSON.stringify({ ...body, stream: streaming }),"
-    new = (
+    request_old = "    body: JSON.stringify({ ...body, stream: streaming }),"
+    request_new = (
         "    body: JSON.stringify({\n"
         "      ...body,\n"
         "      max_output_tokens: body.max_output_tokens ?? "
@@ -351,14 +350,31 @@ def _patch_openresponses_suite(install_dir: Path) -> None:
         "      stream: streaming,\n"
         "    }),"
     )
-    if new in text:
-        return
-    if old not in text:
-        raise RuntimeError(
-            "OpenResponses compliance harness changed; update "
-            "_patch_openresponses_suite before running frontend compliance."
-        )
-    target.write_text(text.replace(old, new, 1))
+    # The System Prompt case's open-ended "Say hello." can settle into a greedy
+    # repetition loop that fills the cap (DYN-5486). Use the bounded wording of
+    # upstream's own Basic Text case; the pirate system message still exercises
+    # system-role handling. A repetition penalty would not help here:
+    # /v1/responses does not forward presence/frequency penalties to the worker.
+    system_prompt_old = (
+        '        { type: "message", role: "user", content: "Say hello." },'
+    )
+    system_prompt_new = (
+        "        "
+        '{ type: "message", role: "user", content: "Say hello in exactly 3 words." },'
+    )
+    for old, new in (
+        (request_old, request_new),
+        (system_prompt_old, system_prompt_new),
+    ):
+        if new in text:
+            continue
+        if old not in text:
+            raise RuntimeError(
+                "OpenResponses compliance harness changed; update "
+                "_patch_openresponses_suite before running frontend compliance."
+            )
+        text = text.replace(old, new, 1)
+    target.write_text(text)
 
 
 @pytest.mark.unit
@@ -366,16 +382,23 @@ def _patch_openresponses_suite(install_dir: Path) -> None:
 @pytest.mark.core
 @pytest.mark.gpu_0
 @pytest.mark.pre_merge
-def test_patch_openresponses_suite_adds_output_cap(tmp_path):
-    """Assert the OpenResponses harness patch injects a deterministic output cap."""
+def test_patch_openresponses_suite_bounds_requests(tmp_path):
+    """Assert the OpenResponses harness patch caps output and bounds System Prompt."""
     source = tmp_path / "src" / "lib" / "compliance-tests.ts"
     source.parent.mkdir(parents=True)
+    request_line = "    body: JSON.stringify({ ...body, stream: streaming }),\n"
+    system_prompt_line = (
+        '        { type: "message", role: "user", content: "Say hello." },\n'
+    )
     source.write_text(
         "export async function makeRequest() {\n"
         "  return fetch(url, {\n"
-        "    body: JSON.stringify({ ...body, stream: streaming }),\n"
+        f"{request_line}"
         "  });\n"
         "}\n"
+        "const input = [\n"
+        f"{system_prompt_line}"
+        "];\n"
     )
 
     _patch_openresponses_suite(tmp_path)
@@ -385,7 +408,19 @@ def test_patch_openresponses_suite_adds_output_cap(tmp_path):
         f"max_output_tokens: body.max_output_tokens ?? "
         f"{OPENRESPONSES_MAX_OUTPUT_TOKENS}" in text
     )
-    assert "body: JSON.stringify({ ...body, stream: streaming })," not in text
+    assert request_line not in text
+    assert (
+        '        { type: "message", role: "user", '
+        'content: "Say hello in exactly 3 words." },\n' in text
+    )
+    assert system_prompt_line not in text
+
+    _patch_openresponses_suite(tmp_path)
+    assert source.read_text() == text
+
+    source.write_text(f"{request_line}")
+    with pytest.raises(RuntimeError, match="harness changed"):
+        _patch_openresponses_suite(tmp_path)
 
 
 def _install_npm_cli(
