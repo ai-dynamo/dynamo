@@ -22,7 +22,9 @@ def write_artifacts(directory: Path, count: int, mode: str) -> None:
     (directory / "profile_export_aiperf.json").write_text(content)
     if mode == "csv-missing":
         return
-    csv_count = "" if mode == "csv-empty-count" else str(summary["request_count"]["avg"])
+    csv_count = (
+        "" if mode == "csv-empty-count" else str(summary["request_count"]["avg"])
+    )
     csv_content = {
         "csv-invalid": 'Metric,avg\n"unterminated',
         "csv-truncated": "Metric,avg,p99\nLatency\n",

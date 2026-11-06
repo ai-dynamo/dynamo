@@ -248,7 +248,14 @@ def test_sweep_cli_propagates_failed_results(monkeypatch, status):
         assert error.value.code == 1
 
 
-@pytest.mark.parametrize("extra", [{"was_cancelled": True}, {"is_complete": False}, {"error_summary": [{"message": "failed"}]}])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"was_cancelled": True},
+        {"is_complete": False},
+        {"error_summary": [{"message": "failed"}]},
+    ],
+)
 @pytest.mark.unit
 def test_artifact_validation_does_not_impose_run_outcome_policy(tmp_path, extra):
     write_artifacts(tmp_path, 3, "healthy")
