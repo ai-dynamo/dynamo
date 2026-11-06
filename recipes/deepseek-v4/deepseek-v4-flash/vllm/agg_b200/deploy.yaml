@@ -12,43 +12,64 @@
 #
 # Weights: served from the `model-cache` PVC populated by
 #          `../../model-cache/model-download-fp8.yaml`.
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: dsv4-flash-agg
 spec:
   backendFramework: vllm
-  pvcs:
-    - name: model-cache
-      create: false
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      volumeMounts:
-        - name: model-cache
-          mountPoint: /opt/models
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3
           workingDir: /workspace/examples/backends/vllm
           env:
-            - name: HF_HOME
-              value: /opt/models
-            - name: HF_HUB_OFFLINE
-              value: "1"
-    worker:
-      componentType: worker
-      subComponentType: decode
-      envFromSecret: hf-token-secret
-      volumeMounts:
+          - name: HF_HOME
+            value: /opt/models
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          volumeMounts:
+          - name: model-cache
+            mountPath: /opt/models
+        volumes:
         - name: model-cache
-          mountPoint: /opt/models
-      sharedMemory:
-        size: 200Gi
-      extraPodSpec:
-        mainContainer:
+          persistentVolumeClaim:
+            claimName: model-cache
+  - name: worker
+    type: decode
+    replicas: 1
+    sharedMemorySize: 200Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - |
+            python3 -m dynamo.vllm \
+              --model "${MODEL_PATH}" \
+              --served-model-name "${SERVED_MODEL_NAME}" \
+              --trust-remote-code \
+              --kv-cache-dtype fp8 \
+              --block-size 256 \
+              --tensor-parallel-size 1 \
+              --data-parallel-size 4 \
+              --enable-expert-parallel \
+              --tokenizer-mode deepseek_v4 \
+              --dyn-reasoning-parser deepseek_v4 \
+              --dyn-tool-call-parser deepseek_v4 \
+              --attention-config '{"use_fp4_indexer_cache":true}' \
+              --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}' \
+              --no-enable-flashinfer-autotune \
+              --max-num-seqs 256
           workingDir: /workspace/examples/backends/vllm
           # Up to ~60 min for first launch: weight load + FlashInfer autotune +
           # cudagraph warmup. periodSeconds * failureThreshold = 10 * 360 = 3600s.
@@ -60,49 +81,37 @@ spec:
             timeoutSeconds: 10
             failureThreshold: 360
           env:
-            - name: SERVED_MODEL_NAME
-              value: deepseek-ai/DeepSeek-V4-Flash
-            - name: MODEL_PATH
-              value: deepseek-ai/DeepSeek-V4-Flash
-            - name: HF_HOME
-              value: /opt/models
+          - name: SERVED_MODEL_NAME
+            value: deepseek-ai/DeepSeek-V4-Flash
+          - name: MODEL_PATH
+            value: deepseek-ai/DeepSeek-V4-Flash
+          - name: HF_HOME
+            value: /opt/models
             # Read weights from the PVC only; do not hit the HF Hub at startup.
-            - name: HF_HUB_OFFLINE
-              value: "1"
+          - name: HF_HUB_OFFLINE
+            value: "1"
             # Give the engine room to finish first-launch init.
-            - name: VLLM_ENGINE_READY_TIMEOUT_S
-              value: "3600"
+          - name: VLLM_ENGINE_READY_TIMEOUT_S
+            value: "3600"
             # Stabilize DP dummy inputs (matches the DeepSeek-R1 vLLM recipe).
-            - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
-              value: "1"
-            - name: VLLM_SKIP_P2P_CHECK
-              value: "1"
-            - name: NCCL_CUMEM_ENABLE
-              value: "1"
-          command:
-            - /bin/sh
-            - -c
-          args:
-            - |
-              python3 -m dynamo.vllm \
-                --model "${MODEL_PATH}" \
-                --served-model-name "${SERVED_MODEL_NAME}" \
-                --trust-remote-code \
-                --kv-cache-dtype fp8 \
-                --block-size 256 \
-                --tensor-parallel-size 1 \
-                --data-parallel-size 4 \
-                --enable-expert-parallel \
-                --tokenizer-mode deepseek_v4 \
-                --dyn-reasoning-parser deepseek_v4 \
-                --dyn-tool-call-parser deepseek_v4 \
-                --attention-config '{"use_fp4_indexer_cache":true}' \
-                --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}' \
-                --no-enable-flashinfer-autotune \
-                --max-num-seqs 256
-      replicas: 1
-      resources:
-        limits:
-          gpu: "4"
-        requests:
-          gpu: "4"
+          - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
+            value: "1"
+          - name: VLLM_SKIP_P2P_CHECK
+            value: "1"
+          - name: NCCL_CUMEM_ENABLE
+            value: "1"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            requests:
+              nvidia.com/gpu: "4"
+            limits:
+              nvidia.com/gpu: "4"
+          volumeMounts:
+          - name: model-cache
+            mountPath: /opt/models
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache

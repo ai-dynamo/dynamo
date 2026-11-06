@@ -10,19 +10,15 @@
 # You may edit a copy before applying it.
 
 # Qwen3-32B BF16 disagg, 1 prefill + 1 decode, with provider-specific RDMA in overlays.
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: q32b-1p1d-cloud-provider
 spec:
-  pvcs:
-  - create: false
-    name: model-cache
-  services:
-    DecodeWorker:
-      componentType: worker
-      envFromSecret: hf-token-secret
-      extraPodMetadata:
+  components:
+  - name: DecodeWorker
+    podTemplate:
+      metadata:
         annotations:
           networking.gke.io/default-interface: eth0
           networking.gke.io/interfaces: |
@@ -34,11 +30,9 @@ spec:
           prometheus.io/path: /metrics
           prometheus.io/port: "19090"
           prometheus.io/scrape: "true"
-      extraPodSpec:
-        imagePullSecrets:
-        - name: nvcr-pull-secret
-        mainContainer:
-          args:
+      spec:
+        containers:
+        - args:
           - |
             exec python3 -m dynamo.vllm \
               --model "${MODEL_NAME}" \
@@ -91,7 +85,33 @@ spec:
             value: /model-cache
           - name: VLLM_LOGGING_LEVEL
             value: INFO
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          name: main
+          resources:
+            limits:
+              networking.gke.io.networks/rdma-0: "1"
+              networking.gke.io.networks/rdma-0.IP: "1"
+              networking.gke.io.networks/rdma-1: "1"
+              networking.gke.io.networks/rdma-1.IP: "1"
+              networking.gke.io.networks/rdma-2: "1"
+              networking.gke.io.networks/rdma-2.IP: "1"
+              networking.gke.io.networks/rdma-3: "1"
+              networking.gke.io.networks/rdma-3.IP: "1"
+              nvidia.com/gpu: "4"
+            requests:
+              ephemeral-storage: 2Gi
+              networking.gke.io.networks/rdma-0: "1"
+              networking.gke.io.networks/rdma-0.IP: "1"
+              networking.gke.io.networks/rdma-1: "1"
+              networking.gke.io.networks/rdma-1.IP: "1"
+              networking.gke.io.networks/rdma-2: "1"
+              networking.gke.io.networks/rdma-2.IP: "1"
+              networking.gke.io.networks/rdma-3: "1"
+              networking.gke.io.networks/rdma-3.IP: "1"
+              nvidia.com/gpu: "4"
           securityContext:
             capabilities:
               add:
@@ -107,6 +127,8 @@ spec:
           - mountPath: /model-cache
             name: model-cache
           workingDir: /workspace
+        imagePullSecrets:
+        - name: nvcr-pull-secret
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu
@@ -125,64 +147,40 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
-      replicas: 1
-      resources:
-        limits:
-          custom:
-            networking.gke.io.networks/rdma-0: "1"
-            networking.gke.io.networks/rdma-0.IP: "1"
-            networking.gke.io.networks/rdma-1: "1"
-            networking.gke.io.networks/rdma-1.IP: "1"
-            networking.gke.io.networks/rdma-2: "1"
-            networking.gke.io.networks/rdma-2.IP: "1"
-            networking.gke.io.networks/rdma-3: "1"
-            networking.gke.io.networks/rdma-3.IP: "1"
-          gpu: "4"
-        requests:
-          custom:
-            ephemeral-storage: 2Gi
-            networking.gke.io.networks/rdma-0: "1"
-            networking.gke.io.networks/rdma-0.IP: "1"
-            networking.gke.io.networks/rdma-1: "1"
-            networking.gke.io.networks/rdma-1.IP: "1"
-            networking.gke.io.networks/rdma-2: "1"
-            networking.gke.io.networks/rdma-2.IP: "1"
-            networking.gke.io.networks/rdma-3: "1"
-            networking.gke.io.networks/rdma-3.IP: "1"
-          gpu: "4"
-      subComponentType: decode
-    Frontend:
-      componentType: frontend
-      envs:
-      - name: HF_HOME
-        value: /model-cache
-      extraPodSpec:
-        imagePullSecrets:
-        - name: nvcr-pull-secret
-        mainContainer:
+    replicas: 1
+    type: decode
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - env:
+          - name: HF_HOME
+            value: /model-cache
           image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
+          name: main
+          resources:
+            limits:
+              cpu: "8"
+            requests:
+              cpu: "4"
           securityContext:
             runAsUser: 0
           volumeMounts:
           - mountPath: /model-cache
             name: model-cache
           workingDir: /workspace
+        imagePullSecrets:
+        - name: nvcr-pull-secret
         volumes:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
-      replicas: 1
-      resources:
-        limits:
-          cpu: "8"
-        requests:
-          cpu: "4"
-      subComponentType: null
-    # Provider Components target backend-neutral worker service keys.
-    PrefillWorker:
-      componentType: worker
-      envFromSecret: hf-token-secret
-      extraPodMetadata:
+    replicas: 1
+    type: frontend
+  # Provider Components target backend-neutral worker service keys.
+  - name: PrefillWorker
+    podTemplate:
+      metadata:
         annotations:
           networking.gke.io/default-interface: eth0
           networking.gke.io/interfaces: |
@@ -194,11 +192,9 @@ spec:
           prometheus.io/path: /metrics
           prometheus.io/port: "19090"
           prometheus.io/scrape: "true"
-      extraPodSpec:
-        imagePullSecrets:
-        - name: nvcr-pull-secret
-        mainContainer:
-          args:
+      spec:
+        containers:
+        - args:
           - |
             exec python3 -m dynamo.vllm \
               --model "${MODEL_NAME}" \
@@ -250,7 +246,33 @@ spec:
             value: /model-cache
           - name: VLLM_LOGGING_LEVEL
             value: INFO
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          name: main
+          resources:
+            limits:
+              networking.gke.io.networks/rdma-0: "1"
+              networking.gke.io.networks/rdma-0.IP: "1"
+              networking.gke.io.networks/rdma-1: "1"
+              networking.gke.io.networks/rdma-1.IP: "1"
+              networking.gke.io.networks/rdma-2: "1"
+              networking.gke.io.networks/rdma-2.IP: "1"
+              networking.gke.io.networks/rdma-3: "1"
+              networking.gke.io.networks/rdma-3.IP: "1"
+              nvidia.com/gpu: "4"
+            requests:
+              ephemeral-storage: 2Gi
+              networking.gke.io.networks/rdma-0: "1"
+              networking.gke.io.networks/rdma-0.IP: "1"
+              networking.gke.io.networks/rdma-1: "1"
+              networking.gke.io.networks/rdma-1.IP: "1"
+              networking.gke.io.networks/rdma-2: "1"
+              networking.gke.io.networks/rdma-2.IP: "1"
+              networking.gke.io.networks/rdma-3: "1"
+              networking.gke.io.networks/rdma-3.IP: "1"
+              nvidia.com/gpu: "4"
           securityContext:
             capabilities:
               add:
@@ -266,6 +288,8 @@ spec:
           - mountPath: /model-cache
             name: model-cache
           workingDir: /workspace
+        imagePullSecrets:
+        - name: nvcr-pull-secret
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu
@@ -284,29 +308,5 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
-      replicas: 1
-      resources:
-        limits:
-          custom:
-            networking.gke.io.networks/rdma-0: "1"
-            networking.gke.io.networks/rdma-0.IP: "1"
-            networking.gke.io.networks/rdma-1: "1"
-            networking.gke.io.networks/rdma-1.IP: "1"
-            networking.gke.io.networks/rdma-2: "1"
-            networking.gke.io.networks/rdma-2.IP: "1"
-            networking.gke.io.networks/rdma-3: "1"
-            networking.gke.io.networks/rdma-3.IP: "1"
-          gpu: "4"
-        requests:
-          custom:
-            ephemeral-storage: 2Gi
-            networking.gke.io.networks/rdma-0: "1"
-            networking.gke.io.networks/rdma-0.IP: "1"
-            networking.gke.io.networks/rdma-1: "1"
-            networking.gke.io.networks/rdma-1.IP: "1"
-            networking.gke.io.networks/rdma-2: "1"
-            networking.gke.io.networks/rdma-2.IP: "1"
-            networking.gke.io.networks/rdma-3: "1"
-            networking.gke.io.networks/rdma-3.IP: "1"
-          gpu: "4"
-      subComponentType: prefill
+    replicas: 1
+    type: prefill

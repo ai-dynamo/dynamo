@@ -17,7 +17,7 @@
 # fd-ec — different sizes. Vision-sweep skill guidance is to match
 # processor cache across configs so the only flag that differs between
 # fd and fd-ec is the EC capacity. We follow vision-sweep.)
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: qwen36-dynamo-fd
@@ -26,92 +26,96 @@ metadata:
     app.kubernetes.io/component: dynamo-fd
     app.kubernetes.io/managed-by: dynamo-recipe
 spec:
-  pvcs:
-    - create: false
-      name: shared-model-cache
-  services:
-    Frontend:
-      componentType: frontend
-      envs:
-        - name: HF_HOME
-          value: /home/dynamo/.cache/huggingface
-        - name: DYN_REQUEST_PLANE
-          value: tcp
-        - name: DYN_HTTP_BODY_LIMIT_MB
-          value: "200"
-      extraPodSpec:
-        # Hostname pin + image come from hw/${HW}.env (shared with
-        # vllm-serve, dynamo-fd-ec). See deploy/dynamo-fd-ec.yaml for
-        # full rationale on why a hostname pin (not podAffinity).
-        nodeSelector: ${HW_NODE_SELECTOR}
-        tolerations: ${HW_TOLERATIONS}
-        mainContainer:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: ${VLLM_IMAGE}
           imagePullPolicy: IfNotPresent
           workingDir: /workspace
-      replicas: 1
-      resources:
-        requests:
-          cpu: "4"
-          memory: 16Gi
-        limits:
-          cpu: "8"
-          memory: 32Gi
-      subComponentType: null
-
-    worker:
-      componentType: worker
-      extraPodSpec:
+          env:
+          - name: HF_HOME
+            value: /home/dynamo/.cache/huggingface
+          - name: DYN_REQUEST_PLANE
+            value: tcp
+          - name: DYN_HTTP_BODY_LIMIT_MB
+            value: "200"
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+            limits:
+              cpu: "8"
+              memory: 32Gi
+        tolerations: ${HW_TOLERATIONS} # Hostname pin + image come from hw/${HW}.env (shared with
+# vllm-serve, dynamo-fd-ec). See deploy/dynamo-fd-ec.yaml for
+# full rationale on why a hostname pin (not podAffinity).
         nodeSelector: ${HW_NODE_SELECTOR}
-        tolerations: ${HW_TOLERATIONS}
-        mainContainer:
-          command:
-            - /bin/bash
-            - -lc
-          args:
-            - |
-              set -euo pipefail
-              ulimit -l unlimited
-              python3 -m dynamo.vllm \
-                --model "${MODEL_NAME}" \
-                --enable-multimodal \
-                --frontend-decoding \
-                --mm-processor-cache-gb 30 \
-                --dyn-tool-call-parser qwen3_coder \
-                --dyn-reasoning-parser qwen3 \
-                --tensor-parallel-size 1 \
-                --gpu-memory-utilization 0.85 \
-                --max-model-len 32768 \
-                --enable-prefix-caching \
-                --no-enable-log-requests
+  - name: worker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: ${VLLM_IMAGE}
           imagePullPolicy: IfNotPresent
-          env:
-            - name: MODEL_NAME
-              value: "Qwen/Qwen3.6-35B-A3B-FP8"
-            - name: HF_HOME
-              value: /home/dynamo/.cache/huggingface
-            - name: HF_HUB_OFFLINE
-              value: "1"
-            - name: DYN_REQUEST_PLANE
-              value: tcp
-            # DYN_VLLM_EMBEDDING_TRANSFER_MODE and DYN_MULTIMODAL_EMBEDDING_CACHE_GB
-            # intentionally omitted — no embedding cache in this config.
-            - name: DYN_MM_ALLOW_INTERNAL
-              value: "1"
+          command:
+          - /bin/bash
+          - -lc
+          args:
+          - |
+            set -euo pipefail
+            ulimit -l unlimited
+            python3 -m dynamo.vllm \
+              --model "${MODEL_NAME}" \
+              --enable-multimodal \
+              --frontend-decoding \
+              --mm-processor-cache-gb 30 \
+              --dyn-tool-call-parser qwen3_coder \
+              --dyn-reasoning-parser qwen3 \
+              --tensor-parallel-size 1 \
+              --gpu-memory-utilization 0.85 \
+              --max-model-len 32768 \
+              --enable-prefix-caching \
+              --no-enable-log-requests
           workingDir: /workspace
           securityContext:
             capabilities:
               add:
-                - IPC_LOCK
-                - SYS_RESOURCE
-      replicas: 1
-      resources:
-        limits:
-          gpu: "1"
-        requests:
-          gpu: "1"
-      subComponentType: null
-      volumeMounts:
+              - IPC_LOCK
+              - SYS_RESOURCE
+          env:
+          - name: MODEL_NAME
+            value: "Qwen/Qwen3.6-35B-A3B-FP8"
+          - name: HF_HOME
+            value: /home/dynamo/.cache/huggingface
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: DYN_REQUEST_PLANE
+            value: tcp
+            # DYN_VLLM_EMBEDDING_TRANSFER_MODE and DYN_MULTIMODAL_EMBEDDING_CACHE_GB
+            # intentionally omitted — no embedding cache in this config.
+          - name: DYN_MM_ALLOW_INTERNAL
+            value: "1"
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /home/dynamo/.cache/huggingface
+        # Hostname pin + image come from hw/${HW}.env (shared with
+        # vllm-serve, dynamo-fd-ec). See deploy/dynamo-fd-ec.yaml for
+        # full rationale on why a hostname pin (not podAffinity).
+        tolerations: ${HW_TOLERATIONS}
+        nodeSelector: ${HW_NODE_SELECTOR}
+        volumes:
         - name: shared-model-cache
-          mountPoint: /home/dynamo/.cache/huggingface
+          persistentVolumeClaim:
+            claimName: shared-model-cache

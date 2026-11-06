@@ -1,16 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: q32b-1p1d-cloud-provider
 spec:
-  services:
-    PrefillWorker:
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: DecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: &vllmEfaImage nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
-    DecodeWorker:
-      extraPodSpec:
-        mainContainer:
+  - name: PrefillWorker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: *vllmEfaImage

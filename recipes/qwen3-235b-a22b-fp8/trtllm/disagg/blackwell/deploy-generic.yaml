@@ -70,20 +70,16 @@ data:
       max_num_tokens: 8192
 ---
 # Shared Blackwell disaggregated graph; provider overlays add RDMA fabric details.
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: qwen3-235b-a22b-disagg
 spec:
   backendFramework: trtllm
-  pvcs:
-  - create: false
-    name: model-cache
-  services:
-    DecodeWorker:
-      componentType: worker
-      envFromSecret: hf-token-secret
-      extraPodSpec:
+  components:
+  - name: DecodeWorker
+    podTemplate:
+      spec:
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -93,8 +89,8 @@ spec:
                   operator: In
                   values:
                   - "true"
-        mainContainer:
-          args:
+        containers:
+        - args:
           - |
             python3 -m dynamo.trtllm \
               --model-path "${MODEL_PATH}" \
@@ -122,7 +118,17 @@ spec:
             value: /mnt/model-cache
           - name: ENGINE_ARGS
             value: /engine_configs/decode.yaml
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "4"
+            requests:
+              ephemeral-storage: 2Gi
+              nvidia.com/gpu: "4"
           securityContext:
             capabilities:
               add:
@@ -136,7 +142,6 @@ spec:
           - mountPath: /mnt/model-cache
             name: model-cache
           workingDir: /workspace/components/backends/trtllm
-        tolerations: []
         volumes:
         - configMap:
             name: decode-config
@@ -144,45 +149,13 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
-      replicas: 1
-      resources:
-        limits:
-          gpu: "4"
-        requests:
-          custom:
-            ephemeral-storage: 2Gi
-          gpu: "4"
-      # TensorRT-LLM workers need a large shared-memory volume for runtime state.
-      sharedMemory:
-        size: 256Gi
-      subComponentType: decode
-    Frontend:
-      componentType: frontend
-      extraPodSpec:
-        affinity:
-          podAntiAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                - key: nvidia.com/dynamo-graph-deployment-name
-                  operator: In
-                  values:
-                  - qwen3-235b-a22b-disagg-frontend
-              topologyKey: kubernetes.io/hostname
-        mainContainer:
-          args:
-          - python3 -m dynamo.frontend --router-mode kv --http-port 8000
-          command:
-          - /bin/sh
-          - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
-        tolerations: []
-      replicas: 1
-    # Provider Components target backend-neutral worker service keys.
-    PrefillWorker:
-      componentType: worker
-      envFromSecret: hf-token-secret
-      extraPodSpec:
+    replicas: 1
+    # TensorRT-LLM workers need a large shared-memory volume for runtime state.
+    sharedMemorySize: 256Gi
+    type: decode
+  - name: PrefillWorker
+    podTemplate:
+      spec:
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -192,8 +165,9 @@ spec:
                   operator: In
                   values:
                   - "true"
-        mainContainer:
-          args:
+        containers:
+        # Provider Components target backend-neutral worker service keys.
+        - args:
           - |
             python3 -m dynamo.trtllm \
               --model-path "${MODEL_PATH}" \
@@ -221,7 +195,17 @@ spec:
             value: /mnt/model-cache
           - name: ENGINE_ARGS
             value: /engine_configs/prefill.yaml
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "2"
+            requests:
+              ephemeral-storage: 2Gi
+              nvidia.com/gpu: "2"
           securityContext:
             capabilities:
               add:
@@ -235,7 +219,6 @@ spec:
           - mountPath: /mnt/model-cache
             name: model-cache
           workingDir: /workspace/components/backends/trtllm
-        tolerations: []
         volumes:
         - configMap:
             name: prefill-config
@@ -243,15 +226,29 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
-      replicas: 6
-      resources:
-        limits:
-          gpu: "2"
-        requests:
-          custom:
-            ephemeral-storage: 2Gi
-          gpu: "2"
-      # TensorRT-LLM workers need a large shared-memory volume for runtime state.
-      sharedMemory:
-        size: 256Gi
-      subComponentType: prefill
+    replicas: 6
+    sharedMemorySize: 256Gi
+    type: prefill
+  - name: Frontend
+    podTemplate:
+      spec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - qwen3-235b-a22b-disagg-frontend
+              topologyKey: kubernetes.io/hostname
+        containers:
+        - args:
+          - python3 -m dynamo.frontend --router-mode kv --http-port 8000
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          name: main
+    replicas: 1
+    type: frontend

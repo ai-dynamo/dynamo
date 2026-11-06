@@ -30,21 +30,26 @@ data:
       backend: DEEPGEMM
       max_num_tokens: 8192
 ---
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: qwen3-235b-a22b-agg
 spec:
   backendFramework: trtllm
-  pvcs:
-    - name: model-cache
-      create: false
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        tolerations: []
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - python3 -m dynamo.frontend --router-mode kv --http-port 8000
         affinity:
           podAntiAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -53,22 +58,50 @@ spec:
                 - key: nvidia.com/dynamo-graph-deployment-name
                   operator: In
                   values:
-                    - qwen3-235b-a22b-agg-frontend
+                  - qwen3-235b-a22b-agg-frontend
               topologyKey: kubernetes.io/hostname
-        mainContainer:
+  - name: TrtllmWorker
+    type: worker
+    replicas: 4
+    sharedMemorySize: 256Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
-          args:
-            - python3 -m dynamo.frontend --router-mode kv --http-port 8000
           command:
-            - /bin/sh
-            - -c
-    TrtllmWorker:
-      componentType: worker
-      envFromSecret: hf-token-secret
-      sharedMemory:
-        size: 256Gi
-      extraPodSpec:
-        tolerations: []
+          - /bin/sh
+          - -c
+          args:
+          - |
+            python3 -m dynamo.trtllm \
+            --model-path "${MODEL_PATH}" \
+            --served-model-name "Qwen/Qwen3-235B-A22B-FP8" \
+            --max-batch-size 128 \
+            --max-num-tokens 8192 \
+            --max-seq-len 8192 \
+            --extra-engine-args "${ENGINE_ARGS}"
+          workingDir: /workspace/components/backends/trtllm
+          env:
+          - name: MODEL_PATH
+            value: Qwen/Qwen3-235B-A22B-FP8
+          - name: HF_HOME
+            value: /mnt/model-cache
+          - name: ENGINE_ARGS
+            value: /engine_configs/agg.yaml
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            requests:
+              nvidia.com/gpu: "4"
+            limits:
+              nvidia.com/gpu: "4"
+          volumeMounts:
+          - name: agg-config
+            mountPath: /engine_configs
+          - name: model-cache
+            mountPath: /mnt/model-cache
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -78,43 +111,10 @@ spec:
                   operator: In
                   values:
                   - "true"
-        mainContainer:
-          env:
-            - name: MODEL_PATH
-              value: Qwen/Qwen3-235B-A22B-FP8
-            - name: HF_HOME
-              value: /mnt/model-cache
-            - name: ENGINE_ARGS
-              value: /engine_configs/agg.yaml
-          command:
-            - /bin/sh
-            - -c
-          args:
-            - |
-              python3 -m dynamo.trtllm \
-              --model-path "${MODEL_PATH}" \
-              --served-model-name "Qwen/Qwen3-235B-A22B-FP8" \
-              --max-batch-size 128 \
-              --max-num-tokens 8192 \
-              --max-seq-len 8192 \
-              --extra-engine-args "${ENGINE_ARGS}"
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
-          workingDir: /workspace/components/backends/trtllm
-          volumeMounts:
-            - name: agg-config
-              mountPath: /engine_configs
-            - name: model-cache
-              mountPath: /mnt/model-cache
         volumes:
-          - name: agg-config
-            configMap:
-              name: agg-config
-          - name: model-cache
-            persistentVolumeClaim:
-              claimName: model-cache
-      replicas: 4
-      resources:
-        limits:
-          gpu: "4"
-        requests:
-          gpu: "4"
+        - name: agg-config
+          configMap:
+            name: agg-config
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache

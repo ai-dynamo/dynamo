@@ -13,94 +13,73 @@
 #
 # Prefill workers offload spilled KV blocks to host memory (host_cache_size +
 # secondary_offload_min_priority in prefill.yaml).
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: kimi-k25-disagg-kv-eagle
 spec:
-  envs:
-    - name: NCCL_MNNVL_ENABLE
-      value: "1"
-    - name: NCCL_CUMEM_ENABLE
-      value: "1"
-    - name: TLLM_LOG_LEVEL
-      value: "info"
-    - name: TRTLLM_ENABLE_PDL
-      value: "1"
-  services:
-    Frontend:
-      componentType: frontend
-      extraPodSpec:
-        containers: null
-        mainContainer:
-          command:
-            - python3
-          args:
-            - -m
-            - dynamo.frontend
-            - --router-mode
-            - kv
-          env:
-            - name: POD_UID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.uid
+  env:
+  - name: NCCL_MNNVL_ENABLE
+    value: "1"
+  - name: NCCL_CUMEM_ENABLE
+    value: "1"
+  - name: TLLM_LOG_LEVEL
+    value: "info"
+  - name: TRTLLM_ENABLE_PDL
+    value: "1"
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:<IMAGE_TAG>
-          name: ""
-          resources: {}
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - kv
+          env:
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
         nodeSelector:
           kubernetes.io/arch: arm64
         # tolerations:     # uncomment to populate any tolerations for the gpu nodes
-      replicas: 1
-
-    prefill:
-      componentType: worker
-      subComponentType: prefill
-      envFromSecret: hf-token-secret
-      extraPodSpec:
-        containers: null
-        mainContainer:
-          args:
-            - --model-path
-            - nvidia/Kimi-K2.5-NVFP4
-            - --served-model-name
-            - nvidia/Kimi-K2.5-NVFP4
-            - --extra-engine-args
-            - /config/prefill.yaml
-            - --disaggregation-mode
-            - prefill
-            - --publish-events-and-metrics
-            - --kv-block-size
-            - "32"
-            - --dyn-tool-call-parser
-            - kimi_k2
-            - --dyn-reasoning-parser
-            - kimi_k25
-          command:
-            - python3
-            - -m
-            - dynamo.trtllm
-          env:
-            - name: POD_UID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.uid
-            - name: HF_HOME
-              value: /model-cache
-            - name: HF_HUB_OFFLINE
-              value: "1"
-            - name: HF_MODULES_CACHE
-              value: /tmp/hf_modules
-            - name: NCCL_GRAPH_MIXING_SUPPORT
-              value: "0"
-            # KV transfer (UCX zcopy on; no staging buffer required)
-            - name: TRTLLM_TRY_ZCOPY_FOR_KVCACHE_TRANSFER
-              value: "1"
-            - name: TRTLLM_KVCACHE_TRANSFER_BUFFER_SIZE
-              value: "0B"
+  - name: decode
+    type: decode
+    replicas: 3
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:<IMAGE_TAG>
-          name: ""
-          resources: {}
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          args:
+          - --model-path
+          - nvidia/Kimi-K2.5-NVFP4
+          - --served-model-name
+          - nvidia/Kimi-K2.5-NVFP4
+          - --extra-engine-args
+          - /config/decode.yaml
+          - --disaggregation-mode
+          - decode
+          - --publish-events-and-metrics
+          - --kv-block-size
+          - "32"
+          - --dyn-tool-call-parser
+          - kimi_k2
+          - --dyn-reasoning-parser
+          - kimi_k25
+          workingDir: /workspace/
           securityContext:
             runAsUser: 0
           startupProbe:
@@ -110,96 +89,95 @@ spec:
               port: 9090
             periodSeconds: 60
             timeoutSeconds: 20
-          volumeMounts:
-            - mountPath: /model-cache
-              name: model-cache
-            - mountPath: /config
-              name: trtllm-config
-              readOnly: true
-          workingDir: /workspace/
-        nodeSelector:
-          kubernetes.io/arch: arm64
-        # tolerations:     # uncomment to populate any tolerations for the gpu nodes
-        resourceClaims:
-          - name: compute-domain-channel
-            resourceClaimTemplateName: your-compute-domain-channel
-        volumes:
-          - name: model-cache
-            persistentVolumeClaim:
-              claimName: model-cache
-          - name: trtllm-config
-            configMap:
-              name: kimi-k25-disagg-kv-eagle-config
-      replicas: 3
-      resources:
-        limits:
-          gpu: "4"
-        claims:
-          - name: compute-domain-channel
-
-    decode:
-      componentType: worker
-      subComponentType: decode
-      envFromSecret: hf-token-secret
-      extraPodSpec:
-        containers: null
-        mainContainer:
-          args:
-            - --model-path
-            - nvidia/Kimi-K2.5-NVFP4
-            - --served-model-name
-            - nvidia/Kimi-K2.5-NVFP4
-            - --extra-engine-args
-            - /config/decode.yaml
-            - --disaggregation-mode
-            - decode
-            - --publish-events-and-metrics
-            - --kv-block-size
-            - "32"
-            - --dyn-tool-call-parser
-            - kimi_k2
-            - --dyn-reasoning-parser
-            - kimi_k25
-          command:
-            - python3
-            - -m
-            - dynamo.trtllm
           env:
-            - name: POD_UID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.uid
-            - name: HF_HOME
-              value: /model-cache
-            - name: HF_HUB_OFFLINE
-              value: "1"
-            - name: TRITON_CACHE_DIR
-              value: /tmp/.triton-cache
-            - name: HF_MODULES_CACHE
-              value: /tmp/hf_modules
-            - name: NCCL_SOCKET_IFNAME
-              value: eth0
-            - name: GLOO_SOCKET_IFNAME
-              value: eth0
-            - name: NCCL_GRAPH_MIXING_SUPPORT
-              value: "0"
-            - name: ENABLE_CONFIGURABLE_MOE
-              value: "1"
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          - name: HF_HOME
+            value: /model-cache
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRITON_CACHE_DIR
+            value: /tmp/.triton-cache
+          - name: HF_MODULES_CACHE
+            value: /tmp/hf_modules
+          - name: NCCL_SOCKET_IFNAME
+            value: eth0
+          - name: GLOO_SOCKET_IFNAME
+            value: eth0
+          - name: NCCL_GRAPH_MIXING_SUPPORT
+            value: "0"
+          - name: ENABLE_CONFIGURABLE_MOE
+            value: "1"
             # Uncomment the below to reproduce benchmark results in README exactly.
             # - name: TLLM_SPEC_DECODE_FORCE_NUM_ACCEPTED_TOKENS
             #   value: "2"
             # KV transfer (UCX zcopy on; no staging buffer required)
-            - name: TRTLLM_TRY_ZCOPY_FOR_KVCACHE_TRANSFER
-              value: "1"
-            - name: TRTLLM_KVCACHE_TRANSFER_BUFFER_SIZE
-              value: "0B"
-            - name: NCCL_NVLS_ENABLE
-              value: "1"
-            - name: NVIDIA_GDRCOPY
-              value: "1"
+          - name: TRTLLM_TRY_ZCOPY_FOR_KVCACHE_TRANSFER
+            value: "1"
+          - name: TRTLLM_KVCACHE_TRANSFER_BUFFER_SIZE
+            value: "0B"
+          - name: NCCL_NVLS_ENABLE
+            value: "1"
+          - name: NVIDIA_GDRCOPY
+            value: "1"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "4"
+            claims:
+            - name: compute-domain-channel
+          volumeMounts:
+          - mountPath: /model-cache
+            name: model-cache
+          - mountPath: /config
+            name: trtllm-config
+            readOnly: true
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: your-compute-domain-channel
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        # tolerations:     # uncomment to populate any tolerations for the gpu nodes
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        - name: trtllm-config
+          configMap:
+            name: kimi-k25-disagg-kv-eagle-config
+  - name: prefill
+    type: prefill
+    replicas: 3
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:<IMAGE_TAG>
-          name: ""
-          resources: {}
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          args:
+          - --model-path
+          - nvidia/Kimi-K2.5-NVFP4
+          - --served-model-name
+          - nvidia/Kimi-K2.5-NVFP4
+          - --extra-engine-args
+          - /config/prefill.yaml
+          - --disaggregation-mode
+          - prefill
+          - --publish-events-and-metrics
+          - --kv-block-size
+          - "32"
+          - --dyn-tool-call-parser
+          - kimi_k2
+          - --dyn-reasoning-parser
+          - kimi_k25
+          workingDir: /workspace/
           securityContext:
             runAsUser: 0
           startupProbe:
@@ -209,32 +187,52 @@ spec:
               port: 9090
             periodSeconds: 60
             timeoutSeconds: 20
+          env:
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          - name: HF_HOME
+            value: /model-cache
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: HF_MODULES_CACHE
+            value: /tmp/hf_modules
+          - name: NCCL_GRAPH_MIXING_SUPPORT
+            value: "0"
+            # KV transfer (UCX zcopy on; no staging buffer required)
+          - name: TRTLLM_TRY_ZCOPY_FOR_KVCACHE_TRANSFER
+            value: "1"
+          - name: TRTLLM_KVCACHE_TRANSFER_BUFFER_SIZE
+            value: "0B"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "4"
+            claims:
+            - name: compute-domain-channel
+
           volumeMounts:
-            - mountPath: /model-cache
-              name: model-cache
-            - mountPath: /config
-              name: trtllm-config
-              readOnly: true
-          workingDir: /workspace/
+          - mountPath: /model-cache
+            name: model-cache
+          - mountPath: /config
+            name: trtllm-config
+            readOnly: true
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: your-compute-domain-channel
         nodeSelector:
           kubernetes.io/arch: arm64
         # tolerations:     # uncomment to populate any tolerations for the gpu nodes
-        resourceClaims:
-          - name: compute-domain-channel
-            resourceClaimTemplateName: your-compute-domain-channel
         volumes:
-          - name: model-cache
-            persistentVolumeClaim:
-              claimName: model-cache
-          - name: trtllm-config
-            configMap:
-              name: kimi-k25-disagg-kv-eagle-config
-      replicas: 3
-      resources:
-        limits:
-          gpu: "4"
-        claims:
-          - name: compute-domain-channel
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        - name: trtllm-config
+          configMap:
+            name: kimi-k25-disagg-kv-eagle-config
 ---
 apiVersion: v1
 kind: ConfigMap

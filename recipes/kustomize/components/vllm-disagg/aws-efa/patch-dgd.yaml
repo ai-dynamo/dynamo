@@ -1,20 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-disagg-aws-efa
 spec:
-  services:
-    PrefillWorker:
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: DecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           env:
-            - name: KV_TRANSFER_CONFIG
-              value: '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
-    DecodeWorker:
-      extraPodSpec:
-        mainContainer:
+          - name: KV_TRANSFER_CONFIG
+            value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+  - name: PrefillWorker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           env:
-            - name: KV_TRANSFER_CONFIG
-              value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
+          - name: KV_TRANSFER_CONFIG
+            value: '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'

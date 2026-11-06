@@ -189,19 +189,26 @@ data:
     disable_overlap_scheduler: true
     print_iter_log: false
 ---
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: qwen3-32b-fp8-disagg
 spec:
   backendFramework: trtllm
-  pvcs:
-    - name: model-cache
-      create: false
-  services:
-    Frontend:
-      componentType: frontend
-      extraPodSpec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - python3 -m dynamo.frontend --router-mode round-robin --http-port 8000
         affinity:
           podAntiAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -212,94 +219,18 @@ spec:
                   values:
                   - qwen3-32b-fp8-disagg-frontend
               topologyKey: kubernetes.io/hostname
-        mainContainer:
-          args:
-          - python3 -m dynamo.frontend --router-mode round-robin --http-port 8000
+  - name: TrtllmDecodeWorker
+    type: decode
+    replicas: 2
+    sharedMemorySize: 80Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
-      replicas: 1
-    TrtllmPrefillWorker:
-      componentType: worker
-      subComponentType: prefill
-      envFromSecret: hf-token-secret
-      volumeMounts:
-        - name: model-cache
-          mountPoint: /opt/models
-      sharedMemory:
-        size: 80Gi
-      extraPodSpec:
-        affinity:
-          nodeAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              nodeSelectorTerms:
-              - matchExpressions:
-                - key: nvidia.com/gpu.present
-                  operator: In
-                  values:
-                  - "true"
-        mainContainer:
-          args:
-          - |
-            python3 -m dynamo.trtllm \
-              --model-path "${MODEL_PATH}" \
-              --served-model-name "${MODEL_PATH}" \
-              --extra-engine-args "${ENGINE_ARGS}" \
-              --tensor-parallel-size 1 \
-              --max-batch-size 1 \
-              --free-gpu-memory-fraction 0.9 \
-              --disaggregation-mode prefill
-          command:
-          - /bin/sh
-          - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
-          env:
-          - name: TRTLLM_ENABLE_PDL
-            value: "1"
-          - name: TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL
-            value: "True"
-          - name: ENGINE_ARGS
-            value: "/opt/dynamo/configs/config-prefill.yaml"
-          - name: MODEL_PATH
-            value: "Qwen/Qwen3-32B-FP8"
-          - name: HF_HOME
-            value: "/opt/models"
-          volumeMounts:
-          - mountPath: /opt/dynamo/configs
-            name: llm-config-prefill
-            readOnly: true
-          workingDir: /workspace/examples/backends/trtllm
-        volumes:
-        - configMap:
-            name: llm-config-prefill
-          name: llm-config-prefill
-      replicas: 4
-      resources:
-        limits:
-          gpu: "1"
-        requests:
-          gpu: "1"
-    TrtllmDecodeWorker:
-      componentType: worker
-      subComponentType: decode
-      envFromSecret: hf-token-secret
-      volumeMounts:
-        - name: model-cache
-          mountPoint: /opt/models
-      sharedMemory:
-        size: 80Gi
-      extraPodSpec:
-        affinity:
-          nodeAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              nodeSelectorTerms:
-              - matchExpressions:
-                - key: nvidia.com/gpu.present
-                  operator: In
-                  values:
-                  - "true"
-        mainContainer:
           args:
           - |
             python3 -m dynamo.trtllm \
@@ -310,10 +241,7 @@ spec:
               --max-batch-size 128 \
               --free-gpu-memory-fraction 0.9 \
               --disaggregation-mode decode
-          command:
-          - /bin/sh
-          - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          workingDir: /workspace/examples/backends/trtllm
           env:
           - name: TRTLLM_ENABLE_PDL
             value: "1"
@@ -325,18 +253,97 @@ spec:
             value: "Qwen/Qwen3-32B-FP8"
           - name: HF_HOME
             value: "/opt/models"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            requests:
+              nvidia.com/gpu: "2"
+            limits:
+              nvidia.com/gpu: "2"
           volumeMounts:
           - mountPath: /opt/dynamo/configs
             name: llm-config-decode
             readOnly: true
-          workingDir: /workspace/examples/backends/trtllm
+          - name: model-cache
+            mountPath: /opt/models
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
         volumes:
         - configMap:
             name: llm-config-decode
           name: llm-config-decode
-      replicas: 2
-      resources:
-        limits:
-          gpu: "2"
-        requests:
-          gpu: "2"
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+  - name: TrtllmPrefillWorker
+    type: prefill
+    replicas: 4
+    sharedMemorySize: 80Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - |
+            python3 -m dynamo.trtllm \
+              --model-path "${MODEL_PATH}" \
+              --served-model-name "${MODEL_PATH}" \
+              --extra-engine-args "${ENGINE_ARGS}" \
+              --tensor-parallel-size 1 \
+              --max-batch-size 1 \
+              --free-gpu-memory-fraction 0.9 \
+              --disaggregation-mode prefill
+          workingDir: /workspace/examples/backends/trtllm
+          env:
+          - name: TRTLLM_ENABLE_PDL
+            value: "1"
+          - name: TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL
+            value: "True"
+          - name: ENGINE_ARGS
+            value: "/opt/dynamo/configs/config-prefill.yaml"
+          - name: MODEL_PATH
+            value: "Qwen/Qwen3-32B-FP8"
+          - name: HF_HOME
+            value: "/opt/models"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - mountPath: /opt/dynamo/configs
+            name: llm-config-prefill
+            readOnly: true
+          - name: model-cache
+            mountPath: /opt/models
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
+        volumes:
+        - configMap:
+            name: llm-config-prefill
+          name: llm-config-prefill
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache

@@ -5,7 +5,7 @@ kind: Component
 patches:
   - target:
       group: nvidia.com
-      version: v1alpha1
+      version: v1beta1
       kind: DynamoGraphDeployment
       name: q32b-1p1d-cloud-provider
     path: patch-dgd.yaml

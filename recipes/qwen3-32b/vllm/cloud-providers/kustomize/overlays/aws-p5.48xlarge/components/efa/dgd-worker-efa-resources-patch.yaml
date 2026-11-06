@@ -6,23 +6,27 @@
 # Regenerate: scripts/kustomize-matrix.py unfold recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml
 # Template source: recipes/kustomize/templates/aws-efa/p5.48xlarge
 
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: q32b-1p1d-cloud-provider
 spec:
-  services:
-    DecodeWorker:
-      resources:
-        limits:
-          custom: &DecodeWorkerEfaResources
-            vpc.amazonaws.com/efa: "16"
-        requests:
-          custom: *DecodeWorkerEfaResources
-    PrefillWorker:
-      resources:
-        limits:
-          custom: &PrefillWorkerEfaResources
-            vpc.amazonaws.com/efa: "16"
-        requests:
-          custom: *PrefillWorkerEfaResources
+  components:
+  - name: DecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          resources:
+            limits: &DecodeWorkerEfaResources
+              vpc.amazonaws.com/efa: "16"
+            requests: *DecodeWorkerEfaResources
+  - name: PrefillWorker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          resources:
+            limits: &PrefillWorkerEfaResources
+              vpc.amazonaws.com/efa: "16"
+            requests: *PrefillWorkerEfaResources
