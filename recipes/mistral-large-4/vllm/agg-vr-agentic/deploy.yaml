@@ -1,0 +1,214 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Mistral Large 4 on Vera Rubin (VR NVL72): aggregated TP4 x 1 with DSpark3,
+# NVFP4, 1M context, native CPU KV offload. One 4-GPU worker; the frontend runs
+# the default router (no KV router, no session affinity) because there is a
+# single worker to route to.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: mistral-large-4-vllm-vr-agg-agentic
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    runtimeVersionOverride: "1.6.0"
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-mistral-large-4-dev.1
+          imagePullPolicy: IfNotPresent
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+          - --http-port
+          - '8000'
+          - --dyn-chat-processor
+          - dynamo
+          # Rust BPE tokenizer for the 100K-token agentic prompts.
+          - --tokenizer
+          - fastokens
+          - --no-tokenizer-fallback
+          env:
+          - name: FASTOKENS_BPE_THREADS
+            value: '16'
+          - name: DYN_PARSER_VERSION
+            value: '2'
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: DYN_LOG
+            value: info
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /shared-model-cache
+            readOnly: true
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+  - name: Worker
+    type: worker
+    runtimeVersionOverride: "1.6.0"
+    replicas: 1
+    # Native CPU KV offload backs onto /dev/shm: keep >= --kv-offloading-size.
+    sharedMemorySize: 848Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-mistral-large-4-dev.1
+          imagePullPolicy: IfNotPresent
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 30
+            failureThreshold: 540
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: system
+              scheme: HTTP
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 30
+            successThreshold: 1
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - $(MODEL_PATH)
+          - --served-model-name
+          - $(SERVED_MODEL_NAME)
+          - --enable-multimodal
+          - --config-format
+          - mistral
+          - --load-format
+          - mistral
+          - --tokenizer-mode
+          - mistral
+          - --tensor-parallel-size
+          - '4'
+          - --max-model-len
+          - '1048576'
+          - --gpu-memory-utilization
+          - '0.95'
+          - --max-num-batched-tokens
+          - '8192'
+          - --max-num-seqs
+          - '64'
+          # sm_107: the runtime defaults rms_norm/fused_add_rms_norm to the
+          # native op; vllm_c is used first. FlashInfer autotune lengthens worker start.
+          - --kernel-config
+          - '{"enable_flashinfer_autotune":true,"ir_op_priority":{"rms_norm":["vllm_c","native"],"fused_add_rms_norm":["vllm_c","native"]}}'
+          - --compilation-config
+          - '{"pass_config":{"fuse_allreduce_rms":true}}'
+          - --dyn-reasoning-parser
+          - mistral
+          - --dyn-tool-call-parser
+          - mistral
+          # 800 GiB host tier (one pool).
+          - --kv-offloading-size
+          - '800'
+          - --kv-offloading-backend
+          - native
+          # NVFP4 latent KV. It changes numerics: re-run an accuracy check after any
+          # model or image change.
+          - --kv-cache-dtype
+          - nvfp4_ds_mla
+          # Hybrid KV cache manager off: required for the host KV tier to hold prefixes
+          # across turns on this hybrid-attention model.
+          - --disable-hybrid-kv-cache-manager
+          # MoE and sparse-indexer kernels for sm_107 (FlashInfer).
+          - --moe-backend
+          - flashinfer_prims_ts
+          - --sparse-indexer-logits-backend
+          - flashinfer
+          - --sparse-indexer-topk-backend
+          - flashinfer_gvr2
+          - --sparse-indexer-prefill-backend
+          - flashinfer
+          # disable_eagle_block_drop keeps the trailing prefix-cache block (DSpark
+          # counts as eagle), which raises the prefix-cache hit rate under agentic reuse.
+          - --speculative-config
+          - '{"method":"dspark","num_speculative_tokens":3,"disable_eagle_block_drop":true}'
+          # For performance benchmarks only, replace the value above with:
+          # '{"method":"dspark","num_speculative_tokens":3,"rejection_sample_method":"synthetic","synthetic_acceptance_length":2.67,"disable_eagle_block_drop":true}'
+          # `synthetic` fixes the acceptance length instead of verifying draft tokens:
+          # use it for performance benchmarks, never for accuracy evaluation.
+          env:
+          - name: MODEL_PATH
+            value: /shared-model-cache/mistral-large-4-nvfp4
+          - name: SERVED_MODEL_NAME
+            value: mistral-large-4
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: DYN_LOG
+            value: info
+          # The generate-canary starves under ~100K-token prefills and drops the
+          # worker from discovery.
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: 'false'
+          - name: NCCL_MNNVL_ENABLE
+            value: '0'
+          - name: VLLM_ALLREDUCE_USE_FLASHINFER
+            value: '1'
+          # Piecewise CUDA-graph capture asserts on sm_107 with DSpark otherwise.
+          - name: VLLM_USE_BREAKABLE_CUDAGRAPH
+            value: '0'
+          - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+            value: '1'
+          resources:
+            requests:
+              memory: 1200Gi
+              nvidia.com/gpu: '4'
+            limits:
+              nvidia.com/gpu: '4'
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /shared-model-cache
+            readOnly: true
+          - name: jitcache
+            mountPath: /home/dynamo/.cache
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - name: jitcache
+          emptyDir: {}
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.machine: VR-NVL72

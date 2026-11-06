@@ -29,7 +29,8 @@ Use this page to:
 - [Troubleshoot collection](#troubleshoot-collection)
 
 For exact metric names, labels, variables, schemas, and endpoint responses, use the
-[Observability Reference](../../reference/observability/metrics-catalog.mdx).
+[Observability Reference](../../reference/observability/metrics-catalog.mdx). To profile chosen components with
+Nsight Systems, see [Profile with Nsight Operator](nsight-operator-profiling.mdx).
 
 ## View Metrics and Dashboards
 

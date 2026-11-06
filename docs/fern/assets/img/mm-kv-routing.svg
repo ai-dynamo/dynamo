@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1054" height="475" viewBox="22 29 1054 475" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">A repeated image goes to the worker that already holds its cache</title>
+  <desc id="desc">The frontend hashes the image, reads its size, counts its tokens, builds a routing view, and scores workers. The request goes to Worker A, which already holds the cache. Worker B has no cache and Worker C is busy.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-blue-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
+  <rect x="22" y="29" width="1054" height="475" fill="#FFFFFF"/>
+  <text x="36" y="66" font-size="26.0" font-weight="700" fill="#1A1A1A">A repeated image goes to the worker that already holds its cache</text>
+  <rect x="440" y="90" width="220" height="70" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="457.0" y="112.0" width="34" height="26" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><circle cx="466.0" cy="120.0" r="3" fill="#76B900"/><polygon points="461.0,134.0 471.0,125.0 477.0,130.0 483.0,124.0 487.0,134.0" fill="#76B900"/>
+  <text x="506" y="131.0" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">Request</text>
+  <line x1="550" y1="162" x2="550" y2="196" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <rect x="38" y="196" width="1024" height="140" rx="12" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
+  <text x="62" y="222" font-size="15" font-weight="700" fill="#5A6572" text-anchor="start" letter-spacing="1.2">FRONTEND</text>
+  <rect x="62" y="246" width="176" height="74" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <circle cx="86" cy="283" r="11" fill="#5A8F00"/>
+  <text x="86" y="287.5" font-size="13.8" font-weight="700" fill="#FFFFFF" text-anchor="middle">1</text>
+  <text x="106" y="289" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Hash the image</text>
+  <line x1="240" y1="283" x2="260" y2="283" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <rect x="262" y="246" width="176" height="74" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <circle cx="286" cy="283" r="11" fill="#5A8F00"/>
+  <text x="286" y="287.5" font-size="13.8" font-weight="700" fill="#FFFFFF" text-anchor="middle">2</text>
+  <text x="306" y="289" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Read the size</text>
+  <line x1="440" y1="283" x2="460" y2="283" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <rect x="462" y="246" width="176" height="74" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <circle cx="486" cy="283" r="11" fill="#5A8F00"/>
+  <text x="486" y="287.5" font-size="13.8" font-weight="700" fill="#FFFFFF" text-anchor="middle">3</text>
+  <text x="506" y="289" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Count tokens</text>
+  <line x1="640" y1="283" x2="660" y2="283" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <rect x="662" y="246" width="176" height="74" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <circle cx="686" cy="283" r="11" fill="#5A8F00"/>
+  <text x="686" y="287.5" font-size="13.8" font-weight="700" fill="#FFFFFF" text-anchor="middle">4</text>
+  <text x="706" y="282" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Build routing</text>
+  <text x="706" y="302" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">view</text>
+  <line x1="840" y1="283" x2="860" y2="283" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <rect x="862" y="246" width="176" height="74" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <circle cx="886" cy="283" r="11" fill="#5A8F00"/>
+  <text x="886" y="287.5" font-size="13.8" font-weight="700" fill="#FFFFFF" text-anchor="middle">5</text>
+  <text x="906" y="289" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="start">Score workers</text>
+  <text x="50" y="372" font-size="15" font-weight="700" fill="#5A6572" text-anchor="start" letter-spacing="1.2">WORKERS</text>
+  <rect x="50" y="386" width="280" height="104" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="3"/>
+  <g transform="translate(78 414) scale(0.9)"><rect x="-12.0" y="-12.0" width="24" height="24" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><rect x="-6.0" y="-6.0" width="12.0" height="12.0" fill="#76B900"/><line x1="-4.8" y1="-17.0" x2="-4.8" y2="-12.0" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="-4.8" y1="12.0" x2="-4.8" y2="17.0" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="-17.0" y1="-4.8" x2="-12.0" y2="-4.8" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="12.0" y1="-4.8" x2="17.0" y2="-4.8" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="4.8" y1="-17.0" x2="4.8" y2="-12.0" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="4.8" y1="12.0" x2="4.8" y2="17.0" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="-17.0" y1="4.8" x2="-12.0" y2="4.8" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="12.0" y1="4.8" x2="17.0" y2="4.8" stroke="#76B900" stroke-width="2" stroke-linecap="round"/></g>
+  <text x="104" y="420" font-size="18" font-weight="700" fill="#3F6600" text-anchor="start">Worker A</text>
+  <rect x="70" y="438" width="18" height="18" rx="3" fill="#76B900" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="92" y="438" width="18" height="18" rx="3" fill="#76B900" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="114" y="438" width="18" height="18" rx="3" fill="#76B900" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="136" y="438" width="18" height="18" rx="3" fill="#76B900" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="158" y="438" width="18" height="18" rx="3" fill="#76B900" stroke="#76B900" stroke-width="1.5"/>
+  <rect x="180" y="438" width="18" height="18" rx="3" fill="#FFFFFF" stroke="#76B900" stroke-width="1.5"/>
+  <text x="70" y="478" font-size="15" font-weight="700" fill="#3F6600" text-anchor="start">cache hit</text>
+  <rect x="400" y="386" width="280" height="104" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
+  <g transform="translate(428 414) scale(0.9)"><rect x="-12.0" y="-12.0" width="24" height="24" rx="4" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="2"/><rect x="-6.0" y="-6.0" width="12.0" height="12.0" fill="#9CA3AF"/><line x1="-4.8" y1="-17.0" x2="-4.8" y2="-12.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round"/><line x1="-4.8" y1="12.0" x2="-4.8" y2="17.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round"/><line x1="-17.0" y1="-4.8" x2="-12.0" y2="-4.8" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round"/><line x1="12.0" y1="-4.8" x2="17.0" y2="-4.8" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round"/><line x1="4.8" y1="-17.0" x2="4.8" y2="-12.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round"/><line x1="4.8" y1="12.0" x2="4.8" y2="17.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round"/><line x1="-17.0" y1="4.8" x2="-12.0" y2="4.8" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round"/><line x1="12.0" y1="4.8" x2="17.0" y2="4.8" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round"/></g>
+  <text x="454" y="420" font-size="18" font-weight="700" fill="#4B5563" text-anchor="start">Worker B</text>
+  <rect x="420" y="438" width="18" height="18" rx="3" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.5"/>
+  <rect x="442" y="438" width="18" height="18" rx="3" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.5"/>
+  <rect x="464" y="438" width="18" height="18" rx="3" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.5"/>
+  <rect x="486" y="438" width="18" height="18" rx="3" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.5"/>
+  <rect x="508" y="438" width="18" height="18" rx="3" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.5"/>
+  <rect x="530" y="438" width="18" height="18" rx="3" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="420" y="478" font-size="15" font-weight="700" fill="#4B5563" text-anchor="start">no cache</text>
+  <rect x="750" y="386" width="280" height="104" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
+  <g transform="translate(778 414) scale(0.9)"><rect x="-12.0" y="-12.0" width="24" height="24" rx="4" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="2"/><rect x="-6.0" y="-6.0" width="12.0" height="12.0" fill="#9CA3AF"/><line x1="-4.8" y1="-17.0" x2="-4.8" y2="-12.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round"/><line x1="-4.8" y1="12.0" x2="-4.8" y2="17.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round"/><line x1="-17.0" y1="-4.8" x2="-12.0" y2="-4.8" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round"/><line x1="12.0" y1="-4.8" x2="17.0" y2="-4.8" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round"/><line x1="4.8" y1="-17.0" x2="4.8" y2="-12.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round"/><line x1="4.8" y1="12.0" x2="4.8" y2="17.0" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round"/><line x1="-17.0" y1="4.8" x2="-12.0" y2="4.8" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round"/><line x1="12.0" y1="4.8" x2="17.0" y2="4.8" stroke="#9CA3AF" stroke-width="2" stroke-linecap="round"/></g>
+  <text x="804" y="420" font-size="18" font-weight="700" fill="#4B5563" text-anchor="start">Worker C</text>
+  <rect x="770" y="438" width="18" height="18" rx="3" fill="#9CA3AF" stroke="#9CA3AF" stroke-width="1.5"/>
+  <rect x="792" y="438" width="18" height="18" rx="3" fill="#9CA3AF" stroke="#9CA3AF" stroke-width="1.5"/>
+  <rect x="814" y="438" width="18" height="18" rx="3" fill="#9CA3AF" stroke="#9CA3AF" stroke-width="1.5"/>
+  <rect x="836" y="438" width="18" height="18" rx="3" fill="#9CA3AF" stroke="#9CA3AF" stroke-width="1.5"/>
+  <rect x="858" y="438" width="18" height="18" rx="3" fill="#9CA3AF" stroke="#9CA3AF" stroke-width="1.5"/>
+  <rect x="880" y="438" width="18" height="18" rx="3" fill="#FFFFFF" stroke="#9CA3AF" stroke-width="1.5"/>
+  <text x="770" y="478" font-size="15" font-weight="700" fill="#92400E" text-anchor="start">busy</text>
+  <rect x="926" y="464" width="84" height="10" rx="5" fill="#FFFFFF" stroke="#D97706" stroke-width="1.5"/><rect x="928" y="466" width="68" height="6" rx="3" fill="#D97706"/>
+  <path d="M950,322 C950,350 190,330 190,384" fill="none" stroke="#76B900" stroke-width="3" marker-end="url(#arrow-green)"/>
+  <path d="M950,322 C950,355 540,340 540,384" fill="none" stroke="#9CA3AF" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arrow-gray)"/>
+  <path d="M950,322 C950,355 890,340 890,384" fill="none" stroke="#9CA3AF" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arrow-gray)"/>
+</svg>
