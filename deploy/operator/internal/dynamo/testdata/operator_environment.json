@@ -1,0 +1,143 @@
+[
+  {
+    "name": "ordinary-worker",
+    "backend": "vllm",
+    "bindings": {}
+  },
+  {
+    "name": "wrapper-model-path-is-not-backend-detection",
+    "main": {
+      "command": ["python3", "/app/worker.py"],
+      "args": ["--model=/models/dynamo.vllm", "--enable-elastic-ep", "--data-parallel-backend=ray", "$(POD_IP)"],
+      "env": [{"name": "POD_IP", "valueFrom": {"secretKeyRef": {"name": "worker-options", "key": "extra-option"}}}]
+    },
+    "backend": "noop",
+    "bindings": {},
+    "preserved": ["POD_IP"]
+  },
+  {
+    "name": "elastic-ep-ray",
+    "main": {"args": ["--enable-elastic-ep", "--data-parallel-backend=ray"]},
+    "backend": "vllm",
+    "bindings": {"POD_IP": null, "VLLM_DP_MASTER_IP": null}
+  },
+  {
+    "name": "direct-vllm-rs-overrides-authored-cycle",
+    "component": {"multinode": {"nodeCount": 2}},
+    "main": {
+      "command": ["/usr/local/bin/vllm-rs"],
+      "env": [{"name": "VLLM_NIXL_SIDE_CHANNEL_HOST", "value": "$(USER)"}]
+    },
+    "graph": {"env": [{"name": "USER", "value": "$(VLLM_NIXL_SIDE_CHANNEL_HOST)"}]},
+    "role": "leader",
+    "backend": "vllm",
+    "bindings": {"DYNAMO_RANK": null, "DYNAMO_LEADER_ADDRESS": null, "VLLM_NIXL_SIDE_CHANNEL_HOST": null}
+  },
+  {
+    "name": "automatic-ray-preserves-authored-host",
+    "component": {
+      "multinode": {"nodeCount": 2},
+      "podTemplate": {"metadata": {"annotations": {"nvidia.com/vllm-distributed-executor-backend": "ray"}}}
+    },
+    "main": {"env": [{"name": "VLLM_NIXL_SIDE_CHANNEL_HOST", "value": "custom"}]},
+    "role": "leader",
+    "backend": "vllm",
+    "bindings": {"DYNAMO_RANK": null, "DYNAMO_LEADER_ADDRESS": null},
+    "preserved": ["VLLM_NIXL_SIDE_CHANNEL_HOST"]
+  },
+  {
+    "name": "role-backend-is-component-wide",
+    "component": {
+      "multinode": {"nodeCount": 2},
+      "roles": [
+        {"name": "leader", "podTemplate": {"spec": {"containers": [{"name": "main", "image": "engine:1.8.0", "command": ["python3", "-m", "dynamo.vllm"], "args": ["--distributed-executor-backend=mp"]}]}}},
+        {"name": "worker", "podTemplate": {"spec": {"containers": [{"name": "main", "image": "engine:1.8.0", "command": ["/app/worker"], "args": ["--distributed-executor-backend=mp"]}]}}}
+      ]
+    },
+    "role": "worker",
+    "backend": "vllm",
+    "bindings": {"DYNAMO_RANK": null, "DYNAMO_LEADER_ADDRESS": null, "VLLM_NIXL_SIDE_CHANNEL_HOST": null}
+  },
+  {
+    "name": "native-engine-main-has-no-vllm-bindings",
+    "component": {
+      "multinode": {"nodeCount": 2},
+      "roles": [
+        {"name": "leader", "podTemplate": {"spec": {
+          "containers": [{"name": "main", "image": "engine:1.8.0", "command": ["python3", "-m", "dynamo.vllm"], "env": [{"name": "VLLM_NIXL_SIDE_CHANNEL_HOST", "value": "custom"}]}],
+          "initContainers": [{"name": "runtime", "image": "runtime:1.8.0", "restartPolicy": "Always"}]
+        }}},
+        {"name": "worker", "podTemplate": {"spec": {"containers": [{"name": "main", "image": "engine:1.8.0", "command": ["/app/worker"]}]}}}
+      ]
+    },
+    "main": {"env": [{"name": "VLLM_NIXL_SIDE_CHANNEL_HOST", "value": "custom"}]},
+    "role": "leader",
+    "backend": "vllm",
+    "bindings": {"DYNAMO_RANK": null, "DYNAMO_LEADER_ADDRESS": null},
+    "preserved": ["VLLM_NIXL_SIDE_CHANNEL_HOST"]
+  },
+  {
+    "name": "intrapod-gms",
+    "component": {"experimental": {"gpuMemoryService": {"mode": "IntraPod"}}},
+    "backend": "vllm",
+    "bindings": {"GMS_SOCKET_DIR": "/gms-intrapod-control"}
+  },
+  {
+    "name": "intrapod-snapshot-failover",
+    "component": {"experimental": {"gpuMemoryService": {"mode": "IntraPod"}, "failover": {"mode": "IntraPod"}, "checkpoint": {"enabled": true}}},
+    "main": {"env": [{"name": "DYN_VLLM_GMS_SHADOW_MODE", "value": "authored"}, {"name": "DYN_HEALTH_CHECK_ENABLED", "value": "authored"}]},
+    "backend": "vllm",
+    "bindings": {
+      "GMS_SOCKET_DIR": "/gms-intrapod-control", "DYN_GMS_USE_V1": "true", "ENGINE_ID": null, "CONTAINER_NAME": null,
+      "FAILOVER_LOCK_PATH": "/gms-intrapod-control/failover.lock", "DYN_SYSTEM_STARTING_HEALTH_STATUS": "notready",
+      "DYN_SYSTEM_PORT": null, "DYN_SYSTEM_ENABLED": "true", "DYN_FORWARDPASS_METRIC_PORT": null
+    },
+    "omitted": ["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", "DYN_HEALTH_CHECK_ENABLED", "DYN_VLLM_GMS_SHADOW_MODE"]
+  },
+  {
+    "name": "intrapod-cold-failover",
+    "component": {"experimental": {"gpuMemoryService": {"mode": "IntraPod"}, "failover": {"mode": "IntraPod"}}},
+    "backend": "vllm",
+    "bindings": {
+      "GMS_SOCKET_DIR": "/gms-intrapod-control", "ENGINE_ID": null, "CONTAINER_NAME": null,
+      "FAILOVER_LOCK_PATH": "/gms-intrapod-control/failover.lock", "DYN_SYSTEM_STARTING_HEALTH_STATUS": "notready",
+      "DYN_SYSTEM_PORT": null, "DYN_SYSTEM_ENABLED": "true", "DYN_FORWARDPASS_METRIC_PORT": null,
+      "DYN_VLLM_GMS_SHADOW_MODE": "true", "VLLM_NIXL_SIDE_CHANNEL_PORT": null, "DYN_VLLM_KV_EVENT_PORT": null
+    },
+    "omitted": ["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", "DYN_HEALTH_CHECK_ENABLED"]
+  },
+  {
+    "name": "interpod-gms-failover",
+    "component": {"experimental": {"gpuMemoryService": {"mode": "InterPod"}, "failover": {"mode": "InterPod"}}},
+    "backend": "vllm",
+    "bindings": {
+      "ENGINE_ID": null, "GMS_SOCKET_DIR": "/run/gms/shared", "FAILOVER_LOCK_PATH": "/run/gms/shared/failover.lock",
+      "DYN_SYSTEM_STARTING_HEALTH_STATUS": "notready", "DYN_VLLM_GMS_SHADOW_MODE": "true"
+    },
+    "omitted": ["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"]
+  },
+  {
+    "name": "graph-policy-omits-unset-weight",
+    "graph": {"experimental": {"kvTransferPolicy": {"labelKey": "topology.kubernetes.io/zone", "domain": "zone", "enforcement": "required"}}},
+    "main": {"env": [{"name": "DYN_KV_TRANSFER_PREFERRED_WEIGHT", "value": "authored"}]},
+    "backend": "vllm",
+    "bindings": {"DYN_KV_TRANSFER_DOMAIN": "zone", "DYN_KV_TRANSFER_ENFORCEMENT": "required", "DYN_TOPOLOGY_ENABLED": "true", "DYN_TOPOLOGY_MOUNT_PATH": "/etc/dynamo/topology"},
+    "omitted": ["DYN_KV_TRANSFER_PREFERRED_WEIGHT"]
+  },
+  {
+    "name": "explicit-backend-mismatch",
+    "graph": {"backendFramework": "sglang"},
+    "error": "backend framework mismatch"
+  },
+  {
+    "name": "role-backend-mismatch",
+    "component": {
+      "multinode": {"nodeCount": 2},
+      "roles": [
+        {"name": "leader", "podTemplate": {"spec": {"containers": [{"name": "main", "command": ["python3", "-m", "dynamo.vllm"]}]}}},
+        {"name": "worker", "podTemplate": {"spec": {"containers": [{"name": "main", "command": ["python3", "-m", "dynamo.sglang"]}]}}}
+      ]
+    },
+    "error": "multiple backend frameworks detected across pod templates"
+  }
+]
