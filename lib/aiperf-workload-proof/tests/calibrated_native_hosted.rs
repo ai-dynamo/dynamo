@@ -31,7 +31,7 @@ use std::{
 use aiperf_clock_runtime::cancellation::RunCancellation;
 use aisimulate_core::engine::{CanonicalTimingModel, EngineConfig, TimingModel, TimingModelConfig};
 use aisimulate_core::replay::{
-    ReplayCaptureOptions, ReplayComposition, ReplayDeterminism, ReplayEngineConfig,
+    ReplayCaptureOptions, ReplayDeterminism, ReplayEngineConfig,
     ReplayEngineFactory, ReplayReport, ReplayRoleConfig, ReplayRuntimeInput, ReplaySpec, Replayer,
 };
 use aisimulate_core::{
@@ -46,9 +46,7 @@ use aisimulate_core::{
 };
 use anyhow::{Context, Result, ensure};
 use dynamo_mocker::common::perf_model::{AisCallback, PerfModel};
-use dynamo_mocker::placement::{
-    KvReplayComposition, KvReplayMetadata, MockerConfig, RouterEventObservation,
-};
+use dynamo_mocker::placement::{KvReplayComposition, MockerConfig};
 use serde_json::{Value, json};
 
 // Shared with the runner's own tests; reused in place rather than copied.
@@ -187,7 +185,7 @@ fn canonical_role(model: &str, systems: &Path, role: ForwardPassWorkerType) -> R
         }))
         .context("complete matching native memory engine identity")?,
         max_num_tokens: 4096,
-        max_batch_size: MAX_NUM_SEQS,
+        max_batch_size: u32::try_from(MAX_NUM_SEQS)?,
         kv_cache_memory_fraction: KvCacheMemoryFraction::OfTotal(0.9),
         gpu_memory_capacity_bytes_override: None,
         cuda_graph_reserved_bytes: 0,
