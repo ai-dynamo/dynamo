@@ -154,8 +154,8 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
 > [!WARNING]
 > **Experimental.** Starting with platform chart v1.7.0, the operator installs and serves
 > the DGDR v1beta2 Request, Run, and Candidate APIs and reconciles Requests into Runs without
-> a feature gate. These APIs may change incompatibly in future releases; Experimental does
-> not imply a stable API contract. Older chart versions, including the `1.2.1` example above,
+> a feature gate. These APIs are not feature complete and may change incompatibly in future
+> releases. Older chart versions, including the `1.2.1` example above,
 > do not provide this default availability.
 >
 > Remove the obsolete `dynamo-operator.dgdrV1Beta2.enabled` Helm value from custom values files.

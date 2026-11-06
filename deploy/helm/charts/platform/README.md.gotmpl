@@ -111,9 +111,9 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 ##### Experimental DGDR v1beta2 Without an API Gate
 
 **Change:** The operator installs and serves the Experimental DGDR v1beta2 Request, Run, and
-Candidate APIs and starts their controllers without a feature gate. The API remains Experimental
-and may change incompatibly in future releases. Existing v1beta1 Requests retain their API and
-behavior; the Request storage version and conversion contract are unchanged.
+Candidate APIs and starts their controllers without a feature gate. The API is Experimental
+and not feature complete; it may change incompatibly in future releases. Existing v1beta1 Requests
+retain their API and behavior; the Request storage version and conversion contract are unchanged.
 
 **Affected:** All operator installations, including those that previously left
 `dynamo-operator.dgdrV1Beta2.enabled` unset or set it to `false`. Existing v1beta2 resources continue

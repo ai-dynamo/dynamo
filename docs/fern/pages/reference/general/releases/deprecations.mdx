@@ -21,7 +21,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 ## v1.7.0 - Upcoming
 
-<span className="dynref-badge dynref-badge--blue">Behavioral</span> **DGDR v1beta2 is available as an Experimental API without a feature gate.** The operator installs and serves the Request, Run, and Candidate APIs and starts their controllers by default. The API remains Experimental and may change incompatibly in future releases. Existing v1beta1 Requests keep their behavior and storage version. See the [DGDR API reference](../../kubernetes-api/dynamo-graph-deployment-request.mdx).
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **DGDR v1beta2 is available as an Experimental API without a feature gate.** The operator installs and serves the Request, Run, and Candidate APIs and starts their controllers by default. The API is not feature complete and may change incompatibly in future releases. Existing v1beta1 Requests keep their behavior and storage version. See the [DGDR API reference](../../kubernetes-api/dynamo-graph-deployment-request.mdx).
 
   > **Migrate:** Remove `dynamo-operator.dgdrV1Beta2.enabled` from custom Helm values and `--dgdr-v1beta2-enabled` from custom operator or CRD-installer commands. Ordinary Helm upgrades update the commands automatically. Installations with `dynamo-operator.upgradeCRD=false`, including namespace-restricted operators, need matching CRDs installed by an administrator before upgrading the operator. Planner live retune retains its separate `dynamo-operator.dgdrV1Beta2.plannerLiveRetune` opt-in, which defaults to `false`; configure the Planner explicitly before using it.
 

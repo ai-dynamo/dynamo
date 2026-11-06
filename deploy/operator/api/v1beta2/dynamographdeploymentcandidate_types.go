@@ -64,7 +64,8 @@ type DynamoGraphDeploymentCandidateStatus struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
-// Experimental. Available without a feature gate; this API may change incompatibly in future releases.
+// Experimental and not feature complete. Available without a feature gate; this API
+// may change incompatibly in future releases.
 type DynamoGraphDeploymentCandidate struct {
 	metav1.TypeMeta `json:",inline"`
 	// +optional

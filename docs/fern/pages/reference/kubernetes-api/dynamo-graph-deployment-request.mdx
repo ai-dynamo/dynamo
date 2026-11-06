@@ -13,8 +13,8 @@ This page documents the `nvidia.com/v1beta1` API — the storage version.
 
 ## Experimental v1beta2 availability
 
-The `nvidia.com/v1beta2` Request, Run, and Candidate APIs are **Experimental** and
-available without a feature gate. They may change incompatibly in future releases.
+The `nvidia.com/v1beta2` Request, Run, and Candidate APIs are **Experimental** and not feature complete.
+They are available without a feature gate and may change incompatibly in future releases.
 The operator installs their CRDs and reconciles native v1beta2 Requests by default;
 `v1beta1` remains the Request storage version. Installations with `dynamo-operator.upgradeCRD=false`, including namespace-restricted
 installations, require an administrator to install the matching CRDs before upgrading the operator.
@@ -105,8 +105,8 @@ spec:
 
 ### v1beta2 DGD Overrides
 
-**Experimental.** DGDR v1beta2 is available without a feature gate. Its API may
-change incompatibly in future releases. `spec.overrides.dgd` accepts one partial
+**Experimental.** DGDR v1beta2 is not feature complete. It is available without a feature gate
+and may change incompatibly in future releases. `spec.overrides.dgd` accepts one partial
 `nvidia.com/v1beta1` DGD, applied to every selected Candidate across backends and topologies.
 Other DGD API versions are not accepted here.
 
@@ -1328,8 +1328,8 @@ kubectl get dgdr my-model -n $NAMESPACE \
 ## Replay a recorded trace (v1beta2)
 
 <Warning>
-The `nvidia.com/v1beta2` Request, Run, and Candidate APIs are **Experimental** and
-available without a feature gate. They may change incompatibly in future releases.
+The `nvidia.com/v1beta2` Request, Run, and Candidate APIs are **Experimental** and not feature complete.
+They are available without a feature gate and may change incompatibly in future releases.
 See the [installation guide](../../kubernetes/installation/install-dynamo.md).
 Planner live retune remains a separate, disabled-by-default opt-in.
 </Warning>

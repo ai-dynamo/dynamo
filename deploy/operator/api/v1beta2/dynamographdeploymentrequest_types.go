@@ -504,7 +504,8 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.status) || !(has(self.status.v1beta1) || has(self.status.observedGeneration) || has(self.status.activeRunRef) || has(self.status.recentRunRefs) || has(self.status.conditions)) || has(self.spec.v1beta1) == has(self.status.v1beta1)",message="nonempty status must use the representation selected by spec"
 
 // DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
-// Experimental. Available without a feature gate; this API may change incompatibly in future releases.
+// Experimental and not feature complete. Available without a feature gate; this API
+// may change incompatibly in future releases.
 type DynamoGraphDeploymentRequest struct {
 	metav1.TypeMeta `json:",inline"`
 	// +optional
