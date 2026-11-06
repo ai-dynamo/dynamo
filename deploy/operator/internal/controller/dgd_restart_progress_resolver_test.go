@@ -289,17 +289,42 @@ func TestGroveRestartWaitsForRequestedRevisionAfterFailedWrite(t *testing.T) {
 			result, err = program.Reconcile(ctx, workloadProgramRequest{DGD: dgd})
 			require.NoError(t, err)
 			require.ElementsMatch(t, pending, result.Status.Restart.InProgress)
+			require.Zero(t, result.RequeueAfter, "unchanged progress waits for Grove events")
 
 			t.Log("Advance or complete only after the requested revision is ready")
 			markRestartGroveComponentsReady(t, reconciler.Client, dgd.Namespace, pcsName, order)
 			result, err = program.Reconcile(ctx, workloadProgramRequest{DGD: dgd})
 			require.NoError(t, err)
+			require.Positive(t, result.RequeueAfter, "changed progress must schedule the next reconcile")
 			if strategy == nvidiacomv1beta1.RestartStrategyTypeParallel {
 				require.Equal(t, nvidiacomv1beta1.RestartPhaseCompleted, result.Status.Restart.Phase)
 			} else {
 				require.Equal(t, nvidiacomv1beta1.RestartPhaseRestarting, result.Status.Restart.Phase)
 				require.Equal(t, []string{"decode"}, result.Status.Restart.InProgress)
+				dgd.Status = result.Status
+				require.NoError(t, reconciler.Client.Update(ctx, dgd))
+
+				t.Log("Use the scheduled reconcile without advancing past the unobserved decode revision")
+				result, err = program.Reconcile(ctx, workloadProgramRequest{DGD: dgd})
+				require.NoError(t, err)
+				require.Equal(t, []string{"decode"}, result.Status.Restart.InProgress)
+				require.Zero(t, result.RequeueAfter)
+
+				t.Log("Complete the sequence once Grove observes the restarted decode")
+				markRestartGroveComponentsReady(t, reconciler.Client, dgd.Namespace, pcsName, order)
+				result, err = program.Reconcile(ctx, workloadProgramRequest{DGD: dgd})
+				require.NoError(t, err)
+				require.Equal(t, nvidiacomv1beta1.RestartPhaseCompleted, result.Status.Restart.Phase)
+				require.Positive(t, result.RequeueAfter)
 			}
+			dgd.Status = result.Status
+			require.NoError(t, reconciler.Client.Update(ctx, dgd))
+
+			t.Log("Stop requeueing after the completed status is persisted")
+			result, err = program.Reconcile(ctx, workloadProgramRequest{DGD: dgd})
+			require.NoError(t, err)
+			require.Equal(t, nvidiacomv1beta1.RestartPhaseCompleted, result.Status.Restart.Phase)
+			require.Zero(t, result.RequeueAfter)
 		})
 	}
 }
