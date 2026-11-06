@@ -25,7 +25,7 @@
 //! * 1800-second profile duration (the full default, not the 900-second lower
 //!   bound and not the 1200-second `agentx_fast` diagnostic)
 //! * concurrency 32, seed 42
-//! * trajectory-start ratios 0.0..=1.0 (not the frozen parity preset)
+//! * operator-selected full-MVP trajectory-start ratios 0.25..=0.75
 //! * no request or session caps, finite replay disabled
 //! * no `unsafe_override`, all corpus sources retained
 //! * direct trace-hash input with no text tokenizer; canonical model-config
@@ -141,9 +141,9 @@ const CONCURRENCY: u32 = 32;
 const SEED: u64 = 42;
 /// Scenario default profiling grace period from the shared canonical plan.
 const GRACE_PERIOD_SECONDS: f64 = 30.0;
-/// Scenario trajectory-start window.
-const TRAJECTORY_START_MIN_RATIO: f64 = 0.0;
-const TRAJECTORY_START_MAX_RATIO: f64 = 1.0;
+/// Operator-selected full-MVP window; explicit values override scenario defaults.
+const TRAJECTORY_START_MIN_RATIO: f64 = 0.25;
+const TRAJECTORY_START_MAX_RATIO: f64 = 0.75;
 /// Canonical role model identity. Same model on every role and on the run.
 const MODEL: &str = "zai-org/GLM-5.2-FP8";
 /// Canonical model maximum context, cross-checked against the consumed model
@@ -165,8 +165,9 @@ const RAW_BACKEND_ARTIFACT: &str = "native_backend_report.json";
 /// The base frame is the shared `run_fixture::request`, so every non-dataset
 /// section keeps its fully materialized native representation. Scenario-owned
 /// dataset, phase, transport, export, and replay policy members are replaced
-/// from `inferencex_agentx_mvp()`; only the documented concurrency and grace
-/// period are authored here because the scenario default does not carry them.
+/// from `inferencex_agentx_mvp()`; concurrency, grace and the operator's explicit
+/// 25-75 trajectory window are authored here. Current Python scenario resolution
+/// honors explicit trajectory ratios instead of replacing them with defaults.
 ///
 /// This call writes nothing into `directory` and needs no external tokenizer
 /// assets, so it runs as a preflight before the artifact directory is created.
@@ -188,20 +189,14 @@ fn full_mvp_run(directory: &Path) -> Result<BenchmarkRun> {
     let system_idle_seconds = scenario
         .system_idle_gap_cap_seconds
         .context("scenario must declare the global system-idle cap")?;
-    let trajectory_min = scenario
-        .default_trajectory_start_min_ratio
-        .context("scenario must declare the trajectory-start minimum")?;
-    let trajectory_max = scenario
-        .default_trajectory_start_max_ratio
-        .context("scenario must declare the trajectory-start maximum")?;
+    // Explicit ratios are honored by current Python origin/main's scenario
+    // resolver; they are not invariant locks. Keep the requested 25-75 window
+    // without changing the distinct named `agentx` preset's other defaults.
+    let trajectory_min = TRAJECTORY_START_MIN_RATIO;
+    let trajectory_max = TRAJECTORY_START_MAX_RATIO;
     ensure!(
         system_idle_seconds == SYSTEM_IDLE_SECONDS,
         "scenario system-idle cap changed to {system_idle_seconds}"
-    );
-    ensure!(
-        trajectory_min == TRAJECTORY_START_MIN_RATIO
-            && trajectory_max == TRAJECTORY_START_MAX_RATIO,
-        "scenario trajectory window changed to {trajectory_min}..={trajectory_max}"
     );
 
     let (catalog_key, meta) = aiperf_config::model::public_catalog::lookup_entry(AGENTX_CORPUS)
@@ -383,12 +378,11 @@ pub fn assert_mvp_config(run: &BenchmarkRun) -> Result<()> {
     let system_idle_seconds = scenario
         .system_idle_gap_cap_seconds
         .context("scenario must declare the global system-idle cap")?;
-    let trajectory_min = scenario
-        .default_trajectory_start_min_ratio
-        .context("scenario must declare the trajectory-start minimum")?;
-    let trajectory_max = scenario
-        .default_trajectory_start_max_ratio
-        .context("scenario must declare the trajectory-start maximum")?;
+    // Explicit ratios are honored by current Python origin/main's scenario
+    // resolver; they are not invariant locks. Keep the requested 25-75 window
+    // without changing the distinct named `agentx` preset's other defaults.
+    let trajectory_min = TRAJECTORY_START_MIN_RATIO;
+    let trajectory_max = TRAJECTORY_START_MAX_RATIO;
 
     ensure!(
         scenario.timing_mode == "agentic_replay",
