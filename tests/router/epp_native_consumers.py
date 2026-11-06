@@ -2245,18 +2245,41 @@ def _prepare_warm_dataplane(
                 case_name=f"{case_name}-prep-{attempt}-margin",
             )
         pending: str | None = None
+        last_pending: str | None = None
         observed: dict[str, Any] | None = None
-        try:
-            observed = _observe_query_routes(
-                stack,
-                cold,
-                expected_worker=divert_worker,
-                case_name=f"{case_name}-prep-{attempt}",
-                shared_tokens=probe_tokens,
-                deadline=deadline,
-            )
-        except WorkerSelectionPending as exc:
-            pending = f"{type(exc).__name__}: {exc}"
+        observation_samples = 0
+        observation_begin = time.monotonic()
+        # Keep this booking alive while async consumers converge.
+        # Limit new polls to a soft window; RPCs keep the original deadline.
+        observation_soft_end = min(deadline, observation_begin + 1.0)
+        while True:
+            observation_samples += 1
+            try:
+                observed = _observe_query_routes(
+                    stack,
+                    cold,
+                    expected_worker=divert_worker,
+                    case_name=f"{case_name}-prep-{attempt}",
+                    shared_tokens=probe_tokens,
+                    deadline=deadline,
+                )
+            except WorkerSelectionPending as exc:
+                pending = f"{type(exc).__name__}: {exc}"
+                last_pending = pending
+                now = time.monotonic()
+                remaining_s = min(observation_soft_end, deadline) - now
+                if remaining_s <= 0:
+                    break
+                time.sleep(min(POLL_S, remaining_s))
+                if (
+                    time.monotonic() >= observation_soft_end
+                    or time.monotonic() >= deadline
+                ):
+                    break
+                continue
+            pending = None
+            break
+        observation_end = time.monotonic()
         _free_booking(
             stack,
             owned_bookings,
@@ -2288,11 +2311,16 @@ def _prepare_warm_dataplane(
                 "loads": loads,
                 "observation": observed,
                 "pending": pending,
+                "observation_samples": observation_samples,
+                "last_pending": last_pending,
+                "observation_begin_monotonic": observation_begin,
+                "observation_soft_end_monotonic": observation_soft_end,
+                "observation_end_monotonic": observation_end,
                 "zero": "sender-active-zero",
                 "restored": restored,
             }
         )
-        if pending is None:
+        if observed is not None and pending is None:
             return attempts
     raise AssertionError(
         f"{case_name}: data-plane preparation stayed pending for "
