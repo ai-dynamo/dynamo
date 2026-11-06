@@ -77,5 +77,5 @@ pub fn run_mocker_aiperf_workload(
             Box::new(model), deployment.admission_capacity, seed,
         )?;
         Ok(serde_json::to_string(&report)?)
-    }).map_err(|error| PyValueError::new_err(format!("native workload execution failed: {error:#}")))
+    }).map_err(|_error| PyValueError::new_err("native workload configuration or execution failed"))
 }
