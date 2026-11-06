@@ -12,6 +12,9 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use dynamo_kv_router::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
 use dynamo_kv_router::indexer::KvIndexerInterface;
+use dynamo_kv_router::plugins::worker_selection::{
+    WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
+};
 use dynamo_kv_router::protocols::{
     BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
     KvCacheStoredBlockData, RouterEvent, RoutingConstraints, StorageTier, WorkerWithDpRank,
@@ -21,7 +24,7 @@ use dynamo_kv_router::scheduling::{BusyThresholds, RejectThresholdsProvider};
 use dynamo_kv_router::services::indexer::backend::Indexer;
 use dynamo_kv_router::services::selection::{
     HostLoad, PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore,
-    SelectionHost, WorkerRequest, WorkerSelectionPolicyFactory,
+    SelectionHost, WorkerRequest,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -35,10 +38,7 @@ fn prompt_tokens() -> Vec<u32> {
 /// worker computes a fetch hint from it.
 fn reference_policy_factory() -> WorkerSelectionPolicyFactory {
     Arc::new(|config, role, _| {
-        dynamo_kv_router::WorkerSelectionPolicy::reference(
-            config.clone(),
-            role.default_selector_label(),
-        )
+        WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
     })
 }
 

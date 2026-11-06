@@ -31,6 +31,7 @@ fn every_supported_field_is_forwarded() {
         prefill_dp_rank: Some(3),
         ..Default::default()
     });
+    request.stop_conditions.stop_token_ids_visible = Some(vec![200012, 7]);
     let sent = build(&request).expect("a supported request");
 
     assert_eq!(sent.request_id, "request-1");
@@ -60,11 +61,16 @@ fn every_supported_field_is_forwarded() {
         Some(pb::StoppingOptions {
             max_tokens: Some(16),
             min_tokens: Some(1),
-            // Both hidden lists, deduplicated. The stop string stays with the
+            // All three lists, deduplicated. The stop string stays with the
             // frontend.
-            conditions: vec![stop_id(7), stop_id(128001), stop_id(128009)],
+            conditions: vec![
+                stop_id(7),
+                stop_id(128001),
+                stop_id(128009),
+                stop_id(200012)
+            ],
             ignore_eos: Some(false),
-            include_stop_in_output: None,
+            include_stop_in_output: Some(false),
         })
     );
     assert_eq!(sent.lora_name, "adapter", "the engine rejects LoRA itself");
@@ -262,22 +268,6 @@ fn unsupported_requests_are_rejected_before_dispatch() {
             "guided decoding",
         ),
         (
-            |r| r.stop_conditions.stop_token_ids_visible = Some(vec![5]),
-            "visible stop token IDs",
-        ),
-        (
-            |r| r.output_options.no_stop_trim = Some(true),
-            "no_stop_trim",
-        ),
-        (
-            |r| {
-                r.output_options.no_stop_trim = Some(true);
-                r.output_options.skip_special_tokens = Some(false);
-                r.stop_conditions.stop_token_ids = None;
-            },
-            "no_stop_trim",
-        ),
-        (
             |r| r.sampling_options.include_stop_str_in_output = Some(true),
             "include_stop_str_in_output",
         ),
@@ -346,19 +336,13 @@ fn neutral_options_are_accepted() {
         |r| r.extra_args = Some(json!({"sampling_options": {"detokenize": false}})),
         |r| r.extra_args = Some(json!({"sampling_options": {"detokenize": true}})),
         |r| r.extra_args = Some(json!({"sampling_options": {"bad_words_token_ids": []}})),
+        // The frontend applies these to the stop token the sidecar returns.
+        |r| r.output_options.no_stop_trim = Some(true),
         |r| {
             r.output_options.no_stop_trim = Some(true);
-            r.stop_conditions.stop_token_ids = None;
-        },
-        |r| {
-            r.output_options.no_stop_trim = Some(true);
-            r.output_options.skip_special_tokens = Some(true);
-            r.stop_conditions.stop_token_ids = Some(vec![]);
-        },
-        |r| {
-            r.output_options.no_stop_trim = Some(false);
             r.output_options.skip_special_tokens = Some(false);
         },
+        |r| r.output_options.retain_model_stop_token_text = Some(true),
     ];
     for mutate in rows {
         let mut request = request();
@@ -487,6 +471,95 @@ fn finish_reasons_map_and_unspecified_fails_closed() {
         .convert(finished(pb::FinishReason::Unspecified, None, None))
         .expect_err("unspecified");
     assert!(error.to_string().contains("unspecified finish reason"));
+}
+
+/// Both engines withhold the stop token they matched and name it in the finish
+/// event. The sidecar returns it when the frontend keeps its text, as it does
+/// for gpt-oss's `<|call|>` (200012), and counts it whether or not the engine
+/// counted it.
+#[test]
+fn a_matched_stop_token_is_returned_when_the_frontend_keeps_it() {
+    use pb::stop_match::Match;
+
+    // 128009 and 7 are client stops, and 128009 and 128001 hidden ones.
+    let request_with = |mutate: Mutation| {
+        let mut request = request();
+        request.stop_conditions.stop_token_ids_visible = Some(vec![200012]);
+        mutate(&mut request);
+        request
+    };
+    let terminal = |request: &PreprocessedRequest,
+                    reason: pb::FinishReason,
+                    matched: Match,
+                    reported: Option<pb::Usage>| {
+        let mut state = ResponseState::new(request, &discovered(AGG));
+        state.convert(token(&[11], Some(0))).expect("token");
+        state
+            .convert(finished(reason, Some(matched), reported))
+            .expect("finished")
+            .expect("terminal")
+    };
+    let visible = request_with(|_| {});
+    for (reason, finish, reported) in [
+        // The hybrid engine counts the token it withholds.
+        (
+            pb::FinishReason::Stop,
+            FinishReason::Stop,
+            Some(engine_usage(3, 2, None)),
+        ),
+        // The LPU-only engine does not.
+        (
+            pb::FinishReason::Stop,
+            FinishReason::Stop,
+            Some(engine_usage(3, 1, None)),
+        ),
+        // A matched stop is withheld whatever the finish reason.
+        (pb::FinishReason::Length, FinishReason::Length, None),
+    ] {
+        let terminal = terminal(&visible, reason, Match::StopTokenId(200012), reported);
+        assert_eq!(terminal.token_ids, [200012]);
+        assert_eq!(terminal.finish_reason, Some(finish));
+        assert_eq!(terminal.stop_reason, Some(StopReason::Int(200012)));
+        let usage = terminal.completion_usage.expect("usage");
+        assert_eq!(
+            (
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.total_tokens
+            ),
+            (3, 2, 5)
+        );
+    }
+
+    let untrimmed = request_with(|r| r.output_options.no_stop_trim = Some(true));
+    let retained = request_with(|r| r.output_options.retain_model_stop_token_text = Some(true));
+    for (request, matched, returned) in [
+        // The frontend trims hidden and client stops by default.
+        (&visible, Match::EosTokenId(128001), None),
+        (&visible, Match::StopTokenId(7), None),
+        (&visible, Match::StopText("done".into()), None),
+        // Keeping stop text needs every stop token; the frontend still trims
+        // the client's own under `retain_model_stop_token_text`.
+        (&untrimmed, Match::StopTokenId(7), Some(7)),
+        (&retained, Match::EosTokenId(128001), Some(128001)),
+        (&retained, Match::StopTokenId(7), Some(7)),
+    ] {
+        let terminal = terminal(request, pb::FinishReason::Stop, matched, None);
+        assert_eq!(terminal.token_ids, Vec::from_iter(returned));
+        assert_eq!(
+            terminal.completion_usage.expect("usage").completion_tokens,
+            1 + u32::from(returned.is_some())
+        );
+    }
+
+    // The hybrid engine names no stop when its final batch is empty, and then
+    // withholds nothing.
+    let terminal = ResponseState::new(&visible, &discovered(AGG))
+        .convert(finished(pb::FinishReason::Stop, None, None))
+        .expect("finished")
+        .expect("terminal");
+    assert!(terminal.token_ids.is_empty());
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
 }
 
 /// A decode engine counts the transferred blocks as cache hits; on a decode

@@ -137,6 +137,10 @@ ignore:
   - '.github/allurerc.mjs'
   - '.github/actionlint.yaml'
   - 'container/Dockerfile.docs'
+  # The Global Discovery Service's image and example manifest have no CI
+  # image-build or deploy job yet.
+  - 'container/Dockerfile.global-discovery-service'
+  - 'container/global-discovery-service.yaml'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
@@ -235,6 +239,9 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
+  # An AISimulate pin bump must refresh the schema used by operator admission.
+  - 'pyproject.toml'
+  - 'container/deps/requirements.aisimulate.txt'
   - 'docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md'
   - 'deploy/helm/charts/platform/**'
   # The operator check owns the real Go/Python DGD override contract test.
@@ -341,10 +348,12 @@ deploy:
 
 dgdr:
   - '.github/workflows/shared-dgdr-deploy-test.yml'
+  - 'components/src/dynamo/aisimulate/output/dgdr_run/**'
   - 'tests/conftest.py'
   - 'tests/deploy/conftest.py'
   - 'tests/deploy/dgdr_utils.py'
   - 'tests/deploy/test_dgdr.py'
+  - 'tests/deploy/test_dgdr_v1beta2.py'
   - 'tests/deploy/test_dgdr_h100.py'
   - 'tests/deploy/test_dgdr_utils.py'
   - 'tests/deploy/dgd_utils.py'
@@ -377,8 +386,9 @@ planner:
   - '!**/*.rst'
 
 sidecar_trtllm_image:
-  # PR CI runs resolver CPU tests; the GPU test runs independently in nightly CI.
+  # PR CI runs nightly resolver/harness CPU tests; GPU cases run in nightly CI.
   - 'lib/sidecar/trtllm/ci/**'
+  - 'lib/llm/tests/data/media/triangle_240p_10.mp4'
   - '.github/actions/changed-files/**'
   - '.github/filters.yaml'
   - '.github/workflows/pr.yaml'
@@ -491,6 +501,7 @@ frontend:
 
 rust:
   - '.github/workflows/pre-merge.yml'
+  - '.github/actions/setup-rust-ci/**'
   - '**/*.rs'
   - '**/Cargo.toml'
   - '**/Cargo.lock'
