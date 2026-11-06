@@ -26,6 +26,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/serviceidentity"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
@@ -158,6 +159,7 @@ func groveComponentServiceParams(
 	return dynamo.ComponentServiceParams{
 		ServiceName:     dynamo.GetDCDResourceName(dgd, componentName, ""),
 		Namespace:       dgd.Namespace,
+		DGDName:         dgd.Name,
 		ComponentType:   componentType,
 		DynamoNamespace: dgd.GetDynamoNamespaceForComponent(component),
 		ComponentName:   componentName,
@@ -201,6 +203,11 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 	if err := r.syncServiceAnnotations(ctx, dgd, syncedService, params.Annotations, componentName); err != nil {
 		logger.Error(err, "Failed to update main component service", "component", componentName)
 		return nil, fmt.Errorf("failed to update main component service %s: %w", componentName, err)
+	}
+
+	// Backfill identity even when the Service spec was already synchronized.
+	if _, err := serviceidentity.Apply(ctx, r, service, syncedService); err != nil {
+		return nil, err
 	}
 
 	resource, err := commoncontroller.NewResource(syncedService, func() (bool, string) {
@@ -317,6 +324,11 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 
 	if err := r.syncServiceAnnotations(ctx, dgd, syncedService, params.Annotations, componentName); err != nil {
 		return nil, fmt.Errorf("failed to update the elastic-EP leader service %s: %w", componentName, err)
+	}
+
+	// The auxiliary leader endpoint exposes the same component identity.
+	if _, err := serviceidentity.Apply(ctx, r, service, syncedService); err != nil {
+		return nil, err
 	}
 
 	resource, err := commoncontroller.NewResource(syncedService, func() (bool, string) { return true, "" })

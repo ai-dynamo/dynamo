@@ -294,6 +294,10 @@ func TestGroveStableResourcesReconcilerElasticEPServicesSelectRenderedPods(t *te
 					require.True(t, labels.SelectorFromSet(service.Spec.Selector).Matches(labels.Set(podLabels)),
 						"Service %s selector %v does not match rendered pod labels %v", name, service.Spec.Selector, podLabels)
 					require.Equal(t, podLabels[commonconsts.KubeLabelDynamoWorkerHash], service.Labels[commonconsts.KubeLabelDynamoWorkerHash])
+					require.Equal(t, dgd.Name, service.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+					for _, key := range []string{commonconsts.KubeLabelDynamoComponent, commonconsts.KubeLabelDynamoComponentType, commonconsts.KubeLabelDynamoNamespace} {
+						require.Equal(t, podLabels[key], service.Labels[key], "Service %s identity %s must match its Pods", name, key)
+					}
 					if tc.labels != nil {
 						require.Subset(t, service.Labels, tc.labels)
 					} else if tc.legacy {

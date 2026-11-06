@@ -165,6 +165,7 @@ func (r *graphReconciler) renderPodCliqueSet(
 			component := dgd.GetComponentByName(workload.ServingComponentName())
 			service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
 				ServiceName: plan.ResourcePrefix + "-serve", Namespace: deployment.Namespace,
+				DGDName:       dgd.Name,
 				ComponentType: string(component.ComponentType), ComponentName: component.ComponentName,
 				DynamoNamespace: dgd.GetDynamoNamespaceForComponent(component), IsK8sDiscovery: true,
 				Labels:      dynamo.GetDGDComponentResourceLabels(dgd, component.ComponentName, component),
