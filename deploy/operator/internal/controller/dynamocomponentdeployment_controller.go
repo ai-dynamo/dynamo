@@ -433,9 +433,12 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 	if err != nil {
 		return ComponentReconcileResult{}, fmt.Errorf("failed to sync the LeaderWorkerSet: %w", err)
 	}
-	// Delete the legacy LWS only after its replacement syncs; a short revision hash can let it serve.
-	if err := r.deleteLegacyOversizedLeaderWorkerSet(ctx, dynamoComponentDeployment); err != nil {
-		return ComponentReconcileResult{}, fmt.Errorf("failed to delete the oversized legacy LeaderWorkerSet: %w", err)
+
+	// Never delete the legacy LWS selected for this reconciliation, even if readiness changes.
+	if lwsObj.Name != legacyLeaderWorkerSetName(dynamoComponentDeployment.Name) {
+		if err := r.deleteLegacyOversizedLeaderWorkerSet(ctx, dynamoComponentDeployment); err != nil {
+			return ComponentReconcileResult{}, fmt.Errorf("failed to delete the oversized legacy LeaderWorkerSet: %w", err)
+		}
 	}
 
 	lwsReplicaStatus := getLeaderWorkerSetReplicasStatus(lwsObj)
@@ -631,7 +634,20 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to render multinode pod templates")
 	}
 
+	// Reuse an existing supported or serving LWS so an operator upgrade does not restart it.
 	kubeName := leaderWorkerSetName(opt.dynamoComponentDeployment)
+	legacy := &leaderworkersetv1.LeaderWorkerSet{}
+	legacyKey := types.NamespacedName{Name: legacyLeaderWorkerSetName(opt.dynamoComponentDeployment.Name), Namespace: opt.dynamoComponentDeployment.Namespace}
+	if legacyKey.Name != kubeName {
+		if err := r.Get(ctx, legacyKey, legacy); err == nil {
+			if metav1.IsControlledBy(legacy, opt.dynamoComponentDeployment) && preserveLegacyLeaderWorkerSet(legacy) {
+				kubeName = legacy.Name
+			}
+		} else if !k8serrors.IsNotFound(err) {
+			return nil, false, fmt.Errorf("get legacy LeaderWorkerSet: %w", err)
+		}
+	}
+
 	kubeNs := opt.dynamoComponentDeployment.Namespace
 	labels := dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment)
 
@@ -677,28 +693,35 @@ const (
 	legacyLeaderWorkerSetNameSuffix     = "-0"
 )
 
-// leaderWorkerSetName returns <dcd-name>-0 when it fits the StatefulSet revision
-// label limit, else a hashed name; neither collides with the operator ClusterIP service.
+// leaderWorkerSetName chooses a name that fits revision labels at every supported
+// group index and does not collide with the operator ClusterIP service.
 func leaderWorkerSetName(dcd *nvidiacomv1beta1.DynamoComponentDeployment) string {
 	return leaderWorkerSetNameForWorkload(dcd.Name)
 }
 
-// leaderWorkerSetNameForWorkload keeps <workload>-0 when it fits group indexes 0-9;
-// longer names can exceed the label limit, so they get a deterministic hashed name instead.
+// leaderWorkerSetNameForWorkload reserves room for every supported group index.
+// Reconciliation separately preserves existing legacy workloads to avoid upgrade restarts.
 func leaderWorkerSetNameForWorkload(workloadName string) string {
 	legacyName := legacyLeaderWorkerSetName(workloadName)
-	if len(legacyName) <= maxLegacyLeaderWorkerSetNameLength {
+	if len(legacyName) <= maxHashedLeaderWorkerSetNameLength {
 		return legacyName
 	}
 	return truncateDNSLabelWithHash(legacyName, maxHashedLeaderWorkerSetNameLength)
 }
 
+// legacyLeaderWorkerSetName matches the name used by earlier operators.
 func legacyLeaderWorkerSetName(workloadName string) string {
 	return workloadName + legacyLeaderWorkerSetNameSuffix
 }
 
-// deleteLegacyOversizedLeaderWorkerSet removes an older operator's <dcd-name>-0 LWS whose
-// name is too long for revision labels; only an LWS controlled by this DCD is deleted.
+// preserveLegacyLeaderWorkerSet avoids renaming previously supported workloads and
+// keeps any serving groups alive when a longer name happens to have a short revision hash.
+func preserveLegacyLeaderWorkerSet(legacy *leaderworkersetv1.LeaderWorkerSet) bool {
+	return len(legacy.Name) <= maxLegacyLeaderWorkerSetNameLength || legacy.Status.ReadyReplicas > 0
+}
+
+// deleteLegacyOversizedLeaderWorkerSet removes a non-serving oversized legacy LWS
+// only when this DCD controls it and its replacement has synced.
 func (r *DynamoComponentDeploymentReconciler) deleteLegacyOversizedLeaderWorkerSet(ctx context.Context, dcd *nvidiacomv1beta1.DynamoComponentDeployment) error {
 	legacyName := legacyLeaderWorkerSetName(dcd.Name)
 	if legacyName == leaderWorkerSetName(dcd) {
@@ -708,7 +731,7 @@ func (r *DynamoComponentDeploymentReconciler) deleteLegacyOversizedLeaderWorkerS
 	if err := r.Get(ctx, types.NamespacedName{Name: legacyName, Namespace: dcd.Namespace}, legacy); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	if !metav1.IsControlledBy(legacy, dcd) {
+	if !metav1.IsControlledBy(legacy, dcd) || preserveLegacyLeaderWorkerSet(legacy) {
 		return nil
 	}
 	log.FromContext(ctx).Info("Deleting LeaderWorkerSet whose name is too long for StatefulSet revision labels", "name", legacyName)

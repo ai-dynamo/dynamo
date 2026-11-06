@@ -750,18 +750,26 @@ func (r *dcdWorkloadRenderer) hasExistingLegacyWorkerSelector(
 	}
 
 	if r.runtimeConfig.Gate.Enabled(features.LWS) {
-		lwsName := leaderWorkerSetNameForWorkload(workloadName)
-		leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{}
-		if err := r.reader.Get(ctx, types.NamespacedName{Name: lwsName, Namespace: namespace}, leaderWorkerSet); err == nil {
-			template := leaderWorkerSet.Spec.LeaderWorkerTemplate
-			if template.LeaderTemplate != nil && hasLegacyWorkerSelector(template.LeaderTemplate.Labels, componentType) {
-				return true, nil
+		// Both old and bounded resource names can carry the worker identity during upgrades.
+		lwsNames := []string{leaderWorkerSetNameForWorkload(workloadName)}
+		if legacyName := legacyLeaderWorkerSetName(workloadName); legacyName != lwsNames[0] {
+			lwsNames = append(lwsNames, legacyName)
+		}
+
+		// Preserve either pod role's existing worker selector before falling back to a Service.
+		for _, lwsName := range lwsNames {
+			leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{}
+			if err := r.reader.Get(ctx, types.NamespacedName{Name: lwsName, Namespace: namespace}, leaderWorkerSet); err == nil {
+				template := leaderWorkerSet.Spec.LeaderWorkerTemplate
+				if template.LeaderTemplate != nil && hasLegacyWorkerSelector(template.LeaderTemplate.Labels, componentType) {
+					return true, nil
+				}
+				if hasLegacyWorkerSelector(template.WorkerTemplate.Labels, componentType) {
+					return true, nil
+				}
+			} else if !k8serrors.IsNotFound(err) {
+				return false, fmt.Errorf("failed to get leaderworkerset %s/%s: %w", namespace, lwsName, err)
 			}
-			if hasLegacyWorkerSelector(template.WorkerTemplate.Labels, componentType) {
-				return true, nil
-			}
-		} else if !k8serrors.IsNotFound(err) {
-			return false, fmt.Errorf("failed to get leaderworkerset %s/%s: %w", namespace, lwsName, err)
 		}
 	}
 
