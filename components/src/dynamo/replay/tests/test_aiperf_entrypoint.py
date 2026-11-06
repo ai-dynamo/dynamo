@@ -156,7 +156,7 @@ def test_installed_entrypoint_runs_aiperf_workload_on_2p2d_kv_deployment() -> No
                 }
             ),
             _SEED_HEX,
-            "native workload configuration or execution failed",
+            "unsupported prefill role configuration",
         ),
         (json.dumps(_DEPLOYMENT_2P2D), "07" * 31, "64 hexadecimal digits"),
         (json.dumps(_DEPLOYMENT_2P2D), "zz" * 32, "64 hexadecimal digits"),
