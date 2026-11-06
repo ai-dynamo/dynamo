@@ -1,32 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! jemalloc as the global allocator for every Rust allocation in the extension.
-//!
-//! The jemalloc symbols are prefixed (`_rjem_`), so CPython and other C code in the process
-//! keep the system allocator.
+//! jemalloc as the Rust global allocator. Its symbols are prefixed (`_rjem_`), so CPython and C
+//! code keep the system allocator.
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-/// jemalloc's application-provided options. `_RJEM_MALLOC_CONF` is read after this string and
-/// overrides it option by option.
-///
-/// - `background_thread:true`: purge freed pages on a schedule. Without it, an arena returns
-///   dirty pages only when one of its threads allocates again, so an idle process keeps the
-///   resident size of its last traffic burst.
-/// - `dirty_decay_ms:10000,muzzy_decay_ms:0`: return dirty pages after 10 s and skip the muzzy
-///   state. These are jemalloc 5.3's defaults, pinned so the purge schedule does not move with a
-///   jemalloc upgrade.
-/// - `narenas:16`: the default is four arenas per CPU in the affinity mask, each holding
-///   partly used slabs for every size class.
+/// Built-in options, overridden one by one by `_RJEM_MALLOC_CONF`. The background thread returns
+/// freed pages while idle, the decay values pin jemalloc 5.3's defaults, and `narenas` caps the
+/// default of four arenas per CPU.
 #[cfg(not(target_os = "macos"))]
 #[unsafe(export_name = "_rjem_malloc_conf")]
 pub static MALLOC_CONF: &[u8; 72] =
     b"background_thread:true,dirty_decay_ms:10000,muzzy_decay_ms:0,narenas:16\0";
 
-/// jemalloc has no background-thread support on macOS, and `background_thread:true` there stops
-/// initialization halfway, which leaves every allocation on a global lock.
+/// macOS jemalloc has no background threads; requesting one leaves every allocation on a lock.
 #[cfg(target_os = "macos")]
 #[unsafe(export_name = "_rjem_malloc_conf")]
 pub static MALLOC_CONF: &[u8; 49] = b"dirty_decay_ms:10000,muzzy_decay_ms:0,narenas:16\0";
