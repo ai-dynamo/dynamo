@@ -36,6 +36,9 @@ def write_artifacts(directory: Path, count: int, mode: str) -> None:
 def main() -> None:
     mode = os.environ["FAKE_AIPERF_MODE"]
     args = sys.argv
+    if calls := os.environ.get("MODEL_CALLS"):
+        with Path(calls).open("a") as stream:
+            stream.write(args[args.index("--model") + 1] + "\n")
     if mode == "exit":
         sys.exit(23)
     if mode == "missing":

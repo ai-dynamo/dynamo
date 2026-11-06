@@ -131,12 +131,12 @@ def test_frontend_benchmark_rejects_failed_exports(tmp_path, mode, models, fake_
     prelude = """
 set -euo pipefail
 BENCHMARK_STATUS=0
-_AIPERF_MODELS=(proof)
+_AIPERF_MODELS=(test-model)
 _AIPERF_TOK_ARGS=()
 _LOAD_ARGS=(--request-count 3)
 _EFFECTIVE_REQUESTS=3
 _WARMUP_ARGS=()
-MODEL=proof
+MODEL=test-model
 ISL=16
 OSL=2
 CONCURRENCY=1
@@ -145,7 +145,7 @@ BENCHMARK_DURATION=
 """
     if models == 2:
         prelude = prelude.replace(
-            "_AIPERF_MODELS=(proof)", "_AIPERF_MODELS=(proof second)"
+            "_AIPERF_MODELS=(test-model)", "_AIPERF_MODELS=(test-model second)"
         )
     result = subprocess.run(
         [
