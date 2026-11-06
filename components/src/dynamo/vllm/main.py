@@ -114,6 +114,7 @@ SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
     "tool_call_structural_tag_excludes_reasoning"
 )
+_OBJECT_STORAGE_SCHEMES = ("s3://", "gs://", "az://")
 
 
 async def close_configured_artifact_runtime() -> None:
@@ -140,8 +141,14 @@ def uses_modelexpress_load_format(config: Config) -> bool:
     return getattr(config.engine_args, "load_format", None) in MX_LOAD_FORMATS
 
 
+def is_object_storage_path(model: str) -> bool:
+    return model.startswith(_OBJECT_STORAGE_SCHEMES)
+
+
 def should_prefetch_model(config: Config) -> bool:
     if os.path.exists(config.model):
+        return False
+    if is_object_storage_path(config.model):
         return False
     return not uses_modelexpress_load_format(config)
 
