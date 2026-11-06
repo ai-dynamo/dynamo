@@ -12,6 +12,7 @@ import (
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	componentdeployment "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/component"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/serviceidentity"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -59,8 +60,7 @@ func RenderElasticEPLeaderService(component *v1beta1.DynamoComponentDeploymentSh
 
 	// Copy the caller's metadata so the Service carries the component's labels and
 	// annotations without aliasing the caller's maps.
-	labels := make(map[string]string)
-	maps.Copy(labels, params.Labels)
+	labels := serviceidentity.Labels(params.Labels, params.DGDName, params.ComponentName, params.ComponentType, params.DynamoNamespace)
 
 	annotations := make(map[string]string)
 	maps.Copy(annotations, params.Annotations)

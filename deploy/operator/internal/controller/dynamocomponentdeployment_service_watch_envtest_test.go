@@ -58,6 +58,20 @@ func TestDCDOwnedServiceIsRecreatedAfterDeletion(t *testing.T) {
 
 	serviceKey := client.ObjectKey{Namespace: dcd.Namespace, Name: dcd.Name}
 	original := waitForDCDOwnedService(t, ctx, env.Client(), serviceKey, dcd.UID, "")
+
+	t.Log("Metadata-only Service drift requeues its DCD and repairs component identity")
+	original.Labels[consts.KubeLabelDynamoComponent] = "wrong"
+	original.Labels["example.com/team"] = "external"
+	require.NoError(t, env.Client().Update(ctx, original))
+	dynamotesting.Eventually(t, func() (bool, string) {
+		service := &corev1.Service{}
+		if err := env.Client().Get(ctx, serviceKey, service); err != nil {
+			return false, err.Error()
+		}
+		return service.Labels[consts.KubeLabelDynamoComponent] == "frontend" && service.Labels["example.com/team"] == "external", "waiting for Service identity repair"
+	}, 10*time.Second, 100*time.Millisecond, "metadata-only Service changes did not trigger identity repair")
+
+	t.Log("Deleting the Service still recreates the DCD-owned endpoint")
 	require.NoError(t, env.Client().Delete(ctx, original))
 
 	waitForDCDOwnedService(t, ctx, env.Client(), serviceKey, dcd.UID, original.UID)
