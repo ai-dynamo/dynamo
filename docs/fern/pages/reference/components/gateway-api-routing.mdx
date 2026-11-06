@@ -134,6 +134,27 @@ Gateway topology.
   Includes active prompt-side prefill tokens in worker load accounting.
 </ParamField>
 
+<ParamField path="DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD" type="number">
+  Fraction (`0.0`–`1.0`) of a worker's KV cache blocks in use above which the router treats the worker
+  as overloaded. When every eligible worker is overloaded, the router rejects the request instead of
+  routing it. Unset or `None` leaves this check off. The Frontend reads the same variable for
+  `--active-decode-blocks-threshold`; see [Request Rejection](../../kubernetes/fault-tolerance/request-rejection.md).
+</ParamField>
+
+<ParamField path="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD" type="integer">
+  Active prefill tokens above which the router treats a worker as overloaded. Unset or `None` leaves
+  this check off. The Frontend reads the same variable for `--active-prefill-tokens-threshold`.
+</ParamField>
+
+<ParamField path="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC" type="number">
+  Prefill threshold as a fraction of the worker's `max_num_batched_tokens`: the worker is overloaded
+  when its active prefill tokens exceed this fraction of that value. Unset or `None` leaves this check
+  off. The Frontend reads the same variable for `--active-prefill-tokens-threshold-frac`.
+</ParamField>
+
+The three thresholds apply to both the decode and prefill pools, and an invalid value stops the EPP at
+startup.
+
 For the full shared configuration surface and tuning guidance, see
 [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md).
 
