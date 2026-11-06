@@ -600,7 +600,8 @@ pub(crate) fn roles_from_config(config: Value) -> Result<(RoleSetup, RoleSetup)>
             "note": "proof inventory only; no recurrent-state capacity or payload is invented",
         });
         let diagnostics = json!({"source": provider, "resolved_config": config,
-            "evidence": timing.evidence_summary()});
+            "timing_evidence_available": timing.evidence_summary().is_some(),
+            "timing_evidence_note": "availability only; no operation-level evidence is serialized by this control"});
         Ok(RoleSetup {
             timing,
             descriptor: descriptor.clone(),

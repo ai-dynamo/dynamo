@@ -53,9 +53,9 @@
 //!
 //! Required environment:
 //!
-//! * `AISIM_SYSTEMS_ROOT` — the checked-in B200 system assets and their sibling
-//!   canonical model configs. Each replica uses TP8, explicit FP8 weight/MoE
-//!   and KV precision with BF16 attention, with no estimator or memory fallback.
+//! * `MVP_AISIM_CONFIG` — an authored canonical AISim YAML configuration. The
+//!   owning compiler/factory resolves it; this proof verifies the accepted
+//!   scenario's physical identity without deriving or overriding its values.
 //! * `MVP_ARTIFACT_DIR` — a new directory. The test refuses to reuse an
 //!   existing path and never uses a temporary directory, so the complete
 //!   result survives.
@@ -1139,19 +1139,112 @@ fn create_new_artifact_dir(path: &Path) -> Result<PathBuf> {
     }
 }
 
-fn full_scenario_roles() -> Result<(calibrated::RoleSetup, calibrated::RoleSetup)> {
+fn full_scenario_config() -> Result<Value> {
     let path = PathBuf::from(
         std::env::var_os("MVP_AISIM_CONFIG")
             .context("MVP_AISIM_CONFIG must identify an authored canonical AISim configuration")?,
     );
     let bytes = aiperf_fsio::artifact_file::read_no_follow_bounded(&path, 1 << 20)
         .context("bounded no-follow canonical AISim configuration")?;
-    let config: Value = serde_yaml::from_slice(&bytes)?;
+    Ok(serde_yaml::from_slice(&bytes)?)
+}
+
+fn full_scenario_roles() -> Result<(calibrated::RoleSetup, calibrated::RoleSetup)> {
+    full_scenario_roles_from_config(full_scenario_config()?)
+}
+
+fn full_scenario_roles_from_config(
+    config: Value,
+) -> Result<(calibrated::RoleSetup, calibrated::RoleSetup)> {
+    let (prefill, decode) = calibrated::roles_from_config(config)?;
+    let spec = calibrated::spec(&prefill, &decode)?;
     ensure!(
-        config["engine"]["model"] == MODEL,
-        "physical configuration must name the accepted scenario model"
+        matches!(&spec.topology,
+        aisimulate_core::replay::ReplayTopology::Disaggregated { prefill, decode, .. }
+            if prefill.initial_workers == 2 && decode.initial_workers == 2),
+        "resolved physical deployment must match the accepted 2P2D scenario"
     );
-    calibrated::roles_from_config(config)
+    for (name, role) in [("prefill", &prefill), ("decode", &decode)] {
+        let aisimulate_core::engine::TimingModelConfig::External { provider, config } =
+            &role.rank.timing_model
+        else {
+            bail!("{name} must retain the canonical AIS timing identity");
+        };
+        ensure!(
+            provider == "aic"
+                && config["model"] == MODEL
+                && config["system"] == "b200_sxm"
+                && config["backend"] == "vllm"
+                && config["backend_version"] == calibrated::BACKEND_VERSION
+                && config["worker_type"] == name
+                && config["tp"] == 8
+                && config["pp"] == 1
+                && config["attention_dp"] == 1,
+            "{name} resolved model/hardware/role/topology differs from the accepted scenario"
+        );
+        ensure!(
+            config["gemm_quant_mode"] == "fp8"
+                && config["moe_quant_mode"] == "fp8"
+                && config["kvcache_quant_mode"] == "fp8"
+                && config["fmha_quant_mode"] == "bfloat16",
+            "{name} resolved precision differs from the accepted scenario"
+        );
+        ensure!(
+            config["estimation_mode"] == "op_level"
+                && config["fallback_policy"] == "deny"
+                && config["database_mode"] == "SILICON",
+            "{name} must use the accepted canonical silicon op-level selection"
+        );
+        ensure!(
+            role.rank.max_num_seqs == CONCURRENCY as usize,
+            "{name} resolved sequence budget differs from the accepted scenario"
+        );
+        ensure!(
+            role.rank.max_num_batched_tokens == 4096
+                && role.rank.block_size == calibrated::BLOCK_SIZE
+                && role.rank.max_model_len == Some(MODEL_MAX_CONTEXT_TOKENS as usize)
+                && role.rank.enable_prefix_caching
+                && role.rank.enable_chunked_prefill
+                && role.rank.async_scheduling == Some(false),
+            "{name} resolved scheduler/context differs from the accepted scenario"
+        );
+        let descriptor = calibrated::role_descriptor(role);
+        ensure!(
+            descriptor.dp_size == 1
+                && descriptor.tensor_parallel_size == 8
+                && descriptor.prefill_context_parallel_size == 1
+                && descriptor.num_gpu_blocks_is_explicit == Some(false)
+                && role.rank.num_gpu_blocks > 0,
+            "{name} must retain the owner-inferred capacity and accepted rank topology"
+        );
+        ensure!(
+            role.rank
+                .kv_transfer_bytes_per_token
+                .is_some_and(|bytes| bytes > 0)
+                && role.rank.kv_transfer_bandwidth == Some(50.0)
+                && role.rank.kv_transfer_timing_mode
+                    == aisimulate_core::engine::TransferTimingMode::FullPrompt,
+            "{name} must retain a compiler-resolved transfer footprint and accepted link"
+        );
+    }
+    Ok((prefill, decode))
+}
+
+#[test]
+#[ignore = "requires MVP_AISIM_CONFIG; negative physical-identity admission control, no corpus execution"]
+fn calibrated_full_scenario_rejects_mismatched_physical_identity() -> Result<()> {
+    let mut config = full_scenario_config()?;
+    config["engine"]["workers"]["prefill"]["scheduler"]["max_sequences"] = json!(31);
+    let result = full_scenario_roles_from_config(config);
+    let error = match result {
+        Ok(_) => bail!("changed authored physical identity was silently accepted"),
+        Err(error) => error,
+    };
+    ensure!(
+        format!("{error:#}").contains("sequence budget"),
+        "negative control failed before its intended physical-identity assertion: {error:#}"
+    );
+    Ok(())
 }
 
 /// Option-matched speed control over AISim's owning WEKA importer and native
