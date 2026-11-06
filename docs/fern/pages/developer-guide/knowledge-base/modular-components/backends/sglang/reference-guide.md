@@ -157,7 +157,7 @@ With an empty `tags` list, release and resume cover the weights, the KV cache, a
 
 Call the routes in this order:
 
-1. **Pause generation.** `pause_generation` pauses SGLang and removes the worker from discovery, so the router stops sending it new requests. Use `"mode": "retract"`. It moves running requests back to SGLang's waiting queue. SGLang releases memory only when no request is running, so do not use an `in_place` pause here.
+1. **Pause generation.** `pause_generation` pauses SGLang and removes the worker from discovery, so the router stops sending it new requests. Use `"mode": "retract"`. It moves running requests back to SGLang's waiting queue. SGLang releases memory only when no request is running, so do not use an `in_place` pause here. The XPU image pins SGLang 0.5.19, which also requires an empty waiting queue before release. On that version, pause with `"mode": "abort"`, which aborts all in-flight requests.
 2. **Release memory.** `release_memory_occupation` frees GPU memory. The worker stays out of discovery.
 3. **Resume memory.** `resume_memory_occupation` restores GPU memory. The worker stays out of discovery.
 4. **Continue generation.** `continue_generation` resumes SGLang and registers the worker in discovery again.
