@@ -110,6 +110,7 @@ impl Parameters {
         match (rank.capacity, self.capacity_fraction) {
             (Some(capacity), Some(fraction)) => {
                 let ppm = (fraction * PPM).round() as u128;
+                // `decode_cost` counts whole blocks, so the cast to an integer drops nothing.
                 rank.decode_cost as u128 * PPM as u128 <= ppm * u128::from(capacity)
             }
             _ => true,

@@ -270,7 +270,7 @@ worker_selection:
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `capacity_fraction` | `1.0` | Share of a rank's capacity a booking may fill. A rank fits when `D <= capacity_fraction × capacity`, compared exactly to six decimal places. `null` turns the filter off. Must be at least `0.000001`. |
+| `capacity_fraction` | `1.0` | Share of a rank's capacity a booking may fill. A rank fits when `D <= capacity_fraction × capacity`, rounded to six decimal places and compared exactly. `null` turns the filter off. Must be at least `0.000001`. |
 | `count_priority` | `true` | Among the ranks that fit, prefer fewer active requests before the block cost. |
 | `decode_active_request_weight` | `0` | `W` in the cost `D + W·N`. Must be at least `0`. `--router-decode-active-request-weight` does not set it. |
 | `capacity_blocks` | unset | Capacity for ranks that do not advertise `total_kv_blocks`, or advertise `0`. Must be greater than `0`. |
