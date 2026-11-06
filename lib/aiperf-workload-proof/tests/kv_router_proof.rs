@@ -295,15 +295,16 @@ fn installed_entrypoint_capture_matches_native_replayer_for_same_captured_reques
     let composition = CanonicalSelectorComposition(KvReplayComposition::disaggregated(
         args.clone(), args, deployment.prefill_workers, deployment.decode_workers,
         deployment.router_config, None, None));
-    // Arrivals already include any capacity wait (start_ns); the cap is kept as
-    // the source-side in-flight bound to preserve the captured deployment.
+    // Captured submit times already include application admission. Native
+    // concurrency replay deliberately ignores authored arrival times, so replay
+    // these admitted inputs in trace mode without applying a second cap.
+    assert!(deployment.admission_capacity >= rows.len(), "this fixture must not require a second admission policy");
     let spec: ReplaySpec = serde_json::from_value(json!({
         "version":1,
         "topology":{"kind":"disaggregated",
             "prefill":{"initial_workers":deployment.prefill_workers},
             "decode":{"initial_workers":deployment.decode_workers},"handoff_latency_ms":0.0},
         "engine": deployment.engine, "adapters":{"placement":{"provider":"dynamo_kv_router"}},
-        "max_in_flight": deployment.admission_capacity,
         "requests": [],
     })).unwrap();
     // Random keeps the supplied explicit ids untouched; the wrapper keeps the
