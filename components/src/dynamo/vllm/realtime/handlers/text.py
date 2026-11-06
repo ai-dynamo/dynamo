@@ -10,6 +10,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncGenerator, Callable
+from functools import partial
 from typing import Any
 
 from dynamo._core import Context
@@ -34,6 +35,7 @@ from ..factories import (
     HeldTextRequest,
     TextPrefillFactory,
     build_realtime_text_factories,
+    has_tool_parsing,
     validate_chat_options,
     validate_vllm_parsers,
 )
@@ -325,13 +327,13 @@ class RealtimeTextHandler:
         model_name: str,
         chat_completion_factory: ChatCompletionFactory,
         text_prefill_factory: TextPrefillFactory | None = None,
-        auto_tool_choice: bool = True,
+        tool_parsing: bool = True,
         chat_options_validator: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.model_name = model_name
         self._chat_completion_factory = chat_completion_factory
         self._text_prefill_factory = text_prefill_factory
-        self._auto_tool_choice = auto_tool_choice
+        self._tool_parsing = tool_parsing
         self._chat_options_validator = chat_options_validator
 
     @classmethod
@@ -360,8 +362,11 @@ class RealtimeTextHandler:
             model_name=model_name,
             chat_completion_factory=chat_completion,
             text_prefill_factory=text_prefill,
-            auto_tool_choice=bool(tool_parser),
-            chat_options_validator=validate_chat_options,
+            tool_parsing=has_tool_parsing(engine_client, tool_parser),
+            chat_options_validator=partial(
+                validate_chat_options,
+                reasoning_config=engine_client.vllm_config.reasoning_config,
+            ),
         )
 
     def _checked_chat_options(
@@ -369,13 +374,13 @@ class RealtimeTextHandler:
     ) -> dict[str, Any]:
         options = _chat_options(session, response)
         if (
-            not self._auto_tool_choice
+            not self._tool_parsing
             and options.get("tools")
-            and options.get("tool_choice", "auto") == "auto"
+            and options.get("tool_choice", "auto") != "none"
         ):
             raise ValueError(
-                "tool_choice 'auto' needs a vLLM tool call parser on this worker; "
-                "use tool_choice 'required', 'none', or a named function"
+                "tools need a vLLM tool call parser on this worker; "
+                "set --dyn-tool-call-parser or use tool_choice 'none'"
             )
         if self._chat_options_validator is not None:
             self._chat_options_validator(options)

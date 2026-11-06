@@ -219,8 +219,9 @@ def _chat_options(
     """Map session options, overridden by ``response`` ones, to chat completion fields.
 
     ``reasoning.effort`` becomes ``reasoning_effort`` and the chat template
-    ``enable_thinking`` switch. Realtime has no ``none`` effort, so ``minimal``
-    turns thinking off and every other effort turns it on.
+    ``enable_thinking`` switch, unless ``chat_template_kwargs`` already sets it.
+    Realtime has no ``none`` effort, so ``minimal`` turns thinking off and every
+    other effort turns it on.
     """
     response = response or {}
     options = _chat_completion_options(session.get("chat_completion_options"))
@@ -228,8 +229,8 @@ def _chat_options(
     if effort is not None:
         options["reasoning_effort"] = effort
         options["chat_template_kwargs"] = {
-            **options.get("chat_template_kwargs", {}),
             "enable_thinking": effort != "minimal",
+            **options.get("chat_template_kwargs", {}),
         }
     options.update(
         _chat_tool_options(

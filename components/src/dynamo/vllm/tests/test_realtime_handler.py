@@ -2062,12 +2062,20 @@ def test_vllm_parser_validation_rejects_unknown_names(
     [
         ({"tools": [LOOKUP_TOOL]}, {}, False),
         ({"tools": [LOOKUP_TOOL], "tool_choice": "auto"}, {}, False),
-        ({"tools": [LOOKUP_TOOL], "tool_choice": "required"}, {}, True),
+        ({"tools": [LOOKUP_TOOL], "tool_choice": "required"}, {}, False),
+        (
+            {
+                "tools": [LOOKUP_TOOL],
+                "tool_choice": {"type": "function", "name": LOOKUP_TOOL["name"]},
+            },
+            {},
+            False,
+        ),
         ({"tools": [LOOKUP_TOOL], "tool_choice": "none"}, {}, True),
         ({}, {"tools": [LOOKUP_TOOL]}, False),
     ],
 )
-def test_auto_tool_choice_requires_a_tool_parser(session_update, response, accepted):
+def test_tools_require_a_tool_parser(session_update, response, accepted):
     tool_options = []
 
     async def chat_completion(messages, max_output_tokens, options, prefill):
@@ -2083,7 +2091,7 @@ def test_auto_tool_choice_requires_a_tool_parser(session_update, response, accep
             RealtimeTextHandler(
                 model_name=TEXT_MODEL,
                 chat_completion_factory=chat_completion,
-                auto_tool_choice=False,
+                tool_parsing=False,
             ),
             [
                 {"type": "session.update", "session": _text_session(**session_update)},
@@ -2102,7 +2110,7 @@ def test_auto_tool_choice_requires_a_tool_parser(session_update, response, accep
         assert errors[-1]["code"] == (
             "invalid_response" if response else "invalid_session"
         )
-        assert "needs a vLLM tool call parser" in errors[-1]["message"]
+        assert "need a vLLM tool call parser" in errors[-1]["message"]
 
 
 @pytest.mark.parametrize(
@@ -2280,6 +2288,10 @@ def test_chat_completion_options_event_reaches_prefill_and_generation():
         ({"seed": 1.5}, "seed: Input should be a valid integer"),
         ({"temperature": -1}, "temperature must be non-negative"),
         ({"top_p": 0}, "top_p must be in (0, 1]"),
+        (
+            {"thinking_token_budget": 256},
+            "thinking_token_budget is set but reasoning_config is not configured",
+        ),
     ],
 )
 def test_chat_completion_options_event_rejects_invalid_options(options, message):
@@ -2310,16 +2322,46 @@ def test_chat_completion_options_event_rejects_invalid_options(options, message)
     assert [event["type"] for event in result].count("session.updated") == 1
 
 
+def test_chat_options_accept_thinking_budget_with_reasoning_config():
+    from dynamo.vllm.realtime.factories import validate_chat_options
+
+    validate_chat_options(
+        {"thinking_token_budget": 256},
+        reasoning_config=SimpleNamespace(enabled=True),
+    )
+
+
 @pytest.mark.parametrize(
-    ("session_effort", "response_effort", "prefill_thinking", "answer_thinking"),
+    ("tool_parser", "model_type", "expected"),
+    [(None, "qwen2", False), ("hermes", "qwen2", True), (None, "gpt_oss", True)],
+)
+def test_has_tool_parsing_matches_vllm(tool_parser, model_type, expected):
+    from dynamo.vllm.realtime.factories import has_tool_parsing
+
+    engine = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=model_type)),
+        renderer=SimpleNamespace(tokenizer=None),
+    )
+    assert has_tool_parsing(engine, tool_parser) is expected
+
+
+@pytest.mark.parametrize(
+    (
+        "session_effort",
+        "response_effort",
+        "client_kwargs",
+        "prefill_thinking",
+        "answer_thinking",
+    ),
     [
-        ("minimal", None, False, False),
-        ("low", None, True, True),
-        ("minimal", "high", False, True),
+        ("minimal", None, {}, False, False),
+        ("low", None, {}, True, True),
+        ("minimal", "high", {}, False, True),
+        ("minimal", None, {"enable_thinking": True}, True, True),
     ],
 )
 def test_text_reasoning_effort_switches_chat_template_thinking(
-    session_effort, response_effort, prefill_thinking, answer_thinking
+    session_effort, response_effort, client_kwargs, prefill_thinking, answer_thinking
 ):
     prefill_options = []
     generation_options = []
@@ -2343,7 +2385,9 @@ def test_text_reasoning_effort_switches_chat_template_thinking(
     session = {
         **_text_session(),
         "reasoning": {"effort": session_effort},
-        "chat_completion_options": {"chat_template_kwargs": {"custom": 1}},
+        "chat_completion_options": {
+            "chat_template_kwargs": {"custom": 1, **client_kwargs}
+        },
     }
     asyncio.run(
         _drive(

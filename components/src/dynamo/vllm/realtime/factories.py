@@ -75,21 +75,45 @@ def validate_vllm_parsers(
             ) from exc
 
 
-def validate_chat_options(options: dict[str, Any]) -> None:
-    """Check chat completion options with vLLM's request and sampling validation."""
+def has_tool_parsing(engine_client: Any, tool_parser: str | None) -> bool:
+    """Whether vLLM parses tool calls: with a parser, a Mistral tokenizer, or harmony."""
+    from vllm.utils.mistral import is_mistral_tokenizer
+
+    return (
+        bool(tool_parser)
+        or engine_client.model_config.hf_config.model_type == "gpt_oss"
+        or is_mistral_tokenizer(engine_client.renderer.tokenizer)
+    )
+
+
+def validate_chat_options(
+    options: dict[str, Any], reasoning_config: Any = None
+) -> None:
+    """Check chat completion options with vLLM's request and sampling validation.
+
+    ``reasoning_config`` is the engine's, which vLLM requires for a thinking budget.
+    """
     from pydantic import ValidationError
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.exceptions import VLLMValidationError
 
     try:
         request = ChatCompletionRequest(messages=[], model="", **options)
-        request.to_sampling_params(1, {})
+        params = request.to_sampling_params(1, {})
     except ValidationError as exc:
         error = exc.errors()[0]
         location = ".".join(str(part) for part in error["loc"])
         raise ValueError(f"{location}: {error['msg']}") from exc
     except VLLMValidationError as exc:
         raise ValueError(str(exc)) from exc
+    if params.thinking_token_budget is not None and not getattr(
+        reasoning_config, "enabled", False
+    ):
+        raise ValueError(
+            "thinking_token_budget is set but reasoning_config is not configured. "
+            "Please set --reasoning-parser and/or --reasoning-config to use "
+            "thinking_token_budget."
+        )
 
 
 class HeldTextRequest:
@@ -193,18 +217,21 @@ class HeldTextRequest:
 
     async def _run(self) -> None:
         try:
-            async for output in self._engine.generate(
-                prompt=self._inputs(),
-                sampling_params=self.prefill_params,
-                request_id=self._request_id,
-            ):
-                if self._answer is None:
-                    self._chunk_done.set()
-                    continue
-                self._answer.put_nowait(output)
-                if output.finished:
-                    break
-                await self._answer.join()
+            async with aclosing(
+                self._engine.generate(
+                    prompt=self._inputs(),
+                    sampling_params=self.prefill_params,
+                    request_id=self._request_id,
+                )
+            ) as outputs:
+                async for output in outputs:
+                    if self._answer is None:
+                        self._chunk_done.set()
+                        continue
+                    self._answer.put_nowait(output)
+                    if output.finished:
+                        break
+                    await self._answer.join()
         except Exception as exc:  # noqa: BLE001 - surfaced as an answer failure
             if (answer := self._claim_answer()) is None:
                 logger.warning("realtime text prefill stopped: %s", exc)
@@ -266,7 +293,7 @@ class _HeldRequestEngine:
         request_id: str,
         **kwargs: Any,
     ) -> AsyncGenerator[Any, None]:
-        await held.close()
+        await asyncio.shield(held.close())
         async for output in self._engine.generate(
             prompt, sampling_params, request_id, **kwargs
         ):
