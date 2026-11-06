@@ -16,6 +16,149 @@ use crate::protocols::{
 use super::filter::KvCacheSpecKind;
 use super::*;
 
+#[test]
+fn trtllm_digest_first_images_match_frontend_hashes_across_blocks() {
+    let a = "a".repeat(64);
+    let b = "b".repeat(64);
+    let key_a = serde_json::json!({"hash": a, "uuid": "dynamo-image-v1:0123456789abcdef", "start_offset": 0});
+    let key_b = serde_json::json!({"hash": b, "uuid": "dynamo-image-v1:fedcba9876543210", "start_offset": 0});
+    let event = serde_json::json!({
+        "type": "BlockStored", "block_hashes": [100, 101], "parent_block_hash": null,
+        "token_ids": [1, a, 1001, 1002, 1003, 9, b, 1001], "block_size": 4,
+        "mm_keys": [[key_a.clone()], [key_a, key_b]],
+        "trtllm_image_routing": {"version": 1, "token_id_offset": 1000}
+    });
+    let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
+    let a = crate::protocols::pad_value_for_mm_hash(0x0123456789abcdef);
+    let b = crate::protocols::pad_value_for_mm_hash(0xfedcba9876543210);
+    let expected =
+        compute_block_hash_for_seq(&[1, a, a, a, a, 9, b, b], 4, BlockHashOptions::default());
+    let placement = ZmqEventNormalizer::new(4)
+        .normalize(raw, 1, WorkerWithDpRank::new(7, 0))
+        .unwrap();
+    let KvCacheEventData::Stored(stored) = placement.event.data else {
+        panic!("stored event expected")
+    };
+    assert_eq!(
+        stored
+            .blocks
+            .iter()
+            .map(|b| b.tokens_hash)
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+#[test]
+fn trtllm_invalid_image_metadata_fails_closed() {
+    let digest = "a".repeat(64);
+    let valid = serde_json::json!({
+        "type": "BlockStored", "block_hashes": [100], "token_ids": [digest, 1001], "block_size": 2,
+        "mm_keys": [[{"hash": digest, "uuid": "dynamo-image-v1:0123456789abcdef"}]],
+        "trtllm_image_routing": {"version": 1, "token_id_offset": 1000}
+    });
+    for (pointer, replacement) in [
+        ("/trtllm_image_routing/version", serde_json::json!(2)),
+        (
+            "/trtllm_image_routing",
+            serde_json::json!({"version": 2, "future_payload": [1, 2]}),
+        ),
+        (
+            "/trtllm_image_routing/token_id_offset",
+            serde_json::json!("invalid"),
+        ),
+        (
+            "/token_ids",
+            serde_json::json!([u64::from(u32::MAX) + 1, 1001]),
+        ),
+        ("/mm_keys", serde_json::json!([])),
+        ("/mm_keys", serde_json::json!(null)),
+        ("/mm_keys", serde_json::json!(17)),
+        ("/mm_keys", serde_json::json!([[{"hash": 17}]])),
+        ("/mm_keys/0/0/hash", serde_json::json!("b".repeat(64))),
+        ("/mm_keys/0/0/uuid", serde_json::json!("caller-identity")),
+        (
+            "/mm_keys/0/0/uuid",
+            serde_json::json!("dynamo-image-v1:invalid"),
+        ),
+        (
+            "/mm_keys/0/0/uuid",
+            serde_json::json!("dynamo-image-v1:+123456789abcdef"),
+        ),
+    ] {
+        let mut event = valid.clone();
+        *event.pointer_mut(pointer).unwrap() = replacement;
+        let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
+        assert!(matches!(raw, RawKvEvent::Ignored), "{pointer}");
+        let batch = serde_json::json!([0.0, [event,
+            {"type": "BlockRemoved", "block_hashes": [100]}
+        ], 0]);
+        let decoded = decode_event_batch(&to_vec_named(&batch).unwrap()).unwrap();
+        assert!(matches!(decoded.events[1], RawKvEvent::BlockRemoved { .. }));
+    }
+}
+
+#[test]
+fn trtllm_unmapped_image_continuations_do_not_drop_subsequent_removals() {
+    let event = serde_json::json!([0.0, [
+        {"type":"BlockStored", "block_hashes":[100], "token_ids":[1003,1004], "block_size":2,
+         "mm_keys":[[{"hash":"a".repeat(64),"start_offset":3,"uuid":null}]],
+         "trtllm_image_routing":{"version":1,"token_id_offset":1000}},
+        {"type":"BlockRemoved", "block_hashes":[100]}
+    ], 0]);
+    let batch = decode_event_batch(&to_vec_named(&event).unwrap()).unwrap();
+    assert!(matches!(batch.events[0], RawKvEvent::Ignored));
+    assert!(matches!(batch.events[1], RawKvEvent::BlockRemoved { .. }));
+}
+
+#[test]
+fn trtllm_routing_requires_sibling_keys_and_preserves_other_producers() {
+    for keys in [
+        serde_json::json!(null),
+        serde_json::json!(17),
+        serde_json::json!([]),
+    ] {
+        let mut event = serde_json::json!({
+            "type": "BlockStored", "block_hashes": [100],
+            "token_ids": [1003, 1004], "block_size": 2, "mm_keys": keys,
+        });
+        // Without the extension, mm_keys remains an unrelated producer field.
+        let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
+        assert!(matches!(raw, RawKvEvent::BlockStored { .. }));
+        event["trtllm_image_routing"] = serde_json::json!({"version": 1, "token_id_offset": 1000});
+        let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
+        assert!(matches!(raw, RawKvEvent::Ignored));
+        event.as_object_mut().unwrap().remove("mm_keys");
+        let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
+        assert!(matches!(raw, RawKvEvent::Ignored));
+    }
+}
+
+#[test]
+fn trtllm_mapped_integer_continuation_uses_sibling_keys() {
+    let event = serde_json::json!({
+        "type": "BlockStored", "block_hashes": [101], "parent_block_hash": 100,
+        "token_ids": [1003, 1004], "block_size": 2,
+        "mm_keys": [[{"hash": "a".repeat(64), "start_offset": 3,
+            "uuid": "dynamo-image-v1:0123456789abcdef"}]],
+        "trtllm_image_routing": {"version": 1, "token_id_offset": 1000},
+    });
+    let raw: RawKvEvent = from_slice(&to_vec_named(&event).unwrap()).unwrap();
+    let RawKvEvent::BlockStored {
+        token_ids,
+        parent_block_hash,
+        ..
+    } = raw
+    else {
+        panic!("stored event expected");
+    };
+    assert!(parent_block_hash.is_some());
+    assert_eq!(
+        token_ids,
+        vec![crate::protocols::pad_value_for_mm_hash(0x0123456789abcdef); 2]
+    );
+}
+
 #[derive(Clone, Copy, Debug)]
 enum TestEventKind {
     BlockStored,
@@ -67,7 +210,7 @@ fn test_deserialize_sglang_cache_salt() {
 }
 
 #[test]
-fn test_deserialize_bigram_block_stored_sequence() {
+fn test_deserialize_bigram_block_stored() {
     let raw_event = (
         "BlockStored",
         vec![BlockHashValue::Unsigned(11), BlockHashValue::Unsigned(12)],
@@ -78,21 +221,28 @@ fn test_deserialize_bigram_block_stored_sequence() {
         Option::<String>::None,
         Option::<String>::None,
     );
-    let encoded = to_vec(&raw_event).unwrap();
-    let event: RawKvEvent = from_slice(&encoded).unwrap();
-
-    match event {
-        RawKvEvent::BlockStored {
-            token_ids,
-            block_size,
-            is_eagle,
-            ..
-        } => {
-            assert_eq!(token_ids, vec![10, 11, 12, 13, 14]);
-            assert_eq!(block_size, 2);
-            assert_eq!(is_eagle, Some(true));
+    let named_event = serde_json::json!({
+        "type": "BlockStored", "block_hashes": [11, 12],
+        "token_ids": [[10, 11], [11, 12], [12, 13], [13, 14]], "block_size": 2,
+    });
+    for encoded in [
+        to_vec(&raw_event).unwrap(),
+        to_vec_named(&named_event).unwrap(),
+    ] {
+        let event: RawKvEvent = from_slice(&encoded).unwrap();
+        match event {
+            RawKvEvent::BlockStored {
+                token_ids,
+                block_size,
+                is_eagle,
+                ..
+            } => {
+                assert_eq!(token_ids, vec![10, 11, 12, 13, 14]);
+                assert_eq!(block_size, 2);
+                assert_eq!(is_eagle, Some(true));
+            }
+            other => panic!("expected BlockStored, got {other:?}"),
         }
-        other => panic!("expected BlockStored, got {other:?}"),
     }
 }
 
@@ -1178,6 +1328,152 @@ fn cpu_event_with_full_payload_is_indexable() {
         _ => panic!("expected Stored event"),
     }
     assert_eq!(warning_count.load(Ordering::Relaxed), 0);
+}
+
+// ---- partial-tail block filtering (vLLM --prefix-match-unit) ----
+
+fn gpu_block_stored(block_hashes: &[u64], token_ids: &[u32], block_size: usize) -> RawKvEvent {
+    RawKvEvent::BlockStored {
+        block_hashes: block_hashes
+            .iter()
+            .copied()
+            .map(BlockHashValue::Unsigned)
+            .collect(),
+        parent_block_hash: None,
+        token_ids: token_ids.to_vec(),
+        block_size,
+        medium: None,
+        lora_name: None,
+        cache_namespace: None,
+        block_mm_infos: None,
+        is_eagle: None,
+        group_idx: None,
+        kv_cache_spec_kind: None,
+        kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
+        session_id: None,
+    }
+}
+
+/// vLLM with `--prefix-match-unit` below the block size publishes full blocks
+/// at the block size and the trailing partial block at the hash-unit size.
+/// Once a worker has published a full block, the undersized event is a partial
+/// tail and is filtered with its own reason instead of reaching conversion,
+/// where it would trigger the block-size-mismatch warning.
+#[test]
+fn partial_tail_block_is_filtered_after_a_full_block_from_the_same_worker() {
+    let mut normalizer = ZmqEventNormalizer::new(4);
+    let worker = WorkerWithDpRank::new(7, 0);
+
+    let full = gpu_block_stored(&[1], &[10, 11, 12, 13], 4);
+    assert!(normalizer.preprocess_with_reason(full, worker).is_ok());
+
+    let partial_tail = gpu_block_stored(&[2], &[14, 15], 2);
+    assert_eq!(
+        normalizer
+            .preprocess_with_reason(partial_tail, worker)
+            .err(),
+        Some(ZmqEventFilterReason::PartialBlock)
+    );
+
+    let next_full = gpu_block_stored(&[3], &[16, 17, 18, 19], 4);
+    assert!(normalizer.preprocess_with_reason(next_full, worker).is_ok());
+}
+
+/// An undersized block from a worker that has never published a full block is
+/// not a partial tail: it may be a real block-size misconfiguration, so it still
+/// reaches conversion and the existing warning fires.
+#[test]
+fn undersized_block_before_any_full_block_still_reaches_conversion_and_warns() {
+    let mut normalizer = ZmqEventNormalizer::new(4);
+    let worker = WorkerWithDpRank::new(7, 0);
+
+    let undersized = gpu_block_stored(&[2], &[14, 15], 2);
+    let raw = normalizer
+        .preprocess_with_reason(undersized, worker)
+        .expect("first undersized block must not be filtered as a partial tail");
+
+    let warning_count = Arc::new(AtomicU32::new(0));
+    let placement = convert_event(raw, 1, 4, worker, &warning_count, None, None).unwrap();
+    match placement.event.data {
+        KvCacheEventData::Stored(store_data) => assert!(store_data.blocks.is_empty()),
+        other => panic!("expected Stored event, got {other:?}"),
+    }
+    assert_eq!(warning_count.load(Ordering::Relaxed), 1);
+}
+
+/// The full-block proof is per worker: another worker's undersized event is not
+/// filtered just because a different worker has published full blocks.
+#[test]
+fn partial_tail_filter_is_tracked_per_worker() {
+    let mut normalizer = ZmqEventNormalizer::new(4);
+    let proven = WorkerWithDpRank::new(7, 0);
+    let unproven = WorkerWithDpRank::new(8, 0);
+
+    let full = gpu_block_stored(&[1], &[10, 11, 12, 13], 4);
+    assert!(normalizer.preprocess_with_reason(full, proven).is_ok());
+
+    let undersized = gpu_block_stored(&[2], &[14, 15], 2);
+    assert!(
+        normalizer
+            .preprocess_with_reason(undersized, unproven)
+            .is_ok()
+    );
+}
+
+/// A full-size block from a group the router filters out (here a Mamba state
+/// group) must not count as proof of the worker's block size: a later undersized
+/// main-attention block still has to reach conversion and warn.
+#[test]
+fn filtered_group_does_not_prove_block_size_for_partial_tail_filter() {
+    let mut normalizer = ZmqEventNormalizer::new(4);
+    let worker = WorkerWithDpRank::new(7, 0);
+
+    let mut full_non_main = gpu_block_stored(&[1], &[10, 11, 12, 13], 4);
+    if let RawKvEvent::BlockStored {
+        kv_cache_spec_kind,
+        group_idx,
+        ..
+    } = &mut full_non_main
+    {
+        *kv_cache_spec_kind = Some(KvCacheSpecKind::Mamba);
+        *group_idx = Some(1);
+    }
+    assert_eq!(
+        normalizer
+            .preprocess_with_reason(full_non_main, worker)
+            .err(),
+        Some(ZmqEventFilterReason::NonMainAttentionKind)
+    );
+
+    let undersized = gpu_block_stored(&[2], &[14, 15], 2);
+    assert!(
+        normalizer
+            .preprocess_with_reason(undersized, worker)
+            .is_ok()
+    );
+}
+
+/// `AllBlocksCleared` resets the worker's full-block history, so an engine
+/// that comes back with a different block size is not silently filtered.
+#[test]
+fn all_blocks_cleared_resets_partial_tail_filter_history() {
+    let mut normalizer = ZmqEventNormalizer::new(4);
+    let worker = WorkerWithDpRank::new(7, 0);
+
+    let full = gpu_block_stored(&[1], &[10, 11, 12, 13], 4);
+    assert!(normalizer.preprocess_with_reason(full, worker).is_ok());
+
+    let cleared = RawKvEvent::AllBlocksCleared { ownership: None };
+    assert!(normalizer.preprocess_with_reason(cleared, worker).is_ok());
+
+    let undersized = gpu_block_stored(&[2], &[14, 15], 2);
+    assert!(
+        normalizer
+            .preprocess_with_reason(undersized, worker)
+            .is_ok()
+    );
 }
 
 // ---- locality decode + storage-tier gating (this PR) ----

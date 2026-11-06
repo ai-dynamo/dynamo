@@ -1,0 +1,205 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# AIPerf AgentX benchmark for the Kimi-K3.1-Pro recipes.
+# Set ENDPOINT, CONCURRENCY, and DURATION for the selected target:
+#   ENDPOINT     <dgd-name>-frontend:8000 (Service of the deployed DynamoGraphDeployment).
+#                Example: kimi-k3-1-pro-vllm-aggregate-gb300-frontend:8000
+#   CONCURRENCY  Closed-loop users. Use 32 for vllm/agg-gb300-agentic and 48 for
+#                vllm/disagg-gb300-agentic (2P1D).
+#   DURATION     Profiling duration in seconds (the reported runs use 1200).
+# The AgentX workload is the aiperf public dataset semianalysis_cc_traces_weka_062126
+# (scenario inferencex-agentx-mvp, 20-minute profiling phase, agentic warmup).
+# Restart workers between independent runs to reset KV-cache and routing state.
+#
+# Prerequisites:
+# - The selected DynamoGraphDeployment is Ready.
+# - The shared-model-cache PVC contains the model and its tokenizer files
+#   (see ../model-cache/model-download.yaml).
+#
+# Results: /shared-model-cache/perf/<epoch>_<job-name>/
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kimi-k3-1-aiperf-agentx
+data:
+  agentx.yaml: |
+    schemaVersion: "2.0"
+    randomSeed: 42
+    benchmark:
+      model: ${TARGET_MODEL:moonshotai/Kimi-K3.1-Pro}
+      scenario: inferencex-agentx-mvp
+      endpoint:
+        url: ${ENDPOINT_URL:http://kimi-k3-1-pro-vllm-aggregate-gb300-frontend:8000}
+        type: chat
+        timeout: 3600
+        streaming: true
+        useLegacyMaxTokens: true
+        useServerTokenCount: true
+        perChunkUsage: true
+        extra:
+          skip_special_tokens: false
+      tokenizer:
+        name: ${TOKENIZER:/shared-model-cache/moonshotai/Kimi-K3.1-Pro}
+        trustRemoteCode: true
+      dataset:
+        name: main
+        type: public
+        dataset: semianalysis_cc_traces_weka_062126
+        randomSeed: 42
+        maxContextLength: 1048576
+      phases:
+        - name: profiling
+          kind: profiling
+          type: concurrency
+          concurrency: ${CONCURRENCY:32}
+          duration: ${DURATION:1200}
+          gracePeriod: 30
+          failedRequestThreshold: 0.1
+          trajectoryStartMinRatio: 0.25
+          trajectoryStartMaxRatio: 0.75
+          agenticWarmupGracePeriod: 1800
+      artifacts:
+        dir: ${ARTIFACT_DIR:/shared-model-cache/perf/UNNAMED}
+        summary: [json]
+        records: [jsonl]
+      runtime:
+        ui: none
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kimi-k3-1-aiperf
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 10800
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: kimi-k3-1-aiperf
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: perf
+          image: nvcr.io/nvidia/ai-dynamo/aiperf:0.13.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+          workingDir: /app
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              ulimit -n 600000
+              export COLUMNS=200
+
+              python3 - <<'PY'
+              import json
+              import os
+              import time
+              import urllib.request
+
+              endpoint = os.environ["ENDPOINT"]
+              model = os.environ["TARGET_MODEL"]
+              max_attempts = int(os.environ.get("WAIT_FOR_MODEL_MAX_ATTEMPTS", "720"))
+              url = f"http://{endpoint}/v1/models"
+
+              print(f"Waiting for model '{model}' at {url}")
+              for attempt in range(1, max_attempts + 1):
+                  try:
+                      with urllib.request.urlopen(url, timeout=5) as response:
+                          payload = json.load(response)
+                      if any(item.get("id") == model for item in payload.get("data", [])):
+                          raise SystemExit(0)
+                  except Exception:
+                      pass
+
+                  if attempt < max_attempts:
+                      time.sleep(5)
+
+              raise SystemExit(
+                  f"model '{model}' did not become ready after {max_attempts} attempts"
+              )
+              PY
+
+              if [ ! -e "${TOKENIZER}/tokenizer_config.json" ]; then
+                echo "ERROR: tokenizer files not found at ${TOKENIZER}"
+                exit 1
+              fi
+
+              EPOCH=$(python3 -c 'import time; print(int(time.time()))')
+              export ARTIFACT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}/agentx_c${CONCURRENCY}"
+              export ENDPOINT_URL="http://${ENDPOINT}"
+              python3 -c 'import os; os.makedirs(os.environ["ARTIFACT_DIR"], exist_ok=True)'
+
+              aiperf config validate /config/agentx.yaml
+
+              # The config sets the chat endpoint (--endpoint-type chat) and streaming
+              # (--streaming); ENDPOINT_URL, TARGET_MODEL, TOKENIZER, CONCURRENCY,
+              # DURATION and ARTIFACT_DIR are resolved from the environment.
+              aiperf profile --config /config/agentx.yaml
+          env:
+            # Set these values for the selected deployment target.
+            - name: ENDPOINT
+              value: kimi-k3-1-pro-vllm-aggregate-gb300-frontend:8000
+            - name: CONCURRENCY
+              value: "32"
+            - name: DURATION
+              value: "1200"
+            # Shared benchmark configuration.
+            - name: TARGET_MODEL
+              value: moonshotai/Kimi-K3.1-Pro
+            - name: TOKENIZER
+              value: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
+            - name: ROOT_ARTIFACT_DIR
+              value: /shared-model-cache/perf
+            - name: JOB_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.labels['job-name']
+            - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
+              value: "1800"
+            - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
+              value: "1800"
+            - name: HF_HOME
+              value: /shared-model-cache/hf-home
+            - name: HF_HUB_OFFLINE
+              value: "0"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          resources:
+            requests:
+              cpu: "4"
+              memory: 8Gi
+            limits:
+              cpu: "16"
+              memory: 64Gi
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /shared-model-cache
+            - name: agentx-config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - name: agentx-config
+          configMap:
+            name: kimi-k3-1-aiperf-agentx

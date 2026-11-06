@@ -260,7 +260,7 @@ address.
 </ParamField>
 
 <ParamField path="--connector" type="string" default="null">
-  KV-cache transfer connector. Accepts zero or more values. Deprecated for vLLM — use `--kv-transfer-config` instead. For TRT-LLM, valid options are `nixl`, `lmcache`, `kvbm`, `null`, and `none`.
+  KV-cache transfer connector. Accepts zero or more values. Deprecated for vLLM — use `--kv-transfer-config` instead. TensorRT-LLM supports only `none`.
 
   Environment variable: `DYN_CONNECTOR`
 </ParamField>
@@ -280,7 +280,7 @@ address.
 </ParamField>
 
 <ParamField path="--dyn-default-thinking-mode" type="string" default="null">
-  Thinking mode to apply when a request omits an explicit thinking control. Request-level `thinking`, `reasoning_effort`, and controls in `chat_template_args` or `chat_template_kwargs` take precedence. When unset, Dynamo preserves the model or chat template's native default. See [Deployment-Level Thinking Default](../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#deployment-level-thinking-default) for examples and precedence details.
+  Thinking mode to apply when a request omits an explicit thinking control. Request-level `thinking`, `reasoning_effort`, and controls in `chat_template_args` or `chat_template_kwargs` take precedence. When unset, Dynamo preserves the model or chat template's native default. See [Deployment-Level Thinking Default](../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#deployment-level-thinking-default) for examples and precedence details.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>enabled</Badge> <Badge intent="note" minimal>disabled</Badge></span>
 
@@ -294,7 +294,7 @@ address.
 </ParamField>
 
 <ParamField path="--dyn-structural-tag" type="boolean or JSON object" default="enabled">
-  Structural tags default to enabled with scope `always` and schema mode `auto` for regular workers. Pass `false` to disable optional guidance, or provide a JSON object for advanced options. Rust retains native tags for Kimi K2 required/named and Kimi K3 named choices; Python vLLM and SGLang respect the opt-out. Of the native Rust sidecars, only SGLang shares this default; the vLLM and TensorRT-LLM sidecars default to `false` until their engines compile these tags. See [Structural Tag](../../use-cases/tool-calling-and-reasoning/structural-tag.md) for configuration and backend compatibility limitations.
+  Structural tags default to enabled with scope `always` and schema mode `auto` for regular workers. Pass `false` to disable optional guidance, or provide a JSON object for advanced options. Rust retains native tags for Kimi K2 required/named and Kimi K3 named choices; Python vLLM and SGLang respect the opt-out. Of the native Rust sidecars, SGLang shares this default, and vLLM shares it on vLLM 0.33 or later, including release candidates and development builds; the vLLM sidecar on older vLLM and the TensorRT-LLM sidecar default to `false` because their engines reject these tags. See [Structural Tag](../../use-cases/tool-calling-and-reasoning/structural-tag.md) for configuration and backend compatibility limitations.
 
   Environment variable: `DYN_STRUCTURAL_TAG`
 </ParamField>
@@ -311,6 +311,14 @@ address.
   Capacity of the multimodal embedding cache in GB. Set to `0` to disable the cache entirely. Increase this for workloads with repeated image or audio inputs to avoid redundant re-encoding.
 
   Environment variable: `DYN_MULTIMODAL_EMBEDDING_CACHE_CAPACITY_GB`
+</ParamField>
+
+<ParamField path="DYN_MM_ALLOW_REMOTE_URLS" type="boolean" default="true">
+  Environment-only. Set to `0` to refuse every `http://` and `https://` media URL. The request fails with HTTP 400, and the client must send the media inline as a `data:` URL instead. Local paths still work when `DYN_MM_LOCAL_PATH` is set. This setting takes precedence over `DYN_MM_ALLOW_INTERNAL`.
+
+  Accepts `1`, `true`, `on`, `yes` and `0`, `false`, `off`, `no`, case-insensitive. Unset or empty keeps remote URLs enabled. Any other value stops the frontend and the workers at startup.
+
+  Set it on both the frontend and the workers. The frontend rejects remote URLs before fetching them, and the workers cover media URLs that the frontend passes through without fetching.
 </ParamField>
 
 <ParamField path="--output-modalities" type="string" default="text">

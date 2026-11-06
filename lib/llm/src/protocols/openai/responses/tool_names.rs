@@ -29,12 +29,24 @@ impl ToolNameMap {
                 Tool::Function(function) => {
                     identities.insert((None, function.name.clone()));
                 }
+                Tool::Custom(tool) => {
+                    identities.insert((None, tool.name.clone()));
+                }
+                Tool::ToolSearch(search)
+                    if search.execution
+                        == Some(
+                            dynamo_protocols::types::responses::ToolSearchExecutionType::Client,
+                        ) =>
+                {
+                    identities.insert((None, "tool_search".to_owned()));
+                }
                 Tool::Namespace(namespace) => {
                     for tool in &namespace.tools {
-                        if let NamespaceToolParamTool::Function(function) = tool {
-                            identities
-                                .insert((Some(namespace.name.clone()), function.name.clone()));
-                        }
+                        let name = match tool {
+                            NamespaceToolParamTool::Function(function) => &function.name,
+                            NamespaceToolParamTool::Custom(custom) => &custom.name,
+                        };
+                        identities.insert((Some(namespace.name.clone()), name.clone()));
                     }
                 }
                 _ => {}
@@ -43,8 +55,17 @@ impl ToolNameMap {
         let available = identities.clone();
         if let Some(InputParam::Items(items)) = input {
             for item in items {
-                if let InputItem::Item(Item::FunctionCall(call)) = item {
-                    identities.insert((call.namespace.clone(), call.name.clone()));
+                match item {
+                    InputItem::Item(Item::FunctionCall(call)) => {
+                        identities.insert((call.namespace.clone(), call.name.clone()));
+                    }
+                    InputItem::Item(Item::CustomToolCall(call)) => {
+                        identities.insert((call.namespace.clone(), call.name.clone()));
+                    }
+                    InputItem::Item(Item::ToolSearchCall(_)) => {
+                        identities.insert((None, "tool_search".to_owned()));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -86,6 +107,23 @@ impl ToolNameMap {
             };
             result.by_identity.insert(identity.clone(), alias.clone());
             result.by_alias.insert(alias, identity.clone());
+            if let Some(namespace) = &identity.0 {
+                result
+                    .by_alias
+                    .insert(format!("{namespace}.{}", identity.1), identity.clone());
+            }
+        }
+        result
+    }
+
+    /// Select native qualified names while retaining reversible fallback aliases.
+    pub(super) fn native(&self) -> Self {
+        let mut result = self.clone();
+        for ((namespace, name), alias) in &mut result.by_identity {
+            *alias = namespace
+                .as_ref()
+                .map(|namespace| format!("{namespace}.{name}"))
+                .unwrap_or_else(|| name.clone());
         }
         result
     }
@@ -106,6 +144,21 @@ impl ToolNameMap {
             .unwrap_or((None, alias))
     }
 
+    /// Preserve identities reserved from history, including tools removed from
+    /// the current registry. Only infer a unique current namespace for a name
+    /// that was never registered; do not reassign a historical bare tool.
+    pub(super) fn encode_history(&self, namespace: Option<&str>, name: &str) -> String {
+        if namespace.is_none() && !self.by_identity.contains_key(&(None, name.to_owned())) {
+            let mut candidates = self.available.iter().filter(|(_, leaf)| leaf == name);
+            if let Some((ns, leaf)) = candidates.next()
+                && candidates.next().is_none()
+            {
+                return self.encode(ns.as_deref(), leaf);
+            }
+        }
+        self.encode(namespace, name)
+    }
+
     /// Older clients omit namespaces in choices. Resolve a top-level function
     /// first, or a unique namespaced function; never guess between namespaces.
     pub(super) fn resolve_choice(
@@ -114,6 +167,15 @@ impl ToolNameMap {
         name: &str,
     ) -> anyhow::Result<String> {
         let identity = (namespace.map(str::to_owned), name.to_owned());
+        if namespace.is_none()
+            && name.contains('.')
+            && let Some((Some(namespace), leaf)) = self.by_alias.get(name)
+            && self
+                .available
+                .contains(&(Some(namespace.clone()), leaf.clone()))
+        {
+            return Ok(self.encode(Some(namespace), leaf));
+        }
         if self.available.contains(&identity) {
             return Ok(self.encode(namespace, name));
         }
