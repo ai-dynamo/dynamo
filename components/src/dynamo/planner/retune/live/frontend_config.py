@@ -68,6 +68,7 @@ from dynamo.common.configuration.groups.router_args import (
 )
 from dynamo.common.configuration.utils import ArgEnv
 from dynamo.common.environment import compose_environment, ordered_environment_enabled
+from dynamo.common.operator_environment import owned_environment
 from dynamo.frontend.frontend_args import build_frontend_parser
 from dynamo.llm import KvRouterConfig
 from dynamo.planner.retune.controller import startup_router_domain
@@ -930,7 +931,12 @@ def _component_env(dgd: Mapping[str, Any], spec: Mapping[str, Any]) -> _Env:
     inert: set[str] = set()
     ordered = ordered_environment_enabled(metadata.get("annotations") or {})
     if ordered:
-        bindings, omitted = _owned_environment(dgd, spec)
+        try:
+            bindings, omitted = owned_environment(dgd, spec)
+        except ValueError as error:
+            raise FrontendParseError(
+                f"P4: invalid component backend: {error}"
+            ) from None
         layers = [
             [entry for entry in layer if entry["name"] not in omitted]
             for layer in layers
@@ -1005,168 +1011,6 @@ def _component_env(dgd: Mapping[str, Any], spec: Mapping[str, Any]) -> _Env:
         inert=frozenset(inert),
         env_from=env_from,
     )
-
-
-def _owned_environment(
-    dgd: Mapping[str, Any], spec: Mapping[str, Any]
-) -> tuple[dict[str, Optional[str]], set[str]]:
-    """Final main-container bindings, before validating source dependencies.
-
-    A None value is an opaque but inert generated value, not an empty string.
-    Native-sidecar mains receive topology and GMS bindings, not runtime policy.
-    """
-
-    bindings: dict[str, Optional[str]] = {}
-    omitted: set[str] = set()
-    multinode = spec.get("multinode")
-    nodes = multinode.get("nodeCount", 2) if isinstance(multinode, Mapping) else 1
-    nodes = nodes if isinstance(nodes, int) else 1
-    if isinstance(multinode, Mapping) and nodes > 1:
-        bindings.update({name: None for name in _OPERATOR_MULTINODE_INERT_ENV})
-    native = _native_sidecar(spec)
-    experimental = spec.get("experimental")
-    if not isinstance(experimental, Mapping):
-        experimental = {}
-    gms = experimental.get("gpuMemoryService")
-    checkpoint = experimental.get("checkpoint")
-    snapshot = isinstance(checkpoint, Mapping) and checkpoint.get("enabled")
-    if isinstance(gms, Mapping) and gms.get("mode") in (None, "", "intraPod"):
-        bindings["GMS_SOCKET_DIR"] = "/gms-intrapod-control"
-        if snapshot:
-            bindings["DYN_GMS_USE_V1"] = "true"
-    if isinstance(gms, Mapping) and gms.get("mode") == "interPod":
-        bindings.update(
-            {
-                "ENGINE_ID": None,
-                "GMS_SOCKET_DIR": "/run/gms/shared",
-                "FAILOVER_LOCK_PATH": "/run/gms/shared/failover.lock",
-                "DYN_SYSTEM_STARTING_HEALTH_STATUS": "notready",
-            }
-        )
-        omitted.add("DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS")
-    failover = experimental.get("failover")
-    if isinstance(failover, Mapping) and failover.get("mode") in (None, "", "intraPod"):
-        bindings.update(
-            {
-                "ENGINE_ID": None,
-                "CONTAINER_NAME": None,
-                "FAILOVER_LOCK_PATH": "/gms-intrapod-control/failover.lock",
-                "DYN_SYSTEM_STARTING_HEALTH_STATUS": "notready",
-                "DYN_SYSTEM_PORT": None,
-                "DYN_SYSTEM_ENABLED": "true",
-                "DYN_FORWARDPASS_METRIC_PORT": None,
-            }
-        )
-        omitted.update(
-            {"DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", "DYN_HEALTH_CHECK_ENABLED"}
-        )
-        if snapshot:
-            omitted.add("DYN_VLLM_GMS_SHADOW_MODE")
-        else:
-            bindings.update(
-                {
-                    "DYN_VLLM_GMS_SHADOW_MODE": "true",
-                    "VLLM_NIXL_SIDE_CHANNEL_PORT": None,
-                    "DYN_VLLM_KV_EVENT_PORT": None,
-                }
-            )
-            if nodes > 1:
-                bindings["NNODES"] = str(nodes)
-
-    # Backend-specific bindings are absent from native engine mains.
-    main = _main_container(spec)
-    launch = [
-        str(part) for part in [*(main.get("command") or []), *(main.get("args") or [])]
-    ]
-    backend = (dgd.get("spec") or {}).get("backendFramework") or (
-        "vllm" if any("dynamo.vllm" in part for part in launch) else ""
-    )
-    if not native and _type(spec) in WORKER_TYPES - {""} and backend == "vllm":
-        # Match getExpandedCommandLine's whitespace splitting, not shell evaluation.
-        tokens = [token for part in launch for token in part.split()]
-
-        def option(*names: str) -> Optional[str]:
-            value = None
-            for index, token in enumerate(tokens):
-                normalized = token.replace("_", "-")
-                for name in names:
-                    if normalized == name and index + 1 < len(tokens):
-                        value = tokens[index + 1]
-                        if (
-                            name == "--distributed-executor-backend"
-                            and not value.startswith("-")
-                        ):
-                            value = re.split(r"[;&|<>()]", value, maxsplit=1)[0]
-                    if normalized.startswith(name + "="):
-                        candidate = re.split(
-                            r"[;&|<>()]", token.split("=", 1)[1], maxsplit=1
-                        )[0]
-                        if not candidate.startswith("--"):
-                            value = candidate
-            return value
-
-        if (
-            isinstance(gms, Mapping)
-            and gms.get("mode") == "interPod"
-            and isinstance(failover, Mapping)
-            and failover.get("mode") == "interPod"
-        ):
-            bindings["DYN_VLLM_GMS_SHADOW_MODE"] = "true"
-        if nodes > 1:
-            annotations = dict((dgd.get("metadata") or {}).get("annotations") or {})
-            annotations.update((dgd.get("spec") or {}).get("annotations") or {})
-            annotations.update(
-                ((spec.get("podTemplate") or {}).get("metadata") or {}).get(
-                    "annotations"
-                )
-                or {}
-            )
-            mode = str(
-                annotations.get("nvidia.com/vllm-distributed-executor-backend") or "mp"
-            ).lower()
-            if mode not in {"mp", "ray"}:
-                mode = "mp"
-            role_owned = any(
-                isinstance(role, Mapping)
-                and isinstance(role.get("podTemplate"), Mapping)
-                for role in spec.get("roles") or []
-            )
-            if (role_owned and option("--distributed-executor-backend") == "mp") or (
-                not role_owned and mode == "mp"
-            ):
-                bindings["VLLM_NIXL_SIDE_CHANNEL_HOST"] = None
-        elif (
-            any(token.replace("_", "-") == "--enable-elastic-ep" for token in tokens)
-            and option("--data-parallel-backend", "-dpb") == "ray"
-        ):
-            bindings.update({"POD_IP": None, "VLLM_DP_MASTER_IP": None})
-    graph_experimental = (dgd.get("spec") or {}).get("experimental")
-    policy = (
-        graph_experimental.get("kvTransferPolicy")
-        if isinstance(graph_experimental, Mapping)
-        else None
-    )
-    if (
-        not native
-        and _type(spec) in WORKER_TYPES - {""}
-        and isinstance(policy, Mapping)
-        and (policy.get("labelKey") or policy.get("clusterTopologyName"))
-    ):
-        bindings.update(
-            {
-                "DYN_KV_TRANSFER_DOMAIN": str(policy.get("domain") or ""),
-                "DYN_KV_TRANSFER_ENFORCEMENT": str(
-                    policy.get("enforcement") or "required"
-                ),
-                "DYN_TOPOLOGY_ENABLED": "true",
-                "DYN_TOPOLOGY_MOUNT_PATH": "/etc/dynamo/topology",
-            }
-        )
-        if policy.get("preferredWeight") is None:
-            omitted.add("DYN_KV_TRANSFER_PREFERRED_WEIGHT")
-        else:
-            bindings["DYN_KV_TRANSFER_PREFERRED_WEIGHT"] = None
-    return bindings, omitted
 
 
 def _operator_inert_env(spec: Mapping[str, Any]) -> list[str]:

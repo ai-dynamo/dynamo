@@ -780,7 +780,84 @@ def test_environment_order_conflict_fails_closed():
         "nvidia.com/dynamo-operator-origin-version": "1.8.0"
     }
     assert "dependency/order conflict" in parse_error(deployment)
-    assert fc.served_model_names(deployment) == ({}, ())
+
+    # Model discovery must visit a worker with the conflict, not just the frontend.
+    component = worker()
+    component["podTemplate"]["spec"]["containers"][0]["env"] = [
+        {"name": "Y", "value": "$(X)"}
+    ]
+    deployment["spec"]["components"] = [frontend(), component, planner()]
+    assert fc.served_model_names(deployment) == ({}, ("agg",))
+    assert any(
+        "dependency/order conflict" in reason for reason in evaluate(deployment).reasons
+    )
+
+
+def test_worker_model_path_does_not_claim_operator_owned_pod_ip():
+    component = worker()
+    main = component["podTemplate"]["spec"]["containers"][0]
+    main["command"] = ["python3", "/app/worker.py"]
+    main["args"] = [
+        "--model=/models/dynamo.vllm",
+        "--enable-elastic-ep",
+        "--data-parallel-backend=ray",
+        "$(POD_IP)",
+    ]
+    main["env"] = [
+        {
+            "name": "POD_IP",
+            "valueFrom": {
+                "secretKeyRef": {"name": "worker-options", "key": "extra-option"}
+            },
+        }
+    ]
+    deployment = dgd(frontend(), component, planner())
+    deployment["metadata"]["annotations"] = {
+        "nvidia.com/dynamo-operator-origin-version": "1.8.0"
+    }
+    env = fc._component_env(deployment, component)
+    assert "POD_IP" in env.opaque and "POD_IP" not in env.inert
+    report = evaluate(deployment)
+    assert not report.p4_ok
+    assert any("references $(POD_IP)" in reason for reason in report.reasons)
+
+
+@pytest.mark.parametrize("role_templates", [False, True], ids=["vllm-rs", "roles"])
+def test_detected_backend_bindings_break_authored_environment_cycles(role_templates):
+    main = {
+        "name": "main",
+        "command": ["/usr/local/bin/vllm-rs"],
+        "args": ["--distributed-executor-backend=mp"],
+        "env": [{"name": "VLLM_NIXL_SIDE_CHANNEL_HOST", "value": "$(USER)"}],
+    }
+    component = worker(multinode={"nodeCount": 2})
+    if role_templates:
+        component.pop("podTemplate")
+        component["roles"] = [
+            {
+                "name": "leader",
+                "podTemplate": {"spec": {"containers": [copy.deepcopy(main)]}},
+            },
+            {
+                "name": "worker",
+                "podTemplate": {
+                    "spec": {"containers": [{**main, "command": ["/app/worker"]}]}
+                },
+            },
+        ]
+    else:
+        component["podTemplate"]["spec"]["containers"] = [main]
+    deployment = dgd(
+        frontend(),
+        component,
+        planner(),
+        env=[{"name": "USER", "value": "$(VLLM_NIXL_SIDE_CHANNEL_HOST)"}],
+    )
+    deployment["metadata"]["annotations"] = {
+        "nvidia.com/dynamo-operator-origin-version": "1.8.0"
+    }
+    report = evaluate(deployment)
+    assert report.p4_ok, report.reasons
 
 
 @pytest.mark.parametrize(
@@ -790,7 +867,7 @@ def test_environment_order_conflict_fails_closed():
         ("DYNAMO_LEADER_ADDRESS", {"multinode": {"nodeCount": 2}}, {}),
         (
             "GMS_SOCKET_DIR",
-            {"experimental": {"gpuMemoryService": {"mode": "intraPod"}}},
+            {"experimental": {"gpuMemoryService": {"mode": "IntraPod"}}},
             {},
         ),
         (
@@ -838,7 +915,7 @@ def test_p4_accounts_for_owned_bindings_before_composition(
         "limits": {"nvidia.com/gpu": "1"}
     }
     if "failover" in (component.get("experimental") or {}):
-        component["experimental"]["gpuMemoryService"] = {"mode": "intraPod"}
+        component["experimental"]["gpuMemoryService"] = {"mode": "IntraPod"}
     deployment = dgd(
         frontend(),
         component,
@@ -867,8 +944,8 @@ def test_p4_accounts_for_owned_bindings_before_composition(
 def test_p4_accounts_for_inter_pod_gms_bindings(name):
     component = worker(
         experimental={
-            "gpuMemoryService": {"mode": "interPod"},
-            "failover": {"mode": "interPod"},
+            "gpuMemoryService": {"mode": "InterPod"},
+            "failover": {"mode": "InterPod"},
         }
     )
     main = component["podTemplate"]["spec"]["containers"][0]
