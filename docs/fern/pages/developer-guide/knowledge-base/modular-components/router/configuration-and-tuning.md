@@ -253,7 +253,7 @@ largest device-KV overlap when that overlap covers more than 50% of the request'
 
 Each worker pool keeps its own bindings, so prefill and decode stages bind sessions independently. The table holds at most 65,536 bindings and ignores session IDs longer than 256 bytes; requests that cannot be bound go to the least-loaded worker.
 
-`dynamo-kv-capacity-aware` places a decode request only on a rank it fits on. For each rank it reads `D`, the KV blocks booked on the rank plus this request's (`decode_cost_blocks`); `N`, the rank's active requests; and the rank's capacity, the `total_kv_blocks` it advertises:
+**Experimental.** Available since v1.7. `dynamo-kv-capacity-aware` places a decode request only on a rank it fits on. For each rank it reads `D`, the KV blocks booked on the rank plus this request's (`decode_cost_blocks`); `N`, the rank's active requests; and the rank's capacity, the `total_kv_blocks` it advertises:
 
 ```yaml
 worker_selection:
@@ -270,17 +270,17 @@ worker_selection:
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `capacity_fraction` | `1.0` | Share of a rank's capacity a booking may fill. A rank fits when `D <= capacity_fraction × capacity`, rounded to six decimal places and compared exactly. `null` turns the filter off. Must be at least `0.000001`. |
+| `capacity_fraction` | `1.0` | Share of a rank's capacity that `D` may fill. A rank fits when `D <= capacity_fraction × capacity`, rounded to six decimal places and compared exactly. `null` turns the filter off. Must be at least `0.000001`. |
 | `count_priority` | `true` | Among the ranks that fit, prefer fewer active requests before the block cost. |
 | `decode_active_request_weight` | `0` | `W` in the cost `D + W·N`. Must be at least `0`. `--router-decode-active-request-weight` does not set it. |
 | `capacity_blocks` | unset | Capacity for ranks that do not advertise `total_kv_blocks`, or advertise `0`. Must be greater than `0`. |
 
-Among the ranks the request fits on, the policy picks the fewest active requests, then the lowest `(D + W·N) × multiplier`, where the multiplier comes from the request's preferred taints as in the default policy. When no rank fits, it picks the lowest `D` and ignores preferred taints, so every request lands on a rank. A rank with no known capacity is never filtered; the router logs a warning the first time it needs that rank's capacity. Session-affinity targets bind as they do with the default policy. With `capacity_fraction: null` and `count_priority: false`, the policy ties exactly like the default plain-decode cost.
+Among the ranks the request fits on, the policy picks the fewest active requests, then the lowest `(D + W·N) × multiplier`, where the multiplier comes from the request's preferred taints as in the default policy. When no rank fits, it picks the lowest `D` and ignores preferred taints, so every request lands on a rank. A rank with no known capacity is never filtered; the router logs a warning the first time it needs that rank's capacity. Session-affinity targets bind as they do with the default policy. With `capacity_fraction: null` and `count_priority: false`, the policy picks from the same tied ranks as the default plain-decode cost.
 
 Use it to keep decode ranks within their KV capacity when one `W` cannot balance both request counts and KV blocks, typically with data-parallel attention. [Policy-class queues](#policy-class-queues) with `decode_busy_threshold_frac` hold a request while every worker is busy; this policy instead chooses among the ranks eligible now, and counts the incoming request's own blocks.
 
 - It is meant for decode pools. Selected for a prefill or aggregated pool, it logs a warning at startup: it ignores cache overlap and prefill load, and on a prefill pool every rank's `D` is 0.
-- `D` counts prompt blocks only unless the router runs with `--router-track-output-blocks`, and it needs active-block tracking, which the decode router keeps by default.
+- `D` counts prompt blocks only unless the router runs with `--router-track-output-blocks`, and it needs active-block tracking (`--router-track-active-blocks`, on by default).
 - Some backends advertise an aggregate or representative-rank `total_kv_blocks` instead of each rank's own value, so treat the capacity as an estimate when you set `capacity_fraction`.
 
 #### Override the Selection

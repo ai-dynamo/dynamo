@@ -1,23 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! KV-capacity-aware decode worker selection.
-//!
-//! The default decode cost `D + W * N` ignores a rank's KV capacity, so a rank can be booked past
-//! what it holds while others have room. Here `D` is `decode_cost_blocks` (blocks booked on the
-//! rank plus this request's), `N` is `active_requests`, and a rank's capacity is the
-//! `total_kv_blocks` it advertises, else the `capacity_blocks` parameter.
-//!
-//! - A rank fits when `D <= capacity_fraction * capacity`, compared exactly with the fraction in
-//!   parts per million. A rank without a capacity fits, and is warned about once.
-//! - Among fitting ranks: fewest requests first (`count_priority`), then the lowest
-//!   `(D + W * N) * taint`, where `taint` is the preferred-taint multiplier, as in the default.
-//! - When no rank fits: the lowest `D`, ignoring taints.
-//! - Ties are broken uniformly at random. Session-affinity targets bind, as in the default.
-//!
-//! The capacity may be an estimate, so the policy never queues or rejects a request. It is meant
-//! for decode pools; on other pools it logs a warning at startup. With `capacity_fraction: null`
-//! and `count_priority: false` it ties exactly like the default plain-decode cost.
+//! KV-capacity-aware decode worker selection: skip ranks where `decode_cost_blocks` would exceed
+//! `capacity_fraction` of the rank's capacity, then prefer the fewest requests, then the lowest
+//! `(D + W * N) * taint`. Advertised capacity may be an estimate, so the policy never queues or
+//! rejects: when no rank fits, it picks the lowest `D`. See the router configuration guide.
 
 use std::sync::Arc;
 
@@ -117,7 +104,6 @@ impl Parameters {
         }
     }
 
-    /// The key `rank` has if it fits.
     fn fit_key(&self, rank: &Rank) -> Key {
         let count = if self.count_priority {
             rank.requests
@@ -129,7 +115,6 @@ impl Parameters {
         Key::Fits { count, cost }
     }
 
-    /// The key of `rank`, given the key it has if it fits.
     fn key_given(&self, rank: &Rank, fit_key: Key) -> Key {
         if self.fits(rank) {
             fit_key
@@ -146,12 +131,9 @@ impl Parameters {
     }
 }
 
-/// The row to place the request on, or `None` without rows. Ties are drawn uniformly in the order
-/// `rows` yields them; `draw(n)` returns an index below `n`.
-///
-/// `rank(row)` comes without a capacity, and `capacity(row)` is a lookup the filter needs only for a
-/// row that can still win: once a fitting row is found, a row whose fitting key is already worse
-/// loses whether it fits or not.
+/// The row with the lowest key, or `None` without rows; ties are drawn uniformly, `draw(n)`
+/// returning an index below `n`. `capacity(row)` is looked up only for a row that can still beat
+/// the best fitting row.
 fn select_row(
     parameters: &Parameters,
     rows: impl Iterator<Item = usize>,
@@ -209,8 +191,6 @@ impl KvCapacityAwarePicker {
         }
     }
 
-    /// Warn once about the rank at `row`, which reports no capacity that `capacity_blocks` could
-    /// replace.
     fn warn_unknown(&self, candidates: &[ScoredWorkerCandidate], row: usize) {
         let worker = candidates[row].worker();
         let mut warned = self.warned.lock();
