@@ -66,14 +66,14 @@ for other models.
 Start the default model:
 
 ```bash
-./launch/agg_realtime_transcription.sh --max-model-len 4096 --max-num-seqs 2
+./launch/agg_asr_realtime.sh --max-model-len 4096 --max-num-seqs 2
 ```
 
 For another realtime-capable model, replace `MODEL_ID` and `REALTIME_ARCHITECTURE`
 with its model identifier and realtime architecture:
 
 ```bash
-./launch/agg_realtime_transcription.sh --model MODEL_ID \
+./launch/agg_asr_realtime.sh --model MODEL_ID \
     --hf-overrides '{"architectures":["REALTIME_ARCHITECTURE"]}'
 ```
 
@@ -92,7 +92,7 @@ python launch/realtime_audio_client.py \
 The client sends audio while receiving transcription events. A successful check prints
 `delta before commit: True`. vLLM processes five-second segments and flushes remaining audio on commit.
 
-[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_realtime_transcription.sh)
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_asr_realtime.sh)
 </Accordion>
 <Accordion title="Text Embeddings">
 
@@ -1012,7 +1012,7 @@ emits speech codec tokens, and stage 1 decodes those tokens to a 16 kHz mono wav
 Audex serves a single built-in voice, so the request contract differs from Qwen3-TTS: the handler
 accepts `voice` only when it is omitted or set to `default`, rejects `ref_audio` and `ref_text`,
 and accepts an optional `nvext.cfg_scale` for classifier-free guidance. The printed curl example adapts to the selected model. See
-[Text-to-Audio](../../use-cases/diffusion/workflows/text-to-audio.md) for the request format.
+[Text-to-Audio](../../use-cases/speech/text-to-speech.md) for the request format.
 
 <Note>
 Both Audex checkpoints report the same model type, so the 30B-A3B needs an explicit stage
