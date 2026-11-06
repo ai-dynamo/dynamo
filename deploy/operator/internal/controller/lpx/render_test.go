@@ -77,6 +77,7 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 		"from_dgd_yaml/node-local-v2-specdecode",
 		"from_dgd_yaml/node-local-v3-hx-lpu-only",
 		"from_dgd_yaml/node-local-v3-hx-specdecode",
+		"from_dgd_yaml/node-local-v3-hx-agent-specdecode",
 		"from_dgd_yaml/node-local-v3-hx-hybrid",
 		"from_dgd_yaml/node-local-v3-hx-hybrid-all-local",
 		"from_dgd_yaml/lpx-v3-hx-local-partitions",
