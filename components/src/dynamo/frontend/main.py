@@ -51,6 +51,7 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
+SESSION_AFFINITY_MAX_ENTRIES_ENV = "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES"
 FRONTEND_ROUTE_ENTRYPOINT_GROUP = "dynamo.frontend.routes"
 
 # The frontend's TCP listener can exhaust the default soft RLIMIT_NOFILE (1024 on
@@ -424,6 +425,9 @@ async def async_main():
         loop.add_signal_handler(sig, signal_handler)
 
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
+    os.environ[SESSION_AFFINITY_MAX_ENTRIES_ENV] = str(
+        config.session_affinity_max_entries
+    )
     # Shared with the backends so a worker's advertised config is built from the
     # same flags and semantics. --router-mode always has a default here, so this
     # never returns None.

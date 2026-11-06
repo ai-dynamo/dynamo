@@ -146,6 +146,17 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   Environment variable: `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS`
 </ParamField>
 
+<ParamField path="--router-session-affinity-max-entries" type="integer" default="65536">
+  Maximum number of sessions each affinity table holds at once; must be at least `1`. A frontend
+  keeps one table per worker set it routes to. A request that would start a new session past the
+  limit fails as resource exhausted (HTTP 529 by default) until an idle session expires. Replica
+  sync copies bindings to every frontend, so size the limit for the sessions live across all
+  frontends; sync is best effort, so it is not a hard fleet-wide cap. Has no effect unless
+  `--router-session-affinity-ttl-secs` is set.
+
+  Environment variable: `DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES`
+</ParamField>
+
 <ParamField path="--decode-fallback / --no-decode-fallback" type="boolean" default="false">
   Fall back to aggregated mode when prefill workers are unavailable.
 
