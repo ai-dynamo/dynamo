@@ -22,9 +22,8 @@
 # the cluster-wide operator.
 upgradeCRD: true
 
-# Read-only Jobs that validate the installed cluster state before an operator install or upgrade.
-# The platform chart's values.yaml documents these settings. This copy keeps the defaults
-# present when `helm upgrade --reuse-values` reuses values from a release that predates them.
+# Read-only preflight Jobs, documented in the platform chart's values.yaml. These defaults
+# cover `helm upgrade --reuse-values` from a release that predates them.
 upgradePreflight:
   job:
     # Image containing Python 3 (standard library only). Override for an internal registry.
