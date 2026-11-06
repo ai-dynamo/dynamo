@@ -1,0 +1,19 @@
+{
+  "account": "111111111111",
+  "stackName": "example-services",
+  "config": {
+    "cluster": {
+      "name": "example-us-east-2",
+      "region": "us-east-2",
+      "securityGroupId": "sg-00000000000000000",
+      "kubectlServiceToken": "arn:aws:lambda:us-east-2:111111111111:function:example-kubectl",
+      "oidcProviderArn": "arn:aws:iam::111111111111:oidc-provider/oidc.eks.us-east-2.amazonaws.com/id/EXAMPLE"
+    },
+    "operatorNamespace": "dynamo-system",
+    "dynamoVersion": "1.6.0",
+    "workloadNamespaces": [
+      "global",
+      "pools"
+    ]
+  }
+}

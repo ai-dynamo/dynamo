@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.relay.dgdName }}-relay
+  labels:
+    app.kubernetes.io/name: kv-dc-relay
+    dynamo.nvidia.com/dgd: {{ .Values.relay.dgdName | quote }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kv-dc-relay
+      dynamo.nvidia.com/dgd: {{ .Values.relay.dgdName | quote }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        app.kubernetes.io/name: kv-dc-relay
+        dynamo.nvidia.com/dgd: {{ .Values.relay.dgdName | quote }}
+    spec:
+      serviceAccountName: {{ required "relay.serviceAccountName is required" .Values.relay.serviceAccountName | quote }}
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector:
+{{ toYaml .Values.relay.placement.nodeSelector | indent 8 }}
+      affinity:
+        nodeAffinity:
+{{ toYaml .Values.relay.placement.nodeAffinity | indent 10 }}
+      containers:
+      - name: kv-dc-relay
+        image: {{ required "relay.image is required" .Values.relay.image | quote }}
+        imagePullPolicy: IfNotPresent
+        args:
+        - /etc/kv-dc-relay/config.json
+        env:
+        - name: DYN_DISCOVERY_BACKEND
+          value: kubernetes
+        - name: DYN_EVENT_PLANE
+          value: zmq
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+        - name: DYN_NAMESPACE
+          value: {{ .Values.relay.runtimeNamespace | quote }}
+        - name: DYN_COMPONENT
+          value: kv_dc_relay
+        - name: DYN_PARENT_DGD_K8S_NAME
+          value: {{ .Values.relay.dgdName | quote }}
+        - name: DYN_PARENT_DGD_K8S_NAMESPACE
+          value: {{ .Release.Namespace | quote }}
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        ports:
+        - name: wan-grpc
+          containerPort: 50051
+          protocol: TCP
+        - name: stats-grpc
+          containerPort: 50052
+          protocol: TCP
+        startupProbe:
+          tcpSocket:
+            port: wan-grpc
+          periodSeconds: 2
+          timeoutSeconds: 1
+          failureThreshold: 60
+        readinessProbe:
+          tcpSocket:
+            port: stats-grpc
+          periodSeconds: 5
+          timeoutSeconds: 1
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: wan-grpc
+          periodSeconds: 10
+          timeoutSeconds: 1
+          failureThreshold: 3
+        resources:
+{{ toYaml .Values.relay.resources | indent 10 }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: config
+          mountPath: /etc/kv-dc-relay
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: {{ .Values.relay.dgdName }}-relay-config

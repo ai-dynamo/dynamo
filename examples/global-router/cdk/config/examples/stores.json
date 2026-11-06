@@ -1,0 +1,12 @@
+{
+  "account": "111111111111",
+  "stackName": "example-stores",
+  "config": {
+    "homeRegion": "us-east-2",
+    "replicaRegions": [
+      "us-west-2"
+    ],
+    "affinityTableName": "example-global-affinity",
+    "discoveryTableName": "example-global-discovery"
+  }
+}
