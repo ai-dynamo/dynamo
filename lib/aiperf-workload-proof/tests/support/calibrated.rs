@@ -99,7 +99,7 @@ impl HardwareSelection {
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub(crate) enum ProofPrecision {
     Bfloat16,
-    Fp8WeightsBfloat16AttentionKv,
+    Fp8WeightsKvBfloat16Attention,
 }
 
 impl ProofPrecision {
@@ -107,10 +107,17 @@ impl ProofPrecision {
         self.quant_mode()
     }
 
+    fn kv_dtype(self) -> &'static str {
+        match self {
+            Self::Bfloat16 => "bfloat16",
+            Self::Fp8WeightsKvBfloat16Attention => "fp8",
+        }
+    }
+
     fn quant_mode(self) -> &'static str {
         match self {
             Self::Bfloat16 => "bfloat16",
-            Self::Fp8WeightsBfloat16AttentionKv => "fp8",
+            Self::Fp8WeightsKvBfloat16Attention => "fp8",
         }
     }
 }
@@ -592,8 +599,10 @@ fn role_config(identity: RoleIdentity<'_>) -> Result<ForwardPassPerfModelConfig>
     config.attention_dp = 1;
     config.gemm_quant_mode = Some(identity.precision.quant_mode().into());
     config.moe_quant_mode = Some(identity.precision.quant_mode().into());
+    config.moe_tp_size = Some(config.tp);
+    config.moe_ep_size = Some(1);
     config.fmha_quant_mode = Some("bfloat16".into());
-    config.kvcache_quant_mode = Some("bfloat16".into());
+    config.kvcache_quant_mode = Some(identity.precision.kv_dtype().into());
     config.estimation_mode = EstimationMode::OpLevel;
     config.fallback_policy = ForwardPassFallbackPolicy::Deny;
     config.database_mode = DatabaseMode::Silicon;
@@ -691,13 +700,15 @@ pub(crate) fn canonical_role(identity: RoleIdentity<'_>) -> Result<RoleSetup> {
             "backend_version": BACKEND_VERSION,
             "forward_model": "op_level",
             "tp_size": tensor_parallel_size,
+            "moe_tp_size": tensor_parallel_size,
+            "moe_ep_size": 1,
             "pp_size": 1,
             "attention_dp_size": 1,
             "kv_block_size": BLOCK_SIZE,
             "weight_dtype": precision.weight_dtype(),
             "moe_dtype": precision.weight_dtype(),
             "activation_dtype": DataType::Bfloat16,
-            "kv_cache_dtype": DataType::Bfloat16,
+            "kv_cache_dtype": precision.kv_dtype(),
             "strict_provenance": true,
             "database_mode": DatabaseMode::Silicon,
             // Canonical geometry rejects a disaggregated role that silently

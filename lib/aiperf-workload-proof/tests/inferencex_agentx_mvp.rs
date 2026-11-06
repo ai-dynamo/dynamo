@@ -9,7 +9,7 @@
 //! E2E then hosts the production AIPerf plans on the native AISim `Replayer`
 //! event loop with:
 //!
-//! * canonical B200 op-level role timing with explicit FP8 weights/MoE and BF16 attention/KV;
+//! * canonical B200 op-level role timing with explicit FP8 weights/MoE/KV and BF16 attention;
 //! * the real Dynamo KV Router composition produced by
 //!   `KvReplayComposition::disaggregated`;
 //! * the caller-owned `HostedTypedReport`, finalized into the normal native-v2
@@ -53,7 +53,7 @@
 //!
 //! * `AISIM_SYSTEMS_ROOT` — the checked-in B200 system assets and their sibling
 //!   canonical model configs. Each replica uses TP8, explicit FP8 weight/MoE
-//!   precision and BF16 attention/KV, with no estimator or memory fallback.
+//!   and KV precision with BF16 attention, with no estimator or memory fallback.
 //! * `MVP_ARTIFACT_DIR` — a new directory. The test refuses to reuse an
 //!   existing path and never uses a temporary directory, so the complete
 //!   result survives.
@@ -1064,7 +1064,7 @@ fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> 
         model: MODEL,
         systems: &systems,
         hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Fp8WeightsBfloat16AttentionKv,
+        precision: calibrated::ProofPrecision::Fp8WeightsKvBfloat16Attention,
         tensor_parallel_size: 8,
         role: ForwardPassWorkerType::Prefill,
         max_num_seqs: usize::try_from(CONCURRENCY)?,
@@ -1077,7 +1077,7 @@ fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> 
         model: MODEL,
         systems: &systems,
         hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Fp8WeightsBfloat16AttentionKv,
+        precision: calibrated::ProofPrecision::Fp8WeightsKvBfloat16Attention,
         tensor_parallel_size: 8,
         role: ForwardPassWorkerType::Decode,
         max_num_seqs: usize::try_from(CONCURRENCY)?,
@@ -1158,7 +1158,7 @@ fn calibrated_hosted_rejections_reconcile_every_request() -> Result<()> {
         model: MODEL,
         systems: &systems,
         hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Fp8WeightsBfloat16AttentionKv,
+        precision: calibrated::ProofPrecision::Fp8WeightsKvBfloat16Attention,
         tensor_parallel_size: 8,
         role: ForwardPassWorkerType::Prefill,
         max_num_seqs: CONCURRENCY as usize,
@@ -1170,7 +1170,7 @@ fn calibrated_hosted_rejections_reconcile_every_request() -> Result<()> {
         model: MODEL,
         systems: &systems,
         hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Fp8WeightsBfloat16AttentionKv,
+        precision: calibrated::ProofPrecision::Fp8WeightsKvBfloat16Attention,
         tensor_parallel_size: 8,
         role: ForwardPassWorkerType::Decode,
         max_num_seqs: CONCURRENCY as usize,
@@ -1225,7 +1225,7 @@ fn calibrated_hosted_artifacts_reconcile_every_request() -> Result<()> {
         model: MODEL,
         systems: &systems,
         hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Fp8WeightsBfloat16AttentionKv,
+        precision: calibrated::ProofPrecision::Fp8WeightsKvBfloat16Attention,
         tensor_parallel_size: 8,
         role: ForwardPassWorkerType::Prefill,
         max_num_seqs: CONCURRENCY as usize,
@@ -1237,7 +1237,7 @@ fn calibrated_hosted_artifacts_reconcile_every_request() -> Result<()> {
         model: MODEL,
         systems: &systems,
         hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Fp8WeightsBfloat16AttentionKv,
+        precision: calibrated::ProofPrecision::Fp8WeightsKvBfloat16Attention,
         tensor_parallel_size: 8,
         role: ForwardPassWorkerType::Decode,
         max_num_seqs: CONCURRENCY as usize,
