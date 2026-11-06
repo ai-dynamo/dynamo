@@ -14,7 +14,7 @@ matches per-session pinning without a client session ID.
 ## Results
 
 AIPerf replays [`Hcompany/h_cua_perf`](https://huggingface.co/datasets/Hcompany/h_cua_perf),
-image `uuid` removed, 128 concurrent agent sessions, 8 GB200 GPUs, one run block.
+without image `uuid`s, 128 concurrent agent sessions, 8 GB200s, run back to back.
 
 | Serving path | Throughput (req/s) | Prompt tokens from cache |
 |--------------|--------------------|--------------------------|
@@ -22,7 +22,7 @@ image `uuid` removed, 128 concurrent agent sessions, 8 GB200 GPUs, one run block
 | Python `vllm serve`, client-pinned | 7.09 | 88.7% |
 | `vllm-rs` alone, client-pinned | 7.10 | 88.7% |
 
-Throughput is within about 1%. Paired per session turn, mean end-to-end latency is 0.23 s and
+Throughput is within about 1%. Per session turn, mean end-to-end latency is 0.23 s and
 0.24 s lower than `vllm serve` and `vllm-rs` alone, and mean time to first token (373 ms) is
 41 ms lower than `vllm serve` (95% intervals exclude zero). October 2026 main
 builds, launched manually, 300 s warm-up dropped.
