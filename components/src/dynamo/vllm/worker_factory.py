@@ -1964,10 +1964,11 @@ class WorkerFactory:
             (prometheus_names.labels.MODEL_NAME, model_name),
         ]
         serve_tasks = []
-        if config.realtime_chat:
+        if config.endpoint_types != "none":
             if "realtime" not in handlers:
                 raise ValueError(
-                    f"--realtime-chat requires a text generation model, not {model_name!r}"
+                    f"Serving {config.endpoint_types} endpoints with realtime "
+                    f"requires a text generation model, not {model_name!r}"
                 )
             serve_tasks.append(
                 await self._realtime_chat_endpoint(

@@ -357,12 +357,6 @@ class TestTranscriptionWorkerExclusivity:
 
 
 class TestRealtimeWorkerExclusivity:
-    def test_realtime_chat_requires_realtime(self):
-        config = create_config()
-        config.realtime_chat = True
-        with pytest.raises(ValueError, match="--realtime-chat requires --realtime"):
-            config._validate_realtime_worker_exclusivity()
-
     def test_baseline_aggregated_is_accepted(self):
         config = create_config()
         config.realtime = True
@@ -561,7 +555,7 @@ class TestParseArgsLoraExclusivity:
 
     def test_realtime_with_enable_lora_is_rejected(self):
         with pytest.raises(ValueError, match="enable-lora"):
-            self._parse(["--realtime", "--enable-lora"])
+            self._parse(["--endpoint-types", "realtime", "--enable-lora"])
 
     def test_classify_worker_with_enable_lora_is_rejected(self):
         """Kept separate from the --realtime case: the classify rule may be
@@ -575,7 +569,7 @@ class TestParseArgsLoraExclusivity:
         assert config.engine_args.enable_lora is True
 
     def test_realtime_alone_is_accepted(self):
-        config = self._parse(["--realtime"])
+        config = self._parse(["--endpoint-types", "realtime"])
         assert config.realtime is True
         assert not config.engine_args.enable_lora
 

@@ -16,6 +16,7 @@ from dynamo.common.configuration.groups.frontend_decoding_args import (
     add_frontend_decoding_arg,
 )
 from dynamo.common.configuration.utils import (
+    Deprecated,
     add_argument,
     add_negatable_bool_argument,
     parse_bool,
@@ -286,20 +287,11 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--realtime",
             env_var="DYN_VLLM_REALTIME",
             default=False,
+            deprecated=Deprecated("--endpoint-types realtime", remove_in="v1.8"),
             help="Serve a ModelType.Realtime bidirectional endpoint through "
             "the OpenAI /v1/realtime protocol. Standard vLLM currently "
             "supports text-only realtime and transcription sessions. "
             "Aggregated workers only.",
-        )
-
-        add_negatable_bool_argument(
-            g,
-            flag_name="--realtime-chat",
-            env_var="DYN_VLLM_REALTIME_CHAT",
-            default=False,
-            help="With --realtime, also serve the --dyn-endpoint-types OpenAI "
-            "endpoints, such as /v1/chat/completions, from the same engine on a "
-            "sibling endpoint.",
         )
 
         add_negatable_bool_argument(
@@ -640,7 +632,6 @@ class DynamoVllmConfig(ConfigBase):
     embedding_worker_processes: int = 1
     transcription_worker: bool = False
     realtime: bool = False
-    realtime_chat: bool = False
     classify_worker: bool = False
 
     # CustomEncoder (image-only embeddings; worker assembles mixed prompt)
@@ -1055,8 +1046,6 @@ class DynamoVllmConfig(ConfigBase):
     def _validate_realtime_worker_exclusivity(self) -> None:
         """Realtime serving uses a dedicated aggregated bidirectional worker."""
         if not self.realtime:
-            if self.realtime_chat:
-                raise ValueError("--realtime-chat requires --realtime.")
             return
         if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
             mode = (
