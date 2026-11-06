@@ -339,7 +339,7 @@ kubectl apply -f recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/deploy-vr200.yam
 
 Wait for the replacement workers to become Ready before measuring. Restore natural acceptance, regenerate, and reapply the manifest before returning to normal serving.
 
-The recorded speculative settings are DSpark with seven draft tokens, probabilistic draft sampling, and synthetic rejection sampling targeting AL 3.84. These settings specify a synthetic acceptance target, not a procedure for measuring natural acceptance. The AgentX dataset and scenario above describe the throughput benchmark; they do not establish the dataset used to measure AL.
+The synthetic acceptance length of 3.84 was measured offline on the SpeedBench (qualitative) coding subset using the same DSpark draft length as this recipe: 7 draft tokens. The AgentX dataset and scenario above describe the throughput benchmark, not the offline acceptance-length measurement.
 
 Set these values in the Job `env` section for your target:
 
