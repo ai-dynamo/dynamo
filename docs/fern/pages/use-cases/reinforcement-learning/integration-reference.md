@@ -70,7 +70,7 @@ Before admitting a sample to training, verify:
 
 | Data | Dynamo surface | Contract boundary |
 |---|---|---|
-| Prompt token IDs | Named `nvext.prompt_token_ids` | Returns the effective single-prompt token sequence used after preprocessing, including token arrays supplied through the request. It reflects `nvext.token_data` only on paths that honor it: `/v1/completions` and chat with the default chat processor. |
+| Prompt token IDs | Named `nvext.prompt_token_ids` | Returns the effective single-prompt token sequence used after preprocessing, including token arrays supplied through the request. It reflects `nvext.token_data` only on paths that honor it: chat with the default chat processor, and `/v1/completions` with a single string `prompt` and no `prompt_embeds`. |
 | Generated token IDs | Named `nvext.completion_token_ids`, or the native SGLang stream | Use the engine-returned sequence; exact placement depends on the selected interface. |
 | Selected and prompt log probabilities | Standard completion log probabilities, named `nvext.prompt_logprobs`, or native SGLang metadata | Check support and alignment on the exact backend and response path. |
 | Routed experts and raw engine data | Opt-in `nvext.routed_experts` or `nvext.engine_data` | Backend-specific. Prefer named fields over the raw engine payload. |

@@ -56,7 +56,7 @@ curl http://localhost:8000/v1/completions \
   }'
 ```
 
-`nvext.token_data` supplies pre-tokenized request input. `prompt` must be a non-empty string; the frontend uses `nvext.token_data` instead of tokenizing it. `nvext.extra_fields` selects response metadata; `prompt_token_ids` returns the effective single-prompt token sequence used after preprocessing, including pre-tokenized input.
+`nvext.token_data` supplies pre-tokenized request input. `prompt` must be a non-empty string; the frontend uses `nvext.token_data` instead of tokenizing it. This needs NvExt enabled, which is the default. If the frontend runs with `DYN_DISABLE_FRONTEND_NVEXT=true`, it drops `nvext.token_data` and `nvext.extra_fields`, tokenizes the placeholder `prompt`, and returns no `prompt_token_ids`. `nvext.extra_fields` selects response metadata; `prompt_token_ids` returns the effective single-prompt token sequence used after preprocessing, including pre-tokenized input.
 
 Treat the engine's token sequence as authoritative. Do not reconstruct training tokens from generated text. Before accepting a sample, check token and log-probability alignment, the terminal state, the selected model and tokenizer, and the framework's mask and retry rules. See [RL Integration Reference](integration-reference.md#know-what-returns-to-the-trainer) for the data Dynamo can return and what remains framework-owned.
 
