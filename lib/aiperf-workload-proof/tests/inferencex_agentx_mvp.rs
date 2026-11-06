@@ -861,6 +861,7 @@ fn host_typed(
     eprintln!("MVP stage: preparing complete shared workload");
     let (participant, handle) = native_hosted(
         run,
+        aisim_aiperf_workload_runner::participant_adapter::NativeInputProjection::TraceHashes,
         RunCancellation::new(),
         Rc::new(aiperf_timing::RecordingPhaseObserver::default()),
         Rc::new(aiperf_rng::identity::DeterministicIdentitySource::new(
