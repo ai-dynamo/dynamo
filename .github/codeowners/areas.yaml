@@ -29,6 +29,8 @@ areas:
   - lib/llm/src/http/service/
   - lib/llm/src/lora.rs
   - lib/llm/src/lora/
+  - lib/llm/src/lora_routing.rs
+  - lib/lora/
   - lib/llm/src/preprocessor.rs
   - lib/llm/src/preprocessor/
   - lib/llm/src/preprocessor/tools/
@@ -64,6 +66,7 @@ areas:
   - lib/kv-router/tests/
   - lib/llm/src/kv_router.rs
   - lib/llm/src/kv_router/
+  - lib/llm/src/routing_policy.rs
   - lib/llm/src/kv_router/indexer/
   - lib/llm/src/kv_router/prefill_router/
   - lib/llm/src/kv_router/publisher/
@@ -287,7 +290,9 @@ areas:
   - lib/llm/src/discovery/
   - lib/llm/src/kernels/
   - lib/llm/src/local_model/
-  - lib/llm/src/lora/routing/
+  - lib/lora/src/huggingface.rs
+  - lib/lora/src/routing/
+  - lib/lora/tests/
   - lib/llm/src/model_card.rs
   - lib/llm/src/perf/
   - lib/llm/src/utils/
@@ -1153,6 +1158,10 @@ shared:
   owners:
   - router
   - kv-memory
+- glob: lib/llm/src/lora_routing.rs
+  owners:
+  - frontend
+  - router
 - glob: lib/llm/src/preprocessor/mm_routing/
   owners:
   - frontend

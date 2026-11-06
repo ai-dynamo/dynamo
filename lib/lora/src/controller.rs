@@ -11,15 +11,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::lora::config::LoraAllocationConfig;
-use crate::lora::load_estimator::LoadEstimator;
-use crate::lora::metrics::ControllerMetrics;
-use crate::lora::routing::mcf_allocator::{
-    LoraInput, McfPlacementSolver, McfSolveParams, WorkerInput,
-};
-use crate::lora::routing::table::{LoraReplicaConfig, LoraRoutingTable};
-use crate::lora::routing::{AllocationAlgorithmType, LoraAllocator, create_lora_allocator};
-use crate::lora::state_tracker::{LoraObservedSnapshot, LoraStateTracker};
+use crate::config::LoraAllocationConfig;
+use crate::load_estimator::LoadEstimator;
+use crate::metrics::ControllerMetrics;
+use crate::routing::mcf_allocator::{LoraInput, McfPlacementSolver, McfSolveParams, WorkerInput};
+use crate::routing::table::{LoraReplicaConfig, LoraRoutingTable};
+use crate::routing::{AllocationAlgorithmType, LoraAllocator, create_lora_allocator};
+use crate::state_tracker::{LoraObservedSnapshot, LoraStateTracker};
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_runtime::protocols::EndpointId;
 
@@ -1297,10 +1295,10 @@ mod tests {
     use super::*;
     use prometheus::{IntGaugeVec, core::Collector};
 
-    use crate::lora::LoraInfo;
-    use crate::lora::load_estimator::LoadEstimator;
-    use crate::lora::routing::table::LoraRoutingTable;
-    use crate::lora::state_tracker::LoraStateTracker;
+    use crate::LoraInfo;
+    use crate::load_estimator::LoadEstimator;
+    use crate::routing::table::LoraRoutingTable;
+    use crate::state_tracker::LoraStateTracker;
 
     fn make_worker(id: u64) -> WorkerWithDpRank {
         WorkerWithDpRank::new(id, 0)
@@ -2068,7 +2066,7 @@ mod tests {
         let mut colliding: Vec<String> = Vec::new();
         for i in 0..10_000 {
             let name = format!("lora-{i}");
-            let ranked = crate::lora::routing::RendezvousHasher::rank_workers(&name, &[w1, w2]);
+            let ranked = crate::routing::RendezvousHasher::rank_workers(&name, &[w1, w2]);
             if ranked[0].0 == w1 {
                 colliding.push(name);
                 if colliding.len() == 2 {
@@ -2084,9 +2082,9 @@ mod tests {
 
         let config = LoraAllocationConfig {
             algorithm: AllocationAlgorithmType::MinCostFlow,
-            mcf: crate::lora::config::McfConfig {
+            mcf: crate::config::McfConfig {
                 candidate_m: 1,
-                ..crate::lora::config::McfConfig::default()
+                ..crate::config::McfConfig::default()
             },
             ..LoraAllocationConfig::default()
         };

@@ -26,8 +26,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::kv_router::protocols::WorkerWithDpRank;
-use crate::lora::routing::hrw::RendezvousHasher;
+use crate::routing::hrw::RendezvousHasher;
+use dynamo_kv_router::protocols::WorkerWithDpRank;
 
 use super::min_cost_flow::{INF_COST, MinCostFlowGraph};
 
