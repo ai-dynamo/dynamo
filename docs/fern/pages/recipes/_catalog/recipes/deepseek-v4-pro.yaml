@@ -133,6 +133,7 @@ targets:
 related_benchmarks: []
 maintainer: null
 gaps:
+- B200 targets agg-b200-agentic and disagg-b200-agentic are unvalidated on vllm-runtime:1.6.0. Their performance was measured on 1.3.0; H200 validation is unchanged.
 - 'H200 targets are secondary/best-effort on the public FP8 checkpoint, capped at max_model_len 86016 (HBM); cannot serve the full 1M context the B200 recipes handle.'
 - maintainer unknown
 - Day-0 / GB200 (vLLM + SGLang) variants (experimental, dev images, ComputeDomain/MNNVL) are intentionally excluded from this customer page.

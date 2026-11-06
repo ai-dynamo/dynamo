@@ -126,5 +126,6 @@ targets:
 related_benchmarks: []
 maintainer: null
 gaps:
+- B200 targets agg-b200-agentic and disagg-b200-agentic are unvalidated on vllm-runtime:1.6.0. Their performance was measured on 1.3.0; H200 validation is unchanged.
 - maintainer unknown
 - Day-0 / GB200 SGLang variants (experimental, dev images) are intentionally excluded from this customer page.
