@@ -12,18 +12,25 @@
 //! - `GET /pools`: the pools a Global Router routes to. `complete` is false
 //!   while the list may be missing pools: for one lease after the service
 //!   starts, while PoolRelays may not have registered yet; with MCS, also
-//!   while the MCS watch keeps failing; and with DynamoDB, also while the
-//!   table cannot be reached and for one lease after, and while a pool from
-//!   another region of a Global Table is listed past its lease, in case
-//!   replication is late. A caller that keeps
-//!   its own list replaces it with a complete list, but merges a partial
-//!   one: it adds new pools and updates changed ones, keeps known pools that
-//!   are missing, and waits for a complete list to remove any. A caller that
-//!   knows no pools yet still uses a partial list.
+//!   while the MCS watch keeps failing, and while another discovery instance
+//!   may hold registrations that this one has not copied yet (see
+//!   [`crate::peers`]); and with DynamoDB, also while the table cannot be
+//!   reached and for one lease after, and while a pool from another region of
+//!   a Global Table is listed past its lease, in case replication is late. A
+//!   caller that keeps its own list replaces it with a complete list, but
+//!   merges a partial one: it adds new pools and updates changed ones, keeps
+//!   known pools that are missing, and waits for a complete list to remove
+//!   any. A caller that knows no pools yet still uses a partial list.
+//! - `GET /registrations`: the registrations this instance's PoolRelays
+//!   made, for the other instances ([`crate::peers`]), which name themselves
+//!   in `asker` and say in `holding` whether registrations were made with
+//!   them; and the instances that recently asked while holding some. Like
+//!   `POST /pools`, it assumes a trusted network.
 //! - `GET /healthz`: readiness. OK once the backend has answered, which with
-//!   DynamoDB follows the startup check of the table. A later failure of the
-//!   backend shows in the answers to requests, not here, so that an outage
-//!   of a store every replica shares does not take them all out of the
+//!   DynamoDB follows the startup check of the table, and, for an instance
+//!   that shares registrations, once it has asked the others. A later failure
+//!   of the backend shows in the answers to requests, not here, so that an
+//!   outage of a store every replica shares does not take them all out of the
 //!   Service at once. Liveness needs only the TCP port. Ready does not mean
 //!   the pool list is complete: `GET /pools` says that in `complete`.
 //!
@@ -38,10 +45,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::pool_discovery::{
-    Completeness, DiscoveryError, PoolDirectory, PoolRegistrar, PoolRegistration, ReplicaDirectory,
+    Completeness, DiscoveryError, PoolDirectory, PoolRegistrar, PoolRegistration,
+    RegistrationSharing, RegistrationsRequest, ReplicaDirectory,
 };
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -60,12 +68,17 @@ pub struct PoolDiscoveryBackend {
     /// `None` when the backend takes no registrations: `POST /pools` then
     /// answers `501`.
     pub registrar: Option<Arc<dyn PoolRegistrar>>,
+    /// `Some` to serve `GET /registrations` to the other instances, as
+    /// [`crate::peers::PeerSync::new`] returns it. `GET /healthz` then fails
+    /// until this instance has asked the others once.
+    pub sharing: Option<Arc<dyn RegistrationSharing>>,
 }
 
 impl fmt::Debug for PoolDiscoveryBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PoolDiscoveryBackend")
             .field("takes_registrations", &self.registrar.is_some())
+            .field("shares_registrations", &self.sharing.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -93,6 +106,7 @@ pub fn routes(backend: PoolDiscoveryBackend) -> Router {
     Router::new()
         .route("/pools", get(list_pools).post(register_pool))
         .route("/routers", get(list_routers).post(register_router))
+        .route("/registrations", get(shared_registrations))
         .route("/healthz", get(healthz))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(Arc::new(Shared {
@@ -172,6 +186,25 @@ async fn list_routers(State(shared): State<Arc<Shared>>) -> Response {
     }
 }
 
+async fn shared_registrations(
+    State(shared): State<Arc<Shared>>,
+    Query(request): Query<RegistrationsRequest>,
+) -> Response {
+    match &shared.backend.sharing {
+        Some(sharing) => {
+            if let Some(asker) = request.asker() {
+                sharing.asked_by(asker);
+            }
+            Json(sharing.reply()).into_response()
+        }
+        None => (
+            StatusCode::NOT_IMPLEMENTED,
+            "this instance does not share registrations",
+        )
+            .into_response(),
+    }
+}
+
 /// `RegisterRouter` from the design. The service takes no router
 /// registrations yet, so every call answers `501`, whatever its body. With
 /// MCS, routers need not register. Without it, how a router proves it is a
@@ -193,12 +226,21 @@ async fn register_router() -> Response {
 /// store every replica shares, such as DynamoDB, readiness that followed the
 /// store would take every replica out of the Service at once during an
 /// outage, and PoolRelays could not register until all were ready again. The
-/// DynamoDB store checks at startup that it can read and write its table.
+/// DynamoDB store checks at startup that it can read and write its table. An
+/// instance that shares registrations is ready only once it has asked the
+/// others; an unreachable one later does not make it unready.
 async fn healthz(State(shared): State<Arc<Shared>>) -> StatusCode {
+    let backend = &shared.backend;
+    if backend
+        .sharing
+        .as_ref()
+        .is_some_and(|sharing| !sharing.synced())
+    {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
     if shared.answered.load(Ordering::Acquire) {
         return StatusCode::OK;
     }
-    let backend = &shared.backend;
     let (pools, routers) = tokio::join!(backend.pools.list(), backend.routers.list());
     match pools.and(routers) {
         Ok(_) => {
@@ -235,7 +277,9 @@ mod tests {
     use url::Url;
 
     use super::*;
+    use crate::backends::http::HttpRegistrationSource;
     use crate::backends::memory::{MemoryPoolStore, StaticReplicaDirectory};
+    use crate::peers::PeerSync;
 
     /// The body `dynamo-global-discovery-client` sends.
     fn registration() -> Value {
@@ -266,6 +310,7 @@ mod tests {
             pools: pools.clone(),
             routers: Arc::new(StaticReplicaDirectory::new(vec![router_replica()])),
             registrar: Some(pools),
+            sharing: None,
         }
     }
 
@@ -357,6 +402,68 @@ mod tests {
             routers,
             json!({"routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}]})
         );
+        shutdown.cancel();
+    }
+
+    /// The sorted keys of a JSON object.
+    fn keys(value: &Value) -> Vec<&str> {
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[tokio::test]
+    async fn registrations_are_shared_in_the_format_other_instances_read() {
+        let lease = Lease::new(1, 3).unwrap();
+        let store = Arc::new(MemoryPoolStore::new(lease));
+        let (_, sharing) = PeerSync::new(
+            Arc::new(StaticReplicaDirectory::new(Vec::new())),
+            Arc::new(HttpRegistrationSource::new().unwrap()),
+            store.clone(),
+            lease,
+        )
+        .unwrap();
+        let instance = sharing.reply().instance.to_string();
+        let mut backend = registrations_backend();
+        backend.registrar = Some(store);
+        backend.sharing = Some(Arc::new(sharing));
+        let (base, shutdown) = start(backend).await;
+        assert_eq!(
+            post_pool(&base, &registration()).await.0,
+            reqwest::StatusCode::OK
+        );
+
+        // The keys that other instances, maybe of another version during a
+        // rollout, read.
+        let (status, body) = get_json(&base, "/registrations").await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        assert_eq!(
+            keys(&body),
+            ["complete", "instance", "lease", "registrations"]
+        );
+        assert_eq!(body["instance"], instance);
+        assert_eq!(
+            body["lease"],
+            json!({"heartbeat_interval_s": 1, "lease_duration_s": 3})
+        );
+        let shared = &body["registrations"][0];
+        assert_eq!(keys(shared), ["expires_in_ms", "registration"]);
+        assert_eq!(shared["registration"]["model"], registration()["model"]);
+        assert!(shared["expires_in_ms"].as_u64().unwrap() <= 3000);
+        // The instance may not have heard from all of its PoolRelays until a
+        // lease after it started.
+        assert_eq!(body["complete"], false);
+        shutdown.cancel();
+
+        // An instance that does not share answers 501.
+        let (base, shutdown) = start(registrations_backend()).await;
+        let response = reqwest::get(format!("{base}/registrations")).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
         shutdown.cancel();
     }
 
@@ -511,6 +618,7 @@ mod tests {
             pools: Arc::new(Down),
             routers: Arc::new(Down),
             registrar: None,
+            sharing: None,
         })
         .await;
         for path in ["/pools", "/routers", "/healthz"] {

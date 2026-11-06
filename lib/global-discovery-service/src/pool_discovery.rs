@@ -10,6 +10,8 @@
 //! - [`PoolRegistrar`]: a PoolRelay registers its pool. Each registration is
 //!   also the pool's heartbeat.
 //! - [`ReplicaDirectory`]: the Global Router replicas a PoolRelay connects to.
+//! - [`RegistrationSharing`], [`RegistrationSource`] and
+//!   [`RegistrationExchange`]: service instances share registrations.
 //!
 //! The two directories are aliases of one trait, [`Directory`], over pools and
 //! over router replicas. What they list, and what a PoolRelay registers, are
@@ -35,11 +37,17 @@
 mod pools;
 mod registrar;
 mod replicas;
+mod sharing;
 mod watch;
 
 pub use pools::{Capacity, PoolDirectory, PoolEvent, PoolListing};
 pub use registrar::{Lease, PoolRegistrar, PoolRegistration};
 pub use replicas::{ReplicaDirectory, RouterReplica, RouterReplicaEvent, RouterReplicaId};
+pub use sharing::{
+    Asker, ExchangeRound, RecentAsker, RegistrationExchange, RegistrationSharing,
+    RegistrationSource, RegistrationsRequest, SharedRegistration, SharedRegistrations,
+    answer_timeout,
+};
 pub use watch::{Completeness, Directory, Snapshot, WatchEvent, WatchStream};
 
 use thiserror::Error;

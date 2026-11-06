@@ -56,6 +56,7 @@ async fn start(store: Arc<DynamoDbPoolStore>) -> (String, CancellationToken) {
         pools,
         routers: Arc::new(StaticReplicaDirectory::new(vec![router_replica()])),
         registrar: Some(registrar),
+        sharing: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());

@@ -9,9 +9,10 @@
 //!   EndpointSlices that MCS imports, named the Karmada way (`karmada`) or
 //!   the standard way (`mcs`), joined with registrations.
 //! - `--registration-storage`: where registrations are kept. Either in this
-//!   process (`memory`), so run one replica, or in a DynamoDB table that
-//!   every replica shares (`dynamodb`), in one region or, through a Global
-//!   Table, in several.
+//!   process (`memory`), so run one replica unless `--peer-service` shares
+//!   them between instances, or in a DynamoDB table that every replica
+//!   shares (`dynamodb`), in one region or, through a Global Table, in
+//!   several.
 //!
 //! ```bash
 //! cargo run -p dynamo-global-discovery-service -- \
@@ -45,14 +46,17 @@ use dynamo_global_common::Lease;
 use dynamo_global_discovery_service::backends::dynamodb::{
     ConnectError, DynamoDbConfig, DynamoDbPoolStore,
 };
+use dynamo_global_discovery_service::backends::http::HttpRegistrationSource;
 use dynamo_global_discovery_service::backends::kubernetes::{
     ExportedService, FrontendService, KARMADA_MAX_SERVICE_NAME, McsImplementation,
     McsPoolDirectory, McsReplicaDirectory,
 };
 use dynamo_global_discovery_service::backends::memory::{MemoryPoolStore, StaticReplicaDirectory};
 use dynamo_global_discovery_service::backends::registered::RegisteredPoolDirectory;
+use dynamo_global_discovery_service::peers::{MIN_LEASE_HEARTBEATS, PeerSync};
 use dynamo_global_discovery_service::pool_discovery::{
-    PoolDirectory, PoolRegistrar, RouterReplica, RouterReplicaId,
+    PoolDirectory, PoolRegistrar, RegistrationExchange, RegistrationSharing, RouterReplica,
+    RouterReplicaId,
 };
 use dynamo_global_discovery_service::service::{self, PoolDiscoveryBackend, Tls};
 use kube::Client;
@@ -228,6 +232,50 @@ struct Args {
         required_if_eq_any = MCS_VALUES
     )]
     router_port_name: Option<String>,
+    /// This service's own Service, exported through MCS. With it, the
+    /// instances in every cluster share their registrations, over plain HTTP
+    /// on a trusted network, so not with `--tls-cert-path` yet. Every cluster
+    /// that runs an instance must import it, so that the import lists its own
+    /// instances too: with Karmada, place the ServiceImport on each of those
+    /// clusters, not only on the others. The lease must be at least three
+    /// heartbeat intervals, and every instance must use the same heartbeat
+    /// interval and lease. While registrations made with another instance may
+    /// be missing here, `GET /pools` says the list is not complete, so Global
+    /// Routers keep pools that may have left: until this instance has asked
+    /// the others and found itself in the list, for a lease after an instance
+    /// leaves, once one has not answered completely for the lease minus two
+    /// heartbeat intervals, while one holding registrations that has not
+    /// answered asks this one or one that it reads, and for about a lease and
+    /// a heartbeat interval after, as when this cluster's import lags behind,
+    /// and after a registration lapses here, until every instance has
+    /// answered again, a round later, since its PoolRelay may have renewed it
+    /// late with any of them.
+    #[arg(
+        long,
+        value_parser = NonEmptyStringValueParser::new(),
+        help_heading = WITH_MCS,
+        conflicts_with = "tls_cert_path"
+    )]
+    peer_service: Option<String>,
+    /// Namespace of `--peer-service`. Defaults to the Kubernetes client's
+    /// namespace: this pod's in the cluster, or the kubeconfig context's with
+    /// `KUBECONFIG`.
+    #[arg(
+        long,
+        value_parser = NonEmptyStringValueParser::new(),
+        help_heading = WITH_MCS,
+        requires = "peer_service"
+    )]
+    peer_namespace: Option<String>,
+    /// The named HTTP port of `--peer-service`.
+    #[arg(
+        long,
+        default_value = "http",
+        value_parser = NonEmptyStringValueParser::new(),
+        help_heading = WITH_MCS,
+        requires = "peer_service"
+    )]
+    peer_port_name: String,
 }
 
 /// The `--pool-discovery` values that read MCS, for clap's
@@ -263,8 +311,9 @@ impl PoolDiscovery {
 /// Where registrations are kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum RegistrationStorage {
-    /// In this process. Run one replica: each keeps only the registrations it
-    /// receives.
+    /// In this process: each instance keeps only the registrations it
+    /// receives. With MCS, `--peer-service` shares them between instances;
+    /// otherwise run one replica.
     Memory,
     /// In the DynamoDB table `--dynamodb-table`, which every replica shares.
     /// As with `memory`, lists are complete one lease after the service
@@ -397,16 +446,47 @@ where
     }
     // Karmada imports no Service with a longer name, and the API server
     // refuses to list one, so the service would never be ready.
-    if let (Some(mcs), Some(service)) = (parsed.pool_discovery.mcs(), &parsed.router_service)
-        && !mcs.can_import(service)
+    if let Some(mcs) = parsed.pool_discovery.mcs() {
+        for (flag, service) in [
+            ("router-service", &parsed.router_service),
+            ("peer-service", &parsed.peer_service),
+        ] {
+            if let Some(service) = service
+                && !mcs.can_import(service)
+            {
+                return Err(command.error(
+                    ErrorKind::ValueValidation,
+                    format!(
+                        "--{flag} has {} characters, and Karmada imports a Service name of at \
+                         most {KARMADA_MAX_SERVICE_NAME}",
+                        service.len()
+                    ),
+                ));
+            }
+        }
+    }
+    // A copy from another instance must outlive a round that times out.
+    if parsed.peer_service.is_some()
+        && parsed.lease_duration_secs
+            < parsed
+                .heartbeat_interval_secs
+                .saturating_mul(MIN_LEASE_HEARTBEATS.into())
     {
         return Err(command.error(
             ErrorKind::ValueValidation,
             format!(
-                "--router-service has {} characters, and Karmada imports a Service name of at \
-                 most {KARMADA_MAX_SERVICE_NAME}",
-                service.len()
+                "with --peer-service, --lease-duration-secs must be at least \
+                 {MIN_LEASE_HEARTBEATS} times --heartbeat-interval-secs, so that copies outlive \
+                 a round that times out"
             ),
+        ));
+    }
+    // Instances share the registrations that each keeps in memory.
+    if parsed.peer_service.is_some() && parsed.registration_storage != RegistrationStorage::Memory {
+        return Err(command.error(
+            ErrorKind::ArgumentConflict,
+            "--peer-service shares registrations kept in memory, so it works only with \
+             --registration-storage memory",
         ));
     }
     // A Service name must not match both suffixes.
@@ -432,8 +512,9 @@ async fn main() -> Result<()> {
     dynamo_runtime::logging::init();
     let args = parse_args(std::env::args_os()).unwrap_or_else(|error| error.exit());
     // Listen for SIGTERM before building the backend, which may wait for
-    // DynamoDB or the Kubernetes API server. As PID 1 in its container, the
-    // process would otherwise ignore SIGTERM until then.
+    // DynamoDB or the Kubernetes API server, and starts tasks that stop with
+    // `shutdown`. As PID 1 in its container, the process would otherwise
+    // ignore SIGTERM until then.
     let shutdown = CancellationToken::new();
     cancel_on_signal(shutdown.clone())?;
     let backend = tokio::select! {
@@ -445,7 +526,7 @@ async fn main() -> Result<()> {
         backend = async {
             match args.pool_discovery.mcs() {
                 None => registrations_backend(&args).await,
-                Some(mcs) => mcs_backend(&args, mcs).await,
+                Some(mcs) => mcs_backend(&args, mcs, &shutdown).await,
             }
         } => backend?,
     };
@@ -469,19 +550,33 @@ fn lease(args: &Args) -> Result<Lease> {
         .context("check --heartbeat-interval-secs and --lease-duration-secs")
 }
 
+/// A registration store, as the backend uses it.
+struct Registrations {
+    pools: Arc<PoolDirectory>,
+    registrar: Arc<dyn PoolRegistrar>,
+    /// What `--peer-service` shares with the other instances: `Some` for a
+    /// store kept in memory.
+    exchange: Option<Arc<dyn RegistrationExchange>>,
+}
+
 /// Where registrations go, as `--registration-storage` says.
-async fn registration_storage(
-    args: &Args,
-    lease: Lease,
-) -> Result<(Arc<PoolDirectory>, Arc<dyn PoolRegistrar>)> {
+async fn registration_storage(args: &Args, lease: Lease) -> Result<Registrations> {
     match args.registration_storage {
         RegistrationStorage::Memory => {
             let store = Arc::new(MemoryPoolStore::new(lease));
-            Ok((store.clone(), store))
+            Ok(Registrations {
+                pools: store.clone(),
+                registrar: store.clone(),
+                exchange: Some(store),
+            })
         }
         RegistrationStorage::Dynamodb => {
             let store = connect_dynamodb(lease, dynamodb_config(args)?).await?;
-            Ok((store.clone(), store))
+            Ok(Registrations {
+                pools: store.clone(),
+                registrar: store,
+                exchange: None,
+            })
         }
     }
 }
@@ -518,7 +613,9 @@ async fn connect_dynamodb(lease: Lease, config: DynamoDbConfig) -> Result<Arc<Dy
 
 /// Pools from registrations; router replicas from `--router`.
 async fn registrations_backend(args: &Args) -> Result<PoolDiscoveryBackend> {
-    let (pools, registrar) = registration_storage(args, lease(args)?).await?;
+    let Registrations {
+        pools, registrar, ..
+    } = registration_storage(args, lease(args)?).await?;
     if args.routers.is_empty() {
         tracing::warn!(
             "no --router given, so GET /routers lists no Global Router replica for PoolRelays to \
@@ -529,6 +626,7 @@ async fn registrations_backend(args: &Args) -> Result<PoolDiscoveryBackend> {
         pools,
         routers: Arc::new(StaticReplicaDirectory::new(args.routers.clone())),
         registrar: Some(registrar),
+        sharing: None,
     })
 }
 
@@ -553,7 +651,11 @@ fn dynamodb_config(args: &Args) -> Result<DynamoDbConfig> {
 /// PoolRelays has registered within the lease. MCS gives the addresses; the
 /// registration gives the model, capabilities, capacity and location. Router
 /// replicas come from the router Service's imports.
-async fn mcs_backend(args: &Args, mcs: McsImplementation) -> Result<PoolDiscoveryBackend> {
+async fn mcs_backend(
+    args: &Args,
+    mcs: McsImplementation,
+    shutdown: &CancellationToken,
+) -> Result<PoolDiscoveryBackend> {
     let (Some(namespace), Some(name), Some(port_name)) = (
         &args.router_namespace,
         &args.router_service,
@@ -565,7 +667,11 @@ async fn mcs_backend(args: &Args, mcs: McsImplementation) -> Result<PoolDiscover
         );
     };
     let lease = lease(args)?;
-    let (registrations, registrar) = registration_storage(args, lease).await?;
+    let Registrations {
+        pools: registrations,
+        registrar,
+        exchange,
+    } = registration_storage(args, lease).await?;
     let client = kubernetes_client()
         .await
         .context("create the Kubernetes client")?;
@@ -577,6 +683,42 @@ async fn mcs_backend(args: &Args, mcs: McsImplementation) -> Result<PoolDiscover
     )
     .context("check --frontend-service-suffix and --pool-service-suffix")?;
     let pools = RegisteredPoolDirectory::new(Arc::new(imported), registrations, lease);
+    let sharing = match &args.peer_service {
+        Some(peer_service) => {
+            // `parse_args` refuses `--peer-service` with any other storage.
+            let exchange =
+                exchange.context("--peer-service needs --registration-storage memory")?;
+            let peers = ExportedService {
+                namespace: args
+                    .peer_namespace
+                    .clone()
+                    .unwrap_or_else(|| client.default_namespace().to_owned()),
+                name: peer_service.clone(),
+                port_name: args.peer_port_name.clone(),
+            };
+            let source = HttpRegistrationSource::new()
+                .context("create the HTTP client for --peer-service")?;
+            let (sync, sharing) = PeerSync::new(
+                Arc::new(McsReplicaDirectory::new(client.clone(), &peers, mcs)),
+                Arc::new(source),
+                exchange,
+                lease,
+            )?;
+            tokio::spawn(sync.run(shutdown.clone()));
+            let sharing: Arc<dyn RegistrationSharing> = Arc::new(sharing);
+            Some(sharing)
+        }
+        None => {
+            // A shared store, such as DynamoDB, needs no sharing.
+            if exchange.is_some() {
+                tracing::info!(
+                    "no --peer-service: registrations stay in this instance, so only pools that \
+                     register here are listed"
+                );
+            }
+            None
+        }
+    };
     let router = ExportedService {
         namespace: namespace.clone(),
         name: name.clone(),
@@ -586,6 +728,7 @@ async fn mcs_backend(args: &Args, mcs: McsImplementation) -> Result<PoolDiscover
         pools: Arc::new(pools),
         routers: Arc::new(McsReplicaDirectory::new(client, &router, mcs)),
         registrar: Some(registrar),
+        sharing,
     })
 }
 
@@ -729,6 +872,11 @@ mod tests {
         assert_refused(
             &["gds", "--frontend-service-suffix=-web"],
             "frontend-service-suffix",
+            "karmada or mcs",
+        );
+        assert_refused(
+            &["gds", "--peer-service", "global-discovery-service"],
+            "peer-service",
             "karmada or mcs",
         );
         // Every --pool-discovery value takes registrations, kept in either
@@ -1005,9 +1153,16 @@ mod tests {
     }
 
     #[test]
-    fn frontend_port_name_cannot_be_empty() {
-        let error = parse_args(karmada(&["--frontend-port-name="])).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidValue, "{error}");
+    fn frontend_and_peer_flags_cannot_be_empty() {
+        for extra in [
+            ["--frontend-port-name=", "--peer-service=gds"],
+            ["--peer-service=", "--frontend-port-name=http"],
+            ["--peer-service=gds", "--peer-namespace="],
+            ["--peer-service=gds", "--peer-port-name="],
+        ] {
+            let error = parse_args(karmada(&extra)).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidValue, "{extra:?}: {error}");
+        }
     }
 
     #[test]
@@ -1026,20 +1181,73 @@ mod tests {
     }
 
     #[test]
-    fn karmada_refuses_a_router_service_it_cannot_import() {
+    fn karmada_refuses_a_service_it_cannot_import() {
         let name = "r".repeat(KARMADA_MAX_SERVICE_NAME + 1);
-        let mut args = karmada(&[]);
-        let at = args
-            .iter()
-            .position(|arg| *arg == "--router-service")
-            .unwrap();
-        args[at + 1] = &name;
-        let error = parse_args(args.clone()).unwrap_err();
+        for flag in ["--router-service", "--peer-service"] {
+            let mut args = karmada(&[]);
+            match args.iter().position(|arg| *arg == flag) {
+                Some(at) => args[at + 1] = &name,
+                None => args.extend([flag, name.as_str()]),
+            }
+            let error = parse_args(args.clone()).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ValueValidation, "{flag}: {error}");
+            assert!(error.to_string().contains(flag), "{error}");
+            // Standard MCS imports it.
+            let at = args.iter().position(|arg| *arg == "karmada").unwrap();
+            args[at] = "mcs";
+            assert!(parse_args(args).is_ok(), "{flag}");
+        }
+    }
+
+    #[test]
+    fn peer_flag_mistakes_are_usage_errors() {
+        // The other peer flags need --peer-service.
+        for flag in ["--peer-namespace=other", "--peer-port-name=grpc"] {
+            let error = parse_args(karmada(&[flag])).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument, "{error}");
+            assert!(error.to_string().contains("--peer-service"), "{error}");
+            assert!(parse_args(karmada(&["--peer-service=gds", flag])).is_ok());
+        }
+        // Instances ask each other over plain HTTP.
+        let error = parse_args(karmada(&[
+            "--peer-service=gds",
+            "--tls-cert-path=/tls/tls.crt",
+            "--tls-key-path=/tls/tls.key",
+        ]))
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{error}");
+        // A DynamoDB table already holds every instance's registrations.
+        let error = parse_args(karmada(&[
+            "--peer-service=gds",
+            "--registration-storage=dynamodb",
+            "--dynamodb-table=pools",
+        ]))
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("works only with --registration-storage memory"),
+            "{error}"
+        );
+        // A lease under three heartbeats lets copies lapse after a round that
+        // times out.
+        let error = parse_args(karmada(&[
+            "--peer-service=gds",
+            "--heartbeat-interval-secs=5",
+            "--lease-duration-secs=14",
+        ]))
+        .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
-        // Standard MCS imports it.
-        let at = args.iter().position(|arg| *arg == "karmada").unwrap();
-        args[at] = "mcs";
-        assert!(parse_args(args).is_ok());
+        assert_eq!(error.exit_code(), 2);
+        assert!(
+            parse_args(karmada(&[
+                "--peer-service=gds",
+                "--heartbeat-interval-secs=5",
+                "--lease-duration-secs=15",
+            ]))
+            .is_ok()
+        );
     }
 
     #[test]
