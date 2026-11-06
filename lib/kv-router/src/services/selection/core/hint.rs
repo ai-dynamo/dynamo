@@ -25,13 +25,24 @@ pub(super) struct BookingHint<'a> {
 /// booked worker's copy source when the selection committed none, then the partition's hint
 /// policies.
 ///
-/// Fails, so the caller releases the booking, when a committed copy goes unsent.
+/// Fails, so the caller releases the booking, when the hint policy that sends committed copies
+/// returns nothing for one. A committed copy the booked worker can no longer take, because its
+/// source left or the worker stopped advertising `router_hint`, is dropped with a warning instead,
+/// and the booking proceeds without it, as main proceeds without a fetch.
 pub(super) fn booking_hint(
     entry: &SelectionEntry,
     booking: BookingHint<'_>,
 ) -> Result<Option<KvHint>, SelectionError> {
+    let committed = entry.responsibilities.commit_kv_copy && booking.kv_copy_source.is_some();
     // No worker in the partition advertises `router_hint`, so the booked worker takes no hint.
     if !entry.hint_capable_workers.load(Ordering::Relaxed) {
+        if committed {
+            warn_dropped_copy(
+                booking.request_id,
+                booking.worker,
+                "no worker advertises router_hint",
+            );
+        }
         return Ok(None);
     }
     let policies = &entry.responsibilities.run_hint_policies;
@@ -43,6 +54,16 @@ pub(super) fn booking_hint(
         .get(&booking.worker.worker_id)
         .and_then(|config| config.kv_hint_transfer_metadata_for_dp_rank(booking.worker.dp_rank))
         .is_some();
+    if !worker_accepts_hints {
+        if committed {
+            warn_dropped_copy(
+                booking.request_id,
+                booking.worker,
+                "the booked worker no longer advertises router_hint",
+            );
+        }
+        return Ok(None);
+    }
     let booked_copy = booking.kv_copy_source.map(|copy| {
         let locations = booking
             .kv_transfer_candidates
@@ -52,7 +73,15 @@ pub(super) fn booking_hint(
     // A selection that reads copy offers commits the booked worker to its offer, which the
     // role's copy consumer sends. Otherwise the copy source is best effort.
     let (committed_kv_copy, kv_copy_source) = if entry.responsibilities.commit_kv_copy {
-        (booked_copy, None)
+        let committed_kv_copy = booked_copy.filter(|copy| copy.locations().is_some());
+        if committed && committed_kv_copy.is_none() {
+            warn_dropped_copy(
+                booking.request_id,
+                booking.worker,
+                "its source is no longer reachable",
+            );
+        }
+        (committed_kv_copy, None)
     } else {
         (None, booked_copy)
     };
@@ -73,6 +102,17 @@ pub(super) fn booking_hint(
     };
     compose_kv_hint(policies, &inputs, router_fetch)
         .map_err(|error| SelectionError::Internal(error.to_string()))
+}
+
+/// Log a committed copy that a booking proceeds without.
+fn warn_dropped_copy(request_id: &str, worker: WorkerWithDpRank, reason: &str) {
+    tracing::warn!(
+        request_id,
+        worker_id = worker.worker_id,
+        dp_rank = worker.dp_rank,
+        reason,
+        "Booking without its committed KV copy"
+    );
 }
 
 /// The router's `kv.fetch` action: every request block from 0 through the source's prefix. The

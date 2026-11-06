@@ -4807,6 +4807,38 @@ mod hint_policies {
     }
 
     #[tokio::test]
+    async fn a_committed_copy_whose_source_left_books_without_it() {
+        let (core, _entry, tokens) = hint_policy_fixture(
+            hints_with(vec![(
+                "copy",
+                HintPolicyConstructor::shared(CopySender { silent: false }),
+            )]),
+            copy_policy(),
+            hint_capable,
+        )
+        .await;
+        let mut select = select_request();
+        select.selection_id = Some("source-left".to_string());
+        select.prompt = prompt_of(&tokens);
+        // Worker 2 can copy both blocks from worker 1, so the scorer picks it and commits it.
+        let selected = core.select(select).await.expect("select");
+        assert_eq!(selected.worker_id, 2);
+
+        // Worker 1 stops serving as a source before the reservation books worker 2.
+        let mut source = worker_with_kv_events(1);
+        hint_capable(&mut source);
+        source.router_hint_source_control_endpoints.clear();
+        core.upsert_worker(source).await.expect("worker upsert");
+
+        let reserved = core
+            .create_reservation(replay_reservation("source-left"))
+            .await
+            .expect("the booking proceeds without the copy, as main proceeds without a fetch");
+        assert_eq!(reserved.worker_id, 2);
+        assert!(reserved.kv_hint.is_none());
+    }
+
+    #[tokio::test]
     async fn a_committing_selection_needs_a_copy_consumer() {
         let core = core_with(
             test_config(true),
