@@ -605,7 +605,7 @@ fn role_config(identity: RoleIdentity<'_>) -> Result<ForwardPassPerfModelConfig>
 
 pub(crate) struct RoleSetup {
     pub(crate) timing: Arc<CanonicalTimingModel>,
-    pub(crate) tensor_parallel_size: usize,
+    pub(crate) tensor_parallel_size: u32,
     /// Recurrent-state modeling limitations are separate from attention KV.
     pub(crate) state_geometry: Value,
     pub(crate) rank: EngineConfig,
@@ -842,7 +842,7 @@ pub(crate) fn canonical_role(identity: RoleIdentity<'_>) -> Result<RoleSetup> {
     };
     Ok(RoleSetup {
         timing,
-        tensor_parallel_size,
+        tensor_parallel_size: u32::try_from(tensor_parallel_size)?,
         state_geometry,
         rank,
         router,
