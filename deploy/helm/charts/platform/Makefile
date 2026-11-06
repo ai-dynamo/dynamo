@@ -88,6 +88,7 @@ test: helm-unittest-install charts-prep verify-operator-chart-crds ## Run chart 
 	@helm unittest -f 'tests/upgrade-preflight/*_test.yaml' .
 	@python3 -m unittest discover -s tests -p 'test_*.py'
 	@python3 -m unittest discover -s tests/upgrade-preflight -p 'test_*.py'
+	@go test -C tests/upgrade-preflight/helm-upgrade ./... -count=1 -timeout=2m
 
 .PHONY: lint
 lint: charts-prep verify-operator-chart-crds ## Run helm lint

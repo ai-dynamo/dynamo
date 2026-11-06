@@ -283,6 +283,11 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
         with:
           version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
+      - name: Set up Go for Helm upgrade-action tests
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version-file: deploy/helm/charts/platform/tests/upgrade-preflight/helm-upgrade/go.mod
+          cache-dependency-path: deploy/helm/charts/platform/tests/upgrade-preflight/helm-upgrade/go.sum
       - name: Lint and test
         run: make -C deploy/helm/charts/platform lint test
 
