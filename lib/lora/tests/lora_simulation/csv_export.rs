@@ -44,7 +44,7 @@ fn percentile_99_ms(values: &[f64]) -> f64 {
 ///
 /// Run with:
 ///   cargo test --test lora_simulation -- test_export_csv --nocapture --ignored
-///   python lib/llm/tests/lora_simulation/plot_lora_churn.py
+///   python lib/lora/tests/lora_simulation/plot_lora_churn.py
 #[test]
 #[ignore] // Run explicitly: cargo test --test lora_simulation -- test_export_csv --ignored --nocapture
 fn test_export_csv() {
@@ -592,5 +592,5 @@ fn test_export_csv() {
     .unwrap();
     writeln!(meta, "adapter_load_cost_ms,{}", ADAPTER_LOAD_COST_MS).unwrap();
     writeln!(meta, "seed_count,1").unwrap();
-    println!("Run: python lib/llm/tests/lora_simulation/plot_lora_churn.py");
+    println!("Run: python lib/lora/tests/lora_simulation/plot_lora_churn.py");
 }
