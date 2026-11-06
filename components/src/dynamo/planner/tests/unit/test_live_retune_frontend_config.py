@@ -728,6 +728,269 @@ def test_router_env_referencing_value_from_is_unparseable():
     assert "DYN_ROUTER_TEMPERATURE" in parse_error(with_frontend(env=env))
 
 
+@pytest.mark.parametrize(
+    "origin, expected", [("", "$(Z_MODE)"), ("1.7.99", "$(Z_MODE)"), ("1.8.0", "kv")]
+)
+def test_environment_origin_selects_operator_order(origin, expected):
+    component = frontend(
+        args=("-m", "dynamo.frontend"),
+        env=[
+            {"name": "Z_MODE", "value": "kv"},
+            {"name": "DYN_ROUTER_MODE", "value": "$(Z_MODE)"},
+        ],
+    )
+    deployment = dgd(component)
+    deployment["metadata"]["annotations"] = {
+        "nvidia.com/dynamo-operator-origin-version": origin
+    }
+    assert (
+        fc._component_env(deployment, component).values["DYN_ROUTER_MODE"] == expected
+    )
+    if origin == "1.8.0":
+        assert parse(deployment).router_mode == "kv_router"
+
+
+def test_ordered_environment_replays_duplicates_and_cross_source_dependencies():
+    component = frontend(
+        args=("-m", "dynamo.frontend"),
+        env=[
+            {"name": "Z_MODE", "value": "k"},
+            {"name": "Z_MODE", "value": "$(Z_MODE)v"},
+            {"name": "OPAQUE", "value": "stale"},
+            {
+                "name": "OPAQUE",
+                "valueFrom": {"secretKeyRef": {"name": "secret", "key": "key"}},
+            },
+        ],
+    )
+    deployment = dgd(component, env=[{"name": "DYN_ROUTER_MODE", "value": "$(Z_MODE)"}])
+    deployment["metadata"]["annotations"] = {
+        "nvidia.com/dynamo-operator-origin-version": "1.8.0"
+    }
+    assert parse(deployment).router_mode == "kv_router"
+    env = fc._component_env(deployment, component)
+    assert "OPAQUE" not in env.values
+    assert "OPAQUE" in env.opaque
+
+
+def test_environment_order_conflict_fails_closed():
+    component = frontend(env=[{"name": "Y", "value": "$(X)"}])
+    deployment = dgd(component, env=[{"name": "X", "value": "$(Y)"}])
+    deployment["metadata"]["annotations"] = {
+        "nvidia.com/dynamo-operator-origin-version": "1.8.0"
+    }
+    assert "dependency/order conflict" in parse_error(deployment)
+    assert fc.served_model_names(deployment) == ({}, ())
+
+
+@pytest.mark.parametrize(
+    "name, component_options, graph_options",
+    [
+        ("DYNAMO_RANK", {"multinode": {"nodeCount": 2}}, {}),
+        ("DYNAMO_LEADER_ADDRESS", {"multinode": {"nodeCount": 2}}, {}),
+        (
+            "GMS_SOCKET_DIR",
+            {"experimental": {"gpuMemoryService": {"mode": "intraPod"}}},
+            {},
+        ),
+        (
+            "DYN_GMS_USE_V1",
+            {"experimental": {"gpuMemoryService": {}, "checkpoint": {"enabled": True}}},
+            {},
+        ),
+        ("DYN_FORWARDPASS_METRIC_PORT", {"experimental": {"failover": {}}}, {}),
+        (
+            "DYN_KV_TRANSFER_DOMAIN",
+            {},
+            {
+                "experimental": {
+                    "kvTransferPolicy": {
+                        "labelKey": "topology.kubernetes.io/zone",
+                        "domain": "zone",
+                        "enforcement": "required",
+                    }
+                }
+            },
+        ),
+        (
+            "DYN_KV_TRANSFER_PREFERRED_WEIGHT",
+            {},
+            {
+                "experimental": {
+                    "kvTransferPolicy": {
+                        "labelKey": "topology.kubernetes.io/zone",
+                        "domain": "zone",
+                        "enforcement": "required",
+                    }
+                }
+            },
+        ),
+    ],
+)
+def test_p4_accounts_for_owned_bindings_before_composition(
+    name, component_options, graph_options
+):
+    component = worker(**component_options)
+    component["podTemplate"]["spec"]["containers"][0]["env"] = [
+        {"name": name, "value": "$(USER)"}
+    ]
+    component["podTemplate"]["spec"]["containers"][0]["resources"] = {
+        "limits": {"nvidia.com/gpu": "1"}
+    }
+    if "failover" in (component.get("experimental") or {}):
+        component["experimental"]["gpuMemoryService"] = {"mode": "intraPod"}
+    deployment = dgd(
+        frontend(),
+        component,
+        planner(),
+        env=[{"name": "USER", "value": f"$({name})"}],
+        **graph_options,
+    )
+    deployment["metadata"]["annotations"] = {
+        "nvidia.com/dynamo-operator-origin-version": "1.8.0"
+    }
+    report = evaluate(deployment)
+    assert report.p4_ok, report.reasons
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "ENGINE_ID",
+        "GMS_SOCKET_DIR",
+        "FAILOVER_LOCK_PATH",
+        "DYN_SYSTEM_STARTING_HEALTH_STATUS",
+        "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+        "DYN_VLLM_GMS_SHADOW_MODE",
+    ],
+)
+def test_p4_accounts_for_inter_pod_gms_bindings(name):
+    component = worker(
+        experimental={
+            "gpuMemoryService": {"mode": "interPod"},
+            "failover": {"mode": "interPod"},
+        }
+    )
+    main = component["podTemplate"]["spec"]["containers"][0]
+    main["resources"] = {"limits": {"nvidia.com/gpu": "1"}}
+    main["env"] = [{"name": name, "value": "$(USER)"}]
+    deployment = dgd(
+        frontend(),
+        component,
+        planner(),
+        backendFramework="vllm",
+        env=[{"name": "USER", "value": f"$({name})"}],
+    )
+    deployment["metadata"]["annotations"] = {
+        "nvidia.com/dynamo-operator-origin-version": "1.8.0"
+    }
+    report = evaluate(deployment)
+    assert report.p4_ok, report.reasons
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "ENGINE_ID",
+        "CONTAINER_NAME",
+        "FAILOVER_LOCK_PATH",
+        "DYN_SYSTEM_PORT",
+        "DYN_SYSTEM_ENABLED",
+        "DYN_HEALTH_CHECK_ENABLED",
+        "DYN_VLLM_GMS_SHADOW_MODE",
+        "VLLM_NIXL_SIDE_CHANNEL_PORT",
+        "DYN_VLLM_KV_EVENT_PORT",
+    ],
+)
+def test_p4_accounts_for_cloned_failover_bindings(name):
+    component = worker(experimental={"gpuMemoryService": {}, "failover": {}})
+    main = component["podTemplate"]["spec"]["containers"][0]
+    main["resources"] = {"limits": {"nvidia.com/gpu": "1"}}
+    main["env"] = [{"name": name, "value": "$(USER)"}]
+    deployment = dgd(
+        frontend(), component, planner(), env=[{"name": "USER", "value": f"$({name})"}]
+    )
+    deployment["metadata"]["annotations"] = {
+        "nvidia.com/dynamo-operator-origin-version": "1.8.0"
+    }
+    report = evaluate(deployment)
+    assert report.p4_ok, report.reasons
+
+
+def test_native_engine_model_name_survives_owned_rank_binding():
+    component = worker(multinode={"nodeCount": 2})
+    template = component.pop("podTemplate")
+    template["spec"]["initContainers"] = [
+        {"name": "runtime", "image": "runtime:test", "restartPolicy": "Always"}
+    ]
+    main = template["spec"]["containers"][0]
+    main["command"] = ["vllm", "serve", MODEL]
+    main["args"] = [f"--served-model-name={MODEL}"]
+    main["env"] = [{"name": "DYNAMO_RANK", "value": "$(USER)"}]
+    worker_template = copy.deepcopy(template)
+    worker_template["spec"].pop("initContainers")
+    component["roles"] = [
+        {"name": "leader", "podTemplate": template},
+        {"name": "worker", "podTemplate": worker_template},
+    ]
+    deployment = dgd(component, env=[{"name": "USER", "value": "$(DYNAMO_RANK)"}])
+    deployment["metadata"]["annotations"] = {
+        "nvidia.com/dynamo-operator-origin-version": "1.8.0"
+    }
+    assert fc.served_model_names(deployment)[0] == {"agg": MODEL}
+
+
+@pytest.mark.parametrize("name", ["POD_IP", "VLLM_DP_MASTER_IP"])
+@pytest.mark.parametrize("explicit_command", [True, False])
+@pytest.mark.parametrize(
+    "last_backend", ["--data-parallel-backend=ray", "--data-parallel-backend=ray;"]
+)
+def test_p4_uses_last_backend_flag_for_owned_elastic_ep_bindings(
+    name, last_backend, explicit_command
+):
+    component = worker()
+    main = component["podTemplate"]["spec"]["containers"][0]
+    main["args"] += [
+        "--enable-elastic-ep",
+        "--data-parallel-backend",
+        "mp",
+        last_backend,
+    ]
+    if not explicit_command:
+        main["args"] = [" ".join([*main.pop("command"), *main["args"]])]
+    main["env"] = [{"name": name, "value": "$(USER)"}]
+    deployment = dgd(
+        frontend(), component, planner(), env=[{"name": "USER", "value": f"$({name})"}]
+    )
+    deployment["metadata"]["annotations"] = {
+        "nvidia.com/dynamo-operator-origin-version": "1.8.0"
+    }
+    report = evaluate(deployment)
+    assert report.p4_ok, report.reasons
+
+
+def test_p4_uses_component_backend_annotation_over_graph_default():
+    component = worker(multinode={"nodeCount": 2})
+    component["podTemplate"]["metadata"] = {
+        "annotations": {"nvidia.com/vllm-distributed-executor-backend": "mp"}
+    }
+    component["podTemplate"]["spec"]["containers"][0]["env"] = [
+        {"name": "VLLM_NIXL_SIDE_CHANNEL_HOST", "value": "$(USER)"}
+    ]
+    deployment = dgd(
+        frontend(),
+        component,
+        planner(),
+        env=[{"name": "USER", "value": "$(VLLM_NIXL_SIDE_CHANNEL_HOST)"}],
+    )
+    deployment["metadata"]["annotations"] = {
+        "nvidia.com/dynamo-operator-origin-version": "1.8.0",
+        "nvidia.com/vllm-distributed-executor-backend": "ray",
+    }
+    report = evaluate(deployment)
+    assert report.p4_ok, report.reasons
+
+
 def test_router_env_references_earlier_literal():
     env = trace_env(A_TEMP="0.7", DYN_ROUTER_TEMPERATURE="$(A_TEMP)")
     assert parse(with_frontend(env=env)).router_config == {"router_temperature": 0.7}
