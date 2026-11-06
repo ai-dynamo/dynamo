@@ -791,11 +791,23 @@ fn write_raw_backend_artifact(
     // serde_json::Value and a second pretty-printed Vec duplicates every
     // per-request observation at full-scenario scale.
     #[derive(serde::Serialize)]
-    struct RawArtifact<'a, T: serde::Serialize> {
+    struct RawArtifact<'a, T: serde::Serialize, R: serde::Serialize> {
         #[serde(flatten)]
         provenance: &'a Value,
         backend_report: &'a ReplayReport,
+        // ReplayReport's owning Serialize deliberately emits aggregates only.
+        // Retain its captured request evidence explicitly rather than assuming
+        // serializing the report also serializes the population we reconciled.
+        backend_requests: &'a [aisimulate_core::replay::PerRequestRecord],
+        native_records: Vec<RawPhaseRecords<'a, R>>,
+        dispatch_requests: &'a [Value],
         typed_phase_report: &'a T,
+    }
+    #[derive(serde::Serialize)]
+    struct RawPhaseRecords<'a, R: serde::Serialize> {
+        phase_index: usize,
+        phase_name: &'a str,
+        records: &'a R,
     }
     let path = artifact_dir.join(RAW_BACKEND_ARTIFACT);
     let file = std::fs::OpenOptions::new()
@@ -809,6 +821,17 @@ fn write_raw_backend_artifact(
         &RawArtifact {
             provenance: &artifact,
             backend_report: backend,
+            backend_requests: &backend.per_request,
+            native_records: typed
+                .records
+                .iter()
+                .map(|phase| RawPhaseRecords {
+                    phase_index: phase.phase_index,
+                    phase_name: &phase.phase_name,
+                    records: &phase.records,
+                })
+                .collect(),
+            dispatch_requests: &typed.dispatch.requests,
             typed_phase_report: &typed.phased,
         },
     )
@@ -992,13 +1015,14 @@ fn assert_full_scenario(
         summary["metadata"]["submission_valid"] == json!(true),
         "the full scenario submission must be valid: {summary}"
     );
-    let invalid_reasons = summary["metadata"]["submission_invalid_reasons"]
-        .as_array()
-        .context("summary must carry submission_invalid_reasons")?;
-    ensure!(
-        invalid_reasons.is_empty(),
-        "valid submission must carry no invalid reasons: {invalid_reasons:?}"
-    );
+    // ScenarioSubmission's owning serializer omits an empty reason list.
+    // Require absence or an empty array, never a malformed/nonempty value.
+    if let Some(invalid_reasons) = summary["metadata"].get("submission_invalid_reasons") {
+        ensure!(
+            invalid_reasons.as_array().is_some_and(Vec::is_empty),
+            "valid submission must carry no invalid reasons: {invalid_reasons:?}"
+        );
+    }
 
     Ok(())
 }
@@ -1368,6 +1392,33 @@ fn calibrated_hosted_artifacts_reconcile_every_request() -> Result<()> {
     ensure!(
         raw["typed_phase_report"] == serde_json::to_value(&typed.phased)?,
         "streaming phase artifact lost facts"
+    );
+    ensure!(
+        raw["backend_requests"] == serde_json::to_value(&backend.per_request)?,
+        "streaming backend artifact lost per-request facts"
+    );
+    ensure!(
+        raw["dispatch_requests"] == serde_json::to_value(&typed.dispatch.requests)?,
+        "streaming artifact lost dispatch evidence"
+    );
+    for (captured, phase) in raw["native_records"]
+        .as_array()
+        .context("raw native phases")?
+        .iter()
+        .zip(&typed.records)
+    {
+        ensure!(
+            captured["records"] == serde_json::to_value(&phase.records)?,
+            "streaming native artifact lost request facts"
+        );
+    }
+    ensure!(
+        raw["native_records"]
+            .as_array()
+            .context("raw native phases")?
+            .len()
+            == typed.records.len(),
+        "streaming native artifact lost a phase"
     );
     ensure!(
         raw["prefill"]["transfer"]["link"]["calibration_manifest_sha256"]
