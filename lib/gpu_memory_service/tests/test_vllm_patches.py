@@ -70,7 +70,7 @@ def test_request_memory_patch_accepts_upstream_signature(monkeypatch):
 
     vLLM 0.32+ calls request_memory(init_snapshot, cache_config,
     external_weight_memory) from gpu_worker; a two-parameter patch crashed
-    init_device with a TypeError (DYN-5448).
+    init_device with a TypeError.
     """
     worker_utils = pytest.importorskip("vllm.v1.worker.utils")
     original = worker_utils.request_memory
