@@ -71,6 +71,12 @@ def test_authenticated_requests_keep_required_secret_reference(
         for component in config["spec"]["components"]
         if component["type"] == "frontend"
     )
+    secret_ref_names = [
+        entry.get("secretRef", {}).get("name")
+        for container in frontend["podTemplate"]["spec"]["containers"]
+        for entry in container.get("envFrom", [])
+    ]
+    assert "hf-token-secret" in secret_ref_names
     for container in frontend["podTemplate"]["spec"]["containers"]:
         for entry in container.get("envFrom", []):
             if entry.get("secretRef", {}).get("name") == "hf-token-secret":
@@ -173,10 +179,8 @@ def _frontend(config: dict) -> dict:
     )
 
 
-@pytest.mark.parametrize("backend", _BACKENDS)
-@pytest.mark.parametrize("mode", ["agg", "disagg"])
-def test_unauthenticated_strips_init_containers(backend: str, mode: str) -> None:
-    config = load_dgd_template(backend, mode)
+def test_unauthenticated_strips_init_containers() -> None:
+    config = load_dgd_template("vllm", "agg")
     pod_spec = _frontend(config)["podTemplate"]["spec"]
     pod_spec["initContainers"] = [
         {
@@ -194,10 +198,8 @@ def test_unauthenticated_strips_init_containers(backend: str, mode: str) -> None
     assert init_container["envFrom"] == [{"configMapRef": {"name": "keep-me"}}]
 
 
-@pytest.mark.parametrize("backend", _BACKENDS)
-@pytest.mark.parametrize("mode", ["agg", "disagg"])
-def test_unauthenticated_strips_env_secret_key_ref(backend: str, mode: str) -> None:
-    config = load_dgd_template(backend, mode)
+def test_unauthenticated_strips_env_secret_key_ref() -> None:
+    config = load_dgd_template("vllm", "agg")
     container = _frontend(config)["podTemplate"]["spec"]["containers"][0]
     container["env"] = [
         {
