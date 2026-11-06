@@ -425,9 +425,6 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 }
 
 func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
-	if err := r.deleteLegacyOversizedLeaderWorkerSet(ctx, dynamoComponentDeployment); err != nil {
-		return ComponentReconcileResult{}, fmt.Errorf("failed to delete the oversized legacy LeaderWorkerSet: %w", err)
-	}
 	leaderWorkerSetModified, lwsObj, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
 		return r.generateLeaderWorkerSet(ctx, generateResourceOption{
 			dynamoComponentDeployment: dynamoComponentDeployment,
@@ -435,6 +432,10 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 	})
 	if err != nil {
 		return ComponentReconcileResult{}, fmt.Errorf("failed to sync the LeaderWorkerSet: %w", err)
+	}
+	// Delete the legacy LWS only after its replacement syncs; a short revision hash can let it serve.
+	if err := r.deleteLegacyOversizedLeaderWorkerSet(ctx, dynamoComponentDeployment); err != nil {
+		return ComponentReconcileResult{}, fmt.Errorf("failed to delete the oversized legacy LeaderWorkerSet: %w", err)
 	}
 
 	lwsReplicaStatus := getLeaderWorkerSetReplicasStatus(lwsObj)
@@ -683,7 +684,7 @@ func leaderWorkerSetName(dcd *nvidiacomv1beta1.DynamoComponentDeployment) string
 }
 
 // leaderWorkerSetNameForWorkload keeps <workload>-0 when it fits group indexes 0-9;
-// longer names never started Pods, so they get a deterministic hashed name instead.
+// longer names can exceed the label limit, so they get a deterministic hashed name instead.
 func leaderWorkerSetNameForWorkload(workloadName string) string {
 	legacyName := legacyLeaderWorkerSetName(workloadName)
 	if len(legacyName) <= maxLegacyLeaderWorkerSetNameLength {
@@ -697,7 +698,7 @@ func legacyLeaderWorkerSetName(workloadName string) string {
 }
 
 // deleteLegacyOversizedLeaderWorkerSet removes an older operator's <dcd-name>-0 LWS whose
-// name is too long to start Pods; only an LWS controlled by this DCD is deleted.
+// name is too long for revision labels; only an LWS controlled by this DCD is deleted.
 func (r *DynamoComponentDeploymentReconciler) deleteLegacyOversizedLeaderWorkerSet(ctx context.Context, dcd *nvidiacomv1beta1.DynamoComponentDeployment) error {
 	legacyName := legacyLeaderWorkerSetName(dcd.Name)
 	if legacyName == leaderWorkerSetName(dcd) {

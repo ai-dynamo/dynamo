@@ -21,6 +21,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"testing"
@@ -60,6 +61,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 )
 
@@ -867,7 +869,7 @@ func multinodeLWSTestReconciler(objects ...client.Object) *DynamoComponentDeploy
 	}
 }
 
-// DYN-5478: controller-revision-hash=<statefulset>-<10-char hash> must fit 63 chars for
+// controller-revision-hash=<statefulset>-<10-char hash> must fit 63 chars for
 // the leader StatefulSet <lws> and each worker StatefulSet <lws>-<groupIndex>.
 func TestDynamoComponentDeploymentReconciler_LeaderWorkerSetNameFitsStatefulSetRevisionLabels(t *testing.T) {
 	require.NoError(t, leaderworkersetv1.AddToScheme(scheme.Scheme))
@@ -933,12 +935,14 @@ func Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSe
 	legacyName := dcdName + "-0"
 
 	tests := []struct {
-		name           string
-		ownedByDCD     bool
-		wantLegacyGone bool
+		name               string
+		ownedByDCD         bool
+		failReplacementLWS bool
+		wantLegacyGone     bool
 	}{
 		{name: "legacy LWS controlled by the DCD is deleted", ownedByDCD: true, wantLegacyGone: true},
 		{name: "legacy LWS controlled by another object is kept", ownedByDCD: false, wantLegacyGone: false},
+		{name: "legacy LWS is kept when the replacement fails to sync", ownedByDCD: true, failReplacementLWS: true, wantLegacyGone: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -956,13 +960,26 @@ func Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSe
 				}
 			}
 			r := multinodeLWSTestReconciler(dcd, legacy)
+			if tt.failReplacementLWS {
+				r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+					Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+						if _, ok := obj.(*leaderworkersetv1.LeaderWorkerSet); ok {
+							return errors.New("injected LeaderWorkerSet create failure")
+						}
+						return c.Create(ctx, obj, opts...)
+					},
+				})
+			}
 
 			_, err := r.reconcileLeaderWorkerSetResources(ctx, dcd)
-			require.NoError(t, err)
-
 			boundedName := leaderWorkerSetName(dcd)
 			require.NotEqual(t, legacyName, boundedName)
-			require.NoError(t, r.Get(ctx, types.NamespacedName{Name: boundedName, Namespace: "default"}, &leaderworkersetv1.LeaderWorkerSet{}))
+			if tt.failReplacementLWS {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.NoError(t, r.Get(ctx, types.NamespacedName{Name: boundedName, Namespace: "default"}, &leaderworkersetv1.LeaderWorkerSet{}))
+			}
 
 			err = r.Get(ctx, types.NamespacedName{Name: legacyName, Namespace: "default"}, &leaderworkersetv1.LeaderWorkerSet{})
 			if tt.wantLegacyGone {
