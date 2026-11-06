@@ -40,6 +40,7 @@ BACKFILL_BASELINE = {
     "kimi-k2-5",
     "kimi-k2-6",
     "kimi-k3",
+    "kimi-k3-1-pro",
     "minimax-m3",
     "minimax-m3-1",
     "mistral-large-4",
