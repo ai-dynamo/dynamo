@@ -21,7 +21,6 @@ metadata:
 data:
   prefill.yaml: |
     reasoning-parser: kimi_k3
-    model-path: moonshotai/Kimi-K3.1-Pro
     served-model-name: moonshotai/Kimi-K3.1-Pro
     tensor-parallel-size: 8
     disaggregation-mode: prefill
@@ -46,7 +45,6 @@ data:
       num_threads: 4
   decode.yaml: |
     reasoning-parser: kimi_k3
-    model-path: moonshotai/Kimi-K3.1-Pro
     served-model-name: moonshotai/Kimi-K3.1-Pro
     tensor-parallel-size: 8
     disaggregation-mode: decode

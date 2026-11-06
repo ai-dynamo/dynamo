@@ -70,19 +70,31 @@ spec:
         - name: compute-domain-channel
           resourceClaimTemplateName: kimi-k3-1-pro-sglang-gb300-agg-agentic-compute-domain-channel
         containers:
+        # Required by the 1.7.0-kimi-k3.1-pro-dev.1 image: stage a model card with model_type rewritten.
         - args:
-          - --config
-          - /etc/sglang/agg.yaml
-          - --dyn-reasoning-parser
-          - kimi_k3
-          - --dyn-structural-tag
-          - '{"reasoning_boundary":"backend"}'
-          - --dyn-tool-call-parser
-          - kimi_k3
+          - |
+            set -euo pipefail
+
+            MODEL_PATH="$(python3 -c 'from huggingface_hub import snapshot_download; print(snapshot_download("moonshotai/Kimi-K3.1-Pro", local_files_only=True))')"
+            export MODEL_PATH
+
+            # Model-card staging required by this image's registration shim (kimi_k31 -> kimi_k3 tokenizer mapping)
+            STAGE=/tmp/kimi-k3-1-model-card; mkdir -p "$STAGE"
+            for f in "$MODEL_PATH"/* "$MODEL_PATH"/.[!.]*; do n=$(basename "$f"); [ -f "$f" ] || continue
+              case "$n" in config.json|*.safetensors|*.safetensors.index.json) continue;; esac
+              ln -sfn "$f" "$STAGE/$n"; done
+            STAGE="$STAGE" python3 -c 'import json,os; c=json.load(open(os.environ["MODEL_PATH"]+"/config.json")); c["model_type"]="kimi_k3"; json.dump(c, open(os.environ["STAGE"]+"/config.json","w"))'
+            ls "$STAGE" | wc -l
+
+            exec python3 -m dynamo.sglang \
+              --config /etc/sglang/agg.yaml \
+              --model-path "${MODEL_PATH}" \
+              --dyn-reasoning-parser kimi_k3 \
+              --dyn-structural-tag '{"reasoning_boundary":"backend"}' \
+              --dyn-tool-call-parser kimi_k3
           command:
-          - python3
-          - -m
-          - dynamo.sglang
+          - /bin/bash
+          - -c
           env:
           - name: HF_HOME
             value: /shared-model-cache
