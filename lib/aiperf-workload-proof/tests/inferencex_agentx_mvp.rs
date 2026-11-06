@@ -17,15 +17,17 @@
 //!   `hosted_report::finalize_hosted_run_report`.
 //!
 //! Scenario invariants are sourced from
-//! `aiperf_agentx::scenario::inferencex_agentx_mvp()`:
+//! `aiperf_agentx::scenario::agentx()`:
 //!
 //! * timing mode `agentic_replay`, streaming, `ignore_eos`
 //! * first-turn-prefix cache bust
 //! * 10-second global system-idle cap
-//! * 1800-second profile duration (the full default, not the 900-second lower
+//! * 3600-second profile duration (the full default, not the 900-second lower
 //!   bound and not the 1200-second `agentx_fast` diagnostic)
 //! * concurrency 32, seed 42
-//! * operator-selected full-MVP trajectory-start ratios 0.25..=0.75
+//! * named `agentx` trajectory-start ratios 0.25..=0.75
+//! * ten live warmup requests per lane, 1800s warmup grace, 300s tree-idle cap
+//! * server/native usage counts, 30s stats cadence, 1s metric slices, no GPU telemetry
 //! * no request or session caps, finite replay disabled
 //! * no `unsafe_override`, all corpus sources retained
 //! * direct trace-hash input with no text tokenizer; canonical model-config
@@ -125,14 +127,14 @@ fn init_debug_tracing() {
 }
 
 /// `aiperf_agentx::scenario::AGENTX_SCENARIO`.
-const AGENTX_SCENARIO: &str = "inferencex-agentx-mvp";
-/// `aiperf_agentx::scenario::inferencex_agentx_mvp()` corpus alias.
+const AGENTX_SCENARIO: &str = "agentx";
+/// `aiperf_agentx::scenario::agentx()` corpus alias.
 const AGENTX_CORPUS: &str = "semianalysis_cc_traces_weka_062126";
 /// The alias's pinned corpus revision, mirrored from the catalog entry.
 const AGENTX_CORPUS_REVISION: &str = "23f152f6f0f9399a85901b89a6458def0ef16729";
 /// Full scenario profile duration. Not 900 (the lower bound) and not 1200
 /// (the `agentx_fast` diagnostic). Cross-checked against the scenario spec.
-const PROFILE_SECONDS: f64 = 1800.0;
+const PROFILE_SECONDS: f64 = 3600.0;
 /// Scenario global system-idle cap. Cross-checked against the scenario spec.
 const SYSTEM_IDLE_SECONDS: f64 = 10.0;
 /// Scenario concurrency.
@@ -165,14 +167,13 @@ const RAW_BACKEND_ARTIFACT: &str = "native_backend_report.json";
 /// The base frame is the shared `run_fixture::request`, so every non-dataset
 /// section keeps its fully materialized native representation. Scenario-owned
 /// dataset, phase, transport, export, and replay policy members are replaced
-/// from `inferencex_agentx_mvp()`; concurrency, grace and the operator's explicit
-/// 25-75 trajectory window are authored here. Current Python scenario resolution
-/// honors explicit trajectory ratios instead of replacing them with defaults.
+/// from the current `agentx()` preset, including its full CLI-default bundle.
+/// Concurrency and profiling grace remain explicit deployment inputs.
 ///
 /// This call writes nothing into `directory` and needs no external tokenizer
 /// assets, so it runs as a preflight before the artifact directory is created.
 fn full_mvp_run(directory: &Path) -> Result<BenchmarkRun> {
-    let scenario = aiperf_agentx::scenario::inferencex_agentx_mvp();
+    let scenario = aiperf_agentx::scenario::agentx();
     ensure!(
         scenario.name == AGENTX_SCENARIO,
         "scenario spec names {}, expected {AGENTX_SCENARIO}",
@@ -243,6 +244,21 @@ fn full_mvp_run(directory: &Path) -> Result<BenchmarkRun> {
     run.cfg.unsafe_override = false;
     run.cfg.agentx_fast = false;
     run.cfg.ignore_trace_delays = false;
+    run.cfg
+        .runtime
+        .as_mut()
+        .context("runtime policy")?
+        .stats_interval = Some(30.0);
+    run.cfg
+        .metrics
+        .as_mut()
+        .context("metrics policy")?
+        .slice_duration_seconds = Some(1.0);
+    run.cfg
+        .gpu_telemetry
+        .as_mut()
+        .context("GPU telemetry policy")?
+        .enabled = false;
     // The full scenario executes the legacy WEKA agentic graph projection. The
     // workload id used by report metadata is then derived by the owning
     // `workload_kind` classifier, never spelled by hand.
@@ -287,6 +303,7 @@ fn full_mvp_run(directory: &Path) -> Result<BenchmarkRun> {
         .as_mut()
         .context("base fixture must carry the endpoint policy")?;
     endpoint.streaming = true;
+    endpoint.use_server_token_count = true;
     endpoint
         .extra
         .insert("ignore_eos".to_owned(), Value::Bool(true));
@@ -302,8 +319,8 @@ fn full_mvp_run(directory: &Path) -> Result<BenchmarkRun> {
         weka_nested_timestamp_basis: None,
         sampling: Sampling("sequential".to_owned()),
         // No entry/conversation cap: the complete pinned corpus is the input.
-        entries: None,
-        entries_explicit: None,
+        entries: Some(393),
+        entries_explicit: Some(false),
         random_seed: Some(SEED),
         prompts: None,
         synthesis: Some(json!({
@@ -313,6 +330,7 @@ fn full_mvp_run(directory: &Path) -> Result<BenchmarkRun> {
             "prompt_len_multiplier": 1.0,
             "output_len_multiplier": 1.0,
             "cache_bust_target": "first_turn_prefix",
+            "idle_gap_cap_seconds": 300.0,
         })),
         cache_bust: Some(CacheBust {
             target: CacheBustTarget::FirstTurnPrefix,
@@ -328,7 +346,7 @@ fn full_mvp_run(directory: &Path) -> Result<BenchmarkRun> {
             kind: None,
             exclude_from_results: false,
             seamless: false,
-            // No request or session caps: the 1800-second profile is the only
+            // No request or session caps: the 3600-second profile is the only
             // stop condition, and finite replay stays off.
             requests: None,
             sessions: None,
@@ -340,9 +358,9 @@ fn full_mvp_run(directory: &Path) -> Result<BenchmarkRun> {
             rate_ramp: None,
             cancellation: None,
             agentic_cache_warmup_duration: None,
-            warmup_requests_per_lane: None,
-            agentic_warmup_grace_period: None,
-            failed_request_threshold: None,
+            warmup_requests_per_lane: Some(10),
+            agentic_warmup_grace_period: Some(1800.0),
+            failed_request_threshold: Some(0.10),
             timing_mode: Some(scenario.timing_mode.clone()),
             adaptive_scale: None,
             rate_series: None,
@@ -370,7 +388,7 @@ fn full_mvp_run(directory: &Path) -> Result<BenchmarkRun> {
 
 /// Assert the exact scenario invariants directly on the strict run.
 pub fn assert_mvp_config(run: &BenchmarkRun) -> Result<()> {
-    let scenario = aiperf_agentx::scenario::inferencex_agentx_mvp();
+    let scenario = aiperf_agentx::scenario::agentx();
     let profile_seconds = scenario
         .default_benchmark_duration_seconds
         .context("scenario must declare the full profile duration")?
@@ -452,8 +470,8 @@ pub fn assert_mvp_config(run: &BenchmarkRun) -> Result<()> {
         public.options
     );
     ensure!(
-        public.entries.is_none() && public.entries_explicit.is_none(),
-        "no entry cap may reduce the corpus"
+        public.entries == Some(393) && public.entries_explicit == Some(false),
+        "agentx defaults must retain all 393 corpus roots"
     );
     ensure!(
         public.cache_bust
@@ -481,6 +499,34 @@ pub fn assert_mvp_config(run: &BenchmarkRun) -> Result<()> {
         .as_ref()
         .context("MVP run must carry the endpoint policy")?;
     ensure!(endpoint.streaming, "streaming must be enabled");
+    ensure!(
+        endpoint.use_server_token_count,
+        "agentx uses authoritative native backend usage"
+    );
+    ensure!(
+        run.cfg.runtime.as_ref().and_then(|x| x.stats_interval) == Some(30.0),
+        "agentx stats cadence"
+    );
+    ensure!(
+        run.cfg
+            .metrics
+            .as_ref()
+            .and_then(|x| x.slice_duration_seconds)
+            == Some(1.0),
+        "agentx timeslices"
+    );
+    ensure!(
+        run.cfg.gpu_telemetry.as_ref().is_some_and(|x| !x.enabled),
+        "agentx disables real GPU telemetry"
+    );
+    ensure!(
+        public
+            .synthesis
+            .as_ref()
+            .and_then(|x| x["idle_gap_cap_seconds"].as_f64())
+            == Some(300.0),
+        "agentx tree idle cap"
+    );
     ensure!(
         endpoint.extra.get("ignore_eos") == Some(&Value::Bool(true)),
         "ignore_eos must be enabled"
@@ -535,6 +581,18 @@ pub fn assert_mvp_config(run: &BenchmarkRun) -> Result<()> {
     ensure!(phases.len() == 1, "MVP run has exactly one profiling phase");
     let phase = &phases[0];
     ensure!(phase.common.name == "profiling", "wrong phase name");
+    ensure!(
+        phase.common.warmup_requests_per_lane == Some(10),
+        "agentx warmup pressure quota"
+    );
+    ensure!(
+        phase.common.agentic_warmup_grace_period == Some(1800.0),
+        "agentx warmup grace"
+    );
+    ensure!(
+        phase.common.failed_request_threshold == Some(0.10),
+        "agentx failed request threshold"
+    );
     ensure!(
         phase.common.requests.is_none() && phase.common.sessions.is_none(),
         "no request or session cap is permitted"
@@ -860,7 +918,7 @@ fn write_raw_backend_artifact(
 }
 
 /// Assert the complete full-scenario evidence: exact corpus population, the
-/// actual 1800-second profile span, branch spawn/join counters from the typed
+/// actual 3600-second profile span, branch spawn/join counters from the typed
 /// phase report, metric coverage from the live accumulator, and the normal
 /// native-v2/schema-1.7 artifacts.
 fn assert_full_scenario(
@@ -869,7 +927,7 @@ fn assert_full_scenario(
     finalized: &FinalizedHostedReport,
     artifact_dir: &Path,
 ) -> Result<()> {
-    let scenario = aiperf_agentx::scenario::inferencex_agentx_mvp();
+    let scenario = aiperf_agentx::scenario::agentx();
     let profile_seconds = scenario
         .default_benchmark_duration_seconds
         .context("scenario must declare the full profile duration")?
@@ -1134,7 +1192,7 @@ fn canonical_weka_agentx_with_matched_options() -> Result<()> {
         std::env::var_os("MVP_INITIAL_SELECTIONS").context("MVP_INITIAL_SELECTIONS required")?,
     );
     let cuts: Value = serde_json::from_slice(&std::fs::read(cuts_file)?)?;
-    let tree_idle_cap_seconds = 1e12; // Finite, beyond this profile: no per-tree cap in MVP.
+    let tree_idle_cap_seconds = 300.0; // Named agentx preset tree-idle cap.
     let imported_at = std::time::Instant::now();
     let (graph, _timestamp_basis) = load_weka_agentic_graph_with_options(
         &corpus,
@@ -1194,7 +1252,7 @@ fn canonical_weka_agentx_with_matched_options() -> Result<()> {
         calibrated::BLOCK_SIZE,
         true,
         1.0,
-        AgenticWarmupPolicy::PrimersOnly,
+        AgenticWarmupPolicy::LiveTrajectoryV1,
         SYSTEM_IDLE_SECONDS * 1000.0,
     )?;
     driver.enable_agentic_profile(AgenticProfileOptions {
@@ -1242,7 +1300,7 @@ fn canonical_weka_agentx_with_matched_options() -> Result<()> {
         backend_report: &report,
         backend_requests: &report.per_request,
         options: json!({"client":"agentx","snapshot":"exact shared source cuts",
-            "warmup":"primers_only","lanes":CONCURRENCY,"duration_seconds":PROFILE_SECONDS,
+            "warmup":"live_trajectory_v1","lanes":CONCURRENCY,"duration_seconds":PROFILE_SECONDS,
             "response_grace_seconds":GRACE_PERIOD_SECONDS,"tree_idle_cap_seconds":tree_idle_cap_seconds,
             "global_idle_cap_seconds":SYSTEM_IDLE_SECONDS,"placement":"same real Dynamo KV composition",
             "model":"same canonical timing/native geometry from full_scenario_roles",
@@ -1267,7 +1325,7 @@ fn canonical_weka_agentx_with_matched_options() -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires AISIM_SYSTEMS_ROOT and a new MVP_ARTIFACT_DIR; runs the full 1800s trace-hash scenario over the real Dynamo KV composition"]
+#[ignore = "requires AISIM_SYSTEMS_ROOT and a new MVP_ARTIFACT_DIR; runs the full 3600s trace-hash scenario over the real Dynamo KV composition"]
 fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> {
     // Static preflight first: the retained directory is created only after the
     // scenario frame, the system assets, and the canonical roles
