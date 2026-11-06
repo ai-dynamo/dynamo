@@ -112,19 +112,17 @@ measured traffic.
 ## Bound frontend host memory growth
 
 The frontend allocates host memory per request for tokenization, routing bookkeeping, and response
-assembly. Freed memory is not always returned to the operating system right away, so frontend
-resident memory rises to a high-water mark under load. This retention is allocator behavior rather
-than a leak.
+assembly. Its Rust allocations use a built-in jemalloc whose background threads return unused pages
+to the operating system over about 10 seconds. Resident memory still rises to a high-water mark
+under load. After the load stops, it falls substantially, but not to the live heap: pages that still
+hold live allocations stay resident, and CPython and C libraries use the system allocator, which
+keeps its own high-water mark. This retention is allocator behavior rather than a leak.
 
-The frontend's Rust allocations use a built-in jemalloc with a background thread that returns
-unused pages to the operating system after about 10 seconds, so resident memory drops once the
-load stops. It does not drop all the way to the live heap: pages that still hold live allocations
-stay resident, and CPython and C libraries use the system allocator, which keeps its own
-high-water mark. To change the decay or arena settings, set `_RJEM_MALLOC_CONF` on the frontend
-container; see
+To change the decay or arena settings, set `_RJEM_MALLOC_CONF` on the frontend container; see
 [Host memory allocator](../../reference/components/frontend-configuration.mdx#host-memory-allocator)
 for the defaults.
 
 To verify a change, run the same workload and track the frontend container's memory usage
 (`memory.current` on cgroup v2, or `memory.usage_in_bytes` on cgroup v1) across repeated benchmark
-rounds and through an idle window after the load stops.
+rounds. Purging is time-based, so also read the value after an idle period of a minute or two once
+the load stops.
