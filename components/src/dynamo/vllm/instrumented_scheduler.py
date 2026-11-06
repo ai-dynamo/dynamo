@@ -2268,6 +2268,7 @@ class InstrumentedScheduler(AsyncScheduler):
         hash_block_size: int | None = None,
         **kwargs,
     ) -> None:
+        """Initialize scheduling, live heartbeat tracking, and startup benchmarking."""
         super().__init__(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,

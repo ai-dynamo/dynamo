@@ -1597,6 +1597,7 @@ def test_benchmark_synchronizer_gives_armed_rank_time_to_receive_go():
 
 
 def test_fpm_publisher_drops_benchmark_metrics_until_resumed():
+    """Keep benchmark frames out of the publisher until live serving resumes."""
     publisher = instrumented_scheduler_module._FpmPublisherThread.__new__(
         instrumented_scheduler_module._FpmPublisherThread
     )
@@ -1720,11 +1721,13 @@ def heartbeat_scheduler(monkeypatch):
     stub._fpm_dp_rank = 0
 
     def parent_schedule(self, *_args):
+        """Dispatch one waiting request without constructing a vLLM engine."""
         if self.waiting:
             self.running.append(self.waiting.popleft())
         return SimpleNamespace(total_num_scheduled_tokens=30000)
 
     def parent_finish(self, _request_ids, _finished_status):
+        """Remove scheduler-visible requests while batches may still be in flight."""
         aborted = list(self.waiting) + self.running
         self.waiting.clear()
         self.skipped_waiting.clear()
@@ -1756,6 +1759,7 @@ def heartbeat_scheduler(monkeypatch):
         steps = iter(messages + [instrumented_scheduler_module.queue.Empty, None])
 
         def next_message(timeout):
+            """Advance the clock at the timeout without sleeping."""
             item = next(steps)
             if item is instrumented_scheduler_module.queue.Empty:
                 clock["now"] += publisher.HEARTBEAT_INTERVAL
