@@ -35,6 +35,7 @@ from .sglang_prepost import (
     _client_wants_separate_reasoning,
     _get_history_tool_calls_count,
     _guided_output_requires_reasoning,
+    _is_named_tool_choice,
     convert_tools,
     create_parsers,
     detect_force_reasoning_from_template,
@@ -673,6 +674,12 @@ class SglangProcessor:
         """Parsers are passed in because the pool path must recreate them in the
         main process; they are not picklable.
         """
+        tool_choice = request.get("tool_choice")
+        named_tool = (
+            tool_choice["function"]["name"]
+            if _is_named_tool_choice(tool_choice)
+            else None
+        )
         return SglangStreamingPostProcessor(
             tokenizer=self.tokenizer,
             tool_call_parser=tool_call_parser,
@@ -683,6 +690,7 @@ class SglangProcessor:
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
             named_zero_arg_tool=named_zero_arg_tool,
+            named_tool=named_tool,
             guided_json_is_content=_guided_json_is_content(dynamo_preproc),
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=prompt_token_ids,
