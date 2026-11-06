@@ -487,7 +487,7 @@ async def test_diffusion_rejects_out_of_range_id_before_the_engine():
 
 
 # Out-of-vocabulary stop IDs: below zero, one past the vocabulary, and the
-# DYN-5471 reproduction.
+# far-out-of-range ID that crashed the SGLang min_new_tokens penalizer.
 STOP_IDS_OUT_OF_VOCAB = [-1, MAX_TOKEN_ID + 1, 1_000_000_000]
 
 
