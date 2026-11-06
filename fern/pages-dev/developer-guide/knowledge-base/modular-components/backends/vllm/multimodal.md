@@ -83,6 +83,8 @@ The main multimodal vLLM launchers in this repo are:
 | P/D | CUDA | `disagg_multimodal_p_d.sh` | Prefill/decode separation without a dedicated encoder |
 | E/PD (Encode + PD) | CUDA | `disagg_multimodal_e_pd.sh` | Separate encoder and embedding-cache workflows |
 | E/P/D (Full Disaggregation) | CUDA | `disagg_multimodal_epd.sh` | Separate encode, prefill, and decode workers |
+| Aggregated ASR | CUDA | `agg_asr.sh` | Speech recognition with Qwen3-ASR; see [Speech Recognition (ASR)](#speech-recognition-asr) |
+| Aggregated streaming ASR | CUDA | `agg_asr_realtime.sh` | Streaming transcription with Qwen3-ASR over `/v1/realtime`; see [Streaming Transcription](#streaming-transcription) |
 
 ### Custom Vision Encoders
 
@@ -156,7 +158,7 @@ This launcher sets `--dyn-chat-processor vllm`. The frontend runs vLLM's Hugging
 
 `DYNAMO_MM_TRANSFER` selects the transfer mechanism:
 
-- `shm` (default) uses shared memory for same-node frontend and worker deployments.
+- `shm` (default) uses shared memory for same-node frontend and worker deployments. The frontend and worker must share `/dev/shm`, as processes on one host do. Separate Kubernetes pods do not share it even on the same node; when the worker cannot read the segment, it serves the request without its media.
 - `nixl` uses NIXL for cross-node transfer.
 - `DYNAMO_DISABLE_NIXL_MM=1` disables processed-input transfer and makes the worker process the original media.
 
@@ -395,7 +397,11 @@ CUDA_VISIBLE_DEVICES=0 bash launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-V
 
 ## Audio Serving
 
-Dynamo supports `audio_url` requests for audio-capable models. Audio is loaded by the backend worker via vLLM's `AudioMediaIO` at native sample rate — vLLM's model-specific processor handles resampling and feature extraction internally. Omni models can handle `image_url`, `video_url`, and `audio_url` in the same request.
+Dynamo supports `audio_url` requests for audio-capable models. Audio is loaded via vLLM's `AudioMediaIO` at native sample rate, and vLLM resamples it to the rate the model's feature extractor expects before extracting features. Omni models can handle `image_url`, `video_url`, and `audio_url` in the same request.
+
+<Tip>
+Resampling needs PyAV, which the Dynamo runtime images do not ship. To accept audio at a rate other than the model's, see [Audio Sample Rates](#audio-sample-rates).
+</Tip>
 
 ### Aggregated Serving
 
@@ -449,6 +455,99 @@ curl http://localhost:8000/v1/chat/completions \
       "stream": false
     }' | jq
 ```
+
+### Speech Recognition (ASR)
+
+Qwen3-ASR checkpoints such as `Qwen/Qwen3-ASR-1.7B` and `Qwen/Qwen3-ASR-0.6B` transcribe speech sent as an `audio_url` content part to `/v1/chat/completions`. These checkpoints ship `vocab.json` and `merges.txt` but no `tokenizer.json`, which the default Rust frontend needs, so run the frontend with the [Python chat processor](#python-chat-processor) (`--dyn-chat-processor vllm`). The `agg_asr.sh` launcher does this and serves `Qwen/Qwen3-ASR-1.7B` by default:
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+bash launch/agg_asr.sh
+```
+
+Pass `--model Qwen/Qwen3-ASR-0.6B` to serve the smaller checkpoint. The launcher passes any other arguments to the worker.
+
+`Qwen/Qwen3-ASR-1.7B-hf`, the Hugging Face Transformers-format checkpoint, ships a `tokenizer.json` and also runs behind the default Rust frontend, which forwards the audio to the worker:
+
+```bash
+DYN_CHAT_PROCESSOR=dynamo bash launch/agg_asr.sh --model Qwen/Qwen3-ASR-1.7B-hf
+```
+
+**Transcription request:**
+
+The request names the default checkpoint. If you serve another checkpoint, such as `Qwen/Qwen3-ASR-0.6B` or `Qwen/Qwen3-ASR-1.7B-hf`, set `model` to that checkpoint's name.
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+      "model": "Qwen/Qwen3-ASR-1.7B",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "audio_url",
+              "audio_url": {
+                "url": "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/main/datasets/mini_en/wav/1221-135766-0002.wav"
+              }
+            }
+          ]
+        }
+      ],
+      "max_tokens": 256
+    }' | jq -r '.choices[0].message.content'
+```
+
+The response names the detected language before an `<asr_text>` tag, followed by the transcript:
+
+```text
+language English<asr_text>Yet these thoughts affected Hester Prynne less with hope than apprehension.
+```
+
+Strip the text up to and including `<asr_text>` to keep only the transcript. With `"stream": true`, the prefix arrives in the first chunks.
+
+Dynamo does not serve `/v1/audio/transcriptions`. Send audio through `/v1/chat/completions` or stream it through `/v1/realtime`.
+
+#### Audio Sample Rates
+
+The Dynamo runtime images accept audio at the model's 16 kHz rate. Audio at any other rate fails with HTTP 500, and the frontend or worker log shows `ImportError: Please install vllm[audio] for audio support`, because vLLM resamples through PyAV, which the images do not ship. To accept other rates, run the bundled installer where the worker runs. With the Python chat processor, the frontend also resamples audio, so run it where the frontend runs too:
+
+```bash
+python -m dynamo.common.utils.install_media_decoders vllm
+```
+
+Alternatively, convert audio to 16 kHz before you send it. See [Additional Media Decoders](../../../../../use-cases/image-understanding/additional-media-decoders.md) for what the installer changes.
+
+#### Streaming Transcription
+
+vLLM serves streaming transcription for Qwen3-ASR through its `Qwen3ASRRealtimeGeneration` architecture on `/v1/realtime`. The launcher does not pick an architecture from the model name, so select it with `--hf-overrides`. The realtime path does not tokenize in the frontend, so it runs with the default Rust frontend:
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+bash launch/agg_asr_realtime.sh --model Qwen/Qwen3-ASR-1.7B \
+  --hf-overrides '{"architectures":["Qwen3ASRRealtimeGeneration"]}'
+```
+
+Stream a sample clip from a second terminal:
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+python launch/realtime_audio_client.py --session-type transcription \
+  --url ws://localhost:8000/v1/realtime --model Qwen/Qwen3-ASR-1.7B
+```
+
+The session accepts 24 kHz PCM16 input, which the worker resamples to 16 kHz with `scipy`. The Dynamo vLLM runtime images do not include `scipy`, and without it the session returns an empty transcript while the worker log shows `ModuleNotFoundError: No module named 'scipy'`. For a local run, install it in the worker's environment:
+
+```bash
+pip install 'scipy>=1.14,<2'
+```
+
+The model transcribes each 5-second segment as it arrives. Each segment's text starts on a new line with its own `language <Language><asr_text>` prefix, and a very short final segment can repeat the previous segment's text.
+
+#### Kubernetes Deployment
+
+To deploy transcription or streaming transcription as a DynamoGraphDeployment, see [Speech Recognition on Kubernetes](../../../../../use-cases/speech/voice-pipelines.md#speech-recognition-on-kubernetes).
 
 ## Embedding Cache
 
