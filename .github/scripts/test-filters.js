@@ -61,6 +61,11 @@ function checkFilter(file, patterns) {
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
   {
+    file: 'lib/llm/tests/data/media/triangle_240p_10.mp4',
+    expect: { sidecar_trtllm_image: true },
+    desc: 'the video fixture triggers the nightly harness checksum tests'
+  },
+  {
     file: 'lib/sidecar/trtllm/ci/resolve_nightly.py',
     expect: { sidecar_trtllm_image: true },
     desc: 'nightly resolver changes run its CPU tests'

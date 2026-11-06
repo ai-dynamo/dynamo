@@ -7,7 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 
 Reference serving profile: JunyiXu-nv/TensorRT-LLM branch
 `dev-junyix-feat-kimi-k3-lhr-serving` at `eb1f4d7bd0b75159b2cc384deb28ed212d531875`.
-Dynamo baseline: `a908c1a14501b4bb03a7c80833edec0f0e571986`.
+Original Dynamo baseline: `a908c1a14501b4bb03a7c80833edec0f0e571986`.
+Integrated upstream main: `fa9852014950ed0aea74e56e1de441fc6de15307`.
 
 The path is the Dynamo HTTP frontend, its prompt/token/parser pipeline, the
 TensorRT-LLM sidecar, and the existing `openengine.v1.Inference/Generate` RPC.
@@ -219,3 +220,19 @@ frontend image. The trace schema does not establish the historical checkpoint
 revision. Output token IDs, usage, grammar enforcement, native Kimi outputs,
 gRPC engine execution, physical KV transfers and performance remain outside
 this replay's scope.
+
+
+### Upstream integration and ARM diagnostic follow-up
+
+The merge with `fa985201495` retains upstream terminal usage/hidden-EOS cleanup
+alongside parser-visible string stops. Hidden stop IDs are tracked even when no
+visible stops are configured, so a held hidden EOS is removed only when the
+terminal engine result confirms that it ended generation.
+
+Offline replay of the published ARM frontend at `f57a81ad605` matches all 72
+captured requests and all 32 native-output pairs. Its six derived thinking-off
+requests correctly reject before dispatch, but their public diagnostic is only
+`Invalid request`. The source follow-up explicitly marks the fixed GLM
+closed-prefill explanation as public; it contains no request content, rendered
+prompt, path or underlying exception. The existing GLM regression also checks
+that public message. This correction is not in the published f57 artifacts.

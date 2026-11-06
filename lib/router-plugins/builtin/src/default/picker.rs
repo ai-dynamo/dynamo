@@ -4,9 +4,11 @@
 //! Minimum-cost selection, tie-breaking, and temperature sampling of scored candidates.
 
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
+    ScoredWorkerCandidate, WorkerInputView, WorkerPicker, WorkerSelectionContext,
+    WorkerSelectionPolicyError,
 };
 use parking_lot::Mutex;
+use std::cell::Cell;
 use std::sync::Arc;
 
 fn softmax_sample_index<T>(
@@ -60,27 +62,39 @@ fn softmax_sample_index<T>(
     entries.len() - 1
 }
 
-pub(super) struct DefaultPicker {
-    temperature: f64,
-    rng: Option<Arc<Mutex<fastrand::Rng>>>,
+/// The (row, cost) pairs and softmax weights a sampled pick fills. Each pick clears them first,
+/// so only their allocated capacity carries over between picks.
+#[derive(Default)]
+struct SamplingBuffers {
     entries: Vec<(usize, f64)>,
     probabilities: Vec<f64>,
 }
 
-impl DefaultPicker {
-    pub(super) fn new(temperature: f64, rng: Option<Arc<Mutex<fastrand::Rng>>>) -> Self {
-        Self {
-            temperature,
-            rng,
+thread_local! {
+    // Each thread keeps one set of sampling buffers, shared by every picker on it, so picks reuse
+    // their memory without a lock.
+    static SAMPLING_BUFFERS: Cell<SamplingBuffers> = const {
+        Cell::new(SamplingBuffers {
             entries: Vec::new(),
             probabilities: Vec::new(),
-        }
+        })
+    };
+}
+
+pub(super) struct DefaultPicker {
+    temperature: f64,
+    rng: Option<Arc<Mutex<fastrand::Rng>>>,
+}
+
+impl DefaultPicker {
+    pub(super) fn new(temperature: f64, rng: Option<Arc<Mutex<fastrand::Rng>>>) -> Self {
+        Self { temperature, rng }
     }
 }
 
 impl WorkerPicker for DefaultPicker {
     fn pick(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -110,24 +124,33 @@ impl WorkerPicker for DefaultPicker {
             }
             return Ok(best_row);
         }
+        let mut buffers = SAMPLING_BUFFERS.take();
+        let row = self.sample(candidates, &mut buffers);
+        SAMPLING_BUFFERS.set(buffers);
+        Ok(row)
+    }
+}
+
+impl DefaultPicker {
+    fn sample(&self, candidates: &[ScoredWorkerCandidate], buffers: &mut SamplingBuffers) -> usize {
         let Some(rng) = &self.rng else {
-            return Ok(softmax_sample_index(
+            return softmax_sample_index(
                 candidates,
                 |candidate| candidate.cost(),
                 self.temperature,
                 fastrand::f64(),
-                &mut self.probabilities,
-            ));
+                &mut buffers.probabilities,
+            );
         };
-        self.entries.clear();
-        self.entries.extend(
+        buffers.entries.clear();
+        buffers.entries.extend(
             candidates
                 .iter()
                 .enumerate()
                 .map(|(row, candidate)| (row, candidate.cost())),
         );
         // Canonical order is required only for deterministic replay, never for production ties.
-        self.entries.sort_unstable_by_key(|(row, _)| {
+        buffers.entries.sort_unstable_by_key(|(row, _)| {
             let worker = candidates[*row].worker();
             (worker.worker_id, worker.dp_rank)
         });
@@ -136,7 +159,7 @@ impl WorkerPicker for DefaultPicker {
             let mut best = 0;
             let mut best_cost = f64::INFINITY;
             let mut ties = 0;
-            for (index, (_, cost)) in self.entries.iter().enumerate() {
+            for (index, (_, cost)) in buffers.entries.iter().enumerate() {
                 if *cost < best_cost {
                     best = index;
                     best_cost = *cost;
@@ -151,13 +174,13 @@ impl WorkerPicker for DefaultPicker {
             best
         } else {
             softmax_sample_index(
-                &self.entries,
+                &buffers.entries,
                 |(_, cost)| *cost,
                 self.temperature,
                 rng.f64(),
-                &mut self.probabilities,
+                &mut buffers.probabilities,
             )
         };
-        Ok(self.entries[selected].0)
+        buffers.entries[selected].0
     }
 }

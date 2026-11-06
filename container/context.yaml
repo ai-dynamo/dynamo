@@ -38,12 +38,12 @@ dynamo:
   # the epp image carries) add on top.
   frontend_baseline_sbom: ubuntu@7291df36
   planner_build_image: python
-  planner_build_image_tag: 3.13.17-slim
+  planner_build_image_tag: 3.13.18-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python
-  planner_runtime_image_tag: 3.13-v4.1.9
+  planner_runtime_image_tag: 3.13-v4.1.10
   # Self-baseline of the distroless-python runtime; the licenses stage subtracts
   # it so planner NOTICES attribute only what the builder adds on top.
-  planner_baseline_sbom: python@d9eff629
+  planner_baseline_sbom: python@c718fc95
   # Planner-scoped interpreter. The planner uses a separate, newer CPython line
   # from the global python_version below because it is the only stage whose
   # interpreter is decoupled from the framework/runtime bases: the build stage
@@ -97,8 +97,11 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.32.0-ubuntu2404
-    vllm_omni_ref: "v0.32.0rc1"
+    runtime_image_tag: v0.33.0
+    vllm_omni_ref: "v0.33.0rc1"
+    # Omni caps Transformers below 5.20; the vLLM 0.33 image ships 5.20.2.
+    transformers_version: "5.19.0"
+    tokenizers_version: "0.23.3"
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
@@ -138,7 +141,7 @@ sglang:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.5.22-cu130-runtime
+    runtime_image_tag: v0.5.23-cu130-runtime
     # Baseline is the TRUE base of the third-party lmsysorg/sglang image,
     # nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04 (Docker Hub; CUDA_VERSION=13.0.3,
     # ubuntu24.04), NOT a self-baseline of lmsysorg/sglang.

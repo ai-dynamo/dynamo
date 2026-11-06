@@ -708,7 +708,6 @@ class VllmProcessor:
         routed_engine: RoutedEngine,
         block_size: int = 16,
         enable_auto_tool_choice: bool = False,
-        default_chat_template_kwargs: dict[str, Any] | None = None,
         default_thinking_mode: str | None = None,
         structural_tag_mode: str = "off",
         structural_tag_scope: str = "auto",
@@ -724,7 +723,6 @@ class VllmProcessor:
         self.exclude_tools_when_tool_choice_none = True
         self.block_size = block_size
         self.enable_auto_tool_choice = enable_auto_tool_choice
-        self.default_chat_template_kwargs = default_chat_template_kwargs
         self.default_thinking_mode = default_thinking_mode
         self.structural_tag_mode = structural_tag_mode
         self.structural_tag_scope = structural_tag_scope
@@ -965,7 +963,6 @@ class VllmProcessor:
                 model_config=self.input_processor.model_config,
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
                 enable_auto_tool_choice=self.enable_auto_tool_choice,
-                default_chat_template_kwargs=self.default_chat_template_kwargs,
                 default_thinking_mode=self.default_thinking_mode,
                 structural_tag_mode=self.structural_tag_mode,
                 structural_tag_scope=self.structural_tag_scope,
@@ -1643,6 +1640,11 @@ class EngineFactory:
                 "from runtime_config.context_length",
                 context_length,
             )
+        # Preserve vLLM defaults when optional frontend arguments are absent.
+        for name in ("renderer_num_workers", "mm_processor_cache_gb"):
+            value = getattr(self.flags, name, None)
+            if value is not None:
+                model_config_kwargs[name] = value
         model_config = ModelConfig(**model_config_kwargs)
         # Use processor_only cache so tensor data persists across requests.
         # The default "lru" sender cache drops tensor data on cache hits
@@ -1718,7 +1720,7 @@ class EngineFactory:
                 reasoning_parser_name,
                 reasoning_parser_class,
                 tokenizer,
-                getattr(self.flags, "default_chat_template_kwargs", None) or {},
+                self.config.default_chat_template_kwargs or {},
                 model_config,
             )
         else:
@@ -1765,9 +1767,6 @@ class EngineFactory:
             routed_engine,
             block_size=block_size,
             enable_auto_tool_choice=enable_auto_tool_choice,
-            default_chat_template_kwargs=getattr(
-                self.flags, "default_chat_template_kwargs", None
-            ),
             default_thinking_mode=default_thinking_mode,
             structural_tag_mode=structural_tag_mode,
             structural_tag_scope=structural_tag_scope,
