@@ -676,8 +676,8 @@ const (
 	legacyLeaderWorkerSetNameSuffix     = "-0"
 )
 
-// leaderWorkerSetName preserves the existing <dcd-name>-0 resource name and
-// avoids colliding with the operator ClusterIP service.
+// leaderWorkerSetName returns <dcd-name>-0 when it fits the StatefulSet revision
+// label limit, else a hashed name; neither collides with the operator ClusterIP service.
 func leaderWorkerSetName(dcd *nvidiacomv1beta1.DynamoComponentDeployment) string {
 	return leaderWorkerSetNameForWorkload(dcd.Name)
 }
