@@ -274,18 +274,34 @@ fi
 echo "  aiperf:     available"
 echo ""
 
+# BEGIN cleanup
 # ─── Tracked PIDs for cleanup ───────────────────────────────────────────────
 ALL_PIDS=()      # everything we need to kill on exit
 CAPTURE_PIDS=()  # capture processes we wait for
 ETCD_PID=""      # etcd PID if we started it
 ETCD_DATA_DIR=""
 NATS_PID=""      # nats-server PID if we started it
+DESCENDANT_PIDS=()
+
+collect_descendants() {
+    local parent=$1 child
+    while read -r child; do
+        [[ -n "$child" ]] || continue
+        collect_descendants "$child"
+        DESCENDANT_PIDS+=("$child")
+    done < <(pgrep -P "$parent" || true)
+}
 
 cleanup() {
+    local status=$?
+    trap - EXIT INT TERM
+    for pid in "${ALL_PIDS[@]}" "${CAPTURE_PIDS[@]}"; do
+        collect_descendants "$pid"
+    done
     echo ""
     echo "--- Cleaning up ---"
     # Stop capture processes with SIGINT first (bpftrace needs INT to flush maps)
-    for pid in "${CAPTURE_PIDS[@]}"; do
+    for pid in "${DESCENDANT_PIDS[@]}" "${CAPTURE_PIDS[@]}"; do
         kill -INT "$pid" 2>/dev/null || true
     done
     # Give bpftrace a moment to flush aggregation output
@@ -300,7 +316,7 @@ cleanup() {
     done
     # Give processes a moment to exit, then force kill
     sleep 1
-    for pid in "${ALL_PIDS[@]}" "${CAPTURE_PIDS[@]}"; do
+    for pid in "${DESCENDANT_PIDS[@]}" "${ALL_PIDS[@]}" "${CAPTURE_PIDS[@]}"; do
         kill -9 "$pid" 2>/dev/null || true
     done
     # Stop infrastructure daemons if we started them
@@ -326,9 +342,13 @@ cleanup() {
         fi
     done
     echo "Cleanup complete."
+    exit "$status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
+# END cleanup
 # ─── Step 0: Ensure etcd + NATS are running ──────────────────────────────────
 echo "--- Checking infrastructure (etcd + NATS) ---"
 
@@ -704,7 +724,7 @@ if [[ -n "$REQUEST_RATE" ]]; then
 fi
 if [[ -n "$NUM_REQUESTS" ]]; then
     _LOAD_ARGS+=(--request-count "$NUM_REQUESTS")
-    _EFFECTIVE_REQUESTS="$NUM_REQUESTS"
+    [[ -n "$BENCHMARK_DURATION" ]] || _EFFECTIVE_REQUESTS="$NUM_REQUESTS"
 fi
 # If neither was specified, default to concurrency * 20 (min 640)
 if [[ ${#_LOAD_ARGS[@]} -eq 0 ]]; then
@@ -732,6 +752,8 @@ else
 fi
 echo "  aiperf targets: ${_AIPERF_MODELS[*]} (mode=$AIPERF_TARGETS)"
 
+# BEGIN benchmark-loop
+BENCHMARK_STATUS=0
 for _AIPERF_MODEL in "${_AIPERF_MODELS[@]}"; do
     if [[ ${#_AIPERF_MODELS[@]} -gt 1 ]]; then
         AIPERF_ARTIFACT_DIR="$OUTPUT_DIR/aiperf/${_AIPERF_MODEL}"
@@ -749,7 +771,8 @@ for _AIPERF_MODEL in "${_AIPERF_MODELS[@]}"; do
         _AIPERF_TOK_ARGS=(--tokenizer "$MODEL")
     fi
 
-    HF_HUB_OFFLINE=1 aiperf profile --artifact-dir "$AIPERF_ARTIFACT_DIR" \
+    rm -f "$AIPERF_ARTIFACT_DIR/profile_export_aiperf.json" "$AIPERF_ARTIFACT_DIR/profile_export_aiperf.csv"
+    if HF_HUB_OFFLINE=1 aiperf profile --artifact-dir "$AIPERF_ARTIFACT_DIR" \
         --model "$_AIPERF_MODEL" \
         "${_AIPERF_TOK_ARGS[@]}" \
         --endpoint-type chat \
@@ -772,9 +795,17 @@ for _AIPERF_MODEL in "${_AIPERF_MODELS[@]}"; do
         --random-seed 100 \
         --workers-max "$CONCURRENCY" \
         --record-processors 32 \
-        --ui simple || echo "WARNING: aiperf failed for model ${_AIPERF_MODEL}"
+        --ui simple; then
+        if ! PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m sweep_core.aiperf "$AIPERF_ARTIFACT_DIR" "$_EFFECTIVE_REQUESTS"; then
+            BENCHMARK_STATUS=1
+        fi
+    else
+        BENCHMARK_STATUS=$?
+        echo "ERROR: AIPerf failed for model $_AIPERF_MODEL (exit $BENCHMARK_STATUS)" >&2
+    fi
 done
 
+# END benchmark-loop
 # Check for server_metrics_export.json in the primary aiperf dir
 _PRIMARY_AIPERF_DIR="$OUTPUT_DIR/aiperf"
 [[ ${#_AIPERF_MODELS[@]} -gt 1 ]] && _PRIMARY_AIPERF_DIR="$OUTPUT_DIR/aiperf/${_AIPERF_MODELS[0]}"
@@ -806,14 +837,18 @@ while [[ "$_all_done" == false && $_capture_waited -lt $_CAPTURE_DEADLINE ]]; do
     fi
 done
 
+# BEGIN capture-timeout
 if [[ "$_all_done" == false ]]; then
+    for pid in "${CAPTURE_PIDS[@]}"; do
+        collect_descendants "$pid"
+    done
     echo "  WARNING: captures still running after ${_CAPTURE_DEADLINE}s — sending SIGTERM"
     for pid in "${CAPTURE_PIDS[@]}"; do
         kill "$pid" 2>/dev/null || true
     done
     sleep 2
     # Force kill any remaining
-    for pid in "${CAPTURE_PIDS[@]}"; do
+    for pid in "${DESCENDANT_PIDS[@]}" "${CAPTURE_PIDS[@]}"; do
         kill -9 "$pid" 2>/dev/null || true
     done
 fi
@@ -822,6 +857,7 @@ for pid in "${CAPTURE_PIDS[@]}"; do
     wait "$pid" 2>/dev/null || true
 done
 
+# END capture-timeout
 # Capture final Prometheus snapshot AFTER all aiperf requests have completed.
 # This must happen after aiperf (Step 5) and after captures (Step 6) to ensure
 # all request metrics are reflected in the snapshot.
@@ -888,46 +924,59 @@ else
     kill -INT "$FRONTEND_PID" 2>/dev/null || true
 fi
 
+# BEGIN metadata-producer
 # ─── Step 8: Save config ────────────────────────────────────────────────────
-cat > "$OUTPUT_DIR/config.json" <<EOF
-{
-  "timestamp": "$TIMESTAMP",
-  "model": "$MODEL",
-  "model_name": "$MODEL_NAME",
-  "model_names": $(printf '%s\n' "${MODEL_NAMES[@]}" | jq -R . | jq -s .),
-  "num_models": $NUM_MODELS,
-  "num_workers_per_model": $NUM_WORKERS,
-  "num_workers_total": $NUM_WORKERS_TOTAL,
-  "speedup_ratio": "$SPEEDUP_RATIO",
-  "data_parallel_size": $DATA_PARALLEL_SIZE,
-  "request_plane": "$REQUEST_PLANE",
-  "event_plane": "$EVENT_PLANE",
-  "frontend_port": $FRONTEND_PORT,
-  "tokenizer_backend": "${TOKENIZER_BACKEND:-hf}",
-  "concurrency": $CONCURRENCY,
-  "num_requests": ${_EFFECTIVE_REQUESTS:-null},
-  "benchmark_duration": ${BENCHMARK_DURATION:-null},
-  "request_rate": ${REQUEST_RATE:-null},
-  "isl": $ISL,
-  "osl": $OSL,
-  "capture_duration": $CAPTURE_DURATION,
-  "frontend_pid": $FRONTEND_PID,
-  "has_nsys": $HAS_NSYS,
-  "has_perf": $HAS_PERF,
-  "has_bpf": $HAS_BPF,
-  "skip_bpf": $SKIP_BPF,
-  "skip_nsys": $SKIP_NSYS,
-  "skip_flamegraph": $SKIP_FLAMEGRAPH,
-  "tcpdump": $ENABLE_TCPDUMP,
-  "tcpdump_port": $TCPDUMP_PORT,
-  "nsys_path": "${NSYS_PATH:-auto}"
-}
-EOF
+python3 - "$OUTPUT_DIR/config.json" \
+    timestamp "$TIMESTAMP" benchmark_exit_status "$BENCHMARK_STATUS" \
+    requested_num_requests "${NUM_REQUESTS:-}" model "$MODEL" model_name "$MODEL_NAME" \
+    num_models "$NUM_MODELS" num_workers_per_model "$NUM_WORKERS" num_workers_total "$NUM_WORKERS_TOTAL" \
+    speedup_ratio "$SPEEDUP_RATIO" data_parallel_size "$DATA_PARALLEL_SIZE" \
+    request_plane "$REQUEST_PLANE" event_plane "$EVENT_PLANE" frontend_port "$FRONTEND_PORT" \
+    tokenizer_backend "${TOKENIZER_BACKEND:-hf}" concurrency "$CONCURRENCY" \
+    num_requests "${_EFFECTIVE_REQUESTS:-null}" benchmark_duration "${BENCHMARK_DURATION:-null}" \
+    request_rate "${REQUEST_RATE:-null}" isl "$ISL" osl "$OSL" capture_duration "$CAPTURE_DURATION" \
+    frontend_pid "$FRONTEND_PID" has_nsys "$HAS_NSYS" has_perf "$HAS_PERF" has_bpf "$HAS_BPF" \
+    skip_bpf "$SKIP_BPF" skip_nsys "$SKIP_NSYS" skip_flamegraph "$SKIP_FLAMEGRAPH" \
+    tcpdump "$ENABLE_TCPDUMP" tcpdump_port "$TCPDUMP_PORT" nsys_path "${NSYS_PATH:-auto}" \
+    -- "${MODEL_NAMES[@]}" <<'PY'
+import json
+import math
+import pathlib
+import sys
 
+separator = sys.argv.index("--")
+arguments = sys.argv[2:separator]
+config = dict(zip(arguments[::2], arguments[1::2], strict=True))
+integers = {
+    "benchmark_exit_status", "num_models", "num_workers_per_model", "num_workers_total",
+    "data_parallel_size", "frontend_port", "concurrency", "num_requests", "isl", "osl",
+    "capture_duration", "frontend_pid", "tcpdump_port",
+}
+booleans = {"has_nsys", "has_perf", "has_bpf", "skip_bpf", "skip_nsys", "skip_flamegraph", "tcpdump"}
+for key in integers | {"benchmark_duration", "request_rate"}:
+    value = config[key]
+    try:
+        number = int(value) if key in integers else float(value)
+        config[key] = number if math.isfinite(number) else None
+    except ValueError:
+        # Invalid load controls already fail the benchmark; retain diagnostic metadata.
+        config[key] = None
+for key in booleans:
+    config[key] = config[key].lower() == "true"
+config["model_names"] = sys.argv[separator + 1:]
+with pathlib.Path(sys.argv[1]).open("w") as stream:
+    json.dump(config, stream, indent=2, allow_nan=False)
+PY
+
+# END metadata-producer
 # ─── Done ────────────────────────────────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║          Capture Complete                                   ║"
+if [[ "$BENCHMARK_STATUS" -eq 0 ]]; then
+    printf '║ %-60s ║\n' 'Benchmark Complete'
+else
+    printf '║ %-60s ║\n' 'Benchmark FAILED - diagnostic artifacts retained'
+fi
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Output directory: $OUTPUT_DIR"
@@ -941,3 +990,4 @@ done
 echo ""
 echo "Run analysis:"
 echo "  python3 ${SCRIPT_DIR}/analysis/create_report.py analyze $OUTPUT_DIR"
+exit "$BENCHMARK_STATUS"

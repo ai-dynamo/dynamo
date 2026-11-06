@@ -22,13 +22,14 @@ spec:
       restartPolicy: Never
       containers:
       - command:
-        - /bin/sh
+        - /bin/bash
         - -c
         - |
-          set -e
+          set -euo pipefail
+          export PYTHONUNBUFFERED=1
           apt-get update && apt-get install -y curl jq procps git build-essential && apt-get clean
 
-          pip install aiperf==0.12.0
+          pip install aiperf==0.13.0
           echo "aiperf installation completed"
 
           export COLUMNS=200
@@ -54,6 +55,7 @@ spec:
 
           # ── Core benchmark function ─────────────────────────────────────────
           # Args: <request_rate_qps> <concurrency> <request_count>
+          # BEGIN benchmark-function
           run_perf() {
             local qps=$1
             local concurrency=$2
@@ -95,10 +97,43 @@ spec:
               --ui simple \
               2>&1 | tee "${ARTIFACT_DIR}/aiperf_qps${qps}_con${concurrency}.txt"
 
+            python3 - "$ARTIFACT_DIR" "$req_count" <<'PY'
+          import csv
+          import json
+          import math
+          import pathlib
+          import sys
+
+          directory = pathlib.Path(sys.argv[1])
+          with (directory / "profile_export_aiperf.json").open() as stream:
+              summary = json.load(stream)
+          completed = summary["request_count"]["avg"]
+          if isinstance(completed, bool) or not isinstance(completed, (int, float)) or not math.isfinite(completed) or completed != int(sys.argv[2]):
+              raise ValueError("Benchmark request count does not match the requested count")
+          with (directory / "profile_export_aiperf.csv").open(newline="") as stream:
+              rows = list(csv.reader(stream, strict=True))
+          width = None
+          csv_count = None
+          for row in rows:
+              if not row:
+                  width = None
+                  continue
+              if width is None:
+                  if len(row) < 2 or row[0] not in {"Metric", "Endpoint"}:
+                      raise ValueError("Unrecognized benchmark CSV section")
+                  width = len(row)
+              elif len(row) != width:
+                  raise ValueError("Truncated benchmark CSV row")
+              elif row[0] == "Request Count":
+                  csv_count = float(row[1])
+          if csv_count != completed:
+              raise ValueError("Benchmark CSV request count does not match JSON")
+          PY
             echo "Done: $key"
             ls -la "$ARTIFACT_DIR"
           }
 
+          # END benchmark-function
           # ── Main execution ──────────────────────────────────────────────────
           wait_for_model_ready
 
