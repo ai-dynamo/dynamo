@@ -92,12 +92,14 @@ RUN if id ubuntu >/dev/null 2>&1; then userdel -r ubuntu; fi && \
 
 # This base has no framework dependency stack to inherit. Resolve Dynamo's
 # dependencies too, constrained to the installed TokenSpeed versions above.
+# cuSPARSELt's arm64 wheel uses NVIDIA's manylinux2014_sbsa tag. pip checks
+# dependency versions without rejecting that vendor tag; imports verify loading.
 COPY --from=wheel_builder /opt/dynamo/dist/ai_dynamo*.whl /opt/dynamo/wheelhouse/
 COPY --from=wheel_builder /opt/dynamo/dist/aisimulate*.whl /opt/dynamo/wheelhouse/
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     uv pip install /opt/dynamo/wheelhouse/*.whl && \
-    uv pip check && \
-    python -c 'import dynamo.runtime; import tokenspeed_engine'
+    python -m pip check && \
+    python -c 'import torch; import dynamo.runtime; import tokenspeed_engine'
 
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
