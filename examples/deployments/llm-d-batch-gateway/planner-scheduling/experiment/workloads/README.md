@@ -304,8 +304,10 @@ drain decision.
 
 ### Canonical Controlled Run
 
-The successful 2026-08-28 treatment used a dedicated test cluster. Set the
-context for your deployment and run these forwards in separate terminals:
+The successful 2026-08-28 treatment used a dedicated test cluster. The commands
+below are a historical transcript, including its `default` namespace and
+workspace-local dataset default; they are not a current runnable recipe. Its
+port-forwards were:
 
 ```bash
 export KUBE_CONTEXT=your-kube-context
@@ -364,8 +366,9 @@ command from the experiment root:
   --expected-gate-type redis-leased-rate
 ```
 
-For a new treatment, replace the paired controller ID with the new ID printed
-by the controller. The controller must already be running before submission.
+Do not adapt this block by changing only the controller ID. For a new treatment,
+deploy with the current [Planner recipe](../../README.md#deploy-the-planner-poc)
+and use the namespace- and dataset-parameterized harness commands below.
 
 Inspect decisions with:
 
@@ -478,7 +481,7 @@ pre-run setup mutation to establish the worker DGDSA at zero:
 
 ```bash
 kubectl patch dgdsa \
-  qwen3-0-6b-batch-worker \
+  qwen3-0-6b-batch-vllmdecodeworker \
   --namespace default \
   --subresource scale \
   --type merge \
