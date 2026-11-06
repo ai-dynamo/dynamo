@@ -332,16 +332,28 @@ impl CheckpointReadView {
         Some(owner)
     }
 
+    #[inline]
+    fn membership(&self, hash: ExternalSequenceBlockHash) -> Option<&CompleteMembership> {
+        let index = CheckpointMembershipIndex::shard(hash.0);
+        let shard =
+            self.shards[index].get_or_init(|| self.memberships.shards[index].entries.load_full());
+        shard.get(&hash.0).map(Arc::as_ref)
+    }
+
+    /// Tests only whether any owner has a tier entry. Call `owners_at` to validate
+    /// the queried owner and layout generation before granting credit.
+    #[inline]
+    pub fn has_checkpoint_hint(&self, hash: ExternalSequenceBlockHash, tier: StorageTier) -> bool {
+        self.membership(hash)
+            .is_some_and(|membership| !membership.owners[tier_index(tier)].is_empty())
+    }
+
     pub fn owners_at(
         &self,
         hash: ExternalSequenceBlockHash,
         tier: StorageTier,
     ) -> impl Iterator<Item = ResidencyOwner> + '_ {
-        let index = CheckpointMembershipIndex::shard(hash.0);
-        let shard =
-            self.shards[index].get_or_init(|| self.memberships.shards[index].entries.load_full());
-        shard
-            .get(&hash.0)
+        self.membership(hash)
             .into_iter()
             .flat_map(move |membership| membership.owners[tier_index(tier)].iter())
             .filter_map(|&(owner, generation)| {
@@ -783,6 +795,61 @@ mod tests {
             expected_group_count: count,
             alignment_blocks: Some(1),
         })
+    }
+
+    #[test]
+    fn checkpoint_hint_does_not_make_untracked_owners_eligible() {
+        let table = KvCacheGroupResidency::new();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let owner = ResidencyOwner::worker(worker);
+        let hash = ExternalSequenceBlockHash(11);
+        assert!(
+            !table
+                .read_view()
+                .has_checkpoint_hint(hash, StorageTier::Device)
+        );
+        table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
+
+        let other = ResidencyOwner::worker(WorkerWithDpRank::new(8, 0));
+        table.declare_groups(other, &[0]);
+        let mut view = table.read_view();
+        view.track_owner(other);
+        assert!(view.has_checkpoint_hint(hash, StorageTier::Device));
+        assert!(!view.has_checkpoint_hint(hash, StorageTier::HostPinned));
+        assert!(!view.has_checkpoint_hint(ExternalSequenceBlockHash(12), StorageTier::Device));
+        assert!(view.owners_at(hash, StorageTier::Device).next().is_none());
+
+        view.track_owner(owner);
+        assert_eq!(
+            view.owners_at(hash, StorageTier::Device)
+                .collect::<Vec<_>>(),
+            [owner]
+        );
+    }
+
+    #[test]
+    fn checkpoint_hint_does_not_bypass_layout_generation_validation() {
+        let table = KvCacheGroupResidency::new();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let owner = ResidencyOwner::worker(worker);
+        let hash = ExternalSequenceBlockHash(11);
+        table.declare_layout(owner, &[0], 1);
+        table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
+        let mut old = table.read_view();
+        old.track_owner(owner);
+
+        table.declare_layout(owner, &[3], 1);
+        table.apply(&checkpoint(worker, StorageTier::Device, 3, hash.0, Some(1)));
+        assert!(old.has_checkpoint_hint(hash, StorageTier::Device));
+        assert!(old.owners_at(hash, StorageTier::Device).next().is_none());
+        let mut current = table.read_view();
+        current.track_owner(owner);
+        assert_eq!(
+            current
+                .owners_at(hash, StorageTier::Device)
+                .collect::<Vec<_>>(),
+            [owner]
+        );
     }
 
     #[test]
