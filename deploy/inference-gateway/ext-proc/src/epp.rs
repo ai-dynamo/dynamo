@@ -18,6 +18,7 @@ use dashmap::DashMap;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
+use dynamo_llm::frontend_config::ChatTemplateDefaults;
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
 use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
@@ -44,6 +45,7 @@ use crate::picker::{
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
+const DYN_DEFAULT_CHAT_TEMPLATE_KWARGS: &str = "DYN_DEFAULT_CHAT_TEMPLATE_KWARGS";
 
 /// `tokens_safe_to_inject` is `false` when `token_ids` were computed from
 /// only one prompt of a multi-prompt text batch (routing-only, matching
@@ -85,6 +87,36 @@ fn validate_kube_discovery_mode_value(mode: Option<&str>) -> Result<bool> {
     }
 }
 
+/// Read `DYN_DEFAULT_CHAT_TEMPLATE_KWARGS` once at startup. The Frontend reads
+/// the same variable; the EPP needs the same value so the tokens it injects
+/// for a Responses request match what the Frontend would render.
+fn chat_template_defaults_from_env() -> Result<ChatTemplateDefaults> {
+    match std::env::var(DYN_DEFAULT_CHAT_TEMPLATE_KWARGS) {
+        Ok(kwargs) => parse_chat_template_defaults(Some(&kwargs)),
+        Err(std::env::VarError::NotPresent) => parse_chat_template_defaults(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{DYN_DEFAULT_CHAT_TEMPLATE_KWARGS} must be valid Unicode")
+        }
+    }
+}
+
+/// Parse the value as the Frontend does: a JSON object of chat template kwargs,
+/// which may not set `chat_template`.
+fn parse_chat_template_defaults(kwargs: Option<&str>) -> Result<ChatTemplateDefaults> {
+    let mut defaults = ChatTemplateDefaults::default();
+    if let Some(kwargs) = kwargs.filter(|kwargs| !kwargs.trim().is_empty()) {
+        let kwargs: serde_json::Map<String, serde_json::Value> = serde_json::from_str(kwargs)
+            .map_err(|e| {
+                anyhow::anyhow!("{DYN_DEFAULT_CHAT_TEMPLATE_KWARGS} must be a JSON object: {e}")
+            })?;
+        if kwargs.contains_key("chat_template") {
+            anyhow::bail!("{DYN_DEFAULT_CHAT_TEMPLATE_KWARGS} cannot set chat_template");
+        }
+        defaults.set_default_chat_template_kwargs(Some(kwargs));
+    }
+    Ok(defaults)
+}
+
 fn decode_router_config_override(is_disaggregated: bool) -> Option<RouterConfigOverride> {
     is_disaggregated.then_some(RouterConfigOverride {
         overlap_score_credit: Some(0.0),
@@ -123,6 +155,9 @@ pub struct Router {
     worker_index: Arc<RwLock<WorkerEndpointIndex>>,
     pod_store_ready: Arc<AtomicBool>,
     served_model: String,
+    /// The Frontend's `--default-chat-template-kwargs`, applied to Responses
+    /// requests before their tokens are computed.
+    chat_template_defaults: ChatTemplateDefaults,
 }
 
 /// Remove and release a booking once. Both response lifecycle callbacks use
@@ -153,6 +188,7 @@ impl Router {
         component: &str,
     ) -> Result<Self> {
         let container_discovery = validate_kube_discovery_mode()?;
+        let chat_template_defaults = chat_template_defaults_from_env()?;
 
         let runtime = Runtime::from_settings()?;
         let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
@@ -255,6 +291,7 @@ impl Router {
             worker_index,
             pod_store_ready,
             served_model: model_name,
+            chat_template_defaults,
         })
     }
 
@@ -291,7 +328,10 @@ impl Router {
                 return self.tokenize_completion(request, headers).await;
             }
             Some(RequestApi::Responses) => {
-                let request = responses_to_chat_request(serde_json::from_str(request_json)?)?;
+                let request = responses_to_chat_request(
+                    serde_json::from_str(request_json)?,
+                    &self.chat_template_defaults,
+                )?;
                 return self.tokenize_chat(&request, headers);
             }
             None => {}
@@ -316,7 +356,7 @@ impl Router {
         // The `:path` dispatch above avoids this scan entirely; it remains only
         // for requests whose path names no known route.
         let value: serde_json::Value = serde_json::from_str(request_json)?;
-        match request_api_from_body(&value) {
+        match request_api_from_body(&value, request_path(headers).is_some()) {
             RequestApi::ChatCompletions => {
                 let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
                     serde_json::from_value(value)?;
@@ -327,7 +367,10 @@ impl Router {
                 self.tokenize_completion(request, headers).await
             }
             RequestApi::Responses => {
-                let request = responses_to_chat_request(serde_json::from_value(value)?)?;
+                let request = responses_to_chat_request(
+                    serde_json::from_value(value)?,
+                    &self.chat_template_defaults,
+                )?;
                 self.tokenize_chat(&request, headers)
             }
         }
@@ -775,7 +818,7 @@ enum RequestApi {
 /// The API named by the request's `:path` pseudo-header, ignoring any query
 /// string. `None` when the header is absent or names no known route.
 fn request_api_from_path(headers: &[(String, String)]) -> Option<RequestApi> {
-    let path = crate::envoy_helpers::find_header(headers, ":path")?;
+    let path = request_path(headers)?;
     let path = path.split_once('?').map_or(path, |(path, _query)| path);
     match path {
         "/v1/chat/completions" => Some(RequestApi::ChatCompletions),
@@ -785,35 +828,48 @@ fn request_api_from_path(headers: &[(String, String)]) -> Option<RequestApi> {
     }
 }
 
+fn request_path(headers: &[(String, String)]) -> Option<&str> {
+    crate::envoy_helpers::find_header(headers, ":path")
+}
+
 /// The API a body is shaped for, used when the path names no known route: a
-/// non-empty `messages` array is chat, a `prompt` is completions, an `input`
-/// is Responses, anything else is chat.
-fn request_api_from_body(value: &serde_json::Value) -> RequestApi {
+/// non-empty `messages` array is chat, an `input` is Responses, a `prompt` is
+/// completions, anything else is chat. `input` is checked before `prompt`
+/// because a Responses body may also carry `prompt`, a prompt-template
+/// reference. It picks Responses only when the request has no `:path`: other
+/// routes (`/v1/embeddings`, `/v1/classify`) carry `input` too, so a path the
+/// EPP does not know keeps the `messages` / `prompt` detection.
+fn request_api_from_body(value: &serde_json::Value, has_path: bool) -> RequestApi {
     let has_messages = value
         .get("messages")
         .and_then(|m| m.as_array())
         .is_some_and(|messages| !messages.is_empty());
     if has_messages {
         RequestApi::ChatCompletions
+    } else if !has_path && value.get("input").is_some() {
+        RequestApi::Responses
     } else if value.get("prompt").is_some() {
         RequestApi::Completions
-    } else if value.get("input").is_some() {
-        RequestApi::Responses
     } else {
         RequestApi::ChatCompletions
     }
 }
 
 /// Convert a `/v1/responses` body to the chat request the Frontend renders
-/// for it: the same `NvCreateResponse` -> chat conversion, then the same
-/// reasoning-control normalization, so the chat template sees identical input.
+/// for it, with the steps the Frontend's Responses handler runs before
+/// templating: the `NvCreateResponse` -> chat conversion, the chat template
+/// defaults, then the reasoning-control normalization. The template sees the
+/// Frontend's input only when `defaults` matches the Frontend's
+/// `--default-chat-template-kwargs`.
 fn responses_to_chat_request(
     request: NvCreateResponse,
+    defaults: &ChatTemplateDefaults,
 ) -> Result<dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest> {
     let mut chat_request =
         dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest::try_from(
             request,
         )?;
+    defaults.apply_to_request(&mut chat_request);
     chat_request.normalize_reasoning_template_args()?;
     Ok(chat_request)
 }
@@ -2104,32 +2160,47 @@ mod tests {
 
     #[test]
     fn request_api_chosen_by_path() {
-        let path = |p: &str| vec![(":path".to_string(), p.to_string())];
+        let api = |p: &str| request_api_from_path(&[(":path".to_string(), p.to_string())]);
         assert_eq!(
-            request_api_from_path(&path("/v1/chat/completions")),
+            api("/v1/chat/completions"),
             Some(RequestApi::ChatCompletions)
         );
+        assert_eq!(api("/v1/completions"), Some(RequestApi::Completions));
+        assert_eq!(api("/v1/responses"), Some(RequestApi::Responses));
         assert_eq!(
-            request_api_from_path(&path("/v1/completions")),
-            Some(RequestApi::Completions)
-        );
-        assert_eq!(
-            request_api_from_path(&path("/v1/responses")),
+            api("/v1/responses?stream=true"),
             Some(RequestApi::Responses)
         );
-        assert_eq!(
-            request_api_from_path(&path("/v1/responses?stream=true")),
-            Some(RequestApi::Responses)
-        );
-        assert_eq!(request_api_from_path(&path("/v1/embeddings")), None);
+        assert_eq!(api("/v1/models"), None);
         assert_eq!(request_api_from_path(&[]), None);
+    }
+
+    /// Other routes carry `input` too (`/v1/embeddings`, `/v1/classify`), so a
+    /// path the EPP does not know keeps the detection from before Responses
+    /// support: `input` picks Responses only when there is no `:path`.
+    #[test]
+    fn unknown_path_does_not_pick_responses_from_input() {
+        for path in ["/v1/embeddings", "/v1/embeddings/", "/v1/classify"] {
+            let headers = [(":path".to_string(), path.to_string())];
+            assert_eq!(request_api_from_path(&headers), None, "{path}");
+        }
+        let body = serde_json::json!({"model": "m", "input": "hi"});
+        assert_eq!(
+            request_api_from_body(&body, true),
+            RequestApi::ChatCompletions
+        );
+        assert_eq!(request_api_from_body(&body, false), RequestApi::Responses);
+        assert_eq!(
+            request_api_from_body(&serde_json::json!({"model": "m", "prompt": "hi"}), true),
+            RequestApi::Completions
+        );
     }
 
     /// A gateway that does not forward `:path` leaves the API to the body, so
     /// a Responses body must still be recognized there.
     #[test]
     fn request_api_chosen_by_body_without_path() {
-        let api = |body: serde_json::Value| request_api_from_body(&body);
+        let api = |body: serde_json::Value| request_api_from_body(&body, false);
         assert_eq!(
             api(serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]})),
             RequestApi::ChatCompletions
@@ -2142,6 +2213,11 @@ mod tests {
             api(serde_json::json!({"model": "m", "input": "hi", "instructions": "be brief"})),
             RequestApi::Responses
         );
+        // Responses has its own `prompt` (a prompt-template reference).
+        assert_eq!(
+            api(serde_json::json!({"model": "m", "input": "hi", "prompt": {"id": "pmpt_1"}})),
+            RequestApi::Responses
+        );
         assert_eq!(
             api(
                 serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "hi"}], "input": "hi"})
@@ -2152,6 +2228,44 @@ mod tests {
             api(serde_json::json!({"model": "m"})),
             RequestApi::ChatCompletions
         );
+    }
+
+    /// The Frontend applies `--default-chat-template-kwargs` to a Responses
+    /// request before templating; the EPP must too, or the tokens it injects
+    /// render a different prompt from the one the Frontend would.
+    #[test]
+    fn responses_conversion_applies_chat_template_defaults() {
+        let defaults = parse_chat_template_defaults(Some(r#"{"enable_thinking": false}"#)).unwrap();
+        let enable_thinking = |body: serde_json::Value| {
+            responses_to_chat_request(serde_json::from_value(body).unwrap(), &defaults)
+                .unwrap()
+                .chat_template_args
+                .and_then(|args| args.get("enable_thinking").cloned())
+        };
+        assert_eq!(
+            enable_thinking(serde_json::json!({"model": "m", "input": "hi"})),
+            Some(serde_json::json!(false))
+        );
+        assert_eq!(
+            enable_thinking(serde_json::json!({
+                "model": "m",
+                "input": "hi",
+                "chat_template_kwargs": {"enable_thinking": true},
+            })),
+            Some(serde_json::json!(true))
+        );
+
+        assert_eq!(
+            parse_chat_template_defaults(None).unwrap(),
+            ChatTemplateDefaults::default()
+        );
+        assert_eq!(
+            parse_chat_template_defaults(Some(" ")).unwrap(),
+            ChatTemplateDefaults::default()
+        );
+        assert!(parse_chat_template_defaults(Some("[1]")).is_err());
+        assert!(parse_chat_template_defaults(Some("enable_thinking=false")).is_err());
+        assert!(parse_chat_template_defaults(Some(r#"{"chat_template": "x"}"#)).is_err());
     }
 
     /// A `/v1/responses` body has `input`, not `messages` or `prompt`, so it
@@ -2199,7 +2313,11 @@ mod tests {
             );
 
             let responses_tokens = template_tokens(
-                &responses_to_chat_request(serde_json::from_str(&responses_body).unwrap()).unwrap(),
+                &responses_to_chat_request(
+                    serde_json::from_str(&responses_body).unwrap(),
+                    &ChatTemplateDefaults::default(),
+                )
+                .unwrap(),
             );
 
             let chat_request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =

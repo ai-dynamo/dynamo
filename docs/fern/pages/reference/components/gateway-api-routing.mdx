@@ -87,6 +87,22 @@ Gateway topology.
   scores.
 </ParamField>
 
+<ParamField path="DYN_DEFAULT_CHAT_TEMPLATE_KWARGS" type="JSON object">
+  Chat template kwargs the Frontend applies to every chat request, as set by the Frontend's
+  `--default-chat-template-kwargs` or `DYN_DEFAULT_CHAT_TEMPLATE_KWARGS`, including any vLLM
+  `--default-chat-template-kwargs` the Frontend folds in. Set the same merged value on the EPP. The
+  EPP renders `/v1/responses` requests with it before it injects their tokens, and the Frontend
+  generates from those tokens, so a mismatch changes the prompt, such as whether thinking is on. The
+  EPP does not apply this setting to `/v1/chat/completions` requests.
+</ParamField>
+
+<ParamField path="DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION" type="boolean" default="false">
+  Set it on the EPP when it is set on the Frontend. The EPP converts `/v1/responses` requests the way
+  the Frontend does, including the strict function-schema check, so without it the Gateway returns
+  400 for a request the Frontend would accept. See the
+  [Frontend setting](frontend-configuration.mdx).
+</ParamField>
+
 <ParamField path="DYN_USE_KV_EVENTS" type="boolean" default="true">
   Enables worker-published KV event consumption in the EPP router. When `false`, the router relies on
   predicted local state instead of precise worker cache events.
