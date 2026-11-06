@@ -16,6 +16,7 @@ from dynamo.common.configuration.groups.frontend_decoding_args import (
     add_frontend_decoding_arg,
 )
 from dynamo.common.configuration.utils import (
+    Deprecated,
     add_argument,
     add_negatable_bool_argument,
     parse_bool,
@@ -286,6 +287,7 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--realtime",
             env_var="DYN_VLLM_REALTIME",
             default=False,
+            deprecated=Deprecated("--endpoint-types realtime", remove_in="v1.9"),
             help="Serve a ModelType.Realtime bidirectional endpoint through "
             "the OpenAI /v1/realtime protocol. Standard vLLM currently "
             "supports text-only realtime and transcription sessions. "
@@ -1052,12 +1054,16 @@ class DynamoVllmConfig(ConfigBase):
                 else self.disaggregation_mode
             )
             raise ValueError(
-                f"--realtime is only valid with --disaggregation-mode=agg (got {mode})."
+                f"--endpoint-types realtime is only valid with --disaggregation-mode=agg (got {mode})."
             )
         if self.embedding_worker:
-            raise ValueError("--realtime cannot be combined with --embedding-worker.")
+            raise ValueError(
+                "--endpoint-types realtime cannot be combined with --embedding-worker."
+            )
         if self.classify_worker:
-            raise ValueError("--realtime cannot be combined with --classify-worker.")
+            raise ValueError(
+                "--endpoint-types realtime cannot be combined with --classify-worker."
+            )
         for enabled, option in (
             (bool(self.custom_encoder_class), "--custom-encoder-class"),
             (self.gms_shadow_mode, "--gms-shadow-mode"),
@@ -1065,15 +1071,21 @@ class DynamoVllmConfig(ConfigBase):
             (self.headless, "--headless"),
         ):
             if enabled:
-                raise ValueError(f"--realtime cannot be combined with {option}.")
+                raise ValueError(
+                    f"--endpoint-types realtime cannot be combined with {option}."
+                )
         if self.enable_multimodal:
             raise ValueError(
-                "--realtime cannot be combined with multimodal worker flags."
+                "--endpoint-types realtime cannot be combined with multimodal worker flags."
             )
         if self.benchmark_mode is not None:
-            raise ValueError("--realtime cannot be combined with --benchmark-mode.")
+            raise ValueError(
+                "--endpoint-types realtime cannot be combined with --benchmark-mode."
+            )
         if getattr(getattr(self, "engine_args", None), "enable_lora", False):
-            raise ValueError("--realtime cannot be combined with --enable-lora.")
+            raise ValueError(
+                "--endpoint-types realtime cannot be combined with --enable-lora."
+            )
 
     def _validate_transcription_worker_exclusivity(self) -> None:
         """Transcription serving uses a dedicated aggregated ASR worker."""
@@ -1092,7 +1104,7 @@ class DynamoVllmConfig(ConfigBase):
         for enabled, option in (
             (self.embedding_worker, "--embedding-worker"),
             (self.classify_worker, "--classify-worker"),
-            (self.realtime, "--realtime"),
+            (self.realtime, "--endpoint-types realtime"),
             (bool(self.custom_encoder_class), "--custom-encoder-class"),
             (self.gms_shadow_mode, "--gms-shadow-mode"),
             (self.enable_rl, "--enable-rl"),

@@ -389,7 +389,8 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Comma-separated list of endpoint types to enable. Options: "
             "'chat', 'completions', or 'none'. Use 'completions' for models "
             "without chat templates. Use 'none' for topology-only workers "
-            "fronted by another Dynamo service.",
+            "fronted by another Dynamo service. vLLM also accepts 'realtime' "
+            "for /v1/realtime, served with the other types by one engine.",
         )
 
         add_argument(
