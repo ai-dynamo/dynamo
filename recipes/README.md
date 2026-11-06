@@ -94,6 +94,7 @@ These recipes are under active development and may require additional setup step
 
 | Model | Framework | Mode | GPUs | Deployment | Notes |
 |-------|-----------|------|------|------------|-------|
+| **[Kimi-K3.1-Pro](kimi-k3.1-pro/)** | vLLM / SGLang | Aggregated / Disaggregated | 16x B200 / 8–24x GB300 / 16–24x VR200 | ✅ | vLLM text benchmarks; GB300 multimodal overlays; B200/VR200 DSpark with separate synthetic-acceptance benchmark variants. SGLang is GB300-only and functional-only. |
 | **[Motif-3 NVFP4](motif-3/)** | vLLM | Aggregated / Disaggregated 3P1D | 2x / 8x B200 | ✅ | TP2 per worker, expert parallelism, MTP2, FP8 KV cache; KV-aware routing and NIXL for disaggregation |
 | **[Gemma-4-31B](gemma4-31b/)** | TensorRT-LLM | Aggregated | 8x B200 / 8x GB200 / 8x H200 | ✅ | NVFP4 + FP8 KV on B200/GB200; BF16 + 16-bit KV and TP4 on H200; KV-aware routing; MTP on B200/GB200, not yet verified on H200; agentic profile |
 | **[GLM-5-NVFP4 (EFA)](glm-5-nvfp4/sglang/disagg/efa/)** | SGLang | Disagg Prefill/Decode over AWS EFA | 20x GB200 | ✅ | KV transfer over AWS EFA via NIXL LIBFABRIC instead of UCX. Patched libfabric baked into image. Requires [custom container build](glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa). |
