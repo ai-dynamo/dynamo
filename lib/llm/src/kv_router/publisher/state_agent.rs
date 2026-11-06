@@ -108,7 +108,17 @@ pub struct KvStateAgentVllmSource {
     pub topic: String,
     pub image_token_id: Option<u32>,
     pub video_token_id: Option<u32>,
+    pub engine_owned_mm_identity: bool,
     pub ingress_protocol: KvStateIngressProtocol,
+}
+
+impl KvStateAgentVllmSource {
+    fn normalizer(&self, kv_block_size: u32) -> ZmqEventNormalizer {
+        ZmqEventNormalizer::new(kv_block_size)
+            .with_image_token_id(self.image_token_id)
+            .with_video_token_id(self.video_token_id)
+            .with_engine_owned_mm_identity(self.engine_owned_mm_identity)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1691,12 +1701,8 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
         status,
         cancel,
     } = task;
-    let mut framework_normalizer = ZmqEventNormalizer::new(kv_block_size)
-        .with_image_token_id(source.image_token_id)
-        .with_video_token_id(source.video_token_id);
-    let mut cache_owner_normalizer = ZmqEventNormalizer::new(kv_block_size)
-        .with_image_token_id(source.image_token_id)
-        .with_video_token_id(source.video_token_id);
+    let mut framework_normalizer = source.normalizer(kv_block_size);
+    let mut cache_owner_normalizer = source.normalizer(kv_block_size);
     loop {
         if !status
             .load()
@@ -2087,6 +2093,55 @@ mod tests {
             locality: None,
             ownership: ownership.map(str::to_owned),
             session_id: None,
+        }
+    }
+
+    #[test]
+    fn sglang_source_applies_mm_exclusion_to_framework_and_cache_owner() {
+        let worker = WorkerWithDpRank::new(17, 0);
+        for engine_owned_mm_identity in [false, true] {
+            let source = KvStateAgentVllmSource {
+                endpoint: String::new(),
+                topic: String::new(),
+                image_token_id: None,
+                video_token_id: None,
+                engine_owned_mm_identity,
+                ingress_protocol: KvStateIngressProtocol::SglangHiCacheV1,
+            };
+            let mut events = vec![
+                raw_store(None, None, 101),
+                raw_store(Some("CPU"), Some("kvcr"), 102),
+            ];
+            for event in &mut events {
+                let RawKvEvent::BlockStored { token_ids, .. } = event else {
+                    panic!("expected store");
+                };
+                token_ids.fill(dynamo_kv_router::protocols::MM_PAD_SHIFT_VALUE as u32);
+            }
+            let normalized = normalize_raw_batch(
+                events,
+                worker,
+                4,
+                source.ingress_protocol,
+                &mut source.normalizer(4),
+                &mut source.normalizer(4),
+            );
+            assert_eq!(normalized.source_fault, None);
+            assert_eq!(normalized.cache_owner_fault, None);
+            assert_eq!(normalized.events.len(), 2);
+            for event in normalized.events {
+                if engine_owned_mm_identity {
+                    assert!(matches!(
+                        event.event.data,
+                        KvCacheEventData::Removed(data) if data.block_hashes.is_empty()
+                    ));
+                } else {
+                    assert!(matches!(
+                        event.event.data,
+                        KvCacheEventData::Stored(data) if data.blocks.len() == 1
+                    ));
+                }
+            }
         }
     }
 

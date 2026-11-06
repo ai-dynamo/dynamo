@@ -63,22 +63,22 @@ type SweeperState struct {
 
 // terminalResult is the outcome once a terminal snapshot has been reconciled. A Failed
 // snapshot fails the run with the producer's own (bounded) diagnostics. A Succeeded one
-// must also contain a materialized candidate: success with nothing to recommend is a
+// must also contain a Valid=True candidate: success with nothing to recommend is a
 // failed run, not a result. The error is a *RunFailedError, so errors.Is(err,
 // ErrRunFailed) and ExitCode are unchanged.
 func terminalResult(desired DesiredState) error {
-	if desired.Phase == PhaseSucceeded && len(desired.Candidates) > 0 {
+	if desired.Phase == PhaseSucceeded && desired.Valid > 0 {
 		return nil
 	}
 	outcome := TerminalOutcome{Phase: PhaseFailed, Message: desired.Message, Error: desired.Error}
 	if desired.Phase == PhaseSucceeded {
-		outcome.Message = "no candidate was materialized"
+		outcome.Message = "no candidate is valid"
 		if desired.Failed > 0 {
 			noun := "failures"
 			if desired.Failed == 1 {
 				noun = "failure"
 			}
-			outcome.Message += fmt.Sprintf(": %d candidate materialization %s", desired.Failed, noun)
+			outcome.Message += fmt.Sprintf(": %d candidate %s", desired.Failed, noun)
 		}
 		outcome.Error = desired.FirstFailure
 	}

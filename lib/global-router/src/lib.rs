@@ -9,7 +9,7 @@
 //! from round trips this process measures, and count this process's own
 //! requests in an [`InFlightTracker`].
 
-mod affinity;
+pub mod affinity;
 mod load;
 mod pool;
 mod selector;
@@ -21,4 +21,4 @@ pub use pool::Pool;
 pub use selector::{
     LeastInFlightSelector, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
 };
-pub use signals::{LoadReport, PoolOccupancy, PoolSignals};
+pub use signals::{LoadReport, PoolOccupancy, PoolSignals, RelaySource, ReportReceipt};

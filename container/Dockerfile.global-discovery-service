@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1.10.0
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# CPU-only image for the Global Discovery Service, which serves pool discovery
+# for the Global Router over HTTP; see global-discovery-service.yaml. Build it
+# from the repository root:
+#   docker build -f container/Dockerfile.global-discovery-service -t global-discovery-service .
+FROM rust:1.96.1-trixie AS builder
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    build-essential cmake pkg-config protobuf-compiler libclang-dev libssl-dev curl \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    cargo build --locked --release -p dynamo-global-discovery-service --bin global-discovery-service
+
+FROM debian:trixie-slim AS global-discovery-service
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /workspace/target/release/global-discovery-service /usr/local/bin/global-discovery-service
+USER 10001:0
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/global-discovery-service"]
