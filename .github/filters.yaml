@@ -359,35 +359,38 @@ dgdr:
   - 'tests/deploy/test_dgdr_utils.py'
   - 'tests/deploy/dgd_utils.py'
 
-# The GAIE deploy test, which `deploy` and `operator` also run. Every worker
-# in it is a mocker, so engine changes do not run it.
+# The GAIE deploy test runs only on these paths. Every worker in it is a
+# mocker, so engine changes do not run it.
 gaie:
   - 'deploy/inference-gateway/ext-proc/**'
   - 'deploy/inference-gateway/scripts/**'
-  # The workspace files and the crates the EPP links
-  # (cargo tree -p dynamo-ext-proc -e normal,build).
+  # The workspace files and the crates the test exercises. The EPP also links
+  # lib/global-*, lib/kv-hashing, lib/rl and lib/truthy, which do not run it.
   - '.cargo/config.toml'
   - 'Cargo.toml'
   - 'Cargo.lock'
-  - 'lib/global-common/**'
-  - 'lib/global-discovery-client/**'
-  - 'lib/global-view-broadcaster/**'
-  - 'lib/kv-hashing/**'
   - 'lib/kv-router/**'
   - 'lib/llm/**'
   - 'lib/memory/**'
   - 'lib/mocker/**'
-  - 'lib/rl/**'
   - 'lib/router-plugins/builtin/**'
   - 'lib/runtime/**'
   - 'lib/tokens/**'
-  - 'lib/truthy/**'
   # The frontend sidecars and mocker workers behind the EPP, the image they run
   # from, and the examples the test deploys.
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/mocker/**'
   - 'container/templates/frontend.Dockerfile'
   - 'examples/backends/*/deploy/gaie/**'
+  # The operator, which renders the EPP and its InferencePool, and its chart.
+  - 'deploy/operator/**'
+  - 'deploy/helm/charts/platform/components/operator/**'
+  # The test and the helpers it runs on.
+  - 'tests/conftest.py'
+  - 'tests/deploy/conftest.py'
+  - 'tests/deploy/dgd_utils.py'
+  - 'tests/deploy/test_dgd.py'
+  - 'tests/deploy/vcluster_utils.py'
   # Engine gRPC APIs served by the mocker, which the EPP does not link.
   - '!lib/mocker/servers/**'
   - '!**/*.md'

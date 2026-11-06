@@ -1511,12 +1511,20 @@ class ManagedDeployment:
 
         try:
             assert self._custom_api is not None, "Kubernetes API not initialized"
-            await self._custom_api.create_namespaced_custom_object(
-                group="nvidia.com",
-                version=self.deployment_spec.api_version,
-                namespace=self.namespace,
-                plural="dynamographdeployments",
-                body=self.deployment_spec.spec(),
+            # A retry whose earlier attempt reached the API server gets 409,
+            # which the handler below accepts.
+            await retry_vcluster_api_async(
+                f"creating deployment {self.namespace}/{self._deployment_name}",
+                partial(
+                    self._custom_api.create_namespaced_custom_object,
+                    group="nvidia.com",
+                    version=self.deployment_spec.api_version,
+                    namespace=self.namespace,
+                    plural="dynamographdeployments",
+                    body=self.deployment_spec.spec(),
+                ),
+                (aiohttp.ClientConnectionError,),
+                self._logger,
             )
             self._logger.info(self.deployment_spec.spec())
             self._logger.info(f"Deployment Started {self._deployment_name}")
@@ -1845,9 +1853,9 @@ class ManagedDeployment:
             await asyncio.sleep(1)
 
     def port_forward(
-        self, pod: Pod, remote_port: int, max_connection_attempts: int = 3
+        self, pod: Pod | Service, remote_port: int, max_connection_attempts: int = 3
     ):
-        """Attempt to connect to a pod and return the port-forward object on success.
+        """Attempt to connect to a pod or Service and return the port-forward on success.
 
         Note: Port forwards run in background threads. When pods are terminated,
         the async cleanup may fail, which is expected and can be safely ignored.
@@ -1909,7 +1917,7 @@ class ManagedDeployment:
 
     def send_request_with_port_forward_retry(
         self,
-        pod: Pod,
+        pod: Pod | Service,
         remote_port: int,
         endpoint: str,
         payload: dict[str, Any],

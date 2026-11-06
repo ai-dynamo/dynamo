@@ -12,7 +12,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
@@ -27,6 +26,7 @@ from kubernetes_asyncio.client.exceptions import ApiException
 from tests.deploy.api_checks import check_chat_api, check_embedding_api
 from tests.deploy.conftest import DeploymentTarget
 from tests.deploy.dgd_utils import (
+    _KR8S_VCLUSTER_CONNECTION_ERRORS,
     DEFAULT_MAX_TOKENS,
     DEFAULT_REQUEST_TIMEOUT,
     DEFAULT_TEMPERATURE,
@@ -37,6 +37,7 @@ from tests.deploy.dgd_utils import (
     kubectl,
     validate_chat_response,
 )
+from tests.deploy.vcluster_utils import retry_vcluster_api
 from tests.utils.client import send_request, wait_for_model_availability
 from tests.utils.output_paths import resolve_test_output_path
 from tests.utils.router_nvext import require_router_worker_id, router_nvext_extra_body
@@ -48,6 +49,7 @@ JSON_LOG_REQUIRED_FIELDS = frozenset({"time", "level", "target", "message"})
 # The install script deploys the Gateway into agentgateway-system; the
 # controller provisions the proxy Service in that same namespace.
 GAIE_AGW_NAMESPACE = "agentgateway-system"
+GAIE_GATEWAY_PORT = 80
 
 
 def normalize_log_lines(log_lines: Any) -> list[str]:
@@ -463,13 +465,20 @@ async def test_gaie_deployment(
         if result.returncode != 0:
             logger.warning(f"Failed to delete HTTPRoute: {result.stderr}")
 
+    def apply_httproute() -> None:
+        """Apply the HTTPRoute, raising on failure so a dropped tunnel is retried."""
+        result = kubectl("apply", "-n", namespace, "-f", "-", input_=httproute_yaml)
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to apply HTTPRoute: {result.stderr}")
+        logger.info(f"HTTPRoute apply stdout: {result.stdout}")
+        if result.stderr:
+            logger.warning(f"HTTPRoute apply stderr: {result.stderr}")
+
     logger.info("Applying GAIE HTTPRoute...")
     request.addfinalizer(delete_httproute)
-    result = kubectl("apply", "-n", namespace, "-f", "-", input_=httproute_yaml)
-    logger.info(f"HTTPRoute apply stdout: {result.stdout}")
-    if result.stderr:
-        logger.warning(f"HTTPRoute apply stderr: {result.stderr}")
-    assert result.returncode == 0, f"Failed to apply HTTPRoute: {result.stderr}"
+    retry_vcluster_api(
+        "applying the HTTPRoute", apply_httproute, (RuntimeError,), logger
+    )
 
     # Debug: verify namespace state before creating DGD
     logger.info(f"Namespace: {namespace}")
@@ -520,12 +529,17 @@ async def test_gaie_deployment(
         # not in the workload namespace.
         gateway_svcs = []
         for attempt in range(30):
-            gateway_svcs = list(
-                kr8s.get(
-                    "services",
-                    "inference-gateway",
-                    namespace=GAIE_AGW_NAMESPACE,
-                )
+            gateway_svcs = retry_vcluster_api(
+                "looking up the inference-gateway Service",
+                lambda: list(
+                    kr8s.get(
+                        "services",
+                        "inference-gateway",
+                        namespace=GAIE_AGW_NAMESPACE,
+                    )
+                ),
+                _KR8S_VCLUSTER_CONNECTION_ERRORS,
+                logger,
             )
             if gateway_svcs:
                 break
@@ -538,82 +552,85 @@ async def test_gaie_deployment(
         assert (
             len(gateway_svcs) > 0
         ), f"inference-gateway service not found in namespace {GAIE_AGW_NAMESPACE}"
-        gateway_pf = gateway_svcs[0].portforward(remote_port=80, local_port=0)
-        gateway_pf.start()
-        time.sleep(2)
+        gateway_svc = gateway_svcs[0]
+        # ManagedDeployment stops its port-forwards at teardown.
+        gateway_pf = deployment.port_forward(gateway_svc, GAIE_GATEWAY_PORT)
+        assert gateway_pf is not None, "Failed to port-forward the inference-gateway"
+        gateway_url = f"http://localhost:{gateway_pf.local_port}"
+        logger.info(f"Gateway port-forward established: {gateway_url}")
 
-        try:
-            gateway_url = f"http://localhost:{gateway_pf.local_port}"
-            logger.info(f"Gateway port-forward established: {gateway_url}")
+        endpoint = deployment_spec.endpoint
+        headers = {"Host": route_hostname}
+        logger.info(f"Using Host header: {route_hostname}")
 
-            endpoint = deployment_spec.endpoint
-            headers = {"Host": route_hostname}
-            logger.info(f"Using Host header: {route_hostname}")
+        model_ready = wait_for_model_availability(
+            url=gateway_url,
+            endpoint=endpoint,
+            model=GAIE_MODEL_NAME,
+            logger=logger,
+            # At most about 200 s, so a Gateway that never routes fails
+            # here, inside the test's timeout.
+            max_attempts=12,
+            attempt_timeouts=[10] * 12,
+            headers=headers,
+        )
+        assert model_ready, (
+            f"Model '{GAIE_MODEL_NAME}' did not become available "
+            f"within the timeout period"
+        )
 
-            model_ready = wait_for_model_availability(
-                url=gateway_url,
-                endpoint=endpoint,
-                model=GAIE_MODEL_NAME,
-                logger=logger,
-                # At most about 200 s, so a Gateway that never routes fails
-                # here, inside the test's timeout.
-                max_attempts=12,
-                attempt_timeouts=[10] * 12,
-                headers=headers,
-            )
-            assert model_ready, (
-                f"Model '{GAIE_MODEL_NAME}' did not become available "
-                f"within the timeout period"
-            )
+        payload = {
+            "model": GAIE_MODEL_NAME,
+            "messages": [{"role": "user", "content": TEST_PROMPT}],
+            "max_tokens": DEFAULT_MAX_TOKENS,
+            "temperature": DEFAULT_TEMPERATURE,
+            "stream": False,
+            **router_nvext_extra_body(["worker_id"]),
+        }
+        logger.info(f"Sending inference request to {gateway_url}{endpoint}")
+        # A dropped vCluster tunnel closes the request's connection; the helper
+        # then sends it again through a new port-forward.
+        response, _ = deployment.send_request_with_port_forward_retry(
+            pod=gateway_svc,
+            remote_port=GAIE_GATEWAY_PORT,
+            endpoint=endpoint,
+            payload=payload,
+            timeout=DEFAULT_REQUEST_TIMEOUT,
+            port_forward=gateway_pf,
+            request_sender=lambda url, payload, *, timeout, method: requests.request(
+                method, url, json=payload, headers=headers, timeout=timeout
+            ),
+        )
 
-            url = f"{gateway_url}{endpoint}"
-            payload = {
-                "model": GAIE_MODEL_NAME,
-                "messages": [{"role": "user", "content": TEST_PROMPT}],
-                "max_tokens": DEFAULT_MAX_TOKENS,
-                "temperature": DEFAULT_TEMPERATURE,
-                "stream": False,
-                **router_nvext_extra_body(["worker_id"]),
-            }
-            logger.info(f"Sending inference request to {url}")
-            response = requests.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=DEFAULT_REQUEST_TIMEOUT,
-            )
+        # A mocker's random tokens give text of unpredictable length, so
+        # require only non-empty text within max_tokens, and check where
+        # the request ran: one worker for both phases in the aggregated
+        # case, separate prefill and decode workers in the disaggregated one.
+        validate_chat_response(
+            response=response,
+            expected_model=GAIE_MODEL_NAME,
+            min_content_length=1,
+            max_tokens=DEFAULT_MAX_TOKENS,
+        )
 
-            # A mocker's random tokens give text of unpredictable length, so
-            # require only non-empty text within max_tokens, and check where
-            # the request ran: one worker for both phases in the aggregated
-            # case, separate prefill and decode workers in the disaggregated one.
-            validate_chat_response(
-                response=response,
-                expected_model=GAIE_MODEL_NAME,
-                min_content_length=1,
-                max_tokens=DEFAULT_MAX_TOKENS,
-            )
+        data = response.json()
+        worker_ids = require_router_worker_id(data, context=deployment_spec.name)
+        prefill_id = worker_ids.get("prefill_worker_id")
+        decode_id = worker_ids.get("decode_worker_id")
+        if "prefill" in workers:
+            assert (
+                None not in (prefill_id, decode_id) and prefill_id != decode_id
+            ), f"Expected separate prefill and decode workers, got {dict(worker_ids)}"
+        else:
+            assert prefill_id in (
+                None,
+                decode_id,
+            ), f"Expected one worker for both phases, got {dict(worker_ids)}"
 
-            data = response.json()
-            worker_ids = require_router_worker_id(data, context=deployment_spec.name)
-            prefill_id = worker_ids.get("prefill_worker_id")
-            decode_id = worker_ids.get("decode_worker_id")
-            if "prefill" in workers:
-                assert (
-                    None not in (prefill_id, decode_id) and prefill_id != decode_id
-                ), f"Expected separate prefill and decode workers, got {dict(worker_ids)}"
-            else:
-                assert prefill_id in (
-                    None,
-                    decode_id,
-                ), f"Expected one worker for both phases, got {dict(worker_ids)}"
-
-            content = data["choices"][0]["message"]["content"]
-            logger.info(
-                f"GAIE deployment test PASSED | "
-                f"model={data['model']}, status={response.status_code}, "
-                f"response_length={len(content)} chars\n"
-                f"Model response: {content}"
-            )
-        finally:
-            gateway_pf.stop()
+        content = data["choices"][0]["message"]["content"]
+        logger.info(
+            f"GAIE deployment test PASSED | "
+            f"model={data['model']}, status={response.status_code}, "
+            f"response_length={len(content)} chars\n"
+            f"Model response: {content}"
+        )

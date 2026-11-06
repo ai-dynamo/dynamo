@@ -13,6 +13,7 @@ import kr8s
 import pytest
 import requests
 import yaml
+from kubernetes_asyncio.client.exceptions import ApiException
 
 from tests.deploy import dgd_utils
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
@@ -93,6 +94,37 @@ async def test_delete_deployment_retries_vcluster_connection_failure(
     await deployment._delete_deployment()
 
     assert deployment._custom_api.delete_namespaced_custom_object.await_count == 2
+    sleep.assert_awaited_once_with(5)
+
+
+@pytest.mark.parametrize(
+    "retry_outcome",
+    [None, ApiException(status=409, reason="Conflict")],
+    ids=["created", "already-created"],
+)
+async def test_create_deployment_retries_vcluster_connection_failure(
+    monkeypatch, tmp_path, retry_outcome
+) -> None:
+    """Retry a create the tunnel dropped, including one the API server applied."""
+    deployment = managed_deployment(tmp_path)
+    deployment.deployment_spec.spec = MagicMock(return_value={})
+    connection_key = MagicMock(host="127.0.0.1", port=8443, ssl=True)
+    deployment._custom_api = MagicMock()
+    deployment._custom_api.create_namespaced_custom_object = AsyncMock(
+        side_effect=[
+            aiohttp.ClientConnectorError(
+                connection_key,
+                ConnectionRefusedError(111, "vCluster tunnel unavailable"),
+            ),
+            retry_outcome,
+        ]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
+
+    await deployment._create_deployment()
+
+    assert deployment._custom_api.create_namespaced_custom_object.await_count == 2
     sleep.assert_awaited_once_with(5)
 
 
