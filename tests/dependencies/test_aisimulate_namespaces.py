@@ -26,7 +26,12 @@ pytestmark = [
 ]
 
 ROOT = Path(__file__).resolve().parents[2]
-LEGACY_DISTRIBUTIONS = {"aiconfigurator", "aiconfigurator-core"}
+LEGACY_DISTRIBUTIONS = {
+    "aiconfigurator",
+    "aiconfigurator-core",
+    "aisimulate",
+    "aisimulate-core",
+}
 CARGO_LOCKFILES = (
     ROOT / "Cargo.lock",
     ROOT / "lib/bindings/python/Cargo.lock",
@@ -147,7 +152,7 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
     requirement = next(
         Requirement(item)
         for item in root_project["dependencies"]
-        if canonicalize_name(Requirement(item).name) == "aisimulate"
+        if canonicalize_name(Requirement(item).name) == "aisim"
     )
     if "git" in canonical_core:
         assert requirement.url == (
@@ -165,7 +170,7 @@ def test_aisimulate_wheel_uses_canonical_import_namespaces() -> None:
     if sys.version_info < (3, 11) or sys.version_info >= (3, 14):
         pytest.skip("AISimulate supports Python 3.11 through 3.13")
 
-    release = metadata.distribution("aisimulate")
+    release = metadata.distribution("aisim")
     release_requirements = _requirement_names(release.requires or [])
     release_files = {str(path) for path in release.files or []}
 

@@ -117,8 +117,7 @@ fn router_client(
 
 /// LoRA-aware routing is only implemented for the KV, Random, and RoundRobin modes. `Direct`
 /// dispatches to a caller-chosen worker and bypasses both the LoRA filter and non-KV load
-/// tracking; the advanced load-based modes (`PowerOfTwoChoices`, `LeastLoaded`,
-/// `DeviceAwareWeighted`) have no 2-stage LoRA filtering. Reject those combinations so a
+/// tracking; the advanced load-based modes (`LeastLoaded`, `DeviceAwareWeighted`) have no 2-stage LoRA filtering. Reject those combinations so a
 /// misconfiguration fails fast — at startup, before the initial-worker wait — instead of
 /// silently mis-routing adapter traffic to a worker without the adapter.
 fn validate_router_mode_for_lora(
@@ -539,7 +538,6 @@ mod tests {
             KV,
             Random,
             RoundRobin,
-            PowerOfTwoChoices,
             LeastLoaded,
             DeviceAwareWeighted,
         ];
@@ -561,7 +559,7 @@ mod tests {
         }
 
         // LoRA enabled: Direct + the advanced load-based modes are rejected with a clear error.
-        for m in [Direct, PowerOfTwoChoices, LeastLoaded, DeviceAwareWeighted] {
+        for m in [Direct, LeastLoaded, DeviceAwareWeighted] {
             let err = validate_router_mode_for_lora(m, true, false)
                 .expect_err("must reject unsupported LoRA router mode")
                 .to_string();

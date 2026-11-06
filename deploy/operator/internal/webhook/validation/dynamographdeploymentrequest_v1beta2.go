@@ -29,7 +29,7 @@ import (
 // validateDynamoGraphDeploymentRequestEnvelopeV1beta2 validates the v1beta2 spec carried in
 // spec.v1beta2 of a v1beta1 object. raw is that field and fldPath is its path; a spec that
 // does not decode is reported there. Errors about the decoded spec use the v1beta2 spec's own
-// field paths (spec.model, spec.aisimulate, ...), which are what the user wrote, so they are
+// field paths (spec.model, spec.aisim, ...), which are what the user wrote, so they are
 // rooted at spec rather than at fldPath.
 func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRequestEnvelopeV1beta2(
 	raw *apiextensionsv1.JSON,
@@ -63,10 +63,10 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	if spec.Workload != nil {
 		allErrs = append(allErrs, validateWorkloadSpec(spec.Workload, fldPath.Child("workload"))...)
 	}
-	if spec.AISimulate == nil {
+	if spec.AISim == nil {
 		return allErrs
 	}
-	return append(allErrs, validateAISimulateSpec(spec.AISimulate, fldPath.Child("aisimulate"))...)
+	return append(allErrs, validateAISimSpec(spec.AISim, fldPath.Child("aisim"))...)
 }
 
 // validateHardwareSpecV1beta2 validates hardware. spec and fldPath must not be nil.

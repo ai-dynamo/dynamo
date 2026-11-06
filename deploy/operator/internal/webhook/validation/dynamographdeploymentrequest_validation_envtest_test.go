@@ -601,7 +601,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			check: func(t *testing.T, result *unstructured.Unstructured) {
-				if got := v1beta2String(t, result, "spec", "aisimulate", "inputOverrides", "dgdr_run", "generator"); got != "aic" {
+				if got := v1beta2String(t, result, "spec", "aisim", "inputOverrides", "dgdr_run", "generator"); got != "aic" {
 					t.Fatalf("dgdr_run.generator = %q, want aic", got)
 				}
 			},
@@ -623,14 +623,14 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantWebhook: []string{
-				"spec.aisimulate.inputOverrides.dgdr_run.derive_runtime_images: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisimulate.inputOverrides.dgdr_run.max_candidates: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisimulate.inputOverrides.dgdr_run.name: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisimulate.inputOverrides.dgdr_run.namespace: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisimulate.inputOverrides.dgdr_run.num_gpus_per_node: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisimulate.inputOverrides.dgdr_run.runtime_image: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisimulate.inputOverrides.dgdr_run.runtime_version_override: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisimulate.inputOverrides.dgdr_run.snapshot_dir: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides.dgdr_run.derive_runtime_images: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides.dgdr_run.max_candidates: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides.dgdr_run.name: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides.dgdr_run.namespace: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides.dgdr_run.num_gpus_per_node: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides.dgdr_run.runtime_image: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides.dgdr_run.runtime_version_override: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides.dgdr_run.snapshot_dir: Forbidden: is managed by the operator and cannot be overridden",
 			},
 		},
 		{
@@ -641,7 +641,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantWebhook: []string{
-				"spec.aisimulate.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
+				"spec.aisim.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
 			},
 		},
 		{
@@ -652,7 +652,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantWebhook: []string{
-				"spec.aisimulate.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
+				"spec.aisim.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
 			},
 		},
 		{
@@ -663,7 +663,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantWebhook: []string{
-				"spec.aisimulate.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
+				"spec.aisim.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
 			},
 		},
 		{
@@ -889,7 +889,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			check: func(t *testing.T, result *unstructured.Unstructured) {
-				if got := v1beta2String(t, result, "spec", "aisimulate", "inputOverrides", "traffic", "source", "format"); got != "mooncake" {
+				if got := v1beta2String(t, result, "spec", "aisim", "inputOverrides", "traffic", "source", "format"); got != "mooncake" {
 					t.Fatalf("inputOverrides.traffic.source.format = %q, want the override kept", got)
 				}
 			},
@@ -1495,12 +1495,12 @@ func v1beta2String(t *testing.T, obj *unstructured.Unstructured, path ...string)
 
 // setV1beta2InputOverrides replaces any input overrides the fixture carried.
 func setV1beta2InputOverrides(spec map[string]any, overrides map[string]any) {
-	aisimulate, _ := spec["aisimulate"].(map[string]any)
-	if aisimulate == nil {
-		aisimulate = map[string]any{}
-		spec["aisimulate"] = aisimulate
+	aisim, _ := spec["aisim"].(map[string]any)
+	if aisim == nil {
+		aisim = map[string]any{}
+		spec["aisim"] = aisim
 	}
-	aisimulate["inputOverrides"] = overrides
+	aisim["inputOverrides"] = overrides
 }
 
 // setBeta2AdmissionHardware names the hardware, so fixtures do not depend on GPU discovery.

@@ -9,9 +9,10 @@ use std::{
 };
 
 use dynamo_kv_router::{
+    plugins::{request_classifier::AbortCause, worker_selection::WorkerInputs},
     protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
-    scheduling::{AbortCause, KvSchedulerError},
-    selector::{HostedSelectionRequest, HostedWorkerPicker, WorkerInputs},
+    scheduling::KvSchedulerError,
+    selector::{HostedSelectionRequest, HostedWorkerPicker},
 };
 use dynamo_runtime::{
     error::{DynamoError, ErrorType, match_error_chain},

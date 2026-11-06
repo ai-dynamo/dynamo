@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use super::*;
-use crate::client::SupportedMedia;
+use crate::client::{SupportedInputs, SupportedMedia};
 use crate::test_fixtures::*;
 use dynamo_backend_common::MultimodalItemRef;
 use serde_json::json;
@@ -79,6 +79,65 @@ fn request_maps_sampling_stop_and_output_fields() {
 }
 
 #[test]
+fn text_input_model_receives_the_formatted_audio_prompt() {
+    let mut req = request();
+    req.token_ids = Arc::new(Vec::new());
+    req.multi_modal_data = Some(HashMap::from([(
+        "audio_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "https://example.com/audio.wav".to_string(),
+        )],
+    )]));
+    let task_prompt = "<|startoftranscript|><|fr|><|translate|><|notimestamps|>";
+    req.extra_args = Some(json!({"formatted_prompt": task_prompt}));
+    let mut model_limits = all_media_limits(4096).expect("limits");
+    model_limits.supported_inputs = Some(SupportedInputs {
+        text: true,
+        token_ids: false,
+    });
+
+    let proto = build_generate_request(req, "req", "model", Some(model_limits), AGG)
+        .expect("text-input audio request");
+    assert_eq!(
+        proto.input,
+        Some(pb::generate_request::Input::Prompt(task_prompt.to_string()))
+    );
+}
+
+#[test]
+fn text_input_model_accepts_an_empty_formatted_prompt() {
+    let mut req = request();
+    req.token_ids = Arc::new(Vec::new());
+    req.extra_args = Some(json!({"formatted_prompt": ""}));
+    let mut model_limits = limits(4096).expect("limits");
+    model_limits.supported_inputs = Some(SupportedInputs {
+        text: true,
+        token_ids: false,
+    });
+
+    let proto = build_generate_request(req, "req", "model", Some(model_limits), AGG)
+        .expect("an empty prompt lets the engine select its model default");
+    assert_eq!(
+        proto.input,
+        Some(pb::generate_request::Input::Prompt(String::new()))
+    );
+}
+
+#[test]
+fn text_input_model_requires_a_formatted_prompt() {
+    let req = request();
+    let mut model_limits = limits(4096).expect("limits");
+    model_limits.supported_inputs = Some(SupportedInputs {
+        text: true,
+        token_ids: false,
+    });
+
+    let error = build_generate_request(req, "req", "model", Some(model_limits), AGG)
+        .expect_err("a token-only preprocessed request cannot serve a text-input model");
+    assert!(error.to_string().contains("extra_args.formatted_prompt"));
+}
+
+#[test]
 fn image_urls_data_uris_and_uuids_are_mapped_in_order() {
     let mut req = request();
     // Routing-only multimodal metadata has already served its purpose by the
@@ -145,7 +204,7 @@ fn inline_media_conversion_preserves_the_payload_allocation() {
 }
 
 #[test]
-fn mixed_image_and_video_media_follow_prompt_order() {
+fn mixed_media_follow_prompt_order() {
     let mut req = request();
     req.multi_modal_data = Some(HashMap::from([
         (
@@ -162,6 +221,12 @@ fn mixed_image_and_video_media_follow_prompt_order() {
                 MultimodalData::RawUrl("data:video/mp4;base64,dmlkZW8=".to_string()),
             ],
         ),
+        (
+            "audio_url".to_string(),
+            vec![MultimodalData::RawUrl(
+                "data:audio/wav;base64,YXVkaW8=".to_string(),
+            )],
+        ),
     ]));
     req.multi_modal_uuids = Some(HashMap::from([
         (
@@ -172,6 +237,7 @@ fn mixed_image_and_video_media_follow_prompt_order() {
             "video_url".to_string(),
             vec![Some("video-0".to_string()), Some("video-1".to_string())],
         ),
+        ("audio_url".to_string(), vec![Some("audio-0".to_string())]),
     ]));
     req.multi_modal_order = Some(vec![
         MultimodalItemRef {
@@ -180,6 +246,10 @@ fn mixed_image_and_video_media_follow_prompt_order() {
         },
         MultimodalItemRef {
             modality: "image_url".to_string(),
+            index: 0,
+        },
+        MultimodalItemRef {
+            modality: "audio_url".to_string(),
             index: 0,
         },
         MultimodalItemRef {
@@ -192,7 +262,7 @@ fn mixed_image_and_video_media_follow_prompt_order() {
         },
     ]);
 
-    let proto = build_generate_request(req, "req", "model", image_video_limits(4096), AGG)
+    let proto = build_generate_request(req, "req", "model", all_media_limits(4096), AGG)
         .expect("mixed media request");
 
     assert_eq!(
@@ -204,6 +274,7 @@ fn mixed_image_and_video_media_follow_prompt_order() {
         [
             pb::Modality::Video as i32,
             pb::Modality::Image as i32,
+            pb::Modality::Audio as i32,
             pb::Modality::Video as i32,
             pb::Modality::Image as i32,
         ]
@@ -214,7 +285,7 @@ fn mixed_image_and_video_media_follow_prompt_order() {
             .iter()
             .map(|item| item.uuid.as_str())
             .collect::<Vec<_>>(),
-        ["video-0", "image-0", "video-1", ""]
+        ["video-0", "image-0", "audio-0", "video-1", ""]
     );
 }
 
@@ -278,8 +349,219 @@ fn mm_routing_hashes_are_not_used_as_engine_cache_uuids() {
 }
 
 #[test]
+fn image_routing_hints_require_capability_and_exact_frontend_metadata() {
+    let mut req = request();
+    add_images(&mut req, ["https://example.com/first.png"]);
+    req.extra_args = Some(json!({"mm_hashes": ["0123456789abcdef"]}));
+    req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
+        routing_token_ids: vec![11, 22, 33],
+        expanded_prompt_len: 3,
+        ..Default::default()
+    });
+    let mut enabled = image_limits(4096).unwrap();
+    enabled.supports_image_routing = true;
+    let proto = build_generate_request(req.clone(), "req", "model", Some(enabled), AGG).unwrap();
+    assert_eq!(proto.media[0].uuid, "dynamo-image-v1:0123456789abcdef");
+
+    for mode in [DisaggregationMode::Prefill, DisaggregationMode::Decode] {
+        let proto =
+            build_generate_request(req.clone(), "req", "model", Some(enabled), mode).unwrap();
+        assert!(proto.media[0].uuid.is_empty());
+    }
+
+    let proto =
+        build_generate_request(req.clone(), "req", "model", image_limits(4096), AGG).unwrap();
+    assert!(proto.media[0].uuid.is_empty());
+    let mut no_routing = req.clone();
+    no_routing.mm_routing_info = None;
+    let proto = build_generate_request(no_routing, "req", "model", Some(enabled), AGG).unwrap();
+    assert!(proto.media[0].uuid.is_empty());
+
+    req.multi_modal_uuids = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![Some("caller-owned".to_string())],
+    )]));
+    let proto = build_generate_request(req, "req", "model", Some(enabled), AGG).unwrap();
+    assert_eq!(proto.media[0].uuid, "caller-owned");
+}
+
+#[test]
+fn caller_uuids_cannot_spoof_internal_image_routing_hints() {
+    let mut req = request();
+    add_images(
+        &mut req,
+        [
+            "https://example.com/first.png",
+            "https://example.com/second.png",
+        ],
+    );
+    req.multi_modal_uuids = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![
+            Some("caller-owned".to_string()),
+            Some("dynamo-image-v1:0123456789abcdef".to_string()),
+        ],
+    )]));
+    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
+        .expect_err("caller UUIDs must not masquerade as adapter-generated routing hints");
+    assert!(
+        error
+            .to_string()
+            .contains("reserved `dynamo-image-v1:` prefix")
+    );
+}
+
+#[test]
+fn image_routing_uses_only_the_image_hashes_from_grouped_metadata() {
+    let mut req = request();
+    add_images(&mut req, ["https://example.com/first.png"]);
+    req.extra_args = Some(json!({
+        "mm_hashes": ["1111111111111111"],
+        "mm_hashes_by_modality": {"image": ["0123456789abcdef"], "video": ["fedcba9876543210"]}
+    }));
+    req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
+        routing_token_ids: vec![11],
+        expanded_prompt_len: 1,
+        ..Default::default()
+    });
+    let mut limits = image_limits(4096).unwrap();
+    limits.supports_image_routing = true;
+    let proto = build_generate_request(req.clone(), "req", "model", Some(limits), AGG).unwrap();
+    assert_eq!(proto.media[0].uuid, "dynamo-image-v1:0123456789abcdef");
+
+    req.extra_args.as_mut().unwrap()["mm_hashes_by_modality"] =
+        json!({"video": ["fedcba9876543210"]});
+    let proto = build_generate_request(req, "req", "model", Some(limits), AGG).unwrap();
+    assert!(proto.media[0].uuid.is_empty());
+}
+
+#[test]
+fn mixed_media_image_hints_follow_modality_indices_and_preserve_video_uuids() {
+    let mut req = request();
+    add_images(
+        &mut req,
+        ["https://example.com/a.png", "https://example.com/b.png"],
+    );
+    req.multi_modal_data.as_mut().unwrap().insert(
+        "video_url".into(),
+        vec![MultimodalData::RawUrl(
+            "https://example.com/video.mp4".into(),
+        )],
+    );
+    req.multi_modal_order = Some(vec![
+        MultimodalItemRef {
+            modality: "video_url".into(),
+            index: 0,
+        },
+        MultimodalItemRef {
+            modality: "image_url".into(),
+            index: 1,
+        },
+        MultimodalItemRef {
+            modality: "image_url".into(),
+            index: 0,
+        },
+    ]);
+    req.multi_modal_uuids = Some(HashMap::from([(
+        "video_url".into(),
+        vec![Some("caller-video".into())],
+    )]));
+    req.extra_args = Some(json!({
+        "mm_hashes": ["fedcba9876543210", "2222222222222222", "1111111111111111"],
+        "mm_hashes_by_modality": {"image": ["1111111111111111", "2222222222222222"]}
+    }));
+    req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
+        routing_token_ids: vec![11, 22, 33],
+        expanded_prompt_len: 3,
+        ..Default::default()
+    });
+    let mut limits = image_video_limits(4096).unwrap();
+    limits.supports_image_routing = true;
+    let proto = build_generate_request(req.clone(), "req", "model", Some(limits), AGG).unwrap();
+    assert_eq!(
+        proto
+            .media
+            .iter()
+            .map(|item| (item.modality, item.uuid.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (pb::Modality::Video as i32, "caller-video"),
+            (
+                pb::Modality::Image as i32,
+                "dynamo-image-v1:2222222222222222"
+            ),
+            (
+                pb::Modality::Image as i32,
+                "dynamo-image-v1:1111111111111111"
+            ),
+        ]
+    );
+    assert_eq!(
+        proto
+            .media
+            .into_iter()
+            .map(|item| item.source.unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "https://example.com/video.mp4",
+            "https://example.com/b.png",
+            "https://example.com/a.png"
+        ]
+        .map(|url| pb::media_item::Source::Url(url.into()))
+    );
+    req.extra_args
+        .as_mut()
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .remove("mm_hashes_by_modality");
+    let proto = build_generate_request(req.clone(), "req", "model", Some(limits), AGG).unwrap();
+    assert_eq!(proto.media[0].uuid, "caller-video");
+    assert!(proto.media[1..].iter().all(|item| item.uuid.is_empty()));
+
+    req.multi_modal_uuids
+        .as_mut()
+        .unwrap()
+        .get_mut("video_url")
+        .unwrap()[0] = Some("dynamo-image-v1:0123456789abcdef".into());
+    let error = build_generate_request(req, "req", "model", Some(limits), AGG).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("reserved `dynamo-image-v1:` prefix")
+    );
+}
+
+#[test]
+fn malformed_image_routing_hashes_are_rejected_before_dispatch() {
+    for hashes in [
+        json!([]),
+        json!([""]),
+        json!(["not-a-valid-hash"]),
+        json!("bad"),
+        json!([null]),
+    ] {
+        let mut req = request();
+        add_images(&mut req, ["https://example.com/first.png"]);
+        req.extra_args = Some(json!({"mm_hashes": hashes}));
+        req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
+            routing_token_ids: vec![11],
+            expanded_prompt_len: 1,
+            ..Default::default()
+        });
+        let mut limits = image_limits(4096).unwrap();
+        limits.supports_image_routing = true;
+        assert!(build_generate_request(req, "req", "model", Some(limits), AGG).is_err());
+    }
+}
+
+#[test]
 fn media_requires_the_loaded_models_advertised_capability() {
-    for (key, modality) in [("image_url", "image"), ("video_url", "video")] {
+    for (key, modality) in [
+        ("image_url", "image"),
+        ("video_url", "video"),
+        ("audio_url", "audio"),
+    ] {
         let mut req = request();
         req.multi_modal_data = Some(HashMap::from([(
             key.to_string(),
@@ -310,6 +592,7 @@ fn images_reject_unknown_or_overridden_engine_windows() {
                 supported_media: Some(SupportedMedia {
                     image: true,
                     video: true,
+                    ..Default::default()
                 }),
                 ..Default::default()
             });
@@ -321,18 +604,37 @@ fn images_reject_unknown_or_overridden_engine_windows() {
 }
 
 #[test]
-fn unsupported_media_modalities_and_sources_are_rejected() {
+fn image_video_models_reject_audio() {
     let mut req = request();
     req.multi_modal_data = Some(HashMap::from([(
         "audio_url".to_string(),
         vec![MultimodalData::RawUrl(
+            "https://example.com/audio.wav".to_string(),
+        )],
+    )]));
+    let error = build_generate_request(req, "req", "model", image_video_limits(4096), AGG)
+        .expect_err("a model without audio support must reject audio");
+    assert!(
+        error
+            .to_string()
+            .contains("does not advertise audio support"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn unsupported_media_modalities_and_sources_are_rejected() {
+    let mut req = request();
+    req.multi_modal_data = Some(HashMap::from([(
+        "future_media".to_string(),
+        vec![MultimodalData::RawUrl(
             "https://example.com/media".to_string(),
         )],
     )]));
-    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
-        .expect_err("audio is not supported yet");
+    let error = build_generate_request(req, "req", "model", all_media_limits(4096), AGG)
+        .expect_err("unsupported modalities must be rejected");
     assert!(
-        error.to_string().contains("audio_url"),
+        error.to_string().contains("future_media"),
         "unexpected error: {error}"
     );
 
@@ -532,6 +834,7 @@ fn the_derived_max_tokens_respects_the_engines_output_cap() {
         Some(ModelLimits {
             context_length: Some(4096),
             max_output_tokens: Some(256),
+            supported_inputs: None,
             supported_media: Some(SupportedMedia::default()),
             ..Default::default()
         }),

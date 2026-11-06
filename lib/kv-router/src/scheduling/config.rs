@@ -1247,7 +1247,7 @@ impl KvRouterConfig {
     pub fn worker_selection_config(
         &self,
     ) -> Result<
-        Option<&super::policy_config::WorkerSelectionConfig>,
+        Option<&crate::plugins::worker_selection::WorkerSelectionConfig>,
         super::policy_config::RouterPolicyConfigError,
     > {
         Ok(self
@@ -1259,7 +1259,7 @@ impl KvRouterConfig {
     pub fn request_classifier_config(
         &self,
     ) -> Result<
-        Option<&super::policy_config::RequestClassifierConfig>,
+        Option<&crate::plugins::request_classifier::RequestClassifierConfig>,
         super::policy_config::RouterPolicyConfigError,
     > {
         Ok(self

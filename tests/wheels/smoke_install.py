@@ -256,10 +256,6 @@ def create_venv(python_spec: str) -> Path:
     return venv_dir / "bin" / "python"
 
 
-# Stage the pinned AISimulate wheel directly from NVIDIA's package index.
-AISIMULATE_FIND_LINKS = "https://pypi.nvidia.com/aisimulate/"
-
-
 def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) -> None:
     # --find-links only registers search paths; nixl is pulled from nixl/ only when a
     # requirement resolves to it, not installed on its own.
@@ -267,12 +263,9 @@ def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) ->
     for path in (wheelhouse, wheelhouse / "nixl"):
         if path.exists():
             find_links.extend(["--find-links", str(path)])
-    # Planner and framework runtime wheelhouses stage their own aisimulate wheel. Offer
-    # NVIDIA's index only when that staged wheel is absent: pip ranks equal candidates
-    # without regard to where they came from, so registering both risks installing the
-    # remote copy in place of the artifact the image actually ships.
-    if not find_wheels(wheelhouse, "aisimulate"):
-        find_links.extend(["--find-links", AISIMULATE_FIND_LINKS])
+    # Every release wheelhouse carries AISim built from the pinned RC source.
+    # Install that exact wheel rather than consulting a public package index.
+    ais_wheel = require_one_wheel(wheelhouse, "aisim")
     run(
         [
             str(venv_python),
@@ -280,8 +273,9 @@ def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) ->
             "pip",
             "install",
             "--only-binary",
-            "aisimulate",
+            "aisim",
             *find_links,
+            str(ais_wheel),
             *requirements,
         ]
     )

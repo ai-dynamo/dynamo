@@ -128,7 +128,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 RUN pip install --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-        /opt/dynamo/wheelhouse/aisimulate*.whl \
+        /opt/dynamo/wheelhouse/aisim-*.whl \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
         "distro==1.9.0"
 {% else %}
@@ -137,7 +137,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip install --break-system-packages --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-        /opt/dynamo/wheelhouse/aisimulate*.whl
+        /opt/dynamo/wheelhouse/aisim-*.whl
 
 # Install accelerate for diffusion/video worker pipelines (diffusers requires it
 # for enable_model_cpu_offload but the upstream SGLang runtime image omits it)
@@ -214,7 +214,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
 # Assert what the install left. The pin is repeated from the requirements file
 # on purpose; a test asserts the two agree.
 RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
-    PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.3
+    PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.4
 {% else %}
 # mooncake and PyNvVideoCodec are CUDA-only. The mooncake floor names the CUDA 13
 # distribution, and PyNvVideoCodec decodes on NVDEC through libnvcuvid, so both

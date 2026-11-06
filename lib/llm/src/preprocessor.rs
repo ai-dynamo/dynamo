@@ -5845,23 +5845,49 @@ impl OpenAIPreprocessor {
             env_is_falsey(env_llm::DYN_ENABLE_GUIDED_TOOL_STREAMING),
         );
 
+        // Guided output may be bare JSON or `reasoning</think>JSON`. Supported
+        // parsers inspect the stream shape before deciding whether to parse it.
+        let is_guided_tool_choice = matches!(
+            request.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::Required)
+                | Some(ChatCompletionToolChoiceOption::Named(_))
+        );
+        let is_structured_response = Self::has_structured_response_format(request);
+        let reasoning_parser = self.runtime_config.reasoning_parser.as_deref();
+        let is_minimax_m3_explicit_guided_output =
+            Self::is_minimax_m3_family(reasoning_parser, self.tool_call_parser.as_deref())
+                && crate::preprocessor::tool_choice::has_explicit_guided_decoding(request);
+        let is_guided_output =
+            is_guided_tool_choice || is_structured_response || is_minimax_m3_explicit_guided_output;
+
         if let ToolProcessingRoute::Unified(family) = &tool_processing_route {
             let tool_definitions =
                 crate::preprocessor::tool_choice::effective_tool_definitions(request)?;
             let tool_definitions = (!tool_definitions.is_empty()).then_some(tool_definitions);
-            let reasoning_disabled = Self::request_disables_reasoning_with_family(
-                request,
-                self.tool_call_parser.as_deref(),
-                self.runtime_config.reasoning_parser.as_deref(),
-                None,
-                Some(family),
-            );
+            // MiniMax M3: the same gate as `reasoning_disabled_by_request` below. A
+            // thinking-disabled request turns the parser off only when the rendered
+            // prompt closed reasoning with `</mm:think>` or a grammar owns the output;
+            // a chat template that does not render `thinking_mode` leaves the prompt
+            // open and the model may still write `<mm:think>...</mm:think>`.
+            let reasoning_disabled =
+                Self::request_disables_reasoning_with_family(
+                    request,
+                    self.tool_call_parser.as_deref(),
+                    self.runtime_config.reasoning_parser.as_deref(),
+                    None,
+                    Some(family),
+                ) && (prompt_prefill.reasoning_closed_by_prompt != Some(false) || is_guided_output);
             // TODO: Replace family-specific guidance decisions with parser capabilities;
             // migrate equivalent batch/stream branches together while preserving legacy/v2 behavior.
             let policy = unified_parser::UnifiedRequestPolicy {
                 reasoning_disabled,
                 structured_response: Self::has_structured_response_format(request),
                 multiple_choices: request.inner.n.unwrap_or(1) > 1,
+                // Same rule as `seed_reasoning_parser` on the v1 route: a
+                // top-level `guided_*` grammar may own the output from
+                // token 0 despite the prompt-opened `<mm:think>`.
+                explicit_guidance: *family == "minimax_m3"
+                    && tool_choice::has_explicit_guided_decoding(request),
             };
             let prefill = policy.resolve_stream_prefill(
                 family,
@@ -5915,20 +5941,6 @@ impl OpenAIPreprocessor {
             ));
         }
 
-        // Guided output may be bare JSON or `reasoning</think>JSON`. Supported
-        // parsers inspect the stream shape before deciding whether to parse it.
-        let is_guided_tool_choice = matches!(
-            request.inner.tool_choice,
-            Some(ChatCompletionToolChoiceOption::Required)
-                | Some(ChatCompletionToolChoiceOption::Named(_))
-        );
-        let is_structured_response = Self::has_structured_response_format(request);
-        let reasoning_parser = self.runtime_config.reasoning_parser.as_deref();
-        let is_minimax_m3_explicit_guided_output =
-            Self::is_minimax_m3_family(reasoning_parser, self.tool_call_parser.as_deref())
-                && crate::preprocessor::tool_choice::has_explicit_guided_decoding(request);
-        let is_guided_output =
-            is_guided_tool_choice || is_structured_response || is_minimax_m3_explicit_guided_output;
         // Force parsers opt in by capability; prompt-seeded parsers opt in per request.
         // Structural-tag tool formats do not use this guided-JSON detection path.
         let inspect_force_reasoning_guided_output = is_guided_output
@@ -6621,7 +6633,9 @@ impl OpenAIPreprocessor {
     ///
     /// The parser can buffer and rewrite several input chunks before it emits an
     /// output. Completion token IDs therefore describe the ordered buffered
-    /// group, not the rewritten text in one output delta.
+    /// group, not the rewritten text in one output delta. Chosen-token logprobs
+    /// follow the same rule per choice: each choice's next emitted delta carries
+    /// every score received since its previous one.
     pub fn apply_tool_calling_jail<S>(
         tool_call_parser: Option<String>,
         tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
@@ -6633,6 +6647,7 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
+        use crate::protocols::openai::chat_completions::unified_parser::empty_choice;
         use dynamo_parsers::tool_calling::jail::{
             Annotated as JailAnnotated, apply_tool_calling_jail,
             apply_tool_calling_jail_with_guided_streaming,
@@ -6657,12 +6672,18 @@ impl OpenAIPreprocessor {
         // `nvext` uses the unary aggregator's merge rules: completion token IDs
         // are appended, while the latest supplied value wins for every other
         // top-level field. `engine_data` is replaced as one complete value.
+        //
+        // Choice logprobs are copied here per choice index. The jail still sees
+        // them, so its text decisions are unchanged, but it splits them by
+        // character count and can drop or repeat them around buffered markers
+        // and terminal chunks. Its copies are therefore replaced on the way out.
         #[derive(Default)]
         struct PendingDynamoMetadata {
             metrics_template: Option<LLMMetricAnnotation>,
             chunk_tokens: usize,
             nvext: Option<serde_json::Value>,
             prompt_logprobs: Option<Arc<crate::protocols::common::llm_backend::PromptLogprobs>>,
+            logprobs: std::collections::BTreeMap<u32, dynamo_protocols::types::ChatChoiceLogprobs>,
             response_template: Option<dynamo_protocols::types::CreateChatCompletionStreamResponse>,
         }
         let pending = Arc::new(Mutex::new(PendingDynamoMetadata::default()));
@@ -6717,7 +6738,10 @@ impl OpenAIPreprocessor {
         // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer Dynamo metadata)
         let jail_input = stream.map(move |mut a| {
             let has_metadata = a.data.as_ref().is_some_and(|nv| {
-                nv.llm_metrics.is_some() || nv.nvext.is_some() || nv.prompt_logprobs.is_some()
+                nv.llm_metrics.is_some()
+                    || nv.nvext.is_some()
+                    || nv.prompt_logprobs.is_some()
+                    || nv.inner.choices.iter().any(|choice| choice.logprobs.is_some())
             });
             if has_metadata {
                 let mut p = pending_in
@@ -6745,6 +6769,28 @@ impl OpenAIPreprocessor {
                     merge_response_nvext(&mut p.nvext, nv.nvext.take());
                     if let Some(prompt_logprobs) = nv.prompt_logprobs.take() {
                         p.prompt_logprobs = Some(prompt_logprobs);
+                    }
+                    for choice in &nv.inner.choices {
+                        let Some(logprobs) = &choice.logprobs else {
+                            continue;
+                        };
+                        let empty = dynamo_protocols::types::ChatChoiceLogprobs {
+                            content: None,
+                            refusal: None,
+                        };
+                        let queued = p.logprobs.entry(choice.index).or_insert(empty);
+                        if let Some(content) = &logprobs.content {
+                            queued
+                                .content
+                                .get_or_insert(Vec::new())
+                                .extend_from_slice(content);
+                        }
+                        if let Some(refusal) = &logprobs.refusal {
+                            queued
+                                .refusal
+                                .get_or_insert(Vec::new())
+                                .extend_from_slice(refusal);
+                        }
                     }
                 }
             }
@@ -6840,7 +6886,7 @@ impl OpenAIPreprocessor {
         };
         let pending_out = Arc::clone(&pending);
         let pending_eof = Arc::clone(&pending);
-        let jailed_output = jailed.flat_map(move |a| {
+        let jailed_output = jailed.flat_map(move |mut a| {
             debug_assert!(
                 a.error.is_none(),
                 "dynamo-parsers must not construct errors"
@@ -6851,10 +6897,15 @@ impl OpenAIPreprocessor {
             let has_choices = a.data.as_ref().is_some_and(|data| !data.choices.is_empty());
             let is_payload_usage = a.event.as_deref() == Some(ANNOTATION_PAYLOAD_USAGE);
             let mut prompt_logprobs = None;
-            let (llm_metrics, nvext) = a.data.as_ref().map_or((None, None), |_| {
+            let (llm_metrics, nvext) = a.data.as_mut().map_or((None, None), |data| {
                 let mut p = pending_out
                     .lock()
                     .expect("jail Dynamo metadata buffer poisoned");
+                // The jail yields everything for one input before it reads the
+                // next, so a queue holds only scores up to this output.
+                for choice in &mut data.choices {
+                    choice.logprobs = p.logprobs.remove(&choice.index);
+                }
                 let chunk_tokens = p.chunk_tokens;
                 p.chunk_tokens = 0;
                 let metrics = p.metrics_template.take().map(|mut metrics| {
@@ -6983,6 +7034,7 @@ impl OpenAIPreprocessor {
                     p.chunk_tokens = 0;
                     p.nvext = None;
                     p.prompt_logprobs = None;
+                    p.logprobs.clear();
                     p.response_template = None;
                 }
                 yield error;
@@ -7001,22 +7053,39 @@ impl OpenAIPreprocessor {
                 });
                 let nvext = p.nvext.take();
                 let prompt_logprobs = p.prompt_logprobs.take();
-                if llm_metrics.is_none() && nvext.is_none() && prompt_logprobs.is_none() {
+                // Scores for text the jail consumed after a choice's last delta.
+                // Each carrier adds only the scores, never content or a finish.
+                let choices: Vec<_> = std::mem::take(&mut p.logprobs)
+                    .into_iter()
+                    .map(|(index, logprobs)| {
+                        let mut choice = empty_choice(index);
+                        choice.logprobs = Some(logprobs);
+                        choice
+                    })
+                    .collect();
+                if llm_metrics.is_none()
+                    && nvext.is_none()
+                    && prompt_logprobs.is_none()
+                    && choices.is_empty()
+                {
                     None
                 } else {
-                    p.response_template.take().map(|inner| Annotated {
-                        data: Some(NvCreateChatCompletionStreamResponse {
-                            message_boundary: None,
-                            inner,
-                            nvext,
-                            prompt_logprobs,
-                            llm_metrics,
-                            tool_call_completion: Vec::new(),
-                        }),
-                        id: None,
-                        event: None,
-                        comment: None,
-                        error: None,
+                    p.response_template.take().map(|mut inner| {
+                        inner.choices = choices;
+                        Annotated {
+                            data: Some(NvCreateChatCompletionStreamResponse {
+                                message_boundary: None,
+                                inner,
+                                nvext,
+                                prompt_logprobs,
+                                llm_metrics,
+                                tool_call_completion: Vec::new(),
+                            }),
+                            id: None,
+                            event: None,
+                            comment: None,
+                            error: None,
+                        }
                     })
                 }
             };
@@ -12551,6 +12620,53 @@ responses_tools: None,
         );
     }
 
+    /// `required` starts the jail active. With no text to flush, it swallows a contentless
+    /// score, so only the end-of-stream choice can deliver it after the finish.
+    #[tokio::test]
+    async fn legacy_jail_delivers_swallowed_eos_score_after_finish() {
+        let score = |token: &str| {
+            Some(
+                serde_json::from_value(serde_json::json!({
+                    "content": [{"token": token, "logprob": -0.5, "bytes": [], "top_logprobs": []}],
+                    "refusal": null
+                }))
+                .unwrap(),
+            )
+        };
+        let mut finish = terminal_chat_stream_chunk();
+        let choice = &mut finish.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.reasoning_content = Some("thought".to_string());
+        choice.logprobs = score("thought");
+        let mut eos = chat_stream_chunk(0, None);
+        let choice = &mut eos.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.logprobs = score("eos");
+
+        let output = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("hermes".to_string()),
+            Some(ChatCompletionToolChoiceOption::Required),
+            None,
+            false,
+            false,
+            stream::iter(vec![finish, eos]),
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let choices: Vec<_> = output
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .collect();
+        assert_eq!(choices.len(), 2);
+        assert_eq!(choices[0].finish_reason, Some(FinishReason::Stop));
+        assert_eq!(choices[0].logprobs, score("thought"));
+        let mut score_only =
+            crate::protocols::openai::chat_completions::unified_parser::empty_choice(0);
+        score_only.logprobs = score("eos");
+        assert_eq!(choices[1], &score_only);
+    }
+
     fn kimi_k3_reasoning_chunk(reasoning: &str) -> Annotated<NvCreateChatCompletionStreamResponse> {
         let mut chunk = chat_stream_chunk(0, Some(Role::Assistant));
         let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
@@ -17742,6 +17858,14 @@ responses_tools: None,
         }
     }
 
+    fn minimax_m3_uses_unified_parser() -> bool {
+        crate::protocols::openai::chat_completions::unified_parser::selected_family(
+            Some("minimax_m3"),
+            Some("minimax_m3"),
+        )
+        .is_some()
+    }
+
     /// `(content, reasoning_content, finish_reason set)` for the first choice
     /// of each chunk that carries one.
     fn minimax_m3_chunk_placement(
@@ -18095,8 +18219,8 @@ responses_tools: None,
         ) {
             return;
         }
-        // Text the parser held to EOF rides the terminal chunk, never a chunk
-        // after `finish_reason`.
+        // Adaptive output has no prompt-opened thought. V2 streams its visible
+        // text immediately; v1 holds it until the terminal chunk.
         let regex = minimax_m3_merge_body(
             serde_json::json!({"guided_regex": "Paris|London"}),
             &serde_json::json!({"chat_template_kwargs": {"thinking_mode": "adaptive"}}),
@@ -18108,11 +18232,19 @@ responses_tools: None,
         );
         assert_eq!(
             placed,
-            vec![
-                (String::new(), String::new(), false),
-                (String::new(), String::new(), false),
-                ("Paris".to_string(), String::new(), true),
-            ],
+            if minimax_m3_uses_unified_parser() {
+                vec![
+                    ("Par".to_string(), String::new(), false),
+                    ("is".to_string(), String::new(), false),
+                    (String::new(), String::new(), true),
+                ]
+            } else {
+                vec![
+                    (String::new(), String::new(), false),
+                    (String::new(), String::new(), false),
+                    ("Paris".to_string(), String::new(), true),
+                ]
+            },
             "guided_regex + adaptive: placement per chunk"
         );
 
@@ -18263,8 +18395,8 @@ responses_tools: None,
             "rows whose (content, reasoning_content) was wrong without a finish_reason"
         );
 
-        // The held text arrives once, in one chunk after the last backend
-        // chunk, with no `finish_reason` because the backend sent none.
+        // Text arrives once, without inventing a finish_reason. V1 flushes at
+        // EOF, while v2 has already delivered both adaptive answer fragments.
         let regex = minimax_m3_merge_body(
             serde_json::json!({"guided_regex": "Paris|London"}),
             &serde_json::json!({"chat_template_kwargs": {"thinking_mode": "adaptive"}}),
@@ -18276,11 +18408,18 @@ responses_tools: None,
         );
         assert_eq!(
             placed,
-            vec![
-                (String::new(), String::new(), false),
-                (String::new(), String::new(), false),
-                ("Paris".to_string(), String::new(), false),
-            ],
+            if minimax_m3_uses_unified_parser() {
+                vec![
+                    ("Par".to_string(), String::new(), false),
+                    ("is".to_string(), String::new(), false),
+                ]
+            } else {
+                vec![
+                    (String::new(), String::new(), false),
+                    (String::new(), String::new(), false),
+                    ("Paris".to_string(), String::new(), false),
+                ]
+            },
             "guided_regex + adaptive without a finish_reason: placement per chunk"
         );
     }
@@ -18364,12 +18503,30 @@ responses_tools: None,
                         .filter_map(|item| item.data.clone())
                         .collect::<Vec<_>>(),
                 );
-                assert!(
-                    placed
-                        .iter()
-                        .all(|(content, reasoning, _)| content.is_empty() && reasoning.is_empty()),
-                    "{desc}: held text must be dropped: {placed:?}"
-                );
+                if minimax_m3_uses_unified_parser() {
+                    assert!(
+                        placed
+                            .iter()
+                            .all(|(_, reasoning, finished)| reasoning.is_empty() && !finished),
+                        "{desc}: no reasoning or successful finish before the error: {placed:?}"
+                    );
+                    assert_eq!(
+                        placed
+                            .iter()
+                            .map(|(content, _, _)| content.as_str())
+                            .collect::<String>(),
+                        model_output,
+                        "{desc}: adaptive text is delivered before the backend error"
+                    );
+                } else {
+                    assert!(
+                        placed
+                            .iter()
+                            .all(|(content, reasoning, _)| content.is_empty()
+                                && reasoning.is_empty()),
+                        "{desc}: held text must be dropped: {placed:?}"
+                    );
+                }
             }
         }
     }
@@ -18415,12 +18572,13 @@ responses_tools: None,
             usage.inner.choices.is_empty() && usage.inner.usage.is_some(),
             "the usage chunk must come last: {chunks:?}"
         );
-        let flushed = before_usage.last().expect("the flushed chunk");
+        let flushed = before_usage.last().expect("the last content chunk");
         assert_eq!(flushed.inner.choices.len(), 1);
         assert!(
             matches!(
                 &flushed.inner.choices[0].delta.content,
-                Some(ChatCompletionMessageContent::Text(text)) if text == "Paris"
+                Some(ChatCompletionMessageContent::Text(text))
+                    if text == if minimax_m3_uses_unified_parser() { "is" } else { "Paris" }
             ),
             "the held text must be flushed: {flushed:?}"
         );
@@ -18873,8 +19031,9 @@ responses_tools: None,
         // A template that renders `thinking_mode` closes reasoning with
         // `</mm:think>` for a thinking-disabled request, so the parser stays
         // off as before and the answer streams as it arrives. Where the
-        // prompt left thinking open, the parser holds marker-free text until
-        // the end of the turn shows it was not reasoning.
+        // prompt left thinking open, the v1 parser holds marker-free text
+        // until the end of the turn shows it was not reasoning; v2 streams
+        // it as it arrives.
         let streams_as_it_arrives = vec![
             ("Hello".to_string(), String::new(), false),
             (" there".to_string(), String::new(), false),
@@ -18893,7 +19052,14 @@ responses_tools: None,
                         MiniMaxM3Template::RendersThinkingMode,
                         &streams_as_it_arrives,
                     ),
-                    (MiniMaxM3Template::IgnoresThinkingMode, &held_until_the_end),
+                    (
+                        MiniMaxM3Template::IgnoresThinkingMode,
+                        if minimax_m3_uses_unified_parser() {
+                            &streams_as_it_arrives
+                        } else {
+                            &held_until_the_end
+                        },
+                    ),
                 ] {
                     let trip = minimax_m3_round_trip_on(
                         template,
