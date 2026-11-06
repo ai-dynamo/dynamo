@@ -40,7 +40,7 @@ Value (a JSON object, not a quoted JSON string):
 
 The key "aisim" matches registry = "aisim" in the source Cargo.toml's
 workspace.metadata.artifactory.dependencies. That metadata selects the exact
-aisim-core version (=0.14.0-rc.0); versions and crate download paths do not belong
+aisim-core version (for example, =0.14.0-rc.1); versions and crate download paths do not belong
 in this variable. Keep the sparse+ prefix and trailing /index/.
 
 Store credentials only in the existing ARTIFACTORY_TOKEN secret, which needs
