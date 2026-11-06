@@ -294,7 +294,12 @@ async fn assert_anthropic_error(
     message: &str,
 ) {
     assert_eq!(response.status(), expected.status());
+    let request_id = response.headers()["request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
     let body: Value = response.json().await.unwrap();
+    assert_eq!(body["request_id"], request_id);
     assert_eq!(body["type"], "error");
     assert_eq!(body["error"]["type"], expected.anthropic_type());
     assert!(
@@ -312,7 +317,14 @@ async fn assert_anthropic_status(
     message: &str,
 ) {
     assert_eq!(response.status(), status);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    let request_id = response.headers()["request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(!request_id.is_empty());
     let body: Value = response.json().await.unwrap();
+    assert_eq!(body["request_id"], request_id);
     assert_eq!(body["type"], "error");
     assert_eq!(body["error"]["type"], error_type);
     assert!(
@@ -589,8 +601,9 @@ async fn strict_tool_schema_rejected_before_dispatch() {
 
 // Beam route: the handler normalizes the request from the parsing options of the engine
 // it then dispatches to, and does so before generic validation, which would otherwise
-// reject exactly the shapes being normalized (noncompliant `strict` schema; legacy
-// `builtin_tools` declaration with `tool_choice: "required"` and no top-level `tools`).
+// reject the shape being normalized: a legacy `builtin_tools` declaration with
+// `tool_choice: "required"` and no top-level `tools`. A `strict` tool whose schema is
+// outside OpenAI's strict subset stays rejected on every route, Beam included.
 #[tokio::test]
 #[serial]
 async fn beam_request_normalization_precedes_generic_validation() {
@@ -609,14 +622,13 @@ async fn beam_request_normalization_precedes_generic_validation() {
             "name": "lookup", "parameters": {"type": "object", "properties": {}}
         }]}
     });
-    let cases = [
-        ("noncompliant strict", noncompliant_strict),
-        ("legacy builtin_tools", legacy_builtin_required),
-    ];
     temp_env::async_with_vars(BASE_ENV, async {
         // Control: without the Beam parsers, generic validation rejects both shapes.
         let svc = HarnessService::start(Vec::new()).await;
-        for (case, body) in &cases {
+        for (case, body) in [
+            ("noncompliant strict", &noncompliant_strict),
+            ("legacy builtin_tools", &legacy_builtin_required),
+        ] {
             for stream in [false, true] {
                 let mut body = body.clone();
                 body["stream"] = json!(stream);
@@ -636,35 +648,35 @@ async fn beam_request_normalization_precedes_generic_validation() {
         card.runtime_config.tool_call_parser = Some("beam".to_string());
         card.runtime_config.reasoning_parser = Some("beam".to_string());
         let engine = Arc::new(ScriptedChatEngine::new(
-            std::iter::repeat_n(script, cases.len() * 2).map(Ok),
+            std::iter::repeat_n(script, 2).map(Ok),
         ));
         let svc = HarnessService::start_with_engine_and_card(engine, card).await;
-        for (case, body) in &cases {
-            for stream in [false, true] {
-                let mut body = body.clone();
-                body["stream"] = json!(stream);
-                let response = post_json(&svc, "/v1/chat/completions", body).await;
-                let status = response.status();
-                let body = bounded(response.text()).await.unwrap_or_default();
-                assert_eq!(
-                    status,
-                    reqwest::StatusCode::OK,
-                    "{case} stream={stream}: {body}"
-                );
-                let requests = svc.engine.take_requests().await;
-                assert_eq!(requests.len(), 1, "{case} stream={stream} dispatches once");
-                let tools = requests[0].inner.tools.as_ref().unwrap();
-                assert_eq!(tools.len(), 1, "{case} stream={stream}");
-                match *case {
-                    "noncompliant strict" => {
-                        assert_eq!(tools[0].function.name, "search");
-                        assert_eq!(tools[0].function.strict, None, "served as non-strict");
-                    }
-                    _ => {
-                        assert_eq!(tools[0].function.name, "lookup", "promoted into tools");
-                    }
-                }
-            }
+        for stream in [false, true] {
+            let mut body = noncompliant_strict.clone();
+            body["stream"] = json!(stream);
+            let response = post_json(&svc, "/v1/chat/completions", body).await;
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::BAD_REQUEST,
+                "noncompliant strict stream={stream} must be rejected on the Beam route"
+            );
+            assert!(svc.engine.take_requests().await.is_empty());
+
+            let mut body = legacy_builtin_required.clone();
+            body["stream"] = json!(stream);
+            let response = post_json(&svc, "/v1/chat/completions", body).await;
+            let status = response.status();
+            let text = bounded(response.text()).await.unwrap_or_default();
+            assert_eq!(
+                status,
+                reqwest::StatusCode::OK,
+                "legacy builtin_tools stream={stream}: {text}"
+            );
+            let requests = svc.engine.take_requests().await;
+            assert_eq!(requests.len(), 1, "stream={stream} dispatches once");
+            let tools = requests[0].inner.tools.as_ref().unwrap();
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0].function.name, "lookup", "promoted into tools");
         }
         assert_eq!(svc.engine.remaining_scripts().await, 0);
         svc.shutdown().await;
@@ -1322,6 +1334,19 @@ async fn anthropic_handler_errors_record_classification_with_response() {
             )
             .await;
 
+            for (fields, diagnostic) in [
+                (format!(r#""model":"{MODEL}","model":"{MODEL}","messages":[{{"role":"user","content":"ping"}}]"#), "duplicate field"),
+                (format!(r#""model":"{MODEL}","messages":[{{"role":"invalid","content":"ping"}}]"#), "messages[0].role"),
+                (format!(r#""model":"{MODEL}","messages":[{{"role":"user","content":"ping"}}],"metadata":true"#), "metadata"),
+                (format!(r#""model":"{MODEL}","messages":[{{"role":"user","content":"ping"}}],"metadata":{{"extra":1e999}}"#), "metadata"),
+            ] {
+                let response = svc.client.post(format!("{}/v1/messages", svc.base_url))
+                    .header("content-type", "application/json")
+                    .body(format!("{{{fields},\"max_tokens\":16,\"stream\":{stream}}}"))
+                    .send().await.unwrap();
+                assert_anthropic_status(response, reqwest::StatusCode::BAD_REQUEST, "invalid_request_error", diagnostic).await;
+            }
+
             assert_error_metrics(
                 &svc,
                 &Endpoint::AnthropicMessages,
@@ -1330,7 +1355,7 @@ async fn anthropic_handler_errors_record_classification_with_response() {
                     (ErrorType::Overload, 1),
                     (ErrorType::Unavailable, 1),
                     (ErrorType::Cancelled, 1),
-                    (ErrorType::Validation, 1),
+                    (ErrorType::Validation, 5),
                     (ErrorType::Internal, 1),
                 ],
             );
