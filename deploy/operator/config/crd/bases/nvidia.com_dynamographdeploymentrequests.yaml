@@ -9604,8 +9604,8 @@ spec:
                 DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
                 Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
               properties:
-                aisimulate:
-                  description: AISimulate supplies public recommendation input to the operator's AISimulate execution bundle.
+                aisim:
+                  description: AISim supplies public recommendation input to the operator's AISimulate execution bundle.
                   properties:
                     inputOverrides:
                       description: |-
@@ -9737,7 +9737,7 @@ spec:
                       description: |-
                         SLA defines per-request latency bounds used to calculate goodput. Admission defaults an
                         omitted SLA to TTFT 2000 ms and ITL 30 ms. An explicit empty object opts out of those
-                        defaults. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names.
+                        defaults. spec.aisim.inputOverrides.evaluation.sla overrides the bounds it names.
                       properties:
                         e2eMs:
                           description: E2EMs is an alternative end-to-end bound in milliseconds.
@@ -9791,7 +9791,7 @@ spec:
                     When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;
                     an explicit empty workload receives the same shape. workload.static: {} opts out of all
                     traffic defaults. Any other static object is completed with its missing defaults.
-                    spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over
+                    spec.aisim.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over
                     every lowered traffic field it names.
                     The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction
                     search. Lowering independently defaults optimizer.max_trials to 320.
@@ -9875,7 +9875,7 @@ spec:
                 - message: exactly one of native v1beta2 fields or v1beta1 must be specified
                   rule: has(self.v1beta1) != has(self.model)
                 - message: v1beta1 is mutually exclusive with native v1beta2 fields
-                  rule: '!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation))'
+                  rule: '!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisim) || has(self.recommendation))'
                 - message: the conversion carrier is immutable
                   rule: has(self.v1beta1) == has(oldSelf.v1beta1) && (!has(self.v1beta1) || self.v1beta1 == oldSelf.v1beta1)
             status:

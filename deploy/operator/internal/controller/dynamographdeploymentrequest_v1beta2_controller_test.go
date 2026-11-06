@@ -153,7 +153,7 @@ func dgdrV1beta2Request(withHardware bool) *nvidiacomv1beta2.DynamoGraphDeployme
 		Name: "search", Namespace: "default", UID: "request-uid", Generation: 1,
 	}
 	request.Spec.Model = &nvidiacomv1beta2.ModelSpec{Name: "Qwen/Qwen3-0.6B"}
-	request.Spec.AISimulate = &nvidiacomv1beta2.AISimulateSpec{
+	request.Spec.AISim = &nvidiacomv1beta2.AISimSpec{
 		InputOverrides: &runtime.RawExtension{Raw: []byte(`{"optimizer":{"max_trials":7}}`)},
 	}
 	if withHardware {
@@ -190,8 +190,8 @@ func TestV1beta2RequestControllerCreatesTheRunOfTheCurrentGeneration(t *testing.
 	if !apiequality.Semantic.DeepEqual(run.Spec.NativeSearchInput, *requestInput) {
 		t.Fatalf("run input = %#v, want the admitted Request snapshot %#v", run.Spec.NativeSearchInput, *requestInput)
 	}
-	if run.Status.AISimulate != nil {
-		t.Fatalf("status.aisimulate = %#v, want the Run controller to lower and record it", run.Status.AISimulate)
+	if run.Status.AISim != nil {
+		t.Fatalf("status.aisim = %#v, want the Run controller to lower and record it", run.Status.AISim)
 	}
 
 	t.Log("The status records the accepted generation and the active Run")
@@ -722,21 +722,21 @@ func TestV1beta2RequestControllerDoesNotAdoptARunOfAnotherOwner(t *testing.T) {
 func TestV1beta2RequestControllerPreservesInputOverridesForRunLowering(t *testing.T) {
 	request := dgdrV1beta2Request(true)
 	const overrides = `{"traffic":{"source":{"input_tokens":null}},"optimizer":{"max_trials":null}}`
-	request.Spec.AISimulate.InputOverrides = &runtime.RawExtension{Raw: []byte(overrides)}
+	request.Spec.AISim.InputOverrides = &runtime.RawExtension{Raw: []byte(overrides)}
 	f := newDGDRV1beta2Fixture(t, request)
 
 	run, err := f.reconciler.buildRun(request)
 	if err != nil {
 		t.Fatalf("build run: %v", err)
 	}
-	if run.Spec.AISimulate == nil || run.Spec.AISimulate.InputOverrides == nil {
-		t.Fatal("Run lost spec.aisimulate.inputOverrides")
+	if run.Spec.AISim == nil || run.Spec.AISim.InputOverrides == nil {
+		t.Fatal("Run lost spec.aisim.inputOverrides")
 	}
-	if got := string(run.Spec.AISimulate.InputOverrides.Raw); got != overrides {
+	if got := string(run.Spec.AISim.InputOverrides.Raw); got != overrides {
 		t.Fatalf("Run inputOverrides = %s, want %s", got, overrides)
 	}
-	request.Spec.AISimulate.InputOverrides.Raw[0] = '['
-	if got := string(run.Spec.AISimulate.InputOverrides.Raw); got != overrides {
+	request.Spec.AISim.InputOverrides.Raw[0] = '['
+	if got := string(run.Spec.AISim.InputOverrides.Raw); got != overrides {
 		t.Fatalf("Run inputOverrides changed with the Request: %s", got)
 	}
 }
