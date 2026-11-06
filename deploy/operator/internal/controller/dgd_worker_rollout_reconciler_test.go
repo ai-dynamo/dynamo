@@ -2431,6 +2431,7 @@ func TestComponentRestartProgressResolver_CheckComponentFullyUpdated(t *testing.
 				ComponentType: consts.ComponentTypeWorker,
 			},
 		})
+		dgd.Spec.Restart = &nvidiacomv1beta1.Restart{ID: "restart-1"}
 		const workerHash = "1a2b3c4d" // opaque stored v1 generation hash
 		dgd.Annotations = map[string]string{
 			consts.AnnotationCurrentWorkerHash: workerHash,
@@ -2440,6 +2441,11 @@ func TestComponentRestartProgressResolver_CheckComponentFullyUpdated(t *testing.
 			Name:       "test-dgd-worker-" + workerHash,
 			Namespace:  "default",
 			Generation: 1,
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					Annotations: map[string]string{consts.RestartAnnotation: "restart-1"},
+				},
+			},
 			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
 				ObservedGeneration: 1,
 				Conditions: []metav1.Condition{
@@ -2465,6 +2471,7 @@ func TestComponentRestartProgressResolver_CheckComponentFullyUpdated(t *testing.
 				ComponentType: consts.ComponentTypeWorker,
 			},
 		})
+		dgd.Spec.Restart = &nvidiacomv1beta1.Restart{ID: "restart-1"}
 		const legacyHash = "1a2b3c4d" // opaque stored v1 generation hash
 		v2Hash := betaDGDWorkersSpecHash(t, dgd)
 		dgd.Annotations = map[string]string{
@@ -2476,6 +2483,11 @@ func TestComponentRestartProgressResolver_CheckComponentFullyUpdated(t *testing.
 			Name:       "test-dgd-worker-" + v2Hash,
 			Namespace:  "default",
 			Generation: 1,
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					Annotations: map[string]string{consts.RestartAnnotation: "restart-1"},
+				},
+			},
 			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
 				ObservedGeneration: 1,
 				Conditions: []metav1.Condition{
@@ -2501,11 +2513,17 @@ func TestComponentRestartProgressResolver_CheckComponentFullyUpdated(t *testing.
 				ComponentType: consts.ComponentTypeFrontend,
 			},
 		})
+		dgd.Spec.Restart = &nvidiacomv1beta1.Restart{ID: "restart-1"}
 
 		frontendDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			Name:       "test-dgd-frontend",
 			Namespace:  "default",
 			Generation: 1,
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					Annotations: map[string]string{consts.RestartAnnotation: "restart-1"},
+				},
+			},
 			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
 				ObservedGeneration: 1,
 				Conditions: []metav1.Condition{
@@ -2531,12 +2549,18 @@ func TestComponentRestartProgressResolver_CheckComponentFullyUpdated(t *testing.
 				ComponentType: consts.ComponentTypeWorker,
 			},
 		})
+		dgd.Spec.Restart = &nvidiacomv1beta1.Restart{ID: "restart-1"}
 		// No worker hash annotation
 
 		workerDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			Name:       "test-dgd-worker",
 			Namespace:  "default",
 			Generation: 1,
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					Annotations: map[string]string{consts.RestartAnnotation: "restart-1"},
+				},
+			},
 			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
 				ObservedGeneration: 1,
 				Conditions: []metav1.Condition{
