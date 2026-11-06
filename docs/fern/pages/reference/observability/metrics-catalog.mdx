@@ -926,6 +926,15 @@ Emitted by the endpoint picker (EPP) when routing through the Gateway API Infere
 
 Requires the client to request usage accounting on streaming calls (`"stream_options": {"include_usage": true}`); without it the response carries no usage block and nothing is recorded.
 
+These metrics show where the EPP spends a request's time and when its async runtime stalls. The settings that control them, and the EPP's diagnostic log lines, are in [EPP Runtime Environment](../components/gateway-api-routing.mdx#epp-runtime-environment).
+
+| Metric | Type | Labels | Description | Status |
+|---|---|---|---|---|
+| `dynamo_epp_stage_duration_seconds` | histogram | `model`, [`stage`](metric-labels.mdx#epp-stage-values) | Time one routed request spends in each EPP stage. `receive_body`, `pick`, `rewrite` and `first_response` together split the EPP's part of a request's time to first token. | Experimental |
+| `dynamo_epp_event_loop_delay_seconds` | histogram | — | How late a 10 ms sleep on the EPP's async runtime wakes. It runs late only when no worker thread services the runtime's timers, so it shows stalls of the whole runtime, not of one task. | Experimental |
+| `dynamo_epp_task_poll_seconds` | histogram | [`task`](metric-labels.mdx#epp-task-values) | Task polls that held an async worker thread at least `DYN_EPP_TASK_METRICS_MIN_US`. The work a poll runs through `block_in_place` does not count, nor does the rest of the poll once another thread has taken its worker over. Recorded only with `DYN_EPP_TASK_METRICS=1`. | Experimental |
+| `dynamo_epp_task_schedule_delay_seconds` | histogram | [`task`](metric-labels.mdx#epp-task-values) | Waits of at least `DYN_EPP_TASK_METRICS_MIN_US` between a task being woken and being polled. Long waits of `task="h2_connection"` mean a gateway connection, and every stream on it, stood still. Recorded only with `DYN_EPP_TASK_METRICS=1`. | Experimental |
+
 ## Global Frontend Metrics
 
 Emitted by the Global Frontend at `/metrics` on its serving port. It forwards each request, as received, to a pool frontend, so it sees requests and response bytes but not tokens: inter-token latency and token counts come from the pool frontends' `dynamo_frontend_*` metrics. Per-pool series are labeled by `pool`, the pool's `<cluster>/<namespace>/<DGD name>`, and `region`, the pool's region. No label comes from the request body.
