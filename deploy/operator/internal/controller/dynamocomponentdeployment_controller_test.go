@@ -53,6 +53,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
@@ -815,6 +816,164 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 	require.Equal(t, "vllm-disagg-decode-4e5bb2af", service.Name)
 	require.Equal(t, "vllm-disagg-decode-4e5bb2af-0", lws.Name)
 	require.NotEqual(t, service.Name, lws.Name)
+}
+
+// multinodeLWSTestDCD builds a two-node multinode DCD with the given name.
+func multinodeLWSTestDCD(t *testing.T, name string) *v1beta1.DynamoComponentDeployment {
+	t.Helper()
+	replicas := int32(1)
+	dcd := betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+		Name:      name,
+		Namespace: "default",
+		Spec: v1alpha1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkSGLang),
+			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName:     "PrefillWorker",
+				DynamoNamespace: new("default"),
+				ComponentType:   commonconsts.ComponentTypePrefill,
+				Replicas:        &replicas,
+				Multinode:       &v1alpha1.MultinodeSpec{NodeCount: 2},
+				Resources:       &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: "1"}},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Image:   "test-image:latest",
+						Command: []string{"python3"},
+						Args:    []string{"-m", "dynamo.sglang"},
+					},
+				},
+			},
+		},
+	})
+	dcd.UID = types.UID(name + "-uid")
+	return dcd
+}
+
+func multinodeLWSTestReconciler(objects ...client.Object) *DynamoComponentDeploymentReconciler {
+	objects = append(objects, &corev1.ServiceAccount{
+		Name:      "default-test-sa",
+		Namespace: "default",
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue,
+		},
+	})
+	return &DynamoComponentDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(objects...).WithStatusSubresource(objects...).Build(),
+		Recorder:      events.NewFakeRecorder(100),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+		},
+	}
+}
+
+// DYN-5478: the StatefulSet controller labels Pods with
+// controller-revision-hash=<statefulset-name>-<hash> (hash up to 10 chars), and
+// LWS names its StatefulSets <lws> (leader) and <lws>-<groupIndex> (workers).
+// Those label values must stay within 63 characters.
+func TestDynamoComponentDeploymentReconciler_LeaderWorkerSetNameFitsStatefulSetRevisionLabels(t *testing.T) {
+	require.NoError(t, leaderworkersetv1.AddToScheme(scheme.Scheme))
+	maxRevisionHash := strings.Repeat("9", 10)
+
+	tests := []struct {
+		name    string
+		dcdName string
+	}{
+		{name: "ticket prefill worker", dcdName: "kimi-k3-sglang-gb200-disagg-agentic-prefillworker-978c2008"},
+		{name: "ticket decode worker", dcdName: "kimi-k3-sglang-gb200-disagg-agentic-decodeworker-978c2008"},
+		{name: "longest name that already fits", dcdName: strings.Repeat("a", 48)},
+		{name: "one character over the boundary", dcdName: strings.Repeat("a", 49)},
+		{name: "short name", dcdName: "test-component"},
+	}
+
+	lwsNames := map[string]string{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dcd := multinodeLWSTestDCD(t, tt.dcdName)
+			r := multinodeLWSTestReconciler(dcd)
+
+			lws, toDelete, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
+			require.NoError(t, err)
+			require.False(t, toDelete)
+			again, _, err := r.generateLeaderWorkerSet(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
+			require.NoError(t, err)
+			require.Equal(t, lws.Name, again.Name, "LWS name must be deterministic")
+			require.NotEqual(t, tt.dcdName, lws.Name, "LWS name must not collide with the component Service name")
+			require.Empty(t, validation.IsDNS1035Label(lws.Name))
+
+			legacyName := tt.dcdName + "-0"
+			fitsLegacy := len(legacyName)+len("-9-")+len(maxRevisionHash) <= validation.LabelValueMaxLength
+			groupIndexes := []string{"0"}
+			if fitsLegacy {
+				require.Equal(t, legacyName, lws.Name, "names that already fit must not change")
+			} else {
+				groupIndexes = append(groupIndexes, "999999")
+			}
+
+			statefulSetNames := []string{lws.Name}
+			for _, groupIndex := range groupIndexes {
+				statefulSetNames = append(statefulSetNames, lws.Name+"-"+groupIndex)
+			}
+			for _, statefulSetName := range statefulSetNames {
+				require.Empty(t, validation.IsDNS1123Label(statefulSetName), statefulSetName)
+				revisionLabel := statefulSetName + "-" + maxRevisionHash
+				require.Empty(t, validation.IsValidLabelValue(revisionLabel),
+					"controller-revision-hash %q is %d characters", revisionLabel, len(revisionLabel))
+			}
+			lwsNames[tt.dcdName] = lws.Name
+		})
+	}
+
+	require.NotEqual(t,
+		lwsNames["kimi-k3-sglang-gb200-disagg-agentic-prefillworker-978c2008"],
+		lwsNames["kimi-k3-sglang-gb200-disagg-agentic-decodeworker-978c2008"])
+}
+
+func Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSet(t *testing.T) {
+	require.NoError(t, leaderworkersetv1.AddToScheme(scheme.Scheme))
+	const dcdName = "kimi-k3-sglang-gb200-disagg-agentic-prefillworker-978c2008"
+	legacyName := dcdName + "-0"
+
+	tests := []struct {
+		name           string
+		ownedByDCD     bool
+		wantLegacyGone bool
+	}{
+		{name: "legacy LWS controlled by the DCD is deleted", ownedByDCD: true, wantLegacyGone: true},
+		{name: "legacy LWS controlled by another object is kept", ownedByDCD: false, wantLegacyGone: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			dcd := multinodeLWSTestDCD(t, dcdName)
+			legacy := &leaderworkersetv1.LeaderWorkerSet{Name: legacyName, Namespace: "default"}
+			if tt.ownedByDCD {
+				legacy.OwnerReferences = []metav1.OwnerReference{
+					*metav1.NewControllerRef(dcd, v1beta1.GroupVersion.WithKind("DynamoComponentDeployment")),
+				}
+			} else {
+				other := multinodeLWSTestDCD(t, "other-component")
+				legacy.OwnerReferences = []metav1.OwnerReference{
+					*metav1.NewControllerRef(other, v1beta1.GroupVersion.WithKind("DynamoComponentDeployment")),
+				}
+			}
+			r := multinodeLWSTestReconciler(dcd, legacy)
+
+			_, err := r.reconcileLeaderWorkerSetResources(ctx, dcd)
+			require.NoError(t, err)
+
+			boundedName := leaderWorkerSetName(dcd)
+			require.NotEqual(t, legacyName, boundedName)
+			require.NoError(t, r.Get(ctx, types.NamespacedName{Name: boundedName, Namespace: "default"}, &leaderworkersetv1.LeaderWorkerSet{}))
+
+			err = r.Get(ctx, types.NamespacedName{Name: legacyName, Namespace: "default"}, &leaderworkersetv1.LeaderWorkerSet{})
+			if tt.wantLegacyGone {
+				require.True(t, k8serrors.IsNotFound(err), "legacy LWS should be deleted, got %v", err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t *testing.T) {

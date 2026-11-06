@@ -750,7 +750,7 @@ func (r *dcdWorkloadRenderer) hasExistingLegacyWorkerSelector(
 	}
 
 	if r.runtimeConfig.Gate.Enabled(features.LWS) {
-		lwsName := fmt.Sprintf("%s-0", workloadName)
+		lwsName := leaderWorkerSetNameForWorkload(workloadName)
 		leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{}
 		if err := r.reader.Get(ctx, types.NamespacedName{Name: lwsName, Namespace: namespace}, leaderWorkerSet); err == nil {
 			template := leaderWorkerSet.Spec.LeaderWorkerTemplate
