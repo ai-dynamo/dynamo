@@ -2351,7 +2351,6 @@ class TestEmbeddingWorkerFlag:
             parse_args()
 
 
-<<<<<<< HEAD
 class TestRealtimeWorkerFlag:
     """Parsing for the generic --realtime worker mode."""
 
