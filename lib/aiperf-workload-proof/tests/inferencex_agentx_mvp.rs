@@ -1332,6 +1332,53 @@ fn inferencex_agentx_mvp_run_is_the_exact_user_scenario() -> Result<()> {
     Ok(())
 }
 
+/// Physical rejection must remain visible, not disappear from metric evidence.
+/// This bounded fixture exercises prompt-at-model-limit rejection without
+/// changing the full scenario's canonical model capacity.
+#[test]
+#[ignore = "requires AISIM_SYSTEMS_ROOT; bounded calibrated rejection accounting control"]
+fn calibrated_hosted_rejections_reconcile_every_request() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let run = aiperf_protocol::runner_v2::decode_run_request_v2(
+        run_fixture::branch_request(directory.path()).as_bytes(),
+    )?
+    .run;
+    let systems = calibrated::systems_root()?;
+    let mut prefill = calibrated::canonical_role(
+        MODEL,
+        &systems,
+        ForwardPassWorkerType::Prefill,
+        CONCURRENCY as usize,
+    )?;
+    let mut decode = calibrated::canonical_role(
+        MODEL,
+        &systems,
+        ForwardPassWorkerType::Decode,
+        CONCURRENCY as usize,
+    )?;
+    prefill.rank.max_model_len = Some(16);
+    decode.rank.max_model_len = Some(16);
+    let (backend, typed) = host_typed(&run, &prefill, &decode)?;
+    ensure!(
+        !backend.per_request.is_empty(),
+        "rejection control is empty"
+    );
+    ensure!(
+        backend
+            .per_request
+            .iter()
+            .all(|row| row.terminal_status
+                == aisimulate_core::replay::ReplayTerminalStatus::Rejected),
+        "every control prompt must hit the explicit context limit"
+    );
+    let reconciled = reconcile_hosted::reconcile(&backend, &typed)?;
+    ensure!(
+        reconciled.native_records == backend.per_request.len(),
+        "rejected native records were lost"
+    );
+    Ok(())
+}
+
 /// Small boundary control, never acceptance for the full corpus or duration.
 /// Exercise the exact calibrated host, typed reconciliation, and artifact
 /// finalizer before spending full-corpus resources. Deliberately use the
