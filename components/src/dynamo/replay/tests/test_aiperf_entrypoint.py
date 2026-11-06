@@ -76,6 +76,12 @@ def test_installed_entrypoint_runs_aiperf_workload_on_2p2d_kv_deployment() -> No
         identity_seed_hex=_SEED_HEX,
     )
 
+    if output := os.environ.get("AIPERF_ENTRYPOINT_CAPTURE_DIR"):
+        directory = Path(output)
+        directory.mkdir(parents=True, exist_ok=False)
+        (directory / "run-request.json").write_text(_frame_text(), encoding="utf-8")
+        (directory / "deployment.json").write_text(json.dumps(_DEPLOYMENT_2P2D), encoding="utf-8")
+        (directory / "result.json").write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
     assert envelope["engine_drained"] is True
     requests = envelope["requests"]
     assert len(requests) == 4
