@@ -80,12 +80,18 @@ def test_installed_entrypoint_runs_aiperf_workload_on_2p2d_kv_deployment() -> No
         directory = Path(output)
         directory.mkdir(parents=True, exist_ok=False)
         (directory / "run-request.json").write_text(_frame_text(), encoding="utf-8")
-        (directory / "deployment.json").write_text(json.dumps(_DEPLOYMENT_2P2D), encoding="utf-8")
-        (directory / "result.json").write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
+        (directory / "deployment.json").write_text(
+            json.dumps(_DEPLOYMENT_2P2D), encoding="utf-8"
+        )
+        (directory / "result.json").write_text(
+            json.dumps(envelope, ensure_ascii=False), encoding="utf-8"
+        )
     assert envelope["engine_drained"] is True
     requests = envelope["requests"]
     assert len(requests) == 4
-    children = [r for r in requests if r["request"]["parent_correlation_id"] is not None]
+    children = [
+        r for r in requests if r["request"]["parent_correlation_id"] is not None
+    ]
     parents = [r for r in requests if r["request"]["parent_correlation_id"] is None]
     assert children and parents, "workload must exercise parent and child requests"
     assert envelope["backend_report"]["completed_requests"] == 4
