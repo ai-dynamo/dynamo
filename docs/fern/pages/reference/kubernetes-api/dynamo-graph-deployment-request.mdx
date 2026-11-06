@@ -696,7 +696,10 @@ service.
 </ParamField>
 
 <ParamField path="prophet_window_size" type="integer" default="50">
-  Window size (seconds) for the Prophet predictor.
+  Maximum number of most recent observations (data points) the Prophet predictor keeps and fits.
+  The planner adds one observation per throughput adjustment interval, so the history covers about
+  `prophet_window_size` × `throughput_adjustment_interval_seconds` seconds (9,000 seconds with the
+  defaults of 50 and 180).
 </ParamField>
 
 <ParamField path="load_predictor_warmup_trace" type="string" default="null">
