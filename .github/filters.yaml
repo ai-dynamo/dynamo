@@ -482,9 +482,37 @@ frontend:
   - 'components/src/dynamo/common/**'
   - 'components/src/dynamo/artifacts/**'
   - 'tests/frontend/router_ais_image_smoke.py'
+  - 'tests/router/test_epp_frontend_parity.py'
+  - 'tests/router/test_epp_frontend_routing_parity.py'
+  - 'tests/router/test_epp_frontend_config_parity.py'
+  - 'tests/router/test_epp_frontend_inputs_parity.py'
+  - 'tests/router/epp_parity.py'
+  - 'tests/router/epp_config_contract.py'
+  - 'tests/router/epp_native_consumers.py'
+  - 'tests/router/epp_native_process.py'
+  - 'tests/router/epp_selector_catalog.py'
+  - 'tests/router/helper.py'
+  - 'tests/router/common.py'
+  - 'tests/router/mocker_process.py'
+  - 'tests/router/mocker_config.py'
+  - 'tests/router/router_process.py'
+  - 'conftest.py'
+  - 'tests/conftest.py'
+  - 'tests/hf_cache.py'
+  - 'tests/marker_categories.py'
+  - 'tests/utils/**'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
   - 'container/templates/verify_ca_certificates.Dockerfile'
+  # Direct frontend image BuildKit inputs. These are not promoted from core
+  # into frontend_any_modified, so a PR that only touches them would otherwise
+  # skip frontend-build and dedicated frontend-runtime-epp-parity.
+  - '.dockerignore'
+  - 'container/Dockerfile.template'
+  - 'container/templates/args.Dockerfile'
+  - 'container/templates/dynamo_base.Dockerfile'
+  - 'container/templates/wheel_builder.Dockerfile'
+  - 'container/templates/compliance.Dockerfile'
   # The frontend image is rendered from these two: render.py generates its
   # Dockerfile, and context.yaml supplies EPP_IMAGE -- the `FROM` that the
   # compliance stages read /sbom-rust-epp.cdx.json and /rust-licenses out of.

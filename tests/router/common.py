@@ -7,16 +7,21 @@ import json
 import logging
 import os
 import random
+import re
 import threading
 import time
 import uuid
-from typing import TYPE_CHECKING, Any, Callable, Optional
+import warnings
+from copy import deepcopy
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence
 
 import aiohttp
 import requests
 
 from dynamo.llm import AisPerfConfig, KvRouter, KvRouterConfig
-from dynamo.prometheus_names import frontend_service, name_prefix
+from dynamo.prometheus_names import frontend_service, labels, name_prefix
 from tests.router.helper import (
     assert_event_dumps_equal,
     get_runtime,
@@ -24,6 +29,7 @@ from tests.router.helper import (
     poll_for_worker_instances,
     send_inflight_requests,
     send_request_via_python_kv_router,
+    unique_request_id,
     verify_response_timing,
     wait_for_frontend_ready,
     wait_for_indexer_workers_active,
@@ -32,6 +38,7 @@ from tests.router.helper import (
 from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
 from tests.utils.constants import DynamoPortRange
 from tests.utils.port_utils import reserved_ports
+from tests.utils.prometheus import find_metric_samples
 from tests.utils.router_logs import (
     parse_kv_event_diagnostics,
     select_kv_event_diagnostics,
@@ -4176,3 +4183,4714 @@ def _test_disagg_per_role_session_affinity(
             f"{set(prefill_ids)} (TTL advertised) while decode spread across "
             f"{set(decode_ids)} (no TTL)"
         )
+
+
+########################################################
+# Frontend / Runtime EPP token parity
+########################################################
+
+
+@dataclass(frozen=True)
+class TokenParityCase:
+    """One actual Frontend-vs-EPP request pair plus a meaning-changing sibling."""
+
+    name: str
+    path: str
+    payload: dict[str, Any]
+    divergent_payload: dict[str, Any]
+
+
+def frontend_epp_token_parity_cases(model_name: str) -> list[TokenParityCase]:
+    """Reusable actual-token scenarios for native Frontend HTTP vs Runtime EPP.
+
+    Each case carries a real request body and a sibling whose system or content
+    meaning changes so the same comparator can reject a live mismatch.
+    """
+    chat_path = "/v1/chat/completions"
+    completion_path = "/v1/completions"
+    return [
+        TokenParityCase(
+            name="plain_chat",
+            path=chat_path,
+            payload={
+                "model": model_name,
+                "messages": [
+                    {"role": "user", "content": "Name the first three prime numbers."}
+                ],
+                "stream": True,
+                "max_tokens": 1,
+            },
+            divergent_payload={
+                "model": model_name,
+                "messages": [
+                    {"role": "user", "content": "Translate good morning into French."}
+                ],
+                "stream": True,
+                "max_tokens": 1,
+            },
+        ),
+        TokenParityCase(
+            name="text_completion",
+            path=completion_path,
+            payload={
+                "model": model_name,
+                "prompt": "The first three prime numbers are",
+                "stream": True,
+                "max_tokens": 1,
+            },
+            divergent_payload={
+                "model": model_name,
+                "prompt": "The capital of France is",
+                "stream": True,
+                "max_tokens": 1,
+            },
+        ),
+        TokenParityCase(
+            name="system_chat",
+            path=chat_path,
+            payload={
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": "Answer with only the numbers."},
+                    {"role": "user", "content": "Name the first three prime numbers."},
+                ],
+                "stream": True,
+                "max_tokens": 1,
+            },
+            divergent_payload={
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": "Answer only in Spanish words."},
+                    {"role": "user", "content": "Name the first three prime numbers."},
+                ],
+                "stream": True,
+                "max_tokens": 1,
+            },
+        ),
+        TokenParityCase(
+            name="multiturn_chat",
+            path=chat_path,
+            payload={
+                "model": model_name,
+                "messages": [
+                    {"role": "user", "content": "What is two plus two?"},
+                    {"role": "assistant", "content": "4"},
+                    {"role": "user", "content": "Add three more."},
+                ],
+                "stream": True,
+                "max_tokens": 1,
+            },
+            divergent_payload={
+                "model": model_name,
+                "messages": [
+                    {"role": "user", "content": "What is two plus two?"},
+                    {"role": "assistant", "content": "4"},
+                    {"role": "user", "content": "Now subtract nine."},
+                ],
+                "stream": True,
+                "max_tokens": 1,
+            },
+        ),
+    ]
+
+
+def assert_ordered_token_ids_match(
+    left: list[int],
+    right: list[int],
+    *,
+    left_label: str,
+    right_label: str,
+    case_name: str,
+) -> None:
+    """Compare exact ordered token IDs and report the first differing position."""
+    if left == right:
+        if not left:
+            raise AssertionError(f"{case_name}: both token sequences are empty")
+        return
+    limit = min(len(left), len(right))
+    index = next((i for i in range(limit) if left[i] != right[i]), limit)
+    left_token = left[index] if index < len(left) else "<missing>"
+    right_token = right[index] if index < len(right) else "<missing>"
+    raise AssertionError(
+        f"{case_name}: token sequence mismatch at index {index}: "
+        f"{left_label}={left_token} {right_label}={right_token} "
+        f"lengths {len(left)} vs {len(right)}"
+    )
+
+
+def run_frontend_epp_token_parity(
+    stack,
+    cases: list[TokenParityCase],
+    *,
+    include_negative_control: bool = True,
+) -> None:
+    """Compare live Frontend query_instance_id tokens to live EPP mutations.
+
+    Frontend uses query-only annotation and does not generate. EPP still picks
+    and books; the driver completes the ext_proc stream before the next case.
+    The optional negative control changes one arm's system or content meaning
+    after unchanged-request parity succeeds and requires the same comparator
+    to reject the live mismatch.
+    """
+    if not cases:
+        raise AssertionError("token parity requires at least one actual request case")
+
+    for case in cases:
+        frontend_tokens = stack.collect_frontend_tokens(
+            case.payload,
+            path=case.path,
+            request_id=unique_request_id(f"fe-{case.name}"),
+        )
+        epp_tokens = stack.collect_epp_tokens(
+            case.payload,
+            path=case.path,
+            request_id=unique_request_id(f"epp-{case.name}"),
+        )
+        assert_ordered_token_ids_match(
+            frontend_tokens,
+            epp_tokens,
+            left_label="frontend.nvext.token_ids",
+            right_label="epp.nvext.token_data",
+            case_name=case.name,
+        )
+        logger.info(
+            "Token parity matched for %s (%s tokens)",
+            case.name,
+            len(frontend_tokens),
+        )
+
+    kube_api = stack.kube_api
+    if kube_api is not None and kube_api.failures:
+        raise AssertionError(
+            "Loopback Kubernetes API recorded unexpected requests: "
+            + "; ".join(kube_api.failures)
+        )
+
+    if not include_negative_control:
+        return
+
+    control = cases[0]
+    frontend_tokens = stack.collect_frontend_tokens(
+        control.payload,
+        path=control.path,
+        request_id=unique_request_id(f"fe-neg-{control.name}"),
+    )
+    epp_tokens = stack.collect_epp_tokens(
+        control.divergent_payload,
+        path=control.path,
+        request_id=unique_request_id(f"epp-neg-{control.name}"),
+    )
+    try:
+        assert_ordered_token_ids_match(
+            frontend_tokens,
+            epp_tokens,
+            left_label="frontend.nvext.token_ids",
+            right_label="epp.nvext.token_data",
+            case_name=f"{control.name}-negative",
+        )
+    except AssertionError as exc:
+        if "mismatch at index" in str(exc):
+            logger.info("Negative control rejected live mismatched token sequences")
+            if kube_api is not None and kube_api.failures:
+                raise AssertionError(
+                    "Loopback Kubernetes API recorded unexpected requests: "
+                    + "; ".join(kube_api.failures)
+                )
+            return
+        raise
+    raise AssertionError(
+        f"{control.name}-negative: same comparator accepted diverged live requests"
+    )
+
+
+def run_keyed_tracking_runtime_config(
+    request,
+    tmp_path,
+    monkeypatch,
+    model_name: str,
+    stack_cls,
+    profile_name: str,
+) -> None:
+    """Consume keyed-xxh3-v1 and require query tokens plus real FE/EPP routes."""
+    import warnings
+
+    from tests.router.epp_config_contract import (
+        KEYED_TRACKING_PROFILE,
+        TRACKING_HASH_ALGORITHM,
+        TRACKING_KEY_ID,
+        TRACKING_KEY_PUBLIC_BYTES,
+        TRACKING_KEY_SIZE,
+        TRACKING_RUNTIME_FIELDS,
+        _keyed_tracking_consumer_env,
+        _plain_chat_token_case,
+        _write_tracking_key_file,
+        assert_frontend_expected_fields,
+        clear_known_manifest_router_envs,
+        compare_effective_fields,
+        frontend_native_projection,
+        native_default_projection,
+        observe_epp_init_event,
+    )
+    from tests.router.epp_parity import collect_frontend_generation_route
+
+    if profile_name != KEYED_TRACKING_PROFILE:
+        raise AssertionError(
+            f"keyed tracking profile {profile_name!r} != {KEYED_TRACKING_PROFILE!r}"
+        )
+    clear_known_manifest_router_envs(monkeypatch)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("RUST_LOG", "info")
+    monkeypatch.setenv("DYN_LOG", "info")
+    key_path = tmp_path / "parity-public-tracking-key.bin"
+    provenance = _write_tracking_key_file(key_path, TRACKING_KEY_PUBLIC_BYTES)
+    if provenance["length"] != TRACKING_KEY_SIZE:
+        raise AssertionError(
+            f"public tracking key length {provenance['length']} != {TRACKING_KEY_SIZE}"
+        )
+    consumer_env = _keyed_tracking_consumer_env(key_path)
+    for name, value in consumer_env.items():
+        monkeypatch.setenv(name, value)
+    expected = {
+        "router_tracking_hash": TRACKING_HASH_ALGORITHM,
+        "router_tracking_key_id": TRACKING_KEY_ID,
+    }
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        frontend = frontend_native_projection(TRACKING_RUNTIME_FIELDS)
+    defaults = native_default_projection(TRACKING_RUNTIME_FIELDS)
+    assert_frontend_expected_fields(
+        profile=profile_name,
+        frontend=frontend,
+        expected=expected,
+        defaults=defaults,
+    )
+    cases = _plain_chat_token_case(model_name)
+    with stack_cls(
+        request,
+        tmp_path,
+        model_name,
+        consumer_env=consumer_env,
+        log_label=profile_name,
+    ) as stack:
+        epp = observe_epp_init_event(
+            stack.epp_process,
+            node_name=request.node.name,
+            expected=expected,
+        )
+        compare_effective_fields(
+            profile=profile_name,
+            frontend=frontend,
+            epp=epp,
+            expected=expected,
+            defaults=defaults,
+        )
+        run_frontend_epp_token_parity(stack, cases, include_negative_control=False)
+        case = cases[0]
+        generation = collect_frontend_generation_route(
+            stack.frontend_url,
+            case.payload,
+            path=case.path,
+            request_id=unique_request_id("fe-gen-keyed-plain_chat"),
+        )
+        if stack.driver is None:
+            raise AssertionError("owned ext_proc driver was not saved")
+        epp_route = stack.driver.collect_route_observation(
+            case.payload,
+            path=case.path,
+            request_id=unique_request_id("epp-route-keyed-plain_chat"),
+        )
+        if not epp_route.token_ids:
+            raise AssertionError("EPP route token_ids are empty")
+        if (generation.worker_id, generation.dp_rank) != (
+            epp_route.worker_id,
+            epp_route.dp_rank,
+        ):
+            raise AssertionError(
+                "frontend generation and EPP route worker/rank differ: "
+                f"fe={generation.worker_id}/{generation.dp_rank} "
+                f"epp={epp_route.worker_id}/{epp_route.dp_rank}"
+            )
+        if generation.dp_rank != 0:
+            raise AssertionError(
+                f"controlled one-worker rank is {generation.dp_rank}, expected 0"
+            )
+        frontend_proc = getattr(stack, "frontend_process", None)
+        epp_proc = getattr(stack, "epp_process", None)
+        if frontend_proc is None or frontend_proc.proc is None:
+            raise AssertionError("owned frontend_process was not saved")
+        if epp_proc is None or epp_proc.proc is None:
+            raise AssertionError("owned epp_process was not saved")
+        kube_api = stack.kube_api
+        if kube_api is not None and kube_api.failures:
+            raise AssertionError(
+                "Loopback Kubernetes API recorded unexpected requests: "
+                + "; ".join(kube_api.failures)
+            )
+        logger.info(
+            "keyed tracking runtime algorithm=%s key_id=%s key_path=%s "
+            "key_length=%s key_sha256=%s frontend pid=%s epp pid=%s "
+            "fe_worker=%s/%s epp_worker=%s/%s",
+            TRACKING_HASH_ALGORITHM,
+            TRACKING_KEY_ID,
+            provenance["path"],
+            provenance["length"],
+            provenance["sha256"],
+            frontend_proc.proc.pid,
+            epp_proc.proc.pid,
+            generation.worker_id,
+            generation.dp_rank,
+            epp_route.worker_id,
+            epp_route.dp_rank,
+        )
+
+
+def run_keyed_tracking_key_file_size(
+    request,
+    tmp_path,
+    monkeypatch,
+    model_name: str,
+    stack_cls,
+    arm: str,
+) -> None:
+    """Reject a 31-byte public tracking key on one owned consumer arm."""
+    from tests.router.epp_config_contract import (
+        KEYED_TRACKING_SIZE_ARMS,
+        TRACKING_KEY_INVALID_BYTES,
+        TRACKING_KEY_SIZE_DEADLINE_S,
+        TRACKING_KEY_SIZE_DIAGNOSTIC,
+        _keyed_tracking_consumer_env,
+        _write_tracking_key_file,
+        clear_known_manifest_router_envs,
+    )
+    from tests.router.router_process import observe_owned_initialization_diagnostic
+
+    if arm not in KEYED_TRACKING_SIZE_ARMS:
+        raise AssertionError(f"keyed tracking size arm {arm!r} is unknown")
+    if TRACKING_KEY_SIZE_DIAGNOSTIC != (
+        "router tracking key file must contain exactly 32 raw bytes; found 31"
+    ):
+        raise AssertionError(
+            "keyed tracking size diagnostic is not the source-derived 31-byte message"
+        )
+    clear_known_manifest_router_envs(monkeypatch)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("RUST_LOG", "info")
+    monkeypatch.setenv("DYN_LOG", "info")
+    key_path = tmp_path / f"parity-public-tracking-key-31-{arm}.bin"
+    provenance = _write_tracking_key_file(key_path, TRACKING_KEY_INVALID_BYTES)
+    if provenance["length"] != 31:
+        raise AssertionError(
+            f"invalid tracking key length {provenance['length']} != 31"
+        )
+    consumer_env = _keyed_tracking_consumer_env(key_path)
+    include_frontend = arm == "frontend"
+    include_epp = arm == "epp"
+    with stack_cls(
+        request,
+        tmp_path,
+        model_name,
+        consumer_env=consumer_env,
+        include_frontend=include_frontend,
+        include_epp=include_epp,
+        require_readiness=False,
+        log_label=f"key-size-{arm}",
+    ) as stack:
+        process = (
+            getattr(stack, "frontend_process", None)
+            if include_frontend
+            else getattr(stack, "epp_process", None)
+        )
+        pid, log = observe_owned_initialization_diagnostic(
+            process,
+            diagnostic=TRACKING_KEY_SIZE_DIAGNOSTIC,
+            deadline_s=TRACKING_KEY_SIZE_DEADLINE_S,
+            node_name=request.node.name,
+            label=f"{arm}_process",
+        )
+    logger.info(
+        "keyed tracking size diagnostic=%s arm=%s key_path=%s key_length=%s "
+        "key_sha256=%s pid=%s log=%s",
+        TRACKING_KEY_SIZE_DIAGNOSTIC,
+        arm,
+        provenance["path"],
+        provenance["length"],
+        provenance["sha256"],
+        pid,
+        log,
+    )
+
+
+def run_approximate_cache_policy_metrics(
+    request,
+    tmp_path,
+    monkeypatch,
+    model_name: str,
+    stack_cls,
+    policy_name: str,
+) -> None:
+    """Read owned FE/EPP configured/effective gauges for LRU or default TTL."""
+    import warnings
+
+    from tests.router.epp_config_contract import (
+        APPROXIMATE_POLICY_NAMES,
+        APPROXIMATE_POLICY_ROW,
+        _approximate_consumer_env,
+        _assert_core_policy_gauges,
+        _frontend_full_kv_json,
+        _plain_chat_token_case,
+        clear_known_manifest_router_envs,
+    )
+
+    if policy_name not in APPROXIMATE_POLICY_NAMES:
+        raise AssertionError(f"unknown approximate policy profile {policy_name!r}")
+    clear_known_manifest_router_envs(monkeypatch)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("RUST_LOG", "info")
+    monkeypatch.setenv("DYN_LOG", "info")
+    consumer_env = _approximate_consumer_env(policy_name)
+    for name, value in consumer_env.items():
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        payload = _frontend_full_kv_json()
+    if APPROXIMATE_POLICY_ROW in payload:
+        raise AssertionError(
+            "native to_json now serializes router_approximate_cache_policy; "
+            "omission is not a default or support oracle"
+        )
+    with stack_cls(
+        request,
+        tmp_path,
+        model_name,
+        consumer_env=consumer_env,
+        core_system_metrics=True,
+        log_label=f"approx-{policy_name}",
+    ) as stack:
+        run_frontend_epp_token_parity(
+            stack, _plain_chat_token_case(model_name), include_negative_control=False
+        )
+        if stack.mockers is None:
+            raise AssertionError("owned mocker endpoint was not saved")
+        namespace = stack.mockers.namespace
+        component = stack.mockers.component_name
+        if not namespace or not component:
+            raise AssertionError(
+                "owned mocker endpoint identity is missing "
+                f"namespace={namespace!r} component={component!r}"
+            )
+        for role in ("frontend", "epp"):
+            pid, port, content = stack.core_system_metrics_text(role=role)
+            _assert_core_policy_gauges(
+                content,
+                role=role,
+                pid=pid,
+                port=port,
+                namespace=namespace,
+                component=component,
+                selected=policy_name,
+            )
+            logger.info(
+                "approximate policy %s %s pid=%s port=%s namespace=%s component=%s",
+                policy_name,
+                role,
+                pid,
+                port,
+                namespace,
+                component,
+            )
+
+
+def run_active_decode_threshold_consumer(
+    request,
+    tmp_path,
+    monkeypatch,
+    model_name: str,
+    stack_cls,
+) -> None:
+    """Observe owned FE/EPP remote-load decode thresholds for default and 0.25."""
+    from tests.router.epp_config_contract import (
+        DECODE_THRESHOLD_CONFIGURED,
+        DECODE_THRESHOLD_ENV,
+        DECODE_THRESHOLD_PROFILES,
+        DECODE_THRESHOLD_ROW,
+        ActiveDecodeThresholdConfigMismatch,
+        _plain_chat_token_case,
+        clear_known_manifest_router_envs,
+        decode_threshold_consumer_env,
+        mark_owned_log_cursor,
+        observe_owned_decode_load_threshold,
+    )
+    from tests.router.epp_parity import (
+        READINESS_DEADLINE_S,
+        collect_frontend_generation_route,
+    )
+
+    observed: dict[str, tuple[float | None, float | None]] = {}
+    for profile_name in DECODE_THRESHOLD_PROFILES:
+        clear_known_manifest_router_envs(monkeypatch)
+        monkeypatch.setenv("NO_COLOR", "1")
+        consumer_env = decode_threshold_consumer_env(profile_name)
+        for name, value in consumer_env.items():
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        cases = _plain_chat_token_case(model_name)
+        log_label = f"decode-{profile_name}"
+        with stack_cls(
+            request,
+            tmp_path,
+            model_name,
+            consumer_env=consumer_env,
+            log_label=log_label,
+        ) as stack:
+            frontend_proc = stack.frontend_process
+            epp_proc = stack.epp_process
+            node_name = request.node.name
+            frontend_pid, frontend_log, frontend_offset = mark_owned_log_cursor(
+                frontend_proc,
+                label="frontend_process",
+                node_name=node_name,
+                log_label=log_label,
+            )
+            epp_pid, epp_log, epp_offset = mark_owned_log_cursor(
+                epp_proc,
+                label="epp_process",
+                node_name=node_name,
+                log_label=log_label,
+            )
+            run_frontend_epp_token_parity(stack, cases, include_negative_control=False)
+            case = cases[0]
+            generation = collect_frontend_generation_route(
+                stack.frontend_url,
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id("fe-gen-decode-plain_chat"),
+            )
+            if stack.driver is None:
+                raise AssertionError("owned ext_proc driver was not saved")
+            epp_route = stack.driver.collect_route_observation(
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id("epp-route-decode-plain_chat"),
+            )
+            if not epp_route.token_ids:
+                raise AssertionError("EPP route token_ids are empty")
+            if (generation.worker_id, generation.dp_rank) != (
+                epp_route.worker_id,
+                epp_route.dp_rank,
+            ):
+                raise AssertionError(
+                    "frontend generation and EPP route worker/rank differ: "
+                    f"fe={generation.worker_id}/{generation.dp_rank} "
+                    f"epp={epp_route.worker_id}/{epp_route.dp_rank}"
+                )
+            if generation.dp_rank != 0:
+                raise AssertionError(
+                    f"controlled one-worker rank is {generation.dp_rank}, expected 0"
+                )
+            if frontend_proc is None or frontend_proc.proc is None:
+                raise AssertionError("owned frontend_process was not saved")
+            if epp_proc is None or epp_proc.proc is None:
+                raise AssertionError("owned epp_process was not saved")
+            if (
+                frontend_proc.proc.poll() is not None
+                or epp_proc.proc.poll() is not None
+            ):
+                raise AssertionError("owned frontend or EPP process is not live")
+            kube_api = stack.kube_api
+            if kube_api is not None and kube_api.failures:
+                raise AssertionError(
+                    "Loopback Kubernetes API recorded unexpected requests: "
+                    + "; ".join(kube_api.failures)
+                )
+            deadline = time.monotonic() + READINESS_DEADLINE_S
+            frontend_value = observe_owned_decode_load_threshold(
+                frontend_proc,
+                label="frontend_process",
+                node_name=node_name,
+                pid=frontend_pid,
+                log=frontend_log,
+                offset=frontend_offset,
+                worker_id=generation.worker_id,
+                dp_rank=generation.dp_rank,
+                deadline=deadline,
+            )
+            epp_value = observe_owned_decode_load_threshold(
+                epp_proc,
+                label="epp_process",
+                node_name=node_name,
+                pid=epp_pid,
+                log=epp_log,
+                offset=epp_offset,
+                worker_id=generation.worker_id,
+                dp_rank=generation.dp_rank,
+                deadline=deadline,
+            )
+            if profile_name == "default":
+                if frontend_value is not None or epp_value is not None:
+                    raise AssertionError(
+                        "default decode-threshold control is not None: "
+                        f"frontend={frontend_value!r} epp={epp_value!r}"
+                    )
+            else:
+                wanted = float(DECODE_THRESHOLD_CONFIGURED)
+                if frontend_value != wanted:
+                    raise AssertionError(
+                        "configured frontend "
+                        f"{DECODE_THRESHOLD_ROW}={frontend_value!r} != "
+                        f"Some({DECODE_THRESHOLD_CONFIGURED})"
+                    )
+            if stack.mockers is None:
+                raise AssertionError("owned mocker endpoint was not saved")
+            namespace = stack.mockers.namespace
+            logger.info(
+                "decode threshold profile=%s env=%s frontend pid=%s log=%s "
+                "value=%s epp pid=%s log=%s value=%s namespace=%s "
+                "worker=%s/%s",
+                profile_name,
+                consumer_env.get(DECODE_THRESHOLD_ENV),
+                frontend_pid,
+                frontend_log,
+                frontend_value,
+                epp_pid,
+                epp_log,
+                epp_value,
+                namespace,
+                generation.worker_id,
+                generation.dp_rank,
+            )
+            observed[profile_name] = (frontend_value, epp_value)
+    if set(observed) != set(DECODE_THRESHOLD_PROFILES):
+        raise AssertionError(
+            f"decode-threshold evidence {sorted(observed)} != "
+            f"{list(DECODE_THRESHOLD_PROFILES)}"
+        )
+    frontend_value, epp_value = observed["configured"]
+    if observed == {
+        "default": (None, None),
+        "configured": (0.25, None),
+    }:
+        raise ActiveDecodeThresholdConfigMismatch(
+            "configured decode-threshold mismatch after default and route "
+            f"controls: frontend={frontend_value!r} epp={epp_value!r}"
+        )
+    if frontend_value != epp_value:
+        raise AssertionError(
+            "configured decode-threshold mismatch after default and route "
+            f"controls: frontend={frontend_value!r} epp={epp_value!r}"
+        )
+
+
+def run_shared_cache_type_consumer(
+    request,
+    tmp_path,
+    monkeypatch,
+    model_name: str,
+    stack_cls,
+) -> None:
+    """Observe omitted none and explicit hicache shared-cache construction."""
+    import warnings
+
+    from tests.router.epp_config_contract import (
+        SHARED_CACHE_TYPE_FIELDS,
+        SHARED_CACHE_TYPE_HICACHE,
+        SHARED_CACHE_TYPE_NONE,
+        SHARED_CACHE_TYPE_PROFILES,
+        SHARED_CACHE_TYPE_ROW,
+        _plain_chat_token_case,
+        assert_frontend_expected_fields,
+        clear_known_manifest_router_envs,
+        compare_effective_fields,
+        frontend_native_projection,
+        native_default_projection,
+        observe_epp_init_event,
+        observe_owned_hicache_constructor,
+        owned_process_log_identity,
+        shared_cache_type_consumer_env,
+    )
+    from tests.router.epp_parity import (
+        READINESS_DEADLINE_S,
+        collect_frontend_generation_route,
+    )
+
+    for profile_name in SHARED_CACHE_TYPE_PROFILES:
+        clear_known_manifest_router_envs(monkeypatch)
+        monkeypatch.setenv("NO_COLOR", "1")
+        consumer_env = shared_cache_type_consumer_env(profile_name)
+        for name, value in consumer_env.items():
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        expected = {SHARED_CACHE_TYPE_ROW: profile_name}
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            frontend = frontend_native_projection(SHARED_CACHE_TYPE_FIELDS)
+        defaults = native_default_projection(SHARED_CACHE_TYPE_FIELDS)
+        if profile_name == SHARED_CACHE_TYPE_NONE:
+            if frontend.get(SHARED_CACHE_TYPE_ROW) != SHARED_CACHE_TYPE_NONE:
+                raise AssertionError(
+                    f"{profile_name} FE {SHARED_CACHE_TYPE_ROW}="
+                    f"{frontend.get(SHARED_CACHE_TYPE_ROW)!r} != "
+                    f"{SHARED_CACHE_TYPE_NONE!r}"
+                )
+            if defaults.get(SHARED_CACHE_TYPE_ROW) != SHARED_CACHE_TYPE_NONE:
+                raise AssertionError(
+                    f"{profile_name} native default {SHARED_CACHE_TYPE_ROW}="
+                    f"{defaults.get(SHARED_CACHE_TYPE_ROW)!r} != "
+                    f"{SHARED_CACHE_TYPE_NONE!r}"
+                )
+        else:
+            assert_frontend_expected_fields(
+                profile=profile_name,
+                frontend=frontend,
+                expected=expected,
+                defaults=defaults,
+            )
+        cases = _plain_chat_token_case(model_name)
+        log_label = f"shared-cache-{profile_name}"
+        with stack_cls(
+            request,
+            tmp_path,
+            model_name,
+            consumer_env=consumer_env,
+            log_label=log_label,
+        ) as stack:
+            node_name = request.node.name
+            epp = observe_epp_init_event(
+                stack.epp_process,
+                node_name=node_name,
+                expected=expected,
+            )
+            if profile_name == SHARED_CACHE_TYPE_NONE:
+                if epp.get(SHARED_CACHE_TYPE_ROW) != SHARED_CACHE_TYPE_NONE:
+                    raise AssertionError(
+                        f"{profile_name} EPP {SHARED_CACHE_TYPE_ROW}="
+                        f"{epp.get(SHARED_CACHE_TYPE_ROW)!r} != "
+                        f"{SHARED_CACHE_TYPE_NONE!r}"
+                    )
+                if frontend[SHARED_CACHE_TYPE_ROW] != epp[SHARED_CACHE_TYPE_ROW]:
+                    raise AssertionError(
+                        f"{profile_name} {SHARED_CACHE_TYPE_ROW} mismatch "
+                        f"frontend={frontend[SHARED_CACHE_TYPE_ROW]!r} "
+                        f"epp={epp[SHARED_CACHE_TYPE_ROW]!r}"
+                    )
+            else:
+                compare_effective_fields(
+                    profile=profile_name,
+                    frontend=frontend,
+                    epp=epp,
+                    expected=expected,
+                    defaults=defaults,
+                )
+            frontend_proc = stack.frontend_process
+            epp_proc = stack.epp_process
+            if stack.mockers is None:
+                raise AssertionError("owned mocker endpoint was not saved")
+            component = stack.mockers.component_name
+            if not component:
+                raise AssertionError(
+                    f"owned mocker component is missing: {component!r}"
+                )
+            if profile_name == SHARED_CACHE_TYPE_HICACHE:
+                frontend_pid, frontend_log = owned_process_log_identity(
+                    frontend_proc,
+                    label="frontend_process",
+                    node_name=node_name,
+                    log_label=log_label,
+                )
+                epp_pid, epp_log = owned_process_log_identity(
+                    epp_proc,
+                    label="epp_process",
+                    node_name=node_name,
+                    log_label=log_label,
+                )
+                deadline = time.monotonic() + READINESS_DEADLINE_S
+                observe_owned_hicache_constructor(
+                    frontend_proc,
+                    label="frontend_process",
+                    node_name=node_name,
+                    log_label=log_label,
+                    pid=frontend_pid,
+                    log=frontend_log,
+                    component=component,
+                    deadline=deadline,
+                )
+                observe_owned_hicache_constructor(
+                    epp_proc,
+                    label="epp_process",
+                    node_name=node_name,
+                    log_label=log_label,
+                    pid=epp_pid,
+                    log=epp_log,
+                    component=component,
+                    deadline=deadline,
+                )
+            run_frontend_epp_token_parity(stack, cases, include_negative_control=False)
+            case = cases[0]
+            generation = collect_frontend_generation_route(
+                stack.frontend_url,
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id("fe-gen-shared-cache-plain_chat"),
+            )
+            if stack.driver is None:
+                raise AssertionError("owned ext_proc driver was not saved")
+            epp_route = stack.driver.collect_route_observation(
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id("epp-route-shared-cache-plain_chat"),
+            )
+            if not epp_route.token_ids:
+                raise AssertionError("EPP route token_ids are empty")
+            if (generation.worker_id, generation.dp_rank) != (
+                epp_route.worker_id,
+                epp_route.dp_rank,
+            ):
+                raise AssertionError(
+                    "frontend generation and EPP route worker/rank differ: "
+                    f"fe={generation.worker_id}/{generation.dp_rank} "
+                    f"epp={epp_route.worker_id}/{epp_route.dp_rank}"
+                )
+            if generation.dp_rank != 0:
+                raise AssertionError(
+                    f"controlled one-worker rank is {generation.dp_rank}, expected 0"
+                )
+            if frontend_proc is None or frontend_proc.proc is None:
+                raise AssertionError("owned frontend_process was not saved")
+            if epp_proc is None or epp_proc.proc is None:
+                raise AssertionError("owned epp_process was not saved")
+            if (
+                frontend_proc.proc.poll() is not None
+                or epp_proc.proc.poll() is not None
+            ):
+                raise AssertionError("owned frontend or EPP process is not live")
+            kube_api = stack.kube_api
+            if kube_api is not None and kube_api.failures:
+                raise AssertionError(
+                    "Loopback Kubernetes API recorded unexpected requests: "
+                    + "; ".join(kube_api.failures)
+                )
+            logger.info(
+                "shared-cache-type profile=%s frontend=%s epp=%s "
+                "component=%s worker=%s/%s",
+                profile_name,
+                frontend[SHARED_CACHE_TYPE_ROW],
+                epp[SHARED_CACHE_TYPE_ROW],
+                component,
+                generation.worker_id,
+                generation.dp_rank,
+            )
+
+
+def run_session_prefix_index_config_parity(
+    request,
+    tmp_path,
+    monkeypatch,
+    model_name: str,
+    stack_cls,
+) -> None:
+    """Owned FE/EPP session-prefix input/config validation parity.
+
+    Controls cover omitted/false success, enabled+kv-events success, YAML
+    validation on each arm, and env-true/kv-false terminal outcomes. Raises
+    SessionPrefixIndexConfigMismatch only for FE exact diagnostic rejection
+    with EPP acceptance and routes.
+    """
+    # epp_parity pulls gRPC tooling; keep selected-test-only like sibling runners.
+    from tests.router.epp_config_contract import (
+        ANSI_RE,
+        SESSION_PREFIX_INDEX_DEADLINE_S,
+        SESSION_PREFIX_INDEX_DIAGNOSTIC,
+        SESSION_PREFIX_INDEX_ENV,
+        SESSION_PREFIX_INDEX_FIELDS,
+        SESSION_PREFIX_INDEX_ROW,
+        SessionPrefixIndexConfigMismatch,
+        _plain_chat_token_case,
+        assert_frontend_session_prefix_index_false,
+        clear_known_manifest_router_envs,
+        frontend_native_projection,
+        session_prefix_index_consumer_env,
+    )
+    from tests.router.epp_parity import (
+        EPP_GRPC_PORT,
+        catalog_generate_instances,
+        collect_frontend_generation_route,
+    )
+    from tests.router.router_process import (
+        epp_loopback_tls_ready,
+        observe_owned_initialization_diagnostic,
+    )
+    from tests.utils.router_logs import completed_utf8_log_prefix
+
+    if SESSION_PREFIX_INDEX_DIAGNOSTIC != (
+        "enable_session_prefix_index requires use_kv_events=true"
+    ):
+        raise AssertionError(
+            "session-prefix diagnostic is not the source-derived validation message"
+        )
+
+    def _apply_consumer_env(consumer_env: Mapping[str, str | None]) -> None:
+        clear_known_manifest_router_envs(monkeypatch)
+        monkeypatch.setenv("NO_COLOR", "1")
+        monkeypatch.setenv("RUST_LOG", "info")
+        monkeypatch.setenv("DYN_LOG", "info")
+        for name, value in consumer_env.items():
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+
+    def _unique_generate_worker(stack) -> tuple[int, Mapping[str, Any]]:
+        if stack.kube_api is None:
+            raise AssertionError("owned kube_api was not saved")
+        if stack.mockers is None:
+            raise AssertionError("owned mocker endpoint was not saved")
+        catalog = catalog_generate_instances(
+            stack.kube_api.listed_metadata(),
+            namespace=stack.mockers.namespace,
+            component="mocker",
+        )
+        if len(catalog) != 1:
+            raise AssertionError(
+                f"expected one generate worker for namespace="
+                f"{stack.mockers.namespace!r}, got {sorted(catalog)}"
+            )
+        worker_id, record = next(iter(catalog.items()))
+        owner_uid = record.get("owner_uid")
+        if not isinstance(owner_uid, str) or not owner_uid:
+            raise AssertionError(
+                f"generate worker {worker_id} missing owner_uid: {record!r}"
+            )
+        expected_uid = stack.identity.pod_uid
+        if owner_uid != expected_uid:
+            logger.error(
+                "generate worker owner_uid mismatch actual=%s expected=%s " "worker=%s",
+                owner_uid,
+                expected_uid,
+                worker_id,
+            )
+            raise AssertionError(
+                f"generate worker {worker_id} owner_uid {owner_uid!r} != "
+                f"stack identity pod_uid {expected_uid!r}"
+            )
+        return worker_id, record
+
+    def _assert_routes_match_catalog(
+        *,
+        worker_id: int,
+        generation,
+        epp_route,
+    ) -> None:
+        expected = (worker_id, 0)
+        if (generation.worker_id, generation.dp_rank) != expected:
+            raise AssertionError(
+                "frontend generation worker/rank "
+                f"{generation.worker_id}/{generation.dp_rank} != catalog {expected}"
+            )
+        if (epp_route.worker_id, epp_route.dp_rank) != expected:
+            raise AssertionError(
+                "EPP route worker/rank "
+                f"{epp_route.worker_id}/{epp_route.dp_rank} != catalog {expected}"
+            )
+
+    def _success_plain_chat_routes(
+        *,
+        consumer_env: Mapping[str, str | None],
+        log_label: str,
+    ) -> dict[str, Any]:
+        cases = _plain_chat_token_case(model_name)
+        case = cases[0]
+        with stack_cls(
+            request,
+            tmp_path,
+            model_name,
+            consumer_env=consumer_env,
+            log_label=log_label,
+        ) as stack:
+            run_frontend_epp_token_parity(stack, cases, include_negative_control=False)
+            fe_tokens = stack.collect_frontend_tokens(
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id(f"fe-ref-{log_label}-plain_chat"),
+            )
+            generation = collect_frontend_generation_route(
+                stack.frontend_url,
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id(f"fe-gen-{log_label}-plain_chat"),
+            )
+            if stack.driver is None:
+                raise AssertionError("owned ext_proc driver was not saved")
+            epp_route = stack.driver.collect_route_observation(
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id(f"epp-route-{log_label}-plain_chat"),
+            )
+            worker_id, record = _unique_generate_worker(stack)
+            _assert_routes_match_catalog(
+                worker_id=worker_id,
+                generation=generation,
+                epp_route=epp_route,
+            )
+            assert_ordered_token_ids_match(
+                fe_tokens,
+                epp_route.token_ids,
+                left_label="frontend.nvext.token_ids",
+                right_label="epp.route.token_ids",
+                case_name=f"{log_label}-plain_chat",
+            )
+            frontend_proc = stack.frontend_process
+            epp_proc = stack.epp_process
+            if (
+                frontend_proc is None
+                or frontend_proc.proc is None
+                or epp_proc is None
+                or epp_proc.proc is None
+            ):
+                raise AssertionError("owned frontend or EPP process was not saved")
+            if (
+                frontend_proc.proc.poll() is not None
+                or epp_proc.proc.poll() is not None
+            ):
+                raise AssertionError("owned frontend or EPP process is not live")
+            if stack.kube_api.failures:
+                raise AssertionError(
+                    "Loopback Kubernetes API recorded unexpected requests: "
+                    + "; ".join(stack.kube_api.failures)
+                )
+            evidence = {
+                "log_label": log_label,
+                "frontend_pid": frontend_proc.proc.pid,
+                "epp_pid": epp_proc.proc.pid,
+                "worker_id": worker_id,
+                "owner_uid": record["owner_uid"],
+                "dp_rank": 0,
+                "fe_tokens": list(fe_tokens),
+            }
+            logger.info(
+                "session-prefix success label=%s session=%s kv_events=%s "
+                "fe_pid=%s epp_pid=%s worker=%s owner=%s tokens=%s",
+                log_label,
+                consumer_env.get(SESSION_PREFIX_INDEX_ENV),
+                consumer_env.get("DYN_ROUTER_USE_KV_EVENTS"),
+                evidence["frontend_pid"],
+                evidence["epp_pid"],
+                worker_id,
+                record["owner_uid"],
+                len(fe_tokens),
+            )
+            return evidence
+
+    def _observe_arm_diagnostic(
+        *,
+        arm: str,
+        consumer_env: Mapping[str, str | None],
+        log_label: str,
+    ) -> tuple[int, Path]:
+        include_frontend = arm == "frontend"
+        include_epp = arm == "epp"
+        with stack_cls(
+            request,
+            tmp_path,
+            model_name,
+            consumer_env=consumer_env,
+            include_frontend=include_frontend,
+            include_epp=include_epp,
+            require_readiness=False,
+            log_label=log_label,
+        ) as stack:
+            process = stack.frontend_process if include_frontend else stack.epp_process
+            pid, log = observe_owned_initialization_diagnostic(
+                process,
+                diagnostic=SESSION_PREFIX_INDEX_DIAGNOSTIC,
+                deadline_s=SESSION_PREFIX_INDEX_DEADLINE_S,
+                node_name=request.node.name,
+                label=f"{arm}_process",
+            )
+        logger.info(
+            "session-prefix diagnostic arm=%s pid=%s log=%s policy=%s",
+            arm,
+            pid,
+            log,
+            consumer_env.get("DYN_ROUTER_POLICY_CONFIG"),
+        )
+        return pid, log
+
+    def _remaining_budget(deadline: float, *, label: str) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(
+                f"{label} exhausted the owned {SESSION_PREFIX_INDEX_DEADLINE_S}s "
+                "deadline before completion"
+            )
+        return remaining
+
+    def _classify_epp_env_conflict_outcome(
+        *,
+        consumer_env: Mapping[str, str | None],
+        log_label: str,
+        fe_token_reference: list[int],
+    ) -> tuple[str, dict[str, Any]]:
+        boundary = re.compile(
+            re.escape(SESSION_PREFIX_INDEX_DIAGNOSTIC) + r"(?![0-9A-Za-z.])"
+        )
+        case = _plain_chat_token_case(model_name)[0]
+        with stack_cls(
+            request,
+            tmp_path,
+            model_name,
+            consumer_env=consumer_env,
+            include_frontend=False,
+            include_epp=True,
+            require_readiness=False,
+            log_label=log_label,
+        ) as stack:
+            process = stack.epp_process
+            if process is None or process.proc is None:
+                raise AssertionError("owned epp_process was not saved")
+            log_path = process.log_path
+            if not log_path:
+                raise AssertionError("epp_process has no log_path")
+            log = Path(log_path)
+            node_name = request.node.name
+            if node_name not in log.as_posix():
+                raise AssertionError(
+                    f"epp_process log_path {log} is not this node {node_name}"
+                )
+            deadline = time.monotonic() + SESSION_PREFIX_INDEX_DEADLINE_S
+            while True:
+                _remaining_budget(deadline, label="epp conflict observation")
+                pid = process.proc.pid
+                process.proc.poll()
+                raw = log.read_bytes() if log.is_file() else b""
+                text = completed_utf8_log_prefix(
+                    raw, label=f"epp_process pid={pid} log={log}"
+                )
+                if boundary.search(ANSI_RE.sub("", text)):
+                    _remaining_budget(deadline, label="epp conflict reject")
+                    evidence = {
+                        "outcome": "reject",
+                        "pid": pid,
+                        "log": str(log),
+                        "diagnostic": SESSION_PREFIX_INDEX_DIAGNOSTIC,
+                    }
+                    logger.info(
+                        "session-prefix env-conflict epp reject pid=%s log=%s",
+                        pid,
+                        log,
+                    )
+                    return "reject", evidence
+                if epp_loopback_tls_ready(EPP_GRPC_PORT, timeout=0.1):
+                    if stack.driver is None:
+                        raise AssertionError("owned ext_proc driver was not saved")
+                    epp_tokens = stack.driver.collect_token_data(
+                        case.payload,
+                        path=case.path,
+                        request_id=unique_request_id(
+                            "epp-token-session-prefix-env-conflict"
+                        ),
+                        timeout_s=_remaining_budget(
+                            deadline, label="epp collect_token_data"
+                        ),
+                    )
+                    epp_route = stack.driver.collect_route_observation(
+                        case.payload,
+                        path=case.path,
+                        request_id=unique_request_id(
+                            "epp-route-session-prefix-env-conflict"
+                        ),
+                        timeout_s=_remaining_budget(
+                            deadline, label="epp collect_route_observation"
+                        ),
+                    )
+                    _remaining_budget(deadline, label="epp acceptance completion")
+                    worker_id, record = _unique_generate_worker(stack)
+                    if (epp_route.worker_id, epp_route.dp_rank) != (worker_id, 0):
+                        raise AssertionError(
+                            "EPP acceptance worker/rank "
+                            f"{epp_route.worker_id}/{epp_route.dp_rank} != "
+                            f"catalog {(worker_id, 0)}"
+                        )
+                    assert_ordered_token_ids_match(
+                        fe_token_reference,
+                        epp_tokens,
+                        left_label="frontend.query_token_ids",
+                        right_label="epp.collect_token_data",
+                        case_name="session-prefix-env-conflict",
+                    )
+                    assert_ordered_token_ids_match(
+                        fe_token_reference,
+                        epp_route.token_ids,
+                        left_label="frontend.query_token_ids",
+                        right_label="epp.route.token_ids",
+                        case_name="session-prefix-env-conflict-route",
+                    )
+                    if process.proc.poll() is not None:
+                        raise AssertionError(
+                            "owned epp_process exited after TLS readiness"
+                        )
+                    if stack.kube_api.failures:
+                        raise AssertionError(
+                            "Loopback Kubernetes API recorded unexpected requests: "
+                            + "; ".join(stack.kube_api.failures)
+                        )
+                    evidence = {
+                        "outcome": "accept",
+                        "pid": pid,
+                        "log": str(log),
+                        "worker_id": worker_id,
+                        "owner_uid": record["owner_uid"],
+                        "dp_rank": 0,
+                        "token_count": len(epp_tokens),
+                    }
+                    logger.info(
+                        "session-prefix env-conflict epp accept pid=%s log=%s "
+                        "worker=%s owner=%s tokens=%s",
+                        pid,
+                        log,
+                        worker_id,
+                        record["owner_uid"],
+                        len(epp_tokens),
+                    )
+                    return "accept", evidence
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        f"epp_process pid={pid} log={log} neither emitted "
+                        f"{SESSION_PREFIX_INDEX_DIAGNOSTIC!r} nor became TLS-ready "
+                        "with tokens/routes before the owned deadline; this is not "
+                        "an expected readiness timeout or setup failure classification"
+                    )
+                time.sleep(min(0.05, max(deadline - time.monotonic(), 0.0)))
+
+    fe_token_reference: list[int] | None = None
+    for log_label, session_prefix, use_kv_events, expect_false in (
+        ("session-prefix-omitted", None, False, True),
+        ("session-prefix-false", "false", False, True),
+        ("session-prefix-true-kv-true", "true", True, False),
+    ):
+        consumer_env = session_prefix_index_consumer_env(
+            session_prefix=session_prefix,
+            use_kv_events=use_kv_events,
+            policy_config=None,
+        )
+        _apply_consumer_env(consumer_env)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            if expect_false:
+                assert_frontend_session_prefix_index_false(profile=log_label)
+            else:
+                frontend_true = frontend_native_projection(SESSION_PREFIX_INDEX_FIELDS)
+                if frontend_true.get(SESSION_PREFIX_INDEX_ROW) is not True:
+                    raise AssertionError(
+                        f"{log_label} FE {SESSION_PREFIX_INDEX_ROW}="
+                        f"{frontend_true.get(SESSION_PREFIX_INDEX_ROW)!r} != True"
+                    )
+        evidence = _success_plain_chat_routes(
+            consumer_env=consumer_env,
+            log_label=log_label,
+        )
+        if fe_token_reference is None:
+            fe_token_reference = evidence["fe_tokens"]
+
+    if fe_token_reference is None:
+        raise AssertionError("no FE plain-chat token reference was captured")
+
+    policy_path = tmp_path / "session-prefix-index-invalid.yaml"
+    policy_path.write_text(
+        "router:\n" "  enable_session_prefix_index: true\n" "  use_kv_events: false\n",
+        encoding="utf-8",
+    )
+    yaml_env = session_prefix_index_consumer_env(
+        session_prefix=None,
+        use_kv_events=True,
+        policy_config=str(policy_path),
+    )
+    _apply_consumer_env(yaml_env)
+    for arm in ("frontend", "epp"):
+        _observe_arm_diagnostic(
+            arm=arm,
+            consumer_env=yaml_env,
+            log_label=f"session-prefix-yaml-{arm}",
+        )
+
+    conflict_env = session_prefix_index_consumer_env(
+        session_prefix="true",
+        use_kv_events=False,
+        policy_config=None,
+    )
+    _apply_consumer_env(conflict_env)
+    fe_pid, fe_log = _observe_arm_diagnostic(
+        arm="frontend",
+        consumer_env=conflict_env,
+        log_label="session-prefix-env-true-kv-false-fe",
+    )
+    epp_outcome, epp_evidence = _classify_epp_env_conflict_outcome(
+        consumer_env=conflict_env,
+        log_label="session-prefix-env-true-kv-false-epp",
+        fe_token_reference=fe_token_reference,
+    )
+    fe_evidence = {
+        "outcome": "reject",
+        "pid": fe_pid,
+        "log": str(fe_log),
+        "diagnostic": SESSION_PREFIX_INDEX_DIAGNOSTIC,
+    }
+    logger.info(
+        "session-prefix env-conflict terminal fe=%s epp=%s",
+        fe_evidence,
+        epp_evidence,
+    )
+    if epp_outcome == "reject":
+        return
+    if epp_outcome == "accept":
+        raise SessionPrefixIndexConfigMismatch(
+            "FE rejected "
+            f"{SESSION_PREFIX_INDEX_DIAGNOSTIC!r} while EPP accepted and routed: "
+            f"fe={fe_evidence!r} epp={epp_evidence!r}"
+        )
+    raise AssertionError(
+        f"unrecognized EPP session-prefix outcome {epp_outcome!r}: {epp_evidence!r}"
+    )
+
+
+def run_prefill_admission_input_boundaries(
+    request,
+    tmp_path,
+    monkeypatch,
+    model_name: str,
+    stack_cls,
+    profile_name: str,
+) -> None:
+    """Observe FE original busy-threshold handles for default/abs/frac profiles.
+
+    Nondefault EPP route success is a fallback control only. This does not claim
+    saturation or admission-rejection measurement.
+    """
+    import aiohttp
+
+    from tests.router.epp_config_contract import (
+        PREFILL_ABS_ENV,
+        PREFILL_ADMISSION_PROFILES,
+        PREFILL_FRAC_ENV,
+        _plain_chat_token_case,
+        assert_input_startup_capability_source_contracts,
+        clear_ais_identity_envs,
+        clear_known_manifest_router_envs,
+        expected_prefill_admission_handles,
+        prefill_admission_consumer_env,
+    )
+    from tests.router.epp_parity import collect_frontend_generation_route
+
+    if profile_name not in PREFILL_ADMISSION_PROFILES:
+        raise AssertionError(
+            f"unknown prefill admission profile {profile_name!r}; "
+            f"expected one of {PREFILL_ADMISSION_PROFILES}"
+        )
+    assert_input_startup_capability_source_contracts()
+    clear_known_manifest_router_envs(monkeypatch)
+    clear_ais_identity_envs(monkeypatch)
+    monkeypatch.setenv("NO_COLOR", "1")
+    wanted_decode, wanted_abs, wanted_frac = expected_prefill_admission_handles(
+        profile_name
+    )
+    cases = _plain_chat_token_case(model_name)
+    admin_host = "127.0.0.1"
+
+    with reserved_ports(1, DynamoPortRange.FRONTEND) as (admin_port,):
+        consumer_env = prefill_admission_consumer_env(profile_name)
+        consumer_env["DYN_ENABLE_FRONTEND_ADMIN_API"] = "1"
+        consumer_env["DYN_FRONTEND_ADMIN_HOST"] = admin_host
+        consumer_env["DYN_FRONTEND_ADMIN_PORT"] = str(admin_port)
+        for name, value in consumer_env.items():
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        with stack_cls(
+            request,
+            tmp_path,
+            model_name,
+            consumer_env=consumer_env,
+            log_label=f"prefill-admission-{profile_name}",
+        ) as stack:
+            run_frontend_epp_token_parity(stack, cases, include_negative_control=False)
+            case = cases[0]
+            generation = collect_frontend_generation_route(
+                stack.frontend_url,
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id("fe-gen-prefill-admission"),
+            )
+            if stack.driver is None:
+                raise AssertionError("owned ext_proc driver was not saved")
+            epp_route = stack.driver.collect_route_observation(
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id("epp-route-prefill-admission"),
+            )
+            if not epp_route.token_ids:
+                raise AssertionError("EPP route token_ids are empty")
+            if (generation.worker_id, generation.dp_rank) != (
+                epp_route.worker_id,
+                epp_route.dp_rank,
+            ):
+                raise AssertionError(
+                    "frontend generation and EPP route worker/rank differ: "
+                    f"fe={generation.worker_id}/{generation.dp_rank} "
+                    f"epp={epp_route.worker_id}/{epp_route.dp_rank}"
+                )
+            if generation.dp_rank != 0:
+                raise AssertionError(
+                    f"controlled one-worker rank is {generation.dp_rank}, expected 0"
+                )
+            frontend_proc = stack.frontend_process
+            epp_proc = stack.epp_process
+            if frontend_proc is None or frontend_proc.proc is None:
+                raise AssertionError("owned frontend_process was not saved")
+            if epp_proc is None or epp_proc.proc is None:
+                raise AssertionError("owned epp_process was not saved")
+            if (
+                frontend_proc.proc.poll() is not None
+                or epp_proc.proc.poll() is not None
+            ):
+                raise AssertionError("owned frontend or EPP process is not live")
+            kube_api = stack.kube_api
+            if kube_api is not None and kube_api.failures:
+                raise AssertionError(
+                    "Loopback Kubernetes API recorded unexpected requests: "
+                    + "; ".join(kube_api.failures)
+                )
+            busy_url = f"http://{admin_host}:{admin_port}/busy_threshold"
+            timeout = aiohttp.ClientTimeout(total=10)
+
+            async def _get_thresholds() -> dict:
+                async with aiohttp.ClientSession(
+                    timeout=timeout, trust_env=False
+                ) as session:
+                    async with session.get(busy_url) as response:
+                        if response.status != 200:
+                            raise AssertionError(
+                                f"GET /busy_threshold failed with status {response.status}"
+                            )
+                        payload = await response.json()
+                        if not isinstance(payload, dict):
+                            raise AssertionError(
+                                f"GET /busy_threshold top-level is not a dict: {payload!r}"
+                            )
+                        return payload
+
+            data = asyncio.run(_get_thresholds())
+            if "thresholds" not in data:
+                raise AssertionError(
+                    f"GET /busy_threshold missing thresholds key: {data!r}"
+                )
+            thresholds = data["thresholds"]
+            if not isinstance(thresholds, list) or len(thresholds) != 1:
+                raise AssertionError(
+                    f"GET /busy_threshold expected exactly one model entry, got {data!r}"
+                )
+            entry = thresholds[0]
+            if not isinstance(entry, dict):
+                raise AssertionError(f"busy_threshold entry is not a dict: {entry!r}")
+            if "model" not in entry:
+                raise AssertionError(f"busy_threshold entry missing model: {entry!r}")
+            if entry["model"] != model_name:
+                raise AssertionError(
+                    f"busy_threshold model {entry['model']!r} != {model_name!r}"
+                )
+            required_keys = (
+                "active_decode_blocks_threshold",
+                "active_prefill_tokens_threshold",
+                "active_prefill_tokens_threshold_frac",
+            )
+            missing = [key for key in required_keys if key not in entry]
+            if missing:
+                raise AssertionError(
+                    f"busy_threshold entry missing keys {missing}: {entry!r}"
+                )
+            got_decode = entry["active_decode_blocks_threshold"]
+            got_abs = entry["active_prefill_tokens_threshold"]
+            got_frac = entry["active_prefill_tokens_threshold_frac"]
+            if (
+                got_decode != wanted_decode
+                or got_abs != wanted_abs
+                or got_frac != wanted_frac
+            ):
+                raise AssertionError(
+                    f"profile {profile_name} FE handles "
+                    f"decode/abs/frac={got_decode!r}/{got_abs!r}/{got_frac!r} != "
+                    f"{wanted_decode!r}/{wanted_abs!r}/{wanted_frac!r}"
+                )
+            logger.info(
+                "prefill admission profile=%s abs_env=%s frac_env=%s "
+                "admin=%s handles=%s/%s/%s fe_worker=%s/%s epp_ok=True",
+                profile_name,
+                consumer_env.get(PREFILL_ABS_ENV),
+                consumer_env.get(PREFILL_FRAC_ENV),
+                admin_port,
+                got_decode,
+                got_abs,
+                got_frac,
+                generation.worker_id,
+                generation.dp_rank,
+            )
+
+
+def frontend_epp_tools_token_parity_cases(model_name: str) -> list[TokenParityCase]:
+    """Reusable actual-token scenarios for tool schema and tool-history rendering.
+
+    Each case carries a real chat body and a sibling that changes only the tool
+    schema or only the tool reply so the same comparator can reject a live
+    mismatch. Payloads are built from local fresh copies.
+    """
+    chat_path = "/v1/chat/completions"
+    weather_tool = {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the current weather for a city.",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }
+    user_message = {"role": "user", "content": "What is the weather in Paris?"}
+
+    schema_payload = {
+        "model": model_name,
+        "messages": [deepcopy(user_message)],
+        "tools": [deepcopy(weather_tool)],
+        "stream": True,
+        "max_tokens": 1,
+    }
+    schema_divergent = deepcopy(schema_payload)
+    schema_divergent["tools"][0]["function"]["parameters"]["properties"]["unit"] = {
+        "type": "string",
+        "enum": ["celsius", "fahrenheit"],
+    }
+
+    history_payload = {
+        "model": model_name,
+        "messages": [
+            deepcopy(user_message),
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_weather_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": json.dumps({"city": "Paris"}),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_weather_1",
+                "content": json.dumps({"temperature": 18}),
+            },
+            {"role": "user", "content": "Should I bring a jacket?"},
+        ],
+        "tools": [deepcopy(weather_tool)],
+        "stream": True,
+        "max_tokens": 1,
+    }
+    history_divergent = deepcopy(history_payload)
+    history_divergent["messages"][2]["content"] = json.dumps({"temperature": -12})
+
+    return [
+        TokenParityCase(
+            name="tool_schema",
+            path=chat_path,
+            payload=schema_payload,
+            divergent_payload=schema_divergent,
+        ),
+        TokenParityCase(
+            name="tool_history",
+            path=chat_path,
+            payload=history_payload,
+            divergent_payload=history_divergent,
+        ),
+    ]
+
+
+def run_frontend_epp_tools_token_parity(
+    stack,
+    cases: list[TokenParityCase],
+) -> None:
+    """Compare live Frontend/EPP tokens for tool schema and tool-history cases.
+
+    Each case is handed to the existing runner with the live negative control
+    enabled so a schema-only mutation and a reply-only mutation must both be
+    rejected. The declaration case also collects original, tools-omitted, and
+    changed-schema bodies on each arm so a silent ignore of tools cannot pass.
+    """
+    if not cases:
+        raise AssertionError(
+            "tools token parity requires at least one actual request case"
+        )
+
+    for case in cases:
+        run_frontend_epp_token_parity(stack, [case], include_negative_control=True)
+
+    declaration = next((case for case in cases if case.name == "tool_schema"), None)
+    if declaration is None:
+        raise AssertionError(
+            "tools token parity requires a tool_schema declaration case"
+        )
+
+    omitted_payload = deepcopy(declaration.payload)
+    del omitted_payload["tools"]
+
+    bodies = (
+        ("baseline", declaration.payload),
+        ("tools_omitted", omitted_payload),
+        ("changed_schema", declaration.divergent_payload),
+    )
+    observed: dict[str, dict[str, list[int]]] = {"frontend": {}, "epp": {}}
+    for body_name, payload in bodies:
+        observed["frontend"][body_name] = stack.collect_frontend_tokens(
+            payload,
+            path=declaration.path,
+            request_id=unique_request_id(f"fe-{declaration.name}-{body_name}"),
+        )
+        observed["epp"][body_name] = stack.collect_epp_tokens(
+            payload,
+            path=declaration.path,
+            request_id=unique_request_id(f"epp-{declaration.name}-{body_name}"),
+        )
+
+    arm_labels = {
+        "frontend": "frontend.nvext.token_ids",
+        "epp": "epp.nvext.token_data",
+    }
+    for arm_name, label in arm_labels.items():
+        arm_tokens = observed[arm_name]
+        for other_name in ("tools_omitted", "changed_schema"):
+            case_name = f"{declaration.name}-{arm_name}-{other_name}"
+            baseline_tokens = arm_tokens["baseline"]
+            variant_tokens = arm_tokens[other_name]
+            assert (
+                baseline_tokens != variant_tokens
+            ), f"{case_name}: {label} baseline matched {other_name}"
+            logger.info(
+                "Tools token sensitivity confirmed for %s (%s vs %s)",
+                case_name,
+                f"{label}.baseline",
+                f"{label}.{other_name}",
+            )
+
+    if stack.kube_api.failures:
+        raise AssertionError(
+            "Loopback Kubernetes API recorded unexpected requests: "
+            + "; ".join(stack.kube_api.failures)
+        )
+
+
+########################################################
+# Frontend / Runtime EPP first-selection conformance
+########################################################
+
+
+@dataclass(frozen=True)
+class FirstSelectionCase:
+    """One actual HTTP body used for a quiescent first-selection comparison."""
+
+    name: str
+    path: str
+    payload: dict[str, Any]
+    label: str
+
+
+def frontend_epp_first_selection_cases(model_name: str) -> list[FirstSelectionCase]:
+    """Opposite long-prefix completions for aggregated first-selection parity."""
+    shared = "prefix cache routing stem " * 8
+    path = "/v1/completions"
+    return [
+        FirstSelectionCase(
+            name="route_a",
+            path=path,
+            payload={
+                "model": model_name,
+                "prompt": shared + ("north unique routing branch " * 12),
+                "stream": True,
+                "max_tokens": 1,
+            },
+            label="A",
+        ),
+        FirstSelectionCase(
+            name="route_b",
+            path=path,
+            payload={
+                "model": model_name,
+                "prompt": shared + ("south unique routing branch " * 12),
+                "stream": True,
+                "max_tokens": 1,
+            },
+            label="B",
+        ),
+    ]
+
+
+def _route_mismatch_message(
+    left,
+    right,
+    *,
+    left_label: str,
+    right_label: str,
+    case_name: str,
+) -> str:
+    return (
+        f"{case_name}: route observation mismatch: "
+        f"{left_label}=(worker_id={left.worker_id}, dp_rank={left.dp_rank}) "
+        f"{right_label}=(worker_id={right.worker_id}, dp_rank={right.dp_rank})"
+    )
+
+
+class SessionAffinityParityMismatch(AssertionError):
+    """Observed FE versus EPP session-affinity first-selection gap."""
+
+
+class PrefillQueueRejectionParityMismatch(AssertionError):
+    """Observed FE typed queue rejection versus EPP aggregated fallback."""
+
+
+class PriorityHeaderParityMismatch(AssertionError):
+    """Observed FE high-then-low versus EPP header-precedence low-then-high."""
+
+
+def assert_route_observations_match(
+    left,
+    right,
+    *,
+    left_label: str,
+    right_label: str,
+    case_name: str,
+) -> None:
+    """Compare typed first-selection routes only: (worker_id, dp_rank)."""
+    if (left.worker_id, left.dp_rank) != (right.worker_id, right.dp_rank):
+        raise AssertionError(
+            _route_mismatch_message(
+                left,
+                right,
+                left_label=left_label,
+                right_label=right_label,
+                case_name=case_name,
+            )
+        )
+
+
+def assert_route_observations_differ(
+    left,
+    right,
+    *,
+    left_label: str,
+    right_label: str,
+    case_name: str,
+) -> None:
+    """Require the same route comparator to reject distinct live observations."""
+    left_route = (left.worker_id, left.dp_rank)
+    right_route = (right.worker_id, right.dp_rank)
+    if left_route == right_route:
+        raise AssertionError(
+            f"{case_name}: live observations are not distinct routes: "
+            f"{left_label}={left_route} {right_label}={right_route}"
+        )
+    try:
+        assert_route_observations_match(
+            left,
+            right,
+            left_label=left_label,
+            right_label=right_label,
+            case_name=case_name,
+        )
+    except AssertionError as exc:
+        expected = _route_mismatch_message(
+            left,
+            right,
+            left_label=left_label,
+            right_label=right_label,
+            case_name=case_name,
+        )
+        if str(exc) == expected:
+            return
+        raise
+    raise AssertionError(
+        f"{case_name}: same route comparator accepted distinct live observations "
+        f"{left_label}=(worker_id={left.worker_id}, dp_rank={left.dp_rank}) "
+        f"{right_label}=(worker_id={right.worker_id}, dp_rank={right.dp_rank})"
+    )
+
+
+def _assert_catalog_valid_route(
+    observation, worker_ids: dict[str, int], case_name: str
+) -> None:
+    if observation.dp_rank != 0:
+        raise AssertionError(
+            f"{case_name}: expected aggregated dp_rank=0, got {observation.dp_rank}"
+        )
+    if observation.worker_id not in worker_ids.values():
+        raise AssertionError(
+            f"{case_name}: worker_id {observation.worker_id} is not a catalog "
+            f"generate target {worker_ids}"
+        )
+
+
+def _wait_for_provider_query_increase(stack, before: float, *, arm: str) -> float:
+    from tests.router.epp_parity import PROVIDER_QUERY_SETTLE_S
+
+    deadline = time.monotonic() + 5.0
+    last = before
+    while time.monotonic() < deadline:
+        time.sleep(PROVIDER_QUERY_SETTLE_S)
+        last = stack.provider_query_count()
+        if last > before:
+            return last
+    raise AssertionError(
+        f"{arm}: provider {stack.component_name}.kv_indexer_query request "
+        f"counter did not increase (before={before}, after={last})"
+    )
+
+
+def _stable_provider_query_baseline(stack, *, arm: str) -> float:
+    from tests.router.epp_parity import PROVIDER_QUERY_SETTLE_S
+
+    first = stack.provider_query_count()
+    time.sleep(PROVIDER_QUERY_SETTLE_S)
+    second = stack.provider_query_count()
+    if first != second:
+        raise AssertionError(
+            f"{arm}: provider query counter is not stable before the arm "
+            f"({first} -> {second})"
+        )
+    return second
+
+
+def _require_cache_sensitive_policy(stack) -> dict[str, float]:
+    parameters = stack.policy_parameters
+    required = (
+        "overlap_score_credit",
+        "overlap_score_credit_decay",
+        "prefill_load_scale",
+        "router_temperature",
+    )
+    missing = [name for name in required if name not in parameters]
+    if missing:
+        raise AssertionError(
+            f"aggregated policy_parameters missing {missing}: {parameters}"
+        )
+    if parameters["overlap_score_credit"] != 1.0:
+        raise AssertionError(
+            "aggregated overlap_score_credit must be 1.0, "
+            f"got {parameters['overlap_score_credit']}"
+        )
+    if parameters["overlap_score_credit_decay"] != 0.0:
+        raise AssertionError(
+            "aggregated overlap_score_credit_decay must be 0.0, "
+            f"got {parameters['overlap_score_credit_decay']}"
+        )
+    if parameters["prefill_load_scale"] != 1.0:
+        raise AssertionError(
+            "aggregated prefill_load_scale must be 1.0, "
+            f"got {parameters['prefill_load_scale']}"
+        )
+    if parameters["router_temperature"] != 0.0:
+        raise AssertionError(
+            "aggregated router_temperature must be 0 for deterministic first "
+            f"selection, got {parameters['router_temperature']}"
+        )
+    encoded = stack.provider_config_json
+    if not isinstance(encoded, str) or not encoded:
+        raise AssertionError(
+            "served KvRouter config JSON was not returned by the native child"
+        )
+    config = json.loads(encoded)
+    if config["router_track_prefill_tokens"] is not True:
+        raise AssertionError(
+            "served KvRouter must retain router_track_prefill_tokens for "
+            "cache-sensitive prefill accounting"
+        )
+    if config["router_track_output_blocks"] is not False:
+        raise AssertionError("served KvRouter must keep output-block tracking off")
+    if config["router_replica_sync"] is not False:
+        raise AssertionError("served KvRouter must keep replica sync off")
+    return parameters
+
+
+def _router_event_sort_key(event: dict[str, Any]) -> tuple[Any, ...]:
+    try:
+        data = event["event"]["data"]["stored"]
+        first_block = data["blocks"][0]
+        return (
+            event["worker_id"],
+            first_block["tokens_hash"],
+            data["parent_hash"],
+        )
+    except (KeyError, IndexError, TypeError) as exc:
+        raise AssertionError(
+            "provider dump_events entry is not a stored RouterEvent"
+        ) from exc
+
+
+def _provider_cache_snapshot(
+    stack, *, timeout_s: float | None = None
+) -> list[dict[str, Any]]:
+    if timeout_s is None:
+        raw = stack.dump_provider_events()
+    else:
+        raw = stack.dump_provider_events(timeout_s=timeout_s)
+    parsed = json.loads(raw)
+    if not isinstance(parsed, list):
+        raise AssertionError("provider dump_events must be a JSON list of RouterEvent")
+    events: list[dict[str, Any]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            raise AssertionError("provider dump_events list contains a non-object")
+        events.append(item)
+    return sorted(events, key=_router_event_sort_key)
+
+
+def _assert_provider_snapshot_unchanged(
+    frozen: list[dict[str, Any]], current: list[dict[str, Any]], case_name: str
+) -> None:
+    assert_event_dumps_equal(
+        frozen,
+        current,
+        f"{case_name}.frozen",
+        f"{case_name}.current",
+    )
+
+
+def _instance_worker_block_size(stack) -> int:
+    size = stack.worker_block_size
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        raise AssertionError(
+            f"stack worker_block_size {size!r} is not a positive instance size"
+        )
+    return size
+
+
+def _require_overlap_block_size(
+    scores: Mapping[str, Any], worker_block_size: int, *, label: str
+) -> None:
+    got = scores.get("block_size")
+    if got != worker_block_size:
+        raise AssertionError(
+            f"{label}: provider overlap block_size={got!r} != instance "
+            f"worker_block_size={worker_block_size}"
+        )
+
+
+def observe_owned_frontend_model_block_size(
+    stack,
+    *,
+    expected: int,
+    node_name: str,
+    deadline: float,
+    tokens: list[int],
+) -> None:
+    """Read the owned Frontend model block-size gauge and provider query under one deadline."""
+    if not isinstance(expected, int) or isinstance(expected, bool) or expected <= 0:
+        raise AssertionError(
+            f"expected model block size {expected!r} is not a positive worker-card value"
+        )
+    if not tokens:
+        raise AssertionError("provider overlap query requires nonempty tokens")
+    process = stack.frontend_process
+    if process is None or process.proc is None:
+        raise AssertionError("owned frontend_process was not saved")
+    if process.proc.poll() is not None:
+        raise AssertionError("owned frontend_process is not live")
+    pid = process.proc.pid
+    port = stack.frontend_port
+    if port is None:
+        raise AssertionError("owned frontend HTTP port was not saved")
+    if not process.log_path:
+        raise AssertionError("owned frontend_process has no log_path")
+    log_path = Path(process.log_path)
+    pair_label = stack.consumer_pair_label
+    if not pair_label:
+        raise AssertionError("owned consumer pair label was not saved")
+    posix = log_path.as_posix()
+    if node_name not in posix:
+        raise AssertionError(
+            f"frontend_process log_path {log_path} is not this node {node_name}"
+        )
+    if pair_label not in posix:
+        raise AssertionError(
+            f"frontend_process log_path {log_path} is not this pair {pair_label}"
+        )
+    metric_name = f"{name_prefix.FRONTEND}_{frontend_service.MODEL_KV_CACHE_BLOCK_SIZE}"
+    model = stack.model_name
+    if not model:
+        raise AssertionError("owned model label is missing")
+    worker_card = _instance_worker_block_size(stack)
+    cli_size = stack.frontend_cli_block_size
+    while True:
+        if stack.frontend_process is not process:
+            raise AssertionError("owned frontend_process is not the captured process")
+        if process.proc is None or process.proc.poll() is not None:
+            raise AssertionError("owned frontend_process is not live")
+        if process.proc.pid != pid:
+            raise AssertionError(
+                f"owned frontend_process moved from pid={pid} to {process.proc.pid}"
+            )
+        if stack.frontend_port != port:
+            raise AssertionError("owned frontend HTTP port changed during observation")
+        if Path(process.log_path) != log_path:
+            raise AssertionError(
+                f"owned frontend_process log moved from {log_path} to {process.log_path}"
+            )
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.get(f"http://127.0.0.1:{port}/metrics", timeout=2)
+        if response.status_code != 200:
+            raise AssertionError(
+                f"frontend_process pid={pid} HTTP /metrics on port {port} "
+                f"returned HTTP {response.status_code}"
+            )
+        family = find_metric_samples(response.text, metric_name)
+        samples = find_metric_samples(response.text, metric_name, {labels.MODEL: model})
+        if family and samples:
+            if len(family) != 1 or len(samples) != 1:
+                raise AssertionError(
+                    f"frontend_process pid={pid} port={port} {metric_name} "
+                    f"model={model!r} is ambiguous: family={len(family)} "
+                    f"model_samples={len(samples)}"
+                )
+            value = samples[0]
+            if value != float(expected):
+                raise AssertionError(
+                    f"frontend_process pid={pid} port={port} {metric_name} "
+                    f"model={model!r} value={value!r} != worker-card {expected}"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(
+                    f"frontend_process pid={pid} port={port} provider overlap "
+                    "query exhausted the readiness budget"
+                )
+
+            async def _provider_block_size() -> Any:
+                return await asyncio.wait_for(
+                    stack.provider_overlap_async(tokens, timeout_s=remaining),
+                    timeout=remaining,
+                )
+
+            try:
+                scores = stack.run_until_complete(_provider_block_size())
+            except asyncio.TimeoutError as exc:
+                raise AssertionError(
+                    f"frontend_process pid={pid} port={port} provider overlap "
+                    "query outlived the remaining readiness budget"
+                ) from exc
+            _require_overlap_block_size(
+                scores, expected, label=f"{pair_label}-provider-query"
+            )
+            logger.info(
+                "owned frontend model block-size pid=%s port=%s model=%s "
+                "metric=%s worker_card=%s cli=%s provider_block_size=%s "
+                "pair=%s",
+                pid,
+                port,
+                model,
+                value,
+                worker_card,
+                cli_size,
+                scores.get("block_size"),
+                pair_label,
+            )
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"frontend_process pid={pid} port={port} missing "
+                f"{metric_name} model={model!r} worker-card={expected}"
+            )
+        remaining = deadline - time.monotonic()
+        time.sleep(min(0.05, max(remaining, 0.0)))
+
+
+def _prepare_first_selection_snapshot(
+    stack,
+    cases: list[FirstSelectionCase],
+    *,
+    expected_model_block_size: int | None = None,
+):
+    # Unrelated router tests import common; keep epp_parity/grpc_tools
+    # selected-test-only so ordinary collection does not require them.
+    from tests.router.epp_parity import (
+        READINESS_DEADLINE_S,
+        collect_frontend_query_token_ids,
+    )
+
+    if stack.provider_router is None:
+        raise AssertionError("first-selection readiness requires a served KvRouter")
+
+    worker_block_size = _instance_worker_block_size(stack)
+    policy = _require_cache_sensitive_policy(stack)
+    worker_a = stack.worker_ids["A"]
+    worker_b = stack.worker_ids["B"]
+    logger.info(
+        "first-selection readiness workers=%s provider=%s policy=%s configs=%s",
+        stack.worker_ids,
+        stack.provider_instance_id,
+        policy,
+        stack.worker_configs,
+    )
+
+    async def activate_publishers() -> None:
+        deadline = time.monotonic() + READINESS_DEADLINE_S
+        for worker_id, label in ((worker_a, "A"), (worker_b, "B")):
+            key = (worker_id, 0)
+            attempt = 0
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssertionError(
+                        f"publisher activation for {label} exhausted the 45s "
+                        f"budget after {attempt} probes key={key}"
+                    )
+                attempt += 1
+                probe = [random.randint(1, 10000) for _ in range(2 * worker_block_size)]
+                try:
+                    await asyncio.wait_for(
+                        stack.provider_generate(
+                            model_name=stack.model_name,
+                            token_ids=probe,
+                            stop_conditions={"ignore_eos": True, "max_tokens": 2},
+                            worker_id=worker_id,
+                            dp_rank=0,
+                            timeout_s=remaining,
+                        ),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise AssertionError(
+                        f"publisher probe request/stream for {label} outlived "
+                        f"the 45s readiness budget on attempt {attempt}"
+                    ) from exc
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssertionError(
+                        f"publisher activation for {label} exhausted the 45s "
+                        f"budget after probe {attempt} before overlap"
+                    )
+                probe_deadline = min(deadline, time.monotonic() + 2.0)
+                indexed = False
+                while time.monotonic() < probe_deadline:
+                    query_budget = probe_deadline - time.monotonic()
+                    if query_budget <= 0:
+                        break
+                    try:
+                        scores = await asyncio.wait_for(
+                            stack.provider_overlap_async(probe, timeout_s=query_budget),
+                            timeout=query_budget,
+                        )
+                    except asyncio.TimeoutError:
+                        if time.monotonic() >= deadline:
+                            raise AssertionError(
+                                f"publisher overlap query for {label} outlived "
+                                "the 45s readiness budget"
+                            )
+                        break
+                    _require_overlap_block_size(
+                        scores,
+                        worker_block_size,
+                        label=f"publisher-{label}",
+                    )
+                    blocks = {
+                        (row["worker_id"], row["dp_rank"]): row["device_blocks"]
+                        for row in scores["workers"]
+                    }
+                    if blocks.get(key, 0) >= 2:
+                        indexed = True
+                        break
+                    await asyncio.sleep(
+                        min(0.05, max(probe_deadline - time.monotonic(), 0.0))
+                    )
+                if indexed:
+                    break
+
+    stack.run_until_complete(activate_publishers())
+
+    token_ids_by_label: dict[str, list[int]] = {}
+    stack.open_consumer_pair(include_epp=False)
+    try:
+        for case in cases:
+            token_ids_by_label[case.label] = collect_frontend_query_token_ids(
+                stack.frontend_url,
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id(f"fe-ready-{case.name}"),
+            )
+        if expected_model_block_size is not None:
+            observe_owned_frontend_model_block_size(
+                stack,
+                expected=expected_model_block_size,
+                node_name=stack.request.node.name,
+                deadline=time.monotonic() + READINESS_DEADLINE_S,
+                tokens=token_ids_by_label[cases[0].label],
+            )
+    finally:
+        stack.close_consumer_pair()
+
+    async def warm_and_gate() -> None:
+        deadline = time.monotonic() + READINESS_DEADLINE_S
+        last: dict[str, dict[tuple[int, int], int]] = {}
+        last_loads: dict[str, list[dict[str, Any]]] = {}
+        for case in cases:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(
+                    f"{case.name}: pinned warmup exhausted the 45s budget before send"
+                )
+            tokens = token_ids_by_label[case.label]
+            target = stack.worker_ids[case.label]
+            try:
+                await asyncio.wait_for(
+                    stack.provider_generate(
+                        model_name=stack.model_name,
+                        token_ids=tokens,
+                        stop_conditions={"ignore_eos": True, "max_tokens": 2},
+                        worker_id=target,
+                        dp_rank=0,
+                        timeout_s=remaining,
+                    ),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError as exc:
+                raise AssertionError(
+                    f"{case.name}: pinned warmup request/stream outlived the "
+                    "45s readiness budget"
+                ) from exc
+            complete_blocks = len(tokens) // worker_block_size
+            if complete_blocks < 2:
+                raise AssertionError(
+                    f"{case.name}: readiness tokens must cover at least two full "
+                    f"blocks, got {len(tokens)} tokens for "
+                    f"worker_block_size={worker_block_size}"
+                )
+        while time.monotonic() < deadline:
+            ready = True
+            for case in cases:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    ready = False
+                    break
+                tokens = token_ids_by_label[case.label]
+                try:
+                    scores = await asyncio.wait_for(
+                        stack.provider_overlap_async(tokens, timeout_s=remaining),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise AssertionError(
+                        f"{case.name}: get_overlap_scores outlived the remaining "
+                        "45s readiness budget"
+                    ) from exc
+                _require_overlap_block_size(scores, worker_block_size, label=case.name)
+                blocks = {
+                    (row["worker_id"], row["dp_rank"]): row["device_blocks"]
+                    for row in scores["workers"]
+                }
+                last[case.label] = blocks
+                preferred = stack.worker_ids[case.label]
+                other = worker_b if case.label == "A" else worker_a
+                preferred_blocks = blocks.get((preferred, 0), 0)
+                other_blocks = blocks.get((other, 0), 0)
+                complete_blocks = len(tokens) // worker_block_size
+                if (
+                    preferred_blocks < complete_blocks
+                    or preferred_blocks <= other_blocks
+                ):
+                    ready = False
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    ready = False
+                    break
+                try:
+                    loads = await asyncio.wait_for(
+                        stack.provider_potential_loads_async(
+                            tokens, timeout_s=remaining
+                        ),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise AssertionError(
+                        f"{case.name}: get_potential_loads outlived the remaining "
+                        "45s readiness budget"
+                    ) from exc
+                last_loads[case.label] = loads
+                by_worker = {(row["worker_id"], row["dp_rank"]): row for row in loads}
+                preferred_load = by_worker.get((preferred, 0))
+                other_load = by_worker.get((other, 0))
+                if preferred_load is None or other_load is None:
+                    ready = False
+                    continue
+                if (
+                    preferred_load["active_requests"] != 0
+                    or other_load["active_requests"] != 0
+                ):
+                    ready = False
+                    continue
+                if (
+                    preferred_load["potential_prefill_tokens"]
+                    >= other_load["potential_prefill_tokens"]
+                ):
+                    ready = False
+            if ready:
+                logger.info(
+                    "first-selection snapshot margins=%s loads=%s policy=%s",
+                    last,
+                    last_loads,
+                    policy,
+                )
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(0.05, remaining))
+        raise AssertionError(
+            "provider overlap/load snapshot did not reach a full-block non-tie "
+            f"quiescent margin before the 45s readiness budget: {last} "
+            f"loads={last_loads}"
+        )
+
+    stack.run_until_complete(warm_and_gate())
+    stack.token_ids_by_label = token_ids_by_label
+
+
+def run_frontend_epp_first_selection_parity(
+    stack,
+    cases: list[FirstSelectionCase],
+    *,
+    expected_model_block_size: int | None = None,
+) -> None:
+    """Compare live FE query-only and first EPP selections on a frozen snapshot."""
+    from tests.router.epp_parity import READINESS_DEADLINE_S
+
+    if len(cases) != 2 or {case.label for case in cases} != {"A", "B"}:
+        raise AssertionError("first-selection parity requires opposite A/B cases")
+
+    _prepare_first_selection_snapshot(
+        stack, cases, expected_model_block_size=expected_model_block_size
+    )
+    frozen_events = _provider_cache_snapshot(stack)
+    logger.info(
+        "first-selection frozen snapshot events=%s workers=%s provider=%s",
+        len(frozen_events),
+        stack.worker_ids,
+        stack.provider_instance_id,
+    )
+
+    observed: dict[str, tuple[Any, Any]] = {}
+    for case in cases:
+        stack.open_consumer_pair()
+        try:
+            if expected_model_block_size is not None:
+                observe_owned_frontend_model_block_size(
+                    stack,
+                    expected=expected_model_block_size,
+                    node_name=stack.request.node.name,
+                    deadline=time.monotonic() + READINESS_DEADLINE_S,
+                    tokens=stack.token_ids_by_label[case.label],
+                )
+            before = _stable_provider_query_baseline(stack, arm=f"{case.name}-frontend")
+            frontend_route = stack.collect_frontend_route(
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id(f"fe-sel-{case.name}"),
+            )
+            after_fe = _wait_for_provider_query_increase(
+                stack, before, arm=f"{case.name}-frontend"
+            )
+            epp_before = _stable_provider_query_baseline(stack, arm=f"{case.name}-epp")
+            if epp_before < after_fe:
+                raise AssertionError(
+                    f"{case.name}-epp: provider counter decreased between arms "
+                    f"({after_fe} -> {epp_before})"
+                )
+            epp_route = stack.collect_epp_route(
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id(f"epp-sel-{case.name}"),
+            )
+            after_epp = _wait_for_provider_query_increase(
+                stack, epp_before, arm=f"{case.name}-epp"
+            )
+            _assert_catalog_valid_route(
+                frontend_route, stack.worker_ids, f"{case.name}-frontend"
+            )
+            _assert_catalog_valid_route(epp_route, stack.worker_ids, f"{case.name}-epp")
+            expected_worker = stack.worker_ids[case.label]
+            if frontend_route.worker_id != expected_worker:
+                raise AssertionError(
+                    f"{case.name}: frontend first selection {frontend_route.worker_id} "
+                    f"does not follow the verified snapshot worker {expected_worker}"
+                )
+            assert_ordered_token_ids_match(
+                frontend_route.token_ids,
+                epp_route.token_ids,
+                left_label="frontend.token_ids",
+                right_label="epp.token_ids",
+                case_name=case.name,
+            )
+            assert_route_observations_match(
+                frontend_route,
+                epp_route,
+                left_label="frontend",
+                right_label="epp",
+                case_name=case.name,
+            )
+            current_events = _provider_cache_snapshot(stack)
+            _assert_provider_snapshot_unchanged(
+                frozen_events, current_events, case.name
+            )
+            logger.info(
+                "%s pair result frontend=%s epp=%s counters=%s->%s->%s",
+                case.name,
+                (frontend_route.worker_id, frontend_route.dp_rank),
+                (epp_route.worker_id, epp_route.dp_rank),
+                before,
+                after_fe,
+                after_epp,
+            )
+            observed[case.label] = (frontend_route, epp_route)
+        finally:
+            stack.close_consumer_pair()
+
+    if observed["A"][0].worker_id == observed["B"][0].worker_id:
+        raise AssertionError(
+            "R_A and R_B must flip the expected generate target; "
+            f"both selected worker_id={observed['A'][0].worker_id}"
+        )
+    logger.info(
+        "first-selection target flip A=%s B=%s",
+        observed["A"][0].worker_id,
+        observed["B"][0].worker_id,
+    )
+
+    control_a = cases[0] if cases[0].label == "A" else cases[1]
+    control_b = cases[0] if cases[0].label == "B" else cases[1]
+    stack.open_consumer_pair()
+    try:
+        if expected_model_block_size is not None:
+            observe_owned_frontend_model_block_size(
+                stack,
+                expected=expected_model_block_size,
+                node_name=stack.request.node.name,
+                deadline=time.monotonic() + READINESS_DEADLINE_S,
+                tokens=stack.token_ids_by_label[control_a.label],
+            )
+        before = _stable_provider_query_baseline(stack, arm="negative-frontend")
+        frontend_route = stack.collect_frontend_route(
+            control_a.payload,
+            path=control_a.path,
+            request_id=unique_request_id("fe-neg-route-a"),
+        )
+        after_fe = _wait_for_provider_query_increase(
+            stack, before, arm="negative-frontend"
+        )
+        epp_before = _stable_provider_query_baseline(stack, arm="negative-epp")
+        if epp_before < after_fe:
+            raise AssertionError(
+                f"negative-epp: provider counter decreased between arms "
+                f"({after_fe} -> {epp_before})"
+            )
+        epp_route = stack.collect_epp_route(
+            control_b.payload,
+            path=control_b.path,
+            request_id=unique_request_id("epp-neg-route-b"),
+        )
+        _wait_for_provider_query_increase(stack, epp_before, arm="negative-epp")
+        _assert_catalog_valid_route(
+            frontend_route, stack.worker_ids, "negative-frontend"
+        )
+        _assert_catalog_valid_route(epp_route, stack.worker_ids, "negative-epp")
+        assert_route_observations_differ(
+            frontend_route,
+            epp_route,
+            left_label="frontend.R_A",
+            right_label="epp.R_B",
+            case_name="live-negative-route",
+        )
+        current_events = _provider_cache_snapshot(stack)
+        _assert_provider_snapshot_unchanged(
+            frozen_events, current_events, "live-negative-route"
+        )
+        logger.info(
+            "live-negative-route rejected frontend.R_A=%s epp.R_B=%s",
+            (frontend_route.worker_id, frontend_route.dp_rank),
+            (epp_route.worker_id, epp_route.dp_rank),
+        )
+    finally:
+        stack.close_consumer_pair()
+
+    if stack.kube_api.failures:
+        raise AssertionError(
+            "Loopback Kubernetes API recorded unexpected requests: "
+            + "; ".join(stack.kube_api.failures)
+        )
+
+
+def run_dynamic_block_size_consumer(
+    request,
+    tmp_path,
+    model_name: str,
+    stack_cls,
+    *,
+    worker_block_size: int,
+    frontend_cli_block_size: int,
+) -> None:
+    """Attribute Dynamic FE/EPP block size to the worker card, not the FE CLI."""
+    cases = frontend_epp_first_selection_cases(model_name)
+    with stack_cls(
+        request,
+        tmp_path,
+        model_name,
+        worker_block_size=worker_block_size,
+        frontend_cli_block_size=frontend_cli_block_size,
+    ) as stack:
+        run_frontend_epp_first_selection_parity(
+            stack,
+            cases,
+            expected_model_block_size=worker_block_size,
+        )
+
+
+########################################################
+# Frontend / Runtime EPP input-family conformance
+########################################################
+
+
+def _with_nvext(payload: dict[str, Any], **fields: Any) -> dict[str, Any]:
+    body = deepcopy(payload)
+    nvext = dict(body.get("nvext") or {})
+    nvext.update(fields)
+    body["nvext"] = nvext
+    return body
+
+
+def _overlap_blocks(scores: Mapping[str, Any]) -> dict[tuple[int, int], int]:
+    return {
+        (row["worker_id"], row["dp_rank"]): row["device_blocks"]
+        for row in scores["workers"]
+    }
+
+
+def _active_requests(loads: list[Mapping[str, Any]]) -> dict[tuple[int, int], int]:
+    return {(row["worker_id"], row["dp_rank"]): row["active_requests"] for row in loads}
+
+
+def _dp0_worker_load_rows(
+    loads: list[Mapping[str, Any]],
+    worker_a: int,
+    worker_b: int,
+    case_name: str,
+) -> dict[tuple[int, int], Mapping[str, Any]] | None:
+    """Return exact DP0 rows for both catalog workers, or None if incomplete.
+
+    Duplicates fail immediately. Empty or missing rows are not evidence.
+    """
+    if not loads:
+        return None
+    seen: dict[tuple[int, int], Mapping[str, Any]] = {}
+    for row in loads:
+        key = (row["worker_id"], row["dp_rank"])
+        if key in seen:
+            raise AssertionError(f"{case_name}: duplicate potential_load row {key}")
+        seen[key] = row
+    expected = {(worker_a, 0), (worker_b, 0)}
+    if set(seen) != expected:
+        return None
+    return seen
+
+
+def _exact_dp0_zero_active(
+    loads: list[Mapping[str, Any]],
+    worker_a: int,
+    worker_b: int,
+    case_name: str,
+) -> bool:
+    rows = _dp0_worker_load_rows(loads, worker_a, worker_b, case_name)
+    if rows is None:
+        return False
+    return all(rows[key]["active_requests"] == 0 for key in rows)
+
+
+def _namespaced_overlap_snapshot(
+    stack,
+    token_ids: list[int],
+    *,
+    worker_a: int,
+    worker_b: int,
+    deadline: float | None = None,
+) -> dict[str | None, Any]:
+    from tests.router.epp_parity import READINESS_DEADLINE_S
+
+    tables: dict[str | None, Any] = {}
+    for namespace in ("tenant-a", "tenant-b", None):
+        if deadline is None:
+            timeout_s = READINESS_DEADLINE_S
+        else:
+            timeout_s = deadline - time.monotonic()
+            if timeout_s <= 0:
+                raise AssertionError(
+                    "cache-salt readiness exhausted the 45s budget before "
+                    f"overlap snapshot cache_namespace={namespace!r}"
+                )
+        scores = stack.provider_overlap_scores(
+            token_ids, cache_namespace=namespace, timeout_s=timeout_s
+        )
+        if deadline is None:
+            timeout_s = READINESS_DEADLINE_S
+        else:
+            timeout_s = deadline - time.monotonic()
+            if timeout_s <= 0:
+                raise AssertionError(
+                    "cache-salt readiness exhausted the 45s budget before "
+                    f"load snapshot cache_namespace={namespace!r}"
+                )
+        loads = stack.provider_potential_loads(
+            token_ids, cache_namespace=namespace, timeout_s=timeout_s
+        )
+        rows = _dp0_worker_load_rows(
+            loads, worker_a, worker_b, f"cache-salt:{namespace}"
+        )
+        tables[namespace] = {
+            "blocks": _overlap_blocks(scores),
+            "active": _active_requests(loads),
+            "rows": rows,
+        }
+    return tables
+
+
+def _assert_overlap_snapshots_match(
+    frozen: Mapping[str | None, Any],
+    current: Mapping[str | None, Any],
+    case_name: str,
+) -> None:
+    if frozen != current:
+        raise AssertionError(
+            f"{case_name}: namespaced overlap/load tables changed: "
+            f"frozen={frozen} current={current}"
+        )
+
+
+def _assert_zero_active_load(
+    tables: Mapping[str | None, Any],
+    worker_a: int,
+    worker_b: int,
+    case_name: str,
+) -> None:
+    for namespace, table in tables.items():
+        rows = table["rows"]
+        if rows is None or any(rows[key]["active_requests"] != 0 for key in rows):
+            raise AssertionError(
+                f"{case_name}: active load is not exactly both DP0 workers "
+                f"at zero for cache_namespace={namespace!r}: {rows}"
+            )
+
+
+def _compare_input_routes(
+    stack,
+    payload: dict[str, Any],
+    *,
+    path: str,
+    case_name: str,
+    headers: Mapping[str, str] | None = None,
+    expected_worker: int | None = None,
+    compare_tokens: bool = True,
+):
+    before = _stable_provider_query_baseline(stack, arm=f"{case_name}-frontend")
+    frontend_route = stack.collect_frontend_route(
+        payload,
+        path=path,
+        request_id=unique_request_id(f"fe-{case_name}"),
+        headers=headers,
+    )
+    after_fe = _wait_for_provider_query_increase(
+        stack, before, arm=f"{case_name}-frontend"
+    )
+    epp_before = _stable_provider_query_baseline(stack, arm=f"{case_name}-epp")
+    if epp_before < after_fe:
+        raise AssertionError(
+            f"{case_name}-epp: provider counter decreased between arms "
+            f"({after_fe} -> {epp_before})"
+        )
+    epp_route = stack.collect_epp_route(
+        payload,
+        path=path,
+        request_id=unique_request_id(f"epp-{case_name}"),
+        headers=headers,
+    )
+    _wait_for_provider_query_increase(stack, epp_before, arm=f"{case_name}-epp")
+    _assert_catalog_valid_route(
+        frontend_route, stack.worker_ids, f"{case_name}-frontend"
+    )
+    _assert_catalog_valid_route(epp_route, stack.worker_ids, f"{case_name}-epp")
+    if compare_tokens:
+        assert_ordered_token_ids_match(
+            frontend_route.token_ids,
+            epp_route.token_ids,
+            left_label="frontend.token_ids",
+            right_label="epp.token_ids",
+            case_name=case_name,
+        )
+    assert_route_observations_match(
+        frontend_route,
+        epp_route,
+        left_label="frontend",
+        right_label="epp",
+        case_name=case_name,
+    )
+    if expected_worker is not None and frontend_route.worker_id != expected_worker:
+        raise AssertionError(
+            f"{case_name}: frontend selected {frontend_route.worker_id}, "
+            f"expected {expected_worker}"
+        )
+    return frontend_route, epp_route
+
+
+def frontend_epp_cache_salt_case(model_name: str) -> FirstSelectionCase:
+    """One fixed completion body reused across two cache namespaces."""
+    return FirstSelectionCase(
+        name="cache_salt",
+        path="/v1/completions",
+        payload={
+            "model": model_name,
+            "prompt": "cache salt routing stem " * 8 + ("shared salt body " * 12),
+            "stream": True,
+            "max_tokens": 1,
+        },
+        label="S",
+    )
+
+
+def run_frontend_epp_cache_salt_parity(stack, case: FirstSelectionCase) -> None:
+    """Compare FE/EPP first selections under controlled namespaced indexer state.
+
+    Native Mocker does not publish salted engine KV events. This profile seeds
+    the approximate indexer through public best_worker and is not proof of
+    engine cache-salt isolation.
+    """
+    from dynamo.llm import RoutingConstraints
+    from tests.router.epp_parity import (
+        READINESS_DEADLINE_S,
+        ZONE_A_TAINT,
+        ZONE_B_TAINT,
+        collect_frontend_query_token_ids,
+    )
+
+    _require_cache_sensitive_policy(stack)
+    worker_a = stack.worker_ids["A"]
+    worker_b = stack.worker_ids["B"]
+    if stack.worker_configs[worker_a]["taints"] & {ZONE_A_TAINT} != {ZONE_A_TAINT}:
+        raise AssertionError(
+            f"worker A {worker_a} missing published {ZONE_A_TAINT}: "
+            f"{stack.worker_configs[worker_a]}"
+        )
+    if stack.worker_configs[worker_b]["taints"] & {ZONE_B_TAINT} != {ZONE_B_TAINT}:
+        raise AssertionError(
+            f"worker B {worker_b} missing published {ZONE_B_TAINT}: "
+            f"{stack.worker_configs[worker_b]}"
+        )
+
+    stack.open_consumer_pair(include_epp=False)
+    deadline = time.monotonic() + READINESS_DEADLINE_S
+
+    def remaining(step: str) -> float:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise AssertionError(
+                f"cache-salt readiness exhausted the 45s budget at {step}"
+            )
+        return left
+
+    try:
+        token_ids = collect_frontend_query_token_ids(
+            stack.frontend_url,
+            case.payload,
+            path=case.path,
+            request_id=unique_request_id("fe-ready-cache-salt"),
+            timeout_s=remaining("tokenize"),
+        )
+    finally:
+        stack.close_consumer_pair()
+    if len(token_ids) // 16 < 2:
+        raise AssertionError(
+            f"{case.name}: readiness tokens must cover at least two full "
+            f"blocks, got {len(token_ids)} tokens"
+        )
+
+    selected_a = stack.provider_best_worker(
+        token_ids,
+        timeout_s=remaining("seed-tenant-a"),
+        update_indexer=True,
+        cache_namespace="tenant-a",
+        routing_constraints=RoutingConstraints(required_taints={ZONE_A_TAINT}),
+        request_id=None,
+    )
+    selected_b = stack.provider_best_worker(
+        token_ids,
+        timeout_s=remaining("seed-tenant-b"),
+        update_indexer=True,
+        cache_namespace="tenant-b",
+        routing_constraints=RoutingConstraints(required_taints={ZONE_B_TAINT}),
+        request_id=None,
+    )
+    if (selected_a[0], selected_a[1]) != (worker_a, 0):
+        raise AssertionError(
+            f"best_worker tenant-a/zone-a returned {selected_a}, expected "
+            f"{(worker_a, 0)}"
+        )
+    if (selected_b[0], selected_b[1]) != (worker_b, 0):
+        raise AssertionError(
+            f"best_worker tenant-b/zone-b returned {selected_b}, expected "
+            f"{(worker_b, 0)}"
+        )
+
+    last_tables: dict[str | None, Any] = {}
+    while time.monotonic() < deadline:
+        last_tables = _namespaced_overlap_snapshot(
+            stack,
+            token_ids,
+            worker_a=worker_a,
+            worker_b=worker_b,
+            deadline=deadline,
+        )
+        blocks_a = last_tables["tenant-a"]["blocks"]
+        blocks_b = last_tables["tenant-b"]["blocks"]
+        default_blocks = {
+            key: value for key, value in last_tables[None]["blocks"].items() if value
+        }
+        winner_a = blocks_a.get((worker_a, 0), 0)
+        winner_b = blocks_b.get((worker_b, 0), 0)
+        other_a = blocks_a.get((worker_b, 0), 0)
+        other_b = blocks_b.get((worker_a, 0), 0)
+        if (
+            winner_a > 0
+            and winner_b > 0
+            and winner_a > other_a
+            and winner_b > other_b
+            and not default_blocks
+        ):
+            if all(
+                table["rows"] is not None
+                and all(
+                    table["rows"][key]["active_requests"] == 0 for key in table["rows"]
+                )
+                for namespace, table in last_tables.items()
+            ):
+                _assert_zero_active_load(
+                    last_tables, worker_a, worker_b, "cache-salt-setup"
+                )
+                break
+        time.sleep(0.05)
+    else:
+        raise AssertionError(
+            "approximate namespaced overlap did not reach opposite unique "
+            f"winners with empty default namespace: {last_tables}"
+        )
+    frozen = last_tables
+    logger.info("cache-salt controlled overlap tables=%s", frozen)
+
+    comparisons = (
+        ("salt-a", _with_nvext(case.payload, cache_salt="tenant-a"), None, worker_a),
+        ("salt-b", _with_nvext(case.payload, cache_salt="tenant-b"), None, worker_b),
+        (
+            "header-over-body",
+            _with_nvext(case.payload, cache_salt="tenant-a"),
+            {"x-tenant-id": "tenant-b"},
+            worker_b,
+        ),
+    )
+    seen_tokens: list[int] | None = None
+    for name, payload, headers, expected in comparisons:
+        stack.open_consumer_pair()
+        try:
+            frontend_route, epp_route = _compare_input_routes(
+                stack,
+                payload,
+                path=case.path,
+                case_name=name,
+                headers=headers,
+                expected_worker=expected,
+            )
+            if seen_tokens is None:
+                seen_tokens = frontend_route.token_ids
+            elif frontend_route.token_ids != seen_tokens:
+                raise AssertionError(
+                    f"{name}: token ids changed across cache-salt variants"
+                )
+            if epp_route.token_ids != seen_tokens:
+                raise AssertionError(
+                    f"{name}: EPP token ids diverged from the shared salt body"
+                )
+            _assert_overlap_snapshots_match(
+                frozen,
+                _namespaced_overlap_snapshot(
+                    stack, token_ids, worker_a=worker_a, worker_b=worker_b
+                ),
+                name,
+            )
+        finally:
+            stack.close_consumer_pair()
+
+    if stack.kube_api.failures:
+        raise AssertionError(
+            "Loopback Kubernetes API recorded unexpected requests: "
+            + "; ".join(stack.kube_api.failures)
+        )
+
+
+def frontend_epp_constraints_cold_case(model_name: str) -> FirstSelectionCase:
+    return FirstSelectionCase(
+        name="constraints_cold",
+        path="/v1/completions",
+        payload={
+            "model": model_name,
+            "prompt": "constraints cold routing stem " * 8
+            + ("unique cold branch " * 12),
+            "stream": True,
+            "max_tokens": 1,
+        },
+        label="C",
+    )
+
+
+def run_frontend_epp_routing_constraints_parity(
+    stack, cached_cases: list[FirstSelectionCase], cold_case: FirstSelectionCase
+) -> None:
+    """Compare FE/EPP routes under published worker taints and request constraints."""
+    from dynamo.llm import RoutingConstraints
+    from tests.router.epp_parity import (
+        READINESS_DEADLINE_S,
+        ZONE_A_TAINT,
+        ZONE_B_TAINT,
+        collect_frontend_query_token_ids,
+    )
+
+    preferred_weight = 0.85
+    if len(cached_cases) != 2 or {case.label for case in cached_cases} != {"A", "B"}:
+        raise AssertionError("constraints parity requires opposite A/B cache cases")
+
+    worker_a = stack.worker_ids["A"]
+    worker_b = stack.worker_ids["B"]
+    if stack.worker_configs[worker_a]["taints"] & {ZONE_A_TAINT} != {ZONE_A_TAINT}:
+        raise AssertionError(
+            f"worker A {worker_a} missing published {ZONE_A_TAINT}: "
+            f"{stack.worker_configs[worker_a]}"
+        )
+    if stack.worker_configs[worker_b]["taints"] & {ZONE_B_TAINT} != {ZONE_B_TAINT}:
+        raise AssertionError(
+            f"worker B {worker_b} missing published {ZONE_B_TAINT}: "
+            f"{stack.worker_configs[worker_b]}"
+        )
+
+    _prepare_first_selection_snapshot(stack, cached_cases)
+    frozen_events = _provider_cache_snapshot(stack)
+    cached_a = next(case for case in cached_cases if case.label == "A")
+    stack.open_consumer_pair()
+    try:
+        _compare_input_routes(
+            stack,
+            cached_a.payload,
+            path=cached_a.path,
+            case_name="unconstrained-cache-a",
+            expected_worker=worker_a,
+        )
+        required_b = RoutingConstraints(required_taints={ZONE_B_TAINT})
+        if required_b.required_taints != {ZONE_B_TAINT}:
+            raise AssertionError(
+                "native required_taints contract mismatch: "
+                f"{required_b.required_taints}"
+            )
+        _compare_input_routes(
+            stack,
+            _with_nvext(
+                cached_a.payload,
+                routing_constraints={"required_taints": [ZONE_B_TAINT]},
+            ),
+            path=cached_a.path,
+            case_name="required-taint-b",
+            expected_worker=worker_b,
+        )
+        _assert_provider_snapshot_unchanged(
+            frozen_events, _provider_cache_snapshot(stack), "required-taint-b"
+        )
+    finally:
+        stack.close_consumer_pair()
+
+    stack.open_consumer_pair(include_epp=False)
+    try:
+        cold_tokens = collect_frontend_query_token_ids(
+            stack.frontend_url,
+            cold_case.payload,
+            path=cold_case.path,
+            request_id=unique_request_id("fe-ready-constraints-cold"),
+        )
+    finally:
+        stack.close_consumer_pair()
+
+    deadline = time.monotonic() + READINESS_DEADLINE_S
+    last_blocks: dict[tuple[int, int], int] = {}
+    last_loads: list[Any] = []
+    cold_ready = False
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        scores = stack.provider_overlap_scores(cold_tokens, timeout_s=remaining)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        loads = stack.provider_potential_loads(cold_tokens, timeout_s=remaining)
+        last_blocks = _overlap_blocks(scores)
+        last_loads = loads
+        rows = _dp0_worker_load_rows(loads, worker_a, worker_b, "preferred-taint-cold")
+        if rows is None:
+            time.sleep(0.05)
+            continue
+        load_a = rows[(worker_a, 0)]
+        load_b = rows[(worker_b, 0)]
+        prefill_a = load_a["potential_prefill_tokens"]
+        prefill_b = load_b["potential_prefill_tokens"]
+        if (
+            last_blocks.get((worker_a, 0), 0) == 0
+            and last_blocks.get((worker_b, 0), 0) == 0
+            and load_a["active_requests"] == 0
+            and load_b["active_requests"] == 0
+            and prefill_a == prefill_b
+            and prefill_a > 0
+        ):
+            cold_ready = True
+            break
+        time.sleep(0.05)
+    if not cold_ready:
+        raise AssertionError(
+            "preferred-taint cold overlap/load did not reach zero-cache "
+            "zero-active equal positive potential_prefill: "
+            f"blocks={last_blocks} loads={last_loads}"
+        )
+    preferred_frozen = _provider_cache_snapshot(stack)
+
+    prefer_a = RoutingConstraints(preferred_taints={ZONE_A_TAINT: preferred_weight})
+    prefer_b = RoutingConstraints(preferred_taints={ZONE_B_TAINT: preferred_weight})
+    weight_a = prefer_a.preferred_taints.get(ZONE_A_TAINT)
+    weight_b = prefer_b.preferred_taints.get(ZONE_B_TAINT)
+    if weight_a is None or abs(float(weight_a) - preferred_weight) > 1e-5:
+        raise AssertionError(
+            "native preferred_taints weight for zone-a is not 0.85: "
+            f"{prefer_a.preferred_taints}"
+        )
+    if weight_b is None or abs(float(weight_b) - preferred_weight) > 1e-5:
+        raise AssertionError(
+            "native preferred_taints weight for zone-b is not 0.85: "
+            f"{prefer_b.preferred_taints}"
+        )
+
+    stack.open_consumer_pair()
+    try:
+        prefer_a_routes = _compare_input_routes(
+            stack,
+            _with_nvext(
+                cold_case.payload,
+                routing_constraints={
+                    "preferred_taints": {ZONE_A_TAINT: preferred_weight}
+                },
+            ),
+            path=cold_case.path,
+            case_name="preferred-taint-a",
+            expected_worker=worker_a,
+        )
+        prefer_b_routes = _compare_input_routes(
+            stack,
+            _with_nvext(
+                cold_case.payload,
+                routing_constraints={
+                    "preferred_taints": {ZONE_B_TAINT: preferred_weight}
+                },
+            ),
+            path=cold_case.path,
+            case_name="preferred-taint-b",
+            expected_worker=worker_b,
+        )
+        if prefer_a_routes[0].token_ids != prefer_b_routes[0].token_ids:
+            raise AssertionError("preferred-taint cases used different token ids")
+        if prefer_a_routes[0].token_ids != cold_tokens:
+            raise AssertionError(
+                "preferred-taint tokens diverged from the cold tokenization"
+            )
+        assert_route_observations_differ(
+            prefer_a_routes[0],
+            prefer_b_routes[1],
+            left_label="frontend.preferred.A",
+            right_label="epp.preferred.B",
+            case_name="preferred-taint-live-negative",
+        )
+        _assert_provider_snapshot_unchanged(
+            preferred_frozen,
+            _provider_cache_snapshot(stack),
+            "preferred-taint",
+        )
+    finally:
+        stack.close_consumer_pair()
+
+    if stack.kube_api.failures:
+        raise AssertionError(
+            "Loopback Kubernetes API recorded unexpected requests: "
+            + "; ".join(stack.kube_api.failures)
+        )
+
+
+def run_frontend_epp_session_id_parity(stack, cases: list[FirstSelectionCase]) -> None:
+    """Establish real FE session affinity, then compare the mismatch observation."""
+    from tests.router.epp_parity import READINESS_DEADLINE_S
+
+    if len(cases) != 2 or {case.label for case in cases} != {"A", "B"}:
+        raise AssertionError("session parity requires opposite A/B cases")
+
+    _prepare_first_selection_snapshot(stack, cases)
+    frozen_events = _provider_cache_snapshot(stack)
+    case_a = next(case for case in cases if case.label == "A")
+    case_b = next(case for case in cases if case.label == "B")
+    worker_a = stack.worker_ids["A"]
+    worker_b = stack.worker_ids["B"]
+    session_headers = {"x-dynamo-session-id": f"inputs-session-{uuid.uuid4()}"}
+    baseline_a = stack.token_ids_by_label["A"]
+
+    stack.open_consumer_pair()
+    try:
+        _compare_input_routes(
+            stack,
+            case_a.payload,
+            path=case_a.path,
+            case_name="no-session-a",
+            expected_worker=worker_a,
+        )
+        _compare_input_routes(
+            stack,
+            case_b.payload,
+            path=case_b.path,
+            case_name="no-session-b",
+            expected_worker=worker_b,
+        )
+        _assert_provider_snapshot_unchanged(
+            frozen_events, _provider_cache_snapshot(stack), "no-session-setup"
+        )
+
+        generation = stack.collect_frontend_generation(
+            case_a.payload,
+            path=case_a.path,
+            request_id=unique_request_id("fe-session-establish-a"),
+            headers=session_headers,
+        )
+        _assert_catalog_valid_route(
+            generation, stack.worker_ids, "fe-session-establish-a"
+        )
+        if generation.worker_id != worker_a:
+            raise AssertionError(
+                "FE session establishment did not bind worker A: "
+                f"{generation.worker_id} != {worker_a}"
+            )
+        epp_seed = stack.collect_epp_route(
+            case_a.payload,
+            path=case_a.path,
+            request_id=unique_request_id("epp-session-seed-a"),
+            headers=session_headers,
+        )
+        _assert_catalog_valid_route(epp_seed, stack.worker_ids, "epp-session-seed-a")
+        if epp_seed.worker_id != worker_a:
+            raise AssertionError(
+                "EPP session seed did not select catalog worker A: "
+                f"{epp_seed.worker_id} != {worker_a}"
+            )
+        assert_ordered_token_ids_match(
+            baseline_a,
+            epp_seed.token_ids,
+            left_label="baseline.A.token_ids",
+            right_label="epp.seed.token_ids",
+            case_name="epp-session-seed-a",
+        )
+        deadline = time.monotonic() + READINESS_DEADLINE_S
+        last_snapshot = None
+        after_establish = None
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            loads = stack.provider_potential_loads(baseline_a, timeout_s=remaining)
+            if not _exact_dp0_zero_active(
+                loads, worker_a, worker_b, "session-establish"
+            ):
+                last_snapshot = None
+                time.sleep(0.05)
+                continue
+            current = _provider_cache_snapshot(stack)
+            if last_snapshot is not None and current == last_snapshot:
+                after_establish = current
+                break
+            last_snapshot = current
+            time.sleep(0.05)
+        if after_establish is None:
+            raise AssertionError(
+                "session establishment events did not settle after worker A bind"
+            )
+
+        bound_before = _stable_provider_query_baseline(stack, arm="fe-session-prefix-b")
+        bound = stack.collect_frontend_route(
+            case_b.payload,
+            path=case_b.path,
+            request_id=unique_request_id("fe-session-prefix-b"),
+            headers=session_headers,
+        )
+        after_bound = _wait_for_provider_query_increase(
+            stack, bound_before, arm="fe-session-prefix-b"
+        )
+        _assert_catalog_valid_route(bound, stack.worker_ids, "fe-session-prefix-b")
+        if bound.worker_id != worker_a:
+            raise AssertionError(
+                "FE session S did not stay bound to worker A on prefix B: "
+                f"{bound.worker_id} != {worker_a}"
+            )
+        control_before = _stable_provider_query_baseline(
+            stack, arm="fe-nosession-prefix-b"
+        )
+        if control_before < after_bound:
+            raise AssertionError(
+                "fe-nosession-prefix-b: provider counter decreased between arms "
+                f"({after_bound} -> {control_before})"
+            )
+        control = stack.collect_frontend_route(
+            case_b.payload,
+            path=case_b.path,
+            request_id=unique_request_id("fe-nosession-prefix-b"),
+        )
+        after_control = _wait_for_provider_query_increase(
+            stack, control_before, arm="fe-nosession-prefix-b"
+        )
+        _assert_catalog_valid_route(control, stack.worker_ids, "fe-nosession-prefix-b")
+        if control.worker_id != worker_b:
+            raise AssertionError(
+                "FE no-session control did not prefer worker B on prefix B: "
+                f"{control.worker_id} != {worker_b}"
+            )
+        epp_before = _stable_provider_query_baseline(stack, arm="epp-session-prefix-b")
+        if epp_before < after_control:
+            raise AssertionError(
+                "epp-session-prefix-b: provider counter decreased between arms "
+                f"({after_control} -> {epp_before})"
+            )
+        epp_bound = stack.collect_epp_route(
+            case_b.payload,
+            path=case_b.path,
+            request_id=unique_request_id("epp-session-prefix-b"),
+            headers=session_headers,
+        )
+        _wait_for_provider_query_increase(stack, epp_before, arm="epp-session-prefix-b")
+        _assert_catalog_valid_route(epp_bound, stack.worker_ids, "epp-session-prefix-b")
+        assert_ordered_token_ids_match(
+            bound.token_ids,
+            control.token_ids,
+            left_label="frontend.session.token_ids",
+            right_label="frontend.nosession.token_ids",
+            case_name="session-prefix-b",
+        )
+        assert_ordered_token_ids_match(
+            bound.token_ids,
+            epp_bound.token_ids,
+            left_label="frontend.session.token_ids",
+            right_label="epp.session.token_ids",
+            case_name="session-prefix-b",
+        )
+        _assert_provider_snapshot_unchanged(
+            after_establish,
+            _provider_cache_snapshot(stack),
+            "session-prefix-b",
+        )
+        if stack.kube_api.failures:
+            raise AssertionError(
+                "Loopback Kubernetes API recorded unexpected requests: "
+                + "; ".join(stack.kube_api.failures)
+            )
+        if (
+            bound.worker_id == worker_a
+            and epp_bound.worker_id == worker_b
+            and bound.dp_rank == 0
+            and epp_bound.dp_rank == 0
+        ):
+            raise SessionAffinityParityMismatch(
+                _route_mismatch_message(
+                    bound,
+                    epp_bound,
+                    left_label="frontend.session",
+                    right_label="epp.session",
+                    case_name="session-prefix-b",
+                )
+            )
+        assert_route_observations_match(
+            bound,
+            epp_bound,
+            left_label="frontend.session",
+            right_label="epp.session",
+            case_name="session-prefix-b",
+        )
+    finally:
+        stack.close_consumer_pair()
+
+    if stack.kube_api.failures:
+        raise AssertionError(
+            "Loopback Kubernetes API recorded unexpected requests: "
+            + "; ".join(stack.kube_api.failures)
+        )
+
+
+########################################################
+# Frontend / Runtime EPP priority queue conformance
+########################################################
+
+
+def frontend_epp_priority_case(model_name: str) -> dict[str, Any]:
+    return {
+        "path": "/v1/completions",
+        "payload": {
+            "model": model_name,
+            "prompt": "priority queue stem " * 8 + ("held prefill body " * 8),
+            "stream": True,
+            "max_tokens": 1,
+        },
+    }
+
+
+def _priority_request_id() -> str:
+    return str(uuid.uuid4())
+
+
+def _canonical_request_uuid(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise AssertionError(f"{label}: request id {value!r} is empty")
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError as exc:
+        raise AssertionError(f"{label}: request id {value!r} is not a UUID") from exc
+    canonical = str(parsed)
+    if value != canonical:
+        raise AssertionError(
+            f"{label}: request id {value!r} is not canonical {canonical}"
+        )
+    return canonical
+
+
+def _cmpl_internal_request_id(raw: Any, *, label: str) -> str:
+    prefix = "cmpl-"
+    if not isinstance(raw, str) or not raw.startswith(prefix):
+        raise AssertionError(
+            f"{label}: SSE id {raw!r} does not have the exact {prefix} prefix"
+        )
+    return _canonical_request_uuid(raw[len(prefix) :], label=label)
+
+
+def _prefill_records_after(stack, boundary: int) -> list[dict[str, Any]]:
+    records = stack.selection_records()
+    if boundary < 0 or boundary > len(records):
+        raise AssertionError(
+            f"owned selection boundary {boundary} is outside {len(records)} records"
+        )
+    return [
+        record
+        for record in records[boundary:]
+        if record.get("worker_type") == "prefill"
+    ]
+
+
+def _require_eligible_prefill_booking(
+    record: Mapping[str, Any], *, expected_prefill: int, label: str
+) -> str:
+    request_id = _canonical_request_uuid(record.get("request_id"), label=label)
+    if record.get("worker_type") != "prefill":
+        raise AssertionError(f"{label}: booking is not prefill: {record}")
+    candidates = record.get("candidates") or []
+    if record.get("candidate_count") != 1 or len(candidates) != 1:
+        raise AssertionError(
+            f"{label}: booking is not one candidate_count/triple: {record}"
+        )
+    worker_id, dp_rank, cost = candidates[0]
+    if worker_id != expected_prefill or dp_rank != 0:
+        raise AssertionError(
+            f"{label}: booking worker/rank is {(worker_id, dp_rank)}, "
+            f"expected ({expected_prefill}, 0): {record}"
+        )
+    if not isinstance(cost, (int, float)) or isinstance(cost, bool):
+        raise AssertionError(f"{label}: booking cost is not numeric: {record}")
+    if cost != cost or cost in (float("inf"), float("-inf")):
+        raise AssertionError(f"{label}: booking cost is not finite: {record}")
+    return request_id
+
+
+def _require_no_prior_selection(stack, *, case_name: str) -> int:
+    prior = stack.selection_records()
+    if prior:
+        raise AssertionError(
+            f"{case_name}: owned selection records are not empty before blocker: "
+            f"{prior}"
+        )
+    return 0
+
+
+def _require_fe_generation_internal_ids(
+    outcomes: Sequence[tuple[str, Mapping[str, Any]]],
+    *,
+    booked_blocker_id: str,
+    case_name: str,
+) -> dict[str, str]:
+    ids: dict[str, str] = {}
+    for label, outcome in outcomes:
+        if "error" in outcome:
+            raise AssertionError(f"{case_name} FE {label} failed: {outcome['error']}")
+        if outcome.get("status") != 200:
+            raise AssertionError(
+                f"{case_name} FE {label} HTTP {outcome.get('status')}: "
+                f"{str(outcome.get('text', ''))[:300]}"
+            )
+        internal = outcome.get("internal_id")
+        if not isinstance(internal, str) or not internal:
+            raise AssertionError(
+                f"{case_name} FE {label} missing response-owned internal id"
+            )
+        ids[label] = internal
+    if ids["blocker"] != booked_blocker_id:
+        raise AssertionError(
+            f"{case_name}: blocker SSE internal id {ids['blocker']!r} != "
+            f"post-book {booked_blocker_id!r}"
+        )
+    if len(set(ids.values())) != 3:
+        raise AssertionError(f"{case_name}: FE internal ids are not distinct: {ids}")
+    return ids
+
+
+def _start_frontend_generation(
+    stack,
+    payload,
+    *,
+    path: str,
+    request_id: str,
+    headers,
+    deadline: float,
+    label: str,
+):
+    from tests.router.epp_parity import (
+        PRIORITY_HOLD_DEADLINE_S,
+        _frontend_sse_data_events,
+        merge_request_headers,
+    )
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise AssertionError(f"{label}: FE hold budget exhausted before HTTP start")
+    outcome: dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            merged = dict(merge_request_headers(request_id, headers))
+            with requests.Session() as session:
+                session.trust_env = False
+                response = session.post(
+                    f"{stack.frontend_url}{path}",
+                    json=payload,
+                    headers=merged,
+                    timeout=remaining + PRIORITY_HOLD_DEADLINE_S,
+                    stream=True,
+                )
+                outcome["status"] = response.status_code
+                outcome["text"] = response.text
+                if response.status_code != 200:
+                    return
+                events = _frontend_sse_data_events(response.text)
+                for event in events[:-1]:
+                    try:
+                        chunk = json.loads(event)
+                    except json.JSONDecodeError as exc:
+                        raise AssertionError(
+                            f"{label}: FE generation stream has a "
+                            "non-JSON data field"
+                        ) from exc
+                    if not isinstance(chunk, dict):
+                        raise AssertionError(
+                            f"{label}: FE generation stream data field "
+                            "is not an object"
+                        )
+                    if "error" in chunk:
+                        raise AssertionError(
+                            f"{label}: FE generation stream contained " "an error chunk"
+                        )
+                    derived = _cmpl_internal_request_id(chunk.get("id"), label=label)
+                    recorded = outcome.get("internal_id")
+                    if recorded is None:
+                        outcome["internal_id"] = derived
+                    elif recorded != derived:
+                        raise AssertionError(
+                            f"{label}: FE generation SSE ids are mixed "
+                            f"{recorded!r} vs {derived!r}"
+                        )
+                if "internal_id" not in outcome:
+                    raise AssertionError(
+                        f"{label}: FE generation stream has no cmpl- internal id"
+                    )
+        except Exception as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    stack.track_http_thread(thread, label)
+    return thread, outcome
+
+
+def _assert_held_generation_open(
+    outcome: Mapping[str, Any],
+    thread,
+    *,
+    label: str,
+    when: str,
+) -> None:
+    if "error" in outcome:
+        raise AssertionError(f"{label} finished with error {when}: {outcome['error']}")
+    status = outcome.get("status")
+    if status is not None and status != 200:
+        raise AssertionError(
+            f"{label} HTTP {status} {when}: " f"{str(outcome.get('text', ''))[:300]}"
+        )
+    if "text" in outcome:
+        raise AssertionError(f"{label} completed {when}: {outcome!r}")
+    if not thread.is_alive():
+        raise AssertionError(f"{label} thread exited {when}")
+
+
+def _require_priority_threads_finished(
+    threads: Sequence[tuple[str, Any]],
+    *,
+    case_name: str,
+) -> None:
+    alive = [label for label, thread in threads if thread.is_alive()]
+    if alive:
+        raise AssertionError(f"{case_name}: FE threads still alive after join: {alive}")
+
+
+def _wait_prefill_booking(
+    stack,
+    *,
+    boundary: int,
+    deadline: float,
+    expected_prefill: int,
+    blocker_thread,
+    blocker_out,
+    case_name: str,
+):
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        _assert_held_generation_open(
+            blocker_out,
+            blocker_thread,
+            label=f"{case_name}: FE blocker",
+            when="before booking",
+        )
+        fresh = _prefill_records_after(stack, boundary)
+        if len(fresh) > 1:
+            raise AssertionError(
+                f"{case_name}: FE blocker booking is ambiguous: {fresh}"
+            )
+        if len(fresh) == 1:
+            request_id = _require_eligible_prefill_booking(
+                fresh[0],
+                expected_prefill=expected_prefill,
+                label=f"{case_name}-blocker",
+            )
+            return request_id, fresh[0]
+        time.sleep(0.05)
+    raise AssertionError(
+        f"{case_name}: FE blocker post-book prefill missing after boundary "
+        f"{boundary}: {stack.selection_records()}"
+    )
+
+
+def _wait_fe_priority_prefill_order(
+    stack,
+    *,
+    low_id: str,
+    high_id: str,
+    blocker_id: str,
+    boundary: int,
+    expected_prefill: int,
+    deadline: float,
+    case_name: str,
+) -> list[str]:
+    last: list[str] = []
+    blocker_count = 0
+    while time.monotonic() < deadline:
+        last = []
+        seen: set[str] = set()
+        blocker_count = 0
+        for record in _prefill_records_after(stack, boundary):
+            rid = record.get("request_id")
+            if rid == blocker_id:
+                if blocker_count:
+                    raise AssertionError(
+                        f"{case_name}: duplicate FE blocker prefill {record}"
+                    )
+                _require_eligible_prefill_booking(
+                    record,
+                    expected_prefill=expected_prefill,
+                    label=f"{case_name}-blocker",
+                )
+                blocker_count += 1
+                continue
+            if rid not in {low_id, high_id}:
+                raise AssertionError(
+                    f"{case_name}: unexpected FE prefill booking {record}"
+                )
+            if rid in seen:
+                raise AssertionError(
+                    f"{case_name}: duplicate FE prefill booking {record}"
+                )
+            _require_eligible_prefill_booking(
+                record,
+                expected_prefill=expected_prefill,
+                label=f"{case_name}-{rid}",
+            )
+            seen.add(rid)
+            last.append(rid)
+        if blocker_count != 1:
+            if last:
+                raise AssertionError(
+                    f"{case_name}: FE post-boundary cohort is not exactly "
+                    f"one blocker plus low/high: blocker={blocker_count} "
+                    f"low/high={last}"
+                )
+        elif len(last) == 2:
+            return last
+        time.sleep(0.05)
+    raise AssertionError(
+        f"{case_name}: FE post-boundary prefill cohort is blocker="
+        f"{blocker_count} low/high={last}, expected one blocker plus both"
+    )
+
+
+def _wait_pending_prefill(stack, expected: float, deadline: float, case_name: str):
+    last = None
+    observed: list[str] = []
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        last, observed = stack.frontend_pending_prefill(timeout_s=min(2.0, remaining))
+        if last == expected:
+            return last
+        time.sleep(0.05)
+    raise AssertionError(
+        f"{case_name}: frontend prefill pending is {last}, expected {expected}; "
+        f"observed {observed}"
+    )
+
+
+def _priority_inputs(kind: str):
+    low_body = {"agent_hints": {"priority": 1, "strict_priority": 0}}
+    high_body = {"agent_hints": {"priority": 8, "strict_priority": 1}}
+    if kind == "body_strict":
+        return low_body, high_body, {}, {}
+    if kind == "header_strict":
+        return (
+            {"agent_hints": {"priority": 1, "strict_priority": 1}},
+            {"agent_hints": {"priority": 1, "strict_priority": 0}},
+            {"x-dynamo-request-strict-priority": "0"},
+            {"x-dynamo-request-strict-priority": "1"},
+        )
+    if kind == "header_normal":
+        return (
+            {"agent_hints": {"priority": 100, "strict_priority": 0}},
+            {"agent_hints": {"priority": 1, "strict_priority": 0}},
+            {"x-dynamo-request-priority": "1"},
+            {"x-dynamo-request-priority": "100"},
+        )
+    raise AssertionError(f"unknown priority kind {kind}")
+
+
+def _close_priority_held_streams(*handles) -> None:
+    errors: list[BaseException] = []
+    for handle in handles:
+        if handle is None:
+            continue
+        try:
+            handle.close()
+        except BaseException as exc:
+            errors.append(exc)
+    if errors:
+        raise errors[0]
+
+
+def _raise_priority_cleanup(body_error, close_error) -> None:
+    if close_error is not None:
+        cleanup = RuntimeError(f"{type(close_error).__name__}: {close_error}")
+        if body_error is not None:
+            raise cleanup from body_error
+        raise cleanup
+    if body_error is not None:
+        raise body_error
+
+
+def _stop_frontend_and_join_http(stack) -> None:
+    errors: list[BaseException] = []
+    try:
+        stack.stop_owned_frontend()
+    except BaseException as exc:
+        errors.append(exc)
+    try:
+        stack.join_owned_http_threads()
+    except BaseException as exc:
+        errors.append(exc)
+    if errors:
+        raise errors[0]
+
+
+def _finish_fe_priority_hold(stack, body_error) -> None:
+    cleanup = None
+    try:
+        stack.resume_owned_prefill()
+    except BaseException as exc:
+        cleanup = exc
+    try:
+        _stop_frontend_and_join_http(stack)
+    except BaseException as exc:
+        if cleanup is None:
+            cleanup = exc
+    if cleanup is not None:
+        raise RuntimeError(f"{type(cleanup).__name__}: {cleanup}") from (
+            body_error if body_error is not None else cleanup
+        )
+    if body_error is not None:
+        raise body_error
+
+
+def _assert_priority_catalog(stack, catalog: dict[str, int], when: str) -> None:
+    current = stack.catalog_snapshot()
+    if current != catalog or current != stack.worker_ids:
+        raise AssertionError(
+            f"catalog/lease changed {when}: {current} vs {catalog} "
+            f"/ {stack.worker_ids}"
+        )
+
+
+def _post_fe_priority_sentinel(
+    stack,
+    case: dict[str, Any],
+    payload: dict[str, Any],
+    sentinel_id: str,
+    deadline: float,
+    case_name: str,
+):
+    from tests.router.epp_parity import _typed_fe_queue_rejection, merge_request_headers
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise AssertionError(f"{case_name}: FE hold budget exhausted before sentinel")
+    headers = dict(merge_request_headers(sentinel_id, None))
+    with requests.Session() as session:
+        session.trust_env = False
+        sentinel = session.post(
+            f"{stack.frontend_url}{case['path']}",
+            json=payload,
+            headers=headers,
+            timeout=remaining,
+        )
+    return _typed_fe_queue_rejection(sentinel)
+
+
+def _assert_priority_hold_pending(
+    stack,
+    *,
+    low_thread,
+    high_thread,
+    low_out,
+    high_out,
+    blocker_id: str,
+    boundary: int,
+    expected_prefill: int,
+    case_name: str,
+) -> None:
+    _assert_held_generation_open(
+        low_out,
+        low_thread,
+        label=f"{case_name}: FE low",
+        when="during hold",
+    )
+    _assert_held_generation_open(
+        high_out,
+        high_thread,
+        label=f"{case_name}: FE high",
+        when="during hold",
+    )
+    fresh = _prefill_records_after(stack, boundary)
+    if len(fresh) != 1:
+        raise AssertionError(
+            f"{case_name}: FE hold has {len(fresh)} post-boundary prefill "
+            f"bookings, expected only the blocker: {fresh}"
+        )
+    booked = _require_eligible_prefill_booking(
+        fresh[0],
+        expected_prefill=expected_prefill,
+        label=f"{case_name}-blocker",
+    )
+    if booked != blocker_id:
+        raise AssertionError(
+            f"{case_name}: FE hold prefill {booked!r} != blocker {blocker_id!r}"
+        )
+
+
+def _wait_blocker_queue_ordering(stack, deadline: float, case_name: str) -> None:
+    last: list[str] = []
+    while time.monotonic() < deadline:
+        last = stack.queue_ordering_records(after_bytes=0)
+        if len(last) > 1:
+            raise AssertionError(
+                f"{case_name}: FE blocker queue ordering records are {last}, "
+                "not exactly 1"
+            )
+        if len(last) == 1:
+            return
+        time.sleep(0.05)
+    raise AssertionError(
+        f"{case_name}: FE blocker queue ordering records are {last}, "
+        "expected exactly 1"
+    )
+
+
+def _wait_priority_queue_ordering(
+    stack,
+    *,
+    after_bytes: int,
+    deadline: float,
+    case_name: str,
+    low_thread,
+    high_thread,
+    low_out,
+    high_out,
+    blocker_id: str,
+    boundary: int,
+    expected_prefill: int,
+) -> None:
+    from tests.router.epp_parity import PRIORITY_QUEUE_LIMIT
+
+    # Closed traffic, one scheduler actor: "ordering request" is not enqueue
+    # proof. The later single FE 529 is the full-capacity proof.
+    last: list[str] = []
+    while time.monotonic() < deadline:
+        _assert_priority_hold_pending(
+            stack,
+            low_thread=low_thread,
+            high_thread=high_thread,
+            low_out=low_out,
+            high_out=high_out,
+            blocker_id=blocker_id,
+            boundary=boundary,
+            expected_prefill=expected_prefill,
+            case_name=case_name,
+        )
+        last = stack.queue_ordering_records(after_bytes=after_bytes)
+        if len(last) > PRIORITY_QUEUE_LIMIT:
+            raise AssertionError(
+                f"{case_name}: FE queue ordering records are {last}, "
+                f"not exactly {PRIORITY_QUEUE_LIMIT}"
+            )
+        if len(last) == PRIORITY_QUEUE_LIMIT:
+            _assert_priority_hold_pending(
+                stack,
+                low_thread=low_thread,
+                high_thread=high_thread,
+                low_out=low_out,
+                high_out=high_out,
+                blocker_id=blocker_id,
+                boundary=boundary,
+                expected_prefill=expected_prefill,
+                case_name=case_name,
+            )
+            return
+        time.sleep(0.05)
+    raise AssertionError(
+        f"{case_name}: FE queue ordering records are {last}, "
+        f"expected exactly {PRIORITY_QUEUE_LIMIT}"
+    )
+
+
+def _prove_fe_priority_capacity(
+    stack,
+    case: dict[str, Any],
+    *,
+    catalog: dict[str, int],
+    deadline: float,
+    case_name: str,
+    blocker_id: str,
+    boundary: int,
+    expected_prefill: int,
+    low_id: str,
+    high_id: str,
+    sentinel_id: str,
+    low_payload: dict[str, Any],
+    high_payload: dict[str, Any],
+    low_headers,
+    high_headers,
+    low_label: str,
+    high_label: str,
+):
+    from tests.router.epp_parity import PRIORITY_QUEUE_LIMIT
+
+    _wait_blocker_queue_ordering(stack, deadline, case_name)
+    log_cursor = stack.frontend_log_bytes()
+    low_thread, low_out = _start_frontend_generation(
+        stack,
+        low_payload,
+        path=case["path"],
+        request_id=low_id,
+        headers=low_headers or None,
+        deadline=deadline,
+        label=low_label,
+    )
+    high_thread, high_out = _start_frontend_generation(
+        stack,
+        high_payload,
+        path=case["path"],
+        request_id=high_id,
+        headers=high_headers or None,
+        deadline=deadline,
+        label=high_label,
+    )
+    _wait_priority_queue_ordering(
+        stack,
+        after_bytes=log_cursor,
+        deadline=deadline,
+        case_name=case_name,
+        low_thread=low_thread,
+        high_thread=high_thread,
+        low_out=low_out,
+        high_out=high_out,
+        blocker_id=blocker_id,
+        boundary=boundary,
+        expected_prefill=expected_prefill,
+    )
+    _assert_priority_catalog(stack, catalog, "before FE sentinel")
+    sentinel = _post_fe_priority_sentinel(
+        stack, case, low_payload, sentinel_id, deadline, case_name
+    )
+    _assert_priority_hold_pending(
+        stack,
+        low_thread=low_thread,
+        high_thread=high_thread,
+        low_out=low_out,
+        high_out=high_out,
+        blocker_id=blocker_id,
+        boundary=boundary,
+        expected_prefill=expected_prefill,
+        case_name=case_name,
+    )
+    _wait_pending_prefill(stack, float(PRIORITY_QUEUE_LIMIT), deadline, case_name)
+    _assert_priority_hold_pending(
+        stack,
+        low_thread=low_thread,
+        high_thread=high_thread,
+        low_out=low_out,
+        high_out=high_out,
+        blocker_id=blocker_id,
+        boundary=boundary,
+        expected_prefill=expected_prefill,
+        case_name=case_name,
+    )
+    _assert_priority_catalog(stack, catalog, "during FE hold")
+    return low_thread, low_out, high_thread, high_out, sentinel
+
+
+def _wait_epp_blocker_queue_ordering(stack, deadline: float, case_name: str) -> None:
+    # The held blocker schedules prefill and decode before mutation returns.
+    last: list[str] = []
+    while time.monotonic() < deadline:
+        last = stack.epp_queue_ordering_records(after_bytes=0)
+        if len(last) > 2:
+            raise AssertionError(
+                f"{case_name}: EPP blocker queue ordering records are {last}, "
+                "not exactly 2"
+            )
+        if len(last) == 2:
+            return
+        time.sleep(0.05)
+    raise AssertionError(
+        f"{case_name}: EPP blocker queue ordering records are {last}, "
+        "expected exactly 2"
+    )
+
+
+def _wait_epp_low_high_queue_ordering(
+    stack,
+    *,
+    after_bytes: int,
+    deadline: float,
+    case_name: str,
+    epp_low,
+    epp_high,
+) -> None:
+    from tests.router.epp_parity import PRIORITY_QUEUE_LIMIT
+
+    last: list[str] = []
+    while time.monotonic() < deadline:
+        if (
+            _poll_held_admission(epp_low, 0.0) is not None
+            or _poll_held_admission(epp_high, 0.0) is not None
+        ):
+            raise AssertionError(f"{case_name}: EPP low/high admitted before sentinel")
+        last = stack.epp_queue_ordering_records(after_bytes=after_bytes)
+        if len(last) > PRIORITY_QUEUE_LIMIT:
+            raise AssertionError(
+                f"{case_name}: EPP queue ordering records are {last}, "
+                f"not exactly {PRIORITY_QUEUE_LIMIT}"
+            )
+        if len(last) == PRIORITY_QUEUE_LIMIT:
+            if (
+                _poll_held_admission(epp_low, 0.0) is not None
+                or _poll_held_admission(epp_high, 0.0) is not None
+            ):
+                raise AssertionError(
+                    f"{case_name}: EPP low/high admitted before sentinel"
+                )
+            return
+        time.sleep(0.05)
+    raise AssertionError(
+        f"{case_name}: EPP queue ordering records are {last}, "
+        f"expected exactly {PRIORITY_QUEUE_LIMIT}"
+    )
+
+
+def _wait_epp_prefill_fallback(
+    stack, *, after_bytes: int, deadline: float, case_name: str
+) -> None:
+    last: list[str] = []
+    while time.monotonic() < deadline:
+        last = stack.epp_prefill_fallback_rejections(after_bytes=after_bytes)
+        if len(last) > 1:
+            raise AssertionError(
+                f"{case_name}: EPP prefill fallback records are extra: " f"{len(last)}"
+            )
+        if len(last) == 1:
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"{case_name}: EPP prefill fallback queue rejection is absent")
+
+
+def _prove_epp_priority_capacity(
+    stack,
+    case: dict[str, Any],
+    *,
+    catalog: dict[str, int],
+    case_name: str,
+    blocker_obs,
+    low_id: str,
+    high_id: str,
+    sentinel_id: str,
+    low_payload: dict[str, Any],
+    high_payload: dict[str, Any],
+    low_headers,
+    high_headers,
+):
+    from tests.router.epp_parity import PRIORITY_HOLD_DEADLINE_S
+
+    deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
+    _wait_epp_blocker_queue_ordering(stack, deadline, case_name)
+    log_cursor = stack.epp_log_bytes()
+    with contextlib.ExitStack() as acquired:
+        epp_low = stack.driver.open_held_stream(
+            low_payload,
+            path=case["path"],
+            request_id=low_id,
+            headers=low_headers or None,
+        )
+        acquired.callback(epp_low.close)
+        epp_high = stack.driver.open_held_stream(
+            high_payload,
+            path=case["path"],
+            request_id=high_id,
+            headers=high_headers or None,
+        )
+        acquired.callback(epp_high.close)
+        _wait_epp_low_high_queue_ordering(
+            stack,
+            after_bytes=log_cursor,
+            deadline=deadline,
+            case_name=case_name,
+            epp_low=epp_low,
+            epp_high=epp_high,
+        )
+        _assert_priority_catalog(stack, catalog, "before EPP sentinel")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(
+                f"{case_name}: EPP hold budget exhausted before sentinel"
+            )
+        epp_sentinel = stack.driver.open_held_stream(
+            low_payload,
+            path=case["path"],
+            request_id=sentinel_id,
+            accept_queue_rejection=True,
+        )
+        acquired.callback(epp_sentinel.close)
+        sentinel_outcome = epp_sentinel.wait_routing_mutation(timeout_s=remaining)
+        sentinel_kind = _classify_epp_sentinel_outcome(
+            sentinel_outcome, case_name, catalog, blocker_obs
+        )
+        if sentinel_kind == "aggregated":
+            _wait_epp_prefill_fallback(
+                stack,
+                after_bytes=log_cursor,
+                deadline=deadline,
+                case_name=case_name,
+            )
+        if (
+            _poll_held_admission(epp_low, 0.0) is not None
+            or _poll_held_admission(epp_high, 0.0) is not None
+        ):
+            raise AssertionError(
+                f"{case_name}: EPP low/high admitted before blocker release"
+            )
+        _assert_priority_catalog(stack, catalog, "during EPP hold")
+        acquired.pop_all()
+        return epp_low, epp_high, epp_sentinel, sentinel_kind, sentinel_outcome
+
+
+def _poll_held_admission(handle, timeout_s: float):
+    try:
+        return handle.wait_routing_mutation(timeout_s=timeout_s)
+    except TimeoutError:
+        return None
+
+
+def _classify_epp_sentinel_outcome(
+    outcome, case_name: str, catalog, blocker_obs
+) -> str:
+    from tests.router.epp_parity import QueueRejectionOutcome, RouteObservation
+
+    if isinstance(outcome, QueueRejectionOutcome):
+        return "typed"
+    if not (
+        isinstance(outcome, RouteObservation) and outcome.routing_mode == "aggregated"
+    ):
+        raise AssertionError(
+            f"{case_name}: EPP sentinel is neither typed 503 nor "
+            f"aggregated fallback: {outcome!r}"
+        )
+    if outcome.worker_id != catalog["decode"]:
+        raise AssertionError(
+            f"{case_name}: EPP aggregated sentinel worker_id is "
+            f"{outcome.worker_id}, not catalog decode {catalog['decode']}"
+        )
+    if outcome.dp_rank != 0:
+        raise AssertionError(
+            f"{case_name}: EPP aggregated sentinel dp_rank is "
+            f"{outcome.dp_rank}, not DP0"
+        )
+    if outcome.token_ids != blocker_obs.token_ids:
+        raise AssertionError(
+            f"{case_name}: EPP aggregated sentinel token_ids differ from " "blocker"
+        )
+    if outcome.prefill_worker_id is not None:
+        raise AssertionError(
+            f"{case_name}: EPP aggregated sentinel reserved prefill "
+            f"{outcome.prefill_worker_id}"
+        )
+    return "aggregated"
+
+
+def run_frontend_epp_priority_parity(stack, model_name: str, kind: str) -> None:
+    """Compare FE/EPP admission under a held 1P+1D queue of two."""
+    from tests.router.epp_parity import PRIORITY_HOLD_DEADLINE_S
+
+    case = frontend_epp_priority_case(model_name)
+    low_nvext, high_nvext, low_headers, high_headers = _priority_inputs(kind)
+    catalog = stack.catalog_snapshot()
+    if catalog != stack.worker_ids:
+        raise AssertionError(
+            f"catalog changed before hold: {catalog} vs {stack.worker_ids}"
+        )
+    blocker_id = _priority_request_id()
+    low_id = _priority_request_id()
+    high_id = _priority_request_id()
+    sentinel_id = _priority_request_id()
+    low_payload = _with_nvext(case["payload"], **low_nvext)
+    high_payload = _with_nvext(case["payload"], **high_nvext)
+    deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
+    stack.pause_owned_prefill(deadline)
+    fe_error = None
+    try:
+        _assert_priority_catalog(stack, catalog, "after SIGSTOP")
+        boundary = _require_no_prior_selection(stack, case_name=kind)
+        blocker_thread, blocker = _start_frontend_generation(
+            stack,
+            case["payload"],
+            path=case["path"],
+            request_id=blocker_id,
+            headers=None,
+            deadline=deadline,
+            label=f"{kind}-blocker",
+        )
+        blocker_internal, _booking = _wait_prefill_booking(
+            stack,
+            boundary=boundary,
+            deadline=deadline,
+            expected_prefill=catalog["prefill"],
+            blocker_thread=blocker_thread,
+            blocker_out=blocker,
+            case_name=kind,
+        )
+        (
+            low_thread,
+            low_out,
+            high_thread,
+            high_out,
+            _fe_sentinel,
+        ) = _prove_fe_priority_capacity(
+            stack,
+            case,
+            catalog=catalog,
+            deadline=deadline,
+            case_name=kind,
+            blocker_id=blocker_internal,
+            boundary=boundary,
+            expected_prefill=catalog["prefill"],
+            low_id=low_id,
+            high_id=high_id,
+            sentinel_id=sentinel_id,
+            low_payload=low_payload,
+            high_payload=high_payload,
+            low_headers=low_headers,
+            high_headers=high_headers,
+            low_label=f"{kind}-low",
+            high_label=f"{kind}-high",
+        )
+        stack.resume_owned_prefill()
+        join_deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
+        leftover = join_deadline - time.monotonic()
+        for thread in (blocker_thread, low_thread, high_thread):
+            thread.join(timeout=max(leftover, 0.0))
+            leftover = join_deadline - time.monotonic()
+        _require_priority_threads_finished(
+            (
+                ("blocker", blocker_thread),
+                ("low", low_thread),
+                ("high", high_thread),
+            ),
+            case_name=kind,
+        )
+        internals = _require_fe_generation_internal_ids(
+            (
+                ("blocker", blocker),
+                ("low", low_out),
+                ("high", high_out),
+            ),
+            booked_blocker_id=blocker_internal,
+            case_name=kind,
+        )
+        fe_order = _wait_fe_priority_prefill_order(
+            stack,
+            low_id=internals["low"],
+            high_id=internals["high"],
+            blocker_id=blocker_internal,
+            boundary=boundary,
+            expected_prefill=catalog["prefill"],
+            deadline=join_deadline,
+            case_name=kind,
+        )
+        if fe_order != [internals["high"], internals["low"]]:
+            raise AssertionError(
+                f"{kind}: FE admission order {fe_order} is not high then low"
+            )
+    except BaseException as exc:
+        fe_error = exc
+    _finish_fe_priority_hold(stack, fe_error)
+
+    epp_low = None
+    epp_high = None
+    epp_blocker = None
+    epp_sentinel = None
+    body_error = None
+    close_error = None
+    try:
+        epp_blocker = stack.driver.open_held_stream(
+            case["payload"],
+            path=case["path"],
+            request_id=_priority_request_id(),
+        )
+        blocker_obs = epp_blocker.wait_routing_mutation(
+            timeout_s=PRIORITY_HOLD_DEADLINE_S
+        )
+        if blocker_obs.routing_mode != "disaggregated":
+            raise AssertionError(
+                f"{kind}: EPP blocker is {blocker_obs.routing_mode}, "
+                "not a held prefill reservation"
+            )
+        if blocker_obs.prefill_worker_id != catalog["prefill"]:
+            raise AssertionError(
+                f"{kind}: EPP blocker did not reserve prefill "
+                f"{catalog['prefill']}: {blocker_obs.prefill_worker_id}"
+            )
+        _assert_priority_catalog(stack, catalog, "after EPP prefill reservation")
+        (
+            epp_low,
+            epp_high,
+            epp_sentinel,
+            sentinel_kind,
+            _,
+        ) = _prove_epp_priority_capacity(
+            stack,
+            case,
+            catalog=catalog,
+            case_name=kind,
+            blocker_obs=blocker_obs,
+            low_id=low_id,
+            high_id=high_id,
+            sentinel_id=sentinel_id,
+            low_payload=low_payload,
+            high_payload=high_payload,
+            low_headers=low_headers,
+            high_headers=high_headers,
+        )
+        if sentinel_kind == "aggregated":
+            epp_sentinel.release()
+        if (
+            _poll_held_admission(epp_low, 0.0) is not None
+            or _poll_held_admission(epp_high, 0.0) is not None
+        ):
+            raise AssertionError(
+                f"{kind}: EPP low/high admitted before blocker release"
+            )
+        _assert_priority_catalog(stack, catalog, "while EPP prefill blocker held")
+        if stack.kube_api.failures:
+            raise AssertionError(
+                "Loopback Kubernetes API recorded unexpected requests: "
+                + "; ".join(stack.kube_api.failures)
+            )
+        epp_blocker.release()
+        admitted = None
+        pending = None
+        admit_deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
+        while time.monotonic() < admit_deadline:
+            remaining = min(0.2, admit_deadline - time.monotonic())
+            _poll_held_admission(epp_high, remaining)
+            _poll_held_admission(epp_low, remaining)
+            if epp_high.observation is not None and epp_low.observation is None:
+                admitted, pending = "high", "low"
+                break
+            if epp_low.observation is not None and epp_high.observation is None:
+                admitted, pending = "low", "high"
+                break
+            if epp_low.observation is not None and epp_high.observation is not None:
+                raise AssertionError(f"{kind}: both EPP streams admitted at once")
+        if (admitted, pending) not in {("high", "low"), ("low", "high")}:
+            raise AssertionError(
+                f"{kind}: EPP first admission is {admitted} then {pending}, "
+                "not exactly one of high-then-low or low-then-high"
+            )
+        first = epp_high if admitted == "high" else epp_low
+        leftover = epp_low if pending == "low" else epp_high
+        first.release()
+        leftover_deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
+        leftover_obs = None
+        while leftover_obs is None and time.monotonic() < leftover_deadline:
+            leftover_obs = _poll_held_admission(
+                leftover, leftover_deadline - time.monotonic()
+            )
+        if leftover_obs is None:
+            raise AssertionError(f"{kind}: EPP leftover {pending} never admitted")
+        for label, obs in (
+            (admitted, first.observation),
+            (pending, leftover_obs),
+        ):
+            if obs is None:
+                raise AssertionError(f"{kind}: EPP {label} has no observation")
+            if obs.routing_mode != "disaggregated":
+                raise AssertionError(
+                    f"{kind}: EPP {label} is {obs.routing_mode}, "
+                    "not a held prefill reservation"
+                )
+            if obs.prefill_worker_id != catalog["prefill"]:
+                raise AssertionError(
+                    f"{kind}: EPP {label} did not reserve prefill "
+                    f"{catalog['prefill']}: {obs.prefill_worker_id}"
+                )
+            if obs.worker_id != catalog["decode"]:
+                raise AssertionError(
+                    f"{kind}: EPP {label} worker_id is {obs.worker_id}, "
+                    f"not catalog decode {catalog['decode']}"
+                )
+            if obs.dp_rank != 0:
+                raise AssertionError(
+                    f"{kind}: EPP {label} dp_rank is {obs.dp_rank}, not DP0"
+                )
+            if obs.token_ids != blocker_obs.token_ids:
+                raise AssertionError(
+                    f"{kind}: EPP {label} token_ids differ from blocker"
+                )
+        leftover.release()
+        if epp_sentinel.queue_rejection is None:
+            epp_sentinel.release()
+        _assert_priority_catalog(stack, catalog, "after EPP admission")
+        if stack.kube_api.failures:
+            raise AssertionError(
+                "Loopback Kubernetes API recorded unexpected requests: "
+                + "; ".join(stack.kube_api.failures)
+            )
+        if admitted != "high" or pending != "low":
+            if (
+                kind in {"header_strict", "header_normal"}
+                and fe_order == [internals["high"], internals["low"]]
+                and admitted == "low"
+                and pending == "high"
+            ):
+                raise PriorityHeaderParityMismatch(
+                    f"{kind}: EPP admission order is {admitted} then {pending}, "
+                    "not high then low"
+                )
+            raise AssertionError(
+                f"{kind}: EPP admission order is {admitted} then {pending}, "
+                "not high then low"
+            )
+    except BaseException as exc:
+        body_error = exc
+    finally:
+        try:
+            _close_priority_held_streams(epp_blocker, epp_low, epp_high, epp_sentinel)
+        except BaseException as exc:
+            close_error = exc
+    _raise_priority_cleanup(body_error, close_error)
+
+
+def run_frontend_epp_priority_sentinel_fallback(stack, model_name: str) -> None:
+    """Compare FE typed 529 to the EPP third-waiter outcome."""
+    from tests.router.epp_parity import PRIORITY_HOLD_DEADLINE_S
+
+    case = frontend_epp_priority_case(model_name)
+    low_nvext, high_nvext, low_headers, high_headers = _priority_inputs("body_strict")
+    catalog = stack.catalog_snapshot()
+    if catalog != stack.worker_ids:
+        raise AssertionError(
+            f"catalog changed before hold: {catalog} vs {stack.worker_ids}"
+        )
+    blocker_id = _priority_request_id()
+    low_id = _priority_request_id()
+    high_id = _priority_request_id()
+    sentinel_id = _priority_request_id()
+    low_payload = _with_nvext(case["payload"], **low_nvext)
+    high_payload = _with_nvext(case["payload"], **high_nvext)
+    deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
+    stack.pause_owned_prefill(deadline)
+    fe_error = None
+    try:
+        _assert_priority_catalog(stack, catalog, "after SIGSTOP")
+        boundary = _require_no_prior_selection(stack, case_name="sentinel")
+        blocker_thread, blocker = _start_frontend_generation(
+            stack,
+            case["payload"],
+            path=case["path"],
+            request_id=blocker_id,
+            headers=None,
+            deadline=deadline,
+            label="sentinel-blocker",
+        )
+        blocker_internal, _booking = _wait_prefill_booking(
+            stack,
+            boundary=boundary,
+            deadline=deadline,
+            expected_prefill=catalog["prefill"],
+            blocker_thread=blocker_thread,
+            blocker_out=blocker,
+            case_name="sentinel",
+        )
+        (
+            low_thread,
+            low_out,
+            high_thread,
+            high_out,
+            fe_sentinel,
+        ) = _prove_fe_priority_capacity(
+            stack,
+            case,
+            catalog=catalog,
+            deadline=deadline,
+            case_name="sentinel",
+            blocker_id=blocker_internal,
+            boundary=boundary,
+            expected_prefill=catalog["prefill"],
+            low_id=low_id,
+            high_id=high_id,
+            sentinel_id=sentinel_id,
+            low_payload=low_payload,
+            high_payload=high_payload,
+            low_headers=low_headers,
+            high_headers=high_headers,
+            low_label="sentinel-low",
+            high_label="sentinel-high",
+        )
+        stack.resume_owned_prefill()
+        join_deadline = time.monotonic() + PRIORITY_HOLD_DEADLINE_S
+        leftover = join_deadline - time.monotonic()
+        for thread in (blocker_thread, low_thread, high_thread):
+            thread.join(timeout=max(leftover, 0.0))
+            leftover = join_deadline - time.monotonic()
+        _require_priority_threads_finished(
+            (
+                ("blocker", blocker_thread),
+                ("low", low_thread),
+                ("high", high_thread),
+            ),
+            case_name="sentinel",
+        )
+        _require_fe_generation_internal_ids(
+            (
+                ("blocker", blocker),
+                ("low", low_out),
+                ("high", high_out),
+            ),
+            booked_blocker_id=blocker_internal,
+            case_name="sentinel",
+        )
+    except BaseException as exc:
+        fe_error = exc
+    _finish_fe_priority_hold(stack, fe_error)
+
+    epp_low = None
+    epp_high = None
+    epp_blocker = None
+    epp_sentinel = None
+    body_error = None
+    close_error = None
+    try:
+        epp_blocker = stack.driver.open_held_stream(
+            case["payload"],
+            path=case["path"],
+            request_id=_priority_request_id(),
+        )
+        blocker_obs = epp_blocker.wait_routing_mutation(
+            timeout_s=PRIORITY_HOLD_DEADLINE_S
+        )
+        if (
+            blocker_obs.routing_mode != "disaggregated"
+            or blocker_obs.prefill_worker_id != catalog["prefill"]
+        ):
+            raise AssertionError(
+                "sentinel EPP blocker is not a held prefill reservation: "
+                f"{blocker_obs}"
+            )
+        _assert_priority_catalog(stack, catalog, "after EPP prefill reservation")
+        (
+            epp_low,
+            epp_high,
+            epp_sentinel,
+            sentinel_kind,
+            sentinel_outcome,
+        ) = _prove_epp_priority_capacity(
+            stack,
+            case,
+            catalog=catalog,
+            case_name="sentinel",
+            blocker_obs=blocker_obs,
+            low_id=low_id,
+            high_id=high_id,
+            sentinel_id=sentinel_id,
+            low_payload=low_payload,
+            high_payload=high_payload,
+            low_headers=low_headers,
+            high_headers=high_headers,
+        )
+        _assert_priority_catalog(stack, catalog, "after EPP admission")
+        if stack.kube_api.failures:
+            raise AssertionError(
+                "Loopback Kubernetes API recorded unexpected requests: "
+                + "; ".join(stack.kube_api.failures)
+            )
+        if sentinel_kind == "aggregated":
+            from tests.router.epp_parity import _typed_fe_queue_rejection
+
+            _typed_fe_queue_rejection(fe_sentinel)
+            raise PrefillQueueRejectionParityMismatch(
+                "FE typed 529 versus EPP aggregated fallback: FE HTTP "
+                f"{fe_sentinel.status_code} with {fe_sentinel.text[:200]!r}; "
+                f"EPP {sentinel_outcome.routing_mode!r}"
+            )
+        if sentinel_kind != "typed":
+            raise AssertionError(
+                "FE typed 529 versus unexpected EPP sentinel: "
+                f"{sentinel_kind!r} {sentinel_outcome!r}"
+            )
+    except BaseException as exc:
+        body_error = exc
+    finally:
+        try:
+            _close_priority_held_streams(epp_blocker, epp_low, epp_high, epp_sentinel)
+        except BaseException as exc:
+            close_error = exc
+    _raise_priority_cleanup(body_error, close_error)
+
+
+def run_native_consumer_profile(request, tmp_path, model_name, profile_name):
+    """Thin bridge: topology routing stack + native provider overlays + helper.
+
+    Scenario logic stays in ``epp_native_consumers``. Selected-test imports keep
+    ordinary ``common`` collection free of EPP/grpc_tools.
+    """
+    from tests.router.epp_native_consumers import (
+        native_provider_config_overrides,
+        native_provider_env_overrides,
+    )
+    from tests.router.epp_native_consumers import (
+        run_native_consumer_profile as _run_native_consumer_profile,
+    )
+    from tests.router.epp_parity import EppFrontendRoutingParityStack
+
+    with EppFrontendRoutingParityStack(
+        request,
+        tmp_path,
+        model_name,
+        enable_worker_topology=True,
+        provider_env_overrides=native_provider_env_overrides(),
+        provider_config_overrides=native_provider_config_overrides(),
+    ) as stack:
+        return _run_native_consumer_profile(
+            stack, profile_name=profile_name, tmp_path=tmp_path
+        )
+
+
+def run_named_policy_catalog(request, tmp_path, model_name):
+    """Thin bridge: default provider, topology stack, named-policy catalog helper.
+
+    Scenario logic stays in ``epp_selector_catalog``. Selected-test imports keep
+    ordinary ``common`` collection free of EPP/grpc_tools.
+    """
+    from tests.router.epp_parity import EppFrontendRoutingParityStack
+    from tests.router.epp_selector_catalog import assert_named_policy_source_contract
+    from tests.router.epp_selector_catalog import (
+        run_named_policy_catalog as _run_named_policy_catalog,
+    )
+
+    assert_named_policy_source_contract()
+    with EppFrontendRoutingParityStack(
+        request,
+        tmp_path,
+        model_name,
+        enable_worker_topology=True,
+    ) as stack:
+        return _run_named_policy_catalog(stack, tmp_path=tmp_path)

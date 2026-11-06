@@ -9,6 +9,7 @@ import os
 import random
 import string
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -26,6 +27,11 @@ BLOCK_SIZE = 16
 def generate_random_suffix() -> str:
     """Generate a 10-character random alphabetic suffix for namespace isolation."""
     return "".join(random.choices(string.ascii_lowercase, k=10))  # noqa: S311
+
+
+def unique_request_id(prefix: str) -> str:
+    """Return a prefix plus UUID4 so concurrent Frontend and EPP requests stay distinct."""
+    return f"{prefix}-{uuid.uuid4()}"
 
 
 def get_kv_indexer_command() -> list[str]:
