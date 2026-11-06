@@ -57,4 +57,13 @@ var (
 		Name:             "MultinodeTopologyAliases",
 		MinOriginVersion: *semver.MustParse("1.6.0"),
 	}
+
+	// VLLMRayWorkerGCSReadiness gates the Ray GCS readiness init container for
+	// plain multi-node vLLM TP/PP workers. Enabled for DGDs originally created
+	// by operator >= 1.6.0 so an operator-only upgrade does not roll existing
+	// Ray workloads.
+	VLLMRayWorkerGCSReadiness = Gate{
+		Name:             "VLLMRayWorkerGCSReadiness",
+		MinOriginVersion: *semver.MustParse("1.6.0"),
+	}
 )
