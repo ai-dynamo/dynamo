@@ -8,7 +8,7 @@
 
 pub use crate::{
     AcquireStep, AffinityError, AffinityLease, AffinityReplicaSink, AffinityTarget,
-    AffinityVersion, Hold, MAX_SESSION_AFFINITY_ID_BYTES, MAX_SESSION_AFFINITY_TTL_SECS,
-    ReplicaApplyOutcome, SessionAffinity, SessionAffinityConfig, SessionAffinityMode,
-    WeakSessionAffinity, WorkerAffinityTarget, subagent_group_affinity_id,
+    AffinityVersion, Hold, MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES,
+    MAX_SESSION_AFFINITY_TTL_SECS, ReplicaApplyOutcome, SessionAffinity, SessionAffinityConfig,
+    SessionAffinityMode, WeakSessionAffinity, WorkerAffinityTarget, subagent_group_affinity_id,
 };

@@ -972,6 +972,35 @@ def test_session_affinity_mode_cli_and_environment(monkeypatch) -> None:
     assert config.session_affinity_mode == "hard"
 
 
+def test_session_affinity_max_entries_cli_and_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def parse(argv: list[str]) -> FrontendConfig:
+        parser = argparse.ArgumentParser()
+        FrontendArgGroup().add_arguments(parser)
+        config = FrontendConfig.from_cli_args(parser.parse_args(argv))
+        config.validate()
+        return config
+
+    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES", raising=False)
+    assert parse([]).session_affinity_max_entries == 65_536
+
+    monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES", "1000000")
+    assert parse([]).session_affinity_max_entries == 1_000_000
+
+    config = parse(["--router-session-affinity-max-entries", "2000000"])
+    assert config.session_affinity_max_entries == 2_000_000
+    assert "session_affinity_max_entries" not in config.router_kwargs()
+
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-session-affinity-max-entries", "0"])
+    )
+    with pytest.raises(ValueError, match="router-session-affinity-max-entries"):
+        config.validate()
+
+
 @pytest.mark.parametrize("ttl", [0, 31_536_001])
 def test_session_affinity_ttl_rejects_out_of_range(ttl: int) -> None:
     parser = argparse.ArgumentParser()

@@ -334,6 +334,7 @@ pub struct WorkerRequest {
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
     pub stable_routing_id: Option<String>,
+    #[serde(default, deserialize_with = "strict_bool")]
     pub is_eagle: Option<bool>,
     #[serde(default)]
     pub taints: HashSet<String>,
@@ -353,7 +354,7 @@ pub struct WorkerRequest {
     pub kv_event_source_mode: Option<String>,
     /// The KV event source derives multimodal pad values from engine identities
     /// (SGLang after sgl-project/sglang#43043). Unset means a legacy source.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "strict_bool")]
     pub engine_owned_mm_identity: Option<bool>,
 }
 
@@ -369,6 +370,7 @@ pub struct WorkerPatchRequest {
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
     pub stable_routing_id: Option<String>,
+    #[serde(default, deserialize_with = "strict_bool")]
     pub is_eagle: Option<bool>,
     pub taints: Option<HashSet<String>>,
     pub topology_domains: Option<HashMap<String, String>>,
@@ -381,7 +383,7 @@ pub struct WorkerPatchRequest {
     pub router_hint_source_control_endpoints: Option<HashMap<u32, String>>,
     #[serde(default)]
     pub kv_event_source_mode: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "strict_bool")]
     pub engine_owned_mm_identity: Option<bool>,
 }
 

@@ -26,7 +26,7 @@ use dynamo_runtime::{
     pipeline::Error,
 };
 use dynamo_session_affinity::host::{
-    AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity, SessionAffinityConfig,
+    AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity,
 };
 
 #[cfg(test)]
@@ -59,7 +59,7 @@ pub struct AffinityCoordinator {
 impl AffinityCoordinator {
     pub fn new(ttl: Duration, mode: SessionAffinityMode) -> Result<Self, Error> {
         Ok(Self::wrap(
-            SessionAffinity::with_config(SessionAffinityConfig::new(ttl).with_mode(mode))
+            SessionAffinity::with_config(super::affinity_config(ttl, mode)?)
                 .map_err(affinity_error)?,
         ))
     }
@@ -200,6 +200,8 @@ impl AffinityCoordinator {
 
     #[cfg(test)]
     pub(super) fn with_test_limits(max_entries: usize, max_session_id_bytes: usize) -> Self {
+        use dynamo_session_affinity::host::SessionAffinityConfig;
+
         Self::wrap(
             SessionAffinity::with_config(SessionAffinityConfig {
                 max_entries,

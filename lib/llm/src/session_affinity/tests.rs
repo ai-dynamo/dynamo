@@ -755,3 +755,23 @@ fn a_subagent_group_id_is_namespaced_and_fixed_size() {
     assert_eq!(long.len(), a.len());
     assert!(long.len() <= MAX_SESSION_AFFINITY_ID_BYTES);
 }
+
+#[test]
+fn session_affinity_max_entries_comes_from_the_environment() {
+    use std::env::VarError;
+
+    assert_eq!(
+        super::max_entries_from(Err(VarError::NotPresent)).unwrap(),
+        65_536
+    );
+    assert_eq!(super::max_entries_from(Ok("2".into())).unwrap(), 2);
+    for value in ["0", "-1", "abc"] {
+        let error = super::max_entries_from(Ok(value.into())).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES must be a positive integer"),
+            "{error}"
+        );
+    }
+}

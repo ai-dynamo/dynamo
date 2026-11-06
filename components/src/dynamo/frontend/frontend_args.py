@@ -314,6 +314,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
                 "--router-session-affinity-ttl-secs must be between 1 and "
                 f"{_MAX_SESSION_AFFINITY_TTL_SECS}"
             )
+        if self.session_affinity_max_entries < 1:
+            raise ValueError("--router-session-affinity-max-entries must be >= 1")
         self.validate_default_chat_template_kwargs()
         if self.tokenizer_backend not in self._VALID_TOKENIZER_BACKENDS:
             raise ValueError(

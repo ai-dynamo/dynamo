@@ -77,7 +77,7 @@ its configuration even if the endpoint is unchanged.
 - `--router-conditional-disagg`: **Experimental.** Enables conditional disaggregation in frontend-embedded disaggregated serving. Requires `--router-mode kv`, `--router-kv-events`, separate prefill/decode worker pools, and decode-worker KV event publishing. Use `--router-conditional-disagg-config` for policy settings. See [Conditional Disaggregation](../../../advanced-customizations/conditional-disaggregation.md) for backend requirements and policy tuning.
 - `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIS prefill load decay to reflect prompt work.
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `ais` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
-- `--router-queue-threshold`: **Deprecated; use `policy_classes[].prefill_busy_threshold_frac` in the policy YAML.** Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how router priority differs from backend engine priority.
+- `--router-queue-threshold`: **Deprecated; use `policy_classes[].prefill_busy_threshold_frac` in the policy YAML.** Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.mdx) for how router priority differs from backend engine priority.
 - `--router-queue-policy`: **Deprecated; use `policy_classes[].queue_policy` in the policy YAML.** Scheduling policy for the router queue: `fcfs` (default) or `wspt`.
 - `--router-policy-config`: Startup-only YAML path for shared router settings, policy-class queues, and worker-selection instances. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Worker-Selection Policies](#worker-selection-policies) to select a built-in policy, and [Write Custom Routing Strategies](custom-worker-selection.mdx) for the linked-policy schema.
 
@@ -97,7 +97,7 @@ default, and `wspt`; policy-class YAML accepts `edf`, `fcfs`, and `wspt`.
 For `fcfs` and `wspt`, the complete pending-queue key is
 `(strict_priority, due_at, policy_key)`, where `due_at` is only a request classifier's explicit
 deadline. Higher strict tiers always win; see
-[Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how due-time
+[Priority Scheduling](../../../../use-cases/agents/priority-scheduling.mdx) for how due-time
 ordering applies within a tier.
 
 ### Worker-Selection Policies
@@ -115,7 +115,7 @@ link no catalog and reject a configured policy type at startup.
 |---|---|
 | `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
 | `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
-| `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [ThunderAgent Program Scheduler](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
+| `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [Schedule Agents with ThunderAgent](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
 | `dynamo-sticky-min-load` | Session-sticky least-loaded placement. A session's first request goes to the eligible worker with the fewest active requests; later requests carrying the same `X-Dynamo-Session-ID` return to that worker until it leaves the candidate set. Ignores cache overlap and load once a session is bound. Requests without a session ID go to the least-loaded worker. Inspired by SMG's `manual` policy with `assignment_mode: min_load`. |
 
@@ -474,6 +474,17 @@ Session affinity is disabled by default. On the frontend, set
 a value from `1` through `31536000` to enable it, then send
 `X-Dynamo-Session-ID` to keep related requests on one worker. Supplying the header
 without the TTL option provides session identity but does not enable router affinity.
+
+Each session holds one entry in an affinity table until it has been idle for the TTL. A
+frontend keeps one table per worker set it routes to, including the prefill set in
+disaggregated serving, and each table holds at most `65536` entries by default. A request that
+would start a new session past that limit fails as resource exhausted (HTTP 529 by default)
+until an idle session expires. To admit more concurrent sessions, such as one per
+reinforcement-learning rollout, set `--router-session-affinity-max-entries` or
+`DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES`. Available since v1.7. Replica sync copies bindings
+into the matching table on every frontend, so size the limit for the sessions live across all
+frontends, not per frontend. Sync is best effort, so treat this as a sizing guide rather than a
+hard fleet-wide cap.
 
 The first successfully dispatched request binds the session ID to its selected worker and, when available, data-parallel rank. Choose how later requests use that binding with `--router-session-affinity-mode` or `DYN_ROUTER_SESSION_AFFINITY_MODE`:
 
