@@ -38,7 +38,7 @@ audio dependencies.
 ### Launch
 
 ```bash
-bash examples/backends/vllm/launch/agg_realtime_transcription.sh \
+bash examples/backends/vllm/launch/agg_asr_realtime.sh \
   --max-model-len 4096 --max-num-seqs 2
 ```
 
@@ -52,7 +52,7 @@ To serve another model, name its realtime architecture explicitly. The launcher
 exits with an error if `--hf-overrides` is missing for a non-default model:
 
 ```bash
-bash examples/backends/vllm/launch/agg_realtime_transcription.sh \
+bash examples/backends/vllm/launch/agg_asr_realtime.sh \
   --model MODEL_ID \
   --hf-overrides '{"architectures":["REALTIME_ARCHITECTURE"]}'
 ```

@@ -509,7 +509,7 @@ The Dynamo runtime images accept audio at the model's 16 kHz rate. Audio at any 
 python -m dynamo.common.utils.install_media_decoders vllm
 ```
 
-Alternatively, convert audio to 16 kHz before you send it. See [Additional Media Decoders](../../../../../use-cases/multimodal-serving/additional-media-decoders.md) for what the installer changes.
+Alternatively, convert audio to 16 kHz before you send it. See [Additional Media Decoders](../../../../../use-cases/image-understanding/additional-media-decoders.md) for what the installer changes.
 
 #### Streaming Transcription
 
@@ -539,7 +539,7 @@ The model transcribes each 5-second segment as it arrives. Each segment's text s
 
 #### Kubernetes Deployment
 
-To deploy transcription or streaming transcription as a DynamoGraphDeployment, see [Speech Recognition on Kubernetes](../../../../../use-cases/multimodal-serving/voice.md#speech-recognition-on-kubernetes).
+To deploy transcription or streaming transcription as a DynamoGraphDeployment, see [Speech Recognition on Kubernetes](../../../../../use-cases/speech/voice-pipelines.md#speech-recognition-on-kubernetes).
 
 ## Embedding Cache
 
