@@ -171,3 +171,51 @@ Clippy passed with `-D warnings` for the sidecar's all-targets check and the
 frontend library; formatting passed. The test image used
 `CUDARC_CUDA_VERSION=13010` because its cached toolkit is CUDA 13.4, newer than
 the pinned cudarc build detector supports. No GPU execution was performed.
+
+
+### Offline replay of captured GLM requests
+
+The implementation at `f57a81ad605d37cb8c56609aa86cd9e19de6fb5d` was
+replayed offline on 2026-11-06 using saved nsc-lhr data and the GLM chat
+template/tokenizer from `hf-416bdc1_orig`. The replay ran the real HTTP service,
+endpoint conversion, `OpenAIPreprocessor`, rendering/tokenization, output
+parsers and HTTP/SSE projection. A scripted token backend returned saved native
+text, using saved frame boundaries when their concatenation matched that text.
+No production deployment or inference request was involved.
+
+All **80 unique cases passed independently under automatic, v1 and v2 parser
+selection** (240 executions):
+
+- 72 captured requests from 33 files across 20 runs. The original run's request
+  files were inspected in full; sibling runs were sampled.
+- 32 matched native-output/HTTP-response pairs with exact visible-text,
+  reasoning and tool-payload agreement, including 12 tool calls.
+- 40 further captured requests checked admission, rendering, custom-input
+  preservation and grammar metadata echo without native-output parity scoring.
+  Across the captured requests, 48 carry grammar descriptors and 2,251
+  historical custom-call inputs retain their bytes through HTTP conversion.
+- Eight derived controls: two unary/streaming developer-message checks and six
+  unary/streaming thinking-off checks across Chat Completions, Responses and
+  Messages. Unsupported thinking-off requests return HTTP 400 before dispatch.
+
+The exact GLM reasoning/tool parser modules and selected Responses tool-schema,
+name-resolution and output-projection code from the pinned reference commit
+`eb1f4d7bd0b75159b2cc384deb28ed212d531875` also agree on all 32 native pairs,
+with batch and streaming assembly checked. This executes selected reference
+code, rather than the complete reference HTTP server or all its validators.
+The approved GLM thinking-off admission above is intentionally stricter than
+Junyi's generic helper behavior; these results do not establish identical
+admission semantics for every request.
+
+Raw-output joins require a nonempty, unique, run-scoped `disagg_request_id`.
+Junyi's disaggregated proxy has no engine `client_id`, and its trace hook does
+not populate `ctx_request_id`; null values in those fields do not prove a failed
+request or supply a context/decode correlation chain. Engine-local request IDs
+are process-scoped. Recorded build-label agreement is attribution, not source
+revision attestation.
+
+These checks validate a source-built frontend, rather than the published ARM
+frontend image. The trace schema does not establish the historical checkpoint
+revision. Output token IDs, usage, grammar enforcement, native Kimi outputs,
+gRPC engine execution, physical KV transfers and performance remain outside
+this replay's scope.
