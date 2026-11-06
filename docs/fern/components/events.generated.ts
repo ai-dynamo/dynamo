@@ -26,6 +26,19 @@ export const GENERATED_ON = "2026-11-05";
 
 export const UPCOMING_EVENTS: DynamoEvent[] = [
   {
+    "title": "Dynamo SIG RL",
+    "start": "2026-11-06T02:00:00.000Z",
+    "month": "Nov",
+    "day": "5",
+    "year": "2026",
+    "dateLabel": "Thu, Nov 5, 2026",
+    "timeLabel": "6:00 PM",
+    "isPast": false,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+SIG+RL&dates=20261106T020000Z%2F20261106T023000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fzcd-qdkb-jvg%0AOr+dial%3A+%28US%29+%2B1+216-755-4682+PIN%3A+144011069%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fzcd-qdkb-jvg%3Fpin%3D7388412058326%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  },
+  {
     "title": "SIG Frontend — Biweekly Sync",
     "start": "2026-11-12T21:00:00.000Z",
     "month": "Nov",
