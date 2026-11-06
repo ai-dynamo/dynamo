@@ -937,6 +937,33 @@ Before conversion, the frontend validates these
 
 For `system`, `metadata`, `tool_choice`, and `thinking`, `null` is treated as omission.
 
+#### API Versions
+
+Both Messages endpoints apply the following policy to the `anthropic-version`
+request header:
+
+| Header | Admission policy |
+|--------|------------------|
+| Omitted | Use `2023-06-01` behavior for existing Dynamo clients |
+| `2023-06-01` | Preserve existing sampling-parameter behavior |
+| `2026-10-21` | Reject requests containing `temperature`, `top_p`, or `top_k`, including default values and `null` |
+| Any other value, or multiple version headers | Return HTTP 400 with `invalid_request_error` |
+
+Version errors use the error envelope and request IDs described above and occur before
+generation. For `2026-10-21`, remove the sampling fields as described in the
+[Anthropic migration guide](https://platform.claude.com/docs/en/api/migration-2026-10-21#sampling-parameters-are-removed).
+Clients that need sampling controls on `/v1/messages` can select `2023-06-01`.
+Token counting does not apply sampling controls.
+
+Under `2026-10-21`, nonempty `citations` arrays on user text blocks also return HTTP
+400, including text nested in tool or search results. Assistant citations and empty
+user citation arrays are accepted. This does not add citation rendering or support
+for otherwise unsupported content blocks.
+
+This policy covers header admission and sampling parameters for Dynamo's experimental
+Messages implementation. It does not establish full compatibility with either API version
+or enable unsupported features such as documents, citations, or hosted tool execution.
+
 ### Infrastructure
 
 | Method | Path | Description |
