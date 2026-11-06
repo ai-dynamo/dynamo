@@ -83,12 +83,10 @@ cd lib/bindings/python
 maturin develop --uv
 
 # Build with the same features as the release wheels
-maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3
+maturin develop --uv --features kv-indexer,slot-tracker,select-service,mm-routing,ais-forward-pass,request-trace-s3,nvtx
 ```
 
-The minimal build leaves out the [release wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) features: the standalone KV indexer, slot tracker and select service (some router tests start these), multimodal KV routing, the AISimulate perf model and S3 request traces.
-
-To annotate Nsight Systems profiles, add `nvtx` to the feature list.
+The minimal build leaves out the [release wheel](https://github.com/ai-dynamo/dynamo/blob/main/container/templates/wheel_builder.Dockerfile) features: the standalone KV indexer, slot tracker and select service (some router tests start these), multimodal KV routing, the AISimulate perf model, S3 request traces, and the NVTX ranges for Nsight Systems profiles. The NVTX ranges stay off until you set `DYN_NVTX`; see [NVTX Profiling](../../reference/observability/nvtx-profiling.md).
 
 ## 6. Install GPU Memory Service
 
