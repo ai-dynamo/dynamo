@@ -283,6 +283,8 @@ fn start_publishers(
                     // The sidecar cannot inspect the SGLang build. Unflagged
                     // sources still exclude values that do not fit in u32.
                     engine_owned_mm_identity: false,
+                    recurrent_groups: None,
+                    recurrent_alignment_blocks: 1,
                     recovery: None,
                 }),
                 config.enable_local_indexer,
