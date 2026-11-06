@@ -20,8 +20,8 @@ use std::sync::Arc;
 use corpus::{Corpus, TraceFormat, WorkloadParams};
 use dynamo_kv_router::KvRouterConfig;
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
-use engine::{Limits, Mode, RunConfig};
-use host::{BenchHost, HostConfig, worker_request};
+use engine::{Action, Lifecycle, Limits, Mode, RunConfig};
+use host::{BenchHost, HostConfig, router_config, worker_request};
 use kv_cache::{KvCaches, decode_block_hashes};
 
 /// Slots a test request holds in a worker's cache.
@@ -32,7 +32,7 @@ const MOONCAKE_TRACE: &str = concat!(
     "/testdata/mooncake_trace_1000.jsonl"
 );
 
-fn params(trace_block_size: usize, lanes: Option<usize>) -> WorkloadParams {
+fn params(trace_block_size: usize, lanes: usize) -> WorkloadParams {
     WorkloadParams {
         trace_format: TraceFormat::Mooncake,
         trace_block_size: Some(trace_block_size),
@@ -48,7 +48,6 @@ fn params(trace_block_size: usize, lanes: Option<usize>) -> WorkloadParams {
         max_num_batched_tokens: 8_192,
         max_num_seqs: 64,
         engine_speedup: 10.0,
-        enable_prefix_caching: true,
     }
 }
 
@@ -97,7 +96,7 @@ fn replay(corpus: &Arc<Corpus>, mode: Mode, queue_threshold: Option<f64>) -> eng
 #[test]
 fn replays_every_request_through_the_frontend_lifecycle() {
     let corpus =
-        Arc::new(corpus::generate(Path::new(MOONCAKE_TRACE), &params(512, Some(32)), 4).unwrap());
+        Arc::new(corpus::generate(Path::new(MOONCAKE_TRACE), &params(512, 32), 4).unwrap());
     assert!(!corpus.requests.is_empty());
     // Every window request finished inside the mocker's run, so none is missing.
     assert_eq!(corpus.omitted.unfinished, 0, "{:?}", corpus.omitted);
@@ -142,7 +141,7 @@ fn saturation_runs_on_while_the_router_queues() {
     // Queue whenever every rank has prefill in flight, with few admission slots, so
     // queued requests hold every slot while they wait on engine actions.
     let corpus =
-        Arc::new(corpus::generate(Path::new(MOONCAKE_TRACE), &params(512, Some(32)), 4).unwrap());
+        Arc::new(corpus::generate(Path::new(MOONCAKE_TRACE), &params(512, 32), 4).unwrap());
     let result = replay(
         &corpus,
         Mode::Saturation {
@@ -154,8 +153,9 @@ fn saturation_runs_on_while_the_router_queues() {
     assert_eq!(result.admitted + result.rejected, result.window_requests);
 }
 
-/// Three three-turn sessions, each turn extending the last, in a temporary Mooncake file.
-fn multi_turn_trace(name: &str) -> std::path::PathBuf {
+/// Three three-turn sessions, each turn extending the last, in a temporary Mooncake
+/// file whose timestamps start at `start_ms`.
+fn multi_turn_trace(name: &str, start_ms: u64) -> std::path::PathBuf {
     let trace = std::env::temp_dir().join(format!(
         "selection-replay-{name}-{}.jsonl",
         std::process::id()
@@ -165,7 +165,7 @@ fn multi_turn_trace(name: &str) -> std::path::PathBuf {
         for turn in 0..3u64 {
             let hash_ids: Vec<u64> = (0..=turn + 1).map(|id| session * 100 + id).collect();
             let timing = if turn == 0 {
-                format!("\"timestamp\": {}", session * 10)
+                format!("\"timestamp\": {}", start_ms + session * 10)
             } else {
                 "\"delay\": 5".to_string()
             };
@@ -182,10 +182,10 @@ fn multi_turn_trace(name: &str) -> std::path::PathBuf {
 
 #[test]
 fn lanes_reusing_a_play_share_no_blocks_and_corpora_round_trip() {
-    let trace = multi_turn_trace("lanes");
+    let trace = multi_turn_trace("lanes", 0);
 
     // Six lanes over three plays: each play runs twice, on disjoint hash IDs.
-    let corpus = corpus::generate(&trace, &params(32, Some(6)), 2).unwrap();
+    let mut corpus = corpus::generate(&trace, &params(32, 6), 2).unwrap();
     std::fs::remove_file(&trace).unwrap();
     assert_eq!(corpus.lanes.len(), 6);
     let first_copy = corpus
@@ -207,9 +207,101 @@ fn lanes_reusing_a_play_share_no_blocks_and_corpora_round_trip() {
         std::env::temp_dir().join(format!("selection-replay-{}.corpus", std::process::id()));
     corpus.save(&saved).unwrap();
     let loaded = Corpus::load(&saved).unwrap();
-    std::fs::remove_file(&saved).unwrap();
     assert_eq!(loaded.digest, corpus.digest);
     assert_eq!(loaded.requests.len(), corpus.requests.len());
+
+    // The digest comes from what was loaded, so a changed corpus can't keep the old one.
+    corpus.requests[0].arrival_us += 1;
+    corpus.save(&saved).unwrap();
+    let changed = Corpus::load(&saved).unwrap();
+    std::fs::remove_file(&saved).unwrap();
+    assert_ne!(changed.digest, loaded.digest);
+}
+
+#[test]
+fn mooncake_arrivals_are_relative_to_the_trace_start() {
+    let generate = |start_ms| {
+        let trace = multi_turn_trace(&format!("start-{start_ms}"), start_ms);
+        let corpus = corpus::generate(&trace, &params(32, 3), 2).unwrap();
+        std::fs::remove_file(&trace).unwrap();
+        corpus
+    };
+    let from_zero = generate(0);
+    assert!(!from_zero.requests.is_empty());
+    assert_eq!(generate(1_000_000).digest, from_zero.digest);
+}
+
+#[test]
+fn a_late_booking_applies_the_actions_already_due_in_order() {
+    let mut lifecycle = Lifecycle::default();
+    assert!(!lifecycle.due(Action::FirstOutput));
+    assert!(!lifecycle.due(Action::OutputBlock(0)));
+    assert!(!lifecycle.due(Action::OutputBlock(1)));
+    assert_eq!(
+        lifecycle.book(),
+        [
+            Action::FirstOutput,
+            Action::OutputBlock(0),
+            Action::OutputBlock(1)
+        ]
+    );
+    // Once booked, each action applies as it comes due.
+    assert!(lifecycle.due(Action::OutputBlock(2)));
+    assert!(lifecycle.due(Action::Completion));
+
+    // Booked after it completed: the whole lifecycle, completion last.
+    let mut lifecycle = Lifecycle::default();
+    for action in [
+        Action::FirstOutput,
+        Action::OutputBlock(0),
+        Action::Completion,
+    ] {
+        lifecycle.due(action);
+    }
+    assert_eq!(
+        lifecycle.book(),
+        [
+            Action::FirstOutput,
+            Action::OutputBlock(0),
+            Action::Completion
+        ]
+    );
+}
+
+#[test]
+fn modes_reject_values_that_cannot_run() {
+    for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(Mode::Fixed { scale }.validate().is_err(), "{scale}");
+    }
+    assert!(Mode::Fixed { scale: 0.5 }.validate().is_ok());
+    assert!(
+        Mode::Saturation {
+            admission_window: 0
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        Mode::Saturation {
+            admission_window: 1
+        }
+        .validate()
+        .is_ok()
+    );
+}
+
+#[test]
+fn router_config_overrides_any_field_and_rejects_unknown_ones() {
+    // `decode_active_request_weight` is left out of the serialized defaults.
+    let config = router_config(Some(
+        r#"{"decode_active_request_weight": 0.5, "router_queue_threshold": 0.1}"#,
+    ))
+    .unwrap();
+    assert_eq!(config.decode_active_request_weight, 0.5);
+    assert_eq!(config.router_queue_threshold, Some(0.1));
+    assert!(config.router_replica_sync);
+    assert!(router_config(Some(r#"{"no_such_field": 1}"#)).is_err());
+    assert!(router_config(Some("[]")).is_err());
 }
 
 fn prompt(blocks: &[u64]) -> kv_cache::PromptBlocks {

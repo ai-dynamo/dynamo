@@ -35,7 +35,8 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::scheduling::queue::SchedulerBookingDescriptor;
 use dynamo_kv_router::services::selection::{
-    SelectionAdmission, SelectionError, SelectionOperation, SelectionOutcome, SessionBinding,
+    PromptRequest, SelectionAdmission, SelectionError, SelectionOperation, SelectionOutcome,
+    SessionBinding,
 };
 use futures_util::FutureExt;
 use serde::Serialize;
@@ -51,6 +52,24 @@ pub enum Mode {
     Fixed { scale: f64 },
     /// Trace time advances as fast as the router admits.
     Saturation { admission_window: usize },
+}
+
+impl Mode {
+    pub fn validate(&self) -> Result<()> {
+        match *self {
+            Mode::Fixed { scale } => ensure!(
+                scale.is_finite() && scale > 0.0,
+                "the time scale must be finite and positive, not {scale}"
+            ),
+            Mode::Saturation { admission_window } => {
+                ensure!(
+                    admission_window > 0,
+                    "the admission window must be positive"
+                )
+            }
+        }
+        Ok(())
+    }
 }
 
 /// When a run counts as keeping up.
@@ -109,6 +128,7 @@ pub struct RunResult {
     pub rejected: usize,
     pub failed: usize,
     pub failure_samples: Vec<String>,
+    /// Booked window requests per second of `window_wall_ns`.
     pub achieved_rps: f64,
     pub kept_up: bool,
     /// Why the run did not keep up; empty when it did.
@@ -138,7 +158,6 @@ pub struct RunResult {
     /// take this load.
     pub max_index_backlog: u64,
     pub index_backlog_at_window_end: u64,
-    pub index_kept_up: bool,
     /// The workers' caches over the whole run.
     pub cache: CacheStats,
     /// Prompt blocks found cached on the booked worker, over all prompt blocks.
@@ -149,6 +168,9 @@ pub struct RunResult {
     pub mean_predicted_cached_blocks: f64,
     pub mean_cached_blocks: f64,
     pub mean_cached_blocks_error: f64,
+    /// The measured interval. Fixed mode: the window's deadlines, or until the last
+    /// window request's answer if later. Saturation: from the first window request
+    /// issued to the last answered, booked or not.
     pub window_wall_ns: u64,
 }
 
@@ -170,18 +192,32 @@ const STALL_NS: u64 = 10_000_000;
 /// How long the end of a run waits for admissions and lifecycle tasks.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
-#[derive(Default)]
 struct Slot {
+    /// Set when the router booked the request.
     booking: OnceLock<SchedulerBookingDescriptor>,
     issued_ns: AtomicU64,
-    /// When the router returned a booking; `UNSET` if it did not.
-    booked_ns: AtomicU64,
+    /// When the router answered, booked or not.
+    answered_ns: AtomicU64,
     rejected: AtomicBool,
     /// Prompt blocks the router predicted cached on its pick, and those the cache held.
     predicted_cached_blocks: AtomicU64,
     cached_blocks: AtomicU64,
     /// The request's place in its worker's cache, from booking to release.
     held: Mutex<Option<Held>>,
+}
+
+impl Default for Slot {
+    fn default() -> Self {
+        Self {
+            booking: OnceLock::new(),
+            issued_ns: AtomicU64::new(UNSET),
+            answered_ns: AtomicU64::new(UNSET),
+            rejected: AtomicBool::new(false),
+            predicted_cached_blocks: AtomicU64::new(UNSET),
+            cached_blocks: AtomicU64::new(UNSET),
+            held: Mutex::new(None),
+        }
+    }
 }
 
 struct Held {
@@ -246,6 +282,12 @@ impl Shared {
         self.stop.load(Ordering::Acquire)
     }
 
+    /// Every request is issued and answered.
+    fn settled(&self) -> bool {
+        self.requests_stopped.load(Ordering::Acquire)
+            && self.outstanding.load(Ordering::Acquire) == 0
+    }
+
     fn fail(&self, message: String) {
         self.failed.fetch_add(1, Ordering::Relaxed);
         let mut samples = self.failure_samples.lock().unwrap();
@@ -294,6 +336,7 @@ pub fn run(
         "--issuer-cpus needs {threads} CPUs: the request issuer, the sampler, \
          {engine_issuers} engine issuers and {prep_threads} prep threads"
     );
+    config.mode.validate()?;
     let clock = BenchmarkClock::new(SPIN_NS)?;
     // Blocks per trace block, when trace blocks hold whole blocks.
     let block_size = params.block_size as usize;
@@ -337,12 +380,6 @@ pub fn run(
         window_start_us: params.warmup_ms * 1_000,
         window_end_us: (params.warmup_ms + params.window_ms) * 1_000,
     });
-    for slot in &shared.slots {
-        slot.issued_ns.store(UNSET, Ordering::Relaxed);
-        slot.booked_ns.store(UNSET, Ordering::Relaxed);
-        slot.predicted_cached_blocks.store(UNSET, Ordering::Relaxed);
-        slot.cached_blocks.store(UNSET, Ordering::Relaxed);
-    }
 
     let mut cpus = config.issuer_cpus.iter().copied();
     let request_cpu = cpus.next();
@@ -555,11 +592,45 @@ fn wait_for_admission_slot(shared: &Shared, admission_window: usize) -> Result<(
 }
 
 /// What an engine does for a request, in the order it happens at equal trace times.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Action {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Action {
     FirstOutput,
     OutputBlock(u32),
     Completion,
+}
+
+/// One request on its engine issuer: the actions due so far, and whether the
+/// router has booked it. A booked request's actions apply as they come due; a late
+/// booking applies the ones already due, in order.
+#[derive(Default)]
+pub struct Lifecycle {
+    booked: bool,
+    first_output: bool,
+    output_blocks: u32,
+    completion: bool,
+    /// The frontend's prefill marks, which its release waits for.
+    marks: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Lifecycle {
+    /// Record that `action` is due; returns whether to apply it now.
+    pub fn due(&mut self, action: Action) -> bool {
+        match action {
+            Action::FirstOutput => self.first_output = true,
+            Action::OutputBlock(k) => self.output_blocks = k + 1,
+            Action::Completion => self.completion = true,
+        }
+        self.booked
+    }
+
+    /// Record the booking; returns the actions already due, to apply in order.
+    pub fn book(&mut self) -> Vec<Action> {
+        self.booked = true;
+        let first = self.first_output.then_some(Action::FirstOutput);
+        let blocks = (0..self.output_blocks).map(Action::OutputBlock);
+        let completion = self.completion.then_some(Action::Completion);
+        first.into_iter().chain(blocks).chain(completion).collect()
+    }
 }
 
 /// What the booked workers do, in trace order: prefill at a request's first output,
@@ -588,7 +659,7 @@ fn issue_engine(
         issuer,
         issuers,
         admissions,
-        states: vec![0; requests.len()],
+        requests: (0..requests.len()).map(|_| Lifecycle::default()).collect(),
     };
     let mut timeline = BinaryHeap::new();
     for index in requests {
@@ -606,12 +677,8 @@ fn issue_engine(
     let mut lags = Vec::new();
     // Actions past the window run only until every request has its answer: a
     // queueing router may need them to free capacity.
-    let settled = || {
-        shared.requests_stopped.load(Ordering::Acquire)
-            && shared.outstanding.load(Ordering::Acquire) == 0
-    };
     while let Some(Reverse((at, action, index))) = timeline.pop() {
-        if settled() {
+        if shared.settled() {
             break;
         }
         let Some(lag) = engine.wait_until(at) else {
@@ -620,15 +687,11 @@ fn issue_engine(
         if shared.in_window(at) {
             lags.extend(lag);
         }
-        match action {
-            Action::FirstOutput => engine.reach(index, FIRST_DUE),
-            Action::Completion => engine.reach(index, DONE_DUE),
-            Action::OutputBlock(k) => {
-                output_block(shared, index, k);
-                if let Some(next) = output_block_due(index, k + 1) {
-                    timeline.push(Reverse((next, Action::OutputBlock(k + 1), index)));
-                }
-            }
+        engine.due(index, action);
+        if let Action::OutputBlock(k) = action
+            && let Some(next) = output_block_due(index, k + 1)
+        {
+            timeline.push(Reverse((next, Action::OutputBlock(k + 1), index)));
         }
     }
     shared.issuer_next_us[issuer].store(UNSET, Ordering::Release);
@@ -636,67 +699,63 @@ fn issue_engine(
     lags
 }
 
-const FIRST_DUE: u8 = 1;
-const DONE_DUE: u8 = 2;
-const BOOKED: u8 = 4;
-
-/// One engine issuer's requests: which lifecycle points each has reached, and
-/// whether it is booked. Admission tasks only report bookings here, so all cache
-/// work runs on this thread, off the router's runtime, and in each request's order.
+/// One engine issuer's requests. Admission tasks only report bookings here, so all
+/// cache work runs on this thread, off the router's runtime, and in each request's
+/// order.
 struct Engine<'a> {
     shared: &'a Arc<Shared>,
     issuer: usize,
     issuers: usize,
     admissions: Receiver<(usize, bool)>,
-    /// `FIRST_DUE`, `DONE_DUE` and `BOOKED`, by request / issuers.
-    states: Vec<u8>,
+    /// By request / issuers.
+    requests: Vec<Lifecycle>,
 }
 
 impl Engine<'_> {
-    /// A request reached its first output or completion; act if it is booked.
-    fn reach(&mut self, index: usize, due: u8) {
-        let state = &mut self.states[index / self.issuers];
-        *state |= due;
-        if *state & BOOKED != 0 {
-            self.act(index, due);
+    /// `action` is due for request `index`; apply it if the request is booked.
+    fn due(&mut self, index: usize, action: Action) {
+        if self.requests[index / self.issuers].due(action) {
+            self.apply(index, action);
         }
     }
 
-    /// Take in finished admissions, and act on what each booking already reached.
+    /// Take in finished admissions, and apply what each booking already has due.
     fn take_admissions(&mut self) {
         while let Ok((index, booked)) = self.admissions.try_recv() {
-            if !booked {
-                continue;
-            }
-            let state = &mut self.states[index / self.issuers];
-            *state |= BOOKED;
-            let reached = *state;
-            for due in [FIRST_DUE, DONE_DUE] {
-                if reached & due != 0 {
-                    self.act(index, due);
+            if booked {
+                for action in self.requests[index / self.issuers].book() {
+                    self.apply(index, action);
                 }
             }
         }
     }
 
-    /// Update the worker's cache, then send the frontend's marks or release.
-    fn act(&self, index: usize, due: u8) {
+    /// Update the worker's cache, then send the frontend's marks or release. The
+    /// release waits for the marks, as the frontend's request task does.
+    fn apply(&mut self, index: usize, action: Action) {
         let shared = self.shared;
-        if due == FIRST_DUE {
-            prefill_cache(shared, index);
-        } else {
-            release_cache(shared, index);
-        }
-        shared.pending_tasks.fetch_add(1, Ordering::AcqRel);
-        let task_shared = Arc::clone(shared);
-        shared.handle.spawn(async move {
-            if due == FIRST_DUE {
-                mark_prefill_complete(&task_shared, index).await;
-            } else {
-                release(&task_shared, index).await;
+        let lifecycle = &mut self.requests[index / self.issuers];
+        match action {
+            Action::FirstOutput => {
+                prefill_cache(shared, index);
+                let task_shared = Arc::clone(shared);
+                lifecycle.marks = Some(spawn_lifecycle_task(shared, async move {
+                    mark_prefill_complete(&task_shared, index).await;
+                }));
             }
-            task_shared.pending_tasks.fetch_sub(1, Ordering::AcqRel);
-        });
+            Action::OutputBlock(k) => output_block(shared, index, k),
+            Action::Completion => {
+                release_cache(shared, index);
+                let marks = lifecycle.marks.take();
+                let task_shared = Arc::clone(shared);
+                spawn_lifecycle_task(shared, async move {
+                    if let Some(marks) = marks {
+                        let _ = marks.await;
+                    }
+                    release(&task_shared, index).await;
+                });
+            }
+        }
     }
 
     /// Wait until `trace_us` is due, taking in admissions meanwhile. Returns the
@@ -737,16 +796,25 @@ impl Engine<'_> {
         let mut spins = 0u32;
         // Admissions report here before they stop counting as outstanding.
         let shared = self.shared;
-        let settled = || {
-            shared.requests_stopped.load(Ordering::Acquire)
-                && shared.outstanding.load(Ordering::Acquire) == 0
-        };
-        while !settled() && !shared.stopped() {
+        while !shared.settled() && !shared.stopped() {
             self.take_admissions();
             backoff(&mut spins);
         }
         self.take_admissions();
     }
+}
+
+/// Run a request's frontend calls on the router's runtime, counted until done.
+fn spawn_lifecycle_task(
+    shared: &Arc<Shared>,
+    task: impl Future<Output = ()> + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    shared.pending_tasks.fetch_add(1, Ordering::AcqRel);
+    let task_shared = Arc::clone(shared);
+    shared.handle.spawn(async move {
+        task.await;
+        task_shared.pending_tasks.fetch_sub(1, Ordering::AcqRel);
+    })
 }
 
 /// Store a booked request's prompt on its worker's cache, once.
@@ -907,6 +975,11 @@ impl PerfControl {
 async fn admit(shared: Arc<Shared>, index: usize, tokens: Vec<u32>, prompt: PromptBlocks) {
     let slot = &shared.slots[index];
     let request_id = format!("req-{index}");
+    let request = PromptRequest {
+        token_ids: Some(tokens),
+        is_eagle: Some(false),
+        ..PromptRequest::default()
+    };
     let run = Box::pin(
         shared
             .host
@@ -914,17 +987,7 @@ async fn admit(shared: Arc<Shared>, index: usize, tokens: Vec<u32>, prompt: Prom
             .core()
             .run_selection(SelectionOperation {
                 key: shared.host.partition.key().clone(),
-                prompt: dynamo_kv_router::services::selection::PromptView {
-                    token_ids: Some(&tokens),
-                    mm_routing_info: None,
-                    block_mm_infos: None,
-                    block_hashes: None,
-                    sequence_hashes: None,
-                    isl_tokens: None,
-                    lora_name: None,
-                    cache_namespace: None,
-                    is_eagle: Some(false),
-                },
+                prompt: request.view(),
                 router_config_override: None,
                 expected_output_tokens: None,
                 priority_jump: 0.0,
@@ -943,15 +1006,15 @@ async fn admit(shared: Arc<Shared>, index: usize, tokens: Vec<u32>, prompt: Prom
             }),
     )
     .await;
-    let returned_ns = shared.clock.now_ns();
-    drop(tokens);
+    slot.answered_ns
+        .store(shared.clock.now_ns(), Ordering::Release);
+    drop(request);
     let mut booked = false;
     match run.result {
         Ok(SelectionOutcome::Selected(selected)) => match selected.booking {
             Some(booking) => {
                 let worker = selected.response.best_worker;
                 let _ = slot.booking.set(booking.commit());
-                slot.booked_ns.store(returned_ns, Ordering::Release);
                 slot.predicted_cached_blocks.store(
                     (selected.response.cached_tokens / shared.corpus.params.block_size as usize)
                         as u64,
@@ -1045,26 +1108,29 @@ fn analyze(
     let (mut window_requests, mut admitted, mut rejected) = (0, 0, 0);
     let (mut compared, mut predicted_sum, mut cached_sum, mut error_sum) =
         (0usize, 0u64, 0u64, 0u64);
-    let (mut first_issued, mut last_booked) = (u64::MAX, 0u64);
+    let (mut first_issued, mut last_answered) = (u64::MAX, 0u64);
     for (request, slot) in shared.corpus.requests.iter().zip(&shared.slots) {
         if !shared.in_window(request.arrival_us) {
             continue;
         }
         window_requests += 1;
-        let booked = slot.booked_ns.load(Ordering::Acquire);
-        if booked == UNSET {
+        let answered = slot.answered_ns.load(Ordering::Acquire);
+        if answered == UNSET {
+            continue;
+        }
+        let issued = slot.issued_ns.load(Ordering::Acquire);
+        first_issued = first_issued.min(issued);
+        last_answered = last_answered.max(answered);
+        if slot.booking.get().is_none() {
             rejected += usize::from(slot.rejected.load(Ordering::Acquire));
             continue;
         }
         admitted += 1;
-        let issued = slot.issued_ns.load(Ordering::Acquire);
-        first_issued = first_issued.min(issued);
-        last_booked = last_booked.max(booked);
         let reference = match shared.mode {
             Mode::Fixed { .. } => shared.deadline_ns(request.arrival_us),
             Mode::Saturation { .. } => issued,
         };
-        admission.push(booked.saturating_sub(reference));
+        admission.push(answered.saturating_sub(reference));
         let predicted = slot.predicted_cached_blocks.load(Ordering::Acquire);
         let cached = slot.cached_blocks.load(Ordering::Acquire);
         if predicted != UNSET && cached != UNSET {
@@ -1075,15 +1141,13 @@ fn analyze(
         }
     }
 
-    // Fixed mode measures against the window's deadlines; saturation from the
-    // first window request issued to the last booked.
     let window_wall_ns = match shared.mode {
         Mode::Fixed { .. } => {
             let start = shared.deadline_ns(shared.window_start_us);
             let span = shared.deadline_ns(shared.window_end_us) - start;
-            last_booked.saturating_sub(start).max(span)
+            last_answered.saturating_sub(start).max(span)
         }
-        Mode::Saturation { .. } => last_booked.saturating_sub(first_issued),
+        Mode::Saturation { .. } => last_answered.saturating_sub(first_issued),
     };
     let achieved_rps = admitted as f64 * 1e9 / window_wall_ns.max(1) as f64;
 
@@ -1120,8 +1184,8 @@ fn analyze(
         }
         let start = shared.deadline_ns(shared.window_start_us);
         let span = shared.deadline_ns(shared.window_end_us) - start;
-        if last_booked > start + span + span / 10 {
-            failure_reasons.push("window admissions ran past 1.1x the window".to_string());
+        if last_answered > start + span + span / 10 {
+            failure_reasons.push("window answers ran past 1.1x the window".to_string());
         }
     }
     if let Some(share) = harness_wait_share
@@ -1139,8 +1203,7 @@ fn analyze(
         .collect();
     let backlog = |sample: &&Sample| sample.events_issued.saturating_sub(sample.events_applied);
     let max_index_backlog = window_samples.iter().map(backlog).max().unwrap_or(0);
-    let index_kept_up = max_index_backlog <= limits.index_backlog;
-    if !index_kept_up {
+    if max_index_backlog > limits.index_backlog {
         failure_reasons.push(format!("the index fell {max_index_backlog} events behind"));
     }
     let spread = |value: fn(&Sample) -> u64| {
@@ -1174,7 +1237,6 @@ fn analyze(
         index_events_applied: shared.host.index_events_applied(),
         max_index_backlog,
         index_backlog_at_window_end: window_samples.last().map_or(0, backlog),
-        index_kept_up,
         cache,
         prompt_hit_rate: cache.prompt_hits as f64 / cache.prompt_blocks.max(1) as f64,
         mean_predicted_cached_blocks: predicted_sum as f64 / compared.max(1) as f64,
@@ -1182,20 +1244,4 @@ fn analyze(
         mean_cached_blocks_error: error_sum as f64 / compared.max(1) as f64,
         window_wall_ns,
     }
-}
-
-/// Requests per second the corpus generates inside the window, in trace time.
-pub fn corpus_window_rate(corpus: &Corpus) -> Result<f64> {
-    let params = &corpus.params;
-    let start = params.warmup_ms * 1_000;
-    let end = start + params.window_ms * 1_000;
-    let count = corpus
-        .requests
-        .iter()
-        .filter(|request| request.arrival_us >= start && request.arrival_us < end)
-        .count();
-    if count == 0 {
-        bail!("the corpus has no requests in its measured window");
-    }
-    Ok(count as f64 * 1_000.0 / params.window_ms as f64)
 }

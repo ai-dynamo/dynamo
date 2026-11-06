@@ -27,7 +27,7 @@ use serde::Serialize;
 
 use corpus::{Corpus, Omitted, WorkloadParams};
 use engine::{Limits, Mode, RunConfig, RunResult};
-use host::{BenchHost, HostConfig, worker_request};
+use host::{BenchHost, HostConfig, router_config, worker_request};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ModeArg {
@@ -54,7 +54,7 @@ struct Args {
     generate_only: bool,
 
     /// JSON object merged over the router config: `KvRouterConfig`'s defaults with
-    /// replica sync on, as the AgentX frontend runs.
+    /// replica sync on, as the AgentX frontend runs. Any `KvRouterConfig` field.
     #[arg(long)]
     router_config_json: Option<String>,
     /// Busy thresholds, as the frontend's runtime config sets them.
@@ -100,30 +100,6 @@ struct Args {
     perf_ack_fifo: Option<PathBuf>,
     #[arg(long, default_value = "warn")]
     log_level: String,
-}
-
-fn router_config(json: Option<&str>) -> Result<KvRouterConfig> {
-    let config = KvRouterConfig {
-        router_replica_sync: true,
-        ..KvRouterConfig::default()
-    };
-    let Some(json) = json else {
-        return Ok(config);
-    };
-    let overrides: serde_json::Value =
-        serde_json::from_str(json).context("--router-config-json")?;
-    let serde_json::Value::Object(overrides) = overrides else {
-        bail!("--router-config-json must be a JSON object");
-    };
-    let mut merged = serde_json::to_value(&config)?;
-    for (key, value) in overrides {
-        ensure!(
-            merged.get(&key).is_some(),
-            "--router-config-json: unknown field {key}"
-        );
-        merged[&key] = value;
-    }
-    serde_json::from_value(merged).context("--router-config-json")
 }
 
 #[derive(Serialize)]
@@ -233,7 +209,7 @@ fn main() -> Result<()> {
         .saturating_sub(router.router_event_threads as usize)
         .max(1);
 
-    let window_rate = engine::corpus_window_rate(&corpus)?;
+    let window_rate = corpus.window_rate()?;
     let limits = Limits::default();
     let run = if args.generate_only {
         None

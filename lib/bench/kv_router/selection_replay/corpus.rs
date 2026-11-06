@@ -48,9 +48,9 @@ pub struct WorkloadParams {
     /// Tokens per trace hash ID. Weka traces carry their own; Mooncake needs it given.
     #[arg(long)]
     pub trace_block_size: Option<usize>,
-    /// Concurrent conversation slots, like aiperf concurrency; unset gives one per play.
-    #[arg(long, default_value = "6144")]
-    pub lanes: Option<usize>,
+    /// Concurrent conversation slots, like aiperf concurrency.
+    #[arg(long, default_value_t = 6144)]
+    pub lanes: usize,
     #[arg(long, default_value_t = 2048)]
     pub workers: usize,
     /// DP ranks per worker; each rank is one engine.
@@ -77,8 +77,6 @@ pub struct WorkloadParams {
     pub max_num_seqs: usize,
     #[arg(long, default_value_t = 10.0)]
     pub engine_speedup: f64,
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-    pub enable_prefix_caching: bool,
 }
 
 impl WorkloadParams {
@@ -90,6 +88,7 @@ impl WorkloadParams {
 /// One conversation from the trace, with hash IDs local to the play.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Play {
+    /// When the play starts, relative to the trace's start; zero with `ignore_trace_delays`.
     pub start_ms: f64,
     pub turns: Vec<PlayTurn>,
 }
@@ -98,7 +97,7 @@ pub struct Play {
 pub struct PlayTurn {
     pub input_length: u32,
     pub output_length: u32,
-    /// Recorded gap after the previous turn; ignored with `ignore_trace_delays`.
+    /// Recorded gap after the previous turn; zero with `ignore_trace_delays`.
     pub delay_ms: f64,
     pub hash_ids: Vec<u32>,
 }
@@ -147,6 +146,8 @@ pub struct Corpus {
     /// Sorted by arrival.
     pub requests: Vec<ReplayRequest>,
     pub omitted: Omitted,
+    /// Computed from the contents, never saved.
+    #[serde(skip)]
     pub digest: String,
 }
 
@@ -178,17 +179,43 @@ impl Corpus {
         let file = std::io::BufReader::new(
             std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?,
         );
-        rmp_serde::from_read(file).context("read corpus")
+        let mut corpus: Self = rmp_serde::from_read(file).context("read corpus")?;
+        corpus.digest = digest(&corpus)?;
+        Ok(corpus)
+    }
+
+    /// Requests per second the corpus generates inside the window, in trace time.
+    pub fn window_rate(&self) -> Result<f64> {
+        let params = &self.params;
+        let start = params.warmup_ms * 1_000;
+        let end = start + params.window_ms * 1_000;
+        let count = self
+            .requests
+            .iter()
+            .filter(|request| (start..end).contains(&request.arrival_us))
+            .count();
+        ensure!(
+            count > 0,
+            "the corpus has no requests in its measured window"
+        );
+        Ok(count as f64 * 1_000.0 / params.window_ms as f64)
     }
 }
 
 /// Load the trace and generate the corpus with `threads` concurrent mocker runs.
 pub fn generate(trace: &Path, params: &WorkloadParams, threads: usize) -> Result<Corpus> {
-    let (trace_block_size, plays, hash_scope) = load_plays(trace, params)?;
+    let (trace_block_size, mut plays, hash_scope) = load_plays(trace, params)?;
     ensure!(!plays.is_empty(), "the trace has no usable plays");
-    let lane_count = params.lanes.unwrap_or(plays.len());
-    ensure!(lane_count > 0, "--lanes must be positive");
-    let lanes = lane_copies(&plays, lane_count, hash_scope)?;
+    if params.ignore_trace_delays {
+        for play in &mut plays {
+            play.start_ms = 0.0;
+            for turn in &mut play.turns {
+                turn.delay_ms = 0.0;
+            }
+        }
+    }
+    ensure!(params.lanes > 0, "--lanes must be positive");
+    let lanes = lane_copies(&plays, params.lanes, hash_scope)?;
     let ranks = params.ranks();
     ensure!(ranks > 0, "--workers and --dp-size must be positive");
 
@@ -322,7 +349,9 @@ fn load_plays(trace: &Path, params: &WorkloadParams) -> Result<(usize, Vec<Play>
             let Some(block_size) = params.trace_block_size else {
                 bail!("--trace-block-size is required for Mooncake traces");
             };
+            // Arrivals relative to the trace's first, as the measured window is.
             let trace = Trace::from_mooncake(trace, block_size)
+                .and_then(Trace::normalize_session_starts)
                 .with_context(|| format!("load Mooncake trace {}", trace.display()))?;
             let mut span = 0u32;
             let plays = trace
@@ -411,13 +440,6 @@ impl Simulator<'_> {
     fn simulate_rank(&self, rank: usize) -> Result<(Vec<ReplayRequest>, Omitted)> {
         let params = self.params;
         let window_end_ms = (params.warmup_ms + params.window_ms) as f64;
-        let delay = |turn: &PlayTurn| {
-            if params.ignore_trace_delays {
-                0.0
-            } else {
-                turn.delay_ms
-            }
-        };
         let lanes: Vec<usize> = (rank..self.lanes.len()).step_by(params.ranks()).collect();
         // Each lane's turns in session order, as (copy, turn within its play).
         let positions: Vec<Vec<(u32, u32)>> = lanes
@@ -451,18 +473,14 @@ impl Simulator<'_> {
                                     .iter()
                                     .map(|id| id + play_copy.base)
                                     .collect(),
-                                delay_after_previous_ms: delay(turn),
+                                delay_after_previous_ms: turn.delay_ms,
                                 ..TurnTrace::default()
                             })
                     })
                     .collect();
                 SessionTrace {
                     session_id: lane.to_string(),
-                    first_arrival_timestamp_ms: Some(if params.ignore_trace_delays {
-                        0.0
-                    } else {
-                        self.plays[copies[0].play as usize].start_ms
-                    }),
+                    first_arrival_timestamp_ms: Some(self.plays[copies[0].play as usize].start_ms),
                     turns,
                 }
             })
@@ -485,7 +503,8 @@ impl Simulator<'_> {
                 "num_gpu_blocks": params.num_gpu_blocks,
                 "block_size": params.block_size,
                 "speedup_ratio": params.engine_speedup,
-                "enable_prefix_caching": params.enable_prefix_caching,
+                // The replay's caches always reuse prefixes: KV routing needs them.
+                "enable_prefix_caching": true,
                 "max_num_batched_tokens": params.max_num_batched_tokens,
                 "max_num_seqs": params.max_num_seqs,
             }
@@ -558,7 +577,7 @@ impl Simulator<'_> {
             let due_us = match last {
                 Some((_, completed_us)) => {
                     let play = &self.plays[copies[copy as usize].play as usize];
-                    completed_us + (delay(&play.turns[turn as usize]) * 1_000.0) as u64
+                    completed_us + (play.turns[turn as usize].delay_ms * 1_000.0) as u64
                 }
                 None => (self.plays[copies[0].play as usize].start_ms * 1_000.0) as u64,
             };
