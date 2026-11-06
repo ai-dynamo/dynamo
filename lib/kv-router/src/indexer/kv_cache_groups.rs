@@ -11,23 +11,21 @@
 //! overestimates the reusable prefix and over-sizes KV transfer hints
 //! (ai-dynamo/dynamo#16794).
 //!
-//! Recurrent-group events are tagged at ingress (`RouterEvent::kv_cache_group`)
-//! and recorded here instead of in the attention radix tree. After a lookup,
-//! [`KvCacheGroupResidency::cut`] shortens each hybrid worker's match to the
-//! rightmost matched position at which all of its recurrent groups hold a
-//! state, and the KV transfer chain is truncated to the same point. Workers
-//! that never published a recurrent-group event are left untouched.
+//! Recurrent events update per-owner checkpoint membership, never attention edges.
+//! Complete layouts include groups with no resident checkpoints and survive dumps.
 
-use std::sync::RwLock;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
+use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 
-use super::lower_tier::{LowerTierContinuation, LowerTierMatchDetails};
-use super::types::MatchDetails;
-use crate::kv_hints::KvTransferCandidateSource;
 use crate::protocols::{
-    ExternalSequenceBlockHash, KvCacheEventData, RouterEvent, StorageTier, WorkerId,
-    WorkerWithDpRank,
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheGroupKind, KvCacheGroupTag,
+    KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, ResetScope, ResidencyDomain,
+    ResidencyOwner, RouterEvent, StorageTier, WorkerId, WorkerWithDpRank,
 };
 
 type GroupPresence = FxHashMap<u32, FxHashMap<u64, u8>>;
@@ -41,11 +39,18 @@ fn tier_bit(tier: StorageTier) -> u8 {
     }
 }
 
-/// Which positional block hashes hold a recurrent state, per worker and group,
-/// across storage tiers (a state is loadable from any tier).
+#[derive(Debug, Default)]
+struct OwnerPresence {
+    groups: GroupPresence,
+    declared: bool,
+    expected_group_count: Option<usize>,
+}
+
+/// Recurrent checkpoints are separate from attention edges and scoped to their owner.
 #[derive(Debug, Default)]
 pub struct KvCacheGroupResidency {
-    workers: RwLock<FxHashMap<WorkerWithDpRank, GroupPresence>>,
+    owners: RwLock<FxHashMap<ResidencyOwner, Arc<RwLock<OwnerPresence>>>>,
+    active: AtomicBool,
 }
 
 impl KvCacheGroupResidency {
@@ -53,253 +58,252 @@ impl KvCacheGroupResidency {
         Self::default()
     }
 
-    /// True once any worker has published a recurrent-group event. Lookups
-    /// then retain the matched hash chain so matches can be cut.
     pub fn is_active(&self) -> bool {
-        !self.workers.read().unwrap().is_empty()
+        self.active.load(Ordering::Relaxed)
     }
 
-    /// Apply a tagged event. Returns false if the event carried no group tag.
+    fn owner(&self, owner: ResidencyOwner) -> Option<Arc<RwLock<OwnerPresence>>> {
+        self.owners.read().get(&owner).cloned()
+    }
+
+    fn get_or_create(&self, owner: ResidencyOwner) -> Arc<RwLock<OwnerPresence>> {
+        if let Some(state) = self.owner(owner) {
+            return state;
+        }
+        let mut owners = self.owners.write();
+        let state = owners.entry(owner).or_default().clone();
+        self.active.store(true, Ordering::Relaxed);
+        state
+    }
+
+    /// Install the complete recurrent layout before accepting routing credit.
+    pub fn declare_groups(&self, owner: ResidencyOwner, groups: &[u32]) {
+        if groups.is_empty() {
+            return;
+        }
+        let state = self.get_or_create(owner);
+        let mut state = state.write();
+        state.groups.retain(|group, _| groups.contains(group));
+        for &group in groups {
+            state.groups.entry(group).or_default();
+        }
+        state.declared = true;
+        state.expected_group_count = Some(groups.len());
+    }
+
+    /// Tagged events are consumed even if unsupported; never send them to attention.
     pub fn apply(&self, event: &RouterEvent) -> bool {
         let Some(tag) = event.kv_cache_group else {
             return false;
         };
-        let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
-        let bit = tier_bit(event.storage_tier);
-        let mut workers = self.workers.write().unwrap();
+        if tag.kind != KvCacheGroupKind::Mamba {
+            return true;
+        }
+        let Ok(owner) = event.residency_owner() else {
+            return true;
+        };
         match &event.event.data {
             KvCacheEventData::Stored(data) => {
-                let group = workers
-                    .entry(worker)
-                    .or_default()
-                    .entry(tag.group_idx)
-                    .or_default();
+                let state = self.get_or_create(owner);
+                let mut state = state.write();
+                if state.declared && !state.groups.contains_key(&tag.group_idx) {
+                    return true;
+                }
+                if let Some(count) = tag.expected_group_count {
+                    if count == 0
+                        || state
+                            .expected_group_count
+                            .is_some_and(|expected| expected != count as usize)
+                    {
+                        return true;
+                    }
+                    state.expected_group_count = Some(count as usize);
+                }
+                let group = state.groups.entry(tag.group_idx).or_default();
                 for block in &data.blocks {
-                    *group.entry(block.block_hash.0).or_insert(0) |= bit;
+                    *group.entry(block.block_hash.0).or_insert(0) |= tier_bit(event.storage_tier);
                 }
             }
             KvCacheEventData::Removed(data) => {
-                if let Some(group) = workers
-                    .get_mut(&worker)
-                    .and_then(|groups| groups.get_mut(&tag.group_idx))
-                {
-                    for hash in &data.block_hashes {
-                        if let Some(mask) = group.get_mut(&hash.0) {
-                            *mask &= !bit;
-                            if *mask == 0 {
-                                group.remove(&hash.0);
+                if let Some(state) = self.owner(owner) {
+                    let mut state = state.write();
+                    if let Some(group) = state.groups.get_mut(&tag.group_idx) {
+                        for hash in &data.block_hashes {
+                            if let Some(mask) = group.get_mut(&hash.0) {
+                                *mask &= !tier_bit(event.storage_tier);
+                                if *mask == 0 {
+                                    group.remove(&hash.0);
+                                }
                             }
                         }
                     }
                 }
             }
-            KvCacheEventData::Cleared => {
-                // A group-tagged clear is not produced by vLLM; treat it as a
-                // worker-wide clear of recurrent presence (the attention tree
-                // handles its own untagged clear).
-                workers.remove(&worker);
-            }
+            KvCacheEventData::Cleared => self.clear_event(event),
         }
         true
     }
 
-    /// Forget recurrent presence for a worker rank (untagged clear, or the
-    /// worker left).
+    pub fn clear_event(&self, event: &RouterEvent) {
+        let Ok(Some(scope)) = event.reset_scope() else {
+            return;
+        };
+        let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+        let owners = self.owners.read();
+        for (owner, state) in owners.iter() {
+            let matches = match (scope, *owner) {
+                (
+                    ResetScope::All | ResetScope::Domain(ResidencyDomain::Worker),
+                    ResidencyOwner::Worker(w),
+                ) => w == worker,
+                (
+                    ResetScope::All | ResetScope::Domain(ResidencyDomain::CacheOwner),
+                    ResidencyOwner::CacheOwner(source),
+                ) => event.state_source == Some(source),
+                _ => false,
+            };
+            if matches {
+                // A cache clear preserves the declared layout; it only invalidates checkpoints.
+                for group in state.write().groups.values_mut() {
+                    group.clear();
+                }
+            }
+        }
+    }
+
     pub fn clear_worker(&self, worker: WorkerWithDpRank) {
-        self.workers.write().unwrap().remove(&worker);
+        if let Some(state) = self.owner(ResidencyOwner::worker(worker)) {
+            for group in state.write().groups.values_mut() {
+                group.clear();
+            }
+        }
     }
 
     pub fn remove_worker(&self, worker_id: WorkerId) {
-        self.workers
-            .write()
-            .unwrap()
-            .retain(|worker, _| worker.worker_id != worker_id);
+        let mut owners = self.owners.write();
+        owners.retain(
+            |owner, _| !matches!(owner, ResidencyOwner::Worker(w) if w.worker_id == worker_id),
+        );
+        self.active.store(!owners.is_empty(), Ordering::Relaxed);
     }
 
-    /// Rightmost `p <= blocks` such that every recurrent group of `worker`
-    /// holds a state at `chain[p - 1]`, the same rule the engine's Mamba
-    /// manager applies on lookup. A state resident on any tier counts: the
-    /// engine loads a lower-tier state back through the offload connector,
-    /// so it resumes from that boundary as if the state were on device.
-    /// `None` means the worker has no recurrent groups and the attention
-    /// match stands.
+    /// Dump empty groups too: absence of a checkpoint must survive recovery.
+    pub fn dump_events(&self) -> Vec<RouterEvent> {
+        let owners = self.owners.read();
+        let mut out = Vec::new();
+        for (&owner, state) in owners.iter() {
+            let state = state.read();
+            for (&group_idx, group) in &state.groups {
+                for tier in [
+                    StorageTier::Device,
+                    StorageTier::HostPinned,
+                    StorageTier::Disk,
+                    StorageTier::External,
+                ] {
+                    if matches!(owner, ResidencyOwner::CacheOwner(_)) && tier == StorageTier::Device
+                    {
+                        continue;
+                    }
+                    let blocks: Vec<_> = group
+                        .iter()
+                        .filter(|(_, mask)| **mask & tier_bit(tier) != 0)
+                        .map(|(&hash, _)| KvCacheStoredBlockData {
+                            block_hash: ExternalSequenceBlockHash(hash),
+                            tokens_hash: LocalBlockHash(0),
+                            mm_extra_info: None,
+                        })
+                        .collect();
+                    if blocks.is_empty()
+                        && tier
+                            != match owner {
+                                ResidencyOwner::Worker(_) => StorageTier::Device,
+                                _ => StorageTier::HostPinned,
+                            }
+                    {
+                        continue;
+                    }
+                    let event = KvCacheEvent {
+                        event_id: 0,
+                        dp_rank: match owner {
+                            ResidencyOwner::Worker(w) => w.dp_rank,
+                            _ => 0,
+                        },
+                        data: KvCacheEventData::Stored(KvCacheStoreData {
+                            parent_hash: None,
+                            start_position: None,
+                            blocks,
+                        }),
+                    };
+                    let event = match owner {
+                        ResidencyOwner::Worker(w) => {
+                            RouterEvent::with_storage_tier(w.worker_id, event, tier)
+                        }
+                        ResidencyOwner::CacheOwner(source) => {
+                            RouterEvent::with_cache_owner(0, event, tier, source)
+                        }
+                    };
+                    out.push(event.with_kv_cache_group(KvCacheGroupTag {
+                        group_idx,
+                        kind: KvCacheGroupKind::Mamba,
+                        expected_group_count: state.expected_group_count.map(|count| count as u32),
+                    }));
+                }
+            }
+        }
+        out
+    }
+
+    /// Evaluate checkpoint membership with one owner read guard per candidate path.
+    pub fn reusable_blocks_on_tier(
+        &self,
+        owner: ResidencyOwner,
+        chain: &[ExternalSequenceBlockHash],
+        blocks: usize,
+        tier: StorageTier,
+        floor: usize,
+    ) -> Option<usize> {
+        let state = self.owner(owner)?;
+        let state = state.read();
+        if state.groups.is_empty() {
+            return None;
+        }
+        if state.expected_group_count != Some(state.groups.len()) {
+            return Some(0);
+        }
+        let limit = blocks.min(chain.len());
+        Some(
+            (floor.saturating_add(1)..=limit)
+                .rev()
+                .find(|&p| {
+                    state.groups.values().all(|group| {
+                        group
+                            .get(&chain[p - 1].0)
+                            .is_some_and(|mask| mask & tier_bit(tier) != 0)
+                    })
+                })
+                .unwrap_or(floor.min(limit)),
+        )
+    }
+
     pub fn reusable_blocks(
         &self,
         worker: WorkerWithDpRank,
         chain: &[ExternalSequenceBlockHash],
         blocks: usize,
     ) -> Option<usize> {
-        let workers = self.workers.read().unwrap();
-        let groups = workers.get(&worker)?;
-        if groups.is_empty() {
-            return None;
-        }
-        let blocks = blocks.min(chain.len());
-        Some(
-            (1..=blocks)
-                .rev()
-                .find(|&p| {
-                    let hash = chain[p - 1].0;
-                    groups.values().all(|group| group.contains_key(&hash))
-                })
-                .unwrap_or(0),
+        self.reusable_blocks_on_tier(
+            ResidencyOwner::worker(worker),
+            chain,
+            blocks,
+            StorageTier::Device,
+            0,
         )
-    }
-
-    /// Cut device-tier matches to each hybrid worker's last complete boundary.
-    /// Needs the retained root-aligned chain (`kv_transfer_candidates`); without
-    /// it the scores are left as they are.
-    pub fn cut_device(&self, details: &mut MatchDetails) {
-        if !self.is_active() {
-            return;
-        }
-        let Some(chain) = details
-            .kv_transfer_candidates
-            .as_ref()
-            .map(|candidates| candidates.block_hashes.clone())
-        else {
-            return;
-        };
-        let mut cuts: Vec<(WorkerWithDpRank, usize)> = Vec::new();
-        for (worker, score) in &details.overlap_scores.scores {
-            let blocks = *score as usize;
-            if let Some(p) = self.reusable_blocks(*worker, &chain, blocks)
-                && p < blocks
-            {
-                cuts.push((*worker, p));
-            }
-        }
-        if cuts.is_empty() {
-            return;
-        }
-        for (worker, p) in &cuts {
-            if *p == 0 {
-                details.overlap_scores.scores.remove(worker);
-                details.last_matched_hashes.remove(worker);
-            } else {
-                details.overlap_scores.scores.insert(*worker, *p as u32);
-                details.last_matched_hashes.insert(*worker, chain[*p - 1]);
-            }
-        }
-        let cut_sources: FxHashMap<KvTransferCandidateSource, usize> = cuts
-            .iter()
-            .map(|(worker, p)| (KvTransferCandidateSource::from(*worker), *p))
-            .collect();
-        if let Some(candidates) = details.kv_transfer_candidates.as_mut() {
-            candidates
-                .owner_prefix_blocks
-                .retain_mut(|(source, blocks)| match cut_sources.get(source) {
-                    Some(0) => false,
-                    Some(p) => {
-                        *blocks = *p;
-                        true
-                    }
-                    None => true,
-                });
-            let max_blocks = candidates
-                .owner_prefix_blocks
-                .iter()
-                .map(|(_, blocks)| *blocks)
-                .max()
-                .unwrap_or(0);
-            candidates.block_hashes.truncate(max_blocks);
-            if candidates.owner_prefix_blocks.is_empty() {
-                details.kv_transfer_candidates = None;
-            }
-        }
-    }
-
-    /// Cut one lower tier's hits the same way. `device_chain` is the retained
-    /// device chain, used when the tier did not retain its own.
-    pub fn cut_lower_tier(
-        &self,
-        details: &mut LowerTierMatchDetails,
-        device_chain: &[ExternalSequenceBlockHash],
-    ) {
-        if !self.is_active() {
-            return;
-        }
-        let chain: Vec<ExternalSequenceBlockHash> = match details.kv_transfer_candidates.as_ref() {
-            Some(candidates) if candidates.block_hashes.len() >= device_chain.len() => {
-                candidates.block_hashes.clone()
-            }
-            _ => device_chain.to_vec(),
-        };
-        if chain.is_empty() {
-            return;
-        }
-        // `hits` counts blocks matched in this tier beyond the continuation
-        // start; the continuation's `start_pos` is the absolute end position.
-        let mut cuts: Vec<(WorkerWithDpRank, usize)> = Vec::new();
-        for (worker, hits) in &details.hits {
-            let Some(end) = details
-                .next_continuations
-                .get(worker)
-                .map(|continuation| continuation.start_pos)
-            else {
-                continue;
-            };
-            let start = end - *hits;
-            if end > chain.len() {
-                // The chain does not cover this tier's extension (device
-                // candidates were truncated below it): nothing to verify.
-                continue;
-            }
-            if let Some(p) = self.reusable_blocks(*worker, &chain, end)
-                && p < end
-            {
-                cuts.push((*worker, p.max(start)));
-            }
-        }
-        if cuts.is_empty() {
-            return;
-        }
-        for (worker, p) in &cuts {
-            let end = details.next_continuations[worker].start_pos;
-            let hits = details.hits[worker];
-            details.hits.insert(*worker, hits - (end - *p));
-            let continuation = if *p == 0 {
-                LowerTierContinuation::from_root(0)
-            } else {
-                LowerTierContinuation::new(*p, chain[*p - 1])
-            };
-            details.next_continuations.insert(*worker, continuation);
-        }
-        let cut_sources: FxHashMap<KvTransferCandidateSource, usize> = cuts
-            .iter()
-            .map(|(worker, p)| (KvTransferCandidateSource::from(*worker), *p))
-            .collect();
-        if let Some(candidates) = details.kv_transfer_candidates.as_mut() {
-            candidates
-                .owner_prefix_blocks
-                .retain_mut(|(source, blocks)| match cut_sources.get(source) {
-                    Some(0) => false,
-                    Some(p) => {
-                        *blocks = *p;
-                        true
-                    }
-                    None => true,
-                });
-            let max_blocks = candidates
-                .owner_prefix_blocks
-                .iter()
-                .map(|(_, blocks)| *blocks)
-                .max()
-                .unwrap_or(0);
-            candidates.block_hashes.truncate(max_blocks);
-            if candidates.owner_prefix_blocks.is_empty() {
-                details.kv_transfer_candidates = None;
-            }
-        }
     }
 
     #[cfg(test)]
     pub(crate) fn groups_for(&self, worker: WorkerWithDpRank) -> rustc_hash::FxHashSet<u32> {
-        self.workers
-            .read()
-            .unwrap()
-            .get(&worker)
-            .map(|groups| groups.keys().copied().collect())
+        self.owner(ResidencyOwner::worker(worker))
+            .map(|state| state.read().groups.keys().copied().collect())
             .unwrap_or_default()
     }
 }
@@ -307,200 +311,133 @@ impl KvCacheGroupResidency {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv_hints::KvTransferCandidates;
-    use crate::protocols::{
-        KvCacheEvent, KvCacheGroupKind, KvCacheGroupTag, KvCacheRemoveData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash,
-    };
+    use crate::protocols::KvCacheRemoveData;
 
-    fn tag(group_idx: u32) -> KvCacheGroupTag {
-        KvCacheGroupTag {
-            group_idx,
-            kind: KvCacheGroupKind::Mamba,
-        }
-    }
-
-    fn stored(
+    fn checkpoint(
         worker: WorkerWithDpRank,
         tier: StorageTier,
-        group_idx: u32,
-        hashes: &[u64],
+        group: u32,
+        hash: u64,
+        count: Option<u32>,
     ) -> RouterEvent {
-        let blocks = hashes
-            .iter()
-            .map(|&h| KvCacheStoredBlockData {
-                block_hash: ExternalSequenceBlockHash(h),
-                tokens_hash: LocalBlockHash(h),
-                mm_extra_info: None,
-            })
-            .collect();
         RouterEvent::with_storage_tier(
             worker.worker_id,
             KvCacheEvent {
                 event_id: 1,
+                dp_rank: worker.dp_rank,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
                     start_position: None,
-                    blocks,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(hash),
+                        tokens_hash: LocalBlockHash(0),
+                        mm_extra_info: None,
+                    }],
                 }),
-                dp_rank: worker.dp_rank,
             },
             tier,
         )
-        .with_kv_cache_group(tag(group_idx))
+        .with_kv_cache_group(KvCacheGroupTag {
+            group_idx: group,
+            kind: KvCacheGroupKind::Mamba,
+            expected_group_count: count,
+        })
     }
 
-    fn removed(
-        worker: WorkerWithDpRank,
-        tier: StorageTier,
-        group_idx: u32,
-        hashes: &[u64],
-    ) -> RouterEvent {
-        RouterEvent::with_storage_tier(
+    #[test]
+    fn incomplete_layout_never_grants_credit_and_dump_preserves_empty_groups() {
+        let table = KvCacheGroupResidency::new();
+        let worker = WorkerWithDpRank::new(7, 2);
+        let owner = ResidencyOwner::worker(worker);
+        table.declare_groups(owner, &[0, 1, 2]);
+        let chain = [ExternalSequenceBlockHash(11)];
+        for group in [0, 1] {
+            table.apply(&checkpoint(worker, StorageTier::Device, group, 11, Some(3)));
+        }
+        assert_eq!(table.reusable_blocks(worker, &chain, 1), Some(0));
+        let restored = KvCacheGroupResidency::new();
+        for event in table.dump_events() {
+            restored.apply(&event);
+        }
+        assert_eq!(restored.groups_for(worker).len(), 3);
+        assert_eq!(restored.reusable_blocks(worker, &chain, 1), Some(0));
+        restored.apply(&checkpoint(worker, StorageTier::Device, 2, 11, Some(3)));
+        assert_eq!(restored.reusable_blocks(worker, &chain, 1), Some(1));
+    }
+
+    #[test]
+    fn tier_membership_and_removal_are_independent() {
+        let table = KvCacheGroupResidency::new();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let owner = ResidencyOwner::worker(worker);
+        let chain = [ExternalSequenceBlockHash(11)];
+        let mut event = checkpoint(worker, StorageTier::HostPinned, 0, 11, Some(1));
+        table.apply(&event);
+        assert_eq!(table.reusable_blocks(worker, &chain, 1), Some(0));
+        assert_eq!(
+            table.reusable_blocks_on_tier(owner, &chain, 1, StorageTier::HostPinned, 0),
+            Some(1)
+        );
+        event.storage_tier = StorageTier::Device;
+        table.apply(&event);
+        event.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: chain.to_vec(),
+        });
+        table.apply(&event);
+        assert_eq!(table.reusable_blocks(worker, &chain, 1), Some(0));
+        assert_eq!(
+            table.reusable_blocks_on_tier(owner, &chain, 1, StorageTier::HostPinned, 0),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn missing_completeness_metadata_fails_closed() {
+        let table = KvCacheGroupResidency::new();
+        let worker = WorkerWithDpRank::new(7, 0);
+        table.apply(&checkpoint(worker, StorageTier::Device, 0, 11, None));
+        assert_eq!(
+            table.reusable_blocks(worker, &[ExternalSequenceBlockHash(11)], 1),
+            Some(0)
+        );
+        table.declare_groups(ResidencyOwner::worker(worker), &[0]);
+        assert_eq!(
+            table.reusable_blocks(worker, &[ExternalSequenceBlockHash(11)], 1),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn cache_clear_preserves_layout_but_worker_retirement_removes_it() {
+        let table = KvCacheGroupResidency::new();
+        let worker = WorkerWithDpRank::new(7, 0);
+        table.declare_groups(ResidencyOwner::worker(worker), &[0, 1]);
+        table.apply(&checkpoint(worker, StorageTier::Device, 0, 11, Some(2)));
+        let clear = RouterEvent::new(
             worker.worker_id,
             KvCacheEvent {
                 event_id: 2,
-                data: KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: hashes
-                        .iter()
-                        .map(|&h| ExternalSequenceBlockHash(h))
-                        .collect(),
-                }),
-                dp_rank: worker.dp_rank,
+                dp_rank: 0,
+                data: KvCacheEventData::Cleared,
             },
-            tier,
-        )
-        .with_kv_cache_group(tag(group_idx))
-    }
-
-    fn chain(n: u64) -> Vec<ExternalSequenceBlockHash> {
-        (1..=n).map(ExternalSequenceBlockHash).collect()
-    }
-
-    fn device_details(worker: WorkerWithDpRank, blocks: u32, chain_len: u64) -> MatchDetails {
-        let mut details = MatchDetails::new();
-        details.overlap_scores.scores.insert(worker, blocks);
-        details
-            .last_matched_hashes
-            .insert(worker, ExternalSequenceBlockHash(blocks as u64));
-        details.kv_transfer_candidates = Some(KvTransferCandidates {
-            block_hashes: chain(chain_len),
-            owner_prefix_blocks: vec![(worker.into(), blocks as usize)],
-            source_intervals: Vec::new(),
-            routing_snapshot: None,
-        });
-        details
-    }
-
-    #[test]
-    fn untagged_events_are_not_recorded() {
-        let residency = KvCacheGroupResidency::new();
-        let worker = WorkerWithDpRank::new(1, 0);
-        let mut event = stored(worker, StorageTier::Device, 1, &[1]);
-        event.kv_cache_group = None;
-        assert!(!residency.apply(&event));
-        assert!(!residency.is_active());
-    }
-
-    #[test]
-    fn dense_worker_is_left_alone() {
-        let residency = KvCacheGroupResidency::new();
-        let hybrid = WorkerWithDpRank::new(1, 0);
-        let dense = WorkerWithDpRank::new(2, 0);
-        residency.apply(&stored(hybrid, StorageTier::Device, 1, &[1]));
-        assert_eq!(residency.reusable_blocks(dense, &chain(3), 3), None);
-        let mut details = device_details(dense, 3, 3);
-        residency.cut_device(&mut details);
-        assert_eq!(details.overlap_scores.scores[&dense], 3);
-    }
-
-    #[test]
-    fn match_is_cut_to_last_boundary_with_every_group() {
-        let residency = KvCacheGroupResidency::new();
-        let worker = WorkerWithDpRank::new(1, 0);
-        residency.apply(&stored(worker, StorageTier::Device, 1, &[1, 3]));
-        residency.apply(&stored(worker, StorageTier::HostPinned, 2, &[1]));
-        assert_eq!(residency.reusable_blocks(worker, &chain(3), 3), Some(1));
-
-        let mut details = device_details(worker, 3, 3);
-        residency.cut_device(&mut details);
-        assert_eq!(details.overlap_scores.scores[&worker], 1);
+        );
+        table.clear_event(&clear);
+        assert_eq!(table.groups_for(worker).len(), 2);
         assert_eq!(
-            details.last_matched_hashes[&worker],
-            ExternalSequenceBlockHash(1)
+            table.reusable_blocks(worker, &[ExternalSequenceBlockHash(11)], 1),
+            Some(0)
         );
-        let candidates = details.kv_transfer_candidates.as_ref().unwrap();
-        assert_eq!(candidates.block_hashes, chain(1));
-        assert_eq!(candidates.owner_prefix_blocks, vec![(worker.into(), 1)]);
+        table.remove_worker(7);
+        assert!(!table.is_active());
     }
 
     #[test]
-    fn worker_without_any_state_on_the_prefix_drops_out() {
-        let residency = KvCacheGroupResidency::new();
-        let worker = WorkerWithDpRank::new(1, 0);
-        residency.apply(&stored(worker, StorageTier::Device, 1, &[9]));
-        let mut details = device_details(worker, 3, 3);
-        residency.cut_device(&mut details);
-        assert!(details.overlap_scores.scores.is_empty());
-        assert!(details.last_matched_hashes.is_empty());
-        assert!(details.kv_transfer_candidates.is_none());
-    }
-
-    #[test]
-    fn removal_and_tiers_are_tracked_per_hash() {
-        let residency = KvCacheGroupResidency::new();
-        let worker = WorkerWithDpRank::new(1, 0);
-        residency.apply(&stored(worker, StorageTier::Device, 1, &[2]));
-        residency.apply(&stored(worker, StorageTier::HostPinned, 1, &[2]));
-        residency.apply(&removed(worker, StorageTier::Device, 1, &[2]));
-        assert_eq!(residency.reusable_blocks(worker, &chain(2), 2), Some(2));
-        residency.apply(&removed(worker, StorageTier::HostPinned, 1, &[2]));
-        assert_eq!(residency.reusable_blocks(worker, &chain(2), 2), Some(0));
-        assert_eq!(residency.groups_for(worker).len(), 1);
-    }
-
-    #[test]
-    fn clear_and_remove_worker_forget_presence() {
-        let residency = KvCacheGroupResidency::new();
-        let worker = WorkerWithDpRank::new(1, 0);
-        residency.apply(&stored(worker, StorageTier::Device, 1, &[1]));
-        residency.clear_worker(worker);
-        assert!(!residency.is_active());
-        residency.apply(&stored(worker, StorageTier::Device, 1, &[1]));
-        residency.remove_worker(1);
-        assert!(!residency.is_active());
-    }
-
-    #[test]
-    fn lower_tier_hits_are_cut_with_the_device_chain() {
-        let residency = KvCacheGroupResidency::new();
-        let worker = WorkerWithDpRank::new(1, 0);
-        residency.apply(&stored(worker, StorageTier::HostPinned, 1, &[2]));
-        let mut details = LowerTierMatchDetails::default();
-        details.hits.insert(worker, 4);
-        details.next_continuations.insert(
-            worker,
-            LowerTierContinuation::new(4, ExternalSequenceBlockHash(4)),
-        );
-        residency.cut_lower_tier(&mut details, &chain(4));
-        assert_eq!(details.hits[&worker], 2);
-        assert_eq!(details.next_continuations[&worker].start_pos, 2);
-        assert_eq!(
-            details.next_continuations[&worker].last_matched_hash,
-            Some(ExternalSequenceBlockHash(2))
-        );
-
-        // Device already matched 2 blocks (continuation starts at 2); the tier
-        // added 2 more but the only state is at block 3: one host hit survives.
-        let mut details = LowerTierMatchDetails::default();
-        details.hits.insert(worker, 2);
-        details.next_continuations.insert(
-            worker,
-            LowerTierContinuation::new(4, ExternalSequenceBlockHash(4)),
-        );
-        residency.apply(&stored(worker, StorageTier::HostPinned, 1, &[3]));
-        residency.cut_lower_tier(&mut details, &chain(4));
-        assert_eq!(details.hits[&worker], 1);
-        assert_eq!(details.next_continuations[&worker].start_pos, 3);
+    fn unknown_group_kind_is_consumed_without_mutation() {
+        let table = KvCacheGroupResidency::new();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let mut event = checkpoint(worker, StorageTier::Device, 0, 11, Some(1));
+        event.kv_cache_group.as_mut().unwrap().kind = KvCacheGroupKind::Unknown;
+        assert!(table.apply(&event));
+        assert!(!table.is_active());
     }
 }

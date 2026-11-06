@@ -34,6 +34,7 @@ fn trtllm_digest_first_images_match_frontend_hashes_across_blocks() {
     let expected =
         compute_block_hash_for_seq(&[1, a, a, a, a, 9, b, b], 4, BlockHashOptions::default());
     let placement = ZmqEventNormalizer::new(4)
+        .with_recurrent_groups(Some(vec![0, 1, 2]))
         .normalize(raw, 1, WorkerWithDpRank::new(7, 0))
         .unwrap();
     let KvCacheEventData::Stored(stored) = placement.event.data else {
@@ -805,7 +806,7 @@ fn test_deserialize_block_stored_sequence_preserves_block_mm_infos_and_metadata(
 
     let remove: RawKvEvent =
         from_slice(&block_removed_sequence(Some(3), None)).expect("valid remove event");
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     let worker = WorkerWithDpRank::new(7, 0);
 
     assert!(normalizer.preprocess(event, worker).is_some());
@@ -899,7 +900,7 @@ fn test_normalizer_keeps_map_serialized_mamba_kind() {
         .expect("serialize raw event batch");
     let mut batch = decode_event_batch(&encoded).expect("deserialize raw event batch");
     let decoded = batch.events.pop().expect("batch should contain event");
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
 
     assert_event_metadata(&decoded, Some(1), Some(KvCacheSpecKind::Mamba), None);
     let worker = WorkerWithDpRank::new(3, 0);
@@ -915,6 +916,7 @@ fn test_normalizer_keeps_map_serialized_mamba_kind() {
         Some(KvCacheGroupTag {
             group_idx: 1,
             kind: KvCacheGroupKind::Mamba,
+            expected_group_count: Some(3),
         })
     );
 }
@@ -946,7 +948,7 @@ fn test_normalizer_drops_sliding_window_kind() {
         .expect("serialize raw event batch");
     let mut batch = decode_event_batch(&encoded).expect("deserialize raw event batch");
     let decoded = batch.events.pop().expect("batch should contain event");
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     assert_eq!(
         normalizer
             .preprocess_with_reason(decoded, WorkerWithDpRank::new(3, 0))
@@ -967,7 +969,7 @@ fn test_normalizer_metadata_is_dp_rank_scoped() {
         from_slice(&block_removed_sequence(Some(3), None)).expect("valid same-rank remove event");
     let different_rank_remove: RawKvEvent = from_slice(&block_removed_sequence(Some(3), None))
         .expect("valid different-rank remove event");
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
 
     assert!(
         normalizer
@@ -996,7 +998,7 @@ fn test_normalizer_does_not_learn_metadata_from_remove_events() {
     .expect("valid metadata remove event");
     let bare_remove: RawKvEvent =
         from_slice(&block_removed_sequence(Some(3), None)).expect("valid bare remove event");
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     let worker = WorkerWithDpRank::new(7, 0);
 
     assert!(normalizer.preprocess(metadata_remove, worker).is_some());
@@ -1006,7 +1008,7 @@ fn test_normalizer_does_not_learn_metadata_from_remove_events() {
 #[test]
 fn test_normalizer_propagates_cache_namespace_from_parent() {
     let worker = WorkerWithDpRank::new(7, 0);
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     let parent = RawKvEvent::BlockStored {
         block_hashes: vec![BlockHashValue::Unsigned(1)],
         parent_block_hash: None,
@@ -1069,7 +1071,7 @@ fn test_normalizer_propagates_cache_namespace_from_parent() {
 #[test]
 fn test_normalizer_shares_cache_namespace_across_blocks() {
     let worker = WorkerWithDpRank::new(7, 0);
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     let event = RawKvEvent::BlockStored {
         block_hashes: vec![BlockHashValue::Unsigned(1), BlockHashValue::Unsigned(2)],
         parent_block_hash: None,
@@ -1102,7 +1104,7 @@ fn test_normalizer_shares_cache_namespace_across_blocks() {
 #[test]
 fn test_normalizer_rejects_ambiguous_parent_cache_namespace() {
     let worker = WorkerWithDpRank::new(7, 0);
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     let stored =
         |cache_namespace: Option<&str>, block_hashes, parent_block_hash| RawKvEvent::BlockStored {
             block_hashes,
@@ -1143,7 +1145,7 @@ fn test_normalizer_rejects_ambiguous_parent_cache_namespace() {
 #[test]
 fn test_normalizer_treats_empty_namespace_as_absent() {
     let worker = WorkerWithDpRank::new(7, 0);
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     let parent = RawKvEvent::BlockStored {
         block_hashes: vec![BlockHashValue::Unsigned(1)],
         parent_block_hash: None,
@@ -1193,7 +1195,7 @@ fn test_normalizer_treats_empty_namespace_as_absent() {
 #[test]
 fn test_mamba_events_do_not_touch_attention_cache_namespaces() {
     let worker = WorkerWithDpRank::new(3, 0);
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     // Attention store in a namespace, then a Mamba store and removal at the
     // same positional hash: the attention namespace state must be unchanged.
     let attention = RawKvEvent::BlockStored {
@@ -1262,11 +1264,12 @@ fn test_normalizer_tags_mamba_group_store_and_learned_removal() {
     .expect("valid raw event");
     let remove: RawKvEvent =
         from_slice(&block_removed_sequence(Some(0), None)).expect("valid remove event");
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     let worker = WorkerWithDpRank::new(3, 0);
     let tag = Some(KvCacheGroupTag {
         group_idx: 0,
         kind: KvCacheGroupKind::Mamba,
+        expected_group_count: Some(3),
     });
 
     let stored = normalizer.preprocess(raw_event, worker).expect("kept");
@@ -1298,7 +1301,7 @@ fn test_normalizer_ignores_sliding_window_group_with_group_idx_zero() {
     .expect("valid raw event");
     let remove: RawKvEvent =
         from_slice(&block_removed_sequence(Some(0), None)).expect("valid remove event");
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
     let worker = WorkerWithDpRank::new(3, 0);
 
     assert!(normalizer.preprocess(raw_event, worker).is_none());
@@ -1506,7 +1509,7 @@ fn gpu_block_stored(block_hashes: &[u64], token_ids: &[u32], block_size: usize) 
 /// where it would trigger the block-size-mismatch warning.
 #[test]
 fn partial_tail_block_is_filtered_after_a_full_block_from_the_same_worker() {
-    let mut normalizer = ZmqEventNormalizer::new(4);
+    let mut normalizer = ZmqEventNormalizer::new(4).with_recurrent_groups(Some(vec![0, 1, 2]));
     let worker = WorkerWithDpRank::new(7, 0);
 
     let full = gpu_block_stored(&[1], &[10, 11, 12, 13], 4);
@@ -1529,7 +1532,7 @@ fn partial_tail_block_is_filtered_after_a_full_block_from_the_same_worker() {
 /// reaches conversion and the existing warning fires.
 #[test]
 fn undersized_block_before_any_full_block_still_reaches_conversion_and_warns() {
-    let mut normalizer = ZmqEventNormalizer::new(4);
+    let mut normalizer = ZmqEventNormalizer::new(4).with_recurrent_groups(Some(vec![0, 1, 2]));
     let worker = WorkerWithDpRank::new(7, 0);
 
     let undersized = gpu_block_stored(&[2], &[14, 15], 2);
@@ -1550,7 +1553,7 @@ fn undersized_block_before_any_full_block_still_reaches_conversion_and_warns() {
 /// filtered just because a different worker has published full blocks.
 #[test]
 fn partial_tail_filter_is_tracked_per_worker() {
-    let mut normalizer = ZmqEventNormalizer::new(4);
+    let mut normalizer = ZmqEventNormalizer::new(4).with_recurrent_groups(Some(vec![0, 1, 2]));
     let proven = WorkerWithDpRank::new(7, 0);
     let unproven = WorkerWithDpRank::new(8, 0);
 
@@ -1570,7 +1573,7 @@ fn partial_tail_filter_is_tracked_per_worker() {
 /// main-attention block still has to reach conversion and warn.
 #[test]
 fn filtered_group_does_not_prove_block_size_for_partial_tail_filter() {
-    let mut normalizer = ZmqEventNormalizer::new(4);
+    let mut normalizer = ZmqEventNormalizer::new(4).with_recurrent_groups(Some(vec![0, 1, 2]));
     let worker = WorkerWithDpRank::new(7, 0);
 
     // A sliding-window group is still filtered at ingress (recurrent groups
@@ -1607,7 +1610,7 @@ fn filtered_group_does_not_prove_block_size_for_partial_tail_filter() {
 /// that comes back with a different block size is not silently filtered.
 #[test]
 fn all_blocks_cleared_resets_partial_tail_filter_history() {
-    let mut normalizer = ZmqEventNormalizer::new(4);
+    let mut normalizer = ZmqEventNormalizer::new(4).with_recurrent_groups(Some(vec![0, 1, 2]));
     let worker = WorkerWithDpRank::new(7, 0);
 
     let full = gpu_block_stored(&[1], &[10, 11, 12, 13], 4);
@@ -1822,7 +1825,8 @@ fn test_preprocess_rejects_non_local_locality_for_every_tier() {
     ];
     for event_kind in [TestEventKind::BlockStored, TestEventKind::BlockRemoved] {
         for (medium, locality) in rejected {
-            let mut normalizer = ZmqEventNormalizer::new(2);
+            let mut normalizer =
+                ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
             let raw = raw_placement_event(event_kind, medium, Some(locality));
             assert_eq!(
                 normalizer.preprocess_with_reason(raw, worker).unwrap_err(),
@@ -1834,7 +1838,7 @@ fn test_preprocess_rejects_non_local_locality_for_every_tier() {
 
     // LOCAL / absent locality still pass preprocess (STORAGE takes the bypass).
     for locality in [Some(Locality::Local), None] {
-        let mut normalizer = ZmqEventNormalizer::new(2);
+        let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
         let raw = raw_placement_event(TestEventKind::BlockStored, Some("STORAGE"), locality);
         assert!(
             normalizer.preprocess_with_reason(raw, worker).is_ok(),
@@ -1855,7 +1859,8 @@ fn test_preprocess_rejects_unknown_medium() {
 
     for event_kind in [TestEventKind::BlockStored, TestEventKind::BlockRemoved] {
         for medium in ["FS", "OBJ", "XYZ"] {
-            let mut normalizer = ZmqEventNormalizer::new(2);
+            let mut normalizer =
+                ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
             let raw = raw_placement_event(event_kind, Some(medium), Some(Locality::Local));
             assert_eq!(
                 normalizer.preprocess_with_reason(raw, worker).unwrap_err(),
@@ -1868,7 +1873,7 @@ fn test_preprocess_rejects_unknown_medium() {
     // Recognized media are never rejected as unknown: GPU/CPU stay on the
     // normalizer path and STORAGE takes the lower-tier bypass.
     for medium in ["GPU", "CPU", "STORAGE"] {
-        let mut normalizer = ZmqEventNormalizer::new(2);
+        let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
         let raw = raw_placement_event(
             TestEventKind::BlockStored,
             Some(medium),
@@ -1987,7 +1992,7 @@ fn namespaced_block_stored(
 #[test]
 fn test_lower_tier_events_do_not_pollute_cache_namespace_state() {
     let worker = WorkerWithDpRank::new(7, 0);
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
 
     let salted_gpu = namespaced_block_stored(1, None, Some("tenant-a"), "GPU");
     assert!(normalizer.preprocess(salted_gpu, worker).is_some());
@@ -2039,7 +2044,7 @@ fn test_convert_event_rejects_unknown_medium_instead_of_defaulting_to_device() {
 #[test]
 fn test_unrecognized_media_do_not_pollute_cache_namespace_state() {
     let worker = WorkerWithDpRank::new(7, 0);
-    let mut normalizer = ZmqEventNormalizer::new(2);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
 
     let salted_gpu = namespaced_block_stored(1, None, Some("tenant-a"), "GPU");
     assert!(normalizer.preprocess(salted_gpu, worker).is_some());
@@ -2069,4 +2074,81 @@ fn test_unrecognized_media_do_not_pollute_cache_namespace_state() {
         panic!("expected BlockStored");
     };
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+#[test]
+fn vllm_checkpoint_only_payload_reaches_presence_and_removes_without_tokens() {
+    use crate::indexer::KvCacheGroupResidency;
+    use crate::protocols::{ExternalSequenceBlockHash, KvCacheEventData};
+    let payload = serde_json::json!([0.0, [{
+        "type": "BlockStored", "block_hashes": [333], "parent_block_hash": 222,
+        "token_ids": [], "block_size": 576, "medium": "CPU", "group_idx": 0,
+        "kv_cache_spec_kind": "mamba"
+    }], 0]);
+    let wire = rmp_serde::to_vec_named(&payload).unwrap();
+    let mut decoded = decode_event_batch(&wire).unwrap();
+    let worker = WorkerWithDpRank::new(7, 0);
+    let raw = decoded.events.remove(0);
+    assert!(
+        ZmqEventNormalizer::new(576)
+            .preprocess(raw.clone(), worker)
+            .is_none(),
+        "default publisher must not emit tagged events"
+    );
+    let mut normalizer = ZmqEventNormalizer::new(576).with_recurrent_groups(Some(vec![0]));
+    let store = normalizer
+        .normalize(raw, 1, worker)
+        .unwrap()
+        .into_router_event()
+        .unwrap();
+    let KvCacheEventData::Stored(data) = &store.event.data else {
+        panic!("store");
+    };
+    assert_eq!(data.blocks.len(), 1);
+    assert_eq!(data.blocks[0].block_hash, ExternalSequenceBlockHash(333));
+    assert!(!store.targets_primary().unwrap());
+    let presence = KvCacheGroupResidency::new();
+    presence.apply(&store);
+    let chain = [ExternalSequenceBlockHash(333)];
+    assert_eq!(
+        presence.reusable_blocks_on_tier(
+            store.residency_owner().unwrap(),
+            &chain,
+            1,
+            crate::protocols::StorageTier::HostPinned,
+            0
+        ),
+        Some(1)
+    );
+    let remove: RawKvEvent = from_slice(&rmp_serde::to_vec_named(&serde_json::json!({"type":"BlockRemoved", "block_hashes":[333], "medium":"CPU", "group_idx":0})).unwrap()).unwrap();
+    let remove = normalizer
+        .normalize(remove, 2, worker)
+        .unwrap()
+        .into_router_event()
+        .unwrap();
+    presence.apply(&remove);
+    assert_eq!(
+        presence.reusable_blocks_on_tier(
+            store.residency_owner().unwrap(),
+            &chain,
+            1,
+            crate::protocols::StorageTier::HostPinned,
+            0
+        ),
+        Some(0)
+    );
+}
+
+#[test]
+fn declared_mamba_group_zero_removal_is_tagged_before_first_store() {
+    let remove: RawKvEvent = from_slice(&block_removed_sequence(Some(0), None)).unwrap();
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2).with_recurrent_groups(Some(vec![0, 1, 2]));
+    let event = normalizer
+        .normalize(remove, 1, worker)
+        .unwrap()
+        .into_router_event()
+        .unwrap();
+    assert_eq!(event.kv_cache_group.unwrap().group_idx, 0);
+    assert!(!event.targets_primary().unwrap());
 }

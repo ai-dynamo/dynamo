@@ -1411,7 +1411,7 @@ impl KvEventPublisher {
     ///         so every event token at or above 1,000,000 is excluded from the
     ///         index. Otherwise only values that do not fit in 32 bits are.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None, video_token_id=None, engine_owned_mm_identity=false))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None, video_token_id=None, engine_owned_mm_identity=false, recurrent_groups=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
@@ -1426,6 +1426,7 @@ impl KvEventPublisher {
         kv_state_endpoint: Option<String>,
         video_token_id: Option<u32>,
         engine_owned_mm_identity: bool,
+        recurrent_groups: Option<Vec<u32>>,
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             liveness: None,
@@ -1435,6 +1436,7 @@ impl KvEventPublisher {
             image_token_id,
             video_token_id,
             engine_owned_mm_identity,
+            recurrent_groups,
             recovery: None,
         });
 

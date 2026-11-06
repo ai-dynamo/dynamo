@@ -1393,6 +1393,7 @@ mod tests_startup_helpers {
                 Some(0),
                 heartbeat_source.then_some((0, std::time::Duration::from_millis(500))),
                 false,
+                Some(vec![0, 1, 2]),
                 None,
             )
         });
@@ -1618,6 +1619,7 @@ mod tests_startup_helpers {
                 None,
                 None,
                 false,
+                Some(vec![0, 1, 2]),
                 None,
             )
         });
@@ -1721,6 +1723,7 @@ mod tests_startup_helpers {
                 None,
                 None,
                 false,
+                Some(vec![0, 1, 2]),
                 None,
             )
         });
@@ -1819,6 +1822,7 @@ mod tests_startup_helpers {
                 None,
                 None,
                 false,
+                Some(vec![0, 1, 2]),
                 None,
             )
         });

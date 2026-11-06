@@ -961,6 +961,8 @@ pub enum PlacementOwner {
 pub enum KvCacheGroupKind {
     /// Mamba / GDN / linear-attention state (`kv_cache_spec_kind = "mamba"`).
     Mamba,
+    #[serde(other)]
+    Unknown,
 }
 
 /// Which KV cache group a residency event describes when it is not the
@@ -975,6 +977,8 @@ pub enum KvCacheGroupKind {
 pub struct KvCacheGroupTag {
     pub group_idx: u32,
     pub kind: KvCacheGroupKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_group_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -1785,6 +1789,14 @@ impl RouterEvent {
     }
 
     pub fn targets_primary(&self) -> Result<bool, UnsupportedResidencyDomain> {
+        if matches!(self.residency_domain, WireResidencyDomain::KnownTagged(_))
+            && self.kv_cache_group.is_none()
+        {
+            return Err(UnsupportedResidencyDomain);
+        }
+        if self.kv_cache_group.is_some() {
+            return Ok(false);
+        }
         if let Some(scope) = self.reset_scope()? {
             return Ok(!matches!(
                 scope,
@@ -2112,6 +2124,7 @@ mod tests {
                 .with_kv_cache_group(KvCacheGroupTag {
                     group_idx: 1,
                     kind: KvCacheGroupKind::Mamba,
+                    expected_group_count: Some(1),
                 });
             let bytes = rmp_serde::to_vec_named(&tagged).unwrap();
 

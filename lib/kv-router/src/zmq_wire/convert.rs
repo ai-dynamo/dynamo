@@ -181,6 +181,80 @@ pub fn convert_event(
     ))
 }
 
+/// Recurrent events carry checkpoint identities, not token ranges.
+pub(super) fn convert_recurrent_event(
+    raw: RawKvEvent,
+    event_id: u64,
+    worker: WorkerWithDpRank,
+) -> Option<PlacementEvent> {
+    if matches!(raw.locality(), Some(Locality::Remote | Locality::Unknown)) {
+        return None;
+    }
+    let tier = match raw.medium() {
+        Some(medium) => StorageTier::from_kv_medium(medium)?,
+        None => StorageTier::Device,
+    };
+    let (data, session_id) = match raw {
+        RawKvEvent::BlockStored {
+            block_hashes,
+            parent_block_hash,
+            block_size,
+            session_id,
+            ..
+        } => {
+            if block_size == 0 || has_duplicate_block_hashes(&block_hashes, parent_block_hash) {
+                return Some(PlacementEvent::new(
+                    Placement::local_worker(worker.worker_id, worker.dp_rank, tier),
+                    KvCacheEvent {
+                        event_id,
+                        dp_rank: worker.dp_rank,
+                        data: KvCacheEventData::Removed(KvCacheRemoveData {
+                            block_hashes: Vec::new(),
+                        }),
+                    },
+                ));
+            }
+            (
+                KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: block_hashes
+                        .into_iter()
+                        .map(|hash| KvCacheStoredBlockData {
+                            block_hash: ExternalSequenceBlockHash(hash.into_u64()),
+                            // Presence consumers never use tokens_hash or enter the radix tree.
+                            tokens_hash: crate::protocols::LocalBlockHash(0),
+                            mm_extra_info: None,
+                        })
+                        .collect(),
+                }),
+                session_id,
+            )
+        }
+        RawKvEvent::BlockRemoved { block_hashes, .. } => (
+            KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: block_hashes
+                    .into_iter()
+                    .map(|hash| ExternalSequenceBlockHash(hash.into_u64()))
+                    .collect(),
+            }),
+            None,
+        ),
+        RawKvEvent::AllBlocksCleared { .. } => (KvCacheEventData::Cleared, None),
+        RawKvEvent::Ignored => return None,
+    };
+    let mut event = PlacementEvent::new(
+        Placement::local_worker(worker.worker_id, worker.dp_rank, tier),
+        KvCacheEvent {
+            event_id,
+            data,
+            dp_rank: worker.dp_rank,
+        },
+    );
+    event.session_id = session_id;
+    Some(event)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MmTokenKind {
     Image,

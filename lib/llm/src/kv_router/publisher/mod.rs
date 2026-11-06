@@ -90,6 +90,7 @@ pub enum KvEventSourceConfig {
         /// above `MM_PAD_SHIFT_VALUE` is excluded from the index. Otherwise only
         /// values that do not fit in `u32` are excluded.
         engine_owned_mm_identity: bool,
+        recurrent_groups: Option<Vec<u32>>,
         /// Opt-in replay recovery that gates readiness on verified continuity.
         /// Cannot be combined with `liveness`.
         recovery: Option<ZmqRecoveryConfig>,
@@ -154,6 +155,7 @@ impl KvEventSource {
                 expected_rank,
                 liveness,
                 engine_owned_mm_identity,
+                recurrent_groups,
                 recovery,
             } => {
                 anyhow::ensure!(
@@ -178,6 +180,7 @@ impl KvEventSource {
                             expected_rank,
                             liveness,
                             engine_owned_mm_identity,
+                            recurrent_groups,
                             recovery,
                         ));
                 let listener_abort_handle = listener_handle.abort_handle();
@@ -412,6 +415,42 @@ impl KvEventPublisher {
                 ),
             "KV replay recovery requires the local indexer"
         );
+        let recurrent_groups = source_config.as_ref().and_then(|config| match config {
+            KvEventSourceConfig::Zmq {
+                recurrent_groups, ..
+            } => recurrent_groups.clone(),
+        });
+        if let Some(groups) = recurrent_groups.as_ref() {
+            anyhow::ensure!(
+                enable_local_indexer,
+                "Recurrent KV events require the local recovery indexer"
+            );
+            let bootstrap = groups
+                .iter()
+                .map(|&group_idx| {
+                    let mut event = PlacementEvent::new(
+                        Placement::local_gpu(worker_id, dp_rank),
+                        KvCacheEvent {
+                            event_id: next_event_id.fetch_add(1, Ordering::SeqCst),
+                            dp_rank,
+                            data: KvCacheEventData::Stored(KvCacheStoreData {
+                                parent_hash: None,
+                                start_position: None,
+                                blocks: Vec::new(),
+                            }),
+                        },
+                    );
+                    event.placement.kv_cache_group = Some(KvCacheGroupTag {
+                        group_idx,
+                        kind: KvCacheGroupKind::Mamba,
+                        expected_group_count: Some(groups.len() as u32),
+                    });
+                    event
+                })
+                .collect();
+            tx.send(PublisherInput::Events(bootstrap))
+                .map_err(|_| anyhow::anyhow!("publisher startup channel closed"))?;
+        }
         let mut source = None;
         if let Some(config) = source_config {
             source = Some(KvEventSource::start(
@@ -438,6 +477,9 @@ impl KvEventPublisher {
         };
 
         let cancellation_token_clone = cancellation_token.clone();
+        if let (Some(indexer), Some(groups)) = (&local_indexer, recurrent_groups) {
+            indexer.declare_recurrent_groups(WorkerWithDpRank::new(worker_id, dp_rank), &groups);
+        }
         let local_indexer_clone = local_indexer.clone();
 
         tracing::info!("Using event plane for KV event publishing");

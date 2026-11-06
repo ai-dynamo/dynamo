@@ -440,6 +440,14 @@ impl Indexer {
     /// per-position state presence. Returns true when the event was consumed
     /// here. An untagged clear also forgets the rank's recurrent presence and
     /// then continues to the tier indexes.
+    pub fn declare_recurrent_groups(&self, worker: WorkerWithDpRank, groups: &[u32]) {
+        if let Self::Single { lower_tier, .. } | Self::Concurrent { lower_tier, .. } = self {
+            lower_tier
+                .group_residency()
+                .declare_groups(crate::protocols::ResidencyOwner::worker(worker), groups);
+        }
+    }
+
     fn apply_group_residency(&self, event: &RouterEvent) -> bool {
         let (Self::Single { lower_tier, .. } | Self::Concurrent { lower_tier, .. }) = self else {
             return false;
@@ -448,9 +456,7 @@ impl Indexer {
             return true;
         }
         if matches!(&event.event.data, KvCacheEventData::Cleared) {
-            lower_tier
-                .group_residency()
-                .clear_worker(WorkerWithDpRank::new(event.worker_id, event.event.dp_rank));
+            lower_tier.group_residency().clear_event(event);
         }
         false
     }
@@ -875,6 +881,9 @@ impl Indexer {
                 out.push(event);
             }
         }
+        if let Self::Single { lower_tier, .. } | Self::Concurrent { lower_tier, .. } = self {
+            out.extend(lower_tier.group_residency().dump_events());
+        }
         Ok(out)
     }
 
@@ -1097,6 +1106,7 @@ mod tests {
         .with_kv_cache_group(KvCacheGroupTag {
             group_idx: 2,
             kind: KvCacheGroupKind::Mamba,
+            expected_group_count: Some(1),
         });
         indexer.try_apply_event(tagged).await.unwrap();
         if let Indexer::Single {

@@ -9,6 +9,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 logger = logging.getLogger(__name__)
 
+DYNAMO_KV_CACHE_GROUPS_KEY = "dynamo_kv_cache_groups"
 DYNAMO_KV_EVENT_BLOCK_SIZE_KEY = "dynamo_kv_event_block_size"
 MAIN_ATTENTION_KV_CACHE_KINDS = {
     "full_attention",
@@ -47,6 +48,7 @@ async def configure_kv_event_block_size(
 ) -> int:
     """Fetch engine cache-group metadata and cache the KV event block size on vLLM config."""
     fallback_block_size = vllm_config.cache_config.block_size
+    group_metadata = None
     try:
         group_metadata = await engine.engine_core.call_utility_async(
             "get_kv_cache_group_metadata"
@@ -67,4 +69,17 @@ async def configure_kv_event_block_size(
     if vllm_config.additional_config is None:
         vllm_config.additional_config = {}
     vllm_config.additional_config[DYNAMO_KV_EVENT_BLOCK_SIZE_KEY] = kv_event_block_size
+    vllm_config.additional_config[DYNAMO_KV_CACHE_GROUPS_KEY] = group_metadata
     return kv_event_block_size
+
+
+def recurrent_kv_groups(vllm_config: VllmConfig) -> list[int] | None:
+    """Enable checkpoint events only after the operator upgrades all consumers."""
+    from dynamo.common.utils.env import env_bool
+
+    if not env_bool("DYN_VLLM_RECURRENT_KV_EVENTS", default=False):
+        return None
+    metadata = (vllm_config.additional_config or {}).get(DYNAMO_KV_CACHE_GROUPS_KEY)
+    if not isinstance(metadata, list) or not metadata:
+        raise ValueError("Recurrent KV events require engine KV cache group metadata")
+    return [int(group["group_idx"]) for group in metadata if group.get("kind") == "mamba"]

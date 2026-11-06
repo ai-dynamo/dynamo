@@ -69,7 +69,7 @@ from .args import (
     parse_args_with_model_fetch,
 )
 from .backend_args import _configured_artifact_router_profile
-from .cache_info import get_configured_kv_event_block_size
+from .cache_info import get_configured_kv_event_block_size, recurrent_kv_groups
 from .capacity import (
     get_metrics_model_name,
     get_spec_decode_runtime_data,
@@ -588,6 +588,7 @@ def setup_kv_event_publisher(
             image_token_id=image_token_id,
             kv_state_endpoint=config.kv_state_endpoint,
             video_token_id=video_token_id,
+            recurrent_groups=recurrent_kv_groups(vllm_config),
         )
         kv_publishers.append(kv_publisher)
 
@@ -950,6 +951,9 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
+    groups = recurrent_kv_groups(vllm_config)
+    if groups is not None:
+        runtime_config.set_engine_specific("kv_cache_group_layout_v1", json.dumps({"recurrent_groups": groups}))
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)
