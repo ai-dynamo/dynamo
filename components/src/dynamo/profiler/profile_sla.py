@@ -33,6 +33,7 @@ from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
 from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
 from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgd_generation import (
+    apply_unauthenticated_mode,
     assemble_final_config,
     build_aic_interpolation_spec,
     build_ais_perf_model_spec,
@@ -482,6 +483,7 @@ async def run_profile(
                 )
                 if resolved_backend == "trtllm":
                     enable_trtllm_chunked_prefill(interpolation_dgd_config)
+                apply_unauthenticated_mode(dgdr, interpolation_dgd_config)
                 await run_interpolation(
                     dgdr,
                     ops,
