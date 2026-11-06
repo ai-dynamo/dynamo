@@ -19,8 +19,16 @@ SCRIPTS = ROOT / "benchmarks/frontend/scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import sweep_runner  # noqa: E402 -- standalone scripts need SCRIPTS on sys.path
-from sweep_core.aiperf import parse_aiperf_into_result  # noqa: E402 -- standalone scripts need SCRIPTS on sys.path
-from sweep_core.models import AiperfDimension, DeployDimension, RunResult, RunSpec  # noqa: E402 -- standalone scripts need SCRIPTS on sys.path
+from sweep_core.aiperf import (  # noqa: E402 -- standalone scripts need SCRIPTS on sys.path
+    parse_aiperf_into_result,
+)
+from sweep_core.models import (  # noqa: E402 -- standalone scripts need SCRIPTS on sys.path
+    AiperfDimension,
+    DeployDimension,
+    RunResult,
+    RunSpec,
+)
+
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0]
 
 
@@ -174,11 +182,26 @@ BENCHMARK_DURATION=
     )
 
 
-@pytest.mark.parametrize("mode", ["healthy", "mixed-errors", "missing", "invalid", "count", "csv-missing", "csv-invalid", "csv-truncated", "csv-empty-count"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "healthy",
+        "mixed-errors",
+        "missing",
+        "invalid",
+        "count",
+        "csv-missing",
+        "csv-invalid",
+        "csv-truncated",
+        "csv-empty-count",
+    ],
+)
 @pytest.mark.unit
 def test_sweep_validates_required_exports(tmp_path, mode):
     deploy = DeployDimension("mocker", "hf")
-    spec = RunSpec(deploy, AiperfDimension(1, 16, num_requests=3), deploy.deploy_key, "test")
+    spec = RunSpec(
+        deploy, AiperfDimension(1, 16, num_requests=3), deploy.deploy_key, "test"
+    )
     directory = tmp_path / "aiperf"
     directory.mkdir()
     write_artifacts(directory, 3, mode)
@@ -190,8 +213,16 @@ def test_sweep_validates_required_exports(tmp_path, mode):
 @pytest.mark.parametrize("status", ["ok", "fail", "skipped"])
 @pytest.mark.unit
 def test_sweep_cli_propagates_failed_results(monkeypatch, status):
-    monkeypatch.setattr(sys, "argv", ["sweep_runner", "--tokenizers", "hf", "--concurrency", "1", "--isl", "16"])
-    monkeypatch.setattr(sweep_runner, "run_sweep", lambda plan, executor: [SimpleNamespace(status=status)] * plan.total_runs)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["sweep_runner", "--tokenizers", "hf", "--concurrency", "1", "--isl", "16"],
+    )
+    monkeypatch.setattr(
+        sweep_runner,
+        "run_sweep",
+        lambda plan, executor: [SimpleNamespace(status=status)] * plan.total_runs,
+    )
     if status == "fail":
         with pytest.raises(SystemExit) as error:
             sweep_runner.main()
@@ -203,7 +234,9 @@ def test_sweep_cli_propagates_failed_results(monkeypatch, status):
 @pytest.mark.unit
 def test_multi_model_discovery_ignores_phase_exports(tmp_path):
     deploy = DeployDimension("mocker", "hf", num_models=2)
-    spec = RunSpec(deploy, AiperfDimension(1, 16, num_requests=3), deploy.deploy_key, "test")
+    spec = RunSpec(
+        deploy, AiperfDimension(1, 16, num_requests=3), deploy.deploy_key, "test"
+    )
     for model in ["model-0", "model-1"]:
         for suffix, count in [("", 3), ("/phases/warmup", 1)]:
             directory = tmp_path / "aiperf" / (model + suffix)

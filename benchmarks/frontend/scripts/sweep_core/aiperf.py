@@ -26,7 +26,8 @@ def validate_artifacts(directory: Path, expected: Optional[int] = None) -> dict:
         )
     with (directory / "profile_export_aiperf.csv").open(newline="") as stream:
         counts = [
-            float(row[1]) for row in csv.reader(stream, strict=True)
+            float(row[1])
+            for row in csv.reader(stream, strict=True)
             if row and row[0] == "Request Count"
         ]
     if counts != [successful]:
