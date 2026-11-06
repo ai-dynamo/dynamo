@@ -3,8 +3,8 @@
 
 //! Native workload composition selected by Dynamo's existing Python runner entrypoint.
 
-use std::rc::Rc;
 use anyhow::Context;
+use std::rc::Rc;
 
 use aisimulate_core::replay::{
     ReplayComposition, ReplayDeterminism, ReplayEngineConfig, ReplayEngineFactory,
@@ -37,8 +37,14 @@ pub fn run_mocker_aiperf_workload(
     if run_request_json.len() > MAX_INPUT_BYTES || deployment_config_json.len() > MAX_INPUT_BYTES {
         return Err(PyValueError::new_err("workload input exceeds 64 MiB"));
     }
-    if identity_seed_hex.len() != 64 || !identity_seed_hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(PyValueError::new_err("identity seed requires 64 hexadecimal digits"));
+    if identity_seed_hex.len() != 64
+        || !identity_seed_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(PyValueError::new_err(
+            "identity seed requires 64 hexadecimal digits",
+        ));
     }
     let mut seed = [0; 32];
     for (index, byte) in seed.iter_mut().enumerate() {
