@@ -34,6 +34,7 @@ import (
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	grovev1beta1 "github.com/ai-dynamo/grove/operator/api/core/v1beta1"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
@@ -3668,13 +3669,24 @@ func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 				Config:        &configv1alpha1.OperatorConfiguration{},
 				RuntimeConfig: &controller_common.RuntimeConfig{},
 			}
-			reqs := newGroveWatchSetup(r.Client).
-				mapPodCliqueScalingGroupToRequests(context.Background(), tt.obj)
+			for _, apiVersion := range []string{grovev1alpha1.SchemeGroupVersion.String(), grovev1beta1.SchemeGroupVersion.String()} {
+				t.Logf("Map scaling-group readiness with %s owner references", apiVersion)
+				obj := tt.obj.DeepCopyObject().(client.Object)
+				owners := obj.GetOwnerReferences()
+				for i := range owners {
+					if owners[i].APIVersion == grovev1alpha1.SchemeGroupVersion.String() {
+						owners[i].APIVersion = apiVersion
+					}
+				}
+				obj.SetOwnerReferences(owners)
+				reqs := newGroveWatchSetup(r.Client).
+					mapPodCliqueScalingGroupToRequests(context.Background(), obj)
 
-			g.Expect(reqs).To(gomega.HaveLen(tt.wantRequests))
-			if tt.wantRequests == 1 {
-				g.Expect(reqs[0].Name).To(gomega.Equal(tt.wantName))
-				g.Expect(reqs[0].Namespace).To(gomega.Equal(tt.wantNs))
+				g.Expect(reqs).To(gomega.HaveLen(tt.wantRequests))
+				if tt.wantRequests == 1 {
+					g.Expect(reqs[0].Name).To(gomega.Equal(tt.wantName))
+					g.Expect(reqs[0].Namespace).To(gomega.Equal(tt.wantNs))
+				}
 			}
 		})
 	}

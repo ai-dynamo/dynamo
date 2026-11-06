@@ -258,7 +258,7 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
 The operator maintains observed state under `status`.
 
 <ParamField path="status.state" type="string" default="initializing">
-  High-level textual status of the graph deployment lifecycle.
+  High-level textual status of the graph deployment lifecycle. It is `failed`, even during a rolling update, while a Deployment-backed or Grove-managed component has a crash-looping container. A Deployment-backed component reports it through the DCD `Available` condition. DisaggregatedSet workers and LeaderWorkerSet-backed components are not covered: LeaderWorkerSet recreates the whole group at the first container restart.
 </ParamField>
 
 <ParamField path="status.conditions" type="[]metav1.Condition">

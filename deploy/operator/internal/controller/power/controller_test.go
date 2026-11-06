@@ -10,6 +10,7 @@ import (
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
@@ -57,7 +58,7 @@ func testScheme(t *testing.T) *runtime.Scheme {
 // testClient registers the production per-component Pod index that propagation queries.
 func testClient(t *testing.T) *fake.ClientBuilder {
 	t.Helper()
-	return fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&corev1.Pod{}, dynamo.ComponentPodIndex, dynamo.ComponentPodIndexValues)
+	return fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues)
 }
 
 // testOwners constructs a fresh complete owner chain and one worker Pod at 300 W.

@@ -16,6 +16,7 @@ import (
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -122,15 +123,15 @@ func (r *Reconciler) propagate(ctx context.Context, dgd *v1beta1.DynamoGraphDepl
 	// Observe only the indexed Pods of each capped component, in a stable order.
 	for _, component := range slices.Sorted(maps.Keys(caps)) {
 		cap := caps[component]
-		pods := &corev1.PodList{}
-		if err := r.client.List(ctx, pods, client.InNamespace(dgd.Namespace), client.MatchingFields{dynamo.ComponentPodIndex: dynamo.ComponentPodIndexValue(dgd.Name, component)}); err != nil {
+		pods, err := podcontroller.ListComponentPods(ctx, r.client, dgd.Namespace, dgd.Name, component)
+		if err != nil {
 			logger.Error(err, "Failed to observe power-cap worker Pods", "component", component)
 			degrade(&condition, metav1.ConditionUnknown, "PodObservationFailed", err.Error())
 			requeue(failureRetryAfter)
 			continue
 		}
-		for i := range pods.Items {
-			pod := &pods.Items[i]
+		for i := range pods {
+			pod := &pods[i]
 			if terminal(pod) || !dynamo.IsWorkerComponent(pod.Labels[consts.KubeLabelDynamoComponentType]) {
 				continue
 			}

@@ -52,7 +52,9 @@ func newComponentWorkloadsReconciler(
 	}
 }
 
-// Reconcile writes the component graph. retained may be nil for ordinary identity selection.
+// Reconcile syncs one DCD per component of dgd and returns their readiness. The
+// graph fails while any DCD reports a crash-looping container. retained may be
+// nil for ordinary identity selection.
 func (r *componentWorkloadsReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -61,6 +63,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	retained *componentPowerCapPreservation,
 ) (ReconcileResult, error) {
 	resources := []Resource{}
+	syncedDCDs := []*nvidiacomv1beta1.DynamoComponentDeployment{}
 	logger := log.FromContext(ctx)
 
 	var rollingUpdateCtx dynamo.RollingUpdateContext
@@ -129,6 +132,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 			return ReconcileResult{}, fmt.Errorf("failed to sync the DynamoComponentDeployment: %w", err)
 		}
 		resources = append(resources, syncedDCD)
+		syncedDCDs = append(syncedDCDs, syncedDCD)
 	}
 
 	if rollingUpdateCtx.InProgress() {
@@ -138,7 +142,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 		}
 	}
 
-	result := checkResourcesReadiness(resources)
+	result := applyComponentCrashLoops(checkResourcesReadiness(resources), syncedDCDs)
 	if rollingUpdateCtx.InProgress() {
 		oldWorkerStatuses, err := r.rollout.aggregateOldWorkerComponentStatuses(ctx, dgd, rollingUpdateCtx)
 		if err != nil {

@@ -15,6 +15,7 @@ import (
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/power"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -56,7 +57,7 @@ func powerCapTestScheme(t *testing.T) *runtime.Scheme {
 
 // powerCapTestClient registers the production per-component Pod index that rollout queries.
 func powerCapTestClient(scheme *runtime.Scheme) *fake.ClientBuilder {
-	return fake.NewClientBuilder().WithScheme(scheme).WithIndex(&corev1.Pod{}, dynamo.ComponentPodIndex, dynamo.ComponentPodIndexValues)
+	return fake.NewClientBuilder().WithScheme(scheme).WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues)
 }
 
 // powerCapTestOwners constructs fresh complete owner chains for each test.
@@ -334,14 +335,8 @@ func TestPowerCapProgramsPassThroughPropagationCondition(t *testing.T) {
 				owners, pod := powerCapTestOwners(dgd, provider)
 				scheme := powerCapTestScheme(t)
 				require.NoError(t, rbacv1.AddToScheme(scheme))
-				podReads, podPatches := 0, 0
+				podPatches := 0
 				c := powerCapTestClient(scheme).WithObjects(append(owners, dgd, pod)...).WithStatusSubresource(dgd).WithInterceptorFuncs(interceptor.Funcs{
-					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-						if _, ok := list.(*corev1.PodList); ok {
-							podReads++
-						}
-						return c.List(ctx, list, opts...)
-					},
 					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 						if _, ok := obj.(*corev1.Pod); ok {
 							podPatches++
@@ -361,7 +356,7 @@ func TestPowerCapProgramsPassThroughPropagationCondition(t *testing.T) {
 				}
 				result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
 
-				t.Log("The program neither observes nor repairs Pods, and returns the condition unchanged")
+				t.Log("The program never repairs Pods and returns the condition unchanged")
 				switch scenario {
 				case "success", "absent":
 					require.NoError(t, err)
@@ -371,9 +366,6 @@ func TestPowerCapProgramsPassThroughPropagationCondition(t *testing.T) {
 					require.Error(t, err)
 				}
 				require.Zero(t, podPatches)
-				if provider == "grove" {
-					require.Zero(t, podReads)
-				}
 				got := meta.FindStatusCondition(result.Status.Conditions, power.ConditionType)
 				if scenario == "absent" {
 					require.Nil(t, got)

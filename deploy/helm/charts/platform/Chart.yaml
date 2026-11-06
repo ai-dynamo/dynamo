@@ -25,7 +25,7 @@ kubeVersion: ">=1.30.0-0"
 home: https://nvidia.com
 annotations:
   # One scalar drives both the bundled dependency and the external-Grove preflight.
-  dynamo.nvidia.com/grove-version: &groveVersion v0.1.0-alpha.15
+  dynamo.nvidia.com/grove-version: &groveVersion v0.2.0-beta1
 dependencies:
   - name: dynamo-operator
     version: 1.7.0
@@ -39,6 +39,8 @@ dependencies:
     version: 12.0.18
     repository: "https://charts.bitnami.com/bitnami"
     condition: global.etcd.install
+  # templates/kai-queue-wait.yaml depends on KAI's queue-controller Deployment and
+  # kai-queue-validation-v2 webhook configuration names.
   - name: kai-scheduler
     version: v0.17.0
     repository: oci://ghcr.io/kai-scheduler/kai-scheduler

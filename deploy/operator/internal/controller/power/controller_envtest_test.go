@@ -12,6 +12,7 @@ import (
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -40,7 +41,7 @@ func startPowerController(t *testing.T, env *operatorenv.TestEnv, restricted str
 	config.Namespace.Restricted = restricted
 	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}
 	env.StartManager(func(mgr ctrl.Manager) error {
-		if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Pod{}, dynamo.ComponentPodIndex, dynamo.ComponentPodIndexValues); err != nil {
+		if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues); err != nil {
 			return err
 		}
 		return Setup(mgr, config, runtimeConfig)

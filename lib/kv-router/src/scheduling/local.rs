@@ -22,7 +22,7 @@ use super::queue::{
     SchedulerQueue,
 };
 use super::request_classifier::{RequestClassifierRuntime, RequestLifecycle};
-use super::selector::{WorkerInputs, WorkerSelector, log_selection};
+use super::selector::{WorkerSelector, log_selection};
 use super::types::{
     AdmissionAttempt, AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId,
     KvSchedulerError, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad,
@@ -30,7 +30,7 @@ use super::types::{
     WorkerAvailabilityProvider,
 };
 use crate::plugins::request_classifier::{ClassifyRequest, RequestClassifier};
-use crate::plugins::worker_selection::WorkerCapacity;
+use crate::plugins::worker_selection::{WorkerCapacity, WorkerInputs};
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{
     LocalBlockHash, SelectionTraceSpec, WorkerConfigLike, WorkerId, WorkerWithDpRank,
@@ -975,9 +975,9 @@ mod tests {
     use tokio::sync::{mpsc, watch};
 
     use super::*;
+    use crate::plugins::request_classifier::ClassifyFuture;
     use crate::plugins::worker_selection::WorkerCandidates;
     use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
-    use crate::scheduling::request_classifier::ClassifyFuture;
     use crate::scheduling::selector::DefaultWorkerSelector;
     use crate::scheduling::{BusyThresholds, PrefillLoadEstimator};
     use crate::sequences::SequenceSubscriber;

@@ -33,7 +33,7 @@ var podMembershipLabels = []string{
 }
 
 // Setup registers the power-cap propagation controller. The caller registers the
-// dynamo.ComponentPodIndex Pod index the controller queries. config and runtimeConfig must be non-nil.
+// podcontroller.ComponentIndex Pod index the controller queries. config and runtimeConfig must be non-nil.
 func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runtimeConfig *commoncontroller.RuntimeConfig) error {
 	r := &Reconciler{client: mgr.GetClient(), groveEnabled: runtimeConfig.Gate.Enabled(features.Grove)}
 

@@ -230,7 +230,7 @@ jobs:
       needs.changed-files.outputs.snapshot_sglang == 'true' ||
       needs.changed-files.outputs.snapshot_trtllm == 'true'
     name: Operator
-    runs-on: prod-default-v2
+    runs-on: dynamo-cpu-4gi-amd64
     # actions: read lets the compliance step download a prior run's baseline
     # operator compliance artifact to diff the OSRB CSV against. Missing -> the
     # diff soft-degrades, build stays green.
@@ -295,7 +295,7 @@ jobs:
     needs: changed-files
     if: needs.changed-files.outputs.power_agent == 'true'
     name: Power Agent
-    runs-on: prod-default-v2
+    runs-on: dynamo-cpu-4gi-amd64
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

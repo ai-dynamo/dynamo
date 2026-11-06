@@ -6,14 +6,12 @@
 package controller
 
 import (
-	"context"
 	"fmt"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	lpxcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/lpx"
 	powercontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/power"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
@@ -94,13 +92,11 @@ func SetupDynamoComponentDeployment(mgr ctrl.Manager, opts DynamoComponentDeploy
 }
 
 func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetupOptions) error {
-	// The DGD rollout and power-cap controllers both query worker Pods by DGD component.
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Pod{}, dynamo.ComponentPodIndex, dynamo.ComponentPodIndexValues); err != nil {
-		return fmt.Errorf("register DGD component Pod index: %w", err)
-	}
 	if err := lpxcontroller.Setup(mgr, opts.Config, opts.RuntimeConfig, opts.DockerSecretRetriever); err != nil {
 		return err
 	}
+	// The power-cap controller queries the podcontroller.ComponentIndex Pod index
+	// that the DGD controller registers below.
 	if err := powercontroller.Setup(mgr, opts.Config, opts.RuntimeConfig); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeployment power-cap controller: %w", err)
 	}
@@ -166,7 +162,8 @@ func SetupDynamoGraphDeploymentRequestV1beta2(mgr ctrl.Manager, opts SetupOption
 }
 
 // SetupDynamoGraphDeploymentRunV1beta2 registers the controller that executes immutable
-// v1beta2 Runs as AISimulate Jobs and observes their lifecycle.
+// v1beta2 Runs as AISimulate Jobs and observes their lifecycle, and the controller that releases
+// the trace claims of deleted Runs.
 func SetupDynamoGraphDeploymentRunV1beta2(mgr ctrl.Manager, opts DynamoGraphDeploymentRunSetupOptions) error {
 	if err := (&DynamoGraphDeploymentRunV1beta2Reconciler{
 		Client:                  mgr.GetClient(),
@@ -179,6 +176,13 @@ func SetupDynamoGraphDeploymentRunV1beta2(mgr ctrl.Manager, opts DynamoGraphDepl
 		OperatorImagePullPolicy: opts.OperatorImagePullPolicy,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeploymentRun v1beta2 controller: %w", err)
+	}
+	if err := (&DynamoGraphDeploymentRunTraceClaimReconciler{
+		Client:        mgr.GetClient(),
+		Config:        opts.Config,
+		RuntimeConfig: opts.RuntimeConfig,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create DynamoGraphDeploymentRun v1beta2 trace claim controller: %w", err)
 	}
 	return nil
 }
