@@ -47,6 +47,9 @@ pub type MultimodalCache = (
     MultimodalCacheKeyExtractor<PreprocessedRequest>,
 );
 
+type MultimodalCacheKeyAlternatives =
+    Arc<dyn Fn(&PreprocessedRequest) -> Vec<Vec<String>> + Send + Sync>;
+
 /// Builds a [`RoutingHost`]. Obtain one from [`RoutingHost::builder`].
 pub struct RoutingHostBuilder {
     client: Client,
@@ -57,6 +60,7 @@ pub struct RoutingHostBuilder {
     lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
     dispatch: Option<LlmDispatch>,
     multimodal_cache: Option<MultimodalCache>,
+    multimodal_cache_key_alternatives: Option<MultimodalCacheKeyAlternatives>,
 }
 
 impl RoutingHost {
@@ -72,6 +76,7 @@ impl RoutingHost {
             lora: None,
             dispatch: None,
             multimodal_cache: None,
+            multimodal_cache_key_alternatives: None,
         }
     }
 }
@@ -122,6 +127,16 @@ impl RoutingHostBuilder {
         self
     }
 
+    /// Match each media item against global or session-scoped keys while
+    /// counting it only once. The flat extractor remains the default.
+    pub(crate) fn multimodal_cache_key_alternatives<F>(mut self, extractor: F) -> Self
+    where
+        F: Fn(&PreprocessedRequest) -> Vec<Vec<String>> + Send + Sync + 'static,
+    {
+        self.multimodal_cache_key_alternatives = Some(Arc::new(extractor));
+        self
+    }
+
     /// Check the inputs against the routing mode, build the transport, and
     /// assemble the host.
     pub async fn build(self) -> anyhow::Result<RoutingHost> {
@@ -134,6 +149,7 @@ impl RoutingHostBuilder {
             lora,
             dispatch,
             multimodal_cache,
+            multimodal_cache_key_alternatives,
         } = self;
         let inputs = PolicyInputs::check(
             router_mode,
@@ -146,7 +162,7 @@ impl RoutingHostBuilder {
             .map_or((None, None), |(indexer, extractor)| {
                 (Some(indexer), Some(extractor))
             });
-        let inner = LlmPushRouter::from_client_with_options(
+        let mut inner = LlmPushRouter::from_client_with_options(
             client,
             router_mode,
             PushRouterOptions {
@@ -157,6 +173,9 @@ impl RoutingHostBuilder {
             },
         )
         .await?;
+        if let Some(extractor) = multimodal_cache_key_alternatives {
+            inner = inner.with_multimodal_cache_key_alternatives(move |request| extractor(request));
+        }
         assemble(inner, inputs, affinity)
     }
 }
