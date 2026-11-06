@@ -21,6 +21,7 @@ from tests.deploy.dgdr_utils import (
     run_lifecycle,
     unique_name,
 )
+from tests.deploy.vcluster_utils import VCLUSTER_CONNECTION_RETRY_LIMIT
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
@@ -311,8 +312,34 @@ async def test_wait_for_phase_limits_vcluster_connection_retries(
     with pytest.raises(aiohttp.ClientConnectorError, match="tunnel unavailable"):
         await manager.wait_for_phase("request", "Ready", timeout=30)
 
-    assert manager.get.await_count == 4
-    assert sleep.await_count == 3
+    assert manager.get.await_count == VCLUSTER_CONNECTION_RETRY_LIMIT + 1
+    assert sleep.await_count == VCLUSTER_CONNECTION_RETRY_LIMIT
+
+
+@pytest.mark.timeout(30)
+async def test_wait_for_phase_survives_tunnel_outage_longer_than_15s(
+    monkeypatch,
+) -> None:
+    # CI saw the vCluster tunnel refuse connections for about 16-26 s before it
+    # recovered. Five refusals with 5 s sleeps cover 25 s of that outage.
+    manager = initialized_manager()
+    connection_key = MagicMock(host="127.0.0.1", port=1234, ssl=False)
+    refusal = aiohttp.ClientConnectorError(
+        connection_key,
+        ConnectionRefusedError(111, "vCluster tunnel unavailable"),
+    )
+    manager.get = AsyncMock(
+        side_effect=[refusal] * 5 + [{"status": {"phase": "Ready"}}]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
+
+    result = await manager.wait_for_phase("request", "Ready", timeout=30)
+
+    assert result == {"status": {"phase": "Ready"}}
+    assert manager.get.await_count == 6
+    assert sleep.await_count == 5
+    assert all(call.args == (5,) for call in sleep.await_args_list)
 
 
 async def test_get_output_dgd_retries_vcluster_connection_refusal(
@@ -447,7 +474,7 @@ async def test_failed_test_cleanup_survives_diagnostic_transport_errors(
         "logs": manager.core.read_namespaced_pod_log,
     }
     reader = readers[diagnostic]
-    failures_left = 1 if recovers else 4
+    failures_left = 1 if recovers else VCLUSTER_CONNECTION_RETRY_LIMIT + 1
 
     async def read(*args, **kwargs):
         nonlocal failures_left
@@ -484,4 +511,6 @@ async def test_failed_test_cleanup_survives_diagnostic_transport_errors(
             call.kwargs["container"] == "second" for call in reader.await_args_list
         )
     if diagnostic in ("dgd", "job"):
-        assert reader.await_count == (2 if recovers else 4)
+        assert reader.await_count == (
+            2 if recovers else VCLUSTER_CONNECTION_RETRY_LIMIT + 1
+        )
