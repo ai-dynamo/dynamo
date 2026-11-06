@@ -384,6 +384,16 @@ _These flags set the default values applied to video and image generation reques
   Environment variable: `DYN_TRTLLM_DEFAULT_NUM_IMAGES_PER_PROMPT`
 </ParamField>
 
+<ParamField path="--image-png-compression-level" type="integer" default="6">
+  Lossless PNG compression level for generated images, from `0` to `9`.
+  `0` disables compression for faster CPU encoding and larger responses; `9` uses the
+  strongest compression. The default `6` preserves Pillow's existing encoding behavior.
+  All levels preserve pixels. It applies to PNG images returned as `url` or `b64_json`.
+
+  Environment variable: `DYN_TRTLLM_IMAGE_PNG_COMPRESSION_LEVEL`. An explicit CLI value takes
+  precedence over the environment variable. Invalid values fail startup.
+</ParamField>
+
 ## Related pages
 
 <CardGroup cols={2}>

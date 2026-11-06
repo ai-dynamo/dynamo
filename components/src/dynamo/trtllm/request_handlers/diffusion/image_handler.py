@@ -219,7 +219,11 @@ class ImageGenerationHandler(BaseGenerativeHandler):
                     f"Request {request_id}: encoding image {i + 1}/{emit_count} "
                     f"(shape={image_np.shape}) to PNG"
                 )
-                image_bytes = await asyncio.to_thread(encode_to_png_bytes, image_np)
+                image_bytes = await asyncio.to_thread(
+                    encode_to_png_bytes,
+                    image_np,
+                    compress_level=self.config.image_png_compression_level,
+                )
                 if response_format == "url":
                     storage_path = f"images/{request_id}_{i}.png"
                     image_url = await upload_to_fs(

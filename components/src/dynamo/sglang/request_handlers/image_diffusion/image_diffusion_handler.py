@@ -61,6 +61,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         self.fs = fs
         self.fs_url = config.dynamo_args.media_output_fs_url
         self.base_url = config.dynamo_args.media_output_http_url
+        self.png_compression_level = config.dynamo_args.image_png_compression_level
 
         logger.info(
             f"Image diffusion worker handler initialized with fs_url={self.fs_url}, url_base={self.base_url}"
@@ -267,7 +268,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             elif isinstance(img, Image.Image):
                 # Convert PIL Image to bytes
                 buf = io.BytesIO()
-                img.save(buf, format="PNG")
+                img.save(buf, format="PNG", compress_level=self.png_compression_level)
                 image_bytes_list.append(buf.getvalue())
             else:
                 try:
@@ -277,7 +278,9 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
                         # Convert numpy array to PIL Image then to bytes
                         pil_img = Image.fromarray(img)
                         buf = io.BytesIO()
-                        pil_img.save(buf, format="PNG")
+                        pil_img.save(
+                            buf, format="PNG", compress_level=self.png_compression_level
+                        )
                         image_bytes_list.append(buf.getvalue())
                     else:
                         raise ValueError(f"Unsupported image type: {type(img)}")

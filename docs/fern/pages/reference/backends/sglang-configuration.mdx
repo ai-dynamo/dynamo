@@ -82,6 +82,19 @@ The SGLang wrapper selects a worker role from these flags and the native `--disa
   Environment variable: `DYN_SGL_IMAGE_DIFFUSION_WORKER`
 </ParamField>
 
+<ParamField path="--image-png-compression-level" type="integer" default="6">
+  Lossless PNG compression level for images from `--image-diffusion-worker`, from `0` to `9`.
+  `0` disables compression for faster CPU encoding and larger responses; `9` uses the
+  strongest compression. The default `6` preserves Pillow's existing encoding behavior.
+  All levels preserve pixels.
+
+  It applies to PNG images returned as `url` or `b64_json`. Image bytes that the engine
+  already encoded are passed through unchanged.
+
+  Environment variable: `DYN_SGL_IMAGE_PNG_COMPRESSION_LEVEL`. An explicit CLI value takes
+  precedence over the environment variable. Invalid values fail startup.
+</ParamField>
+
 <ParamField path="--video-generation-worker" type="boolean" default="false">
   Run as a video generation worker for text-to-video and image-to-video (T2V/I2V) generation.
 
@@ -149,6 +162,7 @@ This flag is retained for backward compatibility and will be removed in a future
 ## Validation rules
 
 - `--disagg-config` and `--disagg-config-key` must both be set, or both unset.
+- `--image-png-compression-level` must be an integer from `0` to `9`.
 - `--dedicated-mm-encoder` requires `--enable-multimodal`.
 - `--dedicated-mm-encoder` is valid only with `--disaggregation-mode=pd`, `--disaggregation-mode=prefill`, or `--disaggregation-mode=decode`; do not combine it with `--disaggregation-mode=encode`.
 - `--frontend-decoding` cannot be combined with internal EPD workers selected by `--dedicated-mm-encoder`; in an EPD deployment, set it only on the frontend-facing `--disaggregation-mode=encode` worker.

@@ -3,6 +3,7 @@
 
 """Unit tests for ImageDiffusionWorkerHandler."""
 
+import argparse
 import base64
 import io
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ import pytest
 from PIL import Image
 
 from dynamo.llm.exceptions import InvalidArgument
+from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 from dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler import (
     ImageDiffusionWorkerHandler,
 )
@@ -40,6 +42,7 @@ def mock_config():
     config.dynamo_args = MagicMock()
     config.dynamo_args.media_output_fs_url = "file:///tmp/images"
     config.dynamo_args.media_output_http_url = "file:///tmp/images"
+    config.dynamo_args.image_png_compression_level = 6
     return config
 
 
@@ -677,6 +680,112 @@ class TestImageDiffusionWorkerHandler:
         call_args = handler.generator.generate.call_args
         sampling_params = call_args[1]["sampling_params_kwargs"]
         assert "image_path" not in sampling_params
+
+
+PNG_LEVEL_ENV = "DYN_SGL_IMAGE_PNG_COMPRESSION_LEVEL"
+
+
+def _parse_sglang_config(argv: list[str]) -> DynamoSGLangConfig:
+    parser = argparse.ArgumentParser()
+    DynamoSGLangArgGroup().add_arguments(parser)
+    config = DynamoSGLangConfig.from_cli_args(parser.parse_args(argv))
+    config.validate()
+    return config
+
+
+@pytest.mark.parametrize(
+    ("env_value", "argv", "expected"),
+    [
+        (None, [], 6),
+        ("0", [], 0),
+        ("9", [], 9),
+        (None, ["--image-png-compression-level", "0"], 0),
+        (None, ["--image-png-compression-level", "9"], 9),
+        ("9", ["--image-png-compression-level", "0"], 0),
+    ],
+)
+def test_image_png_compression_config(monkeypatch, env_value, argv, expected):
+    monkeypatch.delenv(PNG_LEVEL_ENV, raising=False)
+    if env_value is not None:
+        monkeypatch.setenv(PNG_LEVEL_ENV, env_value)
+
+    assert _parse_sglang_config(argv).image_png_compression_level == expected
+
+
+@pytest.mark.parametrize("source", ["cli", "env"])
+@pytest.mark.parametrize("value", ["-1", "10", "1.5"])
+def test_image_png_compression_config_rejects_invalid_level(monkeypatch, source, value):
+    monkeypatch.delenv(PNG_LEVEL_ENV, raising=False)
+    argv = []
+    if source == "cli":
+        argv = ["--image-png-compression-level", value]
+    else:
+        monkeypatch.setenv(PNG_LEVEL_ENV, value)
+
+    with pytest.raises((ValueError, SystemExit)):
+        _parse_sglang_config(argv)
+
+
+class TestPngCompressionLevel:
+    """The configured level reaches both PNG saves in _generate_images."""
+
+    @staticmethod
+    def _frames(kind):
+        import numpy as np
+
+        rng = np.random.default_rng(0)
+        # Smooth gradient plus noise, so the zlib level changes the size.
+        y, x = np.mgrid[0:256, 0:256]
+        array = np.stack([x, y, (x + y) // 2], -1)
+        array = (array // 4 + rng.integers(0, 4, array.shape)).astype(np.uint8)
+        return array, (Image.fromarray(array) if kind == "pil" else array)
+
+    @staticmethod
+    async def _encode(handler, frame):
+        handler.generator.generate = Mock(return_value=SimpleNamespace(frames=[frame]))
+        images = await handler._generate_images(
+            prompt="test",
+            width=256,
+            height=256,
+            num_inference_steps=10,
+            guidance_scale=7.5,
+            seed=42,
+        )
+        assert len(images) == 1
+        return images[0]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["pil", "numpy"])
+    async def test_level_changes_size_and_keeps_pixels(
+        self, mock_generator, mock_config, mock_fs, kind
+    ):
+        import numpy as np
+
+        array, frame = self._frames(kind)
+        sizes = {}
+        for level in (0, 9):
+            mock_config.dynamo_args.image_png_compression_level = level
+            handler = ImageDiffusionWorkerHandler(
+                generator=mock_generator,
+                config=mock_config,
+                publisher=None,
+                fs=mock_fs,
+            )
+            png = await self._encode(handler, frame)
+            decoded = np.asarray(Image.open(io.BytesIO(png)))
+            np.testing.assert_array_equal(decoded, array)
+            sizes[level] = len(png)
+
+        assert sizes[0] > sizes[9]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["pil", "numpy"])
+    async def test_default_level_matches_plain_pillow_png(self, handler, kind):
+        array, frame = self._frames(kind)
+        expected = io.BytesIO()
+        Image.fromarray(array).save(expected, format="PNG")
+
+        assert await self._encode(handler, frame) == expected.getvalue()
 
 
 class TestNParameter:

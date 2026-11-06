@@ -487,6 +487,18 @@ class DynamoTrtllmArgGroup(ArgGroup):
             arg_type=int,
             help="Default number of images per prompt for image generation.",
         )
+        add_argument(
+            diffusion_request_group,
+            flag_name="--image-png-compression-level",
+            env_var="DYN_TRTLLM_IMAGE_PNG_COMPRESSION_LEVEL",
+            default=6,
+            arg_type=int,
+            help=(
+                "Lossless PNG compression level (0-9) for generated images. "
+                "0 disables compression for faster encoding and larger responses; "
+                "6 preserves Pillow's default."
+            ),
+        )
 
 
 class DynamoTrtllmConfig(ConfigBase):
@@ -528,6 +540,7 @@ class DynamoTrtllmConfig(ConfigBase):
     default_width: int
     default_num_frames: int
     default_num_images_per_prompt: int
+    image_png_compression_level: int
     default_num_inference_steps: int
     default_guidance_scale: float
     torch_dtype: str
