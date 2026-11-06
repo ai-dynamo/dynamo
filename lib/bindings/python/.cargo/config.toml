@@ -8,7 +8,5 @@
 rustflags = ["--cfg", "tokio_unstable"]
 
 [env]
-# One aarch64 wheel must run on 4 KiB, 16 KiB and 64 KiB page kernels. jemalloc fixes its page
-# size at build time, and a page size smaller than the kernel's fails at startup.
-# tikv-jemalloc-sys checks this target-qualified name before JEMALLOC_SYS_WITH_LG_PAGE.
+# Build jemalloc for 64 KiB pages so one aarch64 wheel runs on 4, 16 and 64 KiB page kernels.
 AARCH64_UNKNOWN_LINUX_GNU_JEMALLOC_SYS_WITH_LG_PAGE = { value = "16", force = true }

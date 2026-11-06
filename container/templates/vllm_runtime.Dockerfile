@@ -255,9 +255,8 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 # libao*, libmad0, libid3tag0, libltdl7) we'd then be redistributing. SoX is
 # inherently GPL (no LGPL replacement), so the compliant fix is to not ship it.
 # (sglang_runtime.Dockerfile is the reference codec-compliance pattern.)
-# libjemalloc2 lets CPython and C allocations opt into jemalloc via LD_PRELOAD;
-# it is not preloaded by default. Rust allocations in dynamo._core already use
-# a built-in jemalloc.
+# libjemalloc2 lets CPython and C code opt into jemalloc via
+# LD_PRELOAD; it is not preloaded by default.
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
