@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::IgnoredAny};
+use serde::{Deserialize, Serialize, Serializer, de::IgnoredAny};
 use serde_json::{Map, Value};
 use utoipa::ToSchema;
 use validator::Validate;
@@ -124,36 +124,23 @@ enum MessagesField {
 }
 
 /// The request's fields as sent, before chat-style `input` moves to `messages`.
+/// A `null` field counts as absent, as in vLLM.
 #[derive(Deserialize)]
 struct RequestFields {
     model: String,
-    // An explicit `null` is an invalid `input`, not a missing one.
-    #[serde(default, deserialize_with = "present")]
     input: Option<InputField>,
-    #[serde(default)]
     messages: Option<MessagesField>,
-    #[serde(default)]
     encoding_format: Option<dynamo_protocols::types::EncodingFormat>,
-    #[serde(default)]
     user: Option<String>,
-    #[serde(default)]
     dimensions: Option<u32>,
-    #[serde(default)]
     add_special_tokens: Option<bool>,
-    #[serde(default)]
     truncate_prompt_tokens: Option<i64>,
-    #[serde(default)]
     nvext: Option<NvExt>,
-}
-
-/// Deserializes a field that is present, so `null` reaches `T` instead of
-/// becoming `None`; an absent field still takes its `default`.
-fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    T::deserialize(deserializer).map(Some)
+    // vLLM chat-request options the worker does not apply. They are read
+    // only so that a non-default value is rejected rather than ignored.
+    add_generation_prompt: Option<bool>,
+    continue_final_message: Option<bool>,
+    chat_template_kwargs: Option<Map<String, Value>>,
 }
 
 impl TryFrom<RequestFields> for NvCreateEmbeddingRequest {
@@ -161,6 +148,22 @@ impl TryFrom<RequestFields> for NvCreateEmbeddingRequest {
 
     fn try_from(fields: RequestFields) -> Result<Self, Self::Error> {
         use dynamo_protocols::types::EmbeddingInput;
+
+        // vLLM renders embedding conversations with these at their defaults.
+        // Anything else would embed a different prompt than `vllm serve` does.
+        if fields.add_generation_prompt == Some(true) {
+            return Err("`add_generation_prompt: true` is not supported for embeddings");
+        }
+        if fields.continue_final_message == Some(true) {
+            return Err("`continue_final_message: true` is not supported for embeddings");
+        }
+        if fields
+            .chat_template_kwargs
+            .as_ref()
+            .is_some_and(|kwargs| !kwargs.is_empty())
+        {
+            return Err("`chat_template_kwargs` is not supported for embeddings");
+        }
 
         let messages = match fields.messages {
             None => None,
@@ -244,24 +247,41 @@ struct ChatRequestRef<'a> {
 
 impl Serialize for NvCreateEmbeddingRequest {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let Some(messages) = &self.messages else {
+        // Destructured without `..`, so a new field fails to compile here
+        // until it is serialized (or deliberately skipped).
+        let Self {
+            inner,
+            add_special_tokens,
+            truncate_prompt_tokens,
+            messages,
+            nvext,
+        } = self;
+        let Some(messages) = messages else {
             return InputRequestRef {
-                inner: &self.inner,
-                add_special_tokens: self.add_special_tokens,
-                truncate_prompt_tokens: self.truncate_prompt_tokens,
-                nvext: self.nvext.as_ref(),
+                inner,
+                add_special_tokens: *add_special_tokens,
+                truncate_prompt_tokens: *truncate_prompt_tokens,
+                nvext: nvext.as_ref(),
             }
             .serialize(serializer);
         };
+        let dynamo_protocols::types::CreateEmbeddingRequest {
+            model,
+            // An empty placeholder on chat-style requests; see `messages`.
+            input: _,
+            encoding_format,
+            user,
+            dimensions,
+        } = inner;
         ChatRequestRef {
-            model: &self.inner.model,
+            model,
             messages,
-            encoding_format: self.inner.encoding_format.as_ref(),
-            user: self.inner.user.as_deref(),
-            dimensions: self.inner.dimensions,
-            add_special_tokens: self.add_special_tokens,
-            truncate_prompt_tokens: self.truncate_prompt_tokens,
-            nvext: self.nvext.as_ref(),
+            encoding_format: encoding_format.as_ref(),
+            user: user.as_deref(),
+            dimensions: *dimensions,
+            add_special_tokens: *add_special_tokens,
+            truncate_prompt_tokens: *truncate_prompt_tokens,
+            nvext: nvext.as_ref(),
         }
         .serialize(serializer)
     }
@@ -420,6 +440,43 @@ mod tests {
     }
 
     #[test]
+    fn null_input_with_messages_is_a_chat_request() {
+        // As in vLLM, `null` means the field was not sent.
+        let request = parse(json!({
+            "model": "m",
+            "input": null,
+            "messages": image_conversation()
+        }))
+        .unwrap();
+        assert!(request.messages.is_some());
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("input")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn default_chat_options_are_accepted_and_not_forwarded() {
+        // vLLM's defaults for embedding conversations; sending them changes nothing.
+        for options in [
+            json!({"add_generation_prompt": false, "continue_final_message": false, "chat_template_kwargs": {}}),
+            json!({"add_generation_prompt": null, "continue_final_message": null, "chat_template_kwargs": null}),
+        ] {
+            let mut body = json!({"model": "m", "messages": image_conversation()});
+            body.as_object_mut()
+                .unwrap()
+                .extend(options.as_object().unwrap().clone());
+            let request = parse(body).unwrap();
+            assert_eq!(
+                serde_json::to_value(&request).unwrap(),
+                json!({"model": "m", "messages": image_conversation()})
+            );
+        }
+    }
+
+    #[test]
     fn invalid_chat_input_is_rejected() {
         let cases = [
             (
@@ -446,12 +503,23 @@ mod tests {
                 "`input` must be",
             ),
             (json!({"model": "m"}), "missing field `input`"),
-            (json!({"model": "m", "input": null}), "`input` must be"),
             (
-                json!({"model": "m", "input": null, "messages": image_conversation()}),
-                "not both",
+                json!({"model": "m", "input": null}),
+                "missing field `input`",
             ),
             (json!({"input": "hello"}), "missing field `model`"),
+            (
+                json!({"model": "m", "messages": image_conversation(), "add_generation_prompt": true}),
+                "`add_generation_prompt: true` is not supported",
+            ),
+            (
+                json!({"model": "m", "messages": image_conversation(), "continue_final_message": true}),
+                "`continue_final_message: true` is not supported",
+            ),
+            (
+                json!({"model": "m", "messages": image_conversation(), "chat_template_kwargs": {"enable_thinking": false}}),
+                "`chat_template_kwargs` is not supported",
+            ),
         ];
         for (body, expected) in cases {
             let err = parse(body.clone()).unwrap_err().to_string();
