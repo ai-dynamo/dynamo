@@ -885,8 +885,12 @@ fn canonical_router_config(
         num_gpu_blocks_is_explicit: true,
         ..Default::default()
     };
-    let mut router = MockerConfig::from_value(json!({"engine": launch}))
+    let mut router = MockerConfig::from_value(serde_json::to_value(&launch)?)
         .context("canonical engine rank must be a valid Mocker launch config")?;
+    ensure!(
+        router.engine == launch.clone().normalized()?,
+        "router must preserve the complete canonical engine launch identity"
+    );
     ensure!(
         router.tensor_parallel_size == tensor_parallel_size,
         "router must preserve canonical TP identity"
