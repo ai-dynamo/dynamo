@@ -19,7 +19,7 @@ The policy builds on published work: per-step admission of extra decodes against
 Agentic workloads, such as coding, research and browsing agents, keep many long-context sessions in the decode batch at once, and agent frameworks add subagents on top. Each decode step reads every running request's KV cache, so step time grows with the number of running requests and their total context. An interactive request that joins this batch gets its first token on time but then waits for every step:
 
 - In a 24-agent Claude Code workload on MiniMax-M2.7, 81–85% of interactive requests that missed a 3× unloaded inter-token-latency deadline had an on-time first token. Their inter-token latency was 30–35 ms against an 18.5 ms budget.
-- Request priority does not help. Router and engine priority order requests that are waiting; they do not change which running requests decode in a step. See [Priority Scheduling](priority-scheduling.md).
+- Request priority does not help. Router and engine priority order requests that are waiting; they do not change which running requests decode in a step. See [Prioritize Requests](priority-scheduling.mdx).
 
 ## How It Works
 
@@ -201,7 +201,7 @@ Two choices matter for the agents' cost. A fixed per-token target (`DYN_DECODE_R
 
 ## Related Pages
 
-- [Priority Scheduling](priority-scheduling.md)
-- [Agent Hints](agent-hints.md)
-- [Session IDs](session-ids.mdx)
-- [ThunderAgent Program Scheduler](thunderagent-program-scheduler.md)
+- [Prioritize Requests](priority-scheduling.mdx)
+- [Agent Hints](../../developer-guide/additional-resources/nvidia-request-extensions-nvext.md#agent-hints)
+- [Identify Agent Sessions](session-ids.mdx)
+- [Schedule Agents with ThunderAgent](thunderagent-program-scheduler.md)
