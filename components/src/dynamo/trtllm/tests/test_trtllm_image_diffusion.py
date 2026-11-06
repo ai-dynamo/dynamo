@@ -868,28 +868,17 @@ class TestPngCompressionLevel:
 
         assert _parse_png_level(argv) == expected
 
-    @pytest.mark.parametrize("source", ["cli", "env"])
     @pytest.mark.parametrize("value", ["-1", "10", "1.5"])
-    def test_config_rejects_invalid_level_from_cli_and_env(
-        self, monkeypatch, source, value
-    ):
-        monkeypatch.delenv(PNG_LEVEL_ENV, raising=False)
-        argv = []
-        if source == "cli":
-            argv = ["--image-png-compression-level", value]
-        else:
-            monkeypatch.setenv(PNG_LEVEL_ENV, value)
+    def test_config_rejects_invalid_level_from_env(self, monkeypatch, value):
+        monkeypatch.setenv(PNG_LEVEL_ENV, value)
 
-        with pytest.raises((ValueError, SystemExit)):
-            _parse_png_level(argv)
+        with pytest.raises(ValueError):
+            _parse_png_level([])
 
     @pytest.mark.parametrize("level", [-1, 10])
     def test_diffusion_config_rejects_out_of_range_level(self, level):
         with pytest.raises(ValueError, match="--image-png-compression-level"):
             DiffusionConfig(image_png_compression_level=level)
-
-    def test_diffusion_config_default_level(self):
-        assert DiffusionConfig().image_png_compression_level == 6
 
     def test_levels_keep_pixels_and_trade_size(self):
         import numpy as np

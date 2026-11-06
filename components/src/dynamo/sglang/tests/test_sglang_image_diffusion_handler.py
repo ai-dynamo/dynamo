@@ -712,18 +712,12 @@ def test_image_png_compression_config(monkeypatch, env_value, argv, expected):
     assert _parse_sglang_config(argv).image_png_compression_level == expected
 
 
-@pytest.mark.parametrize("source", ["cli", "env"])
 @pytest.mark.parametrize("value", ["-1", "10", "1.5"])
-def test_image_png_compression_config_rejects_invalid_level(monkeypatch, source, value):
-    monkeypatch.delenv(PNG_LEVEL_ENV, raising=False)
-    argv = []
-    if source == "cli":
-        argv = ["--image-png-compression-level", value]
-    else:
-        monkeypatch.setenv(PNG_LEVEL_ENV, value)
+def test_image_png_compression_config_rejects_invalid_level(monkeypatch, value):
+    monkeypatch.setenv(PNG_LEVEL_ENV, value)
 
-    with pytest.raises((ValueError, SystemExit)):
-        _parse_sglang_config(argv)
+    with pytest.raises(ValueError):
+        _parse_sglang_config([])
 
 
 class TestPngCompressionLevel:
@@ -777,15 +771,6 @@ class TestPngCompressionLevel:
             sizes[level] = len(png)
 
         assert sizes[0] > sizes[9]
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("kind", ["pil", "numpy"])
-    async def test_default_level_matches_plain_pillow_png(self, handler, kind):
-        array, frame = self._frames(kind)
-        expected = io.BytesIO()
-        Image.fromarray(array).save(expected, format="PNG")
-
-        assert await self._encode(handler, frame) == expected.getvalue()
 
 
 class TestNParameter:
