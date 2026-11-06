@@ -117,8 +117,10 @@ resident memory rises to a high-water mark under load. This retention is allocat
 than a leak.
 
 The frontend's Rust allocations use a built-in jemalloc with a background thread that returns
-freed pages after about 10 seconds, so resident memory should fall back toward the live heap once
-the load stops. To change the decay or arena settings, set `_RJEM_MALLOC_CONF` on the frontend
+unused pages to the operating system after about 10 seconds, so resident memory drops once the
+load stops. It does not drop all the way to the live heap: pages that still hold live allocations
+stay resident, and CPython and C libraries use the system allocator, which keeps its own
+high-water mark. To change the decay or arena settings, set `_RJEM_MALLOC_CONF` on the frontend
 container; see
 [Host memory allocator](../../reference/components/frontend-configuration.mdx#host-memory-allocator)
 for the defaults.
