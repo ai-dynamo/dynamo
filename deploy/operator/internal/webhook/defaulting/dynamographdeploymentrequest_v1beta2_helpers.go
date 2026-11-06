@@ -246,6 +246,8 @@ func (o DGDRV1beta2Options) hardwareDefaultsFromDiscoveryV1beta2(
 				"the cluster has several GPU types (%s); set spec.hardware.gpu.sku",
 				strings.Join(append([]string{found.Model}, found.OtherModels...), ", "))))
 		}
+
+		// Successful discovery guarantees a non-nil GPUInfo; KnownSKU relies on that contract.
 		sku = string(gpu.KnownSKU(found))
 		if sku == "" || !aisimulate.IsKnownHardwareSKU(sku) {
 			detail := "the cluster's GPUs map to no AISimulate SKU; set spec.hardware.gpu.sku"
