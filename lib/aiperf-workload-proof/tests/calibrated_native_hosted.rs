@@ -268,6 +268,11 @@ fn canonical_role(model: &str, systems: &Path, role: ForwardPassWorkerType) -> R
         // prefill is not part of this preparatory control.
         enable_chunked_prefill: false,
         async_scheduling: Some(false),
+        worker_type: match role {
+            ForwardPassWorkerType::Prefill => aisimulate_core::engine::WorkerType::Prefill,
+            ForwardPassWorkerType::Decode => aisimulate_core::engine::WorkerType::Decode,
+            ForwardPassWorkerType::Aggregated => aisimulate_core::engine::WorkerType::Aggregated,
+        },
         ..Default::default()
     };
     let router = canonical_router_config(&rank, &timing_config, timing.clone())?;
