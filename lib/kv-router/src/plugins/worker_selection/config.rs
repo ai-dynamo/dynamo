@@ -111,19 +111,36 @@ impl WorkerSelectionInstance {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawWorkerSelectionConfig {
-    aggregated: Option<RawRoleSelection>,
-    prefill: Option<RawRoleSelection>,
-    decode: Option<RawRoleSelection>,
-    encode: Option<RawRoleSelection>,
+    aggregated: Option<serde_yaml::Value>,
+    prefill: Option<serde_yaml::Value>,
+    decode: Option<serde_yaml::Value>,
+    encode: Option<serde_yaml::Value>,
     #[serde(default)]
     instances: Vec<RawWorkerSelectionInstance>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
 enum RawRoleSelection {
     Named(String),
     Inline(RawInlineSelection),
+}
+
+impl RawRoleSelection {
+    // Parsed per role rather than with `#[serde(untagged)]`, which discards the inner error
+    // (for example an unknown field) and reports only that no variant matched.
+    fn from_value(role: &str, value: serde_yaml::Value) -> Result<Self, RouterPolicyConfigError> {
+        let location = format!("worker_selection.{role}");
+        match value {
+            serde_yaml::Value::String(name) => Ok(Self::Named(name)),
+            serde_yaml::Value::Mapping(_) => serde_yaml::from_value(value)
+                .map(Self::Inline)
+                .map_err(|source| {
+                    RouterPolicyConfigError::Validation(format!("{location}: {source}"))
+                }),
+            _ => Err(RouterPolicyConfigError::Validation(format!(
+                "{location} must be a policy type name or a {{type, parameters}} mapping"
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,12 +194,15 @@ impl RawWorkerSelectionConfig {
         }
 
         let resolve_role = |role: &str,
-                            raw: Option<RawRoleSelection>|
+                            raw: Option<serde_yaml::Value>|
          -> Result<
             Option<WorkerSelectionPolicySelection>,
             RouterPolicyConfigError,
         > {
             let location = format!("worker_selection.{role}");
+            let raw = raw
+                .map(|value| RawRoleSelection::from_value(role, value))
+                .transpose()?;
             Ok(match raw {
                 None => None,
                 Some(RawRoleSelection::Named(name)) => {

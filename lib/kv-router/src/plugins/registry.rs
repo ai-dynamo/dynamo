@@ -741,6 +741,32 @@ worker_selection:
     }
 
     #[test]
+    fn inline_spec_errors_name_the_offending_key() {
+        let typo = crate::scheduling::RouterPolicyConfig::from_yaml(
+            r#"
+worker_selection:
+  aggregated:
+    type: alpha
+    paramters:
+      x: 1
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(typo.contains("worker_selection.aggregated"), "{typo}");
+        assert!(typo.contains("paramters"), "{typo}");
+
+        let scalar =
+            crate::scheduling::RouterPolicyConfig::from_yaml("worker_selection:\n  decode: 5\n")
+                .unwrap_err()
+                .to_string();
+        assert!(
+            scalar.contains("worker_selection.decode must be a policy type name"),
+            "{scalar}"
+        );
+    }
+
+    #[test]
     fn rejects_invalid_and_unknown_names() {
         let mut registry = RouterPluginRegistry::default();
         let provider: WorkerSelectionPolicyProvider = Arc::new(provider);
