@@ -3272,7 +3272,9 @@ def start_owned_loopback_kube_api(
     retained and before proxy construction or ``API.start``, so a later bind
     or start failure still closes the owned manager.
     """
+    # Use loopback TCP to avoid AF_UNIX limits with long pytest temp paths.
     manager = LoopbackKubeAPIManager(
+        address=("127.0.0.1", 0),
         ctx=_SPAWN_CTX,
         shutdown_timeout=KUBE_API_MANAGER_SHUTDOWN_TIMEOUT_S,
     )
