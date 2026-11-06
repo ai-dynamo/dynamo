@@ -3,12 +3,14 @@
 
 //! Router plugins Dynamo ships.
 //!
-//! Routing hosts always link the default through `default_registry`. The optional custom
-//! catalog adds the named default, `kvcr`, two-tier, and ThunderAgent providers through `register`. The default
-//! itself uses the same public candidate inputs and scorer/picker dispatch as external policies.
+//! Routing hosts always link the default through `default_registry`, which also installs the
+//! `kv_fetch` hint policy as the default hint policy. The optional custom catalog adds the named
+//! default, `kvcr`, two-tier, and ThunderAgent providers through `register`. The default itself
+//! uses the same public candidate inputs and scorer/picker dispatch as external policies.
 //! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
 
 mod default;
+pub mod kv_fetch;
 pub mod router_modes;
 mod sticky_min_load;
 mod thunderagent;
@@ -17,6 +19,7 @@ pub use default::{
     DefaultWorkerSelector, DefaultWorkerSelectorControl, KVCR_POLICY_TYPE, default_factory,
     default_policy, kvcr_policy, startup_policy_parameters,
 };
+pub use kv_fetch::KvSourceLocationsPayload;
 
 /// Registry every host links: the required default plus the routing modes
 /// ([`router_modes`]), without an optional policy catalog.
@@ -24,15 +27,26 @@ pub fn default_registry() -> RouterPluginRegistry {
     with_defaults(RouterPluginRegistry::default())
 }
 
-/// `registry` plus what [`default_registry`] holds: the required default and each routing mode
-/// it doesn't already provide. A host applies this to the catalog it installs, so
-/// `--router-mode` resolves however that catalog was built.
+/// `registry` plus what [`default_registry`] holds: the required default, each routing mode it
+/// doesn't already provide, the `kv_fetch` hint-policy type, and `kv_fetch` as the default hint
+/// policy of every role that `hint_policies` doesn't list. A host applies this to the catalog it
+/// installs, so `--router-mode` and `kv_fetch` resolve however that catalog was built.
 pub fn with_defaults(registry: RouterPluginRegistry) -> RouterPluginRegistry {
     let mut registry = registry.with_default_factory(default_factory());
     router_modes::register_missing(&mut registry);
+    match kv_fetch::register(&mut registry) {
+        Ok(()) | Err(HintPolicyRegistryError::Duplicate { .. }) => {}
+        Err(error) => unreachable!("kv_fetch has a valid type name: {error}"),
+    }
     registry
+        .with_default_hint_policies([(
+            kv_fetch::POLICY_TYPE.to_string(),
+            kv_fetch::default_constructor(),
+        )])
+        .expect("one default hint policy has a unique name")
 }
 
+use dynamo_kv_router::plugins::hint_policy::HintPolicyRegistryError;
 use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError};
 
 /// Register the named providers Dynamo ships, without changing the host's default factory.
@@ -156,6 +170,89 @@ worker_selection:
             WorkerType::Prefill,
             RoutingPartitionRef::new("model", "default"),
         );
+    }
+
+    /// `kv_fetch` resolves by type name in every host registry, validates its parameters, and is
+    /// the default hint policy of every role the config doesn't list.
+    #[test]
+    fn resolves_kv_fetch_by_type_name_and_as_the_default() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        let config = |yaml: &str| {
+            std::fs::write(policy_file.path(), yaml).unwrap();
+            KvRouterConfig {
+                router_policy_config: Some(policy_file.path().display().to_string()),
+                ..Default::default()
+            }
+        };
+        let registry = default_registry();
+        let resolved = registry
+            .resolve_hint_policies(&config(
+                "hint_policies:\n  prefill:\n    - type: kv_fetch\n      parameters: {min_additional_blocks: 2}\n  decode: []\n",
+            ))
+            .unwrap();
+        assert_eq!(resolved.names(WorkerType::Prefill), [kv_fetch::POLICY_TYPE]);
+        assert!(!resolved.uses_defaults(WorkerType::Prefill));
+        assert!(resolved.names(WorkerType::Decode).is_empty());
+        assert_eq!(
+            resolved.names(WorkerType::Aggregated),
+            [kv_fetch::POLICY_TYPE]
+        );
+        assert!(resolved.uses_defaults(WorkerType::Aggregated));
+
+        for parameters in ["{min_additional_blocks: 0}", "{min_blocks: 2}"] {
+            let yaml = format!(
+                "hint_policies:\n  prefill:\n    - type: kv_fetch\n      parameters: {parameters}\n"
+            );
+            assert!(
+                registry.resolve_hint_policies(&config(&yaml)).is_err(),
+                "{parameters}"
+            );
+        }
+    }
+
+    /// `kvcr` commits copies, and the default `kv_fetch` sends them, so a role that lists no hint
+    /// policies resolves. Listing the role without a sender is rejected when the router is built.
+    #[test]
+    fn kvcr_pairs_with_kv_fetch() {
+        use dynamo_kv_router::plugins::{PluginConfigError, resolve_role};
+
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        let resolve = |hint_policies: &str| {
+            std::fs::write(
+                policy_file.path(),
+                format!(
+                    "worker_selection:\n  prefill: kvcr\n  instances:\n    - name: kvcr\n      type: kvcr\n      parameters: {{shared_cache_multiplier: 0.5}}\n{hint_policies}"
+                ),
+            )
+            .unwrap();
+            let config = KvRouterConfig {
+                router_policy_config: Some(policy_file.path().display().to_string()),
+                ..Default::default()
+            };
+            let mut registry = default_registry();
+            register(&mut registry).unwrap();
+            let selection = registry
+                .resolve(&config)
+                .unwrap()
+                .expect("a configured instance resolves to a factory");
+            let partition = RoutingPartitionRef::new("model", "default");
+            let policy = selection(&config, WorkerType::Prefill, partition);
+            let hints = registry.resolve_hint_policies(&config).unwrap();
+            resolve_role(
+                WorkerType::Prefill,
+                &policy,
+                hints.instances(&config, WorkerType::Prefill, partition),
+                &config,
+            )
+        };
+
+        let defaulted = resolve("").unwrap();
+        assert!(defaulted.commit_kv_copy());
+        resolve("hint_policies:\n  prefill:\n    - type: kv_fetch\n").unwrap();
+        assert!(matches!(
+            resolve("hint_policies:\n  prefill: []\n"),
+            Err(PluginConfigError::UnsentCopies { .. })
+        ));
     }
 
     /// An unknown parameter key is a mistake, most often a misremembered threshold name. It must

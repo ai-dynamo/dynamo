@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Typed KV-cache hints attached to selected backend requests.
+//! The KV hint protocol: the envelope a booked request carries to its worker, its version and
+//! its limits. Each action's type, version and payload belong to the hint policy that sends it.
 
 mod advertise;
 mod sources;
@@ -9,8 +10,6 @@ mod sources;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-
-use crate::protocols::ExternalSequenceBlockHash;
 
 #[cfg_attr(not(feature = "standalone-selection"), allow(unused_imports))]
 pub(crate) use advertise::hint_capable_partition;
@@ -31,20 +30,6 @@ pub use sources::{
 const KV_HINT_PROTOCOL_VERSION: &str = "0.1";
 /// Upper bound on the actions one hint carries.
 pub const MAX_KV_HINT_ACTIONS: usize = 32;
-const KV_FETCH_ACTION_TYPE: &str = "kv.fetch";
-const KV_FETCH_ACTION_VERSION: &str = "1.0";
-
-/// Typed payload for the `kv.fetch@1.0` point-to-point action.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct KvSourceLocationsPayload {
-    pub source_control_endpoint: String,
-    /// Root-aligned request hashes through the fetchable end. `block_hashes[i]`
-    /// corresponds to request block `i`; the target fetches its missing suffix.
-    /// With fetch continuation, the source need not hold the target's local prefix.
-    /// If that prefix has been evicted, the receiver must use actual fetch
-    /// results and recompute from any remaining gap; the hint is not a pin.
-    pub block_hashes: Vec<ExternalSequenceBlockHash>,
-}
 
 /// One versioned action in a [`KvHint`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,25 +64,6 @@ impl KvHintAction {
         payload: BTreeMap<String, serde_json::Value>,
     ) -> Self {
         Self::new(String::new(), action_type, action_version, payload)
-    }
-
-    pub fn fetch(action_id: impl Into<String>, payload: KvSourceLocationsPayload) -> Self {
-        let KvSourceLocationsPayload {
-            source_control_endpoint,
-            block_hashes,
-        } = payload;
-        Self::new(
-            action_id,
-            KV_FETCH_ACTION_TYPE,
-            KV_FETCH_ACTION_VERSION,
-            BTreeMap::from([
-                (
-                    "source_control_endpoint".to_string(),
-                    serde_json::json!(source_control_endpoint),
-                ),
-                ("block_hashes".to_string(), serde_json::json!(block_hashes)),
-            ]),
-        )
     }
 }
 
@@ -166,40 +132,6 @@ pub struct KvHintActionLimitError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn serializes_versioned_fetch_action() {
-        let hint = KvHint::new(
-            "msg-123",
-            vec![KvHintAction::fetch(
-                "a1",
-                KvSourceLocationsPayload {
-                    source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
-                    block_hashes: vec![
-                        ExternalSequenceBlockHash(11),
-                        ExternalSequenceBlockHash(22),
-                    ],
-                },
-            )],
-        );
-
-        assert_eq!(
-            serde_json::to_value(hint).unwrap(),
-            serde_json::json!({
-                "protocol_version": "0.1",
-                "message_id": "msg-123",
-                "actions": [{
-                    "action_id": "a1",
-                    "action_type": "kv.fetch",
-                    "action_version": "1.0",
-                    "payload": {
-                        "source_control_endpoint": "tcp://127.0.0.1:23280",
-                        "block_hashes": [11, 22],
-                    },
-                }],
-            })
-        );
-    }
 
     #[test]
     fn appended_actions_are_numbered_and_bounded() {

@@ -21,7 +21,7 @@ use crate::identity::RoutingPartitionId;
 use crate::indexer::{
     LowerTierQueryOptions, RoutingDecisionHashes, SharedKvCache, TieredMatchDetails,
 };
-use crate::kv_hints::{KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidates};
+use crate::kv_hints::{KvHint, KvTransferCandidates};
 use crate::plugins::RouterResponsibilities;
 use crate::plugins::hint_policy::HintPolicyFactory;
 use crate::protocols::{

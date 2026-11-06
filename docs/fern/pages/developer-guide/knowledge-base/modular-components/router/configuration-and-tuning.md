@@ -267,25 +267,33 @@ To write your own policy instead of using a built-in one, see
 
 ### Hint Policies
 
-Hint policies are experimental. They add engine-directed KV actions, such as a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), to the worker a booking selected. They never change which worker is selected. Hint policies are plugin types that a linked plugin crate registers.
+Hint policies are experimental. They add engine-directed KV actions, such as a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), to the worker a booking selected. They never change which worker is selected. Dynamo ships one hint-policy type, and linked plugin crates can register more:
+
+| Hint-policy type | Behavior |
+|---|---|
+| `kv_fetch` | Sends the booked worker a `kv.fetch` hint. When the worker-selection policy committed the worker to a copy, as `kvcr` does, it sends that copy, and the booking fails if the source can no longer be reached. Otherwise it fetches best effort from the worker's eligible source when the fetch adds at least `min_additional_blocks` (default `1`). This is the default hint policy. |
 
 The `hint_policies` section of the same YAML file lists, for each worker role, the hint policies that role runs, in order. Each entry has a `type` and optional `parameters`. Add a `name` only when one role lists the same type twice:
 
 ```yaml
+worker_selection:
+  prefill: kvcr
+  instances:
+    - name: kvcr
+      type: kvcr
+      parameters:
+        shared_cache_multiplier: 0.5
 hint_policies:
+  prefill:
+    - type: kv_fetch
   decode:
-    - type: harness_prefetch
-      name: short
+    - type: kv_fetch
       parameters:
-        max_blocks: 64
-    - type: harness_prefetch
-      name: long
-      parameters:
-        max_blocks: 256
-  prefill: []
+        min_additional_blocks: 4
+  aggregated: []
 ```
 
-- **A role that `hint_policies` doesn't list runs the default hint policies,** if the router image supplies any. Listing the role, even as an empty list, replaces them. Default hint policies are passive: they start no resources and don't change how the role is routed.
+- **A role that `hint_policies` doesn't list runs the default hint policies,** which are `kv_fetch` today, so best-effort fetches go out without configuration. Listing the role, even as an empty list, replaces them; the `aggregated: []` above sends no hints. Default hint policies are passive: they start no resources and don't change how the role is routed.
 - **Configured hint policies run only on the KV path,** because the router composes hints when it books a worker. Startup fails when a role with configured hint policies runs under a non-KV `--router-mode`. To use a routing mode's policy with hint policies, run `--router-mode kv` and name the routing type, such as `round-robin`, under `worker_selection` for that role.
 - **The router composes one hint per booking** and numbers its actions `a1`, `a2`, and so on. It sends the hint only to workers that advertise `router_hint`. A policy that fails drops only its own actions. A hint carries at most 32 actions.
 - **Exactly one hint policy per role sends the KV copies a worker-selection policy, such as `kvcr`, commits to.** Startup fails when a role's selection commits copies and none of its hint policies sends them, or when two do. If that hint policy sends nothing for a committed copy, the booking fails and is released. If the copy's source is gone by booking time, or the booked worker no longer advertises `router_hint`, the router logs a warning and books the worker without the copy. Copy offers and copy sources need a local, event-driven KV index; startup fails without one.

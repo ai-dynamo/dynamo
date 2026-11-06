@@ -23,7 +23,8 @@ pub struct RouterResponsibilities {
     /// keep the request's block chain, for previews as well as bookings, and commit the selected
     /// worker to its offer.
     pub(crate) commit_kv_copy: bool,
-    /// Compute the booked worker's copy source at booking.
+    /// Some hint policy, configured or default, reads [`WorkerInputs::KV_COPY`]: compute the
+    /// booked worker's copy source at booking.
     pub(crate) compute_booked_copy_source: bool,
     /// The role's hint policies in run order: the one that sends committed copies first, then
     /// configured order.
@@ -86,7 +87,7 @@ pub enum PluginConfigError {
     )]
     CopySourcesUnavailable { role: &'static str, policy: String },
     #[error(
-        "the worker-selection policy for {role} commits KV copies, but no hint policy for {role} sends them; add a hint policy that declares Commitments::KV_COPY"
+        "the worker-selection policy for {role} commits KV copies, but no hint policy for {role} sends them; add a hint policy that sends them, such as kv_fetch, or stop listing hint_policies for {role} to run the default"
     )]
     UnsentCopies { role: &'static str },
     #[error(
@@ -151,12 +152,11 @@ pub fn resolve_role(
         return Err(PluginConfigError::UnsentCopies { role: role_label });
     }
     consumers.append(&mut others);
+    let compute_booked_copy_source = consumers.iter().any(|slot| slot.reads_copy_source);
     Ok(RouterResponsibilities {
         prepare_inputs,
         commit_kv_copy,
-        // The router sends its own fetch from the booked worker's copy source for every booking,
-        // so every role computes it; hint policies that read KV_COPY read the same source.
-        compute_booked_copy_source: true,
+        compute_booked_copy_source,
         run_hint_policies: consumers,
     })
 }

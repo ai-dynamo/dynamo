@@ -4,7 +4,7 @@
 //! The booking-time call into the hint stage, shared by selections and replayed reservations.
 
 use super::*;
-use crate::kv_hints::{KvCopyLocations, KvCopySource, kv_copy_locations};
+use crate::kv_hints::{KvCopySource, kv_copy_locations};
 use crate::plugins::hint_policy::runtime::{BookedCopy, HintInputs, compose_kv_hint};
 
 /// One booking's facts the hint stage reads.
@@ -21,9 +21,8 @@ pub(super) struct BookingHint<'a> {
     pub(super) kv_transfer_candidates: Option<&'a KvTransferCandidates>,
 }
 
-/// Compose a booking's KV hint before the booking is handed off: the router's own fetch from the
-/// booked worker's copy source when the selection committed none, then the partition's hint
-/// policies.
+/// Compose a booking's KV hint from the partition's hint policies before the booking is handed
+/// off.
 ///
 /// Fails, so the caller releases the booking, when the hint policy that sends committed copies
 /// returns nothing for one. A committed copy the booked worker can no longer take, because its
@@ -46,7 +45,7 @@ pub(super) fn booking_hint(
         return Ok(None);
     }
     let policies = &entry.responsibilities.run_hint_policies;
-    if policies.is_empty() && booking.kv_copy_source.is_none() {
+    if policies.is_empty() {
         return Ok(None);
     }
     let workers = entry.workers_tx.borrow();
@@ -85,11 +84,6 @@ pub(super) fn booking_hint(
     } else {
         (None, booked_copy)
     };
-    // The router's own fetch, from the booked worker's uncommitted copy source.
-    let router_fetch = kv_copy_source
-        .as_ref()
-        .and_then(BookedCopy::locations)
-        .map(router_fetch_action);
     let inputs = HintInputs {
         request_id: booking.request_id,
         worker: booking.worker,
@@ -100,8 +94,7 @@ pub(super) fn booking_hint(
         committed_kv_copy,
         kv_copy_source,
     };
-    compose_kv_hint(policies, &inputs, router_fetch)
-        .map_err(|error| SelectionError::Internal(error.to_string()))
+    compose_kv_hint(policies, &inputs).map_err(|error| SelectionError::Internal(error.to_string()))
 }
 
 /// Log a committed copy that a booking proceeds without.
@@ -113,16 +106,4 @@ fn warn_dropped_copy(request_id: &str, worker: WorkerWithDpRank, reason: &str) {
         reason,
         "Booking without its committed KV copy"
     );
-}
-
-/// The router's `kv.fetch` action: every request block from 0 through the source's prefix. The
-/// hint stage numbers it.
-fn router_fetch_action(locations: KvCopyLocations<'_>) -> KvHintAction {
-    KvHintAction::fetch(
-        String::new(),
-        KvSourceLocationsPayload {
-            source_control_endpoint: locations.source_address().to_string(),
-            block_hashes: locations.chain()[..locations.source_prefix_blocks()].to_vec(),
-        },
-    )
 }
