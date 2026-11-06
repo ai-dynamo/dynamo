@@ -148,6 +148,10 @@ pub struct DeltaAggregator {
     /// Unique identifier for the chat completion.
     response_events: Vec<ResponseOutputEvent>,
     has_message_phases: bool,
+    /// Scores from content-less chunks, classified by the next content chunk.
+    unclassified_scores: usize,
+    /// Whether the last content chunk was reasoning or a tool call.
+    last_scores_hidden: bool,
     recorded_calls: std::collections::HashSet<String>,
     id: String,
     /// Model name used for the chat completion.
@@ -477,6 +481,8 @@ impl DeltaAggregator {
         Self {
             response_events: Vec::new(),
             has_message_phases: false,
+            unclassified_scores: 0,
+            last_scores_hidden: false,
             recorded_calls: std::collections::HashSet::new(),
             id: "".to_string(),
             model: "".to_string(),
@@ -571,7 +577,9 @@ impl DeltaAggregator {
                             }
                         }
                         let has_text = matches!(&choice.delta.content, Some(ChatCompletionMessageContent::Text(text)) if !text.is_empty());
-                        if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
+                        if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content
+                            && !text.is_empty()
+                        {
                             if let Some(ResponseOutputEvent::Text(previous)) = last_content_event(&mut aggregator.response_events) {
                                 previous.push_str(text);
                             } else {
@@ -585,14 +593,31 @@ impl DeltaAggregator {
                         }
                         // Record only the count: the entries themselves are appended to
                         // the choice's aggregated logprobs below, in the same order.
-                        // Scores on reasoning or tool-call chunks are not output text.
-                        if let Some(content) = choice.logprobs.as_ref().and_then(|lp| lp.content.as_ref())
-                            && !content.is_empty()
-                        {
-                            let hidden = !has_text
-                                && (choice.delta.reasoning_content.as_deref().is_some_and(|text| !text.is_empty())
-                                    || choice.delta.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()));
-                            push_score_event(&mut aggregator.response_events, content.len(), hidden);
+                        // Only output text is scored. A content-less chunk (buffered
+                        // parser output, the EOS) takes the class of the next content
+                        // chunk, except on a message-end chunk, whose scores belong to
+                        // the message that ends.
+                        let own = choice
+                            .logprobs
+                            .as_ref()
+                            .and_then(|lp| lp.content.as_ref())
+                            .map_or(0, Vec::len);
+                        let hidden = !has_text
+                            && (choice.delta.reasoning_content.as_deref().is_some_and(|text| !text.is_empty())
+                                || choice.delta.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()));
+                        if has_text || hidden {
+                            aggregator.last_scores_hidden = hidden;
+                            let count = std::mem::take(&mut aggregator.unclassified_scores) + own;
+                            if count > 0 {
+                                push_score_event(&mut aggregator.response_events, count, hidden);
+                            }
+                        } else if matches!(boundary, Some(MessageBoundary::End)) {
+                            let count = std::mem::take(&mut aggregator.unclassified_scores) + own;
+                            if count > 0 {
+                                push_score_event(&mut aggregator.response_events, count, false);
+                            }
+                        } else {
+                            aggregator.unclassified_scores += own;
                         }
                     }
                     if let Some(MessageBoundary::End) = boundary {
@@ -991,6 +1016,16 @@ impl DeltaAggregator {
 
         choices.sort_by_key(|a| a.index);
 
+        // Trailing content-less scores (the EOS) take the class of the last
+        // content chunk: output text keeps them, a tool call drops them.
+        if aggregator.unclassified_scores > 0 {
+            push_score_event(
+                &mut aggregator.response_events,
+                aggregator.unclassified_scores,
+                aggregator.last_scores_hidden,
+            );
+        }
+
         // Construct the final response object.
         let response = NvCreateChatCompletionResponse {
             // Without message phases only the score bookkeeping is kept, so a
@@ -1222,6 +1257,52 @@ mod tests {
             .and_then(|lp| lp.content.as_ref())
             .map(Vec::len);
         assert_eq!(scored, Some(6));
+    }
+
+    /// Buffered tool-call scores arrive on content-less chunks before the chunk that
+    /// carries `tool_calls`; they take that chunk's class, and so does a trailing
+    /// control token after the call.
+    #[tokio::test]
+    async fn tool_call_scores_on_content_less_chunks_are_hidden() {
+        let deltas = vec![
+            create_test_delta(
+                0,
+                "Let me check.",
+                Some(dynamo_protocols::types::Role::Assistant),
+                None,
+                Some(-0.1),
+                None,
+            ),
+            create_test_delta(0, "", None, None, Some(-0.2), None),
+            create_test_delta(0, "", None, None, Some(-0.3), None),
+            create_test_delta(
+                0,
+                "",
+                None,
+                None,
+                Some(-0.4),
+                Some(r#"{"name":"get_weather","arguments":{"city":"Paris"}}"#),
+            ),
+            create_test_delta(0, "", None, None, Some(-0.5), None),
+            create_test_delta(
+                0,
+                "",
+                None,
+                Some(dynamo_protocols::types::FinishReason::ToolCalls),
+                Some(-0.6),
+                None,
+            ),
+        ];
+        let resp = DeltaAggregator::apply(stream::iter(deltas), ParsingOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.response_events,
+            vec![
+                ResponseOutputEvent::Scores(1),
+                ResponseOutputEvent::HiddenScores(5),
+            ]
+        );
     }
 
     /// Without message phases the response still carries the score bookkeeping, and

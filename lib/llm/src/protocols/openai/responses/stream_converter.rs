@@ -71,6 +71,12 @@ pub struct ResponseStreamConverter {
     pending_logprobs: Vec<LogProb>,
     // Scores already delivered for the open message's text part.
     text_logprobs: Vec<LogProb>,
+    // Scores from chunks without content, waiting for the next content chunk
+    // to decide whether they are output text or hidden parser output.
+    unclassified_logprobs: Vec<LogProb>,
+    // Whether the last content chunk was reasoning or a tool call; trailing
+    // content-less scores at the end of the stream take that class.
+    last_scores_hidden: bool,
     // A `MessageBoundary::End` arrived while scores are requested. The message
     // stays open so a later score-only chunk (hidden EOS) still joins it; the
     // next boundary, visible content, or the end of the stream closes it.
@@ -176,6 +182,8 @@ impl ResponseStreamConverter {
             refusal_content_index: None,
             pending_logprobs: Vec::new(),
             text_logprobs: Vec::new(),
+            unclassified_logprobs: Vec::new(),
+            last_scores_hidden: false,
             close_deferred: false,
             finished_message: None,
             reasoning_items: Vec::new(),
@@ -231,10 +239,15 @@ impl ResponseStreamConverter {
     }
 
     /// Queue a choice's scores in arrival order; the next text delta, or the
-    /// close of the open message, carries them. Scores on reasoning or tool-call
-    /// chunks are not output text and are dropped; scores on chunks without
-    /// content (the hidden EOS) stay with the text they end.
-    fn queue_choice_logprobs(&mut self, choice: &ChatChoiceStream) {
+    /// close of the open message, carries them. Only output text is scored:
+    /// scores on reasoning or tool-call chunks are dropped. A chunk without
+    /// content (buffered parser output, the hidden EOS) takes the class of the
+    /// next content chunk, or of the last one when the stream ends, except on a
+    /// message-end chunk, whose scores belong to the message that ends.
+    fn queue_choice_logprobs(&mut self, choice: &ChatChoiceStream, end_boundary: bool) {
+        if !self.params.logprobs_requested() {
+            return;
+        }
         let delta = &choice.delta;
         let has_text = matches!(
             delta.content.as_ref(),
@@ -249,15 +262,34 @@ impl ResponseStreamConverter {
                     .tool_calls
                     .as_ref()
                     .is_some_and(|calls| !calls.is_empty()));
-        if self.params.logprobs_requested()
-            && !hidden
-            && let Some(entries) = choice
-                .logprobs
-                .as_ref()
-                .and_then(|lp| lp.content.as_deref())
-        {
-            self.pending_logprobs
-                .extend(chat_logprobs_to_output_text(entries));
+        let own = choice
+            .logprobs
+            .as_ref()
+            .and_then(|lp| lp.content.as_deref())
+            .map(chat_logprobs_to_output_text)
+            .unwrap_or_default();
+        if has_text {
+            self.resolve_unclassified_logprobs(false);
+            self.pending_logprobs.extend(own);
+        } else if hidden {
+            self.resolve_unclassified_logprobs(true);
+        } else if end_boundary {
+            let unclassified = std::mem::take(&mut self.unclassified_logprobs);
+            self.pending_logprobs.extend(unclassified);
+            self.pending_logprobs.extend(own);
+        } else {
+            self.unclassified_logprobs.extend(own);
+        }
+    }
+
+    /// Give the scores of content-less chunks the class of the content chunk
+    /// that follows them: output text keeps them, reasoning or a tool call drops
+    /// them.
+    fn resolve_unclassified_logprobs(&mut self, hidden: bool) {
+        self.last_scores_hidden = hidden;
+        let unclassified = std::mem::take(&mut self.unclassified_logprobs);
+        if !hidden {
+            self.pending_logprobs.extend(unclassified);
         }
     }
 
@@ -597,12 +629,31 @@ impl ResponseStreamConverter {
         }
         // A message whose close was deferred for trailing scores closes before
         // anything that belongs to the next item arrives.
-        let chunk_has_content = chunk.inner.choices.iter().any(|choice| {
+        let chunk_has_text = chunk.inner.choices.iter().any(|choice| {
             matches!(choice.delta.content.as_ref(), Some(ChatCompletionMessageContent::Text(text)) if !text.is_empty())
-                || choice.delta.refusal.as_deref().is_some_and(|text| !text.is_empty())
-                || choice.delta.reasoning_content.as_deref().is_some_and(|text| !text.is_empty())
-                || choice.delta.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty())
         });
+        let chunk_has_content = chunk_has_text
+            || chunk.inner.choices.iter().any(|choice| {
+                choice
+                    .delta
+                    .refusal
+                    .as_deref()
+                    .is_some_and(|text| !text.is_empty())
+                    || choice
+                        .delta
+                        .reasoning_content
+                        .as_deref()
+                        .is_some_and(|text| !text.is_empty())
+                    || choice
+                        .delta
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| !calls.is_empty())
+            });
+        let end_boundary = matches!(
+            &chunk.message_boundary,
+            Some(super::super::chat_completions::MessageBoundary::End)
+        );
         if self.close_deferred
             && (chunk_has_content
                 || matches!(
@@ -610,6 +661,11 @@ impl ResponseStreamConverter {
                     Some(super::super::chat_completions::MessageBoundary::Start(_))
                 ))
         {
+            // Content-less scores since the boundary take this chunk's class
+            // before the close drains them into the ending message.
+            if chunk_has_content {
+                self.resolve_unclassified_logprobs(!chunk_has_text);
+            }
             self.close_current_message(events);
         }
         let mut should_finish_function_calls = false;
@@ -640,7 +696,7 @@ impl ResponseStreamConverter {
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
 
-            self.queue_choice_logprobs(choice);
+            self.queue_choice_logprobs(choice, end_boundary);
 
             if let Some(reasoning) = delta.reasoning_content.as_deref()
                 && !reasoning.is_empty()
@@ -1242,8 +1298,12 @@ impl ResponseStreamConverter {
             );
             self.text_content_index = Some(index);
         }
-        // Scores that arrived after the last text delta (a tool call, a hidden
-        // EOS, a late score-only chunk) complete this text part's record.
+        // Scores that arrived after the last text delta complete this text
+        // part's record. Trailing content-less scores (the hidden EOS) take the
+        // class of the last content chunk: kept after text, dropped after a
+        // tool call.
+        let last_hidden = self.last_scores_hidden;
+        self.resolve_unclassified_logprobs(last_hidden);
         let late_logprobs = std::mem::take(&mut self.pending_logprobs);
         self.text_logprobs.extend(late_logprobs);
 
@@ -2205,6 +2265,86 @@ mod tests {
             logprob_tokens(&completed["response"]["output"][0]["content"][0]["logprobs"]),
             ["A", "E"]
         );
+    }
+
+    /// The parser sends buffered tool-call scores on content-less chunks and marks
+    /// only the completing chunk with `tool_calls`. Those scores take the class of
+    /// that chunk and are dropped, as is a trailing control token after the call.
+    #[test]
+    fn tool_call_scores_on_content_less_chunks_are_dropped() {
+        let empty = |token: &str| {
+            let mut chunk = finish_chunk(FinishReason::Stop);
+            chunk.inner.choices[0].finish_reason = None;
+            scored(chunk, token)
+        };
+        let call = scored(
+            tool_call_chunk(
+                0,
+                Some("call_1"),
+                Some("get_weather"),
+                Some("{\"city\":\"Paris\"}"),
+            ),
+            "D",
+        );
+
+        let mut conv = ResponseStreamConverter::new("test-model".into(), logprob_params());
+        let _ = conv.emit_start_events();
+        conv.process_chunk(&scored(text_chunk("Let me check."), "A"));
+        conv.process_chunk(&empty("<tool_call>"));
+        conv.process_chunk(&empty("<function=get_weather>"));
+        conv.process_chunk(&call);
+        conv.process_chunk(&empty("</tool_call>"));
+        conv.process_chunk(&finish_chunk(FinishReason::ToolCalls));
+        let events = conv.emit_end_events();
+
+        let completed = event_json(events.last().unwrap());
+        let output = completed["response"]["output"].as_array().unwrap();
+        let text = output
+            .iter()
+            .find(|item| item["type"] == "message")
+            .expect("text message");
+        assert_eq!(logprob_tokens(&text["content"][0]["logprobs"]), ["A"]);
+        assert!(output.iter().any(|item| item["type"] == "function_call"));
+    }
+
+    /// After a commentary message ends, a tool call takes the next scores and a
+    /// trailing control token after the call is dropped in streaming as in unary.
+    #[test]
+    fn trailing_scores_after_tool_call_are_dropped() {
+        use super::super::super::chat_completions::MessageBoundary;
+
+        let mut end = finish_chunk(FinishReason::Stop);
+        end.inner.choices[0].finish_reason = None;
+        end.message_boundary = Some(MessageBoundary::End);
+        let call = scored(
+            tool_call_chunk(
+                0,
+                Some("call_1"),
+                Some("get_weather"),
+                Some("{\"city\":\"Paris\"}"),
+            ),
+            "D",
+        );
+        let mut eom = finish_chunk(FinishReason::ToolCalls);
+        eom.inner.choices[0].finish_reason = None;
+        let eom = scored(eom, "<|eom|>");
+
+        let mut conv = ResponseStreamConverter::new("test-model".into(), logprob_params());
+        let _ = conv.emit_start_events();
+        conv.process_chunk(&scored(text_chunk("Checking."), "A"));
+        conv.process_chunk(&end);
+        conv.process_chunk(&call);
+        conv.process_chunk(&eom);
+        conv.process_chunk(&finish_chunk(FinishReason::ToolCalls));
+        let events = conv.emit_end_events();
+
+        let completed = event_json(events.last().unwrap());
+        let output = completed["response"]["output"].as_array().unwrap();
+        let text = output
+            .iter()
+            .find(|item| item["type"] == "message")
+            .expect("commentary message");
+        assert_eq!(logprob_tokens(&text["content"][0]["logprobs"]), ["A"]);
     }
 
     /// An error after the message completed closes it again; the republished
