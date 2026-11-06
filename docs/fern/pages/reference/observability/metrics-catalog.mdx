@@ -629,7 +629,7 @@ Emitted by every process that routes requests: the frontend, which serves them o
 </ParamField>
 
 <ParamField path="dynamo_component_router_non_max_overlap_selections_total" type="counter">
-  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. Labeled by `worker_type` (`prefill`).
+  Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. [Explicitly pinned requests](../../developer-guide/knowledge-base/modular-components/router/worker-filtering.md#candidate-eligibility) (direct routing or an explicit worker target) and equal-overlap ties are excluded. Session-affinity selections are compared against the best eligible worker when the selection policy has no worker filters of its own (the default); otherwise they are excluded like pinned requests. Labeled by `worker_type` (`prefill`).
 </ParamField>
 
 <ParamField path="dynamo_component_router_overlap_blocks_lost" type="histogram">
@@ -651,7 +651,7 @@ The cache reuse funnel shows how much of the incoming prompt could be reused, an
 | **F3 — Selected worker's match** | Prefix the router estimates is cached on the worker it chooses. | `dynamo_component_router_kv_selected_cached_prefix_tokens_total` |
 | **F4 — Reported reuse** | Tokens the worker reports reusing. Missing reports count as zero. | `dynamo_component_router_kv_worker_reused_tokens_total` |
 
-F2, F3, and F4 are counters labeled by `router_id`, `model`, and `phase`. They need no enable flag.
+F2, F3, and F4 are counters labeled by `router_id`, `model`, and `phase`. They are populated only with `--router-mode kv` and need no additional enable flag. Incoming tokens (F0) are recorded in every router mode.
 
 Compare token increases over the same time window and matching KV-routing traffic. Use a long enough window: the steps are recorded at different times, and F4 depends on worker reports arriving after routing. Short windows may therefore compare different requests. Divide each step by F0 to express it as a percentage of incoming tokens.
 
@@ -925,6 +925,15 @@ Emitted by the endpoint picker (EPP) when routing through the Gateway API Infere
 </ParamField>
 
 Requires the client to request usage accounting on streaming calls (`"stream_options": {"include_usage": true}`); without it the response carries no usage block and nothing is recorded.
+
+These metrics show where the EPP spends a request's time and when its async runtime stalls. The settings that control them, and the EPP's diagnostic log lines, are in [EPP Runtime Environment](../components/gateway-api-routing.mdx#epp-runtime-environment).
+
+| Metric | Type | Labels | Description | Status |
+|---|---|---|---|---|
+| `dynamo_epp_stage_duration_seconds` | histogram | `model`, [`stage`](metric-labels.mdx#epp-stage-values) | Time one routed request spends in each EPP stage. `receive_body`, `pick`, `rewrite` and `first_response` together split the EPP's part of a request's time to first token. | Experimental |
+| `dynamo_epp_event_loop_delay_seconds` | histogram | — | How late a 10 ms sleep on the EPP's async runtime wakes. It runs late only when no worker thread services the runtime's timers, so it shows stalls of the whole runtime, not of one task. | Experimental |
+| `dynamo_epp_task_poll_seconds` | histogram | [`task`](metric-labels.mdx#epp-task-values) | Task polls that held an async worker thread at least `DYN_EPP_TASK_METRICS_MIN_US`. The work a poll runs through `block_in_place` does not count, nor does the rest of the poll once another thread has taken its worker over. Recorded only with `DYN_EPP_TASK_METRICS=1`. | Experimental |
+| `dynamo_epp_task_schedule_delay_seconds` | histogram | [`task`](metric-labels.mdx#epp-task-values) | Waits of at least `DYN_EPP_TASK_METRICS_MIN_US` between a task being woken and being polled. Long waits of `task="h2_connection"` mean a gateway connection, and every stream on it, stood still. Recorded only with `DYN_EPP_TASK_METRICS=1`. | Experimental |
 
 ## Global Frontend Metrics
 

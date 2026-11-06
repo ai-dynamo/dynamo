@@ -22,9 +22,9 @@ USER root
 
 # Install AWS EFA installer with bundled libfabric and aws-ofi-nccl
 # Flags explanation:
-#   --skip-kmod: Skip kernel module installation (handled by host)
-#   --skip-limit-conf: Skip ulimit configuration (handled by container runtime)
-#   --no-verify: Skip GPG verification (optional, can be removed if verification is needed)
+#   --build-ngc turns on --yes, --skip-kmod, --skip-limit-conf and --no-verify (Ubuntu only)
+#   --skip-rdma-core skips rdma-core packages
+#   --skip-mpi skips mpi packages
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     curl --retry 3 --retry-delay 2 -fsSL -o aws-efa-installer-${EFA_VERSION}.tar.gz \
@@ -32,7 +32,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     tar -xf aws-efa-installer-${EFA_VERSION}.tar.gz && \
     cd aws-efa-installer && \
     apt-get update && \
-    ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify && \
+    ./efa_installer.sh --skip-mpi --skip-rdma-core --build-ngc && \
     cd .. && rm -rf aws-efa-installer* && \
     ldconfig
 
