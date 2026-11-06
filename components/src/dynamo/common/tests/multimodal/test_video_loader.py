@@ -414,6 +414,31 @@ class _FailedOpenMediaIO:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "media_io",
+    [_ImportErrorMediaIO(), _SystemErrorMediaIO(), _FailedOpenMediaIO()],
+    ids=["import", "system", "failed-open"],
+)
+async def test_undetected_codec_is_client_unsupported_media(monkeypatch, media_io):
+    """A non-video payload has no codec. That is client input, not a missing decoder.
+
+    The shipped vLLM image has OpenCV without a video backend, so the same
+    failure used to become ``MissingMediaDecoderError`` and HTTP 500. A probed
+    codec such as VP9 still takes that path.
+    """
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: None)
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader._decode_video_bytes(b"not-a-video", media_io)
+
+    assert exc_info.value.status == 415
+    assert "Unsupported video media" in exc_info.value.message
+
+
+@pytest.mark.asyncio
 async def test_decode_video_bytes_failed_open_value_error_is_actionable(
     monkeypatch, carrier_imports
 ):

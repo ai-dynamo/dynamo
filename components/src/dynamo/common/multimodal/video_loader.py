@@ -50,6 +50,18 @@ from dynamo.common.http.media_reference import max_media_bytes  # isort: skip
 logger = logging.getLogger(__name__)
 
 
+def _unsupported_video_input() -> HttpStatusError:
+    """Reject bytes that carry no recognizable video codec.
+
+    ``HttpStatusError`` is what the bindings map to a client status. 415
+    matches image loading: the media type is unsupported, and the frontend
+    answers both unary HTTP and a post-commit SSE error with that code.
+    A probed codec still uses ``MissingMediaDecoderError``, because that
+    input may be valid media the image was not given a decoder for.
+    """
+    return HttpStatusError(415, "Unsupported video media", "video")
+
+
 def _attributable_to_cv2(exc: BaseException, media_io: Any | None = None) -> bool:
     """Identify OpenCV errors without relabeling failures from other video backends."""
     if getattr(exc, "name", None) == "cv2" or "cv2" in str(exc):
@@ -201,8 +213,12 @@ class VideoLoader:
     ) -> tuple[np.ndarray, Dict[str, Any]]:
         """Decode video bytes: H.264/H.265 on NVDEC, all else software.
 
-        vLLM ships OpenCV for still images without video backends. Translate
-        its decode failures into install guidance; preserve other backends.
+        vLLM ships OpenCV for still images without video backends. A probed
+        codec with no decoder is deployment configuration
+        (``MissingMediaDecoderError``). Bytes with no recognizable video
+        codec are client input: a non-video file must not be reported as a
+        server failure. Translate the remaining OpenCV decode failures into
+        install guidance; preserve other backends.
 
         The NVDEC path honors the two ``media_io_kwargs`` that decide *which*
         frames come back -- ``num_frames`` and ``fps`` -- because it samples
@@ -231,6 +247,8 @@ class VideoLoader:
         except ImportError as exc:
             if not _attributable_to_cv2(exc):
                 raise
+            if codec is None:
+                raise _unsupported_video_input() from exc
             raise video_decoder_missing(
                 "vllm", "opencv-python-headless", "cv2", codec, cause=str(exc)
             ) from exc
@@ -238,6 +256,8 @@ class VideoLoader:
             # Confirm both the error source and missing video support.
             if not (_attributable_to_cv2(exc, media_io) and _cv2_lacks_video_backend()):
                 raise
+            if codec is None:
+                raise _unsupported_video_input() from exc
             raise video_decoder_missing(
                 "vllm",
                 "opencv-python-headless",
