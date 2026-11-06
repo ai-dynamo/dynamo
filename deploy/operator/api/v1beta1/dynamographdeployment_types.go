@@ -63,7 +63,7 @@ type DynamoGraphDeploymentSpec struct {
 
 	// env supplies general environment defaults for main and declared runtime
 	// containers. Container-specific definitions with the same name take
-	// precedence. For operator origins >= 1.7.0, relative order is preserved
+	// precedence. For operator origins >= 1.8.0, relative order is preserved
 	// within each source list and cross-layer references are topologically
 	// ordered; cycles fail rendering. Earlier or missing origins retain legacy
 	// sorted composition. Generated DCDs preserve this list as spec.env.

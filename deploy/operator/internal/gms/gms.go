@@ -36,6 +36,24 @@ const (
 	ServerModule = "gpu_memory_service.cli.server"
 )
 
+// ClientEnvironment returns the owned bindings independently of resource setup,
+// so renderers can compose them before installing the GMS sidecar and DRA claim.
+func ClientEnvironment(useV1 bool) []corev1.EnvVar {
+	bindings := []corev1.EnvVar{socketEnvironment()}
+	if useV1 {
+		bindings = append(bindings, v1Environment())
+	}
+	return bindings
+}
+
+func socketEnvironment() corev1.EnvVar {
+	return corev1.EnvVar{Name: EnvSocketDir, Value: SharedMountPath}
+}
+
+func v1Environment() corev1.EnvVar {
+	return corev1.EnvVar{Name: EnvUseV1, Value: "true"}
+}
+
 // EnsureServerSidecar adds the GMS server as a native sidecar (init +
 // restartPolicy=Always). With no StartupProbe, kubelet considers it Started
 // as soon as the process is running — clients ride out the sub-second
@@ -73,7 +91,7 @@ func EnableV1(container *corev1.Container) []corev1.EnvVar {
 	if container == nil {
 		return nil
 	}
-	binding := corev1.EnvVar{Name: EnvUseV1, Value: "true"}
+	binding := v1Environment()
 	for i := range container.Env {
 		if container.Env[i].Name == EnvUseV1 {
 			container.Env[i] = binding
@@ -119,7 +137,7 @@ func EnsureClient(podSpec *corev1.PodSpec, container *corev1.Container) []corev1
 		container.VolumeMounts = append(container.VolumeMounts, sharedMount)
 	}
 
-	sharedEnv := corev1.EnvVar{Name: EnvSocketDir, Value: SharedMountPath}
+	sharedEnv := socketEnvironment()
 	foundEnv := false
 	for i := range container.Env {
 		if container.Env[i].Name == EnvSocketDir {
@@ -153,9 +171,7 @@ func Container(name, module, image string) corev1.Container {
 		Name:    name,
 		Image:   image,
 		Command: []string{"python3", "-m", module},
-		Env: []corev1.EnvVar{
-			{Name: EnvSocketDir, Value: SharedMountPath},
-		},
+		Env:     ClientEnvironment(false),
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: SharedVolumeName, MountPath: SharedMountPath},
 		},

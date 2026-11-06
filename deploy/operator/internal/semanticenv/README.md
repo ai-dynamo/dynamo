@@ -53,6 +53,12 @@ layer would force `A` before `B`, contradicting the actual dependency chain.
 Persisting or passing environments between rendering stages must therefore retain
 their source layers, or happen only after final composition.
 
+`ContainerLayers` carries these sources through Pod transformations. Capture them
+before mutation, record authoritative values with `Bind`, remove intentionally
+absent values with `Omit`, then `Apply` once all bindings and removals are known.
+A nil collector leaves legacy lowerings unchanged. Dynamo enables composition
+only for resources whose stored operator origin is at least 1.8.0.
+
 The caller controls precedence for operator-owned bindings by supplying their
 layer after overridable defaults and authored values. Runtime providers must
 place externally injected definitions before entries that reference them.

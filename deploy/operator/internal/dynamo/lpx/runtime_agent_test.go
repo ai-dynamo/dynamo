@@ -99,7 +99,7 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 
 				t.Log("Apply runtime bindings for the selected family and role")
 				if role.conductor {
-					configureNodeLocalConductorRuntime(&pod, "allocation")
+					configureNodeLocalConductorRuntime(&pod, "allocation", nil)
 				} else {
 					configureAgentScheduling(&pod, role.family, role.devicesPerNode)
 				}
@@ -163,7 +163,7 @@ func TestAllocationPrecedesAuthoredReferences(t *testing.T) {
 			want.Env = append([]corev1.EnvVar{{Name: allocationEnvVar, Value: "agt0:agt1"}}, authored...)
 
 			t.Log("Publish exactly one authoritative allocation before references without changing startup or other environment")
-			configureNodeLocalConductorRuntime(&pod, "agt0:agt1")
+			configureNodeLocalConductorRuntime(&pod, "agt0:agt1", nil)
 			require.Equal(t, *want, pod.Containers[0])
 		})
 	}
@@ -243,11 +243,13 @@ func TestModelPathsPrecedeAuthoredReferences(t *testing.T) {
 			}
 
 			t.Log("Publish only the first draft and final target once in every container, before all authored references")
-			require.NoError(t, applyModelPaths(containerLists, projections, "/custom/models"))
+			_, err := applyModelPaths(containerLists, projections, "/custom/models")
+			require.NoError(t, err)
 			require.Equal(t, wantLists, containerLists)
 
 			t.Log("Repeated rendering keeps environment order, startup and authoritative values unchanged")
-			require.NoError(t, applyModelPaths(containerLists, projections, "/custom/models"))
+			_, err = applyModelPaths(containerLists, projections, "/custom/models")
+			require.NoError(t, err)
 			require.Equal(t, wantLists, containerLists)
 		})
 	}
@@ -276,7 +278,7 @@ func TestModelPathsRejectInvalidReferences(t *testing.T) {
 			before := [][]corev1.Container{{*containerLists[0][0].DeepCopy()}, {*containerLists[1][0].DeepCopy()}}
 
 			t.Log("Report the failing binding without changing any container's environment")
-			err := applyModelPaths(containerLists, projections, "/custom/models")
+			_, err := applyModelPaths(containerLists, projections, "/custom/models")
 			require.ErrorContains(t, err, "resolve "+test.name)
 			require.ErrorContains(t, err, "bad path segment")
 			require.Equal(t, before, containerLists)

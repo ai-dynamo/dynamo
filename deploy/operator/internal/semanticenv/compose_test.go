@@ -6,12 +6,31 @@
 package semanticenv_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 )
+
+func BenchmarkComposeUnterminatedReferences(b *testing.B) {
+	for _, test := range []struct {
+		name string
+		size int
+	}{{name: "1K", size: 1_000}, {name: "100K", size: 100_000}} {
+		b.Run(test.name, func(b *testing.B) {
+			layer := semanticenv.Layer{Env: []corev1.EnvVar{{Name: "VALUE", Value: strings.Repeat("$(", test.size)}}}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				if _, err := semanticenv.Compose(layer); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
 
 func TestCompose(t *testing.T) {
 	tests := []struct {
@@ -78,6 +97,14 @@ func TestCompose(t *testing.T) {
 			want: []corev1.EnvVar{{Name: "PATH", Value: "$(PATH):/extra"}, {Name: "VALUE", Value: "$(EXTERNAL)-$PATH-${PATH}-$(unclosed"}},
 		},
 		{
+			name: "a valid reference before an unterminated suffix still orders its definition",
+			layers: []semanticenv.Layer{
+				{Source: "spec.env", Env: []corev1.EnvVar{{Name: "VALUE", Value: "$(BASE)" + strings.Repeat("$(", 100_000)}}},
+				{Source: "container.env", Env: []corev1.EnvVar{{Name: "BASE", Value: "b"}}},
+			},
+			want: []corev1.EnvVar{{Name: "BASE", Value: "b"}, {Name: "VALUE", Value: "$(BASE)" + strings.Repeat("$(", 100_000)}},
+		},
+		{
 			name: "discarded definitions cannot introduce cycles",
 			layers: []semanticenv.Layer{
 				{Source: "spec.env", Env: []corev1.EnvVar{{Name: "A", Value: "$(B)"}, {Name: "B", Value: "$(A)"}}},
@@ -113,12 +140,12 @@ func TestCompose(t *testing.T) {
 			layers: []semanticenv.Layer{
 				{Source: "spec.env", Env: []corev1.EnvVar{{Name: "BASE", Value: "discard"}, {Name: "MODEL", Value: "$(BASE)/model"}}},
 				{Source: "container.env", Env: []corev1.EnvVar{{Name: "BASE", ValueFrom: &corev1.EnvVarSource{
-					ConfigMapKeyRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "paths"}, Key: "base"},
+					ConfigMapKeyRef: &corev1.ConfigMapKeySelector{Name: "paths", Key: "base"},
 				}}}},
 			},
 			want: []corev1.EnvVar{
 				{Name: "BASE", ValueFrom: &corev1.EnvVarSource{
-					ConfigMapKeyRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "paths"}, Key: "base"},
+					ConfigMapKeyRef: &corev1.ConfigMapKeySelector{Name: "paths", Key: "base"},
 				}},
 				{Name: "MODEL", Value: "$(BASE)/model"},
 			},

@@ -44,11 +44,11 @@ func TestApplyCyborgManifestPathPrecedesAuthoredReferences(t *testing.T) {
 				t.Run(test.name, func(t *testing.T) {
 					t.Log("Publish the authoritative path before references while preserving other bindings")
 					container := corev1.Container{Env: test.env}
-					require.NoError(t, applyCyborgManifestPath(&container, projection, "/models"))
+					require.NoError(t, applyCyborgManifestPath(&container, projection, "/models", nil))
 					require.Equal(t, want, container.Env)
 
 					t.Log("Repeat rendering without duplicating or reordering environment bindings")
-					require.NoError(t, applyCyborgManifestPath(&container, projection, "/models"))
+					require.NoError(t, applyCyborgManifestPath(&container, projection, "/models", nil))
 					require.Equal(t, want, container.Env)
 				})
 			}

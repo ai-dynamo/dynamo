@@ -3576,7 +3576,7 @@ See [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentshar
 </ParamField>
 
 <ParamField path="env" type="EnvVar array">
-env supplies general environment defaults for main and declared runtime containers. Container-specific definitions with the same name take precedence. For operator origins &gt;= 1.7.0, relative order is preserved within each source list and cross-layer references are topologically ordered; cycles fail rendering. Earlier or missing origins retain legacy sorted composition. Generated DCDs preserve this list as spec.env.
+env supplies general environment defaults for main and declared runtime containers. Container-specific definitions with the same name take precedence. For operator origins &gt;= 1.8.0, relative order is preserved within each source list and cross-layer references are topologically ordered; cycles fail rendering. Earlier or missing origins retain legacy sorted composition. Generated DCDs preserve this list as spec.env.
 See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

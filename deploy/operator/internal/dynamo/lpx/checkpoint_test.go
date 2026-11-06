@@ -41,11 +41,11 @@ func TestApplyCyborgWeightsPathPrecedesAuthoredReferences(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Publish the snapshot path before references while preserving other bindings")
 			container := corev1.Container{Env: test.env}
-			applyCyborgWeightsPath(&container, projection, "/nfs")
+			applyCyborgWeightsPath(&container, projection, "/nfs", nil)
 			require.Equal(t, want, container.Env)
 
 			t.Log("Repeat rendering without duplicating or reordering environment bindings")
-			applyCyborgWeightsPath(&container, projection, "/nfs")
+			applyCyborgWeightsPath(&container, projection, "/nfs", nil)
 			require.Equal(t, want, container.Env)
 		})
 	}
@@ -57,7 +57,7 @@ func TestApplyCyborgWeightsPathWithoutCheckpointKeepsAuthoredValue(t *testing.T)
 	t.Log("Leave an authored weights path in place when no checkpoint is selected")
 	authored := []corev1.EnvVar{{Name: cyborgWeightsPathEnv, Value: "/nfs/authored"}}
 	container := corev1.Container{Env: append([]corev1.EnvVar(nil), authored...)}
-	applyCyborgWeightsPath(&container, &ModelProjection{}, "/nfs")
+	applyCyborgWeightsPath(&container, &ModelProjection{}, "/nfs", nil)
 	require.Equal(t, authored, container.Env)
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -61,6 +62,50 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 	pcs.Spec.Template.Cliques = templates.Cliques
 	pcs.Spec.Template.PodCliqueScalingGroupConfigs = []grovev1alpha1.PodCliqueScalingGroupConfig{templates.ScalingGroup}
 	return pcs, nil
+}
+
+func TestRenderFinalizesModelPathBindings(t *testing.T) {
+	for _, pipeline := range []Pipeline{PipelineSingle, PipelineHybrid} {
+		t.Run(string(pipeline), func(t *testing.T) {
+			t.Log("Retain graph dependencies until model paths are bound to every final LPX role")
+			projection := projectRenderFixture(t, pipeline, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+			pcs := renderTestPCS(pipeline == PipelineHybrid)
+			template := corev1.PodTemplateSpec{Spec: renderTestPodSpec()}
+			template.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "LPX_MODEL_PATH", Value: "$(MODEL)"}}
+			conductor := template.DeepCopy()
+			input := RenderInput{Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: template}, Conductor: conductor,
+				StageEnvironments: map[string]semanticenv.ContainerLayers{},
+			}
+			pods := []*corev1.PodSpec{&template.Spec, &conductor.Spec}
+			if pipeline == PipelineHybrid {
+				pod := &pcs.Spec.Template.Cliques[0].Spec.PodSpec
+				pod.Containers[0].Env = append(pod.Containers[0].Env, template.Spec.Containers[0].Env...)
+				pods = append(pods, pod)
+			}
+			collectors := make([]semanticenv.ContainerLayers, len(pods))
+			for i, pod := range pods {
+				layers := make(semanticenv.ContainerLayers)
+				layers.Capture(pod)
+				layers["main"] = append([]semanticenv.Layer{{Source: "spec.env", Env: []corev1.EnvVar{{Name: "MODEL", Value: "$(LPX_MODEL_PATH)/model"}}}}, layers["main"]...)
+				collectors[i] = layers
+			}
+			input.StageEnvironments[testRenderComponentName], input.ConductorEnvironment = collectors[0], collectors[1]
+			if pipeline == PipelineHybrid {
+				input.CyborgEnvironment = collectors[2]
+			}
+			rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, input)
+			require.NoError(t, err)
+			for _, clique := range rendered.Spec.Template.Cliques {
+				var relevant []string
+				for _, env := range clique.Spec.PodSpec.Containers[0].Env {
+					if env.Name == "LPX_MODEL_PATH" || env.Name == "MODEL" {
+						relevant = append(relevant, env.Name)
+					}
+				}
+				require.Equal(t, []string{"LPX_MODEL_PATH", "MODEL"}, relevant, clique.Name)
+			}
+		})
+	}
 }
 
 func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {

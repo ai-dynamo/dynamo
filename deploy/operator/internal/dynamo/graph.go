@@ -659,7 +659,7 @@ func applyDynDeploymentConfigToComponent(
 			if err != nil {
 				return err
 			}
-			setDynamoDeploymentConfig(main, updatedConfig)
+			setDynamoDeploymentConfig(main, updatedConfig, GetPodTemplateAnnotations(component))
 			rawConfig = updatedConfig
 		}
 		config, err := ParseDynDeploymentConfig(rawConfig)
@@ -710,14 +710,25 @@ func getDynamoDeploymentConfig(container *corev1.Container) []byte {
 	return nil
 }
 
-func setDynamoDeploymentConfig(container *corev1.Container, config []byte) {
+func setDynamoDeploymentConfig(container *corev1.Container, config []byte, annotations map[string]string) {
+	// Semantic origins rewrite the same last definition selected by the reader.
+	if compatibility.OrderedEnvironmentVariables.Enabled(annotations) {
+		binding := corev1.EnvVar{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: string(config)}
+		if current := findEnvVar(container.Env, binding.Name); current != nil {
+			*current = binding
+		} else {
+			container.Env = append(container.Env, binding)
+		}
+		return
+	}
+
+	// Preserve the legacy first-match update, including no append when absent.
 	for i := range container.Env {
 		if container.Env[i].Name == commonconsts.DynamoDeploymentConfigEnvVar {
 			container.Env[i].Value = string(config)
 			return
 		}
 	}
-	container.Env = append(container.Env, corev1.EnvVar{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: string(config)})
 }
 
 func updateDynDeploymentConfigBytes(rawConfig []byte, serviceName string, newPort int) ([]byte, error) {
@@ -1660,11 +1671,23 @@ func applyDefaultSecurityContext(podSpec *corev1.PodSpec) {
 	}
 }
 
-// GenerateBasePodSpec creates a basic PodSpec with common logic shared between controller and grove
-// Includes standard environment variables (DYNAMO_PORT, NATS_SERVER, ETCD_ENDPOINTS)
-// Deployment-specific environment merging should be handled by the caller
+// GenerateBasePodSpecOptions supplies graph defaults and their policy ownership.
+type GenerateBasePodSpecOptions struct {
+	GeneralEnvironment []corev1.EnvVar
+
+	// KVTransferPolicy means the graph's policy owns the runtime's policy env,
+	// including absence of optional settings. Standalone topology sources do not.
+	KVTransferPolicy bool
+
+	// PolicyAuthored preserves the DGD source when the caller already normalized
+	// the component. Persisted DCDs instead use their actual stored source indexes.
+	PolicyAuthored *semanticenv.Layer
+}
+
+// GenerateBasePodSpec creates a basic PodSpec with common logic shared between controller and grove.
+// Includes standard environment variables (DYNAMO_PORT, NATS_SERVER, ETCD_ENDPOINTS).
 // containerGPUs lazily resolves the main container's scalar or DRA-backed GPU count.
-// component and operatorConfig must be non-nil.
+// component and operatorConfig must be non-nil. At most one options value is accepted.
 func GenerateBasePodSpec(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	backendFramework BackendFramework,
@@ -1678,14 +1701,31 @@ func GenerateBasePodSpec(
 	serviceName string,
 	deployerOverride MultinodeDeployer, // Optional: overrides factory-created deployer when non-nil
 	containerGPUs ContainerGPUCount,
-	generalEnvironment ...corev1.EnvVar,
+	options ...GenerateBasePodSpecOptions,
 ) (*corev1.PodSpec, error) {
+	// Keep optional rendering inputs together without changing existing callers.
+	if len(options) > 1 {
+		return nil, fmt.Errorf("expected at most one base pod spec options value")
+	}
+	var opts GenerateBasePodSpecOptions
+	if len(options) == 1 {
+		opts = options[0]
+	}
+	generalEnvironment := opts.GeneralEnvironment
+
 	// Validate the complete component before selecting its authored role template.
 	component, roleLaunchOwnership, nativeSidecar, err := lowerComponentForRole(component, role)
 	if err != nil {
 		return nil, err
 	}
 	environment := newPodEnvironment(GetPodTemplateAnnotations(component), generalEnvironment)
+	if opts.KVTransferPolicy {
+		environment.ownKVTransferPolicy(component, nativeSidecar)
+		if environment != nil && opts.PolicyAuthored != nil && environment.policyRuntime != "" {
+			layer := opts.PolicyAuthored.Without(workerKvTransferPolicyEnvNames...)
+			environment.policyAuthored = &layer
+		}
+	}
 	if environment == nil && len(generalEnvironment) > 0 {
 		component = component.DeepCopy()
 		applyLegacyGeneralEnvironment(component, generalEnvironment)
@@ -1732,10 +1772,10 @@ func generateBasePodSpecWithDefaults(
 	componentDefaults ComponentDefaults,
 	containerGPUs ContainerGPUCount,
 	generalEnvironment ...corev1.EnvVar,
-) (*corev1.PodSpec, error) {
+) (*corev1.PodSpec, semanticenv.ContainerLayers, error) {
 	// Stored objects must satisfy admission invariants before defaults are applied.
 	if errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec")); len(errs) > 0 {
-		return nil, errs.ToAggregate()
+		return nil, nil, errs.ToAggregate()
 	}
 	environment := newPodEnvironment(GetPodTemplateAnnotations(component), generalEnvironment)
 	pod, err := generateBasePodSpecWithDefaultsAndOwnership(
@@ -1757,12 +1797,9 @@ func generateBasePodSpecWithDefaults(
 		environment,
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if err := environment.apply(pod); err != nil {
-		return nil, err
-	}
-	return pod, nil
+	return pod, environment.capture(pod), nil
 }
 
 func generateBasePodSpec(
@@ -2401,10 +2438,38 @@ func GeneratePodSpecForComponent(
 	containerGPUs ContainerGPUCount,
 	additionalEnvironment ...map[string]semanticenv.Layer,
 ) (*corev1.PodSpec, error) {
+	pod, layers, err := GeneratePodSpecForComponentStaged(component, backendFramework, secretsRetriever, dynamoDeployment,
+		role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, deployerOverride, containerGPUs, additionalEnvironment...)
+	if err != nil {
+		return nil, err
+	}
+	if err := layers.Apply(pod); err != nil {
+		return nil, err
+	}
+	return pod, nil
+}
+
+// GeneratePodSpecForComponentStaged retains source layers for providers that
+// still add bindings or omit containers. The caller must finalize with Apply
+// after those transformations. Nil layers preserve the complete legacy path.
+func GeneratePodSpecForComponentStaged(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	backendFramework BackendFramework,
+	secretsRetriever SecretsRetriever,
+	dynamoDeployment *v1beta1.DynamoGraphDeployment,
+	role Role,
+	numberOfNodes int32,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
+	serviceName string,
+	deployerOverride MultinodeDeployer,
+	containerGPUs ContainerGPUCount,
+	additionalEnvironment ...map[string]semanticenv.Layer,
+) (*corev1.PodSpec, semanticenv.ContainerLayers, error) {
 	// Validate the complete component before selecting its authored role template.
 	component, ownership, nativeSidecar, err := lowerComponentForRole(component, role)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	environment := newPodEnvironment(dynamoDeployment.Annotations, dynamoDeployment.Spec.Env)
 	if environment != nil {
@@ -2416,12 +2481,9 @@ func GeneratePodSpecForComponent(
 		serviceName, deployerOverride, ownership, nativeSidecar, nil, containerGPUs, environment,
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if err := environment.apply(pod); err != nil {
-		return nil, err
-	}
-	return pod, nil
+	return pod, environment.capture(pod), nil
 }
 
 func generatePodSpecForComponent(
@@ -2448,6 +2510,9 @@ func generatePodSpecForComponent(
 		return nil, fmt.Errorf("dynamoDeployment is nil")
 	}
 	component = component.DeepCopy()
+	if shouldApplyKvTransferPolicyToWorkerComponent(component, dynamoDeployment) {
+		environment.ownKVTransferPolicy(component, nativeSidecar)
+	}
 	applyDGDTemplateDefaults(component, dynamoDeployment, groveClusterTopologyDomains, nativeSidecar)
 	if operatorConfig == nil {
 		operatorConfig = &configv1alpha1.OperatorConfiguration{}
@@ -2663,7 +2728,7 @@ func removeWorkerKvTransferPolicyEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
 	}
 	filtered := make([]corev1.EnvVar, 0, len(envs))
 	for _, env := range envs {
-		if isWorkerKvTransferPolicyEnvVar(env.Name) {
+		if slices.Contains(workerKvTransferPolicyEnvNames, env.Name) {
 			continue
 		}
 		filtered = append(filtered, env)
@@ -2671,17 +2736,12 @@ func removeWorkerKvTransferPolicyEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
 	return filtered
 }
 
-func isWorkerKvTransferPolicyEnvVar(name string) bool {
-	switch name {
-	case commonconsts.EnvKvTransferDomain,
-		commonconsts.EnvKvTransferEnforcement,
-		commonconsts.EnvKvTransferPreferredWeight,
-		commonconsts.EnvTopologyEnabled,
-		commonconsts.EnvTopologyMountPath:
-		return true
-	default:
-		return false
-	}
+var workerKvTransferPolicyEnvNames = []string{
+	commonconsts.EnvKvTransferDomain,
+	commonconsts.EnvKvTransferEnforcement,
+	commonconsts.EnvKvTransferPreferredWeight,
+	commonconsts.EnvTopologyEnabled,
+	commonconsts.EnvTopologyMountPath,
 }
 
 func appendTopologyLabelVolumeMount(mounts []corev1.VolumeMount, mount corev1.VolumeMount) []corev1.VolumeMount {
@@ -3686,6 +3746,9 @@ func GenerateBasePodSpecForController(
 	// Generate base PodSpec with standard env vars using merged component envs
 	componentName := GetDCDComponentName(dynComponent)
 	environment := newPodEnvironment(GetPodTemplateAnnotations(componentSpec), dynComponent.Spec.Env)
+	if DCDHasKVTransferPolicy(dynComponent) {
+		environment.ownKVTransferPolicy(componentSpec, nativeSidecar)
+	}
 	if environment == nil && len(dynComponent.Spec.Env) > 0 {
 		applyLegacyGeneralEnvironment(componentSpec, dynComponent.Spec.Env)
 	}

@@ -852,7 +852,7 @@ func TestBuildFailoverPod_SemanticEnvironment(t *testing.T) {
 			podSpec.Containers[0].Env = append(slices.Clone(defaults), user...)
 			var collector *podEnvironment
 			if tt.ordered {
-				collector = newPodEnvironment(map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0"}, nil)
+				collector = newPodEnvironment(map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"}, nil)
 				collector.register(podSpec.Containers[0].Name, "container.env", defaults, nil, user)
 			}
 			require.NoError(t, buildColdStartFailoverPod(&podSpec, 2, BackendFrameworkVLLM, collector))
@@ -883,7 +883,7 @@ func TestAugmentEngineForGMS_SemanticEnvironment(t *testing.T) {
 			{Name: "USER_REFERENCE", Value: "$(ENGINE_ID)-$(GMS_SOCKET_DIR)"},
 		},
 	}}}
-	collector := newPodEnvironment(map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0"}, nil)
+	collector := newPodEnvironment(map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"}, nil)
 	collector.register("engine", "container.env", podSpec.Containers[0].Env[:1], nil, podSpec.Containers[0].Env[1:])
 	augmentEngineForGMS(podSpec, 0, false, collector)
 	require.NoError(t, collector.apply(podSpec))

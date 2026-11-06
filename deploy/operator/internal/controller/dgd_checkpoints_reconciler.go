@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"slices"
 	"strings"
 
 	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
@@ -351,7 +350,6 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 			targetContainerName,
 			checkpointID,
 			gmsSpec,
-			dynamoDeployment.Annotations,
 		); err != nil {
 			return nil, err
 		}
@@ -745,7 +743,6 @@ func prepareCheckpointGMSPodTemplate(
 	targetContainerName string,
 	checkpointID string,
 	gmsSpec *nvidiacomv1alpha1.GPUMemoryServiceSpec,
-	annotations map[string]string,
 ) error {
 	switch gmsSpec.Mode {
 	case "", nvidiacomv1alpha1.GMSModeIntraPod:
@@ -765,34 +762,12 @@ func prepareCheckpointGMSPodTemplate(
 		}
 	}
 	dra.ApplyPodClaim(&podTemplate.Spec, checkpointGMSResourceClaimTemplateName(checkpointID))
-	var baseEnvironment map[string][]corev1.EnvVar
-	if compatibility.OrderedEnvironmentVariables.Enabled(annotations) {
-		baseEnvironment = make(map[string][]corev1.EnvVar)
-		for _, container := range podTemplate.Spec.Containers {
-			baseEnvironment[container.Name] = slices.Clone(container.Env)
-		}
-	}
-	bindings := checkpoint.EnsureIntraPodGPUMemoryService(
+	checkpoint.EnsureIntraPodGPUMemoryService(
 		&podTemplate.Spec,
 		[]*corev1.Container{targetContainer},
 		gmsSpec.ExtraClientContainers,
 		true,
 	)
-	if baseEnvironment != nil {
-		for i := range podTemplate.Spec.Containers {
-			container := &podTemplate.Spec.Containers[i]
-			if values, exists := bindings[container.Name]; exists {
-				env, err := semanticenv.Compose(
-					semanticenv.Layer{Source: "snapshot.containers[name=" + container.Name + "].env", Env: baseEnvironment[container.Name]},
-					semanticenv.Layer{Source: "operator.gpuMemoryService", Env: values},
-				)
-				if err != nil {
-					return err
-				}
-				container.Env = env
-			}
-		}
-	}
 	return nil
 }
 
@@ -996,6 +971,10 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 	if config := dynamo.GetCheckpoint(component); config != nil && config.Job != nil && config.Job.PodTemplate != nil {
 		jobEnvironment = make(map[string]semanticenv.Layer)
 		for _, container := range config.Job.PodTemplate.Spec.Containers {
+			// Other regular containers are discarded, then job-only sidecars are added fresh.
+			if container.Name != targetContainerName {
+				continue
+			}
 			jobEnvironment[container.Name] = semanticenv.Layer{
 				Source: "experimental.checkpoint.job.podTemplate.spec.containers[name=" + container.Name + "].env",
 				Env:    container.Env,
@@ -1005,7 +984,7 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 
 	// Use the normal DGD path so graph-level defaults such as spec.env,
 	// annotations, labels, and pod-template metadata are applied consistently.
-	podSpec, err := dynamo.GeneratePodSpecForComponent(
+	podSpec, environment, err := dynamo.GeneratePodSpecForComponentStaged(
 		componentForJob,
 		backendFramework,
 		r.dockerSecretRetriever,
@@ -1087,7 +1066,17 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 
 			podTemplate.Spec.Volumes = mergeNamedSlice(podTemplate.Spec.Volumes, volumes, func(v corev1.Volume) string { return v.Name })
 			podTemplate.Spec.InitContainers = mergeNamedSlice(podTemplate.Spec.InitContainers, initContainers, func(c corev1.Container) string { return c.Name })
+			if environment != nil {
+				// An init-container override replaces the entire container, not only env.
+				for _, container := range initContainers {
+					environment[container.Name] = []semanticenv.Layer{{Source: "experimental.checkpoint.job.podTemplate.spec.initContainers[name=" + container.Name + "].env", Env: container.Env}}
+				}
+			}
 			for _, override := range containers {
+				// Job-only sidecars do not inherit discarded serving containers' sources.
+				if environment != nil && override.Name != targetContainerName {
+					environment[override.Name] = []semanticenv.Layer{{Source: "experimental.checkpoint.job.podTemplate.spec.containers[name=" + override.Name + "].env", Env: override.DeepCopy().Env}}
+				}
 				if override.Name == "" {
 					podTemplate.Spec.Containers = append(podTemplate.Spec.Containers, override)
 					continue
@@ -1110,7 +1099,7 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 					return corev1.PodTemplateSpec{}, fmt.Errorf("failed to merge SnapshotJob container %q: %w", override.Name, err)
 				}
 				if compatibility.OrderedEnvironmentVariables.Enabled(dynamoDeployment.Annotations) {
-					// The renderer already composed this override with the original source layers.
+					// The staged environment already retains this override as a separate layer.
 					existing.Env = baseEnv
 				} else {
 					existing.Env = dynamo.MergeEnvsForOrigin(dynamoDeployment.Annotations, baseEnv, user.Env)
@@ -1150,7 +1139,24 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 		if err != nil {
 			return corev1.PodTemplateSpec{}, err
 		}
-		dynamo.PrepareSnapshotFailoverCapture(targetContainer)
+		omitted := dynamo.PrepareSnapshotFailoverCapture(targetContainer)
+		environment.Omit(targetContainerName, omitted...)
+	}
+
+	// All surviving sources are now known; record logical GMS bindings before
+	// hashing, while physical sidecar and claim setup remains checkpoint-ID dependent.
+	environment.Capture(&podTemplate.Spec)
+	if service := dynamo.GetGPUMemoryService(component); service != nil && (service.Mode == "" || service.Mode == nvidiacomv1beta1.GMSModeIntraPod) {
+		clients := []string{targetContainerName}
+		if config := dynamo.GetCheckpoint(component); config != nil && config.Job != nil {
+			clients = append(clients, config.Job.GMSClientContainers...)
+		}
+		for _, name := range clients {
+			environment.Bind(name, "operator.gpuMemoryService", gms.ClientEnvironment(true))
+		}
+	}
+	if err := environment.Apply(&podTemplate.Spec); err != nil {
+		return corev1.PodTemplateSpec{}, err
 	}
 	return podTemplate, nil
 }

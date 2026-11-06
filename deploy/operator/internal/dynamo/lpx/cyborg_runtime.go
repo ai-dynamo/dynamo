@@ -10,6 +10,7 @@ import (
 	"math"
 	"path/filepath"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -32,7 +33,7 @@ func (w *Workload) ValidateCyborgReplicas(replicas int32) error {
 }
 
 // applyCyborgManifestPath projects an authoritative manifest location into one Cyborg container.
-func applyCyborgManifestPath(container *corev1.Container, projection *ModelProjection, modelStoragePath string) error {
+func applyCyborgManifestPath(container *corev1.Container, projection *ModelProjection, modelStoragePath string, environment semanticenv.ContainerLayers) error {
 	buildRoot, err := buildRuntimePath(projection.configuredBuild.path, projection.runtimeBuildRef, modelStoragePath)
 	if err != nil {
 		return fmt.Errorf("resolve GBuild manifest path: %w", err)
@@ -55,6 +56,7 @@ func applyCyborgManifestPath(container *corev1.Container, projection *ModelProje
 		}
 	}
 	container.Env = env
+	environment.Bind(container.Name, "operator.lpx.manifest", env[:1])
 	return nil
 }
 

@@ -11,13 +11,12 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestDCDEnvironmentLayerConversion(t *testing.T) {
 	t.Log("Keep general defaults distinct from the specific container environment")
 	hub := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Name: "worker",
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			Env: []corev1.EnvVar{{Name: "BASE", Value: "/models"}, {Name: "MODEL", Value: "$(BASE)/qwen"}},
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -38,7 +37,7 @@ func TestDCDEnvironmentLayerConversion(t *testing.T) {
 
 	t.Log("A live alpha edit wins without flattening or restoring a stale environment")
 	spoke.Spec.Env = []corev1.EnvVar{{Name: "BASE", ValueFrom: &corev1.EnvVarSource{
-		ConfigMapKeyRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "paths"}, Key: "base"},
+		ConfigMapKeyRef: &corev1.ConfigMapKeySelector{Name: "paths", Key: "base"},
 	}}}
 	require.NoError(t, spoke.ConvertTo(roundTrip))
 	require.Equal(t, spoke.Spec.Env, roundTrip.Spec.Env)

@@ -154,10 +154,10 @@ func TestNativeSidecarCompilationCacheBackendDetection(t *testing.T) {
 }
 
 func TestNativeSidecarEnvironmentByOrigin(t *testing.T) {
-	const currentOrigin = "1.7.0"
+	const currentOrigin = "1.8.0"
 	const legacyOrigin = "1.6.0"
 
-	for _, origin := range []string{currentOrigin, legacyOrigin, "1.5.0", ""} {
+	for _, origin := range []string{currentOrigin, "1.7.0", legacyOrigin, "1.5.0", ""} {
 		t.Run("origin="+origin, func(t *testing.T) {
 			t.Log("Configure graph, engine, runtime, and frontend dependencies with duplicate overrides")
 			graphEnv := []corev1.EnvVar{{Name: "Z_GRAPH", Value: "graph"}, {Name: "A_GRAPH", Value: "$(Z_GRAPH)"}}
@@ -220,7 +220,7 @@ func TestNativeSidecarEnvironmentByOrigin(t *testing.T) {
 			require.Len(t, children, 1)
 			pods := []*corev1.PodSpec{pod}
 			for _, child := range children {
-				childPod, err := GenerateBasePodSpec(&child.Spec.DynamoComponentDeploymentSharedSpec, BackendFrameworkVLLM, nil, dgd.Name, dgd.Namespace, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0), child.Spec.Env...)
+				childPod, err := GenerateBasePodSpec(&child.Spec.DynamoComponentDeploymentSharedSpec, BackendFrameworkVLLM, nil, dgd.Name, dgd.Namespace, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0), GenerateBasePodSpecOptions{GeneralEnvironment: child.Spec.Env})
 				require.NoError(t, err)
 				pods = append(pods, childPod)
 			}
@@ -485,9 +485,9 @@ func (r *nativeSidecarSecretsRetriever) GetSecrets(namespace, image string) ([]s
 }
 
 func TestCombinedWorkerCompilationCacheEnvironmentOrder(t *testing.T) {
-	const currentOrigin = "1.7.0"
+	const currentOrigin = "1.8.0"
 
-	for _, origin := range []string{currentOrigin, "1.6.0", "1.5.0", ""} {
+	for _, origin := range []string{currentOrigin, "1.7.0", "1.6.0", "1.5.0", ""} {
 		t.Run("origin="+origin, func(t *testing.T) {
 			t.Log("Configure a combined worker that references and overrides the cache default")
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{

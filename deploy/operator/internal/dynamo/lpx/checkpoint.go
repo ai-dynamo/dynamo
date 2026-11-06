@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -102,7 +103,7 @@ func checkpointSnapshotPath(checkpoint *Checkpoint, modelStoragePath string) str
 	return filepath.Join(modelStoragePath, repository, "snapshots", checkpoint.Revision)
 }
 
-func applyCyborgWeightsPath(container *corev1.Container, projection *ModelProjection, modelStoragePath string) {
+func applyCyborgWeightsPath(container *corev1.Container, projection *ModelProjection, modelStoragePath string, environment semanticenv.ContainerLayers) {
 	if projection.checkpoint == nil {
 		return
 	}
@@ -119,4 +120,5 @@ func applyCyborgWeightsPath(container *corev1.Container, projection *ModelProjec
 		}
 	}
 	container.Env = env
+	environment.Bind(container.Name, "operator.lpx.weights", env[:1])
 }
