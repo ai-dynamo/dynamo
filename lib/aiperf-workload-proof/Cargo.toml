@@ -15,6 +15,9 @@ edition = "2024"
 publish = false
 license = "Apache-2.0"
 
+[features]
+calibrated-proof = ["aisimulate-core/embed-python"]
+
 [dev-dependencies]
 dynamo-mocker = { path = "../mocker", features = ["replay-bench"] }
 aisim-aiperf-workload-runner = { path = "../../../../../aisimulate/.worktrees/aiperf-owned-runner-proof/crates/tests/aiperf-workload-runner" }
