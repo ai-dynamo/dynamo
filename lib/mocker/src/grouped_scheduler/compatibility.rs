@@ -74,6 +74,7 @@ impl CompatibilityState {
                 .replay_context
                 .and_then(|context| context.session_id().map(str::to_owned)),
             images: Vec::new(),
+            cache_salt: request.cache_salt,
             kv_hint: None,
         })
     }
