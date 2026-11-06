@@ -642,3 +642,55 @@ async def test_native_generate_passes_boundary_stop_ids_to_the_engine():
 
     with pytest.raises(_Reached):
         await anext(handler.generate(_native_stop_request(sampling_params), _context()))
+
+
+@pytest.mark.asyncio
+async def test_diffusion_rejects_out_of_vocab_stop_id_before_the_engine():
+    engine = SimpleNamespace(async_generate=AsyncMock(side_effect=_Reached))
+    handler = _diffusion_handler(engine)
+
+    with pytest.raises(HttpError, match=r"stop_token_ids\[1\]") as error:
+        await anext(
+            handler.generate(_stop_token_request([0, 1_000_000_000]), _context())
+        )
+
+    assert error.value.code == 400
+    engine.async_generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prefill_rejects_out_of_vocab_stop_id_before_the_engine():
+    engine = SimpleNamespace(async_generate=AsyncMock(side_effect=_Reached))
+    handler = _prefill_handler(engine)
+
+    with pytest.raises(HttpError, match=r"stop_token_ids\[1\]") as error:
+        await anext(
+            handler.generate(_stop_token_request([0, 1_000_000_000]), _context())
+        )
+
+    assert error.value.code == 400
+    engine.async_generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prefill_native_generate_rejects_out_of_vocab_stop_id_before_the_engine(
+    monkeypatch,
+):
+    # Disaggregated native requests carry one sampling_params object; a list
+    # is rejected earlier by validate_disagg_parallel_sampling.
+    def native_generate_stream(engine, request):
+        raise _Reached
+
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.llm.prefill_handler.native_generate_stream",
+        native_generate_stream,
+    )
+    handler = _prefill_handler(SimpleNamespace())
+    sampling_params = {"min_new_tokens": 1, "stop_token_ids": [0, 1_000_000_000]}
+
+    with pytest.raises(
+        HttpError, match=r"sampling_params\.stop_token_ids\[1\]"
+    ) as error:
+        await anext(handler.generate(_native_stop_request(sampling_params), _context()))
+
+    assert error.value.code == 400

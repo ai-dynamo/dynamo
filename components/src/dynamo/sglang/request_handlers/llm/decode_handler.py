@@ -449,6 +449,46 @@ def _openai_stop_sampling_params(request: Dict[str, Any]) -> Dict[str, Any]:
     return {}
 
 
+def _validate_stop_token_ids(
+    handler: BaseWorkerHandler, request: Dict[str, Any]
+) -> None:
+    """Reject client stop token IDs outside the model vocabulary.
+
+    SGLang does not range-check stop_token_ids, and its min_new_tokens
+    penalizer scatters them into a vocab-sized CUDA tensor on every extend
+    batch, prefill included, so one out-of-vocabulary ID kills the scheduler
+    (sgl-project/sglang#44535). Decode, diffusion and prefill workers all call
+    this before their engine call. Hidden stop IDs come from the model card,
+    not the client, and are not checked.
+    """
+    native_payload = native_generate_payload(request)
+    if native_payload is not None:
+        sampling_params = native_payload.get("sampling_params")
+        if isinstance(sampling_params, list):
+            batch = [
+                (f"sampling_params[{index}].stop_token_ids", params)
+                for index, params in enumerate(sampling_params)
+            ]
+        else:
+            batch = [("sampling_params.stop_token_ids", sampling_params)]
+        for label, params in batch:
+            if isinstance(params, dict) and params.get("stop_token_ids"):
+                handler._validate_token_ids(params["stop_token_ids"], label=label)
+        return
+
+    if handler.use_sglang_tokenizer:
+        # Check what _openai_stop_sampling_params forwards: an integer
+        # `stop` list, or the integer entries of `stop_token_ids`.
+        stop_token_ids = _openai_stop_sampling_params(request).get("stop_token_ids")
+        label = "stop" if stop_token_ids is request.get("stop") else "stop_token_ids"
+    else:
+        stop_conditions = request.get("stop_conditions") or {}
+        stop_token_ids = stop_conditions.get("stop_token_ids")
+        label = "stop_token_ids"
+    if stop_token_ids:
+        handler._validate_token_ids(stop_token_ids, label=label)
+
+
 def _extract_sglang_stop_reason(
     finish_reason: Dict[str, Any] | None,
     user_stop_token_ids: set[int] | None = None,
@@ -585,44 +625,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         super().cleanup()
         self.engine.shutdown()
         logging.info("Engine shutdown")
-
-    def _validate_stop_token_ids(self, request: Dict[str, Any]) -> None:
-        """Reject client stop token IDs outside the model vocabulary.
-
-        SGLang does not range-check stop_token_ids, and its min_new_tokens
-        penalizer scatters them into a vocab-sized CUDA tensor, so one
-        out-of-vocabulary ID kills the scheduler (sgl-project/sglang#44535).
-        Hidden stop IDs come from the model card, not the client, and are not
-        checked.
-        """
-        native_payload = native_generate_payload(request)
-        if native_payload is not None:
-            sampling_params = native_payload.get("sampling_params")
-            if isinstance(sampling_params, list):
-                batch = [
-                    (f"sampling_params[{index}].stop_token_ids", params)
-                    for index, params in enumerate(sampling_params)
-                ]
-            else:
-                batch = [("sampling_params.stop_token_ids", sampling_params)]
-            for label, params in batch:
-                if isinstance(params, dict) and params.get("stop_token_ids"):
-                    self._validate_token_ids(params["stop_token_ids"], label=label)
-            return
-
-        if self.use_sglang_tokenizer:
-            # Check what _openai_stop_sampling_params forwards: an integer
-            # `stop` list, or the integer entries of `stop_token_ids`.
-            stop_token_ids = _openai_stop_sampling_params(request).get("stop_token_ids")
-            label = (
-                "stop" if stop_token_ids is request.get("stop") else "stop_token_ids"
-            )
-        else:
-            stop_conditions = request.get("stop_conditions") or {}
-            stop_token_ids = stop_conditions.get("stop_token_ids")
-            label = "stop_token_ids"
-        if stop_token_ids:
-            self._validate_token_ids(stop_token_ids, label=label)
 
     def _build_sampling_params(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Build sampling params from request format.
@@ -789,7 +791,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         _raise_if_conditional_disagg_bypass(request)
         sglang_request_id = new_sglang_request_id()
         input_param = self._get_input_param(request)
-        self._validate_stop_token_ids(request)
+        _validate_stop_token_ids(self, request)
         priority = (request.get("routing") or {}).get("priority")
         native_payload = native_generate_payload(request)
         native_session_request_id = None
