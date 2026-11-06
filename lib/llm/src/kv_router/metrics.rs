@@ -643,8 +643,11 @@ impl WorkerLoadMetrics {
         }
     }
 
-    #[cfg(test)]
-    fn register(&self, registry: &prometheus::Registry) -> Result<(), prometheus::Error> {
+    /// Register these per-worker load gauges with `registry`.
+    ///
+    /// The frontend HTTP service and the Gateway EPP both call this so a scrape
+    /// of either endpoint serves the same `dynamo_frontend_worker_*` series.
+    pub fn register(&self, registry: &prometheus::Registry) -> Result<(), prometheus::Error> {
         registry.register(Box::new(self.active_decode_blocks.clone()))?;
         registry.register(Box::new(self.active_prefill_tokens.clone()))?;
         registry.register(Box::new(self.active_requests.clone()))?;
@@ -691,6 +694,16 @@ impl WorkerLoadMetrics {
 }
 
 pub static WORKER_LOAD_METRICS: LazyLock<WorkerLoadMetrics> = LazyLock::new(WorkerLoadMetrics::new);
+
+/// Register the per-worker load gauges with `registry`.
+///
+/// The gauges are process-wide, so when the worker monitor removes a departed
+/// worker's series it disappears from every registry that holds them.
+pub fn register_worker_load_metrics(
+    registry: &prometheus::Registry,
+) -> Result<(), prometheus::Error> {
+    WORKER_LOAD_METRICS.register(registry)
+}
 
 // ---------------------------------------------------------------------------
 // Router queue and admission metrics
