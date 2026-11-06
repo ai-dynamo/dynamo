@@ -9580,7 +9580,9 @@ spec:
       name: v1beta2
       schema:
         openAPIV3Schema:
-          description: DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
+          description: |-
+            DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment searches.
+            Experimental. Available without a feature gate; this API may change incompatibly in future releases.
           properties:
             apiVersion:
               description: |-

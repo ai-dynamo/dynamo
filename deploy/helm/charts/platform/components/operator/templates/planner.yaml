@@ -57,7 +57,7 @@ rules:
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["list"]
-{{- if and .Values.dgdrV1Beta2.enabled .Values.dgdrV1Beta2.plannerLiveRetune }}
+{{- if .Values.dgdrV1Beta2.plannerLiveRetune }}
 # EXPERIMENTAL live retune (planner retune.executor: dgdr): sweep through DGDR
 # v1beta2 Requests, read their Runs and list their Candidates, and hold the
 # leadership and state Leases (read, create, replace and delete; never patch).
@@ -129,7 +129,7 @@ rules:
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["list"]
-{{- if and .Values.dgdrV1Beta2.enabled .Values.dgdrV1Beta2.plannerLiveRetune }}
+{{- if .Values.dgdrV1Beta2.plannerLiveRetune }}
 # EXPERIMENTAL live retune (planner retune.executor: dgdr): sweep through DGDR
 # v1beta2 Requests, read their Runs and list their Candidates, and hold the
 # leadership and state Leases (read, create, replace and delete; never patch).
