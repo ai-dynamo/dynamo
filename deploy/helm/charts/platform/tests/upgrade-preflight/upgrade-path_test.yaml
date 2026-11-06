@@ -124,3 +124,16 @@ tests:
     documentSelector: {path: kind, value: Job}
     asserts:
       - matchRegex: {path: metadata.name, pattern: '^.{1,44}-check-upgrade-path$'}
+
+  # `helm upgrade --reuse-values` from a release that predates upgradePreflight drops the
+  # parent chart's defaults; the operator subchart's values must still supply them.
+  - it: renders with defaults when values predate upgradePreflight (helm upgrade --reuse-values)
+    set:
+      dynamo-operator.upgradePreflight: null
+    documentSelector: {path: kind, value: Job}
+    asserts:
+      - equal: {path: spec.activeDeadlineSeconds, value: 120}
+      - equal: {path: 'spec.template.spec.containers[0].image', value: docker.io/library/python:3.12-slim}
+      - equal: {path: 'spec.template.spec.containers[0].args[3]', value: "1.7.0"}
+      - equal: {path: 'spec.template.spec.containers[0].args[4]', value: ""}
+      - equal: {path: 'spec.template.spec.containers[0].args[5]', value: ""}
