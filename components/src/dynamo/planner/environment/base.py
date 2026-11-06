@@ -412,7 +412,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
         # Fallback WorkerInfo carries no capacity fields. Once worker metadata
         # supplies them, its endpoint identity also replaces the fallback guess,
         # and the FPM provider rebinds to it.
-        fields = _MDC_REFRESH_FIELDS
+        fields: tuple[str, ...] = _MDC_REFRESH_FIELDS
         if any(getattr(fresh, name) is not None for name in _MDC_REFRESH_FIELDS):
             fields += _MDC_IDENTITY_FIELDS
         for field_name in fields:
