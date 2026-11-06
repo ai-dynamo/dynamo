@@ -37,6 +37,7 @@ type GroupPresence = FxHashMap<u32, FxHashMap<u64, u8>>;
 const CHECKPOINT_SHARDS: usize = 256;
 const GENERATION_WORD_MASK: u64 = u64::MAX >> 6;
 const GENERATION_TIER_SHIFT: u32 = 62;
+const GENERATION_LEVEL_SHIFT: u32 = 60;
 
 type CheckpointShardMap = FxHashMap<u64, Arc<CompleteMembership>>;
 type CapturedCheckpointShards = [OnceCell<Arc<CheckpointShardMap>>; CHECKPOINT_SHARDS];
@@ -88,7 +89,7 @@ impl<'a> CheckpointMembershipView<'a> {
             .map(|index| self.owners[index].1)
     }
 
-    /// Sorted nonempty generation words for this tier. Disjoint generation sets
+    /// Sorted unique nonempty generation words for this tier. Disjoint generation sets
     /// rule out an eligible owner; an intersection still requires exact owner
     /// and captured-generation validation. The range is found only on demand.
     /// The returned slice-backed iterator supports O(1) cloning, front/back
@@ -96,24 +97,54 @@ impl<'a> CheckpointMembershipView<'a> {
     pub fn generation_words(
         &self,
     ) -> impl ExactSizeIterator<Item = (u64, u64)> + DoubleEndedIterator + Clone + '_ {
-        let tier_start = (self.tier_index as u64) << GENERATION_TIER_SHIFT;
+        self.words_at_level(0)
+    }
+
+    /// Sorted unique occupancy words for this tier's generation-word indices.
+    /// A bit names a nonempty generation word, so disjoint occupancy rules out
+    /// an eligible owner without comparing every sparse generation word.
+    /// The iterator has the same O(1) clone/indexing guarantees as `generation_words`.
+    pub fn generation_word_groups(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (u64, u64)> + DoubleEndedIterator + Clone + '_ {
+        self.words_at_level(1)
+    }
+
+    fn words_at_level(
+        &self,
+        level: u32,
+    ) -> impl ExactSizeIterator<Item = (u64, u64)> + DoubleEndedIterator + Clone + '_ {
+        let tier_start = ((self.tier_index as u64) << GENERATION_TIER_SHIFT)
+            | (u64::from(level) << GENERATION_LEVEL_SHIFT);
+        let word_mask = GENERATION_WORD_MASK >> (6 * level);
         let start = self
             .generation_words
             .partition_point(|&(key, _)| key < tier_start);
         let end = self
             .generation_words
-            .partition_point(|&(key, _)| key <= (tier_start | GENERATION_WORD_MASK));
+            .partition_point(|&(key, _)| key <= (tier_start | word_mask));
         self.generation_words[start..end]
             .iter()
-            .map(|&(key, mask)| (key & GENERATION_WORD_MASK, mask))
+            .map(move |&(key, mask)| (key & word_mask, mask))
     }
 
     /// Returns this tier's generation bits for one word, or zero if absent.
     pub fn generation_mask(&self, word: u64) -> u64 {
-        if word > GENERATION_WORD_MASK {
+        self.mask_at_level(word, 0)
+    }
+
+    /// Returns occupancy bits for one group of generation-word indices.
+    pub fn generation_word_group_mask(&self, group: u64) -> u64 {
+        self.mask_at_level(group, 1)
+    }
+
+    fn mask_at_level(&self, word: u64, level: u32) -> u64 {
+        if word > GENERATION_WORD_MASK >> (6 * level) {
             return 0;
         }
-        let key = ((self.tier_index as u64) << GENERATION_TIER_SHIFT) | word;
+        let key = ((self.tier_index as u64) << GENERATION_TIER_SHIFT)
+            | (u64::from(level) << GENERATION_LEVEL_SHIFT)
+            | word;
         self.generation_words
             .binary_search_by_key(&key, |&(key, _)| key)
             .ok()
@@ -127,7 +158,8 @@ struct CompleteMembership {
     owners: [Vec<(ResidencyOwner, u64)>; 4],
     revision: u64,
     // One sparse sidecar shared by all tiers. High two key bits encode tier;
-    // low 58 bits encode generation / 64. Positive matches remain owner-exact.
+    // bit 60 encodes fine words or their occupancy groups. Low 58/52 bits
+    // encode generation / 64 or / 4096. Positive matches remain owner-exact.
     generation_words: Vec<(u64, u64)>,
 }
 
@@ -171,24 +203,43 @@ impl CompleteMembership {
     ) {
         let key = ((tier_index as u64) << GENERATION_TIER_SHIFT) | (generation >> 6);
         let bit = 1_u64 << (generation & 63);
+        if let Some(occupied) = Self::update_sparse_word(words, key, bit, present) {
+            let group_key = ((tier_index as u64) << GENERATION_TIER_SHIFT)
+                | (1_u64 << GENERATION_LEVEL_SHIFT)
+                | (generation >> 12);
+            let _ =
+                Self::update_sparse_word(words, group_key, 1 << ((generation >> 6) & 63), occupied);
+        }
+    }
+
+    /// Returns a transition only when the entire sparse word appears/disappears.
+    fn update_sparse_word(
+        words: &mut Vec<(u64, u64)>,
+        key: u64,
+        bit: u64,
+        present: bool,
+    ) -> Option<bool> {
         match (words.binary_search_by_key(&key, |&(key, _)| key), present) {
             (Ok(index), true) => words[index].1 |= bit,
             (Err(index), true) => {
-                // The common one-word membership needs one payload slot, not
+                // One fine word and its occupancy group need two slots, not
                 // Vec's minimum four-element growth allocation.
                 if words.capacity() == 0 {
-                    words.reserve_exact(1);
+                    words.reserve_exact(2);
                 }
                 words.insert(index, (key, bit));
+                return Some(true);
             }
             (Ok(index), false) => {
                 words[index].1 &= !bit;
                 if words[index].1 == 0 {
                     words.remove(index);
+                    return Some(false);
                 }
             }
             (Err(_), false) => {}
         }
+        None
     }
 
     fn is_empty(&self) -> bool {
@@ -1197,6 +1248,7 @@ mod tests {
     }
 
     fn assert_generation_words_match_facts(membership: &CompleteMembership) {
+        let mut expected_rows = 0;
         for (tier, owners) in membership.owners.iter().enumerate() {
             let mut expected = std::collections::BTreeMap::<u64, u64>::new();
             for &(_, generation) in owners {
@@ -1204,8 +1256,19 @@ mod tests {
             }
             let indexed = CheckpointMembershipView::new(membership, tier);
             let expected = expected.into_iter().collect::<Vec<_>>();
+            let mut groups = std::collections::BTreeMap::<u64, u64>::new();
+            for &(word, _) in &expected {
+                *groups.entry(word >> 6).or_default() |= 1_u64 << (word & 63);
+            }
+            let groups = groups.into_iter().collect::<Vec<_>>();
+            expected_rows += expected.len() + groups.len();
             assert_eq!(indexed.generation_words().collect::<Vec<_>>(), expected);
             assert_eq!(indexed.generation_words().len(), expected.len());
+            assert_eq!(indexed.generation_word_groups().collect::<Vec<_>>(), groups);
+            for &(group, bits) in &groups {
+                assert_eq!(indexed.generation_word_group_mask(group), bits);
+            }
+            assert_eq!(indexed.generation_word_group_mask(u64::MAX), 0);
             for &(word, mask) in &expected {
                 assert_ne!(mask, 0);
                 assert_eq!(indexed.generation_mask(word), mask);
@@ -1218,6 +1281,13 @@ mod tests {
                 assert_eq!(indexed.generation_mask(word), mask);
             }
         }
+        assert_eq!(membership.generation_words.len(), expected_rows);
+        assert!(
+            membership
+                .generation_words
+                .windows(2)
+                .all(|pair| pair[0].0 < pair[1].0)
+        );
     }
 
     #[test]
@@ -1315,7 +1385,21 @@ mod tests {
 
     #[test]
     fn incremental_generation_words_match_exact_facts_through_mixed_updates() {
-        let generations = [0, 1, 2, 63, 64, 65, 127, 128, u64::MAX - 63, u64::MAX];
+        let generations = [
+            0,
+            1,
+            2,
+            63,
+            64,
+            65,
+            127,
+            128,
+            4095,
+            4096,
+            4097,
+            u64::MAX - 63,
+            u64::MAX,
+        ];
         let mut random = 0xa175_c9e3_f62b_840d_u64;
         let mut membership = CompleteMembership::default();
         for step in 0..1024 {
