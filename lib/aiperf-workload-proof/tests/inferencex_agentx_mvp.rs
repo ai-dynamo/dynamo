@@ -1433,7 +1433,7 @@ fn calibrated_hosted_rejections_reconcile_every_request() -> Result<()> {
 /// finalizer before spending full-corpus resources. Deliberately use the
 /// existing branch fixture and builtin tokenizer, with no scenario designation.
 #[test]
-#[ignore = "requires AISIM_SYSTEMS_ROOT; four-request calibrated artifact control, not full MVP acceptance"]
+#[ignore = "requires AISIM_SYSTEMS_ROOT and pinned MVP_TOKENIZER_ROOT/MVP_TOKENIZER_REVISION; four-request calibrated artifact control, not full MVP acceptance"]
 fn calibrated_hosted_artifacts_reconcile_every_request() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut run = aiperf_protocol::runner_v2::decode_run_request_v2(
@@ -1520,6 +1520,32 @@ fn calibrated_hosted_artifacts_reconcile_every_request() -> Result<()> {
     ensure!(
         summary["schema_version"] == json!(SUMMARY_SCHEMA),
         "summary artifact schema mismatch"
+    );
+    let (_, tokenizer) = full_mvp_run(directory.path())?;
+    write_raw_backend_artifact(
+        directory.path(),
+        &backend,
+        &typed,
+        &prefill,
+        &decode,
+        &tokenizer,
+        &executable_distribution_id()?,
+    )?;
+    let raw: Value =
+        serde_json::from_slice(&std::fs::read(directory.path().join(RAW_BACKEND_ARTIFACT))?)?;
+    ensure!(
+        raw["backend_report"] == serde_json::to_value(&backend)?,
+        "streaming backend artifact lost facts"
+    );
+    ensure!(
+        raw["typed_phase_report"] == serde_json::to_value(&typed.phased)?,
+        "streaming phase artifact lost facts"
+    );
+    ensure!(
+        raw["prefill"]["transfer"]["link"]["calibration_manifest_sha256"]
+            .as_str()
+            .is_some_and(|hash| hash.len() == 64),
+        "full artifact lost calibration provenance"
     );
     // A validator that only counts rows would miss this corruption.
     backend.per_request[0].terminal_time_ms += 1.0;
