@@ -31,7 +31,8 @@ use std::{
 
 use aiperf_clock_runtime::cancellation::RunCancellation;
 use aisimulate_core::engine::{
-    CanonicalTimingModel, EngineConfig, TimingModel, TimingModelConfig, TransferTimingMode,
+    CanonicalTimingModel, EngineConfig, EngineLaunchConfig, TimingModel, TimingModelConfig,
+    TransferTimingMode,
 };
 use aisimulate_core::replay::{
     ReplayCaptureOptions, ReplayDeterminism, ReplayEngineConfig, ReplayEngineFactory, ReplayReport,
@@ -57,6 +58,83 @@ use crate::run_fixture;
 
 pub(crate) const DEFAULT_MODEL: &str = "Qwen/Qwen3-8B";
 pub(crate) const SYSTEM: &str = "h100_sxm";
+pub(crate) const LONG_CONTEXT_MODEL: &str = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4";
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub(crate) enum HardwareSelection {
+    H100Sxm,
+    B200Sxm,
+}
+
+impl HardwareSelection {
+    pub(crate) fn system(self) -> &'static str {
+        match self {
+            Self::H100Sxm => SYSTEM,
+            Self::B200Sxm => "b200_sxm",
+        }
+    }
+
+    fn pins(self) -> (&'static str, &'static str, usize, u64) {
+        match self {
+            Self::H100Sxm => (
+                HARDWARE_YAML_SHA256,
+                CALIBRATION_MANIFEST_SHA256,
+                CALIBRATION_FILE_COUNT,
+                CALIBRATION_TOTAL_BYTES,
+            ),
+            // Frozen from the canonical AISim checkout's git-tracked assets;
+            // identical sorted relative-path manifest algorithm for both GPUs.
+            Self::B200Sxm => (
+                "2cf8081b7a78da88cc332d4fdaf4259ba7b47f48397f9c100bbf7206e5245cfd",
+                "73134c5fe1874b0deefe8242f4bbf4c6046fdeb661f269c594e4ebcc090c5add",
+                321,
+                37_311_596,
+            ),
+        }
+    }
+}
+
+/// Explicit arithmetic choice, independent of a checkpoint ID's suffix. This
+/// proof does not claim that BF16 timing measures NVFP4 checkpoint execution.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub(crate) enum ProofPrecision {
+    Bfloat16,
+    Fp8WeightsBfloat16AttentionKv,
+}
+
+impl ProofPrecision {
+    fn weight_dtype(self) -> &'static str {
+        self.quant_mode()
+    }
+
+    fn quant_mode(self) -> &'static str {
+        match self {
+            Self::Bfloat16 => "bfloat16",
+            Self::Fp8WeightsBfloat16AttentionKv => "fp8",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub(crate) enum PrefillMode {
+    Unchunked,
+    Chunked { max_num_batched_tokens: usize },
+}
+
+/// Complete serving identity shared by canonical timing, physical geometry,
+/// replay and router. PP1/attention-DP1 remain fixed proof assumptions.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RoleIdentity<'a> {
+    pub(crate) model: &'a str,
+    pub(crate) systems: &'a Path,
+    pub(crate) hardware: HardwareSelection,
+    pub(crate) precision: ProofPrecision,
+    pub(crate) role: ForwardPassWorkerType,
+    pub(crate) tensor_parallel_size: usize,
+    pub(crate) max_num_seqs: usize,
+    pub(crate) prefill: PrefillMode,
+}
+
 pub(crate) const BACKEND_VERSION: &str = "0.24.0";
 pub(crate) const IDENTITY_SEED: [u8; 32] = [7; 32];
 pub(crate) const PREFILL_WORKERS: usize = 2;
@@ -83,11 +161,10 @@ pub(crate) fn systems_root() -> Result<PathBuf> {
         "AISIM_SYSTEMS_ROOT must identify the pinned checked-in systems assets; no skip or synthetic fallback",
     )?;
     let root = PathBuf::from(root);
-    let hardware = root.join(format!("{SYSTEM}.yaml"));
     ensure!(
-        hardware.is_file(),
-        "H100 hardware metadata is required at {}",
-        hardware.display()
+        root.is_dir(),
+        "canonical systems root is required at {}",
+        root.display()
     );
     Ok(root)
 }
@@ -300,8 +377,12 @@ fn collect_manifest_files(
 /// path, as `sha256(file) + "  " + relative_path + "\n"` lines. Every regular
 /// file is included; symlinks and special files are rejected. The aggregate
 /// is compared with the literal frozen from the pinned AISimulate git object.
-fn calibration_inventory(systems: &Path) -> Result<(PathBuf, String, usize, u64)> {
-    let root = systems.join("data").join(SYSTEM);
+fn calibration_inventory(
+    systems: &Path,
+    hardware: HardwareSelection,
+) -> Result<(PathBuf, String, usize, u64)> {
+    let (_, expected_manifest, expected_count, expected_bytes) = hardware.pins();
+    let root = systems.join("data").join(hardware.system());
     let metadata = fs::symlink_metadata(&root)
         .with_context(|| format!("inspect calibration root {}", root.display()))?;
     ensure!(
@@ -327,17 +408,17 @@ fn calibration_inventory(systems: &Path) -> Result<(PathBuf, String, usize, u64)
     }
     let manifest_sha256 = format!("{:x}", aggregate.finalize());
     ensure!(
-        files.len() == CALIBRATION_FILE_COUNT
-            && total_bytes == CALIBRATION_TOTAL_BYTES
-            && manifest_sha256 == CALIBRATION_MANIFEST_SHA256,
+        files.len() == expected_count
+            && total_bytes == expected_bytes
+            && manifest_sha256 == expected_manifest,
         "whole calibration root {} changed: {} files/{} bytes/manifest {} vs pinned {}/{} bytes/{}",
         root.display(),
         files.len(),
         total_bytes,
         manifest_sha256,
-        CALIBRATION_FILE_COUNT,
-        CALIBRATION_TOTAL_BYTES,
-        CALIBRATION_MANIFEST_SHA256
+        expected_count,
+        expected_bytes,
+        expected_manifest
     );
     Ok((root, manifest_sha256, files.len(), total_bytes))
 }
@@ -391,11 +472,35 @@ fn canonical_model_config(model: &str, systems: &Path) -> Result<ModelConfigEvid
             "canonical Qwen3-8B model config changed: {sha256}"
         );
     }
+    if model == LONG_CONTEXT_MODEL {
+        ensure!(
+            sha256 == "3440a8570e178cfc8a44e0877d48d6bc959cceed89a8e3a9afa7fa45790dea4e",
+            "canonical Nemotron Lightning model config changed: {sha256}"
+        );
+    }
+    let recurrent_layers = value["layers_block_type"].as_array().map_or(0, |layers| {
+        layers
+            .iter()
+            .filter(|layer| matches!(layer.as_str(), Some("mamba" | "linear_attention")))
+            .count()
+    });
+    let recurrent_metadata = json!({
+        "model_type": value["model_type"],
+        "layers_block_type": value["layers_block_type"],
+        "mamba_num_heads": value["mamba_num_heads"],
+        "mamba_head_dim": value["mamba_head_dim"],
+        "mamba_ssm_cache_dtype": value["mamba_ssm_cache_dtype"],
+        "ssm_state_size": value["ssm_state_size"],
+        "conv_kernel": value["conv_kernel"],
+        "n_groups": value["n_groups"],
+    });
     Ok(ModelConfigEvidence {
         path: config,
         sha256,
         bytes: bytes.len(),
         max_model_len,
+        recurrent_layers,
+        recurrent_metadata,
     })
 }
 
@@ -406,15 +511,19 @@ pub(crate) struct ModelConfigEvidence {
     pub(crate) sha256: String,
     pub(crate) bytes: usize,
     pub(crate) max_model_len: usize,
+    pub(crate) recurrent_layers: usize,
+    pub(crate) recurrent_metadata: Value,
 }
 
-fn hardware_link(systems: &Path) -> Result<HardwareLink> {
-    let yaml = systems.join(format!("{SYSTEM}.yaml"));
+fn hardware_link(systems: &Path, hardware: HardwareSelection) -> Result<HardwareLink> {
+    let system = hardware.system();
+    let (expected_yaml, _, _, _) = hardware.pins();
+    let yaml = systems.join(format!("{system}.yaml"));
     let bytes = read_bounded(&yaml, MAX_HARDWARE_YAML_BYTES)?;
     let yaml_sha256 = format!("{:x}", Sha256::digest(&bytes));
     ensure!(
-        yaml_sha256 == HARDWARE_YAML_SHA256,
-        "{} content SHA-256 {yaml_sha256} does not match the pinned {HARDWARE_YAML_SHA256}",
+        yaml_sha256 == expected_yaml,
+        "{} content SHA-256 {yaml_sha256} does not match the pinned {expected_yaml}",
         yaml.display()
     );
     let text =
@@ -426,7 +535,7 @@ fn hardware_link(systems: &Path) -> Result<HardwareLink> {
         calibration_manifest_sha256,
         calibration_file_count,
         calibration_total_bytes,
-    ) = calibration_inventory(systems)?;
+    ) = calibration_inventory(systems, hardware)?;
     let node = parsed.node;
     ensure!(
         node.num_gpus_per_node > 0,
@@ -445,7 +554,7 @@ fn hardware_link(systems: &Path) -> Result<HardwareLink> {
     );
     Ok(HardwareLink {
         topology: LINK_TOPOLOGY,
-        system: SYSTEM,
+        system,
         yaml,
         yaml_sha256,
         calibration_root,
@@ -470,30 +579,35 @@ fn memory_role(role: ForwardPassWorkerType) -> &'static str {
 /// A fully resolved, immutable per-role canonical FPM config. Callers must not
 /// mutate it after construction: the timing model, native memory geometry and
 /// router launch config all derive from this exact identity.
-fn role_config(
-    model: &str,
-    systems: &Path,
-    role: ForwardPassWorkerType,
-) -> ForwardPassPerfModelConfig {
-    let mut config = ForwardPassPerfModelConfig::new(model, SYSTEM, BackendKind::Vllm, role);
+fn role_config(identity: RoleIdentity<'_>) -> Result<ForwardPassPerfModelConfig> {
+    let mut config = ForwardPassPerfModelConfig::new(
+        identity.model,
+        identity.hardware.system(),
+        BackendKind::Vllm,
+        identity.role,
+    );
     config.backend_version = Some(BACKEND_VERSION.into());
-    config.tp = 1;
+    config.tp = u32::try_from(identity.tensor_parallel_size)?;
     config.pp = 1;
     config.attention_dp = 1;
-    config.gemm_quant_mode = Some("bfloat16".into());
+    config.gemm_quant_mode = Some(identity.precision.quant_mode().into());
+    config.moe_quant_mode = Some(identity.precision.quant_mode().into());
     config.fmha_quant_mode = Some("bfloat16".into());
     config.kvcache_quant_mode = Some("bfloat16".into());
     config.estimation_mode = EstimationMode::OpLevel;
     config.fallback_policy = ForwardPassFallbackPolicy::Deny;
     config.database_mode = DatabaseMode::Silicon;
     config.strict_provenance = true;
-    config.systems_paths = vec![systems.to_path_buf()];
+    config.systems_paths = vec![identity.systems.to_path_buf()];
     config.estimator_config.correction.enabled = false;
-    config
+    Ok(config)
 }
 
 pub(crate) struct RoleSetup {
     pub(crate) timing: Arc<CanonicalTimingModel>,
+    pub(crate) tensor_parallel_size: usize,
+    /// Recurrent-state modeling limitations are separate from attention KV.
+    pub(crate) state_geometry: Value,
     pub(crate) rank: EngineConfig,
     pub(crate) router: MockerConfig,
     pub(crate) diagnostics: Value,
@@ -531,32 +645,57 @@ impl AisCallback for CanonicalAisCallback {
     }
 }
 
-pub(crate) fn canonical_role(
-    model: &str,
-    systems: &Path,
-    role: ForwardPassWorkerType,
-    max_num_seqs: usize,
-) -> Result<RoleSetup> {
+pub(crate) fn canonical_role(identity: RoleIdentity<'_>) -> Result<RoleSetup> {
+    let RoleIdentity {
+        model,
+        systems,
+        hardware,
+        precision,
+        role,
+        tensor_parallel_size,
+        max_num_seqs,
+        prefill,
+    } = identity;
+    ensure!(
+        max_num_seqs > 0 && tensor_parallel_size > 0,
+        "role sequence and TP limits must be positive"
+    );
     let model_config = canonical_model_config(model, systems)?;
-    // This serving configuration deliberately uses unchunked prefill. Every
-    // model-admissible prompt must fit one complete pass; a smaller permanent
-    // batch budget would leave the FIFO head waiting with no physical producer.
-    let max_num_batched_tokens = MAX_NUM_BATCHED_TOKENS.max(model_config.max_model_len);
-    let config = role_config(model, systems, role);
+    // An unchunked FIFO head needs a complete model-admissible pass. Chunked
+    // serving instead sizes activations to its real per-pass budget, without
+    // changing the model's native context maximum.
+    let (max_num_batched_tokens, enable_chunked_prefill) = match prefill {
+        PrefillMode::Unchunked => (
+            MAX_NUM_BATCHED_TOKENS.max(model_config.max_model_len),
+            false,
+        ),
+        PrefillMode::Chunked {
+            max_num_batched_tokens,
+        } => {
+            ensure!(
+                max_num_batched_tokens > 0,
+                "chunked prefill budget must be positive"
+            );
+            (max_num_batched_tokens, true)
+        }
+    };
+    let system = hardware.system();
+    let config = role_config(identity)?;
     let memory = KvCacheEstimateRequest {
         engine: serde_json::from_value(json!({
             "schema_version": aisimulate_core::perfmodel::ENGINE_CONFIG_SCHEMA_VERSION,
             "model_name": model,
-            "system_name": SYSTEM,
+            "system_name": system,
             "systems_path": systems,
             "backend": BackendKind::Vllm,
             "backend_version": BACKEND_VERSION,
             "forward_model": "op_level",
-            "tp_size": 1,
+            "tp_size": tensor_parallel_size,
             "pp_size": 1,
             "attention_dp_size": 1,
             "kv_block_size": BLOCK_SIZE,
-            "weight_dtype": DataType::Bfloat16,
+            "weight_dtype": precision.weight_dtype(),
+            "moe_dtype": precision.weight_dtype(),
             "activation_dtype": DataType::Bfloat16,
             "kv_cache_dtype": DataType::Bfloat16,
             "strict_provenance": true,
@@ -567,7 +706,7 @@ pub(crate) fn canonical_role(
         }))
         .context("complete matching native memory engine identity")?,
         max_num_tokens: u32::try_from(max_num_batched_tokens)
-            .context("model-admissible unchunked batch budget must fit u32")?,
+            .context("serving per-pass token budget must fit u32")?,
         max_batch_size: u32::try_from(max_num_seqs)?,
         kv_cache_memory_fraction: KvCacheMemoryFraction::OfTotal(0.9),
         gpu_memory_capacity_bytes_override: None,
@@ -582,7 +721,7 @@ pub(crate) fn canonical_role(
     let (timing, memory) =
         CanonicalTimingModel::new_with_geometry(config, memory).with_context(|| {
             format!(
-                "calibrated {role:?} timing/memory for {model} on {SYSTEM} \
+                "calibrated {role:?} timing/memory for {model} on {system} \
                  vllm {BACKEND_VERSION}; checked-in op-level silicon tables must \
                  serve this identity and deny fallback"
             )
@@ -619,7 +758,11 @@ pub(crate) fn canonical_role(
     // The handoff carries exactly the native per-token KV geometry the rank
     // already uses for capacity, over one explicit hardware link. Nothing here
     // is a fixed transfer constant.
-    let link = hardware_link(systems)?;
+    let link = hardware_link(systems, hardware)?;
+    ensure!(
+        tensor_parallel_size <= link.num_gpus_per_node as usize,
+        "proof TP size exceeds the selected hardware node"
+    );
     let bytes_per_token = usize::try_from(memory.kv_size_per_token_bytes)
         .context("native KV geometry exceeds usize")?;
     ensure!(
@@ -673,9 +816,7 @@ pub(crate) fn canonical_role(
         // prices exactly this token count, never a partial cached prefix.
         kv_transfer_timing_mode: TransferTimingMode::FullPrompt,
         enable_prefix_caching: true,
-        // Keep the existing native-hosted disaggregated handoff path; chunked
-        // prefill is not part of this preparatory control.
-        enable_chunked_prefill: false,
+        enable_chunked_prefill,
         async_scheduling: Some(false),
         worker_type: match role {
             ForwardPassWorkerType::Prefill => aisimulate_core::engine::WorkerType::Prefill,
@@ -684,10 +825,25 @@ pub(crate) fn canonical_role(
         },
         ..Default::default()
     };
-    let router = canonical_router_config(&rank, &timing_config, timing.clone())?;
+    let router =
+        canonical_router_config(&rank, tensor_parallel_size, &timing_config, timing.clone())?;
 
+    let state_geometry = if model_config.recurrent_layers > 0 {
+        json!({
+            "required": true,
+            "supported": false,
+            "full_physical_gpu_modeling": false,
+            "recurrent_layers": model_config.recurrent_layers,
+            "metadata": model_config.recurrent_metadata,
+            "reason": "canonical estimate_state_cache supports Kimi K3/DeepSeek V4 only; native Nemotron token KV explicitly excludes fixed per-request Mamba state; no state capacity or transfer size is invented",
+        })
+    } else {
+        json!({"required": false, "supported": true, "reason": "pinned model config declares no recurrent layers"})
+    };
     Ok(RoleSetup {
         timing,
+        tensor_parallel_size,
+        state_geometry,
         rank,
         router,
         diagnostics,
@@ -707,11 +863,23 @@ pub(crate) fn canonical_role(
 /// the provider or the resulting slot is not what this proof requires.
 fn canonical_router_config(
     rank: &EngineConfig,
+    tensor_parallel_size: usize,
     timing_config: &Value,
     timing: Arc<CanonicalTimingModel>,
 ) -> Result<MockerConfig> {
-    let mut router = MockerConfig::from_value(json!({"engine": rank.clone()}))
+    let launch = EngineLaunchConfig {
+        engine: rank.clone(),
+        dp_size: 1,
+        tensor_parallel_size,
+        num_gpu_blocks_is_explicit: true,
+        ..Default::default()
+    };
+    let mut router = MockerConfig::from_value(json!({"engine": launch}))
         .context("canonical engine rank must be a valid Mocker launch config")?;
+    ensure!(
+        router.tensor_parallel_size == tensor_parallel_size,
+        "router must preserve canonical TP identity"
+    );
     ensure!(
         router.ais_perf_config() == Some(timing_config),
         "router MockerConfig must carry the same resolved canonical FPM config as the role engine"
@@ -747,7 +915,7 @@ fn native_run(frame: &str, model: &str) -> Result<aiperf_config::model::Benchmar
 pub(crate) fn role_descriptor(setup: &RoleSetup) -> ReplayRoleConfig {
     ReplayRoleConfig {
         dp_size: 1,
-        tensor_parallel_size: 1,
+        tensor_parallel_size: setup.tensor_parallel_size,
         prefill_context_parallel_size: 1,
         num_gpu_blocks_is_explicit: Some(true),
         rank: setup.rank.clone(),
@@ -757,6 +925,16 @@ pub(crate) fn role_descriptor(setup: &RoleSetup) -> ReplayRoleConfig {
 /// Disaggregated 2P2D spec with separate per-role geometry. Requests are
 /// supplied by the hosted participant, not by the serializable spec.
 pub(crate) fn spec(prefill: &RoleSetup, decode: &RoleSetup) -> Result<ReplaySpec> {
+    ensure!(
+        prefill.state_geometry["supported"] == true && decode.state_geometry["supported"] == true,
+        "full physical replay requires supported recurrent-state geometry; prefill={} decode={}",
+        prefill.state_geometry,
+        decode.state_geometry
+    );
+    ensure!(
+        prefill.tensor_parallel_size == decode.tensor_parallel_size,
+        "proof prefill/decode TP topology must match"
+    );
     ensure!(
         prefill.transfer.link == decode.transfer.link,
         "prefill and decode must share one hardware link assumption"
@@ -800,7 +978,7 @@ pub(crate) fn spec(prefill: &RoleSetup, decode: &RoleSetup) -> Result<ReplaySpec
         },
         "engine": ReplayEngineConfig {
             dp_size: 1,
-            tensor_parallel_size: 1,
+            tensor_parallel_size: prefill.tensor_parallel_size,
             prefill_context_parallel_size: 1,
             num_gpu_blocks_is_explicit: Some(true),
             rank: prefill.rank.clone(),
@@ -1035,19 +1213,22 @@ pub(crate) fn calibrated_control() -> Result<()> {
     ensure!(!model.trim().is_empty(), "AISIM_MODEL must not be empty");
     let systems = systems_root()?;
 
-    let prefill = canonical_role(
-        &model,
-        &systems,
-        ForwardPassWorkerType::Prefill,
-        MAX_NUM_SEQS,
-    )
-    .context("prefill canonical op-level timing and native geometry")?;
-    let decode = canonical_role(
-        &model,
-        &systems,
-        ForwardPassWorkerType::Decode,
-        MAX_NUM_SEQS,
-    )
+    let identity = RoleIdentity {
+        model: &model,
+        systems: &systems,
+        hardware: HardwareSelection::H100Sxm,
+        precision: ProofPrecision::Bfloat16,
+        role: ForwardPassWorkerType::Prefill,
+        tensor_parallel_size: 1,
+        max_num_seqs: MAX_NUM_SEQS,
+        prefill: PrefillMode::Unchunked,
+    };
+    let prefill = canonical_role(identity)
+        .context("prefill canonical op-level timing and native geometry")?;
+    let decode = canonical_role(RoleIdentity {
+        role: ForwardPassWorkerType::Decode,
+        ..identity
+    })
     .context("decode canonical op-level timing and native geometry")?;
     let (prefill_small, prefill_large, decode_small, decode_large) =
         assert_not_fixed(&prefill, &decode).context("fixed-vs-calibrated causal control")?;
