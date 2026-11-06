@@ -140,6 +140,18 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		}
 	}
 
+	// A retained generation written before its hash commit is what the workers run; record it once observed.
+	if renderedPodCliqueSet.powerCapPreserved && !pcsWasWritten && renderedPodCliqueSet.powerCapHash != "" &&
+		!currentWorkerHashes(req.DGD).contains(renderedPodCliqueSet.powerCapHash) {
+		transition := unsupportedWorkerHashTransition{next: workerGenerationHashes{v2: renderedPodCliqueSet.powerCapHash}, hashChanged: true}
+		if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, req.DGD, transition, true); err != nil {
+			return groveWorkloadResult{}, failWorkloadProgram(
+				reasonRollingUpdateFailed,
+				fmt.Errorf("project retained Grove worker hash: %w", err),
+			)
+		}
+	}
+
 	// Wait for cached PCS intent, Coherent generation acknowledgement, and completion.
 	scalingBlocked := pcsWasWritten || dynamo.GroveScalingBlocked(syncedPodCliqueSet)
 	scalingDeferred, scaleErr := r.scaler.Reconcile(ctx, req, checkpointInfos, scalingBlocked)

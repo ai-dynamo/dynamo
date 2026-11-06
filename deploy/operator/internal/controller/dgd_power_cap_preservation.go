@@ -5,16 +5,13 @@ package controller
 
 import (
 	"context"
-	"strings"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -72,8 +69,8 @@ func (r *componentWorkloadsReconciler) resolvePowerCapPreservation(ctx context.C
 // resolveWorkerPowerCapPreservation compares every worker's DCD intent with its live DCD.
 // A preserved DCD worker spec means the cap-only edit adds no change to the Deployment's desired template,
 // so the API-server-defaulted stored template is never compared.
-// It aligns each desired worker entry in place (checkpoint startup policy and retained cap) before comparing.
-// dgd and desired worker entries must be non-nil.
+// It aligns each desired worker entry in place (checkpoint startup policy, stored backendFramework and
+// retained cap) before comparing. dgd and desired worker entries must be non-nil.
 func (r *componentWorkloadsReconciler) resolveWorkerPowerCapPreservation(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, desired map[string]*v1beta1.DynamoComponentDeployment, checkpoints map[string]*checkpoint.CheckpointInfo, hash string) (*componentPowerCapPreservation, error) {
 	retained := &componentPowerCapPreservation{hash: hash, caps: map[string]string{}}
 	changed := false
@@ -106,6 +103,8 @@ func (r *componentWorkloadsReconciler) resolveWorkerPowerCapPreservation(ctx con
 				candidate.Spec.PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = old
 			}
 		}
+		// Ordinary reconciliation keeps the stored backendFramework, so it is not worker drift.
+		candidate.Spec.BackendFramework = live.Spec.BackendFramework
 		if !dynamo.WorkerSpecsEqual(candidate, live) {
 			return nil, nil
 		}
@@ -125,102 +124,14 @@ func (r *componentWorkloadsReconciler) resolveWorkerPowerCapPreservation(ctx con
 	if !changed {
 		return nil, nil
 	}
+
+	// Only caps may differ from the recorded generation, across every input the worker hash covers.
+	identity, err := dynamo.WorkerHashWithCaps(dgd, retained.caps)
+	if err != nil {
+		return nil, err
+	}
+	if identity != hash && identity != currentWorkerHashes(dgd).v2 {
+		return nil, nil
+	}
 	return retained, nil
-}
-
-// defaultPowerCapTemplate normalizes Kubernetes' built-in Pod defaults for Grove clique comparisons.
-func defaultPowerCapTemplate(template *corev1.PodTemplateSpec) {
-	spec := &template.Spec
-	if spec.RestartPolicy == "" {
-		spec.RestartPolicy = corev1.RestartPolicyAlways
-	}
-	if spec.DNSPolicy == "" {
-		spec.DNSPolicy = corev1.DNSClusterFirst
-	}
-	if spec.SchedulerName == "" {
-		spec.SchedulerName = corev1.DefaultSchedulerName
-	}
-	if spec.TerminationGracePeriodSeconds == nil {
-		spec.TerminationGracePeriodSeconds = new(int64(30))
-	}
-	if spec.SecurityContext == nil {
-		spec.SecurityContext = &corev1.PodSecurityContext{}
-	}
-	for i := range spec.Volumes {
-		volume := &spec.Volumes[i]
-		if volume.Secret != nil && volume.Secret.DefaultMode == nil {
-			volume.Secret.DefaultMode = new(int32(0644))
-		}
-		if volume.ConfigMap != nil && volume.ConfigMap.DefaultMode == nil {
-			volume.ConfigMap.DefaultMode = new(int32(0644))
-		}
-		if volume.DownwardAPI != nil && volume.DownwardAPI.DefaultMode == nil {
-			volume.DownwardAPI.DefaultMode = new(int32(0644))
-		}
-		if volume.Projected != nil && volume.Projected.DefaultMode == nil {
-			volume.Projected.DefaultMode = new(int32(0644))
-		}
-	}
-	for i := range spec.Containers {
-		defaultPowerCapContainer(&spec.Containers[i])
-	}
-	for i := range spec.InitContainers {
-		defaultPowerCapContainer(&spec.InitContainers[i])
-	}
-}
-
-func defaultPowerCapContainer(container *corev1.Container) {
-	for i := range container.Env {
-		value := container.Env[i].ValueFrom
-		if value == nil {
-			continue
-		}
-		if value.FieldRef != nil && value.FieldRef.APIVersion == "" {
-			value.FieldRef.APIVersion = "v1"
-		}
-		if value.ResourceFieldRef != nil && value.ResourceFieldRef.Divisor.IsZero() {
-			value.ResourceFieldRef.Divisor = resource.MustParse("1")
-		}
-	}
-	for i := range container.Ports {
-		if container.Ports[i].Protocol == "" {
-			container.Ports[i].Protocol = corev1.ProtocolTCP
-		}
-	}
-	if container.TerminationMessagePath == "" {
-		container.TerminationMessagePath = corev1.TerminationMessagePathDefault
-	}
-	if container.TerminationMessagePolicy == "" {
-		container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
-	}
-	if container.ImagePullPolicy == "" {
-		container.ImagePullPolicy = corev1.PullIfNotPresent
-		image, _, _ := strings.Cut(container.Image, "@")
-		if !strings.Contains(container.Image, "@") && (!strings.Contains(image[strings.LastIndex(image, "/")+1:], ":") || strings.HasSuffix(image, ":latest")) {
-			container.ImagePullPolicy = corev1.PullAlways
-		}
-	}
-	for _, probe := range []*corev1.Probe{container.LivenessProbe, container.ReadinessProbe, container.StartupProbe} {
-		if probe == nil {
-			continue
-		}
-		if probe.TimeoutSeconds == 0 {
-			probe.TimeoutSeconds = 1
-		}
-		if probe.PeriodSeconds == 0 {
-			probe.PeriodSeconds = 10
-		}
-		if probe.SuccessThreshold == 0 {
-			probe.SuccessThreshold = 1
-		}
-		if probe.FailureThreshold == 0 {
-			probe.FailureThreshold = 3
-		}
-		if probe.HTTPGet != nil && probe.HTTPGet.Scheme == "" {
-			probe.HTTPGet.Scheme = corev1.URISchemeHTTP
-		}
-		if probe.HTTPGet != nil && probe.HTTPGet.Path == "" {
-			probe.HTTPGet.Path = "/"
-		}
-	}
 }

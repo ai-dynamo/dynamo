@@ -472,3 +472,53 @@ func TestPowerCapComponentPreservationBoundaries(t *testing.T) {
 		})
 	}
 }
+
+func TestPowerCapComponentPreservationComparesHashedInputs(t *testing.T) {
+	for _, scenario := range []string{"cap-only", "legacy-backend-framework", "subtype-change"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Log("Store one active component worker generation at 300 W with its owned Deployment")
+			dgd := powerCapTestDGD(t, "component")
+			hash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+			require.NoError(t, err)
+			dgd.Annotations[consts.AnnotationCurrentWorkerHashV2] = hash
+			generated, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, dynamo.RollingUpdateContext{NewWorkerHash: hash})
+			require.NoError(t, err)
+			dcd := generated["worker"]
+			dcd.UID = "dcd-uid"
+			dcd.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}
+			if scenario == "legacy-backend-framework" {
+				t.Log("An older operator stored a different backendFramework, which ordinary reconciliation keeps")
+				dcd.Spec.BackendFramework = "sglang"
+			}
+			deployment := &appsv1.Deployment{Name: dcd.Name, Namespace: dcd.Namespace, UID: "deployment-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dcd, v1beta1.DynamoComponentDeploymentGVK)}}
+			c := powerCapTestClient(powerCapTestScheme(t)).WithObjects(dgd, dcd, deployment).Build()
+			workloads := newComponentWorkloadsReconciler(c, nil, newDGDWorkerRolloutReconciler(c, nil))
+
+			t.Log("Edit the cap to 350 W, together with a v1alpha1 subtype in the subtype-change scenario")
+			edited := dgd
+			if scenario == "subtype-change" {
+				edited = createTestDGD("power", map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"worker": {ComponentType: consts.ComponentTypeWorker, SubComponentType: "custom-prefill", Envs: []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "v1"}}},
+				})
+				edited.UID, edited.Generation = dgd.UID, dgd.Generation
+				maps.Copy(edited.Annotations, dgd.Annotations)
+				edited.Spec.Components[0].PodTemplate.Annotations = map[string]string{consts.KubeAnnotationGPUPowerLimit: "300"}
+				changed, err := dynamo.ComputeDGDWorkersSpecHash(edited)
+				require.NoError(t, err)
+				require.NotEqual(t, hash, changed, "the subtype must be a hashed worker input")
+			}
+			edited.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
+			retained, err := workloads.resolvePowerCapPreservation(t.Context(), edited, nil)
+			require.NoError(t, err)
+
+			t.Log("Only a change confined to caps keeps the recorded generation")
+			if scenario == "subtype-change" {
+				require.Nil(t, retained)
+				return
+			}
+			require.NotNil(t, retained)
+			require.Equal(t, hash, retained.hash)
+			require.Equal(t, "300", retained.caps["worker"])
+		})
+	}
+}

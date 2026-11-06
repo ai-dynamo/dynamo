@@ -17,7 +17,9 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -164,9 +166,11 @@ func TestPowerCapGroveRoleTemplateWorkerHasNoCap(t *testing.T) {
 	roleWorker := *dgd.Spec.Components[0].DeepCopy()
 	roleWorker.ComponentName, roleWorker.PodTemplate = "role-worker", nil
 	dgd.Spec.Components = append(dgd.Spec.Components, roleWorker)
-	dgd.Annotations[consts.AnnotationCurrentWorkerHashV2] = "active"
-	workerLabels := map[string]string{consts.KubeLabelDynamoComponent: "worker", consts.KubeLabelDynamoComponentType: "worker", consts.KubeLabelDynamoWorkerHash: "active"}
-	roleWorkerLabels := map[string]string{consts.KubeLabelDynamoComponent: "role-worker", consts.KubeLabelDynamoComponentType: "worker", consts.KubeLabelDynamoWorkerHash: "active"}
+	active, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+	dgd.Annotations[consts.AnnotationCurrentWorkerHashV2] = active
+	workerLabels := map[string]string{consts.KubeLabelDynamoComponent: "worker", consts.KubeLabelDynamoComponentType: "worker", consts.KubeLabelDynamoWorkerHash: active}
+	roleWorkerLabels := map[string]string{consts.KubeLabelDynamoComponent: "role-worker", consts.KubeLabelDynamoComponentType: "worker", consts.KubeLabelDynamoWorkerHash: active}
 	pcs := &grovev1alpha1.PodCliqueSet{Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
 		{Name: "worker", Labels: workerLabels, Annotations: map[string]string{consts.KubeAnnotationGPUPowerLimit: "300"}},
 		{Name: "role-worker", Labels: roleWorkerLabels},
@@ -174,13 +178,84 @@ func TestPowerCapGroveRoleTemplateWorkerHasNoCap(t *testing.T) {
 	dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
 
 	t.Log("The template-less worker has no explicit cap and does not block the cap-only exception")
-	retained, applicable := retainedGrovePowerCaps(groveReconcileRequest{DGD: dgd}, pcs)
+	retained, applicable, err := retainedGrovePowerCaps(groveReconcileRequest{DGD: dgd}, pcs)
+	require.NoError(t, err)
 	require.True(t, applicable)
-	require.Equal(t, "active", retained.Hash)
+	require.Equal(t, active, retained.Hash)
 	require.Equal(t, map[string]string{"worker": "300"}, retained.PowerCaps)
 
 	t.Log("A cap on that worker's clique without a source cap is still drift")
 	pcs.Spec.Template.Cliques[1].Annotations = map[string]string{consts.KubeAnnotationGPUPowerLimit: "300"}
-	_, applicable = retainedGrovePowerCaps(groveReconcileRequest{DGD: dgd}, pcs)
+	_, applicable, err = retainedGrovePowerCaps(groveReconcileRequest{DGD: dgd}, pcs)
+	require.NoError(t, err)
 	require.False(t, applicable)
+}
+
+func TestPowerCapGroveRetainsGenerationAwaitingHashCommit(t *testing.T) {
+	t.Log("Let the production Grove program commit worker hash A at 300 W")
+	dgd := powerCapTestDGD(t, "grove")
+	scheme := powerCapTestScheme(t)
+	require.NoError(t, rbacv1.AddToScheme(scheme))
+	c := powerCapTestClient(scheme).WithRESTMapper(groveScaleRESTMapper()).WithInterceptorFuncs(groveScaleInterceptor(interceptor.Funcs{}, nil)).WithObjects(dgd).WithStatusSubresource(dgd).Build()
+	config := &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}, Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendEtcd}}
+	root := &DynamoGraphDeploymentReconciler{Client: c, Config: config, RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}, DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}}
+	for range 2 {
+		// The first pass writes the PCS; the next observes it and commits the worker hash.
+		_, err := root.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+		require.NoError(t, err)
+	}
+	hashA := dgd.Annotations[consts.AnnotationCurrentWorkerHashV2]
+	require.NotEmpty(t, hashA)
+
+	t.Log("An image update writes generation B; its hash commit waits for the next pass")
+	dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Image = "different:v2"
+	_, err := root.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+	require.NoError(t, err)
+	sets := &grovev1alpha1.PodCliqueSetList{}
+	require.NoError(t, c.List(t.Context(), sets))
+	require.Len(t, sets.Items, 1)
+	pcs := &sets.Items[0]
+	hashB := podCliqueSetCliqueForComponent(pcs, "worker").Labels[consts.KubeLabelDynamoWorkerHash]
+	require.NotEqual(t, hashA, hashB)
+	require.Equal(t, hashA, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
+
+	t.Log("A cap-only edit before that commit retains B at its 300 W creation cap instead of writing a third generation")
+	dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
+	for range 2 {
+		_, err = root.newGroveProgram().Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+		require.NoError(t, err)
+		require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
+		require.Equal(t, hashB, podCliqueSetCliqueForComponent(pcs, "worker").Labels[consts.KubeLabelDynamoWorkerHash])
+		require.Equal(t, "300", podCliqueSetCliqueForComponent(pcs, "worker").Annotations[consts.KubeAnnotationGPUPowerLimit])
+	}
+
+	t.Log("The DGD records the generation its workers run")
+	require.Equal(t, hashB, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
+}
+
+func TestGrovePowerCapWorkerSpecNormalizesOnlyGroveDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		set       func(*corev1.PodSpec)
+		wantEqual bool
+	}{
+		{name: "restartPolicy defaulted by Grove", set: func(spec *corev1.PodSpec) { spec.RestartPolicy = corev1.RestartPolicyAlways }, wantEqual: true},
+		{name: "terminationGracePeriodSeconds defaulted by Grove", set: func(spec *corev1.PodSpec) { spec.TerminationGracePeriodSeconds = new(int64(30)) }, wantEqual: true},
+		{name: "explicit dnsPolicy", set: func(spec *corev1.PodSpec) { spec.DNSPolicy = corev1.DNSClusterFirst }},
+		{name: "explicit schedulerName", set: func(spec *corev1.PodSpec) { spec.SchedulerName = corev1.DefaultSchedulerName }},
+		{name: "explicit imagePullPolicy", set: func(spec *corev1.PodSpec) { spec.Containers[0].ImagePullPolicy = corev1.PullIfNotPresent }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Compare a worker clique with a copy that sets one Pod field explicitly")
+			labels := map[string]string{consts.KubeLabelDynamoComponent: "worker", consts.KubeLabelDynamoComponentType: "worker"}
+			source := &grovev1alpha1.PodCliqueSet{Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
+				Name: "worker", Labels: labels, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1, PodSpec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "example/engine:1.6.0"}}}},
+			}}}}}
+			edited := source.DeepCopy()
+			tc.set(&edited.Spec.Template.Cliques[0].Spec.PodSpec)
+
+			t.Log("Only fields Grove's webhook defaults compare equal; other explicit fields stay visible as drift")
+			require.Equal(t, tc.wantEqual, apiequality.Semantic.DeepEqual(grovePowerCapWorkerSpec(source), grovePowerCapWorkerSpec(edited)))
+		})
+	}
 }

@@ -75,6 +75,20 @@ func DesiredWorkerPowerCaps(dgd *v1beta1.DynamoGraphDeployment) map[string]strin
 	return caps
 }
 
+// WorkerHashWithCaps hashes the DGD's workers as if each named worker still carried the given cap.
+// It equals a worker generation's hash exactly when the DGD differs from that generation only in caps,
+// across every input the hash covers, including DCD metadata and runtime versions. dgd must be non-nil.
+func WorkerHashWithCaps(dgd *v1beta1.DynamoGraphDeployment, caps map[string]string) (string, error) {
+	retained := dgd.DeepCopy()
+	for i := range retained.Spec.Components {
+		component := &retained.Spec.Components[i]
+		if cap, ok := caps[component.ComponentName]; ok && component.PodTemplate != nil {
+			component.PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = cap
+		}
+	}
+	return ComputeDGDWorkersSpecHash(retained)
+}
+
 // WorkerSpecsEqual compares the non-scaling spec and resolved runtime versions used by worker hashing.
 // Callers align identity and the explicitly retained cap before comparison; neither input is mutated.
 func WorkerSpecsEqual(a, b *v1beta1.DynamoComponentDeployment) bool {

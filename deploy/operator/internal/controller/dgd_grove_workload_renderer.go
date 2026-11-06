@@ -59,6 +59,8 @@ type grovePodCliqueSetRender struct {
 	gpuShapes         map[string]dynamo.GPUShape
 	runtimeStatuses   map[string]dynamo.ComponentRuntimeStatus
 	powerCapPreserved bool
+	// powerCapHash is the retained worker generation, which may still await its DGD hash commit.
+	powerCapHash string
 }
 
 func newGroveWorkloadRenderer(
@@ -119,9 +121,12 @@ func (r *groveWorkloadRenderer) Render(
 	)
 
 	// Prove cap-only divergence against the observed PCS before choosing its generation identity.
-	preserved := false
+	preserved, preservedHash := false, ""
 	if len(dynamo.DesiredWorkerPowerCaps(req.DGD)) > 0 && !powerCapRolloutBlocked(req.DGD.Status.RollingUpdate) && existingPodCliqueSet != nil && metav1.IsControlledBy(existingPodCliqueSet, req.DGD) {
-		retained, applicable := retainedGrovePowerCaps(req, existingPodCliqueSet)
+		retained, applicable, err := retainedGrovePowerCaps(req, existingPodCliqueSet)
+		if err != nil {
+			return nil, err
+		}
 		if applicable {
 			candidate, renderErr := dynamo.GenerateGrovePodCliqueSet(ctx, req.DGD, req.IsDelegated, r.config, r.runtimeConfig, r.reader, r.dockerSecretRetriever, restartState, existingPodCliqueSet, false, checkpointInfos, &retained)
 			if renderErr != nil {
@@ -139,7 +144,7 @@ func (r *groveWorkloadRenderer) Render(
 				return nil, err
 			}
 			if apiequality.Semantic.DeepEqual(grovePowerCapWorkerSpec(comparisonCandidate), grovePowerCapWorkerSpec(existingPodCliqueSet)) {
-				desired, preserved = candidate, true
+				desired, preserved, preservedHash = candidate, true, retained.Hash
 			}
 		}
 	}
@@ -154,6 +159,7 @@ func (r *groveWorkloadRenderer) Render(
 		gpuShapes:         gpuShapes,
 		runtimeStatuses:   dynamo.ResolveGroveComponentRuntimeStatuses(req.DGD, desired),
 		powerCapPreserved: preserved,
+		powerCapHash:      preservedHash,
 	}, nil
 }
 
@@ -208,17 +214,24 @@ func grovePowerCapWorkerSpec(pcs *grovev1alpha1.PodCliqueSet) grovev1alpha1.PodC
 			clique.Spec.ScaleConfig.MinReplicas = new(clique.Spec.Replicas)
 		}
 		clique.RollingUpdate = nil
-		template := &corev1.PodTemplateSpec{Spec: clique.Spec.PodSpec}
-		defaultPowerCapTemplate(template)
-		clique.Spec.PodSpec = template.Spec
+
+		// A PodCliqueSet gets no core Pod defaulting; only Grove's webhook sets these Pod fields.
+		if clique.Spec.PodSpec.RestartPolicy == "" {
+			clique.Spec.PodSpec.RestartPolicy = corev1.RestartPolicyAlways
+		}
+		if clique.Spec.PodSpec.TerminationGracePeriodSeconds == nil {
+			clique.Spec.PodSpec.TerminationGracePeriodSeconds = new(int64(30))
+		}
 		cliques = append(cliques, clique)
 	}
 	spec.Template.Cliques = cliques
 	return spec
 }
 
-// retainedGrovePowerCaps requires one coherent active worker identity and at least one cap difference.
-func retainedGrovePowerCaps(req groveReconcileRequest, pcs *grovev1alpha1.PodCliqueSet) (dynamo.GroveWorkerIdentity, bool) {
+// retainedGrovePowerCaps requires one coherent worker identity and at least one cap difference. The identity
+// is the DGD's own spec at the retained caps: a recorded generation, or one written and awaiting its hash
+// commit. req.DGD and pcs must be non-nil.
+func retainedGrovePowerCaps(req groveReconcileRequest, pcs *grovev1alpha1.PodCliqueSet) (dynamo.GroveWorkerIdentity, bool, error) {
 	retained := dynamo.GroveWorkerIdentity{PowerCaps: map[string]string{}}
 	changed, found := false, false
 	for _, clique := range pcs.Spec.Template.Cliques {
@@ -228,7 +241,7 @@ func retainedGrovePowerCaps(req groveReconcileRequest, pcs *grovev1alpha1.PodCli
 		}
 		hash := clique.Labels[commonconsts.KubeLabelDynamoWorkerHash]
 		if found && hash != retained.Hash {
-			return retained, false
+			return retained, false, nil
 		}
 		retained.Hash, found = hash, true
 		for i := range req.DGD.Spec.Components {
@@ -244,22 +257,28 @@ func retainedGrovePowerCaps(req groveReconcileRequest, pcs *grovev1alpha1.PodCli
 			}
 			old, oldPresent := clique.Annotations[commonconsts.KubeAnnotationGPUPowerLimit]
 			if wantPresent != oldPresent {
-				return retained, false
+				return retained, false, nil
 			}
 			if oldPresent {
 				if previous, exists := retained.PowerCaps[component]; exists && previous != old {
-					return retained, false
+					return retained, false, nil
 				}
 				retained.PowerCaps[component] = old
 				changed = changed || old != want
 			}
 		}
 	}
-	current := currentWorkerHashes(req.DGD)
-	if retained.Hash != "" && !current.contains(retained.Hash) {
-		return retained, false
+	if !changed || !found || retained.Hash == "" {
+		return retained, changed && found, nil
 	}
-	return retained, changed && found
+
+	// A migrated generation keeps its v1 label while the recorded v2 hash describes the same spec.
+	identity, err := dynamo.WorkerHashWithCaps(req.DGD, retained.PowerCaps)
+	if err != nil {
+		return retained, false, err
+	}
+	current := currentWorkerHashes(req.DGD)
+	return retained, retained.Hash == identity || (current.contains(retained.Hash) && identity == current.v2), nil
 }
 
 func shouldRenderGroveWorkerHashSuffix(
