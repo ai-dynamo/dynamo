@@ -385,12 +385,16 @@ integration: envtest setup-clustertest ## Run envtests and clustertests, creatin
 		$(MAKE) clustertest
 
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter & yamllint
+lint: golangci-lint lint-api ## Run golangci-lint linter, the Kubernetes API linter & yamllint
 	$(GOLANGCI_LINT) run
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 	$(GOLANGCI_LINT) run --fix
+
+.PHONY: lint-api
+lint-api: kube-api-linter ## Check the v1beta2 API types against Kubernetes API conventions
+	$(KUBE_API_LINTER) run -c .golangci-kal.yml ./api/v1beta2/...
 
 ##@ Build
 
@@ -579,6 +583,8 @@ YQ_VERSION ?= v4.45.4
 CONTROLLER_TOOLS_VERSION ?= v0.17.3
 ENVTEST_VERSION ?= release-0.19
 GOLANGCI_LINT_VERSION ?= v2.15.0
+# kube-api-linter publishes no tags; this pseudo-version is its 2026-10-12 main.
+KUBE_API_LINTER_VERSION ?= v0.0.0-20261012124120-79b557aa8c8d
 
 ## Tool Binaries
 KUBECTL ?= $(LOCALBIN)/kubectl-$(KUBECTL_VERSION)
@@ -588,6 +594,7 @@ YQ ?= $(LOCALBIN)/yq-$(YQ_VERSION)
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen-$(CONTROLLER_TOOLS_VERSION)
 ENVTEST ?= $(LOCALBIN)/setup-envtest-$(ENVTEST_VERSION)
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
+KUBE_API_LINTER = $(LOCALBIN)/golangci-lint-kube-api-linter-$(KUBE_API_LINTER_VERSION)
 
 ## ---------- Binary download targets ----------
 
@@ -650,6 +657,11 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,${GOLANGCI_LINT_VERSION})
+
+.PHONY: kube-api-linter
+kube-api-linter: $(KUBE_API_LINTER) ## Build the golangci-lint that includes kube-api-linter locally if necessary.
+$(KUBE_API_LINTER): $(LOCALBIN)
+	$(call go-install-tool,$(KUBE_API_LINTER),sigs.k8s.io/kube-api-linter/cmd/golangci-lint-kube-api-linter,${KUBE_API_LINTER_VERSION})
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary (ideally with version)

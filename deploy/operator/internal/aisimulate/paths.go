@@ -37,6 +37,7 @@ var (
 	optimizerMaxTrials         = []string{"optimizer", "max_trials"}
 
 	trafficPath                  = []string{"traffic"}
+	trafficSource                = []string{"traffic", "source"}
 	trafficSourceType            = []string{"traffic", "source", "type"}
 	trafficSourceInputTokens     = []string{"traffic", "source", "input_tokens"}
 	trafficSourceOutputTokens    = []string{"traffic", "source", "output_tokens"}
@@ -44,6 +45,7 @@ var (
 	trafficLoadConcurrency       = []string{"traffic", "load", "concurrency"}
 	trafficLoadRequestsPerSecond = []string{"traffic", "load", "requests_per_second"}
 	trafficLoadFraction          = []string{"traffic", "load", "fraction"}
+	trafficLoadSpeedup           = []string{"traffic", "load", "speedup"}
 	trafficStopRequests          = []string{"traffic", "stop", "requests"}
 )
 

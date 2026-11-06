@@ -24,7 +24,12 @@ from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
-from dynamo.common.configuration.utils import add_argument, nullable_float, nullable_int
+from dynamo.common.configuration.utils import (
+    ArgEnv,
+    add_argument,
+    nullable_float,
+    nullable_int,
+)
 
 if TYPE_CHECKING:
     from dynamo.llm import RouterConfig
@@ -67,7 +72,14 @@ _ADMISSION_CONTROL_FLAG_REMOVAL_WARNING = (
 )
 
 
-class _IgnoredAdmissionControlAction(argparse.Action):
+class _IgnoredAction(argparse.Action):
+    """Store nothing, so the namespace never carries the value."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        return None
+
+
+class _IgnoredAdmissionControlAction(_IgnoredAction):
     """Warn and store nothing, so the namespace never carries the value."""
 
     def __call__(self, parser, namespace, values, option_string=None):
@@ -169,6 +181,8 @@ class RouterArgGroup(ArgGroup):
             consumes. ``--router-min-initial-workers`` gates frontend startup
             and is not carried on the model card, so a worker registering it
             would ship a flag that does nothing.
+        env: Another process's env (see ``ArgEnv``); the removed and
+            deprecated flags then parse without their notices.
     """
 
     def __init__(
@@ -176,15 +190,18 @@ class RouterArgGroup(ArgGroup):
         *,
         default_router_mode: Optional[str],
         include_frontend_only: bool,
+        env: Optional[ArgEnv] = None,
     ) -> None:
         self.default_router_mode = default_router_mode
         self.include_frontend_only = include_frontend_only
+        self.env = env
 
     def add_arguments(self, parser) -> None:
-        if "DYN_ADMISSION_CONTROL" in os.environ:
-            logger.warning(_ADMISSION_CONTROL_REMOVAL_WARNING)
-        if "DYN_ENFORCE_DISAGG" in os.environ:
-            logger.warning(_ENFORCE_DISAGG_DEPRECATION, "DYN_ENFORCE_DISAGG")
+        if self.env is None:
+            if "DYN_ADMISSION_CONTROL" in os.environ:
+                logger.warning(_ADMISSION_CONTROL_REMOVAL_WARNING)
+            if "DYN_ENFORCE_DISAGG" in os.environ:
+                logger.warning(_ENFORCE_DISAGG_DEPRECATION, "DYN_ENFORCE_DISAGG")
 
         g = parser.add_argument_group("Router Options")
 
@@ -199,7 +216,11 @@ class RouterArgGroup(ArgGroup):
             g.add_argument(
                 "--admission-control",
                 choices=("token-capacity", "none"),
-                action=_IgnoredAdmissionControlAction,
+                action=(
+                    _IgnoredAdmissionControlAction
+                    if self.env is None
+                    else _IgnoredAction
+                ),
                 default=argparse.SUPPRESS,
                 help=argparse.SUPPRESS,
             )
@@ -214,7 +235,12 @@ class RouterArgGroup(ArgGroup):
                     "readiness are determined from registered worker types."
                 ),
                 arg_type=None,
-                action=_DeprecatedEnforceDisaggAction,
+                action=(
+                    _DeprecatedEnforceDisaggAction
+                    if self.env is None
+                    else argparse.BooleanOptionalAction
+                ),
+                env=self.env,
             )
             add_argument(
                 g,
@@ -229,6 +255,7 @@ class RouterArgGroup(ArgGroup):
                 ),
                 arg_type=int,
                 dest="min_initial_workers",
+                env=self.env,
             )
 
         add_argument(
@@ -251,6 +278,7 @@ class RouterArgGroup(ArgGroup):
                 "least-loaded",
                 "device-aware-weighted",
             ],
+            env=self.env,
         )
         add_argument(
             g,
@@ -265,6 +293,7 @@ class RouterArgGroup(ArgGroup):
             ),
             arg_type=int,
             dest="session_affinity_ttl_secs",
+            env=self.env,
         )
         if self.include_frontend_only:
             # Sizes this frontend's affinity table, so it is not advertised on a
@@ -300,6 +329,7 @@ class RouterArgGroup(ArgGroup):
             ),
             choices=("hard", "soft"),
             dest="session_affinity_mode",
+            env=self.env,
         )
         add_argument(
             g,
@@ -312,6 +342,7 @@ class RouterArgGroup(ArgGroup):
                 "Unset by default; pass 'None' to disable it."
             ),
             arg_type=nullable_float,
+            env=self.env,
         )
         add_argument(
             g,
@@ -327,6 +358,7 @@ class RouterArgGroup(ArgGroup):
                 "with --active-prefill-tokens-threshold-frac."
             ),
             arg_type=nullable_int,
+            env=self.env,
         )
         add_argument(
             g,
@@ -340,6 +372,7 @@ class RouterArgGroup(ArgGroup):
                 "OR logic with --active-prefill-tokens-threshold."
             ),
             arg_type=nullable_float,
+            env=self.env,
         )
 
 
@@ -368,16 +401,19 @@ class WorkerRouterConfig(RouterConfigBase, KvRouterConfigBase):
     session_affinity_max_entries: int = DEFAULT_SESSION_AFFINITY_MAX_ENTRIES
 
 
-def add_worker_router_arguments(parser: argparse.ArgumentParser) -> None:
+def add_worker_router_arguments(
+    parser: argparse.ArgumentParser, *, env: Optional[ArgEnv] = None
+) -> None:
     """Register the worker-side router flags.
 
     ``--router-mode`` defaults to ``None``: a worker that omits it advertises
-    nothing and inherits the frontend's configuration.
+    nothing and inherits the frontend's configuration. ``env`` is another
+    process's env (see ``ArgEnv``).
     """
-    RouterArgGroup(default_router_mode=None, include_frontend_only=False).add_arguments(
-        parser
-    )
-    KvRouterArgGroup().add_arguments(parser)
+    RouterArgGroup(
+        default_router_mode=None, include_frontend_only=False, env=env
+    ).add_arguments(parser)
+    KvRouterArgGroup(env=env).add_arguments(parser)
 
 
 def parse_worker_router_config(

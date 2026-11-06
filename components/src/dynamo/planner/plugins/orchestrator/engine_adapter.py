@@ -62,8 +62,9 @@ adapter so callers (mode subclasses) have a single entry point.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
-from dataclasses import replace
+from collections.abc import Callable, Iterable
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 from dynamo.common.forward_pass_metrics import encode as _encode_fpm_record
@@ -74,6 +75,7 @@ if TYPE_CHECKING:
     import grpc.aio
 
     from dynamo.planner.retune.controller import RetuneController
+    from dynamo.planner.retune.live.contracts import HarvestAllowed, LaunchGate
 
 from dynamo.planner.core.batch_policy import plan_batch_schedule
 from dynamo.planner.core.budget import (
@@ -136,6 +138,26 @@ from dynamo.planner.plugins.types import TrafficMetrics, WorkerState
 log = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class RetuneHooks:
+    """Live retune hooks a planner host hands every retune controller.
+
+    ``sweep_fn(request, *, cancel, abort)`` runs one sweep (the DGDR
+    executor); ``launch_gate`` and ``harvest_allowed`` are the live
+    supervisor's predicates (see ``retune.controller``); ``phase_s`` is the
+    epoch phase the window schedule is anchored at. Replay passes no hooks.
+    """
+
+    sweep_fn: Callable[..., Any]
+    launch_gate: LaunchGate
+    harvest_allowed: HarvestAllowed
+    phase_s: float = 0.0
+
+
+def _no_sweep() -> None:
+    """Queued behind the live sweeps by ``retune_sweeps_done``."""
+
+
 class OrchestratorEngineAdapter:
     """``EngineProtocol``-compatible wrapper around the builtin plugin chain.
 
@@ -155,6 +177,13 @@ class OrchestratorEngineAdapter:
     ``RetuneController`` built from ``retune_inputs``: ``initial_tick``
     anchors its window schedule, every ``tick`` runs it after the plugin
     pipeline, and ``shutdown`` closes it.
+
+    A live host also passes ``retune_hooks``. Live, missing
+    ``retune_inputs`` (the frontend's startup router config does not satisfy
+    the retune premises) or a controller that fails construction leaves the
+    adapter in a disabled state, retune configured but no controller,
+    instead of failing the planner; ``replace_retune`` later installs or
+    removes a controller without rebuilding the engine.
     """
 
     def __init__(
@@ -165,6 +194,7 @@ class OrchestratorEngineAdapter:
         observe_plugin: Optional[EnvironmentObserver] = None,
         clock: Optional[Clock] = None,
         retune_inputs: Optional[RetuneInputs] = None,
+        retune_hooks: Optional[RetuneHooks] = None,
     ) -> None:
         self._config = config
         self._capabilities = capabilities
@@ -335,15 +365,46 @@ class OrchestratorEngineAdapter:
         self._plugins_bootstrapped = False
         self._in_process_plugins_loaded = False
         self._register_builtin_plugins()
-        self._retune = self._build_retune_controller(retune_inputs)
+        self._retune_hooks = retune_hooks
+        self._retune: Optional[RetuneController] = None
+        # Live: the one sweep thread every controller generation submits to,
+        # so a rebuilt controller's sweep queues behind a dropped one and two
+        # generations never sweep at once.
+        self._retune_executor: Optional[ThreadPoolExecutor] = None
+        if retune_hooks is None or self._config.retune is None:
+            self._retune = self._build_retune_controller(retune_inputs)
+        elif retune_inputs is None:
+            log.warning(
+                "planner.retune is configured but its live premises do not "
+                "hold; retune stays disabled until they do"
+            )
+        else:
+            try:
+                self._retune = self._build_retune_controller(
+                    retune_inputs, generation=0
+                )
+            except ValueError as exc:
+                # A live planner never exits on a retune premise: the
+                # supervisor keeps running (to roll routers back) and may
+                # install a controller later through replace_retune.
+                log.error(
+                    "planner.retune controller construction failed; retune "
+                    "stays disabled: %s",
+                    exc,
+                )
 
     def _build_retune_controller(
-        self, retune_inputs: Optional[RetuneInputs]
+        self,
+        retune_inputs: Optional[RetuneInputs],
+        *,
+        generation: int = 0,
     ) -> Optional[RetuneController]:
         """Build the retune controller iff ``config.retune`` is set.
 
         The controller validates the retune setup in its constructor, so an
-        invalid one fails here, at engine construction.
+        invalid one fails here, at engine construction. With live hooks the
+        controller gets them, ``generation`` and the adapter's shared sweep
+        executor; without (replay) it is built exactly as before.
         """
         if self._config.retune is None:
             return None
@@ -358,13 +419,99 @@ class OrchestratorEngineAdapter:
         # this module.
         from dynamo.planner.retune.controller import RetuneController
 
+        hooks = self._retune_hooks
+        if hooks is None:
+            return RetuneController(
+                self._config,
+                retune_inputs,
+                self._capabilities,
+                self._clock,
+                self._scale_interval,
+            )
+        if self._retune_executor is None:
+            self._retune_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="planner-retune"
+            )
         return RetuneController(
             self._config,
             retune_inputs,
             self._capabilities,
             self._clock,
             self._scale_interval,
+            sweep_fn=hooks.sweep_fn,
+            launch_gate=hooks.launch_gate,
+            harvest_allowed=hooks.harvest_allowed,
+            generation=generation,
+            executor=self._retune_executor,
         )
+
+    @property
+    def retune_controller(self) -> Optional[RetuneController]:
+        """The installed retune controller; ``None`` without retune or when
+        a live retune is disabled."""
+
+        return self._retune
+
+    def replace_retune(
+        self,
+        retune_inputs: Optional[RetuneInputs],
+        *,
+        generation: int,
+        now_s: float,
+    ) -> None:
+        """Swap the live retune controller without rebuilding the engine.
+
+        The old controller's sweep is aborted (``drop_pending``) and the
+        controller closed. With ``retune_inputs`` a new controller of
+        ``generation`` is built with the same hooks and anchored at ``now_s``
+        and the hooks' phase; with ``None`` the adapter stays disabled. Every
+        generation submits to the adapter's one sweep thread, so the new
+        controller's first sweep queues behind the old one while that still
+        runs. A construction error is raised after the old controller is
+        gone, leaving the adapter disabled. Callers serialize this with
+        ticks (the planner's config lock).
+        """
+        hooks = self._retune_hooks
+        if self._config.retune is None or hooks is None:
+            raise RuntimeError("replace_retune requires a live retune configuration")
+        old = self._retune
+        self._retune = None
+        if old is not None:
+            try:
+                old.drop_pending()
+            except Exception:
+                log.exception("retune controller drop_pending failed")
+            try:
+                old.close()
+            except Exception:
+                log.exception("retune controller close failed")
+        if retune_inputs is None:
+            log.info(
+                "retune controller generation %d: disabled (premises do not hold)",
+                generation,
+            )
+            return
+        controller = self._build_retune_controller(retune_inputs, generation=generation)
+        if controller is None:
+            raise RuntimeError("replace_retune requires a live retune configuration")
+        controller.start(now_s, hooks.phase_s)
+        self._retune = controller
+        log.info("retune controller generation %d installed", generation)
+
+    def retune_sweeps_done(self) -> Optional[Future[None]]:
+        """A future done once every live sweep submitted so far returned.
+
+        The sweep thread runs one sweep at a time in submission order, so a
+        no-op queued behind them completes after the last one. ``None``
+        without live retune or once the engine is shut down.
+        """
+        executor = self._retune_executor
+        if executor is None:
+            return None
+        try:
+            return executor.submit(_no_sweep)
+        except RuntimeError:  # shut down
+            return None
 
     @property
     def plugins_bootstrapped(self) -> bool:
@@ -610,8 +757,12 @@ class OrchestratorEngineAdapter:
             if plugin.is_builtin and plugin.last_call_at == float("-inf"):
                 plugin.registered_at = self._last_tick_monotonic
         if self._retune is not None:
-            # Anchors the retune window schedule (s0) at the planner start.
-            self._retune.start(start_s)
+            if self._retune_hooks is None:
+                # Anchors the retune window schedule (s0) at the planner start.
+                self._retune.start(start_s)
+            else:
+                # Live: anchored at the configured epoch phase instead.
+                self._retune.start(start_s, self._retune_hooks.phase_s)
         return self._compute_next_scheduled_tick()
 
     def apply_runtime_configuration(
@@ -722,9 +873,13 @@ class OrchestratorEngineAdapter:
                 decision_id=ctx.decision_id,
             )
         worker_counts = tick_input.worker_counts or WorkerCounts()
-        # A retune-only planner keeps the deployment's replicas: no
-        # GPU-budget, min-endpoint, or batch-floor repair.
-        retune_only = self._retune is not None and not self._config.scaling_enabled()
+        # A retune-only planner (retune with both scaling modes off) keeps
+        # the deployment's replicas: no GPU-budget, min-endpoint, or
+        # batch-floor repair. Decided by config, so a disabled live retune
+        # (no controller) keeps them too.
+        retune_only = (
+            self._config.retune is not None and not self._config.scaling_enabled()
+        )
         scale_to = (
             None
             if retune_only
@@ -849,6 +1004,8 @@ class OrchestratorEngineAdapter:
                     type(exc).__name__,
                     exc,
                 )
+        if self._retune_executor is not None:
+            self._retune_executor.shutdown(wait=False, cancel_futures=True)
         await self._orchestrator.shutdown()
 
     # ------------------------------------------------------------------

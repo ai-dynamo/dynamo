@@ -579,6 +579,38 @@ def test_retune_rejects_an_engine_shape_that_differs_from_the_planner_mode(
 
 
 @pytest.mark.unit
+def test_retune_rejects_the_dgdr_executor(tmp_path):
+    # Replay runs local sweeps only; executor 'dgdr' needs a live Planner.
+    preset = dict.fromkeys(
+        ("tensor", "pipeline", "attention_data", "moe_tensor", "moe_expert"), 1
+    )
+    worker = {
+        "parallelism": {"preset": [preset]},
+        "scheduler": {"max_batched_tokens": 8192, "max_sequences": 256},
+    }
+    engine = {"mode": "aggregated", "workers": {"aggregated": worker}}
+    dgdr = {"claim_name": "traces", "model": "m", "sku": "h200_sxm", "engine": engine}
+    config = PlannerConfig.model_validate(
+        _guard_config()
+        | {
+            "retune": {
+                "interval_seconds": 21600,
+                "timeout_seconds": 20400,
+                "router": "default",
+                "executor": "dgdr",
+                "dgdr": dgdr,
+            }
+        }
+    )
+    trace = _write_trace(
+        tmp_path / "trace.jsonl", count=4, gap_ms=100, blocks=1, output_tokens=2
+    )
+
+    with pytest.raises(ValueError, match="executor 'dgdr' is not supported in replay"):
+        api._retune_inputs(config, **_inputs_kwargs(trace))
+
+
+@pytest.mark.unit
 def test_synthetic_replay_rejects_retune():
     with pytest.raises(
         ValueError, match="traffic.source type: trace with format: dynamo"

@@ -131,6 +131,11 @@ dynamo-operator:
     # reconciles v1beta2 Requests into Runs and executes each Run as an AISimulate
     # planner Job with a publisher sidecar that persists deployment Candidates.
     enabled: false
+    # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: With dgdrV1Beta2.enabled, grant every
+    # Planner ServiceAccount what Planner live retune (retune.executor: dgdr) needs:
+    # create, read and delete DGDR v1beta2 Requests, read their Runs and Candidates,
+    # and read, create, update and delete any Lease in the namespace.
+    plannerLiveRetune: false
 
   # Environment variables to pass to operator Deployment.
   env: []
