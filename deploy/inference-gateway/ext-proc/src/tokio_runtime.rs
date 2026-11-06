@@ -190,13 +190,7 @@ pub fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 }
 
 fn task_metrics_min_from_env() -> Option<Duration> {
-    let enabled = std::env::var(TASK_METRICS_ENV).is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    });
-    enabled.then(|| {
+    dynamo_runtime::config::env_is_truthy(TASK_METRICS_ENV).then(|| {
         std::env::var(TASK_METRICS_MIN_US_ENV)
             .ok()
             .and_then(|value| value.trim().parse::<u64>().ok())
