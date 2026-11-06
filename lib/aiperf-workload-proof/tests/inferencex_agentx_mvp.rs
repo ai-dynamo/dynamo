@@ -219,7 +219,7 @@ struct TokenizerFileEvidence {
 /// Also returns the verified tokenizer provenance. This call writes nothing
 /// into `directory`, so it runs as a preflight before the artifact directory
 /// is created.
-pub fn full_mvp_run(directory: &Path) -> Result<(BenchmarkRun, TokenizerEvidence)> {
+fn full_mvp_run(directory: &Path) -> Result<(BenchmarkRun, TokenizerEvidence)> {
     let tokenizer_root = std::env::var_os("MVP_TOKENIZER_ROOT").context(
         "MVP_TOKENIZER_ROOT must identify the local pinned Qwen3-8B tokenizer; \
          no builtin or remote fallback is permitted",
