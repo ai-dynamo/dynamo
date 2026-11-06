@@ -137,11 +137,13 @@ Add `NIXL_TELEMETRY_ENABLE` to each worker that should expose transfer metrics:
 
 ```yaml
 spec:
-  services:
-    decode:
-      componentType: worker
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: decode
+    type: decode
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           env:
             - name: NIXL_TELEMETRY_ENABLE
               value: "y"
@@ -204,16 +206,17 @@ backend needs structured fields for filtering and trace correlation.
 Set the logging variables at graph level to apply them to every component:
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-agg-logging
 spec:
-  envs:
-    - name: DYN_LOGGING_CONSOLE_FORMAT
-      value: "jsonl"
-    - name: DYN_LOG
-      value: "info"
+  env:
+  - name: DYN_LOGGING_CONSOLE_FORMAT
+    value: "jsonl"
+  - name: DYN_LOG
+    value: "info"
+  components: []
 ```
 
 See [Logging](../../reference/observability/logging.mdx) for the output fields and
@@ -227,11 +230,13 @@ Add a component-level value when one component needs more detail than the rest o
 
 ```yaml
 spec:
-  services:
-    Frontend:
-      componentType: frontend
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: Frontend
+    type: frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           env:
             - name: DYN_LOG
               value: "info,dynamo_runtime::system_status_server:trace"
@@ -326,16 +331,20 @@ Mount the PVC on each worker that should write a trace and set the output prefix
 
 ```yaml
 spec:
-  pvcs:
-    - create: false
-      name: fpm-traces
-  services:
-    worker:
-      volumeMounts:
+  components:
+  - name: worker
+    type: worker
+    podTemplate:
+      spec:
+        volumes:
         - name: fpm-traces
-          mountPoint: /var/log/dynamo
-      extraPodSpec:
-        mainContainer:
+          persistentVolumeClaim:
+            claimName: fpm-traces
+        containers:
+        - name: main
+          volumeMounts:
+            - name: fpm-traces
+              mountPath: /var/log/dynamo
           env:
             - name: DYN_FPM_TRACE
               value: "1"

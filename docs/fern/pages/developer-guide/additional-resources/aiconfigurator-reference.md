@@ -293,71 +293,80 @@ kubectl apply -f ./results_vllm/agg/top1/agg/k8s_deploy.yaml
 **Complete deployment example** with model cache and production settings:
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: dynamo-agg
   namespace: your-namespace
 spec:
   backendFramework: vllm
-  pvcs:
-    - name: model-cache
-      create: false           # Use existing PVC
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      volumeMounts:
-        - name: model-cache
-          mountPoint: /opt/models
-      envs:
-        - name: HF_HOME
-          value: /opt/models
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
           imagePullPolicy: IfNotPresent
-
-    worker:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      replicas: 4
-      resources:
-        limits:
-          gpu: "2"
-      sharedMemory:
-        size: 16Gi            # Required for vLLM
-      volumeMounts:
+          env:
+          - name: HF_HOME
+            value: /opt/models
+          volumeMounts:
+          - name: model-cache
+            mountPath: /opt/models
+        volumes:
         - name: model-cache
-          mountPoint: /opt/models
-      envs:
-        - name: HF_HOME
-          value: /opt/models
-      extraPodSpec:
-        mainContainer:
+          persistentVolumeClaim:
+            claimName: model-cache
+  - name: worker
+    type: worker
+    replicas: 4
+    sharedMemorySize: 16Gi          # Required for vLLM
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
-          workingDir: /workspace
           imagePullPolicy: IfNotPresent
           command:
-            - python3
-            - -m
-            - dynamo.vllm
+          - python3
+          - -m
+          - dynamo.vllm
           args:
-            - --model
-            - "Qwen/Qwen3-32B-FP8"
-            - "--no-enable-prefix-caching"
-            - "--tensor-parallel-size"
-            - "2"
-            - "--pipeline-parallel-size"
-            - "1"
-            - "--data-parallel-size"
-            - "1"
-            - "--kv-cache-dtype"
-            - "fp8"
-            - "--max-model-len"
-            - "6000"
-            - "--max-num-seqs"
-            - "1024"
+          - --model
+          - "Qwen/Qwen3-32B-FP8"
+          - "--no-enable-prefix-caching"
+          - "--tensor-parallel-size"
+          - "2"
+          - "--pipeline-parallel-size"
+          - "1"
+          - "--data-parallel-size"
+          - "1"
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--max-model-len"
+          - "6000"
+          - "--max-num-seqs"
+          - "1024"
+          workingDir: /workspace
+          env:
+          - name: HF_HOME
+            value: /opt/models
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "2"
+          volumeMounts:
+          - name: model-cache
+            mountPath: /opt/models
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
 ```
 
 **Key deployment settings:**
@@ -365,10 +374,10 @@ spec:
 | Setting | Purpose | Notes |
 |---------|---------|-------|
 | `backendFramework: vllm` | Tells Dynamo which runtime to use | Required at spec level |
-| `pvcs` + `volumeMounts` | Caches model weights across restarts | Mount at `/opt/models` (not `/root/`) |
-| `HF_HOME` env var | Points HuggingFace to cache location | Must match `mountPoint` |
-| `sharedMemory.size: 16Gi` | IPC memory for vLLM | 16Gi for vLLM, 80Gi for TRT-LLM |
-| `envFromSecret` | Injects HF_TOKEN | Required for gated models |
+| Pod `volumes` + container `volumeMounts` | Caches model weights across restarts | Reference a pre-existing model-cache PVC; mount at `/opt/models` (not `/root/`) |
+| `HF_HOME` env var | Points HuggingFace to cache location | Must match the `mountPath` |
+| `sharedMemorySize: 16Gi` | IPC memory for vLLM | 16Gi for vLLM, 80Gi for TRT-LLM |
+| `envFrom` with `secretRef` | Injects HF_TOKEN | Required for gated models |
 
 ### Step 4: Validate with AIPerf
 

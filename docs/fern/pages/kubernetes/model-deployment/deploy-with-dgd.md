@@ -9,7 +9,7 @@ A **DynamoGraphDeployment (DGD)** is the Kubernetes Custom Resource (CRD) that d
 
 This guide walks through authoring that spec end to end: choose a model, pick a backend, choose aggregated or disaggregated serving, size the topology and parallelism for your hardware, then apply the deployment and send it a request. Each step fills in more of a single DGD spec. Environment-specific values — namespace, runtime image, HuggingFace token — stay in shell variables and are filled into the spec at apply time with `envsubst`, so the same YAML file moves between clusters unchanged.
 
-The examples use the `nvidia.com/v1beta1` API: `spec.components` is a list, and each component carries a standard Kubernetes `podTemplate`. (The older `nvidia.com/v1alpha1` API used a `spec.services` map with `extraPodSpec`; the operator still serves it and converts between the two.)
+The examples use the `nvidia.com/v1beta1` API: `spec.components` is a list, and each component carries a standard Kubernetes `podTemplate`. (The older `nvidia.com/v1alpha1` API used a `spec.services` map with `extraPodSpec`; it is deprecated and no longer served.)
 
 ## Prerequisites
 

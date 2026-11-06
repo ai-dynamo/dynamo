@@ -29,34 +29,58 @@ First, follow to [See Install Dynamo Kubernetes Platform](../../kubernetes/insta
 Create a new file in your Git repository (e.g., `deployments/llm-agg.yaml`) with the following content:
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: llm-agg
 spec:
-  pvcs:
-    - name: vllm-model-storage
-      size: 100Gi
-  services:
-    Frontend:
-      replicas: 1
-      envs:
-      - name: SPECIFIC_ENV_VAR
-        value: some_specific_value
-    Processor:
-      replicas: 1
-      envs:
-      - name: SPECIFIC_ENV_VAR
-        value: some_specific_value
-    worker:
-      replicas: 1
-      envs:
-      - name: SPECIFIC_ENV_VAR
-        value: some_specific_value
-      # Add PVC for model storage
-      volumeMounts:
+  components:
+  - name: Frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          env:
+          - name: SPECIFIC_ENV_VAR
+            value: some_specific_value
+  - name: Processor
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          env:
+          - name: SPECIFIC_ENV_VAR
+            value: some_specific_value
+  - name: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        # Add PVC for model storage
+        volumes:
         - name: vllm-model-storage
-          mountPoint: /models
+          persistentVolumeClaim:
+            claimName: vllm-model-storage
+        containers:
+        - name: main
+          env:
+          - name: SPECIFIC_ENV_VAR
+            value: some_specific_value
+          volumeMounts:
+          - name: vllm-model-storage
+            mountPath: /models
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vllm-model-storage
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
 ```
 
 Commit and push this file to your Git repository. FluxCD will detect the new CR and create the initial Dynamo deployment in your cluster.

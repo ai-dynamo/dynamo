@@ -22,12 +22,13 @@ Dynamo operator-created pods default to **60 seconds**. Set a longer value when 
 time or high utilization can keep admitted requests active beyond that window:
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 spec:
-  services:
-    worker:
-      extraPodSpec:
+  components:
+  - name: worker
+    podTemplate:
+      spec:
         terminationGracePeriodSeconds: 180  # allow time for request draining
 ```
 
