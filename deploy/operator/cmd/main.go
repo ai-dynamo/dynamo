@@ -158,7 +158,6 @@ func main() {
 	var operatorImage string
 	var operatorImagePullPolicy string
 	var dgdrDefaultImage string
-	var dgdrV1beta2Enabled bool
 	flag.StringVar(&configFile, "config", "", "Path to operator configuration file (required)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
@@ -177,8 +176,6 @@ func main() {
 		"Planner image used by v1beta2 Runs and as the v1beta1 spec.image default; "+
 			"empty derives dynamo-planner:<operator-version>",
 	)
-	flag.BoolVar(&dgdrV1beta2Enabled, "dgdr-v1beta2-enabled", false,
-		"Reconcile native v1beta2 DGDRs; requires the v1beta2 Request and Run CRDs to be installed")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -513,7 +510,6 @@ func main() {
 		mgr, operatorCfg, runtimeConfig,
 		dockerSecretRetriever, sshKeyManager,
 		operatorImage, pullPolicy, plannerImage, dynamoVersion,
-		dgdrV1beta2Enabled,
 	); err != nil {
 		setupLog.Error(err, "failed to register controllers")
 		os.Exit(1)
@@ -565,7 +561,6 @@ func registerControllers(
 	operatorPullPolicy corev1.PullPolicy,
 	plannerImage string,
 	dynamoVersion string,
-	dgdrV1beta2Enabled bool,
 ) error {
 	if operatorCfg.Namespace.Restricted == "" {
 		// The cluster-wide manager cache covers all namespaces. ExcludedNamespaces only filters
@@ -629,20 +624,19 @@ func registerControllers(
 	}); err != nil {
 		return err
 	}
-	if dgdrV1beta2Enabled {
-		if err := controller.SetupDynamoGraphDeploymentRequestV1beta2(mgr, setupOptions); err != nil {
-			return err
-		}
-		if err := controller.SetupDynamoGraphDeploymentRunV1beta2(mgr, controller.DynamoGraphDeploymentRunSetupOptions{
-			SetupOptions:            setupOptions,
-			DockerSecretRetriever:   dockerSecretRetriever,
-			PlannerImage:            plannerImage,
-			DynamoVersion:           dynamoVersion,
-			OperatorImage:           operatorImage,
-			OperatorImagePullPolicy: operatorPullPolicy,
-		}); err != nil {
-			return err
-		}
+	// Experimental DGDR v1beta2 is available without an API feature gate.
+	if err := controller.SetupDynamoGraphDeploymentRequestV1beta2(mgr, setupOptions); err != nil {
+		return err
+	}
+	if err := controller.SetupDynamoGraphDeploymentRunV1beta2(mgr, controller.DynamoGraphDeploymentRunSetupOptions{
+		SetupOptions:            setupOptions,
+		DockerSecretRetriever:   dockerSecretRetriever,
+		PlannerImage:            plannerImage,
+		DynamoVersion:           dynamoVersion,
+		OperatorImage:           operatorImage,
+		OperatorImagePullPolicy: operatorPullPolicy,
+	}); err != nil {
+		return err
 	}
 	if err := controller.SetupDynamoModel(mgr, controller.DynamoModelSetupOptions{
 		SetupOptions: setupOptions,

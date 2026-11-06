@@ -79,7 +79,7 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest webhook: %w", err)
 	}
 
-	// Helm installs the Run admission rule only when the v1beta2 APIs are enabled.
+	// The platform chart installs Run admission by default alongside the Experimental API.
 	dgdrRunHandler := webhookvalidation.NewDynamoGraphDeploymentRunHandler()
 	if err := dgdrRunHandler.RegisterWithManager(mgr, gate); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRun webhook: %w", err)

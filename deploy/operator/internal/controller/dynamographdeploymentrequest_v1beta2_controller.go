@@ -559,8 +559,8 @@ func requireDGDRV1beta2RESTMappings(mapper meta.RESTMapper) error {
 	} {
 		_, err := mapper.RESTMapping(schema.GroupKind{Group: group, Kind: kind}, version)
 		if meta.IsNoMatchError(err) {
-			return fmt.Errorf("--dgdr-v1beta2-enabled is set but the cluster does not serve %s/%s %s; "+
-				"install the v1beta2 CRDs (dgdrV1Beta2.enabled)", group, version, kind)
+			return fmt.Errorf("the cluster does not serve %s/%s %s; "+
+				"install the CRDs from the matching operator image", group, version, kind)
 		}
 		if err != nil {
 			return fmt.Errorf("check that %s/%s %s is served: %w", group, version, kind, err)

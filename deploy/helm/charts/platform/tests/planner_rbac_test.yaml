@@ -126,27 +126,8 @@ tests:
           count: 6
         documentIndex: 0
 
-  - it: omits live retune rules from the ClusterRole with dgdrV1Beta2 alone
-    set:
-      dynamo-operator.dgdrV1Beta2.enabled: true
-    asserts:
-      - lengthEqual:
-          path: rules
-          count: 6
-        documentIndex: 0
-
-  - it: omits live retune rules from the ClusterRole with plannerLiveRetune alone
-    set:
-      dynamo-operator.dgdrV1Beta2.plannerLiveRetune: true
-    asserts:
-      - lengthEqual:
-          path: rules
-          count: 6
-        documentIndex: 0
-
   - it: grants DGDR v1beta2 and Lease access in the ClusterRole with plannerLiveRetune
     set:
-      dynamo-operator.dgdrV1Beta2.enabled: true
       dynamo-operator.dgdrV1Beta2.plannerLiveRetune: true
     asserts:
       - lengthEqual:
@@ -200,11 +181,10 @@ tests:
               - delete
         documentIndex: 0
 
-  - it: omits live retune rules from the Role with dgdrV1Beta2 alone in namespace-restricted mode
+  - it: omits live retune rules from the Role by default in namespace-restricted mode
     set:
       dynamo-operator.namespaceRestriction.enabled: true
       dynamo-operator.upgradeCRD: false
-      dynamo-operator.dgdrV1Beta2.enabled: true
     asserts:
       - lengthEqual:
           path: rules
@@ -215,7 +195,6 @@ tests:
     set:
       dynamo-operator.namespaceRestriction.enabled: true
       dynamo-operator.upgradeCRD: false
-      dynamo-operator.dgdrV1Beta2.enabled: true
       dynamo-operator.dgdrV1Beta2.plannerLiveRetune: true
     asserts:
       - lengthEqual:
