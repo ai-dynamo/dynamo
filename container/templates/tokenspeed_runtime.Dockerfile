@@ -12,13 +12,24 @@ ARG PYTHON_VERSION
 USER root
 WORKDIR /workspace
 
-# TokenSpeed JIT-compiles kernels, so retain the NVIDIA CUDA development toolkit.
+# TokenSpeed JIT-compiles kernels: add only the compiler/header packages its
+# runner uses to the smaller NVIDIA CUDA runtime image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        {{ context.tokenspeed.cuda_jit_packages | join(" ") }} \
         python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-        build-essential ca-certificates git ninja-build \
+        build-essential ca-certificates git ninja-build pkg-config \
         libnuma1 libibverbs1 ibverbs-providers libopenmpi-dev libssl-dev \
-        libturbojpeg libjemalloc2 && \
+        libspdlog-dev libturbojpeg libjemalloc2 && \
     rm -rf /var/lib/apt/lists/* && ldconfig
+
+# Compile without a GPU to verify that the runtime base has the JIT headers.
+RUN printf '%s\n' \
+        '#include <cuda_runtime.h>' '#include <cublas_v2.h>' \
+        '#include <nvrtc.h>' '#include <curand_kernel.h>' \
+        '#include <spdlog/spdlog.h>' '__global__ void smoke() {}' \
+        > /tmp/tokenspeed-jit-smoke.cu && \
+    nvcc -std=c++17 -arch=sm_90 -c /tmp/tokenspeed-jit-smoke.cu -o /tmp/tokenspeed-jit-smoke.o && \
+    rm /tmp/tokenspeed-jit-smoke.cu /tmp/tokenspeed-jit-smoke.o
 
 COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /uvx /opt/uv/bin/
 RUN python${PYTHON_VERSION} -m venv /opt/dynamo/venv

@@ -212,8 +212,15 @@ tokenspeed:
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image: nvcr.io/nvidia/cuda-dl-base
-    runtime_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
+    runtime_image: nvcr.io/nvidia/cuda
+    runtime_image_tag: 13.0.3-runtime-ubuntu24.04
+  # Match the CUDA compiler/header packages in TokenSpeed's runner without
+  # inheriting the larger CUDA DL development image in the final runtime.
+  cuda_jit_packages:
+    - cuda-nvcc-13-0
+    - libcublas-dev-13-0
+    - cuda-nvrtc-dev-13-0
+    - libcurand-dev-13-0
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "false"
   # Matched nightly set from lightseekorg/tokenspeed@ee5b468f165af2ec33e6a581d683b7d4a396e00f.
