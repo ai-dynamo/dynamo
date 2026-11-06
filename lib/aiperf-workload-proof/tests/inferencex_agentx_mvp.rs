@@ -9,7 +9,7 @@
 //! E2E then hosts the production AIPerf plans on the native AISim `Replayer`
 //! event loop with:
 //!
-//! * canonical B200 BF16 op-level role timing for prefill and decode;
+//! * canonical B200 op-level role timing with explicit FP8 weights/MoE and BF16 attention/KV;
 //! * the real Dynamo KV Router composition produced by
 //!   `KvReplayComposition::disaggregated`;
 //! * the caller-owned `HostedTypedReport`, finalized into the normal native-v2
@@ -52,8 +52,8 @@
 //! Required environment:
 //!
 //! * `AISIM_SYSTEMS_ROOT` — the checked-in B200 system assets and their sibling
-//!   canonical model configs. The model ID ends in `NVFP4`, but this proof uses
-//!   explicitly selected BF16 timing and memory, not NVFP4 precision.
+//!   canonical model configs. Each replica uses TP8, explicit FP8 weight/MoE
+//!   precision and BF16 attention/KV, with no estimator or memory fallback.
 //! * `MVP_ARTIFACT_DIR` — a new directory. The test refuses to reuse an
 //!   existing path and never uses a temporary directory, so the complete
 //!   result survives.
@@ -145,9 +145,9 @@ const GRACE_PERIOD_SECONDS: f64 = 30.0;
 const TRAJECTORY_START_MIN_RATIO: f64 = 0.0;
 const TRAJECTORY_START_MAX_RATIO: f64 = 1.0;
 /// Canonical role model identity. Same model on every role and on the run.
-const MODEL: &str = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4";
+const MODEL: &str = "zai-org/GLM-5.2-FP8";
 /// Canonical model maximum context, cross-checked against the consumed model
-/// config. The model ID does not select precision: both roles explicitly use BF16.
+/// config. Both roles explicitly use FP8 weights/MoE with BF16 attention/KV.
 const MODEL_MAX_CONTEXT_TOKENS: u64 = 1_048_576;
 /// Complete root trees the full pinned corpus prepares.
 const EXPECTED_PREPARED_ROOTS: usize = 393;
@@ -1064,8 +1064,8 @@ fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> 
         model: MODEL,
         systems: &systems,
         hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Bfloat16,
-        tensor_parallel_size: 1,
+        precision: calibrated::ProofPrecision::Fp8WeightsBfloat16AttentionKv,
+        tensor_parallel_size: 8,
         role: ForwardPassWorkerType::Prefill,
         max_num_seqs: usize::try_from(CONCURRENCY)?,
         prefill: calibrated::PrefillMode::Chunked {
@@ -1077,8 +1077,8 @@ fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> 
         model: MODEL,
         systems: &systems,
         hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Bfloat16,
-        tensor_parallel_size: 1,
+        precision: calibrated::ProofPrecision::Fp8WeightsBfloat16AttentionKv,
+        tensor_parallel_size: 8,
         role: ForwardPassWorkerType::Decode,
         max_num_seqs: usize::try_from(CONCURRENCY)?,
         prefill: calibrated::PrefillMode::Chunked {
@@ -1105,14 +1105,7 @@ fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> 
     let (backend, typed) = host_typed(&run, &prefill, &decode, true)?;
     // Retain complete physical evidence before any acceptance assertion can
     // fail, so a population or metric defect never erases the run's output.
-    write_raw_backend_artifact(
-        &artifact_dir,
-        &backend,
-        &typed,
-        &prefill,
-        &decode,
-        &harness,
-    )?;
+    write_raw_backend_artifact(&artifact_dir, &backend, &typed, &prefill, &decode, &harness)?;
 
     ensure!(
         metadata.transport == "aisimulate",
@@ -1165,8 +1158,8 @@ fn calibrated_hosted_rejections_reconcile_every_request() -> Result<()> {
         model: MODEL,
         systems: &systems,
         hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Bfloat16,
-        tensor_parallel_size: 1,
+        precision: calibrated::ProofPrecision::Fp8WeightsBfloat16AttentionKv,
+        tensor_parallel_size: 8,
         role: ForwardPassWorkerType::Prefill,
         max_num_seqs: CONCURRENCY as usize,
         prefill: calibrated::PrefillMode::Chunked {
@@ -1177,8 +1170,8 @@ fn calibrated_hosted_rejections_reconcile_every_request() -> Result<()> {
         model: MODEL,
         systems: &systems,
         hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Bfloat16,
-        tensor_parallel_size: 1,
+        precision: calibrated::ProofPrecision::Fp8WeightsBfloat16AttentionKv,
+        tensor_parallel_size: 8,
         role: ForwardPassWorkerType::Decode,
         max_num_seqs: CONCURRENCY as usize,
         prefill: calibrated::PrefillMode::Chunked {
@@ -1232,8 +1225,8 @@ fn calibrated_hosted_artifacts_reconcile_every_request() -> Result<()> {
         model: MODEL,
         systems: &systems,
         hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Bfloat16,
-        tensor_parallel_size: 1,
+        precision: calibrated::ProofPrecision::Fp8WeightsBfloat16AttentionKv,
+        tensor_parallel_size: 8,
         role: ForwardPassWorkerType::Prefill,
         max_num_seqs: CONCURRENCY as usize,
         prefill: calibrated::PrefillMode::Chunked {
@@ -1244,8 +1237,8 @@ fn calibrated_hosted_artifacts_reconcile_every_request() -> Result<()> {
         model: MODEL,
         systems: &systems,
         hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Bfloat16,
-        tensor_parallel_size: 1,
+        precision: calibrated::ProofPrecision::Fp8WeightsBfloat16AttentionKv,
+        tensor_parallel_size: 8,
         role: ForwardPassWorkerType::Decode,
         max_num_seqs: CONCURRENCY as usize,
         prefill: calibrated::PrefillMode::Chunked {
