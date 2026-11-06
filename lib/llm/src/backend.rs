@@ -501,7 +501,15 @@ impl
                     // stop_reason is only present when a user-specified stop sequence is matched.
                     let (finish_reason, stop_reason) = result.stop_trigger.as_ref()
                         .map(|trigger| {
-                            let (reason, stop) = trigger.reasons();
+                            let (mut reason, stop) = trigger.reasons();
+                            // A stop string can win over the EOS token's trigger.
+                            // Only the consumed prefix supplies evidence of model EOS.
+                            if state.retain_model_stop_token_text
+                                && data.token_ids[..result.tokens.len()].last()
+                                    .is_some_and(|id| decoder.system_stop_ids.contains(id))
+                            {
+                                reason = FinishReason::EoS;
+                            }
                             (Some(reason), stop)
                         })
                         .unwrap_or((None, None));
@@ -550,6 +558,7 @@ impl
                     // Local stop detection must not turn the worker's error into success.
                     if finish_reason.is_some()
                         && !matches!(data.finish_reason, Some(FinishReason::Error(_)))
+                        && !(state.retain_model_stop_token_text && matches!(data.finish_reason, Some(FinishReason::Length | FinishReason::Cancelled)))
                     {
                         data.finish_reason = finish_reason;
                         data.stop_reason = stop_reason.or(data.stop_reason);
@@ -719,6 +728,7 @@ pub struct Decoder {
     // user-provided token stop IDs, kept separate from system/EOS stop IDs so
     // stop_reason can report user-triggered token stops without reporting EOS.
     user_stop_ids: HashSet<TokenIdType>,
+    system_stop_ids: HashSet<TokenIdType>,
 
     // Include matched stop token text while preserving its stopping reason.
     no_stop_trim: bool,
@@ -966,6 +976,7 @@ impl Decoder {
             hidden_stop_ids,
             visible_stop_ids,
             user_stop_ids,
+            system_stop_ids,
             no_stop_trim,
             retain_model_stop_token_text,
             hidden_stop_sequences,
@@ -1004,7 +1015,7 @@ impl Decoder {
         // The model's own stop token text stays visible when the route asked for it
         // (`retain_model_stop_token_text`); user stop ids keep their normal trimming.
         let retains_model_stop_text =
-            self.retain_model_stop_token_text && !self.user_stop_ids.contains(&token_id);
+            self.retain_model_stop_token_text && self.system_stop_ids.contains(&token_id);
         // Finalize older text before dropping a hidden stop token.
         if !below_min_tokens
             && self.hidden_stop_ids.contains(&token_id)
@@ -2150,6 +2161,79 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_user_stop_preserves_overlapping_model_eos() {
+        for (kind, system_eos) in [
+            ("token", false),
+            ("token", true),
+            ("hidden_string", true),
+            ("visible_string", true),
+            ("earlier_string", true),
+        ] {
+            let stop_string = if kind == "earlier_string" {
+                "Okay"
+            } else {
+                "<|return|>"
+            };
+            let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+            let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+            let request = PreprocessedRequest::builder()
+                .model("test-model".to_string())
+                .token_ids(vec![])
+                .stop_conditions(StopConditions {
+                    stop_token_ids: (kind == "token").then_some(vec![104]),
+                    stop_token_ids_hidden: system_eos.then_some(vec![104]),
+                    stop: (kind != "token").then(|| vec![stop_string.to_string()]),
+                    ..Default::default()
+                })
+                .sampling_options(SamplingOptions {
+                    include_stop_str_in_output: Some(kind == "visible_string"),
+                    ..Default::default()
+                })
+                .output_options(OutputOptions {
+                    retain_model_stop_token_text: Some(true),
+                    ..Default::default()
+                })
+                .build()
+                .unwrap();
+            let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+                Arc::new(SyntheticSglangStopEngine {
+                    outputs: Some(vec![LLMEngineOutput {
+                        token_ids: vec![101, 104],
+                        ..Default::default()
+                    }]),
+                });
+            let mut stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+                .await
+                .unwrap();
+            let output = stream.next().await.unwrap().data.unwrap();
+            assert_eq!(
+                output.finish_reason,
+                Some(if system_eos && kind != "earlier_string" {
+                    FinishReason::EoS
+                } else {
+                    FinishReason::Stop
+                })
+            );
+            assert_eq!(
+                output.stop_reason,
+                Some(if kind == "token" {
+                    StopReason::Int(104)
+                } else {
+                    StopReason::String(stop_string.to_string())
+                })
+            );
+            assert_eq!(
+                output.token_ids,
+                if kind == "earlier_string" {
+                    vec![101]
+                } else {
+                    vec![101, 104]
+                }
+            );
+        }
+    }
+
     #[test]
     fn test_no_stop_trim_marker_stops_in_unary_and_chunked_output() {
         let (stop_id, marker) = (104, "<|return|>");
@@ -2219,12 +2303,12 @@ mod tests {
     #[test]
     fn test_retain_model_stop_token_text_keeps_only_the_models_eos_text() {
         let (stop_id, marker) = (104, "<|return|>");
-        for kind in ["eos", "user", "string"] {
+        for kind in ["eos", "user", "both", "string"] {
             for streaming in [false, true] {
                 let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
                 let stops = StopConditions {
-                    stop_token_ids: (kind == "user").then_some(vec![stop_id]),
-                    stop_token_ids_hidden: (kind == "eos").then_some(vec![stop_id]),
+                    stop_token_ids: matches!(kind, "user" | "both").then_some(vec![stop_id]),
+                    stop_token_ids_hidden: matches!(kind, "eos" | "both").then_some(vec![stop_id]),
                     stop: (kind == "string").then(|| vec![marker.to_string()]),
                     ..Default::default()
                 };
@@ -2249,7 +2333,7 @@ mod tests {
                 };
                 let result = decoder.process_token_ids(&ids).unwrap();
                 text.push_str(result.text.as_deref().unwrap_or_default());
-                let expected = if kind == "eos" {
+                let expected = if matches!(kind, "eos" | "both") {
                     format!("Okay{marker}")
                 } else {
                     "Okay".to_string()
@@ -2257,7 +2341,9 @@ mod tests {
                 assert_eq!(text, expected, "{kind} streaming={streaming}");
                 match (kind, result.stop_trigger.unwrap()) {
                     ("eos", StopTrigger::HiddenStopTokenDetected(id))
-                    | ("user", StopTrigger::UserStopTokenDetected(id)) => assert_eq!(id, stop_id),
+                    | ("user" | "both", StopTrigger::UserStopTokenDetected(id)) => {
+                        assert_eq!(id, stop_id)
+                    }
                     ("string", StopTrigger::HiddenStopSequenceDetected(seq)) => {
                         assert_eq!(seq, marker)
                     }

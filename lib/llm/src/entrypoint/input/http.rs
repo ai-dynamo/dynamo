@@ -81,6 +81,25 @@ impl HttpFrontend {
             anyhow::bail!("custom router plugins require a dynamic engine");
         }
 
+        // Hosts that pass no resolved plugins resolve the policy file later, so read its
+        // selection from the config as well.
+        let router_config = engine_config.local_model().router_config();
+        if router_config.router_mode.is_kv_routing()
+            && !self.plugins.has_custom_worker_selection()
+            && matches!(
+                router_config
+                    .kv_router_config
+                    .selected_worker_selection_policy_instance(),
+                Ok(None)
+            )
+        {
+            tracing::warn!(
+                "Starting with Dynamo 1.8, --router-mode kv will default to the two-tier cost \
+                 function (dynamo-two-tier-cost-fn). To keep the current cost function, select a \
+                 dynamo-default-cost-fn instance in --router-policy-config."
+            );
+        }
+
         let plugins = RouterPluginBuilder::new(self.plugins);
         plugins.validate_config(&engine_config.local_model().router_config().kv_router_config)?;
 
@@ -293,7 +312,8 @@ async fn run_with_router_plugins(
             .collect::<Vec<String>>()
     );
 
-    let run_result = http_service.run(distributed_runtime.primary_token()).await;
+    let _graceful_task = distributed_runtime.register_graceful_task();
+    let run_result = http_service.run(distributed_runtime.child_token()).await;
 
     // Initiate runtime shutdown whenever the server exits, including bind
     // failures, for both discovery-backed and in-process engines.

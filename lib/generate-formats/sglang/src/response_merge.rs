@@ -23,7 +23,9 @@ use crate::{ClientCodec, Native};
 pub enum FieldClass {
     /// Output-side arrays or text appended across chunks.
     Delta,
-    /// Prompt-side values supplied by prefill in disaggregated serving.
+    /// Prompt-side values supplied by prefill in disaggregated serving. An
+    /// engine may send them once, so a later empty or absent value keeps the
+    /// earlier one.
     Prompt,
     /// Final Base64 rows: prefill's bytes replace decode's stale prompt rows.
     SequenceFinal,
@@ -145,7 +147,10 @@ impl RuleSet {
 
     /// Join the next streamed chunk onto the response so far.
     fn join_step(&self, joined: &mut Value, mut next: Value) {
-        for field in self.of(FieldClass::Delta) {
+        for field in self
+            .of(FieldClass::Delta)
+            .chain(self.of(FieldClass::Prompt))
+        {
             let Some(head) = object(joined, &field.parent).and_then(|o| o.remove(&field.key))
             else {
                 continue;
@@ -154,6 +159,11 @@ impl RuleSet {
                 continue;
             };
             match (head, slot(target, &field.key)) {
+                (head, tail) if field.class == FieldClass::Prompt => {
+                    if tail.is_null() || tail.as_array().is_some_and(Vec::is_empty) {
+                        *tail = head;
+                    }
+                }
                 (Value::Array(mut head), Value::Array(tail)) => {
                     head.append(tail);
                     *tail = head;

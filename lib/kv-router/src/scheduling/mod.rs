@@ -36,7 +36,7 @@ pub use policy_config::{
     RouterPolicyConfigError,
 };
 pub use policy_queue::{
-    PolicyQueue, PolicyQueueEntry, QueueLimitKind, QueueRejection, QueueSnapshot,
+    PolicyQueue, PolicyQueueEntry, QueueLimitKind, QueueMetadata, QueueRejection, QueueSnapshot,
 };
 pub use prefill_load::{
     InvalidEffectivePrefillTokens, PrefillLoadEstimator, effective_prefill_tokens,

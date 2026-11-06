@@ -863,6 +863,12 @@ pub mod model {
 pub mod router {
     /// Opt-in frontend-local aggregated decoder progress; independent of TRACE logging.
     pub const DYN_ROUTER_DECODE_PROGRESS: &str = "DYN_ROUTER_DECODE_PROGRESS";
+
+    /// Most sessions each session-affinity table holds; defaults to 65,536.
+    /// The Python frontend exports `--router-session-affinity-max-entries` here.
+    pub const DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES: &str =
+        "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES";
+
     /// Scale applied to adjusted prompt-side prefill load after overlap/cache-hit credits.
     pub const DYN_ROUTER_PREFILL_LOAD_SCALE: &str = "DYN_ROUTER_PREFILL_LOAD_SCALE";
 

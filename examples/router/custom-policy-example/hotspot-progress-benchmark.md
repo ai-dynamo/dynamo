@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 This experiment compares upstream `2141a9690d670440d729e99771afb2fb53e79284` (B) with the native-tracker revision `80fa97214acd789460baf93a07daaceb31c7f3b4` (P). P enables observation and the experimental `progress_group` picker together; its complete costs are included.
 
-These GPU measurements describe those historical revisions. The later adaptation to main `8b4ad6a1b041a249952586c519ca657f67522cef` changes the selection and stream-processing integration. Its validation is tracked separately; these results do not establish GPU performance for the adapted source.
+These GPU measurements describe those historical revisions. Subsequent adaptations to main change the selection and stream-processing integration. Its validation is tracked separately; these results do not establish GPU performance for the adapted source.
 
 ### Fixed experiment
 
