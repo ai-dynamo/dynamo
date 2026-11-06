@@ -27,6 +27,7 @@ from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 
+from .responses_history import responses_tools_request
 from .sglang_prepost import (
     ReasoningParser,
     SglangStreamingPostProcessor,
@@ -274,13 +275,29 @@ _FINISH_REASON_MAP: dict[str, str] = {
 }
 
 
-def _map_finish_reason(raw: str | None) -> str | None:
+def _finish_reason_error_message(
+    raw_reason: str | dict[str, Any] | None,
+) -> str | None:
+    """Extract a backend error before OpenAI finish-reason projection."""
+    if isinstance(raw_reason, dict):
+        error_message = raw_reason.get("error")
+        return error_message if isinstance(error_message, str) else None
+    if isinstance(raw_reason, str) and raw_reason.startswith("error"):
+        _, separator, detail = raw_reason.partition(":")
+        return detail.strip() if separator and detail.strip() else raw_reason
+    return None
+
+
+def _map_finish_reason(raw: str | dict[str, Any] | None) -> str | None:
     """Map Dynamo router finish reasons to OpenAI finish reasons.
 
     Exact matches use the dict.  Prefixed variants (``error:timeout``,
     ``abort:cancelled``) are handled by ``startswith`` fallbacks.
     """
     if raw is None:
+        return None
+    if not isinstance(raw, str):
+        logger.warning("Malformed finish_reason from router: %r", raw)
         return None
     mapped = _FINISH_REASON_MAP.get(raw)
     if mapped is not None:
@@ -603,6 +620,19 @@ class SglangProcessor:
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Main entry point: preprocess, route, post-process a chat request."""
+        if request.get("responses_native_tools") and not (
+            self.exclude_tools_when_tool_choice_none
+            and request.get("tool_choice") == "none"
+        ):
+            # Inline and pool postprocessing must use the same tool identities
+            # as the prompt, including when parsers are recreated in the parent.
+            request = responses_tools_request(
+                request,
+                self.tokenizer.get_chat_template(
+                    chat_template=request.get("chat_template"),
+                    tools=request.get("tools"),
+                ),
+            )
         if self.debug_perf:
             from .perf_instrumentation import (  # type: ignore[import-not-found, import-untyped]
                 enter_generator,
@@ -818,6 +848,10 @@ class SglangProcessor:
         stream_interval = self.stream_interval
         prompt_logprobs = PromptLogprobsAccumulator(request)
         logprobs_count = _request_logprobs_count(request)
+        include_completion_ids = nvext_extra_field_requested(
+            request, "completion_token_ids"
+        )
+        include_prompt_ids = nvext_extra_field_requested(request, "prompt_token_ids")
 
         try:
             dynamo_stream = await self.routed_engine.generate(
@@ -831,6 +865,8 @@ class SglangProcessor:
             pending_token_ids: list[int] = []
             pending_log_probs: list[float] | None = None
             pending_top_logprobs: list[list[dict[str, Any]]] | None = None
+            # Requested generated IDs wait here while parsing emits no chunk.
+            completion_ids: list[int] = []
             latest_usage: dict[str, Any] = {}
             pending_terminal: dict[str, Any] | None = None
             first_chunk = True
@@ -854,6 +890,7 @@ class SglangProcessor:
                 nonlocal pending_token_ids
                 nonlocal pending_log_probs
                 nonlocal pending_top_logprobs
+                nonlocal completion_ids
                 nonlocal latest_usage
                 nonlocal first_chunk
                 nonlocal post_proc_total_ms
@@ -875,6 +912,12 @@ class SglangProcessor:
                     t_pp0 = time.monotonic()
 
                 choice = post.process_output(mapped_response)
+                if include_completion_ids:
+                    completion_ids.extend(pending_token_ids)
+                    if post.locally_finished:
+                        # IDs that decoding withheld before the stop are still queued.
+                        dropped = post.post_stop_token_count()
+                        del completion_ids[len(completion_ids) - dropped :]
 
                 if post.locally_finished and not latest_usage:
                     latest_usage = {
@@ -921,6 +964,11 @@ class SglangProcessor:
                         request, "engine_data"
                     ):
                         response_nvext["engine_data"] = engine_data
+                    if include_completion_ids:
+                        response_nvext["completion_token_ids"] = completion_ids
+                        completion_ids = []
+                    if include_prompt_ids and (finish_reason or post.locally_finished):
+                        response_nvext["prompt_token_ids"] = tokens
                     if response_nvext:
                         dynamo_out["nvext"] = response_nvext
 
@@ -999,13 +1047,21 @@ class SglangProcessor:
                     break
 
                 raw_finish_reason = engine_response.get("finish_reason")
-                finish_reason = _map_finish_reason(raw_finish_reason)
-                backend_finished = raw_finish_reason is not None
-                if pending_terminal is not None and finish_reason == "error":
+                # Backend errors (structured or legacy "error: ..." strings)
+                # end the stream before OpenAI finish-reason projection.
+                error_message = _finish_reason_error_message(raw_finish_reason)
+                if error_message is not None:
+                    logger.error(
+                        "Router reported a generation error for request %s: %s",
+                        request_id,
+                        error_message,
+                    )
                     yield as_error_envelope(
-                        make_internal_error(request_id, raw_finish_reason)
+                        make_internal_error(request_id, error_message)
                     )
                     break
+                finish_reason = _map_finish_reason(raw_finish_reason)
+                backend_finished = raw_finish_reason is not None
                 prompt_logprobs.update(engine_response)
                 if usage := engine_response.get("completion_usage"):
                     update_usage_metadata(latest_usage, usage)

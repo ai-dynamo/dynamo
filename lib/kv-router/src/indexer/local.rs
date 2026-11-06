@@ -390,6 +390,15 @@ impl LocalKvIndexer {
         drop(unusable_snapshot);
     }
 
+    /// Wait until every admitted event has been applied on every tier; event errors stay logged.
+    pub async fn flush_and_wait(&self) -> Result<(), KvRouterError> {
+        self.indexer.flush_and_wait().await?;
+        for indexer in self.all_lower_tier_indexers() {
+            indexer.flush_and_wait().await?;
+        }
+        Ok(())
+    }
+
     /// Apply event with buffering.
     ///
     /// Stored and Removed events are recorded after successful queue admission; this does not

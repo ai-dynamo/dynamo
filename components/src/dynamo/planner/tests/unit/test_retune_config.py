@@ -4,9 +4,11 @@
 # Optional-dependency preflight must run before the retune imports.
 
 """The planner retune config section: a valid round trip, a rejected
-startup-only knob and the grid-size limit, plus the retune-only, decision
-latency and history rules that only config validation enforces, and one
-error per invalid knob."""
+startup-only knob and the grid-size limit, plus the retune-only, objective,
+decision latency and history rules that only config validation enforces, and
+one error per invalid knob."""
+
+from typing import get_args
 
 import pytest
 
@@ -17,7 +19,11 @@ pytest.importorskip(
 
 from pydantic import ValidationError
 
-from dynamo.planner.config.planner_config import PlannerConfig, RetuneConfig
+from dynamo.planner.config.planner_config import (
+    PlannerConfig,
+    RetuneConfig,
+    RetuneObjective,
+)
 from dynamo.planner.reconfiguration import candidate_config
 from dynamo.planner.retune.domains import (
     expand_planner_domain,
@@ -102,18 +108,19 @@ def _config(mode="disagg", retune=None, **overrides):
                 planner={
                     "prefill_scale_up_queue_tokens": {"choices": [800, 1200]},
                     "decode_scale_down_kv_rate": {"choices": [30, 50.0]},
-                    "decode_min_workers": 2,
-                    "min_num_gpus": {"choices": [-1, 4]},
+                    "scaling_policy": {"preset": ["load_180_5", "load_180_10"]},
                 }
             ),
             {"decode_scale_down_kv_rate": 50.0, LSD: 70},
             ROUTER_GRID,
             {
+                "enable_throughput_scaling": [False],
+                "enable_load_scaling": [True],
+                "throughput_adjustment_interval_seconds": [180],
+                "load_adjustment_interval_seconds": [5, 10],
                 LSD: [70, 80, 90],
                 "prefill_scale_up_queue_tokens": [800, 1200],
                 "decode_scale_down_kv_rate": [30.0, 50.0],
-                "decode_min_endpoint": [2],
-                "min_gpu_budget": [-1, 4],
             },
         ),
         # The load predictor goes to the pre-sweep, not the grid.
@@ -169,8 +176,8 @@ def test_retune_round_trips_through_strict_runtime_reconfiguration(
     ("retune", "match"),
     [
         (
-            {"planner": {"enable_load_scaling": {"choices": [True, False]}}},
-            r"cannot change \['enable_load_scaling'\]: they are fixed when the "
+            {"planner": {"max_num_fpm_samples": {"choices": [32, 64]}}},
+            r"cannot change \['max_num_fpm_samples'\]: they are fixed when the "
             "planner starts",
         ),
         ({"router": {"policy": "round_robin"}}, "policy is fixed at startup"),
@@ -192,6 +199,33 @@ def test_retune_round_trips_through_strict_runtime_reconfiguration(
 def test_startup_only_knobs_are_rejected(retune, match):
     with pytest.raises(ValidationError, match=match):
         _config(retune=_retune(**retune))
+
+
+@pytest.mark.parametrize(
+    ("name", "public"),
+    [
+        ("min_workers", "min_workers"),
+        ("prefill_min_workers", "prefill_min_workers"),
+        ("decode_min_workers", "decode_min_workers"),
+        ("max_num_gpus", "max_num_gpus"),
+        ("min_num_gpus", "min_num_gpus"),
+        # A live name is reported under its public name.
+        ("max_gpu_budget", "max_num_gpus"),
+        ("decode_min_endpoint", "decode_min_workers"),
+    ],
+)
+def test_user_constraints_are_never_searched(name, public):
+    # Worker minimums and GPU budgets belong to the user: retune rejects
+    # them like the SLA, and the control API still changes them.
+    with pytest.raises(
+        ValidationError,
+        match=rf"retune.planner cannot search \['{public}'\]: worker minimums and "
+        "GPU budgets are user constraints, not tuning knobs; change them through "
+        "the Planner config or the runtime control API",
+    ):
+        _config(retune=_retune(planner={name: {"choices": [1, 2]}}), **LOAD_TARGET)
+    config = _config(retune=_retune(), **LOAD_TARGET)
+    assert candidate_config(config, {"max_gpu_budget": 4}).max_gpu_budget == 4
 
 
 @pytest.mark.parametrize(
@@ -279,6 +313,20 @@ def test_retune_only_mode_needs_both_scaling_flags_explicitly_false():
     # Without retune, both flags false is still an error.
     with pytest.raises(ValidationError, match="At least one scaling mode must be"):
         _config(optimization_target="sla", **RETUNE_ONLY)
+
+
+@pytest.mark.parametrize("objective", get_args(RetuneObjective))
+def test_scaling_retune_needs_a_per_gpu_objective(objective):
+    # Easy mode forces load scaling on, so each candidate replay sizes its
+    # own replicas; a metric that ignores GPU count would buy the most.
+    if objective in ("GoodputPerGPU", "ThroughputPerGPU"):
+        config = _config(retune=_retune(objective=objective))
+        assert config.scaling_enabled()
+        return
+    with pytest.raises(ValidationError, match=f"{objective}' does not divide by GPUs"):
+        _config(retune=_retune(objective=objective))
+    with pytest.raises(ValidationError, match="does not divide by GPUs"):
+        _config(retune=_retune(objective=objective), **SLA_THROUGHPUT)
 
 
 def test_measured_decision_latency_must_fit_the_interval():

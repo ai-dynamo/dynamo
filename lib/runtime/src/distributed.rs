@@ -350,6 +350,12 @@ impl DistributedRuntime {
                 distributed_runtime.get_metrics_registry(),
             );
         }
+        if response_plane == ResponsePlaneMode::Velo {
+            distributed_runtime.velo_response_service().await?;
+            crate::pipeline::network::velo_response::register_metrics(
+                distributed_runtime.get_metrics_registry(),
+            );
+        }
 
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime
@@ -597,6 +603,12 @@ impl DistributedRuntime {
             })
             .await?
             .clone())
+    }
+
+    pub async fn velo_response_service(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::velo_response::VeloResponseService>> {
+        self.runtime.velo_response_service().service().await
     }
 
     pub async fn quic_response_server(
@@ -852,6 +864,77 @@ impl DistributedRuntime {
 #[cfg(test)]
 mod parser_env_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn distributed_runtime_validates_velo_at_startup() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::distributed_runtime_validates_velo_at_startup"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let busy_port = busy.local_addr().unwrap().port().to_string();
+        // Each case sets one variable over a valid TCP configuration.
+        let mut cases = vec![
+            (
+                "DYN_VELO_RESPONSE_TRANSPORT",
+                "invalid",
+                "DYN_VELO_RESPONSE_TRANSPORT",
+            ),
+            (
+                "DYN_VELO_RESPONSE_BATCH_MS",
+                "invalid",
+                "DYN_VELO_RESPONSE_BATCH_MS",
+            ),
+            (
+                "DYN_VELO_RESPONSE_HEARTBEAT_MS",
+                "0",
+                "DYN_VELO_RESPONSE_HEARTBEAT_MS",
+            ),
+            (
+                "DYN_VELO_RESPONSE_PORT",
+                "invalid",
+                "DYN_VELO_RESPONSE_PORT",
+            ),
+            (
+                "DYN_VELO_RESPONSE_PORT",
+                busy_port.as_str(),
+                "Failed to pre-bind TCP listener",
+            ),
+            // Velo has no TLS, so TLS settings must not be silently ignored.
+            (
+                "DYN_TCP_TLS_CERT_PATH",
+                "/nonexistent/cert.pem",
+                "DYN_TCP_TLS_CERT_PATH",
+            ),
+            ("DYN_TCP_TLS_INSECURE", "true", "DYN_TCP_TLS_INSECURE"),
+        ];
+        if !cfg!(all(target_os = "linux", feature = "velo-ucx")) {
+            cases.push(("DYN_VELO_RESPONSE_TRANSPORT", "ucx", "velo-ucx"));
+        }
+        for (name, value, message) in cases {
+            let mut vars = vec![
+                ("DYN_VELO_RESPONSE_TRANSPORT", Some("tcp")),
+                ("DYN_TCP_RESPONSE_STREAM_HOST", Some("127.0.0.1")),
+            ];
+            vars.retain(|(var, _)| *var != name);
+            vars.push((name, Some(value)));
+            temp_env::async_with_vars(vars, async {
+                let runtime = Runtime::from_current().unwrap();
+                let mut config = DistributedConfig::process_local();
+                config.response_plane = Some(ResponsePlaneMode::Velo);
+                let error = DistributedRuntime::new(runtime, config)
+                    .await
+                    .expect_err("Velo configuration must fail before serving endpoints");
+                assert!(error.to_string().contains(message), "{error:#}");
+            })
+            .await;
+        }
+    }
 
     #[tokio::test]
     async fn distributed_runtime_rejects_invalid_parser_version() {

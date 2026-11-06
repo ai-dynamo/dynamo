@@ -12,6 +12,7 @@ import pytest
 import torch
 from vllm.outputs import RequestOutput
 
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm.handlers import BaseWorkerHandler
 
 pytestmark = [
@@ -33,6 +34,8 @@ def mock_handler():
     handler.model_config = Mock(enable_prompt_embeds=True)
     handler.model_config.dtype = torch.float32
     handler.model_config.get_hidden_size.return_value = 4096
+    # A non-OPT text config: vLLM checks word_embed_proj_dim before hidden_size.
+    handler.model_config.hf_text_config = Mock(spec=[])
     handler._decode_prompt_embeds = BaseWorkerHandler._decode_prompt_embeds.__get__(  # type: ignore
         handler
     )
@@ -96,8 +99,8 @@ class TestPromptEmbedsDecode:
     def test_decode_invalid_inputs(
         self, mock_handler, invalid_input, error_match, description
     ):
-        """Test that invalid inputs raise ValueError."""
-        with pytest.raises(ValueError, match=error_match):
+        """Test that undecodable inputs raise InvalidArgument (client 400)."""
+        with pytest.raises(InvalidArgument, match=error_match):
             mock_handler._decode_prompt_embeds(invalid_input)
 
     def test_missing_model_config_is_server_error(self, mock_handler):
@@ -130,7 +133,7 @@ class TestPromptEmbedsDecode:
         buffer.seek(0)
         embeddings_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-        with pytest.raises(ValueError, match="Failed to decode.*PyTorch"):
+        with pytest.raises(InvalidArgument, match="Failed to decode.*PyTorch"):
             mock_handler._decode_prompt_embeds(embeddings_base64)
 
     def test_decode_non_tensor_object_rejected(self, mock_handler):
@@ -138,7 +141,7 @@ class TestPromptEmbedsDecode:
         non_tensor = {"key": "value"}
         embeddings_base64 = encode_tensor_to_base64_obj(non_tensor)
 
-        with pytest.raises(ValueError, match="Failed to decode"):
+        with pytest.raises(InvalidArgument, match="Failed to decode"):
             mock_handler._decode_prompt_embeds(embeddings_base64)
 
 

@@ -465,7 +465,7 @@ impl OAIChatLikeRequest for UnifiedRequest {
     }
 
     fn messages(&self) -> minijinja::value::Value {
-        let messages_json = serde_json::to_value(&self.inner.inner.messages).unwrap();
+        let messages_json = self.inner.template_messages_json();
         minijinja::value::Value::from_serialize(&messages_json)
     }
 
@@ -475,6 +475,10 @@ impl OAIChatLikeRequest for UnifiedRequest {
 
     fn tools(&self) -> Option<minijinja::value::Value> {
         OAIChatLikeRequest::tools(&self.inner)
+    }
+
+    fn template_tools(&self) -> Option<minijinja::value::Value> {
+        OAIChatLikeRequest::template_tools(&self.inner)
     }
 
     fn tool_choice(&self) -> Option<minijinja::value::Value> {
@@ -550,6 +554,7 @@ mod tests {
             },
             common: CommonExt::default(),
             nvext: None,
+            responses_tools: None,
             chat_template_args: None,
             thinking: None,
             media_io_kwargs: None,
