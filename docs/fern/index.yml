@@ -151,6 +151,9 @@ navigation:
             path: pages/kubernetes/model-deployment/expose-the-frontend.md
           - page: Deploy on Intel GPUs
             path: pages/kubernetes/model-deployment/deploy-on-intel-gpus.mdx
+          - page: Offline Batch Inference (Experimental)
+            slug: offline-batch-inference
+            path: pages/kubernetes/model-deployment/offline-batch-inference.md
           - section: Model Loading
             collapsed: true
             contents:
@@ -175,6 +178,9 @@ navigation:
             path: pages/kubernetes/kv-aware-routing/global-discovery-service-storage.md
           - page: Using GAIE with Dynamo
             path: pages/kubernetes/kv-aware-routing/gateway-api.mdx
+          - page: Model Routing with Switchyard
+            slug: switchyard
+            path: pages/kubernetes/kv-aware-routing/switchyard.md
           - page: Using GAIE with vanilla vLLM
             path: pages/kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx
             slug: vanilla-vllm-onramp
@@ -197,6 +203,9 @@ navigation:
             path: pages/kubernetes/kv-cache-offloading/overview.mdx
           - page: Deploy LMCache MP
             path: pages/kubernetes/kv-cache-offloading/lmcache.mdx
+          - page: Deploy KVCR (Experimental)
+            slug: kvcr
+            path: pages/kubernetes/kv-cache-offloading/kvcr.md
 
       - section: Fault Tolerance
         icon: shield-halved
@@ -243,6 +252,9 @@ navigation:
             path: pages/kubernetes/operations/performance-tuning.md
           - page: LoRA Adapters
             path: pages/kubernetes/operations/lora-adapters.md
+          - page: LoRA Adapter Walkthrough
+            slug: lora-adapter-walkthrough
+            path: pages/kubernetes/operations/lora-adapter-walkthrough.md
 
   # ==================== Local Guide ====================
   - tab: cli-guide
@@ -293,6 +305,9 @@ navigation:
         contents:
           - page: Overview
             path: pages/cli/disaggregated-serving/overview.mdx
+          - page: TokenSpeed (Experimental)
+            slug: tokenspeed
+            path: pages/cli/disaggregated-serving/tokenspeed.md
           - page: Sizing with AIConfigurator
             path: pages/cli/disaggregated-serving/sizing-with-aiconfigurator.mdx
 
@@ -313,6 +328,9 @@ navigation:
             path: pages/cli/operations/benchmarking-with-aiperf.mdx
           - page: LoRA Adapters
             path: pages/cli/operations/lora-adapters.md
+          - page: LoRA Adapter Walkthrough
+            slug: lora-adapter-walkthrough
+            path: pages/cli/operations/lora-adapter-walkthrough.md
 
   - tab: developer-guide
     layout:
@@ -805,6 +823,9 @@ navigation:
         contents:
           - page: Voice Pipelines
             path: pages/use-cases/speech/voice-pipelines.md
+          - page: Nemotron Speech Pipeline
+            slug: nemotron-speech-pipeline
+            path: pages/use-cases/speech/nemotron-speech-pipeline.md
           - page: Speech to Text (STT)
             slug: speech-to-text
             path: pages/use-cases/speech/speech-to-text.md
@@ -853,6 +874,9 @@ navigation:
               - page: Text-to-Text (LLM Diffusion)
                 slug: text-to-text
                 path: pages/use-cases/diffusion/workflows/text-to-text-llm-diffusion.md
+          - page: Cosmos 3 (Experimental)
+            slug: cosmos3
+            path: pages/use-cases/diffusion/cosmos3.md
 
       - section: GPU Sharing
         collapsed: true

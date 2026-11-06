@@ -8,7 +8,7 @@ hide-toc: true
 
 import { ExampleSelector } from "@/components/ExampleSelector";
 
-**Prerequisites:** [Offline Batch Inference README](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/batch-gateway/README.md)
+**Prerequisites:** [Offline Batch Inference setup](../../kubernetes/model-deployment/offline-batch-inference.md)
 
 <ExampleSelector
   variants={[
@@ -18,8 +18,8 @@ import { ExampleSelector } from "@/components/ExampleSelector";
 
 <div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-dynamo-yaml">
 
-The frontend forwards `/v1/files` and `/v1/batches` to the batch services that the README's
-`dynamo-batch` Helm release installs for this DGD.
+The frontend forwards `/v1/files` and `/v1/batches` to the batch services that the
+`dynamo-batch` Helm release from the setup guide installs for this DGD.
 
 [Source: `dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/batch-gateway/dynamo.yaml)
 
