@@ -4865,17 +4865,6 @@ class EmbeddingWorkerHandler:
                 # Re-raise EngineShutdown if the monitor task raised it.
                 task.result()
 
-    @functools.cached_property
-    def _chat_template(self) -> Optional[str]:
-        """Template for chat-style requests: ``--custom-jinja-template``, or
-        None for the model's own, as with ``vllm serve`` without
-        ``--chat-template``."""
-        if not self.config.custom_jinja_template:
-            return None
-        from vllm.renderers.chat_utils import load_chat_template
-
-        return load_chat_template(self.config.custom_jinja_template)
-
     async def _render_chat_embedding_input(self, request: dict) -> list[Any]:
         """Render chat-style ``messages`` into one engine prompt per conversation.
 
@@ -4899,6 +4888,7 @@ class EmbeddingWorkerHandler:
             EmbeddingChatRequest,
         )
         from vllm.exceptions import VLLMClientError
+        from vllm.renderers.chat_utils import load_chat_template
         from vllm.utils.mistral import is_mistral_tokenizer
 
         from .errors import vllm_client_error_to_http_error
@@ -4921,8 +4911,10 @@ class EmbeddingWorkerHandler:
                     if request.get(key) is not None
                 }
             )
+            # ``--custom-jinja-template``, or None for the model's own, as with
+            # ``vllm serve`` without ``--chat-template``. vLLM caches the load.
             chat_params = chat_request.build_chat_params(
-                self._chat_template, "auto"
+                load_chat_template(self.config.custom_jinja_template), "auto"
             ).with_defaults(
                 {"tokenize": is_mistral_tokenizer(renderer.tokenizer)},
                 default_media_io_kwargs=(
