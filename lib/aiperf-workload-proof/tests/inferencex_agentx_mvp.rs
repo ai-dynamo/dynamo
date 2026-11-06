@@ -67,7 +67,6 @@ use std::{
     io::{ErrorKind, Read},
     path::{Path, PathBuf},
     rc::Rc,
-    sync::Arc,
 };
 
 use aiperf_clock_runtime::cancellation::RunCancellation;
@@ -86,13 +85,8 @@ use aisim_aiperf_workload_runner::{
     hosted_report::{FinalizedHostedReport, finalize_hosted_run_report},
     participant_adapter::{HostedTypedReport, native_hosted},
 };
-use aisimulate_core::{
-    engine::TimingModel,
-    perfmodel::ForwardPassWorkerType,
-    replay::{
-        ReplayCaptureOptions, ReplayDeterminism, ReplayEngineFactory, ReplayReport,
-        ReplayRuntimeInput, Replayer,
-    },
+use aisimulate_core::replay::{
+    ReplayCaptureOptions, ReplayDeterminism, ReplayReport, ReplayRuntimeInput, Replayer,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use dynamo_mocker::placement::KvReplayComposition;
@@ -708,8 +702,6 @@ fn host_typed(
     if compact_evidence {
         handle.use_compact_dispatch_evidence()?;
     }
-    let prefill_timing: Arc<dyn TimingModel> = prefill.timing.clone();
-    let decode_timing: Arc<dyn TimingModel> = decode.timing.clone();
     let composition = KvReplayComposition::disaggregated(
         prefill.router.clone(),
         decode.router.clone(),
@@ -722,10 +714,7 @@ fn host_typed(
     eprintln!("MVP stage: prepared; entering native simulator event loop");
     let report = Replayer::with_composition(
         calibrated::spec(prefill, decode)?,
-        ReplayEngineFactory::with_optional_role_timing_models(
-            Some(prefill_timing),
-            Some(decode_timing),
-        ),
+        prefill.factory.clone(),
         composition,
     )
     .context("real Dynamo KV composition accepts the disaggregated calibrated spec")?
@@ -847,12 +836,10 @@ fn write_raw_backend_artifact(
         ],
         "prepared_roots": typed.prepared_roots,
         "virtual_end_ns": typed.virtual_end_ns,
-        "physical_configuration_source": if std::env::var_os("MVP_CANONICAL_RESOLVED_CONFIG").is_some() {
-            "official compiler/runner resolved descriptors; native memory capacity without extra margin; compiler auto transfer footprint"
-        } else { "native memory geometry with explicit proof safety margin" },
+        "physical_configuration_source": "AISim CorePredictionConfig/compiler/Runner materializer and native physical factory",
         "prefill": {
             "timing": &prefill.diagnostics,
-            "native_kv_geometry": &prefill.geometry,
+            "capacity_diagnostics": &prefill.geometry,
             "state_geometry": &prefill.state_geometry,
             "replay_rank": &prefill.rank,
             "transfer": &prefill.transfer,
@@ -860,7 +847,7 @@ fn write_raw_backend_artifact(
         },
         "decode": {
             "timing": &decode.diagnostics,
-            "native_kv_geometry": &decode.geometry,
+            "capacity_diagnostics": &decode.geometry,
             "state_geometry": &decode.state_geometry,
             "replay_rank": &decode.rank,
             "transfer": &decode.transfer,
@@ -1153,43 +1140,18 @@ fn create_new_artifact_dir(path: &Path) -> Result<PathBuf> {
 }
 
 fn full_scenario_roles() -> Result<(calibrated::RoleSetup, calibrated::RoleSetup)> {
-    let systems = calibrated::systems_root()?;
-    if let Some(path) = std::env::var_os("MVP_CANONICAL_RESOLVED_CONFIG") {
-        let resolved: Value = serde_json::from_slice(&std::fs::read(PathBuf::from(path))?)?;
-        let engine: aisimulate_core::replay::ReplayEngineConfig =
-            serde_json::from_value(resolved["resolved"]["spec"]["engine"].clone())?;
-        return Ok((
-            calibrated::resolved_canonical_role(
-                engine.prefill.context("canonical prefill role")?,
-                resolved["memory"]["prefill"].clone(),
-                &systems,
-            )?,
-            calibrated::resolved_canonical_role(
-                engine.decode.context("canonical decode role")?,
-                resolved["memory"]["decode"].clone(),
-                &systems,
-            )?,
-        ));
-    }
-    let identity = calibrated::RoleIdentity {
-        model: MODEL,
-        systems: &systems,
-        hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Fp8WeightsKvBfloat16Attention,
-        tensor_parallel_size: 8,
-        role: ForwardPassWorkerType::Prefill,
-        max_num_seqs: usize::try_from(CONCURRENCY)?,
-        prefill: calibrated::PrefillMode::Chunked {
-            max_num_batched_tokens: 4096,
-        },
-    };
-    Ok((
-        calibrated::canonical_role(identity)?,
-        calibrated::canonical_role(calibrated::RoleIdentity {
-            role: ForwardPassWorkerType::Decode,
-            ..identity
-        })?,
-    ))
+    let path = PathBuf::from(
+        std::env::var_os("MVP_AISIM_CONFIG")
+            .context("MVP_AISIM_CONFIG must identify an authored canonical AISim configuration")?,
+    );
+    let bytes = aiperf_fsio::artifact_file::read_no_follow_bounded(&path, 1 << 20)
+        .context("bounded no-follow canonical AISim configuration")?;
+    let config: Value = serde_yaml::from_slice(&bytes)?;
+    ensure!(
+        config["engine"]["model"] == MODEL,
+        "physical configuration must name the accepted scenario model"
+    );
+    calibrated::roles_from_config(config)
 }
 
 /// Option-matched speed control over AISim's owning WEKA importer and native
@@ -1294,10 +1256,7 @@ fn canonical_weka_agentx_with_matched_options() -> Result<()> {
     );
     let report = Replayer::with_composition(
         calibrated::spec(&prefill, &decode)?,
-        ReplayEngineFactory::with_optional_role_timing_models(
-            Some(prefill.timing.clone()),
-            Some(decode.timing.clone()),
-        ),
+        prefill.factory.clone(),
         composition,
     )?
     .with_runtime_input(ReplayRuntimeInput::Workload(driver))
@@ -1323,7 +1282,7 @@ fn canonical_weka_agentx_with_matched_options() -> Result<()> {
             "warmup":"live_trajectory_v1","lanes":CONCURRENCY,"duration_seconds":PROFILE_SECONDS,
             "response_grace_seconds":GRACE_PERIOD_SECONDS,"tree_idle_cap_seconds":tree_idle_cap_seconds,
             "global_idle_cap_seconds":SYSTEM_IDLE_SECONDS,"placement":"same real Dynamo KV composition",
-            "model":"same canonical timing/native geometry from full_scenario_roles",
+            "model":"same owner-prepared physical factory from full_scenario_roles",
             "capture_per_request":true,"determinism":"canonical_v1",
             "limitations":["native WEKA hash rekeying differs from shared first_turn_prefix representation",
                 "native driver and shared workload are independently owned semantics; matching options is not parity"]}),
@@ -1345,7 +1304,7 @@ fn canonical_weka_agentx_with_matched_options() -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires AISIM_SYSTEMS_ROOT and a new MVP_ARTIFACT_DIR; runs the full 3600s trace-hash scenario over the real Dynamo KV composition"]
+#[ignore = "requires MVP_AISIM_CONFIG and a new MVP_ARTIFACT_DIR; runs the full 3600s trace-hash scenario over the real Dynamo KV composition"]
 fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> {
     // Static preflight first: the retained directory is created only after the
     // scenario frame, the system assets, and the canonical roles
@@ -1416,38 +1375,14 @@ fn inferencex_agentx_mvp_run_is_the_exact_user_scenario() -> Result<()> {
 /// This bounded fixture exercises prompt-at-model-limit rejection without
 /// changing the full scenario's canonical model capacity.
 #[test]
-#[ignore = "requires AISIM_SYSTEMS_ROOT; bounded calibrated rejection accounting control"]
+#[ignore = "requires MVP_AISIM_CONFIG; bounded calibrated rejection accounting control"]
 fn calibrated_hosted_rejections_reconcile_every_request() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let run = aiperf_protocol::runner_v2::decode_run_request_v2(
         run_fixture::branch_request(directory.path()).as_bytes(),
     )?
     .run;
-    let systems = calibrated::systems_root()?;
-    let mut prefill = calibrated::canonical_role(calibrated::RoleIdentity {
-        model: MODEL,
-        systems: &systems,
-        hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Fp8WeightsKvBfloat16Attention,
-        tensor_parallel_size: 8,
-        role: ForwardPassWorkerType::Prefill,
-        max_num_seqs: CONCURRENCY as usize,
-        prefill: calibrated::PrefillMode::Chunked {
-            max_num_batched_tokens: 4096,
-        },
-    })?;
-    let mut decode = calibrated::canonical_role(calibrated::RoleIdentity {
-        model: MODEL,
-        systems: &systems,
-        hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Fp8WeightsKvBfloat16Attention,
-        tensor_parallel_size: 8,
-        role: ForwardPassWorkerType::Decode,
-        max_num_seqs: CONCURRENCY as usize,
-        prefill: calibrated::PrefillMode::Chunked {
-            max_num_batched_tokens: 4096,
-        },
-    })?;
+    let (mut prefill, mut decode) = full_scenario_roles()?;
     prefill.rank.max_model_len = Some(16);
     decode.rank.max_model_len = Some(16);
     let (backend, typed) = host_typed(&run, &prefill, &decode, true)?;
@@ -1476,7 +1411,7 @@ fn calibrated_hosted_rejections_reconcile_every_request() -> Result<()> {
 /// finalizer before spending full-corpus resources. Deliberately use the
 /// existing branch fixture's trace hashes, with no scenario designation.
 #[test]
-#[ignore = "requires AISIM_SYSTEMS_ROOT; four-request calibrated trace-hash artifact control, not full MVP acceptance"]
+#[ignore = "requires MVP_AISIM_CONFIG; four-request calibrated trace-hash artifact control, not full MVP acceptance"]
 fn calibrated_hosted_artifacts_reconcile_every_request() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut run = aiperf_protocol::runner_v2::decode_run_request_v2(
@@ -1490,31 +1425,7 @@ fn calibrated_hosted_artifacts_reconcile_every_request() -> Result<()> {
     let export = run.cfg.export.as_mut().context("fixture export")?;
     export.genai_perf.enabled = true;
     export.genai_perf.json = true;
-    let systems = calibrated::systems_root()?;
-    let prefill = calibrated::canonical_role(calibrated::RoleIdentity {
-        model: MODEL,
-        systems: &systems,
-        hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Fp8WeightsKvBfloat16Attention,
-        tensor_parallel_size: 8,
-        role: ForwardPassWorkerType::Prefill,
-        max_num_seqs: CONCURRENCY as usize,
-        prefill: calibrated::PrefillMode::Chunked {
-            max_num_batched_tokens: 4096,
-        },
-    })?;
-    let decode = calibrated::canonical_role(calibrated::RoleIdentity {
-        model: MODEL,
-        systems: &systems,
-        hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Fp8WeightsKvBfloat16Attention,
-        tensor_parallel_size: 8,
-        role: ForwardPassWorkerType::Decode,
-        max_num_seqs: CONCURRENCY as usize,
-        prefill: calibrated::PrefillMode::Chunked {
-            max_num_batched_tokens: 4096,
-        },
-    })?;
+    let (prefill, decode) = full_scenario_roles()?;
     let (mut backend, typed) = host_typed(&run, &prefill, &decode, true)?;
     let (complete_backend, complete_typed) = host_typed(&run, &prefill, &decode, false)?;
     let mut compact_physical = serde_json::to_value(&backend)?;

@@ -5,7 +5,7 @@
 //!
 //! This proves *provider wiring*, not a full-scenario equivalence claim. Per
 //! role (prefill and decode), the canonical H100 BF16 op-level silicon timing
-//! model and the native KV-cache geometry from `new_with_geometry` are the one
+//! model and capacity configuration from the canonical compiler are the one
 //! timing source for both the native Replayer engines and the real Dynamo KV
 //! Router launch config. The router's `MockerConfig` carries the same resolved
 //! FPM config as its role and is given a canonical AIS callback, never a
@@ -30,23 +30,11 @@ use std::{
 };
 
 use aiperf_clock_runtime::cancellation::RunCancellation;
-use aisimulate_core::engine::{
-    CanonicalTimingModel, EngineConfig, EngineLaunchConfig, TimingModel, TimingModelConfig,
-    TransferTimingMode,
-};
+use aisimulate_core::engine::{EngineConfig, TimingModel, TimingModelConfig};
 use aisimulate_core::replay::{
-    ReplayCaptureOptions, ReplayDeterminism, ReplayEngineConfig, ReplayEngineFactory, ReplayReport,
-    ReplayRoleConfig, ReplayRuntimeInput, ReplaySpec, Replayer,
-};
-use aisimulate_core::{
-    BackendKind, DataType, DatabaseMode,
-    perfmodel::{
-        EstimationMode, ForwardPassFallbackPolicy, ForwardPassPerfModelConfig,
-        ForwardPassWorkerType,
-        memory::{
-            EstimateSource, KvCacheEstimateOptions, KvCacheEstimateRequest, KvCacheMemoryFraction,
-        },
-    },
+    PreparedReplay, ReplayCaptureOptions, ReplayDeterminism, ReplayEngineConfig,
+    ReplayEngineFactory, ReplayReport, ReplayRoleConfig, ReplayRuntimeInput, ReplaySpec, Replayer,
+    WorkerStage,
 };
 use anyhow::{Context, Result, ensure};
 use dynamo_mocker::common::perf_model::{AisCallback, PerfModel};
@@ -92,54 +80,6 @@ impl HardwareSelection {
             ),
         }
     }
-}
-
-/// Explicit arithmetic choice, independent of a checkpoint ID's suffix. This
-/// proof does not claim that BF16 timing measures NVFP4 checkpoint execution.
-#[derive(Clone, Copy, Debug, serde::Serialize)]
-pub(crate) enum ProofPrecision {
-    Bfloat16,
-    Fp8WeightsKvBfloat16Attention,
-}
-
-impl ProofPrecision {
-    fn weight_dtype(self) -> &'static str {
-        self.quant_mode()
-    }
-
-    fn kv_dtype(self) -> &'static str {
-        match self {
-            Self::Bfloat16 => "bfloat16",
-            Self::Fp8WeightsKvBfloat16Attention => "fp8",
-        }
-    }
-
-    fn quant_mode(self) -> &'static str {
-        match self {
-            Self::Bfloat16 => "bfloat16",
-            Self::Fp8WeightsKvBfloat16Attention => "fp8",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, serde::Serialize)]
-pub(crate) enum PrefillMode {
-    Unchunked,
-    Chunked { max_num_batched_tokens: usize },
-}
-
-/// Complete serving identity shared by canonical timing, physical geometry,
-/// replay and router. PP1/attention-DP1 remain fixed proof assumptions.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct RoleIdentity<'a> {
-    pub(crate) model: &'a str,
-    pub(crate) systems: &'a Path,
-    pub(crate) hardware: HardwareSelection,
-    pub(crate) precision: ProofPrecision,
-    pub(crate) role: ForwardPassWorkerType,
-    pub(crate) tensor_parallel_size: usize,
-    pub(crate) max_num_seqs: usize,
-    pub(crate) prefill: PrefillMode,
 }
 
 pub(crate) const BACKEND_VERSION: &str = "0.24.0";
@@ -261,7 +201,7 @@ impl HardwareLink {
     }
 }
 
-/// Per-role KV-transfer configuration derived from native memory geometry and
+/// Per-role KV-transfer configuration resolved by the owning compiler and
 /// one hardware link, kept beside the timing model so both cannot drift.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub(crate) struct KvTransferConfig {
@@ -575,156 +515,142 @@ fn hardware_link(systems: &Path, hardware: HardwareSelection) -> Result<Hardware
     })
 }
 
-fn memory_role(role: ForwardPassWorkerType) -> &'static str {
-    match role {
-        ForwardPassWorkerType::Prefill => "prefill",
-        ForwardPassWorkerType::Decode => "decode",
-        _ => "aggregated",
-    }
-}
-
-/// A fully resolved, immutable per-role canonical FPM config. Callers must not
-/// mutate it after construction: the timing model, native memory geometry and
-/// router launch config all derive from this exact identity.
-fn role_config(identity: RoleIdentity<'_>) -> Result<ForwardPassPerfModelConfig> {
-    let mut config = ForwardPassPerfModelConfig::new(
-        identity.model,
-        identity.hardware.system(),
-        BackendKind::Vllm,
-        identity.role,
-    );
-    config.backend_version = Some(BACKEND_VERSION.into());
-    config.tp = u32::try_from(identity.tensor_parallel_size)?;
-    config.pp = 1;
-    config.attention_dp = 1;
-    config.gemm_quant_mode = Some(identity.precision.quant_mode().into());
-    config.moe_quant_mode = Some(identity.precision.quant_mode().into());
-    config.moe_tp_size = Some(config.tp);
-    config.moe_ep_size = Some(1);
-    config.fmha_quant_mode = Some("bfloat16".into());
-    config.kvcache_quant_mode = Some(identity.precision.kv_dtype().into());
-    config.estimation_mode = EstimationMode::OpLevel;
-    config.fallback_policy = ForwardPassFallbackPolicy::Deny;
-    config.database_mode = DatabaseMode::Silicon;
-    config.strict_provenance = true;
-    config.systems_paths = vec![identity.systems.to_path_buf()];
-    config.estimator_config.correction.enabled = false;
-    Ok(config)
-}
-
 pub(crate) struct RoleSetup {
-    pub(crate) timing: Arc<CanonicalTimingModel>,
-    pub(crate) tensor_parallel_size: u32,
-    pub(crate) num_gpu_blocks_is_explicit: bool,
-    /// Recurrent-state modeling limitations are separate from attention KV.
+    pub(crate) timing: Arc<dyn TimingModel>,
+    descriptor: ReplayRoleConfig,
     pub(crate) state_geometry: Value,
     pub(crate) rank: EngineConfig,
     pub(crate) router: MockerConfig,
     pub(crate) diagnostics: Value,
     pub(crate) geometry: Value,
     pub(crate) model_config: ModelConfigEvidence,
-    /// Physical KV payload and hardware link used for the P/D handoff.
     pub(crate) transfer: KvTransferConfig,
+    pub(crate) factory: ReplayEngineFactory,
+    physical_spec: ReplaySpec,
 }
 
-/// Consume a role resolved by the official Python compiler/runner. No caller
-/// capacity margin, transfer-size estimate or alternate role defaults are applied.
-/// Native memory and compiler transfer footprints remain separate labelled facts.
-pub(crate) fn resolved_canonical_role(
-    descriptor: ReplayRoleConfig,
-    geometry: Value,
-    systems: &Path,
-) -> Result<RoleSetup> {
-    let rank = descriptor.rank;
-    let TimingModelConfig::External { provider, config } = &rank.timing_model else {
-        anyhow::bail!("canonical descriptor requires the real AIS timing provider");
+/// Configuration policy belongs entirely to AISimulate's public prediction
+/// schema, compiler, Runner materializer and existing physical role factory.
+/// This proof only binds the resulting model instance to Dynamo's placement API.
+pub(crate) fn roles_from_config(config: Value) -> Result<(RoleSetup, RoleSetup)> {
+    let prepared = PreparedReplay::from_prediction_config(&serde_json::to_string(&config)?)?;
+    let engine: ReplayEngineConfig = serde_json::from_value(prepared.spec.engine.clone())?;
+    ensure!(
+        matches!(
+            prepared.spec.topology,
+            aisimulate_core::replay::ReplayTopology::Disaggregated { .. }
+        ),
+        "this composition control requires a disaggregated physical configuration"
+    );
+    let role_setup = |stage| -> Result<RoleSetup> {
+        let descriptor = engine.role(stage);
+        let timing = prepared
+            .factory
+            .timing_model(stage)
+            .context("canonical role did not materialize a timing model")?;
+        let TimingModelConfig::External { provider, config } = &descriptor.rank.timing_model else {
+            anyhow::bail!("calibrated control requires canonical AIS timing");
+        };
+        ensure!(
+            provider == "aic",
+            "calibrated control requires the owning AIS provider"
+        );
+        let model = config["model"]
+            .as_str()
+            .context("resolved canonical model identity")?;
+        let system = config["system"]
+            .as_str()
+            .context("resolved canonical hardware identity")?;
+        let hardware = match system {
+            "h100_sxm" => HardwareSelection::H100Sxm,
+            "b200_sxm" => HardwareSelection::B200Sxm,
+            _ => anyhow::bail!("no pinned proof asset inventory for {system}"),
+        };
+        let systems = config["systems_paths"]
+            .as_array()
+            .filter(|paths| paths.len() == 1)
+            .and_then(|paths| paths[0].as_str())
+            .map(PathBuf::from)
+            .context("proof requires one explicit canonical systems root")?;
+        let model_config = canonical_model_config(model, &systems)?;
+        let link = hardware_link(&systems, hardware)?;
+        let launch = descriptor.launch_config(None)?;
+        let router = canonical_router_config(&launch, timing.clone())?;
+        let bytes_per_token = descriptor
+            .rank
+            .kv_transfer_bytes_per_token
+            .context("owning compiler did not resolve KV transfer footprint")?;
+        let bandwidth_gbps = descriptor
+            .rank
+            .kv_transfer_bandwidth
+            .context("physical configuration must author a transfer link")?;
+        ensure!(
+            bandwidth_gbps == link.bandwidth_gbps(),
+            "configured transfer link must match this control's pinned inter-node hardware assumption"
+        );
+        let role_name = match stage {
+            WorkerStage::Prefill => "prefill",
+            WorkerStage::Decode => "decode",
+            WorkerStage::Aggregated => "aggregated",
+        };
+        let state_geometry = json!({
+            "required": model_config.recurrent_layers > 0,
+            "supported": model_config.recurrent_layers == 0,
+            "recurrent_layers": model_config.recurrent_layers,
+            "note": "proof inventory only; no recurrent-state capacity or payload is invented",
+        });
+        let diagnostics = json!({"source": provider, "resolved_config": config,
+            "evidence": timing.evidence_summary()});
+        Ok(RoleSetup {
+            timing,
+            descriptor: descriptor.clone(),
+            state_geometry,
+            rank: descriptor.rank,
+            router,
+            diagnostics,
+            geometry: prepared.memory_diagnostics[role_name].clone(),
+            model_config,
+            transfer: KvTransferConfig {
+                bytes_per_token,
+                bandwidth_gbps,
+                link,
+            },
+            factory: prepared.factory.clone(),
+            physical_spec: prepared.spec.clone(),
+        })
     };
-    ensure!(
-        provider == "aic" || provider == "ais",
-        "canonical AIS provider required"
-    );
-    let mut timing_config = config.clone();
-    let object = timing_config
-        .as_object_mut()
-        .context("canonical timing identity")?;
-    // The runner carries memory allocation controls beside FPM identity. They
-    // remain in rank.timing_model/provenance; the FPM DTO has no such members.
-    for key in [
-        "gpu_memory_utilization",
-        "mem_fraction_static",
-        "free_gpu_memory_fraction",
-        "cuda_graph_reserved_bytes",
-    ] {
-        object.remove(key);
-    }
-    let config: ForwardPassPerfModelConfig = serde_json::from_value(timing_config.clone())?;
-    ensure!(
-        descriptor.dp_size == config.attention_dp && descriptor.tensor_parallel_size == config.tp,
-        "resolved replay topology conflicts with canonical model identity"
-    );
-    ensure!(
-        geometry["source"] == "native"
-            && geometry["estimated_num_gpu_blocks"].as_u64() == Some(rank.num_gpu_blocks as u64),
-        "official native geometry and resolved rank capacity must agree"
-    );
-    let model_config = canonical_model_config(&config.model, systems)?;
-    ensure!(
-        rank.max_model_len == Some(model_config.max_model_len),
-        "resolved context must match canonical model config"
-    );
-    ensure!(
-        model_config.recurrent_layers == 0,
-        "resolved canonical recurrent state is unsupported by this control"
-    );
-    let timing = CanonicalTimingModel::new(config)?;
-    let diagnostics = serde_json::to_value(timing.diagnostics())?;
-    let link = hardware_link(systems, HardwareSelection::B200Sxm)?;
-    let transfer_bytes = rank
-        .kv_transfer_bytes_per_token
-        .context("canonical transfer footprint required")?;
-    let bandwidth = rank
-        .kv_transfer_bandwidth
-        .context("canonical transfer bandwidth required")?;
-    ensure!(
-        bandwidth == link.bandwidth_gbps(),
-        "resolved transfer bandwidth conflicts with hardware link"
-    );
-    let num_gpu_blocks_is_explicit = descriptor
-        .num_gpu_blocks_is_explicit
-        .context("resolved capacity source required")?;
-    // The router must carry the exact resolved rank identity, not a second
-    // serialization of the stripped FPM-only DTO.
-    let router = canonical_router_config(
-        &rank,
-        descriptor.tensor_parallel_size as usize,
-        num_gpu_blocks_is_explicit,
-        &rank_timing_config(&rank)?,
-        timing.clone(),
-    )?;
-    Ok(RoleSetup {
-        timing,
-        tensor_parallel_size: descriptor.tensor_parallel_size,
-        num_gpu_blocks_is_explicit,
-        state_geometry: json!({"required":false,"supported":true,
-            "reason":"canonical non-recurrent model metadata"}),
-        rank,
-        router,
-        diagnostics,
-        geometry,
-        model_config,
-        transfer: KvTransferConfig {
-            bytes_per_token: transfer_bytes,
-            bandwidth_gbps: bandwidth,
-            link,
-        },
-    })
+    Ok((
+        role_setup(WorkerStage::Prefill)?,
+        role_setup(WorkerStage::Decode)?,
+    ))
 }
 
-fn rank_timing_config(rank: &EngineConfig) -> Result<Value> {
-    match &rank.timing_model {
-        TimingModelConfig::External { config, .. } => Ok(config.clone()),
-        _ => anyhow::bail!("canonical timing descriptor absent"),
-    }
+/// A small authored AISim configuration, not a second physical configuration
+/// implementation. The same canonical parser and factory serve the full target.
+pub(crate) fn small_control_roles() -> Result<(RoleSetup, RoleSetup)> {
+    let (model, _) = configured_model();
+    let systems = systems_root()?;
+    let link = hardware_link(&systems, HardwareSelection::H100Sxm)?;
+    let worker = json!({
+        "parallelism": {"replicas": PREFILL_WORKERS, "tensor": 1, "pipeline": 1,
+            "attention_data": 1, "moe_tensor": 1, "moe_expert": 1},
+        "scheduler": {"max_batched_tokens": MAX_NUM_BATCHED_TOKENS,
+            "max_sequences": MAX_NUM_SEQS, "async_scheduling": false},
+        "kv_cache": {"block_size": BLOCK_SIZE, "prefix_caching": true,
+            "capacity": {"type": "default", "memory_fraction": 0.9}},
+        "timing": {"type": "default"},
+    });
+    roles_from_config(json!({"engine": {
+        "mode": "disaggregated", "model": model, "hardware": SYSTEM,
+        "backend": "vllm", "backend_version": BACKEND_VERSION,
+        "enable_chunked_prefill": true,
+        "gemm_quant_mode": "bfloat16", "moe_quant_mode": "bfloat16",
+        "kvcache_quant_mode": "bfloat16", "fmha_quant_mode": "bfloat16",
+        "estimation_mode": "op_level", "fallback_policy": "deny", "database_mode": "SILICON",
+        "systems_paths": [systems], "estimator_config": {"correction": {"enabled": false}},
+        "kv_transfer": {"bandwidth_gb_per_second": link.bandwidth_gbps(), "timing_mode": "full_prompt"},
+        "workers": {"prefill": worker, "decode": worker},
+    }}))
 }
 
 /// Router-side adapter over the exact canonical estimator used by the engine.
@@ -733,7 +659,7 @@ fn rank_timing_config(rank: &EngineConfig) -> Result<Value> {
 /// the host must install the real model here instead of leaving Polynomial or
 /// choosing `PerfModel::Fixed`.
 struct CanonicalAisCallback {
-    timing: Arc<CanonicalTimingModel>,
+    timing: Arc<dyn TimingModel>,
 }
 
 impl AisCallback for CanonicalAisCallback {
@@ -755,268 +681,89 @@ impl AisCallback for CanonicalAisCallback {
     }
 }
 
-pub(crate) fn canonical_role(identity: RoleIdentity<'_>) -> Result<RoleSetup> {
-    let RoleIdentity {
-        model,
-        systems,
-        hardware,
-        precision,
-        role,
-        tensor_parallel_size,
-        max_num_seqs,
-        prefill,
-    } = identity;
-    ensure!(
-        max_num_seqs > 0 && tensor_parallel_size > 0,
-        "role sequence and TP limits must be positive"
-    );
-    let model_config = canonical_model_config(model, systems)?;
-    // An unchunked FIFO head needs a complete model-admissible pass. Chunked
-    // serving instead sizes activations to its real per-pass budget, without
-    // changing the model's native context maximum.
-    let (max_num_batched_tokens, enable_chunked_prefill) = match prefill {
-        PrefillMode::Unchunked => (
-            MAX_NUM_BATCHED_TOKENS.max(model_config.max_model_len),
-            false,
-        ),
-        PrefillMode::Chunked {
-            max_num_batched_tokens,
-        } => {
-            ensure!(
-                max_num_batched_tokens > 0,
-                "chunked prefill budget must be positive"
-            );
-            (max_num_batched_tokens, true)
-        }
-    };
-    let system = hardware.system();
-    let config = role_config(identity)?;
-    let memory = KvCacheEstimateRequest {
-        engine: serde_json::from_value(json!({
-            "schema_version": aisimulate_core::perfmodel::ENGINE_CONFIG_SCHEMA_VERSION,
-            "model_name": model,
-            "system_name": system,
-            "systems_path": systems,
-            "backend": BackendKind::Vllm,
-            "backend_version": BACKEND_VERSION,
-            "forward_model": "op_level",
-            "tp_size": tensor_parallel_size,
-            "moe_tp_size": tensor_parallel_size,
-            "moe_ep_size": 1,
-            "pp_size": 1,
-            "attention_dp_size": 1,
-            "kv_block_size": BLOCK_SIZE,
-            "weight_dtype": precision.weight_dtype(),
-            "moe_dtype": precision.weight_dtype(),
-            "activation_dtype": DataType::Bfloat16,
-            "kv_cache_dtype": precision.kv_dtype(),
-            "strict_provenance": true,
-            "database_mode": DatabaseMode::Silicon,
-            // Canonical geometry rejects a disaggregated role that silently
-            // inherits the aggregated worker default.
-            "extra": {"worker_type": memory_role(role)},
-        }))
-        .context("complete matching native memory engine identity")?,
-        max_num_tokens: u32::try_from(max_num_batched_tokens)
-            .context("serving per-pass token budget must fit u32")?,
-        max_batch_size: u32::try_from(max_num_seqs)?,
-        kv_cache_memory_fraction: KvCacheMemoryFraction::OfTotal(0.9),
-        gpu_memory_capacity_bytes_override: None,
-        cuda_graph_reserved_bytes: 0,
-        tolerance_fraction: Some(0.05),
-        options: KvCacheEstimateOptions {
-            allow_naive_fallback: false,
-            allow_hf_config_download: false,
-            naive_kv_reservation: 0.8,
-        },
-    };
-    let (timing, memory) =
-        CanonicalTimingModel::new_with_geometry(config, memory).with_context(|| {
-            format!(
-                "calibrated {role:?} timing/memory for {model} on {system} \
-                 vllm {BACKEND_VERSION}; checked-in op-level silicon tables must \
-                 serve this identity and deny fallback"
-            )
-        })?;
-
-    let provenance = timing
-        .provenance()
-        .context("canonical construction omitted resolved provenance")?;
-    ensure!(
-        provenance.selected_estimation_mode == EstimationMode::OpLevel,
-        "canonical {role:?} timing did not select op-level estimation"
-    );
-    ensure!(
-        provenance.config.database_mode == DatabaseMode::Silicon,
-        "canonical {role:?} timing did not select the silicon database"
-    );
-    ensure!(
-        provenance.config.fallback_policy == ForwardPassFallbackPolicy::Deny,
-        "canonical {role:?} timing must deny fallback"
-    );
-    ensure!(
-        provenance.selection_failures.is_empty(),
-        "no alternate estimator may qualify the {role:?} proof"
-    );
-    ensure!(
-        memory.source == EstimateSource::Native,
-        "canonical {role:?} geometry requires the native memory model"
-    );
-    ensure!(
-        memory.total_kv_size_tokens > 0 && memory.kv_size_per_token_bytes > 0,
-        "canonical {role:?} geometry is empty"
-    );
-
-    // The handoff carries exactly the native per-token KV geometry the rank
-    // already uses for capacity, over one explicit hardware link. Nothing here
-    // is a fixed transfer constant.
-    let link = hardware_link(systems, hardware)?;
-    ensure!(
-        tensor_parallel_size <= link.num_gpus_per_node as usize,
-        "proof TP size exceeds the selected hardware node"
-    );
-    let bytes_per_token = usize::try_from(memory.kv_size_per_token_bytes)
-        .context("native KV geometry exceeds usize")?;
-    ensure!(
-        bytes_per_token > 0,
-        "native {role:?} geometry must yield positive KV transfer bytes per token"
-    );
-    let bandwidth_gbps = link.bandwidth_gbps();
-    ensure!(
-        bandwidth_gbps.is_finite() && bandwidth_gbps > 0.0,
-        "{} inter-node link must yield positive decimal GB/s",
-        link.yaml.display()
-    );
-
-    let diagnostics = serde_json::to_value(timing.diagnostics())?;
-    ensure!(
-        diagnostics["source"] == json!("aic"),
-        "calibrated {role:?} timing must be served by the AIC provider: {diagnostics}"
-    );
-
-    let adjusted = memory
-        .tolerance_adjusted
-        .as_ref()
-        .context("explicit tolerance geometry")?;
-    let num_gpu_blocks = usize::try_from(adjusted.total_kv_size_tokens)? / BLOCK_SIZE;
-    ensure!(
-        num_gpu_blocks > 0,
-        "native {role:?} geometry yields no KV blocks"
-    );
-
-    let timing_config = serde_json::to_value(&provenance.config)?;
-    // Full GPU modeling must not treat `None` as unlimited: the pinned model
-    // config's native context maximum is the rank's prompt-plus-output limit.
-    let max_model_len = model_config.max_model_len;
-    let rank = EngineConfig {
-        // External AIS timing is priced by the role factory supplied below; the
-        // rank still names the exact resolved config so the engine and router
-        // cannot silently diverge.
-        timing_model: TimingModelConfig::External {
-            provider: "aic".into(),
-            config: timing_config.clone(),
-        },
-        max_num_seqs,
-        max_num_batched_tokens,
-        max_model_len: Some(max_model_len),
-        block_size: BLOCK_SIZE,
-        num_gpu_blocks,
-        kv_cache_bytes_per_token: Some(bytes_per_token),
-        kv_transfer_bytes_per_token: Some(bytes_per_token),
-        kv_transfer_bandwidth: Some(bandwidth_gbps),
-        // Transfer the complete prompt footprint; the causal assertion below
-        // prices exactly this token count, never a partial cached prefix.
-        kv_transfer_timing_mode: TransferTimingMode::FullPrompt,
-        enable_prefix_caching: true,
-        enable_chunked_prefill,
-        async_scheduling: Some(false),
-        worker_type: match role {
-            ForwardPassWorkerType::Prefill => aisimulate_core::engine::WorkerType::Prefill,
-            ForwardPassWorkerType::Decode => aisimulate_core::engine::WorkerType::Decode,
-            ForwardPassWorkerType::Aggregated => aisimulate_core::engine::WorkerType::Aggregated,
-        },
-        ..Default::default()
-    };
-    let router = canonical_router_config(
-        &rank,
-        tensor_parallel_size,
-        true,
-        &timing_config,
-        timing.clone(),
-    )?;
-
-    let state_geometry = if model_config.recurrent_layers > 0 {
-        json!({
-            "required": true,
-            "supported": false,
-            "full_physical_gpu_modeling": false,
-            "recurrent_layers": model_config.recurrent_layers,
-            "metadata": model_config.recurrent_metadata,
-            "reason": "canonical estimate_state_cache supports Kimi K3/DeepSeek V4 only; native Nemotron token KV explicitly excludes fixed per-request Mamba state; no state capacity or transfer size is invented",
-        })
-    } else {
-        json!({"required": false, "supported": true, "reason": "pinned model config declares no recurrent layers"})
-    };
-    Ok(RoleSetup {
-        timing,
-        tensor_parallel_size: u32::try_from(tensor_parallel_size)?,
-        num_gpu_blocks_is_explicit: true,
-        state_geometry,
-        rank,
-        router,
-        diagnostics,
-        geometry: serde_json::to_value(&memory)?,
-        model_config,
-        transfer: KvTransferConfig {
-            bytes_per_token,
-            bandwidth_gbps,
-            link,
-        },
-    })
-}
-
 /// Build the router launch config through its owning parser and require that it
 /// carries the same canonical FPM config. The parser maps external AIS timing
 /// to a callback slot; install the real canonical estimator there and fail if
 /// the provider or the resulting slot is not what this proof requires.
 fn canonical_router_config(
-    rank: &EngineConfig,
-    tensor_parallel_size: usize,
-    num_gpu_blocks_is_explicit: bool,
-    timing_config: &Value,
-    timing: Arc<CanonicalTimingModel>,
+    launch: &aisimulate_core::engine::EngineLaunchConfig,
+    timing: Arc<dyn TimingModel>,
 ) -> Result<MockerConfig> {
-    let launch = EngineLaunchConfig {
-        engine: rank.clone(),
-        dp_size: 1,
-        tensor_parallel_size,
-        num_gpu_blocks_is_explicit,
-        ..Default::default()
-    };
-    let mut router = MockerConfig::from_value(serde_json::to_value(&launch)?)
-        .context("canonical engine rank must be a valid Mocker launch config")?;
+    let mut router = MockerConfig::from_value(serde_json::to_value(launch)?)
+        .context("owner-normalized physical launch must be accepted by Dynamo")?;
     ensure!(
-        router.engine == launch.clone().normalized()?,
-        "router must preserve the complete canonical engine launch identity"
-    );
-    ensure!(
-        router.tensor_parallel_size == tensor_parallel_size,
-        "router must preserve canonical TP identity"
-    );
-    ensure!(
-        router.ais_perf_config() == Some(timing_config),
-        "router MockerConfig must carry the same resolved canonical FPM config as the role engine"
+        router.engine == *launch,
+        "Dynamo must preserve the complete owner-normalized launch identity"
     );
     ensure!(
         !matches!(router.perf_model.as_ref(), PerfModel::Fixed { .. }),
-        "canonical external timing must never be priced by PerfModel::Fixed"
+        "canonical timing must not be replaced with fixed timing"
     );
     router.perf_model = Arc::new(PerfModel::from_ais_callback(Arc::new(
-        CanonicalAisCallback {
-            timing: timing.clone(),
-        },
+        CanonicalAisCallback { timing },
     )));
     Ok(router)
+}
+
+#[test]
+fn owner_launch_normalization_preserves_role_allocation_and_callback_identity() -> Result<()> {
+    struct PlacementProbe;
+    impl TimingModel for PlacementProbe {
+        fn predict_prefill_ms(&self, batch: usize, tokens: usize, prefix: usize) -> Result<f64> {
+            Ok((batch + tokens + prefix) as f64)
+        }
+        fn predict_decode_ms(
+            &self,
+            batch: usize,
+            kv: usize,
+            context: usize,
+            total: usize,
+        ) -> Result<f64> {
+            Ok((batch + kv + context + total) as f64)
+        }
+    }
+    for (stage, role_name) in [
+        (WorkerStage::Prefill, "prefill"),
+        (WorkerStage::Decode, "decode"),
+    ] {
+        let config: ReplayEngineConfig = serde_json::from_value(json!({
+            "tensor_parallel_size": 2, "num_gpu_blocks_is_explicit": false,
+            "rank": {"num_gpu_blocks": 37, "block_size": 8,
+                "kv_transfer_bytes_per_token": 44928, "kv_transfer_bandwidth": 50.0,
+                "timing_model": {"type": "external", "provider": "aic", "config": {
+                    "model": DEFAULT_MODEL, "system": SYSTEM, "backend": "vllm",
+                    "worker_type": role_name, "tp": 2, "pp": 1, "attention_dp": 1,
+                    "gpu_memory_utilization": 0.83, "cuda_graph_reserved_bytes": 128,
+                }}}
+        }))?;
+        let role = config.role(stage);
+        let launch = role.launch_config(Some(0.25))?;
+        assert_eq!(launch.engine.worker_type, role.rank.worker_type);
+        assert_eq!(launch.gpu_memory_utilization, Some(0.83));
+        assert_eq!(launch.cuda_graph_reserved_bytes, Some(128));
+        assert!(!launch.num_gpu_blocks_is_explicit);
+        assert_eq!(launch.num_gpu_blocks, 37);
+        assert_eq!(launch.kv_transfer_bytes_per_token, Some(44928));
+        assert_eq!(launch.tensor_parallel_size, 2);
+        assert_eq!(launch.startup_time, Some(0.25));
+        let timing: Arc<dyn TimingModel> = Arc::new(PlacementProbe);
+        let router = canonical_router_config(&launch, timing.clone())?;
+        let identity = router
+            .ais_perf_config()
+            .context("canonical timing identity")?;
+        assert_eq!(identity["worker_type"], role_name);
+        assert_eq!(identity["tp"], 2);
+        assert!(identity.get("gpu_memory_utilization").is_none());
+        assert_eq!(
+            router.perf_model.predict_prefill_time(2, 16, 8)?,
+            timing.predict_prefill_ms(2, 8, 8)?
+        );
+        assert_eq!(
+            router.perf_model.predict_decode_time(2, 64, 32, 64)?,
+            timing.predict_decode_ms(2, 64, 32, 64)?
+        );
+    }
+    Ok(())
 }
 
 fn native_run(frame: &str, model: &str) -> Result<aiperf_config::model::BenchmarkRun> {
@@ -1036,13 +783,9 @@ fn native_run(frame: &str, model: &str) -> Result<aiperf_config::model::Benchmar
 }
 
 pub(crate) fn role_descriptor(setup: &RoleSetup) -> ReplayRoleConfig {
-    ReplayRoleConfig {
-        dp_size: 1,
-        tensor_parallel_size: setup.tensor_parallel_size,
-        prefill_context_parallel_size: 1,
-        num_gpu_blocks_is_explicit: Some(setup.num_gpu_blocks_is_explicit),
-        rank: setup.rank.clone(),
-    }
+    let mut descriptor = setup.descriptor.clone();
+    descriptor.rank = setup.rank.clone();
+    descriptor
 }
 
 /// Disaggregated 2P2D spec with separate per-role geometry. Requests are
@@ -1050,69 +793,18 @@ pub(crate) fn role_descriptor(setup: &RoleSetup) -> ReplayRoleConfig {
 pub(crate) fn spec(prefill: &RoleSetup, decode: &RoleSetup) -> Result<ReplaySpec> {
     ensure!(
         prefill.state_geometry["supported"] == true && decode.state_geometry["supported"] == true,
-        "full physical replay requires supported recurrent-state geometry; prefill={} decode={}",
-        prefill.state_geometry,
-        decode.state_geometry
+        "this calibrated control does not establish recurrent-state modeling"
     );
-    ensure!(
-        prefill.tensor_parallel_size == decode.tensor_parallel_size,
-        "proof prefill/decode TP topology must match"
-    );
-    ensure!(
-        prefill.transfer.link == decode.transfer.link,
-        "prefill and decode must share one hardware link assumption"
-    );
-    ensure!(
-        prefill.transfer.bytes_per_token > 0 && decode.transfer.bytes_per_token > 0,
-        "every disaggregated role needs positive native KV transfer bytes per token"
-    );
-    ensure!(
-        prefill.transfer.bytes_per_token == decode.transfer.bytes_per_token,
-        "prefill and decode must price the same native KV transfer bytes per token: {} vs {}",
-        prefill.transfer.bytes_per_token,
-        decode.transfer.bytes_per_token
-    );
-    ensure!(
-        prefill.transfer.bandwidth_gbps > 0.0 && decode.transfer.bandwidth_gbps > 0.0,
-        "every disaggregated role needs a positive physical transfer bandwidth"
-    );
-    ensure!(
-        prefill.transfer.bandwidth_gbps == decode.transfer.bandwidth_gbps,
-        "prefill and decode must price the same transfer bandwidth: {} vs {}",
-        prefill.transfer.bandwidth_gbps,
-        decode.transfer.bandwidth_gbps
-    );
-    // AISim applies `handoff_latency_ms` only when a role cannot derive a delay
-    // from `kv_transfer_bytes_per_token` + `kv_transfer_bandwidth`. Both roles
-    // supply that pair, so the bandwidth-priced serialization is authoritative
-    // and this hardware p2p fallback is not added on top (no double count).
-    let handoff_latency_ms = prefill.transfer.link.p2p_latency_ms();
-    ensure!(
-        handoff_latency_ms.is_finite() && handoff_latency_ms > 0.0,
-        "hardware p2p latency must produce a positive finite handoff fallback"
-    );
-    serde_json::from_value(json!({
-        "version": 1,
-        "topology": {
-            "kind": "disaggregated",
-            "prefill": {"initial_workers": PREFILL_WORKERS},
-            "decode": {"initial_workers": DECODE_WORKERS},
-            "handoff_latency_ms": handoff_latency_ms
-        },
-        "engine": ReplayEngineConfig {
-            dp_size: 1,
-            tensor_parallel_size: prefill.tensor_parallel_size,
-            prefill_context_parallel_size: 1,
-            num_gpu_blocks_is_explicit: Some(prefill.num_gpu_blocks_is_explicit),
-            rank: prefill.rank.clone(),
-            prefill: Some(role_descriptor(prefill)),
-            decode: Some(role_descriptor(decode)),
-            ..Default::default()
-        },
-        "adapters": {"placement": {"provider": "dynamo_kv_router"}},
-        "requests": []
-    }))
-    .context("strict disaggregated ReplaySpec")
+    let mut spec = prefill.physical_spec.clone();
+    let mut engine: ReplayEngineConfig = serde_json::from_value(spec.engine)?;
+    // Focused rejection controls may deliberately reduce the physical context
+    // limit. All ordinary configuration was already lowered by its owner.
+    engine.prefill = Some(role_descriptor(prefill));
+    engine.decode = Some(role_descriptor(decode));
+    spec.engine = serde_json::to_value(engine)?;
+    spec.adapters.placement.provider = "dynamo_kv_router".into();
+    spec.requests.clear();
+    Ok(spec)
 }
 
 /// Host the production AIPerf plans on the native Replayer event loop with the
@@ -1132,8 +824,6 @@ pub(crate) fn host(
         )),
     )
     .context("shared native lowering hosts the production plans")?;
-    let prefill_timing: Arc<dyn TimingModel> = prefill.timing.clone();
-    let decode_timing: Arc<dyn TimingModel> = decode.timing.clone();
     let composition = KvReplayComposition::disaggregated(
         prefill.router.clone(),
         decode.router.clone(),
@@ -1143,23 +833,19 @@ pub(crate) fn host(
         None,
         None,
     );
-    let report = Replayer::with_composition(
-        spec(prefill, decode)?,
-        ReplayEngineFactory::with_optional_role_timing_models(
-            Some(prefill_timing),
-            Some(decode_timing),
-        ),
-        composition,
-    )
-    .context("real Dynamo KV composition accepts the disaggregated calibrated spec")?
-    .with_runtime_input(ReplayRuntimeInput::External(Box::new(participant)))
-    .with_capture_options(ReplayCaptureOptions {
-        capture_per_request: true,
-        determinism: ReplayDeterminism::CanonicalV1,
-        ..Default::default()
-    })
-    .run()
-    .context("native Replayer event loop hosts calibrated AIPerf over the real KV composition")?;
+    let report =
+        Replayer::with_composition(spec(prefill, decode)?, prefill.factory.clone(), composition)
+            .context("real Dynamo KV composition accepts the disaggregated calibrated spec")?
+            .with_runtime_input(ReplayRuntimeInput::External(Box::new(participant)))
+            .with_capture_options(ReplayCaptureOptions {
+                capture_per_request: true,
+                determinism: ReplayDeterminism::CanonicalV1,
+                ..Default::default()
+            })
+            .run()
+            .context(
+                "native Replayer event loop hosts calibrated AIPerf over the real KV composition",
+            )?;
     Ok((report, handle.into_report().context("AIPerf phase report")?))
 }
 
@@ -1334,34 +1020,17 @@ fn assert_not_fixed(prefill: &RoleSetup, decode: &RoleSetup) -> Result<(f64, f64
 pub(crate) fn calibrated_control() -> Result<()> {
     let (model, model_source) = configured_model();
     ensure!(!model.trim().is_empty(), "AISIM_MODEL must not be empty");
-    let systems = systems_root()?;
-
-    let identity = RoleIdentity {
-        model: &model,
-        systems: &systems,
-        hardware: HardwareSelection::H100Sxm,
-        precision: ProofPrecision::Bfloat16,
-        role: ForwardPassWorkerType::Prefill,
-        tensor_parallel_size: 1,
-        max_num_seqs: MAX_NUM_SEQS,
-        prefill: PrefillMode::Unchunked,
-    };
-    let prefill = canonical_role(identity)
-        .context("prefill canonical op-level timing and native geometry")?;
-    let decode = canonical_role(RoleIdentity {
-        role: ForwardPassWorkerType::Decode,
-        ..identity
-    })
-    .context("decode canonical op-level timing and native geometry")?;
+    let (prefill, decode) =
+        small_control_roles().context("canonical AISim configuration and physical factory")?;
     let (prefill_small, prefill_large, decode_small, decode_large) =
         assert_not_fixed(&prefill, &decode).context("fixed-vs-calibrated causal control")?;
 
-    // The control must actually price a physical handoff: nonzero native KV
-    // payload on both roles, a positive hardware link, and one shared
-    // topology assumption with a positive p2p fallback.
+    // The control must actually price a physical handoff: a compiler-resolved
+    // payload on both roles and one shared positive hardware link. Capacity's
+    // native memory geometry is not relabelled as the transfer payload.
     ensure!(
         prefill.transfer.bytes_per_token > 0 && decode.transfer.bytes_per_token > 0,
-        "native KV geometry must yield positive transfer bytes per token on every role"
+        "compiler must resolve positive transfer bytes per token on every role"
     );
     ensure!(
         prefill.transfer.bandwidth_gbps > 0.0 && decode.transfer.bandwidth_gbps > 0.0,
@@ -1395,7 +1064,7 @@ pub(crate) fn calibrated_control() -> Result<()> {
             "scope": "preparatory GPU provider control; not a full-scenario or tokenizer-equivalence claim",
             "model": model,
             "model_source": model_source,
-            "max_model_len_note": "rank.max_model_len derives from the pinned model config max_position_embeddings; unbounded context is not claimed",
+            "max_model_len_note": "rank.max_model_len is resolved by the canonical AISim compiler; unbounded context is not claimed",
             "system": SYSTEM,
             "backend": "vllm",
             "backend_version": BACKEND_VERSION,
@@ -1411,8 +1080,9 @@ pub(crate) fn calibrated_control() -> Result<()> {
                 "inter_node_bandwidth_decimal_gb_s": prefill.transfer.bandwidth_gbps,
                 "p2p_latency_s": prefill.transfer.link.p2p_latency_s,
                 "p2p_latency_ms": prefill.transfer.link.p2p_latency_ms(),
-                "handoff_latency_ms": prefill.transfer.link.p2p_latency_ms(),
-                "handoff_latency_use": "fallback only when a role lacks bytes-per-token or positive bandwidth; never added to the bandwidth-priced serialization",
+                "configured_topology": prefill.physical_spec.topology,
+                "handoff_latency_use": "the owning configuration's fallback only; the hardware p2p latency above is not added to bandwidth-priced serialization",
+                "payload_source": "owning compiler transfer estimate; distinct from native capacity geometry",
                 "bytes_per_token": {
                     "prefill": prefill.transfer.bytes_per_token,
                     "decode": decode.transfer.bytes_per_token,
@@ -1436,7 +1106,7 @@ pub(crate) fn calibrated_control() -> Result<()> {
             "roles": {
                 "prefill": {
                     "timing": prefill.diagnostics,
-                    "native_kv_geometry": prefill.geometry,
+                    "capacity_diagnostics": prefill.geometry,
                     "model_config": prefill.model_config,
                     "kv_transfer": {
                         "bytes_per_token": prefill.transfer.bytes_per_token,
@@ -1447,7 +1117,7 @@ pub(crate) fn calibrated_control() -> Result<()> {
                 },
                 "decode": {
                     "timing": decode.diagnostics,
-                    "native_kv_geometry": decode.geometry,
+                    "capacity_diagnostics": decode.geometry,
                     "model_config": decode.model_config,
                     "kv_transfer": {
                         "bytes_per_token": decode.transfer.bytes_per_token,

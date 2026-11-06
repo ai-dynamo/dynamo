@@ -2936,6 +2936,7 @@ dependencies = [
  "aiperf-clock-runtime",
  "aiperf-config",
  "aiperf-engine-input",
+ "aiperf-fsio",
  "aiperf-protocol",
  "aiperf-report-model",
  "aiperf-rng",

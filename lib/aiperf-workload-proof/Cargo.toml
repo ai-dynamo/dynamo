@@ -24,6 +24,7 @@ aisim-aiperf-workload-runner = { path = "../../../../../aisimulate/.worktrees/ai
 aisimulate-core = { package = "aisim-core", path = "../../../../../aisimulate/.worktrees/aiperf-owned-runner-proof/crates/core", default-features = false }
 aiperf-clock-runtime = { path = "../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/libs/clock-runtime" }
 aiperf-config = { path = "../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/config/config" }
+aiperf-fsio = { path = "../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/libs/fsio" }
 aiperf-engine-input = { path = "../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/engine/input" }
 aiperf-protocol = { path = "../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/config/protocol" }
 aiperf-timing = { path = "../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/scheduling/timing" }
