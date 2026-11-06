@@ -238,7 +238,7 @@ func TestRenderHybridLocalPartitions(t *testing.T) {
 
 			t.Log("Render the hybrid workload")
 			rendered, err := renderSelectedForTest(renderTestPCS(true), projections, RenderInput{
-				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
+				Stages: map[string]PodTemplate{testRenderComponentName: {Template: corev1.PodTemplateSpec{Spec: renderTestPodSpec()}}},
 			})
 			require.NoError(t, err)
 

@@ -511,6 +511,12 @@ func generateSingleDCDFromNormalized(
 	deployment.Namespace = parentDGD.Namespace
 	component = &deployment.Spec.DynamoComponentDeploymentSharedSpec
 
+	// Persist the policy snapshot only at the child API boundary; in-memory
+	// normalized components retain authored environment provenance.
+	if compatibility.OrderedEnvironmentVariables.Enabled(parentDGD.Annotations) && shouldApplyKvTransferPolicyToWorkerComponent(component, parentDGD) {
+		compileWorkerKVTransferPolicyEnvironment(component, parentDGD.Spec.Experimental.KvTransferPolicy, parentDGD.Annotations)
+	}
+
 	if err := applyDGDComponentAlphaCompatibilityToDCD(parentDGD, componentName, deployment); err != nil {
 		return nil, err
 	}
@@ -646,7 +652,7 @@ func applyDynDeploymentConfigToComponent(
 			continue
 		}
 		rawConfig := getDynamoDeploymentConfig(main)
-		if compatibility.OrderedEnvironmentVariables.Enabled(GetPodTemplateAnnotations(component)) {
+		if compatibility.OrderedEnvironmentVariables.Enabled(podTemplate.Annotations) {
 			if config := findEnvVar(slices.Concat(generalEnvironment, main.Env), commonconsts.DynamoDeploymentConfigEnvVar); config != nil {
 				rawConfig = []byte(config.Value)
 			}
@@ -659,7 +665,7 @@ func applyDynDeploymentConfigToComponent(
 			if err != nil {
 				return err
 			}
-			setDynamoDeploymentConfig(main, updatedConfig, GetPodTemplateAnnotations(component))
+			setDynamoDeploymentConfig(main, updatedConfig, podTemplate.Annotations)
 			rawConfig = updatedConfig
 		}
 		config, err := ParseDynDeploymentConfig(rawConfig)
@@ -1591,6 +1597,7 @@ func BackendFactory(
 		return &TRTLLMBackend{
 			MpiRunSecretName:    operatorConfig.MPI.SSHSecretName,
 			roleLaunchOwnership: roleLaunchOwnership,
+			environment:         environment,
 		}
 	case BackendFrameworkNoop:
 		return &NoopBackend{}
@@ -1675,13 +1682,10 @@ func applyDefaultSecurityContext(podSpec *corev1.PodSpec) {
 type GenerateBasePodSpecOptions struct {
 	GeneralEnvironment []corev1.EnvVar
 
-	// KVTransferPolicy means the graph's policy owns the runtime's policy env,
-	// including absence of optional settings. Standalone topology sources do not.
-	KVTransferPolicy bool
-
-	// PolicyAuthored preserves the DGD source when the caller already normalized
-	// the component. Persisted DCDs instead use their actual stored source indexes.
-	PolicyAuthored *semanticenv.Layer
+	// KVTransferPolicy contains the compiled runtime bindings, if a graph policy
+	// owns them. The renderer removes authored policy inputs before registering
+	// this source; nil leaves standalone topology configuration user-owned.
+	KVTransferPolicy []corev1.EnvVar
 }
 
 // GenerateBasePodSpec creates a basic PodSpec with common logic shared between controller and grove.
@@ -1719,13 +1723,7 @@ func GenerateBasePodSpec(
 		return nil, err
 	}
 	environment := newPodEnvironment(GetPodTemplateAnnotations(component), generalEnvironment)
-	if opts.KVTransferPolicy {
-		environment.ownKVTransferPolicy(component, nativeSidecar)
-		if environment != nil && opts.PolicyAuthored != nil && environment.policyRuntime != "" {
-			layer := opts.PolicyAuthored.Without(workerKvTransferPolicyEnvNames...)
-			environment.policyAuthored = &layer
-		}
-	}
+	environment.ownKVTransferPolicy(component, nativeSidecar, opts.KVTransferPolicy)
 	if environment == nil && len(generalEnvironment) > 0 {
 		component = component.DeepCopy()
 		applyLegacyGeneralEnvironment(component, generalEnvironment)
@@ -1955,16 +1953,13 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		addLegacyMultinodeTopologyEnvVars(&container, numberOfNodes, serviceName, multinodeDeployer, annotations)
 	} else if numberOfNodes > 1 && usesMultinodeTopologyAliases(annotations) {
 		bindings := multinodeTopologyEnvironment(serviceName, multinodeDeployer)
-		container.Env = append(container.Env, bindings...)
-		environment.bind(container.Name, "operator.multinode", bindings)
+		environment.bind(&container, "operator.multinode", bindings)
 	}
 
 	backend := BackendFactory(backendFramework, operatorConfig, parentGraphDeploymentName, roleLaunchOwnership, environment)
 	if backend == nil {
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
-
-	backendEnvironmentStart := len(container.Env)
 
 	// Native engines retain their authored launch, probes, and ports.
 	if !nativeSidecar {
@@ -1975,11 +1970,9 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 
 	// Cache env remains a backend addition in both worker modes, preserving legacy ordering.
 	if backendFramework == BackendFrameworkVLLM && component.CompilationCache != nil {
-		container.Env = append(container.Env, corev1.EnvVar{Name: "VLLM_CACHE_ROOT", Value: component.CompilationCache.MountPath})
+		environment.appendDefaults(&container, []corev1.EnvVar{{Name: "VLLM_CACHE_ROOT", Value: component.CompilationCache.MountPath}})
 	}
 
-	// Backends inspect the authored values; their append-only additions remain defaults.
-	environment.appendDefaults(container.Name, container.Env[backendEnvironmentStart:])
 	// get base podspec from component
 	podSpec, err := componentDefaults.GetBasePodSpec(componentContext)
 	if err != nil {
@@ -2043,7 +2036,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		if environment == nil {
 			addLegacyMultinodeTopologyEnvVars(runtime, numberOfNodes, serviceName, multinodeDeployer, annotations)
 		} else if numberOfNodes > 1 && usesMultinodeTopologyAliases(annotations) {
-			environment.bind(runtime.Name, "operator.multinode", multinodeTopologyEnvironment(serviceName, multinodeDeployer))
+			environment.bind(runtime, "operator.multinode", multinodeTopologyEnvironment(serviceName, multinodeDeployer))
 		}
 	}
 
@@ -2088,8 +2081,13 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
 		}
 		// Snapshot workers use GMS V1; snapshot-less workers retain GMS V0.
-		bindings := gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0], snapshotEnabled)
-		environment.bind(podSpec.Containers[0].Name, "operator.gpuMemoryService", bindings)
+		if environment == nil {
+			gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0], snapshotEnabled)
+		} else {
+			environment.capture(&podSpec)
+			gms.EnsureServerSidecarResources(&podSpec, &podSpec.Containers[0], snapshotEnabled)
+			environment.bind(&podSpec.Containers[0], "operator.gpuMemoryService", gms.ClientEnvironment(snapshotEnabled))
+		}
 		for _, name := range gmsSpec.ExtraClientContainers {
 			var container *corev1.Container
 			for i := range podSpec.Containers {
@@ -2101,16 +2099,15 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 			if container == nil {
 				return nil, fmt.Errorf("gpuMemoryService extra client container %q disappeared while rendering the pod", name)
 			}
-			if environment != nil {
-				if _, registered := environment.containers[container.Name]; !registered {
-					environment.register(container.Name, "podTemplate.spec.containers[name="+container.Name+"].env", nil, nil, container.Env)
+			if environment == nil {
+				gms.EnsureClient(&podSpec, container)
+				if snapshotEnabled {
+					gms.EnableV1(container)
 				}
+			} else {
+				gms.EnsureClientResources(&podSpec, container)
+				environment.bind(container, "operator.gpuMemoryService", gms.ClientEnvironment(snapshotEnabled))
 			}
-			bindings := gms.EnsureClient(&podSpec, container)
-			if snapshotEnabled {
-				bindings = append(bindings, gms.EnableV1(container)...)
-			}
-			environment.bind(container.Name, "operator.gpuMemoryService", bindings)
 		}
 	}
 
@@ -2511,7 +2508,7 @@ func generatePodSpecForComponent(
 	}
 	component = component.DeepCopy()
 	if shouldApplyKvTransferPolicyToWorkerComponent(component, dynamoDeployment) {
-		environment.ownKVTransferPolicy(component, nativeSidecar)
+		environment.ownKVTransferPolicy(component, nativeSidecar, KVTransferPolicyEnvironment(dynamoDeployment.Spec.Experimental.KvTransferPolicy))
 	}
 	applyDGDTemplateDefaults(component, dynamoDeployment, groveClusterTopologyDomains, nativeSidecar)
 	if operatorConfig == nil {
@@ -2656,9 +2653,26 @@ func applyKvTransferPolicyToWorkerComponent(
 		if sidecarMode && runtime.Name != commonconsts.RuntimeContainerName {
 			continue
 		}
-		runtime.Env = MergeEnvsForOrigin(annotations, workerKvTransferPolicyEnvVars(kvt), removeWorkerKvTransferPolicyEnvVars(runtime.Env))
+		if !compatibility.OrderedEnvironmentVariables.Enabled(annotations) {
+			runtime.Env = mergeEnvsLegacy(KVTransferPolicyEnvironment(kvt), removeWorkerKvTransferPolicyEnvVars(runtime.Env))
+		}
 		runtime.VolumeMounts = appendTopologyLabelVolumeMount(runtime.VolumeMounts, TopologyLabelVolumeMount())
 		podTemplate.Spec.Volumes = appendTopologyLabelVolume(podTemplate.Spec.Volumes, TopologyLabelVolume(kvt, groveClusterTopologyDomains))
+	}
+}
+
+// compileWorkerKVTransferPolicyEnvironment snapshots graph-owned runtime values
+// into persisted child templates without changing in-memory normalized sources.
+func compileWorkerKVTransferPolicyEnvironment(component *v1beta1.DynamoComponentDeploymentSharedSpec, policy *v1beta1.KvTransferPolicy, annotations map[string]string) {
+	native := GetComponentDynamoSidecar(component) != nil
+	for _, template := range ComponentPodTemplates(component) {
+		runtime := findRuntimeInitContainer(&template.Spec)
+		if runtime == nil && !native {
+			runtime = ensureMainContainer(template)
+		}
+		if runtime != nil {
+			runtime.Env = MergeEnvsForOrigin(annotations, KVTransferPolicyEnvironment(policy), removeWorkerKvTransferPolicyEnvVars(runtime.Env))
+		}
 	}
 }
 
@@ -2702,7 +2716,9 @@ func ApplyDGDComponentTopologyAnnotations(
 	return result
 }
 
-func workerKvTransferPolicyEnvVars(kvt *v1beta1.KvTransferPolicy) []corev1.EnvVar {
+// KVTransferPolicyEnvironment returns the runtime bindings compiled from a graph
+// policy. kvt must not be nil; optional settings remain absent when unset.
+func KVTransferPolicyEnvironment(kvt *v1beta1.KvTransferPolicy) []corev1.EnvVar {
 	enforcement := string(kvt.Enforcement)
 	if enforcement == "" {
 		enforcement = string(v1beta1.KvTransferEnforcementRequired)
@@ -3386,8 +3402,7 @@ func generatePodSpecForRole(
 		if err != nil {
 			return nil, fmt.Errorf("failed to get GPU count for GMS weight server: %w", err)
 		}
-		gmsPodSpec := gmsWeightServerPodSpec(basePodSpec, r.Rank, int(gpuCount))
-		environment.bind(gmsPodSpec.Containers[0].Name, "operator.gpuMemoryService", []corev1.EnvVar{{Name: gms.EnvSocketDir, Value: gmsSharedMountPath}})
+		gmsPodSpec := gmsWeightServerPodSpec(basePodSpec, r.Rank, int(gpuCount), environment)
 		if err := environment.apply(gmsPodSpec); err != nil {
 			return nil, err
 		}
@@ -3746,9 +3761,7 @@ func GenerateBasePodSpecForController(
 	// Generate base PodSpec with standard env vars using merged component envs
 	componentName := GetDCDComponentName(dynComponent)
 	environment := newPodEnvironment(GetPodTemplateAnnotations(componentSpec), dynComponent.Spec.Env)
-	if DCDHasKVTransferPolicy(dynComponent) {
-		environment.ownKVTransferPolicy(componentSpec, nativeSidecar)
-	}
+	environment.ownKVTransferPolicy(componentSpec, nativeSidecar, DCDKVTransferPolicyEnvironment(dynComponent, componentSpec))
 	if environment == nil && len(dynComponent.Spec.Env) > 0 {
 		applyLegacyGeneralEnvironment(componentSpec, dynComponent.Spec.Env)
 	}

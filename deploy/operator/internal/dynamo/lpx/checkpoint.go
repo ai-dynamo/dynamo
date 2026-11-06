@@ -109,16 +109,8 @@ func applyCyborgWeightsPath(container *corev1.Container, projection *ModelProjec
 	}
 
 	// Kubernetes expands environment references in order; publish the checkpoint before authored bindings.
-	env := make([]corev1.EnvVar, 0, len(container.Env)+1)
-	env = append(env, corev1.EnvVar{
+	environment.Prepend(container, "operator.lpx.weights", []corev1.EnvVar{{
 		Name:  cyborgWeightsPathEnv,
 		Value: checkpointSnapshotPath(projection.checkpoint, modelStoragePath),
-	})
-	for _, variable := range container.Env {
-		if variable.Name != cyborgWeightsPathEnv {
-			env = append(env, variable)
-		}
-	}
-	container.Env = env
-	environment.Bind(container.Name, "operator.lpx.weights", env[:1])
+	}})
 }

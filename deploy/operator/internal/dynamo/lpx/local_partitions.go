@@ -95,18 +95,9 @@ func applyLocalPartitionIDs(container *corev1.Container, projection *ModelProjec
 	publish := len(ids) > 0 || len(container.EnvFrom) > 0
 
 	// Kubernetes expands environment references in order; publish the selection before authored bindings.
-	env := make([]corev1.EnvVar, 0, len(container.Env)+1)
 	if publish {
-		env = append(env, corev1.EnvVar{Name: localPartitionIDsEnv, Value: strings.Join(ids, ",")})
-	}
-	for _, variable := range container.Env {
-		if variable.Name != localPartitionIDsEnv {
-			env = append(env, variable)
-		}
-	}
-	container.Env = env
-	environment.Omit(container.Name, localPartitionIDsEnv)
-	if publish {
-		environment.Bind(container.Name, "operator.lpx.partitions", env[:1])
+		environment.Prepend(container, "operator.lpx.partitions", []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: strings.Join(ids, ",")}})
+	} else {
+		environment.Omit(container, localPartitionIDsEnv)
 	}
 }

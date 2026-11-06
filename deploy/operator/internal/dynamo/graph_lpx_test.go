@@ -156,7 +156,7 @@ func TestLPXRoleDefersEnvironmentComposition(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Log("The final LPX binding replaces the authored cycle without inventing local order")
-	environment.Bind("main", "operator.lpx.modelPaths", []corev1.EnvVar{{Name: "LPX_MODEL_PATH", Value: "/models"}})
+	environment.Bind(&template.Spec.Containers[0], "operator.lpx.modelPaths", []corev1.EnvVar{{Name: "LPX_MODEL_PATH", Value: "/models"}})
 	require.NoError(t, environment.Apply(&template.Spec))
 	var relevant []string
 	for _, env := range template.Spec.Containers[0].Env {

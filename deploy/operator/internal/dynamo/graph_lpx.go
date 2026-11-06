@@ -265,9 +265,8 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 	}
 	// Pass runtime inputs; deployment identity is stamped only on final resources.
 	input := &dynamolpx.RenderInput{
-		MinAvailable:      new(provideroverride.EffectiveGroveMinAvailable(p.component)),
-		Stages:            make(map[string]corev1.PodTemplateSpec),
-		StageEnvironments: make(map[string]semanticenv.ContainerLayers),
+		MinAvailable: new(provideroverride.EffectiveGroveMinAvailable(p.component)),
+		Stages:       make(map[string]dynamolpx.PodTemplate),
 	}
 
 	// Resolve preserved alpha metadata once for all independently rendered roles.
@@ -288,8 +287,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		if err != nil {
 			return nil, fmt.Errorf("rendering %s.agent: rendering selected LPX base pod: %w", component.ComponentName, err)
 		}
-		input.Stages[component.ComponentName] = *lpuTemplate
-		input.StageEnvironments[component.ComponentName] = environment
+		input.Stages[component.ComponentName] = dynamolpx.PodTemplate{Template: *lpuTemplate, Environment: environment}
 		conductor := component.ComponentRole(v1beta1.ComponentRoleLPXConductor)
 
 		// Only the serving component's declared conductor contributes a template.
@@ -300,11 +298,12 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		// The serving role owns its startup independently of the Agent template.
 		if workload.Pipeline() != dynamolpx.PipelineHybrid {
 			role := lpxRoleComponent(component, conductor.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
-			input.Conductor, input.ConductorEnvironment, err = renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
+			template, environment, err := renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
 				p.discoveryContext, defaults)
 			if err != nil {
 				return nil, fmt.Errorf("rendering %s.conductor: rendering selected LPX base pod: %w", component.ComponentName, err)
 			}
+			input.Conductor = &dynamolpx.PodTemplate{Template: *template, Environment: environment}
 			continue
 		}
 
@@ -333,8 +332,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		}
 
 		clique.Labels[commonconsts.KubeLabelDynamoComponentType] = string(v1beta1.ComponentTypeLPX)
-		input.Cyborg = clique
-		input.CyborgEnvironment = environment
+		input.Cyborg = &dynamolpx.CliqueTemplate{Template: clique, Environment: environment}
 	}
 	return input, nil
 }

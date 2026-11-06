@@ -45,18 +45,10 @@ func applyCyborgManifestPath(container *corev1.Container, projection *ModelProje
 	}
 
 	// Kubernetes expands environment references in order; publish the manifest before authored bindings.
-	env := make([]corev1.EnvVar, 0, len(container.Env)+1)
-	env = append(env, corev1.EnvVar{
+	environment.Prepend(container, "operator.lpx.manifest", []corev1.EnvVar{{
 		Name:  gbuildManifestPathEnv,
 		Value: filepath.Join(buildRoot, manifestPath),
-	})
-	for _, variable := range container.Env {
-		if variable.Name != gbuildManifestPathEnv {
-			env = append(env, variable)
-		}
-	}
-	container.Env = env
-	environment.Bind(container.Name, "operator.lpx.manifest", env[:1])
+	}})
 	return nil
 }
 

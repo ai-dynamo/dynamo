@@ -7,7 +7,6 @@ package lpx
 
 import (
 	"fmt"
-	"slices"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -25,19 +24,11 @@ func configureNodeLocalConductorRuntime(
 	conductor := common.FindContainerByName(conductorPodSpec.Containers, commonconsts.MainContainerName)
 
 	// Kubernetes expands environment references in order; publish allocation before authored bindings.
-	env := make([]corev1.EnvVar, 0, len(conductor.Env)+1)
-	env = append(env, corev1.EnvVar{Name: allocationEnvVar, Value: allocation})
-	for _, variable := range conductor.Env {
-		if variable.Name != allocationEnvVar {
-			env = append(env, variable)
-		}
-	}
-	conductor.Env = env
-	environment.Bind(conductor.Name, "operator.lpx.allocation", env[:1])
+	environment.Prepend(conductor, "operator.lpx.allocation", []corev1.EnvVar{{Name: allocationEnvVar, Value: allocation}})
 }
 
-// applyModelPaths resolves nonempty canonical projections and rewrites each container's Env in place.
-func applyModelPaths(containerLists [][]corev1.Container, projections []*ModelProjection, modelStoragePath string) ([]corev1.EnvVar, error) {
+// modelPaths resolves every binding for nonempty canonical projections before any Pod is changed.
+func modelPaths(projections []*ModelProjection, modelStoragePath string) ([]corev1.EnvVar, error) {
 	// Single-model workloads publish one path; speculative workloads publish the first draft and final target.
 	type modelPathBinding struct {
 		name       string
@@ -60,19 +51,5 @@ func applyModelPaths(containerLists [][]corev1.Container, projections []*ModelPr
 		paths = append(paths, corev1.EnvVar{Name: binding.name, Value: path})
 	}
 
-	// Regular and init containers receive authoritative paths ahead of authored references.
-	for _, containers := range containerLists {
-		for i := range containers {
-			container := &containers[i]
-			env := make([]corev1.EnvVar, 0, len(paths)+len(container.Env))
-			env = append(env, paths...)
-			for _, variable := range container.Env {
-				if !slices.ContainsFunc(paths, func(path corev1.EnvVar) bool { return path.Name == variable.Name }) {
-					env = append(env, variable)
-				}
-			}
-			container.Env = env
-		}
-	}
 	return paths, nil
 }

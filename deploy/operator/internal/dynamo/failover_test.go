@@ -62,7 +62,7 @@ func TestGmsWeightServerPodSpec(t *testing.T) {
 		}},
 	}
 
-	result := gmsWeightServerPodSpec(base, 0, 8)
+	result := gmsWeightServerPodSpec(base, 0, 8, nil)
 
 	require.Len(t, result.Containers, 1)
 	c := result.Containers[0]
@@ -96,7 +96,7 @@ func TestGmsWeightServerPodSpec(t *testing.T) {
 
 func TestGmsWeightServerPodSpec_EmptyContainers(t *testing.T) {
 	base := &corev1.PodSpec{}
-	result := gmsWeightServerPodSpec(base, 0, 1)
+	result := gmsWeightServerPodSpec(base, 0, 1, nil)
 	assert.Empty(t, result.Containers)
 }
 
@@ -106,14 +106,14 @@ func TestGmsWeightServerPodSpec_SubPathExpr(t *testing.T) {
 	}
 
 	t.Run("rank 0", func(t *testing.T) {
-		result := gmsWeightServerPodSpec(base, 0, 4)
+		result := gmsWeightServerPodSpec(base, 0, 4, nil)
 		mount := findVolumeMount(result.Containers[0], gmsSharedMountPath)
 		require.NotNil(t, mount, "GMS container should mount shared volume")
 		assert.Equal(t, "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)/rank-0", mount.SubPathExpr)
 	})
 
 	t.Run("rank 3", func(t *testing.T) {
-		result := gmsWeightServerPodSpec(base, 3, 4)
+		result := gmsWeightServerPodSpec(base, 3, 4, nil)
 		mount := findVolumeMount(result.Containers[0], gmsSharedMountPath)
 		require.NotNil(t, mount, "GMS container should mount shared volume")
 		assert.Equal(t, "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)/rank-3", mount.SubPathExpr)
@@ -249,7 +249,8 @@ func TestAddGPUToleration_Idempotent(t *testing.T) {
 	assert.Equal(t, 1, count, "toleration should be added only once")
 }
 
-func TestRemoveEnvVar(t *testing.T) {
+func TestEnvironmentOmitRepeatedNames(t *testing.T) {
+	t.Log("A legacy omission removes every repeated name without reordering survivors")
 	c := &corev1.Container{
 		Env: []corev1.EnvVar{
 			{Name: "A", Value: "1"},
@@ -259,7 +260,8 @@ func TestRemoveEnvVar(t *testing.T) {
 		},
 	}
 
-	removeEnvVar(c, "REMOVE_ME")
+	var environment *podEnvironment
+	environment.omit(c, "REMOVE_ME")
 	assert.Len(t, c.Env, 2)
 	assert.Equal(t, "A", c.Env[0].Name)
 	assert.Equal(t, "B", c.Env[1].Name)

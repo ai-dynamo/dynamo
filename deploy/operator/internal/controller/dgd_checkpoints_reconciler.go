@@ -1139,20 +1139,23 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 		if err != nil {
 			return corev1.PodTemplateSpec{}, err
 		}
-		omitted := dynamo.PrepareSnapshotFailoverCapture(targetContainer)
-		environment.Omit(targetContainerName, omitted...)
+		dynamo.PrepareSnapshotFailoverCapture(targetContainer, environment)
 	}
 
 	// All surviving sources are now known; record logical GMS bindings before
 	// hashing, while physical sidecar and claim setup remains checkpoint-ID dependent.
 	environment.Capture(&podTemplate.Spec)
-	if service := dynamo.GetGPUMemoryService(component); service != nil && (service.Mode == "" || service.Mode == nvidiacomv1beta1.GMSModeIntraPod) {
+	if service := dynamo.GetGPUMemoryService(component); environment != nil && service != nil && (service.Mode == "" || service.Mode == nvidiacomv1beta1.GMSModeIntraPod) {
 		clients := []string{targetContainerName}
 		if config := dynamo.GetCheckpoint(component); config != nil && config.Job != nil {
 			clients = append(clients, config.Job.GMSClientContainers...)
 		}
 		for _, name := range clients {
-			environment.Bind(name, "operator.gpuMemoryService", gms.ClientEnvironment(true))
+			container, err := findPodTemplateContainer(&podTemplate, name)
+			if err != nil {
+				return corev1.PodTemplateSpec{}, err
+			}
+			environment.Bind(container, "operator.gpuMemoryService", gms.ClientEnvironment(true))
 		}
 	}
 	if err := environment.Apply(&podTemplate.Spec); err != nil {
