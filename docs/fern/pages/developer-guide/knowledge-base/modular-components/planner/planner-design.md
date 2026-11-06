@@ -255,7 +255,7 @@ Each engine emits per-iteration `ForwardPassMetrics` via ZMQ -> FpmEventRelay ->
 - **scheduled_requests.sum_prefill_tokens**: prefill regression input
 - **scheduled_requests.sum_decode_kv_tokens**: decode regression input
 - **queued_requests**: queued prefill/decode load for TTFT/ITL simulation
-- Heartbeats (wall_time=0) are skipped for the regression, but their `queued_requests` still count as queued load
+- Heartbeats (wall_time=0) are not added as regression observations, but their `queued_requests` still count as queued load
 
 ### Diagnostics
 

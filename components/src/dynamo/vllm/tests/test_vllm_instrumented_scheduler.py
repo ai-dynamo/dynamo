@@ -31,6 +31,7 @@ from unittest.mock import MagicMock, call
 import pytest
 import torch
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
+import zmq
 from vllm.config import CUDAGraphMode  # noqa: E402
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
@@ -66,6 +67,7 @@ def _isolate_synthetic_content_env(monkeypatch):
 # not be resolvable and ``instrumented_scheduler`` will fail to load with
 # ``ModuleNotFoundError: No module named 'vllm.sampling_params'``.
 import dynamo.vllm.instrumented_scheduler as instrumented_scheduler_module  # noqa: E402
+from dynamo.common.forward_pass_metrics import decode  # noqa: E402
 from dynamo.vllm.benchmark_points import (  # noqa: E402
     BenchmarkPoints,
     PrefillPointCandidate,
@@ -1612,8 +1614,6 @@ def test_fpm_publisher_drops_benchmark_metrics_until_resumed():
 
 def _recv_fpm_until(sub, predicate, timeout_s: float = 10.0):
     """Decode FPM frames from ``sub`` until one matches ``predicate``."""
-    from dynamo.common.forward_pass_metrics import decode
-
     seen = []
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -1630,8 +1630,6 @@ def _recv_fpm_until(sub, predicate, timeout_s: float = 10.0):
 @pytest.mark.timeout(60)
 def test_fpm_heartbeat_reports_latest_queued_snapshot(monkeypatch):
     """A heartbeat sent during a long pass must not hide the waiting queue."""
-    import zmq
-
     publisher_cls = instrumented_scheduler_module._FpmPublisherThread
     monkeypatch.setattr(publisher_cls, "HEARTBEAT_INTERVAL", 0.2)
     queued = instrumented_scheduler_module.QueuedRequestMetrics(
