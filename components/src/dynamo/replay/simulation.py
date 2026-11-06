@@ -10,6 +10,7 @@ hooks and translates the neutral spec to the existing replay entry points.
 
 from __future__ import annotations
 
+import importlib
 import json
 import math
 from collections.abc import Mapping
@@ -51,6 +52,23 @@ _ROUTER_HOOK = HookCapability(
     api_version=1,
 )
 _REPLAY_SPEC_API_VERSION = 1
+_NATIVE_AIPERF_MODULE = "dynamo._core"
+_NATIVE_AIPERF_FUNCTION = "run_mocker_aiperf_workload"
+
+
+def _load_native_aiperf_workload():
+    """Resolve the optional native AIPerf workload binding on first use."""
+
+    # Optional native feature of _core (python-guidelines optional-dependency
+    # exception): a build without aiperf-workload must still import this module.
+    module = importlib.import_module(_NATIVE_AIPERF_MODULE)
+    function = getattr(module, _NATIVE_AIPERF_FUNCTION, None)
+    if function is None:
+        raise RuntimeError(
+            f"{_NATIVE_AIPERF_MODULE} was built without {_NATIVE_AIPERF_FUNCTION}; "
+            "rebuild the bindings with the aiperf-workload feature"
+        )
+    return function
 
 
 @dataclass(frozen=True)
@@ -203,6 +221,35 @@ class DynamoReplayRunner:
             )
         self._require_goodput_metric(metrics, spec)
         return ReplayReport(metrics=metrics, metadata=metadata)
+
+    def run_aiperf_workload(
+        self,
+        run_request_json: str,
+        deployment_config_json: str,
+        *,
+        identity_seed_hex: str,
+    ) -> dict[str, Any]:
+        """Run one native AIPerf workload through the Dynamo mocker.
+
+        Python only checks argument types and decodes the proof envelope; the
+        native binding owns strict validation of every payload and the seed.
+        The workload loop runs natively, with no per-request Python.
+        """
+
+        for name, value in (
+            ("run_request_json", run_request_json),
+            ("deployment_config_json", deployment_config_json),
+            ("identity_seed_hex", identity_seed_hex),
+        ):
+            if not isinstance(value, str):
+                raise TypeError(f"{name} must be a str")
+        run = _load_native_aiperf_workload()
+        envelope = json.loads(
+            run(run_request_json, deployment_config_json, identity_seed_hex)
+        )
+        if not isinstance(envelope, dict):
+            raise ValueError("native AIPerf proof envelope must be a JSON object")
+        return envelope
 
     def close(self) -> None:
         """Release runner-local resources.

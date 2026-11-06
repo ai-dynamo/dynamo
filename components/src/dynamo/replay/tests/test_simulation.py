@@ -1225,3 +1225,96 @@ def test_shared_g2_launch_rejects_unsupported_backend(backend):
                 "timing_model": {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
             }
         )
+
+
+def _runner() -> simulation.DynamoReplayRunner:
+    return simulation.DynamoReplayRunnerFactory().create(0)
+
+
+def test_aiperf_workload_delegates_strings_to_native_binding(monkeypatch) -> None:
+    # Unit test with an injected fake binding; not end-to-end proof.
+    calls = []
+
+    def fake(run_request, deployment, seed):
+        calls.append((run_request, deployment, seed))
+        return json.dumps({"proof": {"ok": True}})
+
+    monkeypatch.setattr(simulation, "_load_native_aiperf_workload", lambda: fake)
+
+    envelope = _runner().run_aiperf_workload(
+        '{"r":1}', '{"d":2}', identity_seed_hex="ab" * 16
+    )
+
+    assert calls == [('{"r":1}', '{"d":2}', "ab" * 16)]
+    assert envelope == {"proof": {"ok": True}}
+
+
+def test_aiperf_workload_seed_is_keyword_only_and_typed(monkeypatch) -> None:
+    monkeypatch.setattr(
+        simulation,
+        "_load_native_aiperf_workload",
+        lambda: pytest.fail("binding must not load on invalid arguments"),
+    )
+    runner = _runner()
+    with pytest.raises(TypeError):
+        runner.run_aiperf_workload("{}", "{}", "ab")  # type: ignore[misc]
+    with pytest.raises(TypeError, match="run_request_json"):
+        runner.run_aiperf_workload(b"{}", "{}", identity_seed_hex="ab")  # type: ignore[arg-type]
+
+
+def test_aiperf_workload_rejects_non_object_envelope(monkeypatch) -> None:
+    monkeypatch.setattr(
+        simulation, "_load_native_aiperf_workload", lambda: lambda *_: "[1]"
+    )
+    with pytest.raises(ValueError, match="JSON object"):
+        _runner().run_aiperf_workload("{}", "{}", identity_seed_hex="ab")
+
+
+def test_aiperf_workload_propagates_native_validation_errors(monkeypatch) -> None:
+    def reject(*_):
+        raise ValueError("strict native validation failed")
+
+    monkeypatch.setattr(simulation, "_load_native_aiperf_workload", lambda: reject)
+    with pytest.raises(ValueError, match="strict native"):
+        _runner().run_aiperf_workload("{}", "{}", identity_seed_hex="ab")
+
+
+def test_native_loader_reports_missing_binding_function(monkeypatch) -> None:
+    import types
+
+    monkeypatch.setattr(
+        simulation.importlib,
+        "import_module",
+        lambda name: types.SimpleNamespace(),
+    )
+    with pytest.raises(RuntimeError, match="run_mocker_aiperf_workload"):
+        simulation._load_native_aiperf_workload()
+    assert simulation._NATIVE_AIPERF_MODULE == "dynamo._core"
+
+
+def test_injected_entry_point_loads_factory_whose_runner_has_aiperf_method() -> None:
+    from importlib.metadata import EntryPoint
+
+    entry_point = EntryPoint(
+        name="dynamo",
+        value="dynamo.replay.simulation:DynamoReplayRunnerFactory",
+        group="aisimulate.runner_factories",
+    )
+    factory_cls = entry_point.load()
+    assert factory_cls is simulation.DynamoReplayRunnerFactory
+    assert callable(factory_cls().create(0).run_aiperf_workload)
+
+
+def test_installed_entry_point_is_the_existing_dynamo_factory() -> None:
+    from importlib.metadata import entry_points
+
+    matches = [
+        ep
+        for ep in entry_points(group="aisimulate.runner_factories")
+        if ep.name == "dynamo"
+    ]
+    if not matches:
+        pytest.skip("ai-dynamo distribution metadata is not installed")
+    assert len(matches) == 1
+    assert matches[0].value == "dynamo.replay.simulation:DynamoReplayRunnerFactory"
+    assert matches[0].load() is simulation.DynamoReplayRunnerFactory

@@ -23,6 +23,8 @@
 /// integration between Python tools and the Dynamo runtime.
 use super::*;
 
+#[cfg(feature = "aiperf-workload")]
+pub mod aiperf_workload;
 pub mod ais_callback;
 pub mod entrypoint;
 pub mod fpm;
