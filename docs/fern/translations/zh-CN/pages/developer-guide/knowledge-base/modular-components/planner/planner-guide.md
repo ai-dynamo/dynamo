@@ -169,7 +169,7 @@ spec:
 |-------|------|---------|-------------|
 | `load_predictor` | string | `arima` | 用于 request count、ISL 和 OSL 的预测方法：`constant`、`arima`、`kalman` 或 `prophet`。KV hit rate 和 speculative decode accept length 等运行时元数据会使用最新的有效观测值。 |
 | `load_predictor_log1p` | bool | `false` | 对被预测的 request count、ISL 和 OSL 数据应用 log1p 变换。 |
-| `prophet_window_size` | int | `50` | Prophet predictor 保留并用于拟合的最近观测点（数据点）的最大数量，而不是秒数。历史跨度约为该值 × `throughput_adjustment_interval_seconds` 秒。 |
+| `prophet_window_size` | int | `50` | Prophet predictor 保留并用于拟合的最近观测点（数据点）的最大数量，而不是秒数。完整窗口的历史跨度约为该值 × `throughput_adjustment_interval_seconds` 秒；开头的零值观测点不会被保存。Prophet 至少需要 5 个观测点才会拟合模型，否则返回最新的观测值。 |
 | `load_predictor_warmup_trace` | string | `null` | 用于引导预测的 warmup trace 文件路径。 |
 
 KV hit rate 和 speculative decode accept length 是引擎/Router 运行时信号，不是流量形状。Planner 会保存每个信号最新的有效观测值，并在新的有效值到达前复用它。冷启动时，缺失的 KV hit rate 表示不做 prefix-cache discount，缺失的 accept length 表示 `1.0`。

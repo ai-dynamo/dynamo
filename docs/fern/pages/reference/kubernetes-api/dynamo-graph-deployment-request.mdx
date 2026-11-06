@@ -697,9 +697,11 @@ service.
 
 <ParamField path="prophet_window_size" type="integer" default="50">
   Maximum number of most recent observations (data points) the Prophet predictor keeps and fits.
-  The planner adds one observation per throughput adjustment interval, so the history covers about
+  The planner adds one observation per throughput adjustment interval, so a full window covers about
   `prophet_window_size` × `throughput_adjustment_interval_seconds` seconds (9,000 seconds with the
-  defaults of 50 and 180).
+  defaults of 50 and 180). Leading zero observations are not stored, so the history can be shorter
+  after start-up. Prophet needs at least 5 observations before it fits a model; until then, and
+  always when this value is below 5, it returns the latest observation.
 </ParamField>
 
 <ParamField path="load_predictor_warmup_trace" type="string" default="null">
