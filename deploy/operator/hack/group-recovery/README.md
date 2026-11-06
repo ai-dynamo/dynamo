@@ -5,14 +5,63 @@ SPDX-License-Identifier: Apache-2.0
 
 # Native LWS CPU reproducer (Part of #17951)
 
-Characterization aid for native LeaderWorkerSet group replacement.
-**Real cluster execution has not been run.** These files do not install a
+Characterization aid for native LeaderWorkerSet group replacement. A native
+CPU cluster run on 2026-11-06 is recorded below. These files do not install a
 controller, start the Dynamo operator, or decide that recovery succeeded.
 
 The fixture is only `recovery-target` and `recovery-control`
 (`leaderworkerset.x-k8s.io/v1`, size 2, `RecreateGroupOnPodRestart`). It is
 not a DynamoGraphDeployment, DynamoComponentDeployment, DisaggregatedSet, or
 Grove workload, and it cannot validate operator or cache restart.
+
+## Validation record
+
+The recorded 2026-11-06 experiment applies to public commit
+`8d25e776bd511c9173e86f5632da42c6de978678`. Cloud source was the exact
+archive, with no Git HEAD or commit object; the independently rebuilt Git
+tree was `39e8cb2e380af2339a3ec8398ec1f11d7d5deb4b`, and all three
+source-file hashes matched the frozen revision. This later docs edit does not
+change or retest the fixture or collector. Details:
+<https://github.com/ai-dynamo/dynamo/pull/18296>.
+
+One ECS CPU host: 8 vCPU, 32 GiB RAM, 200 GiB ESSD PL0, Ubuntu 24.04 x86_64.
+kind v0.32.0, 1 control-plane and 2 logical workers, Kubernetes v1.36.1,
+Docker 29.1.3, a real LeaderWorkerSet v0.10.0 controller, matching CRDs, and
+active webhooks. No Dynamo operator or GPU ran.
+
+Five native cases. Every accepted case recovered with full target and control
+membership and Ready, with a minimum observed healthy age over 15 seconds.
+Confirmed failed incarnations / leader replacements:
+
+| Case | Failed incarnations / leader replacements |
+| --- | --- |
+| Persistent leader | 7/7 |
+| Persistent follower | 15/15 |
+| Transient leader | 1/1 |
+| Transient follower, valid repeat | 1/1 |
+| Healthy follower, exact-UID deletion | 0/1 |
+
+The committed collector produced 878 complete snapshots. Separate task-only
+Pod watch windows had 664 + 65 = 729 records, plus selected StatefulSet owner
+metadata. Those observers are not shipped here. The collector alone does
+periodic GETs. Root UID and generation, actual role revision, and original
+healthy-control UIDs stayed stable. Strict controller owner UID chains were
+checked. Observed API Pod `restartCount` never exceeded 1 during accepted
+windows despite replacements.
+
+The first transient-follower attempt, without complete valid coverage, remains
+inconclusive. The repeat was accepted separately. Transient actions used a
+Ready=False cue before repair, not a claim of subsecond client exit or patch
+order. About 0.2 seconds client-receive failure windows prove API visibility,
+not Dynamo informer, cache, or reconcile capture. Healthy administrative
+deletion also caused exit 137 on deleting Pods. UID changes or arbitrary
+nonzero exits alone are not sufficient failed-recovery evidence.
+
+This is manual native-provider characterization. It is not production
+diagnosis acceptance or CI integration. DynamoComponentDeployment,
+DynamoGraphDeployment, DisaggregatedSet, and Grove diagnosis, durable reset
+and restart, isolation around 10,000 unrelated Pods, and inference remain
+unimplemented and unvalidated by this experiment.
 
 ## Prerequisites
 
