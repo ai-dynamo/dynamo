@@ -170,6 +170,29 @@ def test_hint_policy_opt_out_is_allowed_off_the_kv_path(tmp_path):
     assert build_router_config(config) is not None
 
 
+@pytest.mark.parametrize(
+    "document, message",
+    [
+        ("- type: kv_fetch\n", "--router-policy-config must contain a YAML mapping"),
+        (
+            "hint_policies:\n  - type: kv_fetch\n",
+            "hint_policies must contain a YAML mapping",
+        ),
+    ],
+)
+def test_malformed_policy_config_is_rejected_off_the_kv_path(
+    tmp_path, document, message
+):
+    """Off the KV path nothing else reads the file, so a bad shape would go unnoticed."""
+    path = tmp_path / "router-policy.yaml"
+    path.write_text(document)
+    config, _ = parse_worker_router_config(
+        ["--router-mode", "round-robin", "--router-policy-config", str(path)]
+    )
+    with pytest.raises(ValueError, match=message):
+        build_router_config(config)
+
+
 @pytest.mark.parametrize("backend", ["vllm", "trtllm", "sglang"])
 def test_router_flags_do_not_collide_with_backend_flags(backend):
     """Guard against a backend later adding a flag the router group owns.

@@ -250,11 +250,13 @@ class KvRouterConfigBase(ConfigBase):
             return []
         with Path(self.router_policy_config).open() as source:
             document = yaml.safe_load(source)
-        hint_policies = (
-            document.get("hint_policies") if isinstance(document, dict) else None
-        )
-        if not isinstance(hint_policies, dict):
+        if not isinstance(document, dict):
+            raise ValueError("--router-policy-config must contain a YAML mapping")
+        hint_policies = document.get("hint_policies")
+        if hint_policies is None:
             return []
+        if not isinstance(hint_policies, dict):
+            raise ValueError("hint_policies must contain a YAML mapping")
         return [role for role, entries in hint_policies.items() if entries]
 
     def apply_router_config(self) -> None:
