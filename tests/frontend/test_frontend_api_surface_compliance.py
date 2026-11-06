@@ -75,12 +75,8 @@ BUN_VERSION = "1.3.12"
 NODE_VERSION = "20.19.0"
 OPENRESPONSES_REPO = "https://github.com/openresponses/openresponses.git"
 OPENRESPONSES_SHA = "fa29df5"
-# A guard, not headroom: a degenerate generation from the small compliance
-# model rambles to whatever cap is set and comes back status=incomplete /
-# {"reason": "max_output_tokens"}, which fails completedStatus for reasons
-# unrelated to API compliance. Greedy decoding alone did not stop that on the
-# "System Prompt" case (DYN-5486), so _patch_openresponses_suite also bounds
-# that case's prompt. Worst case stays under a minute per response.
+# A guard, not headroom: degenerate generations ramble to the cap and fail
+# completedStatus; _patch_openresponses_suite also bounds System Prompt (DYN-5486).
 OPENRESPONSES_MAX_OUTPUT_TOKENS = 2048
 CLAUDE_SUBAGENT_NAME = "dynamo-subagent-smoke"
 CLAUDE_SUBAGENT_TIMEOUT_S = 45
@@ -350,11 +346,8 @@ def _patch_openresponses_suite(install_dir: Path) -> None:
         "      stream: streaming,\n"
         "    }),"
     )
-    # The System Prompt case's open-ended "Say hello." can settle into a greedy
-    # repetition loop that fills the cap (DYN-5486). Use the bounded wording of
-    # upstream's own Basic Text case; the pirate system message still exercises
-    # system-role handling. A repetition penalty would not help here:
-    # /v1/responses does not forward presence/frequency penalties to the worker.
+    # "Say hello." can loop greedily to the cap (DYN-5486), and /v1/responses does
+    # not forward repetition penalties, so reuse upstream Basic Text's bounded wording.
     system_prompt_old = (
         '        { type: "message", role: "user", content: "Say hello." },'
     )
