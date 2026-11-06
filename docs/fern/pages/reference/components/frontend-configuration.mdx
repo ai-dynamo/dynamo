@@ -796,18 +796,24 @@ use it as well. CPython and other C libraries in the process keep the system all
 
 jemalloc cannot be turned off at runtime. It comes from the extension's default `jemalloc` Cargo
 feature, so to use the system allocator, build the extension without default features and
-re-enable the others you need, for example
-`maturin build --no-default-features --features custom-policy`. musl and Windows (MSVC) builds
-always use the system allocator. In those builds `_RJEM_MALLOC_CONF` has no effect.
+re-enable the other default features (currently `custom-policy`):
+`maturin build --no-default-features --features custom-policy`. Heap-profiling Rust allocations
+with a preloaded jemalloc also needs such a build, because a preloaded library never sees them.
+musl and Windows (MSVC) builds always use the system allocator. In those builds
+`_RJEM_MALLOC_CONF` has no effect.
 
 The built-in configuration suits a long-running server:
 
 | Option | Value | Effect |
 |---|---|---|
-| `background_thread` | `true` | A background thread returns unused pages to the operating system on a schedule, including while the frontend is idle. Without it, pages are returned only when the process allocates again. Not set on macOS, where jemalloc has no background threads. |
+| `background_thread` | `true` | Background threads return unused pages to the operating system on a schedule, including while the frontend is idle. Without it, pages are returned only when the process allocates again. Not set on macOS, where jemalloc has no background threads. |
 | `dirty_decay_ms` | `10000` | Unused pages are returned after about 10 seconds. Pages that still hold live allocations stay resident. |
-| `muzzy_decay_ms` | `0` | Pages skip the intermediate "muzzy" state. |
-| `narenas` | `16` | Caps the number of arenas; the jemalloc default is four per CPU. |
+| `muzzy_decay_ms` | `0` | Once the dirty decay ends, pages go straight back to the operating system instead of first being marked lazily reclaimable (`MADV_FREE`), which leaves them counted as resident until the kernel needs the memory. |
+| `narenas` | `16` | Caps the number of arenas. The jemalloc default is four per CPU in the process's affinity mask; a Kubernetes CPU limit does not shrink that mask unless the CPU manager gives the pod exclusive CPUs. |
+
+Every process that imports `dynamo._core` starts one jemalloc background thread, named
+`jemalloc_bg_thd`, and up to four once it allocates from several threads. They sleep between
+purges. To lower the cap, set `max_background_threads` in `_RJEM_MALLOC_CONF`.
 
 <ParamField path="_RJEM_MALLOC_CONF" type="string" default="the built-in configuration above">
   Override individual jemalloc options for the built-in allocator. Options not listed keep their
@@ -822,12 +828,32 @@ The built-in configuration suits a long-running server:
   for how to measure the effect.
 </ParamField>
 
-<Note>
-`MALLOC_CONF` and a jemalloc `LD_PRELOAD` do not configure the built-in allocator. A preloaded
-jemalloc only serves allocations from CPython and other C code, as a separate instance.
-`DYN_FRONTEND_JEMALLOC` is no longer read; to put CPython and C allocations on jemalloc, set
-`LD_PRELOAD` yourself.
-</Note>
+<ParamField path="LD_PRELOAD" type="string" default="unset">
+  Optional. Preloads a separate jemalloc for allocations from CPython and other C code. It does not
+  change the built-in allocator, and `MALLOC_CONF` configures only the preloaded copy. The vLLM,
+  SGLang, TensorRT-LLM, and frontend images ship `libjemalloc2` from v1.6.0, and images built with
+  `--framework dynamo` from v1.3.0; check with `dpkg -L libjemalloc2 | grep 'libjemalloc.so'`.
+
+  ```bash
+  # x86_64
+  export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+
+  # arm64
+  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+  ```
+
+  The TensorRT-LLM image sets its own `LD_PRELOAD` (`/opt/dynamo/libstdc++.so.6` and TensorRT-LLM's
+  bundled `libnixl.so`), so prepend jemalloc instead of replacing that value:
+
+  ```bash
+  export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+  ```
+
+  In a Kubernetes manifest, write out the full list, because the pod spec does not expand the
+  image's `LD_PRELOAD`.
+</ParamField>
+
+`DYN_FRONTEND_JEMALLOC` is no longer read.
 
 ## HTTP endpoints
 
