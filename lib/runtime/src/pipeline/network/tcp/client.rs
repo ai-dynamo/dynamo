@@ -981,10 +981,11 @@ mod tests {
                 server.send(control_message(control)).await.unwrap();
             }
             server.close().await.unwrap();
-            drop(server);
+            let mut server = server.into_inner();
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 reader_task.await.unwrap();
-                writer_task.await.unwrap().unwrap();
+                drop(writer_task.await.unwrap().unwrap());
+                assert_eq!(server.read(&mut [0]).await.unwrap(), 0);
             })
             .await
             .expect("peer EOF must wake an idle writer");
