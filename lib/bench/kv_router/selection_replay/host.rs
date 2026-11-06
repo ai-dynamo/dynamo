@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use dynamo_kv_router::identity::RoutingPartitionId;
 use dynamo_kv_router::indexer::{KvIndexerMetrics, LowerTierIndexers};
 use dynamo_kv_router::plugins::RouterPluginRegistry;
@@ -38,6 +38,29 @@ use tokio::sync::mpsc;
 const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
 /// The bench's router identity on the replica channels; distinct from every worker ID.
 const BENCH_ROUTER_ID: u64 = u64::MAX;
+
+/// `KvRouterConfig`'s defaults with replica sync on, as the AgentX frontend runs,
+/// and `json`'s fields over them. Deserialization rejects unknown fields.
+pub fn router_config(json: Option<&str>) -> Result<KvRouterConfig> {
+    let config = KvRouterConfig {
+        router_replica_sync: true,
+        ..KvRouterConfig::default()
+    };
+    let Some(json) = json else {
+        return Ok(config);
+    };
+    let serde_json::Value::Object(overrides) =
+        serde_json::from_str(json).context("--router-config-json")?
+    else {
+        bail!("--router-config-json must be a JSON object");
+    };
+    let mut merged = serde_json::to_value(&config)?;
+    merged
+        .as_object_mut()
+        .context("KvRouterConfig serializes to an object")?
+        .extend(overrides);
+    serde_json::from_value(merged).context("--router-config-json")
+}
 
 #[derive(Clone, Debug)]
 pub struct HostConfig {

@@ -74,17 +74,19 @@ Mooncake JSONL traces also work (`--trace-format mooncake --trace-block-size N`)
 **Fixed** (`--mode fixed`): wall time is trace time divided by `--time-scale`, or
 the scale that offers `--target-rate` window requests per second. Admission
 latency runs from each request's deadline to its booking. The run keeps up when,
-over the window, every request is booked, requests issue within 50 µs and engine
-actions within 10 ms (p99), admission p99 stays within 20 ms, and the last
-booking lands within 1.1x of the window.
+over the window, every request is booked or rejected, requests issue within 50 µs
+and engine actions within 10 ms (p99), admission p99 stays within 20 ms, and the
+last answer lands within 1.1x of the window.
 
 **Saturation** (`--mode saturation`): trace time advances only as fast as the
 router admits, with at most `--admission-window` admissions in flight, so the
 in-flight load stays the trace's. Engine actions may trail a request's arrival by
 up to 10 ms of trace time, as a real router hears of them late. If a queueing
 router holds every admission slot waiting on an engine action, trace time moves
-on to the next one (`stall_advances`). The result is booked requests per second. `harness_wait_share` is the share of the window the
-bench's own threads, not the router, held back; above 5% the run is invalid.
+on to the next one (`stall_advances`). The result is booked requests per second,
+from the first window request issued to the last one answered, booked or
+rejected. `harness_wait_share` is the share of the window the bench's own
+threads, not the router, held back; above 5% the run is invalid.
 
 In both modes, an index more than 20,000 events behind during the window means
 the router routed on a stale index because it could not take the load: the run
