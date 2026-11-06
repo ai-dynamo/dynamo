@@ -21,6 +21,10 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 ## v1.7.0 - Upcoming
 
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated `worker_selection.instances` in the router policy YAML** in favor of writing each role's policy inline. A role (`aggregated`, `prefill`, `decode`, `encode`) is now a policy type name, or a mapping with `type` and `parameters`. The `instances` list and name references still load with a warning and are scheduled for removal in v1.8.0. `DYN_ROUTER_WORKER_SELECTION_POLICY`, `DYN_ROUTER_PREFILL_POLICY`, and `DYN_ROUTER_DECODE_POLICY` now accept a policy type as well as an instance name.
+
+  > **Migrate:** Replace `aggregated: my-instance` plus its `instances` entry with `aggregated: {type: <type>, parameters: {...}}`, or just `aggregated: <type>` when the type needs no parameters.
+
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **DGDR v1beta1: hardware overrides that differ from discovery require `hardware.totalGpus`** ([#17308](https://github.com/ai-dynamo/dynamo/pull/17308)). When `hardware.totalGpus` is omitted, `hardware.numGpusPerNode` must match the auto-selected node shape and `hardware.vramMb` must be within 10% of its measured VRAM. Otherwise, the DGDR is stored but profiling fails with `phase: Failed` before a profiling Job is created. Previously, these overrides could use an automatically derived budget. Automatic budgets now count only nodes matching the selected GPU type, GPUs per node, and measured VRAM; a cluster with one 8-GPU and one 4-GPU node of the same type and VRAM now yields a budget of 8. Previously, it was incorrectly computed as 2 nodes × 8 GPUs = 16.
 
   > **Migrate:** Set `hardware.totalGpus` explicitly to retain an intentional node-size or VRAM override. A DGDR that already failed this check (`cannot auto-detect hardware.totalGpus: ...`) is not retried when its spec changes; delete and re-create it with `totalGpus` set. Explicit budgets remain authoritative; nominal VRAM values within the 10% tolerance continue to work with automatic budgets.
