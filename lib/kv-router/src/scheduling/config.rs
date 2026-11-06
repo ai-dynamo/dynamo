@@ -1527,7 +1527,7 @@ impl KvRouterConfig {
     }
 
     /// Whether the KV index built from this config can retain the block chain
-    /// that KV fetch hints need: a local, event-driven primary with no
+    /// that KV copy sources need: a local, event-driven primary with no
     /// predict-on-route side indexer. Offline replay, which cannot build that
     /// index, relies on this matching `Indexer::supports_kv_transfer_chain_retention`.
     pub fn supports_kv_transfer_chain_retention(&self) -> bool {

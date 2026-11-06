@@ -277,7 +277,8 @@ impl WorkerSelectionPolicy {
         }
     }
 
-    fn input_requirements(&self) -> WorkerInputs {
+    /// The union of every component's declared inputs; only scorers keep `KV_TRANSFER`.
+    pub(crate) fn input_requirements(&self) -> WorkerInputs {
         match &self.state {
             #[cfg(any(test, feature = "bench"))]
             WorkerSelectionPolicyState::Reference(..) => WorkerInputs::CACHE | WorkerInputs::LOAD,

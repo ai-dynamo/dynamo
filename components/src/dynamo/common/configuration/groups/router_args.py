@@ -434,6 +434,9 @@ class RouterConfigSource(Protocol):
     def kv_router_kwargs(self) -> dict:
         ...
 
+    def hint_policy_roles(self) -> list[str]:
+        ...
+
 
 def build_router_config(
     config: Optional[RouterConfigSource],
@@ -474,6 +477,13 @@ def build_router_config(
         ) from error
 
     mode = getattr(RouterMode, mode_attr)
+    if mode != RouterMode.KV and (roles := config.hint_policy_roles()):
+        # Hint policies run when the KV path books a worker; other modes would drop them.
+        raise ValueError(
+            f"hint_policies for {', '.join(roles)} run only on the KV path, but "
+            f"--router-mode {router_mode} routes without it; use --router-mode kv, "
+            "or remove those roles' hint_policies from --router-policy-config"
+        )
     # Only KV routing consults KvRouterConfig; passing it for other modes would
     # imply tuning that is never read.
     kv_router_config = (

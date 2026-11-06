@@ -145,6 +145,31 @@ def test_unknown_mode_is_rejected():
         build_router_config(config)
 
 
+def _policy_config(tmp_path, hint_policies: str) -> str:
+    path = tmp_path / "router-policy.yaml"
+    path.write_text(f"hint_policies:\n{hint_policies}")
+    return str(path)
+
+
+@pytest.mark.parametrize("mode", ["round-robin", "least-loaded", "direct"])
+def test_hint_policies_off_the_kv_path_are_rejected(tmp_path, mode):
+    """Only the KV path runs hint policies, so another mode would drop them silently."""
+    policy = _policy_config(tmp_path, "  aggregated:\n    - type: kv_fetch\n")
+    config, _ = parse_worker_router_config(
+        ["--router-mode", mode, "--router-policy-config", policy]
+    )
+    with pytest.raises(ValueError, match="hint_policies for aggregated run only"):
+        build_router_config(config)
+
+
+def test_hint_policy_opt_out_is_allowed_off_the_kv_path(tmp_path):
+    policy = _policy_config(tmp_path, "  aggregated: []\n")
+    config, _ = parse_worker_router_config(
+        ["--router-mode", "round-robin", "--router-policy-config", policy]
+    )
+    assert build_router_config(config) is not None
+
+
 @pytest.mark.parametrize("backend", ["vllm", "trtllm", "sglang"])
 def test_router_flags_do_not_collide_with_backend_flags(backend):
     """Guard against a backend later adding a flag the router group owns.

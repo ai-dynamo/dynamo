@@ -43,10 +43,7 @@
 //!   `dropped_book_selection_during_routing_record_frees_booking_and_claim`).
 
 use super::super::affinity::{SessionAffinityMode, validate_dispatch_target};
-use super::hint::transfer_hint_payload;
-use crate::plugins::hint_policy::runtime::{
-    ActionInputs, KV_HINT_FETCH_ACTION_ID, compose_kv_hint,
-};
+use super::hint::{BookingHint, booking_hint};
 
 /// `try_acquire` then `join_initializing` attempts before a commit that finds
 /// the session initializing routes unpinned (see the module doc).
@@ -314,23 +311,32 @@ impl SelectionCore {
                 .map_err(affinity_error)?,
             _ => affinity_target,
         };
-        // Transfer candidates need a worker in this partition that consumes
-        // router hints and an indexer that can retain the matched chain (local,
-        // event-driven, no approximate writes). Bookings use them for the fetch
-        // hint; when the policy scores fetchable prefixes, every selection
-        // retains them so previews score like bookings.
-        let hint_capable_workers = (book || entry.scores_kv_transfer)
+        // Copy sources need a worker in this partition that consumes router
+        // hints and an indexer that can retain the matched chain (local,
+        // event-driven, no approximate writes). Bookings use them for the
+        // booked worker's copy source; when the policy scores copy offers,
+        // every selection retains them so previews score like bookings.
+        let responsibilities = &entry.responsibilities;
+        let hint_capable_workers = (responsibilities.commit_kv_copy
+            || (book && responsibilities.compute_booked_copy_source))
             && entry.hint_capable_workers.load(Ordering::Relaxed);
         let retain_kv_transfer_chain =
             hint_capable_workers && entry.indexer.supports_kv_transfer_chain_retention();
         if hint_capable_workers && !retain_kv_transfer_chain {
-            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
-            WARN_ONCE.call_once(|| {
+            entry.copy_sources_warning.call_once(|| {
                 tracing::warn!(
-                    "router hints need a local event-driven indexer with no approximate side indexer; workers advertise hint capability but no hints will be attached"
+                    partition = %key,
+                    "KV copy sources need a local, event-driven KV index with no approximate side index; this partition's workers advertise router_hint, but the router computes no copy sources for them"
                 );
             });
         }
+        // Hint policies may read the session at booking, now or when a reservation replays this
+        // selection.
+        let hint_session_context = (!responsibilities.run_hint_policies.is_empty()
+            && (book || replay_id.is_some())
+            && entry.hint_capable_workers.load(Ordering::Relaxed))
+        .then(|| session_context.clone())
+        .flatten();
         let PreparedSelectionInputs {
             block_hashes,
             sequence_hashes,
@@ -395,6 +401,7 @@ impl SelectionCore {
                     SessionBinding::Query { session_id } => Some(session_id.clone()),
                     _ => None,
                 },
+                hint_session_context.clone(),
             )
         });
         let allowed_worker_ids = match self.host.eligibility.lora_worker_filter.as_deref() {
@@ -484,27 +491,20 @@ impl SelectionCore {
             (Some(endpoint), total_kv_blocks)
         };
         let effective_prefill = effective_prefill_tokens(isl_tokens, response.cached_tokens);
-        // The router's own fetch: bookings only, from the source selection chose.
-        let router_fetch = match (
-            book,
-            response.kv_transfer_source,
-            response.kv_transfer_candidates.as_ref(),
-        ) {
-            (true, Some(source), Some(candidates)) => {
-                transfer_hint_payload(&entry.workers_tx.borrow(), source, candidates)
-                    .map(|payload| KvHintAction::fetch(KV_HINT_FETCH_ACTION_ID, payload))
-            }
-            _ => None,
-        };
-        // Hint policies run for bookings only, never for previews.
+        // Hints are composed for bookings only, never for previews. A committed copy that goes
+        // unsent fails here, while the booking is still armed, so it is freed.
         let kv_hint = if book {
-            let inputs = ActionInputs {
-                request_id: admission.request_id().unwrap_or_default(),
-                worker: response.best_worker,
-                prompt_tokens: isl_tokens,
-                block_size: entry.block_size,
-            };
-            compose_kv_hint(&entry.hint_policies, &inputs, router_fetch)
+            booking_hint(
+                &entry,
+                BookingHint {
+                    request_id: admission.request_id().unwrap_or_default(),
+                    worker: response.best_worker,
+                    isl_tokens,
+                    session_context: hint_session_context.as_ref(),
+                    kv_copy_source: response.kv_copy_source,
+                    kv_transfer_candidates: response.kv_transfer_candidates.as_ref(),
+                },
+            )?
         } else {
             None
         };
@@ -536,8 +536,14 @@ impl SelectionCore {
             booking
         };
 
-        if let Some((cache_id, sequence_hashes, lora_name, track_prefill_tokens, session_id)) =
-            cached_inputs
+        if let Some((
+            cache_id,
+            sequence_hashes,
+            lora_name,
+            track_prefill_tokens,
+            session_id,
+            session_context,
+        )) = cached_inputs
         {
             self.selection_cache.insert(
                 cache_id,
@@ -552,6 +558,7 @@ impl SelectionCore {
                     lora_name,
                     routing_hashes,
                     session_id,
+                    session_context,
                 },
                 Instant::now(),
             );

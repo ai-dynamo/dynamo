@@ -70,10 +70,10 @@ impl<'a> WorkerCandidate<'a> {
             .then_some(&self.data.load)
     }
 
-    /// The KV prefix this worker could fetch, only for a scorer that declared
+    /// This worker's KV copy offer, only for a scorer that declared
     /// KV_TRANSFER; filters and pickers do not receive it. None also means the
-    /// host has no transfer data for this request: no worker in the partition
-    /// consumes router hints, or the indexer cannot retain the matched block chain.
+    /// host has no copy data for this request: no worker in the partition
+    /// advertises `router_hint`, or the indexer cannot retain the matched block chain.
     pub fn kv_transfer(self) -> Option<WorkerTransferInput> {
         if self.inputs.contains(WorkerInputs::KV_TRANSFER) {
             self.data.transfer
@@ -186,7 +186,16 @@ impl WorkerInputs {
     // TODO(v1.9): Remove this alias.
     #[deprecated(since = "1.7.0", note = "use `WorkerInputs::ACTIVE_REQUESTS`")]
     pub const OCCUPANCY: Self = Self::ACTIVE_REQUESTS;
-    /// Request the KV prefix each worker could fetch from another worker or cache.
+    /// Request each worker's KV copy offer: the prefix it could copy from another worker or
+    /// cache owner.
+    ///
+    /// Which plugin kinds receive each group:
+    ///
+    /// | Group | Filters | Scorers | Pickers | Hint policies |
+    /// | --- | --- | --- | --- | --- |
+    /// | `CACHE`, `LOAD`, `PREFERRED_TAINT` | Yes | Yes | Yes | Starts resources only |
+    /// | `ACTIVE_REQUESTS` | No | No | Yes | No |
+    /// | `KV_TRANSFER` | No | Yes | No | The booked worker's copy source |
     pub const KV_TRANSFER: Self = Self(1 << 6);
     #[cfg(any(test, feature = "bench"))]
     pub(crate) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
@@ -545,12 +554,12 @@ impl WorkerTransferInput {
     /// eligible source holds more than this worker's device and host-pinned
     /// prefix, the `CACHE` inputs' `device_overlap_blocks() + host_overlap_blocks()`.
     ///
-    /// The host chooses the source by its router-hint rules: the same hint
-    /// worker type, neither this worker nor a cache owner attached to it, and,
-    /// when this worker sets a KV transfer domain, its topology island
-    /// (`preferred` enforcement falls back to another island). Booking this
-    /// worker attaches a fetch hint for that source. Fetches are best effort:
-    /// the source may no longer hold the blocks when the request runs.
+    /// The host chooses the source by its copy rules: the same hint worker
+    /// type, neither this worker nor a cache owner attached to it, and, when
+    /// this worker sets a KV transfer domain, its topology island (`preferred`
+    /// enforcement falls back to another island). This is the copy offer for
+    /// this worker; hint policies decide whether a booking sends it. A copy is
+    /// best effort: the source may no longer hold the blocks when it runs.
     pub fn source_prefix_blocks(&self) -> Option<u32> {
         self.source_prefix_blocks
     }

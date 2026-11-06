@@ -3,6 +3,7 @@
 
 //! Public filter, scorer, and picker contracts and their input signals.
 
+mod commitments;
 mod config;
 mod context;
 pub(crate) mod inputs;
@@ -13,6 +14,7 @@ pub use runtime::{
     RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
 
+pub use commitments::{Commitments, KvCopyLocations, KvCopySource};
 pub use context::WorkerSelectionContext;
 pub use inputs::{
     ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,

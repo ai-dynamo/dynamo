@@ -2434,13 +2434,10 @@ impl ModelManager {
             metric_worker_type,
             model_name.as_deref(),
         )?;
-        // Hint policies start the resources they read even when the worker-selection policy reads
-        // none. Without cache input from either, create no shared-cache client and subscribe to
-        // no KV events.
-        let hint_policies = crate::kv_router::plugins::router_plugin_registry()
-            .resolve_hint_policies(&effective_kv_router_config)?;
-        let index_inputs =
-            crate::kv_router::router_index_inputs(policy.inputs(), &hint_policies, worker_type);
+        // Configured hint policies start the resources they read even when the worker-selection
+        // policy reads none. Without cache input from either, create no shared-cache client and
+        // subscribe to no KV events.
+        let index_inputs = policy.prepare_inputs();
         let wants_cache = index_inputs.contains(WorkerInputs::CACHE);
         let shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>> = if wants_cache {
             match kv_router_config

@@ -398,6 +398,11 @@ impl PrefillRouter {
                     .await?,
             )
         } else {
+            crate::kv_router::check_hint_policies_route_on_kv_path(
+                prefill_router_mode,
+                &prefill_kv_config.clone().unwrap_or_default(),
+                &[crate::worker_type::WorkerType::Prefill],
+            )?;
             let affinity = create_affinity_coordinator(
                 prefill_session_affinity_ttl,
                 context.session_affinity_mode,

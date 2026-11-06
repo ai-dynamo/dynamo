@@ -10,7 +10,8 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use super::hint_policy::{
-    HintPolicyFactory, HintPolicyProvider, HintPolicyRegistry, HintPolicyRegistryError,
+    HintPolicyConstructor, HintPolicyFactory, HintPolicyProvider, HintPolicyRegistry,
+    HintPolicyRegistryError,
 };
 use super::request_classifier::RequestClassifierRegistry;
 use super::request_classifier::{
@@ -170,8 +171,23 @@ impl RouterPluginRegistry {
         self.hint_policies.register(name, provider)
     }
 
-    /// Resolve the configured hint policies once at startup. Hint policies are opt-in: without
-    /// `hint_policies` in the router policy config, no worker role runs any.
+    /// Supply the hint policies a role runs when `hint_policies` doesn't list it, the way
+    /// [`Self::with_default_factory`] supplies the default worker selection. Listing a role, even
+    /// as an empty list, replaces them.
+    ///
+    /// Defaults are passive: the router starts no resources for what they read, and a non-KV routing
+    /// mode skips them instead of failing, so they act only where the role's own configuration
+    /// already provides their inputs.
+    pub fn with_default_hint_policies(
+        mut self,
+        policies: impl IntoIterator<Item = (String, HintPolicyConstructor)>,
+    ) -> Result<Self, HintPolicyRegistryError> {
+        self.hint_policies.set_defaults(policies)?;
+        Ok(self)
+    }
+
+    /// Resolve the configured hint policies once at startup. A role that `hint_policies` doesn't
+    /// list runs the default hint policies, if the host supplied any.
     pub fn resolve_hint_policies(
         &self,
         config: &KvRouterConfig,

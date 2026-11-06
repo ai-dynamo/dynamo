@@ -769,8 +769,8 @@ impl Indexer {
             .await
     }
 
-    /// [`Self::find_tiered_matches`] with lower-tier query options. Router-hint
-    /// chain retention is honored only by a local event-driven primary (see
+    /// [`Self::find_tiered_matches`] with lower-tier query options. Block-chain
+    /// retention for KV copy sources is honored only by a local event-driven primary (see
     /// [`Self::supports_kv_transfer_chain_retention`]); other shapes ignore it.
     pub async fn find_tiered_matches_with_options(
         &self,

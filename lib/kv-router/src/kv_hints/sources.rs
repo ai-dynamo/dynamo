@@ -21,7 +21,8 @@ use rustc_hash::FxHashMap;
 
 use super::{KvTransferCandidateSource, KvTransferCandidates};
 use crate::protocols::{
-    KvTransferEnforcement, RouterHintSourceMetadata, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    ExternalSequenceBlockHash, KvTransferEnforcement, RouterHintSourceMetadata, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank,
 };
 
 /// Hash a label once, when its config or snapshot is published, so matching
@@ -225,6 +226,123 @@ impl CacheOwnerKvTransferKeys {
 pub struct KvTransferSourceChoice {
     pub source: KvTransferCandidateSource,
     pub prefix_blocks: usize,
+}
+
+/// A KV copy the router found for one target worker: the eligible source with the longest prefix
+/// beyond the target's local prefix.
+///
+/// Only the router constructs one, so a copy always names a source the router offered for that
+/// target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KvCopySource {
+    target: WorkerWithDpRank,
+    choice: KvTransferSourceChoice,
+    local_prefix_blocks: usize,
+}
+
+impl KvCopySource {
+    pub(crate) fn new(
+        target: WorkerWithDpRank,
+        choice: KvTransferSourceChoice,
+        local_prefix_blocks: usize,
+    ) -> Self {
+        Self {
+            target,
+            choice,
+            local_prefix_blocks,
+        }
+    }
+
+    /// The worker and rank that receives the blocks.
+    pub fn target(&self) -> WorkerWithDpRank {
+        self.target
+    }
+
+    /// The worker or cache owner the blocks come from.
+    pub fn source(&self) -> KvTransferCandidateSource {
+        self.choice.source
+    }
+
+    /// Blocks the copy adds beyond the target's device and host-pinned prefix; at least one.
+    pub fn additional_blocks(&self) -> usize {
+        self.choice
+            .prefix_blocks
+            .saturating_sub(self.local_prefix_blocks)
+    }
+}
+
+/// Where one copy's blocks are, borrowed for the booking that sends it. Nothing is copied: the
+/// hint policy that sends the copy picks the range of [`Self::chain`] its action carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KvCopyLocations<'a> {
+    source_address: &'a str,
+    chain: &'a [ExternalSequenceBlockHash],
+    local_prefix_blocks: usize,
+    source_prefix_blocks: usize,
+}
+
+impl<'a> KvCopyLocations<'a> {
+    /// The source's KV control endpoint, from the router's current worker and cache-owner
+    /// snapshots. Never empty.
+    pub fn source_address(&self) -> &'a str {
+        self.source_address
+    }
+
+    /// The request's root-aligned block hashes: `chain()[i]` is request block `i`. It covers at
+    /// least the source's prefix.
+    pub fn chain(&self) -> &'a [ExternalSequenceBlockHash] {
+        self.chain
+    }
+
+    /// The target's device and host-pinned prefix, in blocks, when the router found the source.
+    pub fn local_prefix_blocks(&self) -> usize {
+        self.local_prefix_blocks
+    }
+
+    /// The root-aligned prefix, in blocks, the source holds: at least one, and at most
+    /// `chain().len()`.
+    pub fn source_prefix_blocks(&self) -> usize {
+        self.source_prefix_blocks
+    }
+}
+
+/// The locations of `copy`, read from the current snapshots: `workers` for a worker source and
+/// the candidates' routing snapshot for a cache owner. `None` when the source no longer advertises
+/// a control endpoint, or `candidates` no longer covers its prefix.
+#[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
+pub(crate) fn kv_copy_locations<'a, C: WorkerConfigLike>(
+    workers: &'a HashMap<WorkerId, C>,
+    candidates: &'a KvTransferCandidates,
+    copy: &KvCopySource,
+) -> Option<KvCopyLocations<'a>> {
+    let choice = copy.choice;
+    let source_address = match choice.source {
+        KvTransferCandidateSource::Worker(worker) => {
+            workers
+                .get(&worker.worker_id)?
+                .kv_hint_transfer_metadata_for_dp_rank(worker.dp_rank)?
+                .source_control_endpoint?
+        }
+        KvTransferCandidateSource::CacheOwner(owner) => candidates
+            .routing_snapshot
+            .as_ref()?
+            .router_hint_source(owner)?
+            .metadata
+            .source_control_endpoint
+            .as_str(),
+    };
+    if source_address.is_empty()
+        || choice.prefix_blocks == 0
+        || choice.prefix_blocks > candidates.block_hashes.len()
+    {
+        return None;
+    }
+    Some(KvCopyLocations {
+        source_address,
+        chain: &candidates.block_hashes,
+        local_prefix_blocks: copy.local_prefix_blocks,
+        source_prefix_blocks: choice.prefix_blocks,
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -9,44 +9,49 @@ use std::sync::Arc;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use super::{HintPolicyInstance, HintRequirements};
+use super::HintPolicy;
 use crate::config::KvRouterConfig;
 use crate::{RoutingPartitionRef, WorkerType};
 
-/// Creates one instance of a configured hint policy per routing partition.
-pub type HintPolicyConstructor = Arc<
-    dyn for<'a> Fn(&KvRouterConfig, WorkerType, RoutingPartitionRef<'a>) -> HintPolicyInstance
-        + Send
-        + Sync,
->;
+type Construct = dyn for<'a> Fn(&KvRouterConfig, WorkerType, RoutingPartitionRef<'a>) -> Arc<dyn HintPolicy>
+    + Send
+    + Sync;
 
-/// A configured hint policy: the requirements every instance declares, and its constructor.
-///
-/// The host unions requirements across the configured policies before it starts indexes and
-/// subscriptions, independently of the worker-selection policy, and rejects an instance whose
-/// requirements differ from the declared ones.
+/// Creates the instance of one configured hint policy that each routing partition runs.
 #[derive(Clone)]
-pub struct HintPolicyDefinition {
-    requirements: HintRequirements,
-    constructor: HintPolicyConstructor,
-}
+pub struct HintPolicyConstructor(Arc<Construct>);
 
-impl HintPolicyDefinition {
-    pub fn new(requirements: HintRequirements, constructor: HintPolicyConstructor) -> Self {
-        Self {
-            requirements,
-            constructor,
-        }
+impl HintPolicyConstructor {
+    /// Construct a fresh instance per partition, for a policy that keeps per-partition state.
+    pub fn new<F>(construct: F) -> Self
+    where
+        F: for<'a> Fn(&KvRouterConfig, WorkerType, RoutingPartitionRef<'a>) -> Arc<dyn HintPolicy>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self(Arc::new(construct))
     }
 
-    pub fn requirements(&self) -> HintRequirements {
-        self.requirements
+    /// Share one instance across every partition, for a stateless policy.
+    pub fn shared<P: HintPolicy>(policy: P) -> Self {
+        let policy: Arc<dyn HintPolicy> = Arc::new(policy);
+        Self::new(move |_, _, _| Arc::clone(&policy))
+    }
+
+    fn construct(
+        &self,
+        config: &KvRouterConfig,
+        worker_type: WorkerType,
+        partition: RoutingPartitionRef<'_>,
+    ) -> Arc<dyn HintPolicy> {
+        (self.0)(config, worker_type, partition)
     }
 }
 
-/// Parses one instance's YAML parameters and returns its definition.
+/// Parses one entry's YAML parameters and returns its constructor.
 pub type HintPolicyProvider = Arc<
-    dyn Fn(&HintPolicyParameters) -> Result<HintPolicyDefinition, HintPolicyProviderError>
+    dyn Fn(&HintPolicyParameters) -> Result<HintPolicyConstructor, HintPolicyProviderError>
         + Send
         + Sync,
 >;
@@ -60,14 +65,14 @@ impl HintPolicyParameters {
         Self(value)
     }
 
-    /// Deserialize this instance's parameter mapping into a policy-owned type.
+    /// Deserialize this entry's parameter mapping into a policy-owned type.
     pub fn deserialize<T: DeserializeOwned>(&self) -> Result<T, HintPolicyProviderError> {
         serde_yaml::from_value(self.0.clone())
             .map_err(|source| HintPolicyProviderError::new(source.to_string()))
     }
 }
 
-/// A policy-owned validation failure while creating a hint-policy definition.
+/// A policy-owned validation failure while creating a hint-policy constructor.
 #[derive(Debug, Error)]
 #[error("{message}")]
 pub struct HintPolicyProviderError {
@@ -82,7 +87,7 @@ impl HintPolicyProviderError {
     }
 }
 
-/// An error from hint-policy registration, resolution, or instance construction.
+/// An error from hint-policy registration or resolution.
 #[derive(Debug, Error)]
 pub enum HintPolicyRegistryError {
     #[error("hint-policy type must not be empty")]
@@ -95,7 +100,7 @@ pub enum HintPolicyRegistryError {
         source: crate::scheduling::RouterPolicyConfigError,
     },
     #[error("hint policy {name:?} is listed more than once")]
-    DuplicateInstance { name: String },
+    DuplicateName { name: String },
     #[error("unknown hint-policy type {name:?}; linked hint-policy types: {available}")]
     UnknownType { name: String, available: String },
     #[error("invalid parameters for hint-policy type {policy_type:?}: {source}")]
@@ -104,29 +109,29 @@ pub enum HintPolicyRegistryError {
         #[source]
         source: HintPolicyProviderError,
     },
-    #[error(
-        "hint policy {name:?} constructed an instance whose requirements {actual:?} differ from its declared {declared:?}"
-    )]
-    RequirementsChanged {
-        name: String,
-        declared: HintRequirements,
-        actual: HintRequirements,
-    },
 }
 
 #[derive(Clone)]
 struct ResolvedHintPolicy {
     name: Arc<str>,
-    definition: HintPolicyDefinition,
+    constructor: HintPolicyConstructor,
+}
+
+/// One role's resolved hint policies.
+#[derive(Clone, Default)]
+struct ResolvedRole {
+    policies: Vec<ResolvedHintPolicy>,
+    /// `hint_policies` doesn't list the role, so it runs the registry's default hint policies.
+    defaults: bool,
 }
 
 /// The resolved, ordered hint policies for every worker role.
 ///
-/// Cloning shares the resolved definitions. Each call to [`Self::instances`] constructs fresh
-/// instances for one partition, so mutable policy state is never shared across partitions.
+/// Cloning shares the resolved constructors. Each call to [`Self::instances`] constructs one
+/// partition's instances, so a policy that keeps per-partition state never shares it.
 #[derive(Clone)]
 pub struct HintPolicyFactory {
-    roles: Arc<[Vec<ResolvedHintPolicy>; 4]>,
+    roles: Arc<[ResolvedRole; 4]>,
 }
 
 impl HintPolicyFactory {
@@ -138,54 +143,33 @@ impl HintPolicyFactory {
     }
 
     /// The same ordered policies for every worker role, for hosts that build hint policies in
-    /// code rather than from router configuration.
+    /// code rather than from router configuration. They count as configured, not as defaults.
     pub fn for_all_roles(
-        policies: impl IntoIterator<Item = (String, HintPolicyDefinition)>,
+        policies: impl IntoIterator<Item = (String, HintPolicyConstructor)>,
     ) -> Result<Self, HintPolicyRegistryError> {
-        let policies: Vec<_> = policies
-            .into_iter()
-            .map(|(name, definition)| ResolvedHintPolicy {
-                name: Arc::from(name),
-                definition,
-            })
-            .collect();
-        for (index, policy) in policies.iter().enumerate() {
-            if policies[..index]
-                .iter()
-                .any(|earlier| earlier.name == policy.name)
-            {
-                return Err(HintPolicyRegistryError::DuplicateInstance {
-                    name: policy.name.to_string(),
-                });
-            }
-        }
+        let policies = named(policies)?;
+        let role = ResolvedRole {
+            policies,
+            defaults: false,
+        };
         Ok(Self {
-            roles: Arc::new([
-                policies.clone(),
-                policies.clone(),
-                policies.clone(),
-                policies,
-            ]),
+            roles: Arc::new([role.clone(), role.clone(), role.clone(), role]),
         })
-    }
-
-    /// The union of the requirements of the policies a worker role runs. Hosts start the
-    /// resources these require, such as the KV index and its event subscription, independently
-    /// of the worker-selection policy.
-    pub fn requirements(&self, worker_type: WorkerType) -> HintRequirements {
-        self.role(worker_type)
-            .iter()
-            .fold(HintRequirements::new(), |requirements, policy| {
-                requirements.union(policy.definition.requirements)
-            })
     }
 
     /// The configured policy names for a worker role, in order.
     pub fn names(&self, worker_type: WorkerType) -> Vec<&str> {
         self.role(worker_type)
+            .policies
             .iter()
             .map(|policy| policy.name.as_ref())
             .collect()
+    }
+
+    /// Whether a worker role runs the registry's default hint policies, because `hint_policies`
+    /// doesn't list it.
+    pub fn uses_defaults(&self, worker_type: WorkerType) -> bool {
+        self.role(worker_type).defaults
     }
 
     /// Construct one partition's instances in configured order.
@@ -194,26 +178,83 @@ impl HintPolicyFactory {
         config: &KvRouterConfig,
         worker_type: WorkerType,
         partition: RoutingPartitionRef<'_>,
-    ) -> Result<Vec<HintPolicyInstance>, HintPolicyRegistryError> {
-        self.role(worker_type)
-            .iter()
-            .map(|policy| {
-                let instance = (policy.definition.constructor)(config, worker_type, partition);
-                if instance.requirements() != policy.definition.requirements {
-                    return Err(HintPolicyRegistryError::RequirementsChanged {
-                        name: policy.name.to_string(),
-                        declared: policy.definition.requirements,
-                        actual: instance.requirements(),
-                    });
-                }
-                Ok(instance)
-            })
-            .collect()
+    ) -> RoleHintPolicies {
+        let role = self.role(worker_type);
+        RoleHintPolicies {
+            policies: role
+                .policies
+                .iter()
+                .map(|policy| {
+                    (
+                        Arc::clone(&policy.name),
+                        policy.constructor.construct(config, worker_type, partition),
+                    )
+                })
+                .collect(),
+            defaults: role.defaults,
+        }
     }
 
-    fn role(&self, worker_type: WorkerType) -> &[ResolvedHintPolicy] {
+    fn role(&self, worker_type: WorkerType) -> &ResolvedRole {
         &self.roles[role_index(worker_type)]
     }
+}
+
+/// A hint-policy instance and its name in logs.
+pub type NamedHintPolicy = (Arc<str>, Arc<dyn HintPolicy>);
+
+/// One role's hint-policy instances for one routing partition, in configured order.
+pub struct RoleHintPolicies {
+    policies: Vec<NamedHintPolicy>,
+    defaults: bool,
+}
+
+impl RoleHintPolicies {
+    /// No hint policies, as configured rather than defaulted.
+    pub fn none() -> Self {
+        Self {
+            policies: Vec::new(),
+            defaults: false,
+        }
+    }
+
+    /// The named instances, in configured order.
+    pub fn policies(&self) -> &[NamedHintPolicy] {
+        &self.policies
+    }
+
+    /// Whether these are the registry's default hint policies, which are passive: they start no
+    /// resources and don't require the KV path.
+    pub fn are_defaults(&self) -> bool {
+        self.defaults
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<NamedHintPolicy>, bool) {
+        (self.policies, self.defaults)
+    }
+}
+
+fn named(
+    policies: impl IntoIterator<Item = (String, HintPolicyConstructor)>,
+) -> Result<Vec<ResolvedHintPolicy>, HintPolicyRegistryError> {
+    let policies: Vec<_> = policies
+        .into_iter()
+        .map(|(name, constructor)| ResolvedHintPolicy {
+            name: Arc::from(name),
+            constructor,
+        })
+        .collect();
+    for (index, policy) in policies.iter().enumerate() {
+        if policies[..index]
+            .iter()
+            .any(|earlier| earlier.name == policy.name)
+        {
+            return Err(HintPolicyRegistryError::DuplicateName {
+                name: policy.name.to_string(),
+            });
+        }
+    }
+    Ok(policies)
 }
 
 fn role_index(worker_type: WorkerType) -> usize {
@@ -232,10 +273,12 @@ const WORKER_TYPES: [WorkerType; 4] = [
     WorkerType::Encode,
 ];
 
-/// Linked hint-policy providers.
+/// Linked hint-policy providers, and the default hint policies a role runs when `hint_policies`
+/// doesn't list it.
 #[derive(Clone, Default)]
 pub(crate) struct HintPolicyRegistry {
     providers: HashMap<String, HintPolicyProvider>,
+    defaults: Vec<ResolvedHintPolicy>,
 }
 
 impl HintPolicyRegistry {
@@ -259,68 +302,60 @@ impl HintPolicyRegistry {
         Ok(())
     }
 
-    /// Resolve the configured hint policies once at startup. Hint policies are opt-in: a role
-    /// without a configured list runs none.
+    /// Replace the default hint policies.
+    pub(crate) fn set_defaults(
+        &mut self,
+        policies: impl IntoIterator<Item = (String, HintPolicyConstructor)>,
+    ) -> Result<(), HintPolicyRegistryError> {
+        self.defaults = named(policies)?;
+        Ok(())
+    }
+
+    /// Resolve the configured hint policies once at startup. A role that `hint_policies` doesn't
+    /// list runs the default hint policies.
     pub(crate) fn resolve(
         &self,
         config: &KvRouterConfig,
     ) -> Result<HintPolicyFactory, HintPolicyRegistryError> {
-        let Some(hint_config) = config
+        let hint_config = config
             .hint_policy_config()
-            .map_err(|source| HintPolicyRegistryError::Config { source })?
-        else {
-            return Ok(HintPolicyFactory::none());
-        };
-        let mut resolved: HashMap<&str, ResolvedHintPolicy> = HashMap::new();
-        let mut roles: [Vec<ResolvedHintPolicy>; 4] = Default::default();
+            .map_err(|source| HintPolicyRegistryError::Config { source })?;
+        let mut roles: [ResolvedRole; 4] = Default::default();
         for worker_type in WORKER_TYPES {
-            let names = hint_config.role(worker_type);
-            let mut policies = Vec::with_capacity(names.len());
-            for name in names.iter().map(String::as_str) {
-                if let Some(policy) = resolved.get(name) {
-                    policies.push(policy.clone());
-                    continue;
-                }
-                let instance = hint_config
-                    .instance(name)
-                    .expect("hint_policies role entries name configured instances");
-                let policy = ResolvedHintPolicy {
-                    name: Arc::from(name),
-                    definition: self.definition(
-                        instance.policy_type(),
-                        HintPolicyParameters::new(instance.parameters().clone()),
-                    )?,
+            let Some(entries) = hint_config.and_then(|config| config.role(worker_type)) else {
+                roles[role_index(worker_type)] = ResolvedRole {
+                    policies: self.defaults.clone(),
+                    defaults: true,
                 };
-                resolved.insert(name, policy.clone());
-                policies.push(policy);
-            }
-            roles[role_index(worker_type)] = policies;
-        }
-        // Validate instances no role lists too, so a typo in one fails at startup.
-        let mut unlisted: Vec<_> = hint_config
-            .instance_names()
-            .filter(|name| !resolved.contains_key(name))
-            .collect();
-        unlisted.sort_unstable();
-        for name in unlisted {
-            let instance = hint_config
-                .instance(name)
-                .expect("instance names come from the config");
-            self.definition(
-                instance.policy_type(),
-                HintPolicyParameters::new(instance.parameters().clone()),
-            )?;
+                continue;
+            };
+            let policies = entries
+                .iter()
+                .map(|entry| {
+                    Ok(ResolvedHintPolicy {
+                        name: Arc::from(entry.name()),
+                        constructor: self.constructor(
+                            entry.policy_type(),
+                            HintPolicyParameters::new(entry.parameters().clone()),
+                        )?,
+                    })
+                })
+                .collect::<Result<_, HintPolicyRegistryError>>()?;
+            roles[role_index(worker_type)] = ResolvedRole {
+                policies,
+                defaults: false,
+            };
         }
         Ok(HintPolicyFactory {
             roles: Arc::new(roles),
         })
     }
 
-    fn definition(
+    fn constructor(
         &self,
         policy_type: &str,
         parameters: HintPolicyParameters,
-    ) -> Result<HintPolicyDefinition, HintPolicyRegistryError> {
+    ) -> Result<HintPolicyConstructor, HintPolicyRegistryError> {
         let provider = self.providers.get(policy_type).ok_or_else(|| {
             HintPolicyRegistryError::UnknownType {
                 name: policy_type.to_owned(),

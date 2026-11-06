@@ -10,6 +10,7 @@ use std::{
 
 use anyhow::Result;
 use dynamo_kv_router::plugins::hint_policy::HintPolicyFactory;
+use dynamo_kv_router::plugins::resolve_role;
 #[cfg(test)]
 use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
 use dynamo_kv_router::{
@@ -78,6 +79,7 @@ pub use encoder_router::EncoderRouter;
 pub use indexer::Indexer;
 pub use prefill_router::PrefillRouter;
 pub(crate) use request_lease::RequestAttemptRelease;
+pub(crate) use routing_host::{EVERY_ROLE, check_hint_policies_route_on_kv_path};
 pub use routing_host::{
     KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,
 };
@@ -146,7 +148,7 @@ impl SelectionPolicySource {
                 config,
                 worker_type,
                 model_name,
-            ),
+            )?,
         };
         if !prepared.inputs().contains(WorkerInputs::CACHE) {
             anyhow::ensure!(
@@ -167,10 +169,15 @@ impl SelectionPolicySource {
 /// `embedded::EmbeddedSelection::start` builds) and defers every other call to
 /// the wrapped factory. This keeps the one-call-per-partition contract while
 /// letting the router read the inputs of the instance that actually serves.
+///
+/// Preparing also resolves the role's hint policies and checks, with [`resolve_role`], that they
+/// fit the policy, so a bad combination fails when the router is built.
 #[derive(Clone)]
 pub struct PreparedSelectionPolicy {
     factory: WorkerSelectionPolicyFactory,
     inputs: WorkerInputs,
+    prepare_inputs: WorkerInputs,
+    hint_policies: HintPolicyFactory,
 }
 
 impl PreparedSelectionPolicy {
@@ -179,13 +186,20 @@ impl PreparedSelectionPolicy {
         config: &KvRouterConfig,
         worker_type: WorkerType,
         model_name: Option<&str>,
-    ) -> Self {
+    ) -> Result<Self> {
         let key = embedded::embedded_partition_key(model_name);
         let policy = inner(config, worker_type, key.as_ref());
         let inputs =
             dynamo_kv_router::selector::WorkerSelector::<ModelRuntimeConfig>::required_worker_inputs(
                 &policy,
             );
+        let hint_policies = plugins::router_plugin_registry().resolve_hint_policies(config)?;
+        let responsibilities = resolve_role(
+            worker_type,
+            &policy,
+            hint_policies.instances(config, worker_type, key.as_ref()),
+            config,
+        )?;
         let slot = Arc::new(parking_lot::Mutex::new(Some(policy)));
         let factory: WorkerSelectionPolicyFactory = Arc::new(
             move |config: &KvRouterConfig, worker_type, partition: RoutingPartitionRef<'_>| {
@@ -197,12 +211,28 @@ impl PreparedSelectionPolicy {
                 inner(config, worker_type, partition)
             },
         );
-        Self { factory, inputs }
+        Ok(Self {
+            factory,
+            inputs,
+            prepare_inputs: responsibilities.prepare_inputs(),
+            hint_policies,
+        })
     }
 
     /// The optional worker inputs the prepared instance consumes.
     pub fn inputs(&self) -> WorkerInputs {
         self.inputs
+    }
+
+    /// The worker inputs whose resources the router starts: the policy's, plus those of the
+    /// role's configured hint policies. Default hint policies add none.
+    pub fn prepare_inputs(&self) -> WorkerInputs {
+        self.prepare_inputs
+    }
+
+    /// The resolved hint policies the router's partitions run.
+    pub fn hint_policies(&self) -> &HintPolicyFactory {
+        &self.hint_policies
     }
 }
 
@@ -396,17 +426,6 @@ pub(crate) fn to_worker_selection_session_context(
         input_trigger,
     )
     .with_agent_headers(agent_headers.clone())
-}
-
-/// The worker inputs whose resources a router starts: the worker-selection policy's, plus those
-/// its role's hint policies read. A hint policy that reads cache inputs needs the KV index, its
-/// event subscription, and the shared cache even when the worker-selection policy reads none.
-pub(crate) fn router_index_inputs(
-    selection_inputs: WorkerInputs,
-    hint_policies: &HintPolicyFactory,
-    worker_type: WorkerType,
-) -> WorkerInputs {
-    selection_inputs | hint_policies.requirements(worker_type).worker_inputs()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -740,13 +759,12 @@ impl KvRouter {
             metric_worker_type,
             model_name.as_deref(),
         )?;
+        // Configured hint policies start the resources they read, such as the KV index, even when
+        // the worker-selection policy does not read it.
         let required_worker_inputs = prepared.inputs();
+        let index_inputs = prepared.prepare_inputs();
+        let hint_policies = prepared.hint_policies().clone();
         let policy_factory = prepared.factory;
-        // Hint policies are a peer plugin role: they start the resources they read, such as the
-        // KV index, even when the worker-selection policy does not read it.
-        let hint_policies =
-            plugins::router_plugin_registry().resolve_hint_policies(&kv_router_config)?;
-        let index_inputs = router_index_inputs(required_worker_inputs, &hint_policies, worker_type);
         // ModelManager gates client construction as well, but preserve the capability boundary for
         // direct KvRouter callers.
         let shared_cache = if index_inputs.contains(WorkerInputs::CACHE) {
@@ -2175,24 +2193,49 @@ mod tests {
     #[test]
     fn configured_hint_policies_start_the_kv_index_for_load_only_selection() {
         use dynamo_kv_router::plugins::hint_policy::{
-            HintPolicy, HintPolicyDefinition, HintPolicyInstance, HintRequirements,
+            HintContext, HintPolicy, HintPolicyConstructor, HintPolicyError, KvHintAction,
+        };
+        use dynamo_kv_router::plugins::worker_selection::{
+            WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
         };
 
         /// A hint policy that reads cache inputs.
         struct CacheReader;
 
         impl HintPolicy for CacheReader {
-            fn requirements(&self) -> HintRequirements {
-                HintRequirements::new()
-                    .with_actions()
-                    .with_inputs(WorkerInputs::CACHE)
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::CACHE
+            }
+
+            fn build_hints(
+                &self,
+                _context: &HintContext<'_>,
+            ) -> Result<Vec<KvHintAction>, HintPolicyError> {
+                Ok(Vec::new())
+            }
+        }
+
+        /// A load-only selection.
+        struct LoadPicker;
+
+        impl WorkerPicker for LoadPicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::LOAD
+            }
+
+            fn pick(
+                &self,
+                _context: &WorkerSelectionContext<'_>,
+                _input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                Ok(0)
             }
         }
 
         let policy_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             policy_file.path(),
-            "hint_policies:\n  prefill: [reader]\n  instances:\n    - name: reader\n      type: cache_reader\n",
+            "hint_policies:\n  prefill:\n    - type: cache_reader\n",
         )
         .unwrap();
         let config = KvRouterConfig {
@@ -2204,20 +2247,29 @@ mod tests {
         registry
             .register_hint_policy(
                 "cache_reader",
-                Arc::new(|_| {
-                    Ok(HintPolicyDefinition::new(
-                        CacheReader.requirements(),
-                        Arc::new(|_, _, _| HintPolicyInstance::new("cache_reader", CacheReader)),
-                    ))
-                }),
+                Arc::new(|_| Ok(HintPolicyConstructor::shared(CacheReader))),
             )
             .unwrap();
         let hints = registry.resolve_hint_policies(&config).unwrap();
+        let partition = RoutingPartitionRef::new("model", DEFAULT_ROUTING_GROUP);
         let requirement = |worker_type| {
+            let selection = WorkerSelectionPolicy::new(
+                config.clone(),
+                "test",
+                Vec::new(),
+                Box::new(LoadPicker),
+            );
+            let responsibilities = resolve_role(
+                worker_type,
+                &selection,
+                hints.instances(&config, worker_type, partition),
+                &config,
+            )
+            .unwrap();
             KvEventSourceRequirement::derive(
                 Some(worker_type),
                 &config,
-                router_index_inputs(WorkerInputs::LOAD, &hints, worker_type),
+                responsibilities.prepare_inputs(),
             )
         };
         assert_eq!(
@@ -3434,7 +3486,8 @@ mod tests {
             &config,
             WorkerType::Decode,
             Some("named-model"),
-        );
+        )
+        .expect("prepare");
         assert_eq!(constructions.load(Ordering::SeqCst), 1);
         let inputs = prepared.inputs();
 

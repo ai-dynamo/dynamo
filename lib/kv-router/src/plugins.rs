@@ -10,6 +10,7 @@
 pub mod hint_policy;
 mod registry;
 pub mod request_classifier;
+mod resolve;
 pub mod worker_selection;
 
 pub use registry::{
@@ -17,6 +18,8 @@ pub use registry::{
     RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
+
+pub use resolve::{PluginConfigError, RouterResponsibilities, resolve_role};
 
 use request_classifier::{RequestClassifierFactory, RequestClassifierRegistryError};
 use worker_selection::WorkerSelectionPolicyFactory;

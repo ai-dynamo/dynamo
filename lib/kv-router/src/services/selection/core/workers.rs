@@ -9,6 +9,8 @@ use std::collections::HashSet;
 use super::hint::hint_capable_partition;
 use super::reservations::{ReservationIndexObserver, spawn_reservation_index_sweep};
 use super::*;
+use crate::plugins::hint_policy::RoleHintPolicies;
+use crate::plugins::resolve_role;
 use crate::sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER;
 
 impl SelectionCore {
@@ -294,8 +296,14 @@ impl SelectionCore {
                     block_size,
                     host_replica,
                 );
-                // Instantiate before any partition task starts, so a rejected policy leaves nothing.
-                let hint_policies = self.partition_hint_policies(&key)?;
+                // Instantiate and check the plugins before any partition task starts, so a
+                // rejected configuration leaves nothing.
+                let selector = (self.worker_selection_policy_factory)(
+                    &self.kv_router_config,
+                    self.worker_type,
+                    key.as_ref(),
+                );
+                let responsibilities = self.partition_responsibilities(&key, &selector)?;
                 let worker_label = self.worker_type.as_str();
                 let slots = Arc::new(ActiveSequencesMultiWorker::new_with_options(
                     scoped_replica_sync
@@ -340,14 +348,6 @@ impl SelectionCore {
                         block_size,
                     ))
                 });
-                let selector = (self.worker_selection_policy_factory)(
-                    &self.kv_router_config,
-                    self.worker_type,
-                    key.as_ref(),
-                );
-                let scores_kv_transfer =
-                    WorkerSelector::<SelectionWorkerConfig>::required_worker_inputs(&selector)
-                        .contains(WorkerInputs::KV_TRANSFER);
                 let profile = self
                     .kv_router_config
                     .policy_profile(Some(&key.model_name))
@@ -378,13 +378,13 @@ impl SelectionCore {
                     indexer,
                     workers_tx,
                     hint_capable_workers: AtomicBool::new(false),
-                    scores_kv_transfer,
+                    responsibilities,
+                    copy_sources_warning: std::sync::Once::new(),
                     scheduler,
                     replica_inbox,
                     affinity: OnceCell::new(),
                     replica_config: self.replica_config.clone(),
                     affinity_replication: self.session_binding_sink(&key),
-                    hint_policies,
                 }))
             })?
             .clone();
@@ -417,30 +417,26 @@ impl SelectionCore {
         ingress.detach(&self.indexer_registry, record).await;
     }
 
-    /// Construct this partition's hint policies, keeping those that run at booking.
-    fn partition_hint_policies(
+    /// Construct this partition's hint policies and resolve its role's responsibilities with its
+    /// worker-selection policy.
+    fn partition_responsibilities(
         &self,
         key: &RoutingPartitionId,
-    ) -> Result<Vec<HintPolicySlot>, SelectionError> {
-        let factory = self
-            .host
-            .hints
-            .policies
-            .clone()
-            .unwrap_or_else(HintPolicyFactory::none);
-        let instances = factory
-            .instances(&self.kv_router_config, self.worker_type, key.as_ref())
-            .map_err(|error| SelectionError::Internal(error.to_string()))?;
-        Ok(instances
-            .into_iter()
-            .filter_map(|instance| {
-                let (name, policy) = instance.into_parts();
-                Some(HintPolicySlot {
-                    name,
-                    policy: policy?,
-                })
-            })
-            .collect())
+        selector: &WorkerSelectionPolicy,
+    ) -> Result<RouterResponsibilities, SelectionError> {
+        let hint_policies = match &self.host.hints.policies {
+            Some(factory) => {
+                factory.instances(&self.kv_router_config, self.worker_type, key.as_ref())
+            }
+            None => RoleHintPolicies::none(),
+        };
+        resolve_role(
+            self.worker_type,
+            selector,
+            hint_policies,
+            &self.kv_router_config,
+        )
+        .map_err(|error| SelectionError::Internal(error.to_string()))
     }
 
     pub(super) fn publish_scheduler_config(&self, key: &RoutingPartitionId) {

@@ -1,137 +1,170 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Host-side inputs for running hint policies after booking, and composition of a booked
-//! selection's KV hint from the router's fetch and its hint policies.
+//! The hint stage: runs a booking's hint policies and composes their actions into one KV hint.
+//!
+//! The stage never reads an action's payload. It numbers the actions, caps the hint at
+//! [`MAX_KV_HINT_ACTIONS`](crate::kv_hints::MAX_KV_HINT_ACTIONS), and treats a committed copy as
+//! delivered when the policy that sends committed copies returns at least one action.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::{HintActionContext, HintPolicy};
-use crate::kv_hints::{KvHint, KvHintAction};
+use super::{HintContext, HintPolicy};
+use crate::kv_hints::{KvCopyLocations, KvCopySource, KvHint, KvHintAction};
+use crate::plugins::worker_selection::{Commitments, WorkerInputs};
 use crate::protocols::WorkerWithDpRank;
+use crate::scheduling::SessionContext;
 
-/// Action ID of the router's `kv.fetch` action. No other action may use it.
-pub(crate) const KV_HINT_FETCH_ACTION_ID: &str = "a1";
-/// Upper bound on the actions one composed hint carries.
-const MAX_KV_HINT_ACTIONS: usize = 32;
-const KV_FETCH_ACTION_TYPE: &str = "kv.fetch";
-
-/// Request values the selection core shares with every hint policy of one booking.
-pub(crate) struct ActionInputs<'a> {
-    pub(crate) request_id: &'a str,
-    pub(crate) worker: WorkerWithDpRank,
-    pub(crate) prompt_tokens: usize,
-    pub(crate) block_size: u32,
-}
-
-impl<'a> ActionInputs<'a> {
-    /// The context every policy sees.
-    pub(crate) fn context(&self) -> HintActionContext<'a> {
-        HintActionContext {
-            request_id: self.request_id,
-            worker: self.worker,
-            prompt_tokens: self.prompt_tokens,
-            block_size: self.block_size,
-        }
-    }
-}
-
-/// One configured hint policy of a partition that runs at booking, in configured order.
+/// One hint policy of a partition, with the declarations the stage reads. Built once per role,
+/// in run order, by [`crate::plugins::resolve_role`].
 pub(crate) struct HintPolicySlot {
     pub(crate) name: Arc<str>,
     pub(crate) policy: Arc<dyn HintPolicy>,
+    /// Declares [`Commitments::KV_COPY`]: it sends the copy the selection committed to.
+    pub(crate) consumes_kv_copy: bool,
+    /// Reads [`WorkerInputs::KV_TRANSFER`]: it receives the booked worker's copy source.
+    pub(crate) reads_copy_source: bool,
 }
 
-/// Compose one booking's KV hint: the router's fetch, if any, then its partition's hint
-/// policies' actions in configured order.
+impl HintPolicySlot {
+    /// Read the policy's declarations once.
+    pub(crate) fn new(name: Arc<str>, policy: Arc<dyn HintPolicy>) -> Self {
+        Self {
+            consumes_kv_copy: policy.commitments().contains(Commitments::KV_COPY),
+            reads_copy_source: policy
+                .required_worker_inputs()
+                .contains(WorkerInputs::KV_TRANSFER),
+            name,
+            policy,
+        }
+    }
+}
+
+/// A copy the booking can send, with its locations resolved from the current snapshots.
+pub(crate) struct BookedCopy<'a> {
+    copy: KvCopySource,
+    /// `None` when the source no longer advertises a control endpoint.
+    locations: Option<KvCopyLocations<'a>>,
+}
+
+impl<'a> BookedCopy<'a> {
+    pub(crate) fn new(copy: KvCopySource, locations: Option<KvCopyLocations<'a>>) -> Self {
+        Self { copy, locations }
+    }
+
+    pub(crate) fn copy(&self) -> &KvCopySource {
+        &self.copy
+    }
+
+    pub(crate) fn locations(&self) -> Option<KvCopyLocations<'a>> {
+        self.locations
+    }
+}
+
+/// One booking's facts, shared by every hint policy it runs.
+pub(crate) struct HintInputs<'a> {
+    pub(crate) request_id: &'a str,
+    pub(crate) worker: WorkerWithDpRank,
+    pub(crate) isl_tokens: usize,
+    pub(crate) block_size: u32,
+    /// Whether the booked worker advertises `router_hint`. Other workers get no hint, and their
+    /// policies don't run.
+    pub(crate) worker_accepts_hints: bool,
+    pub(crate) session_context: Option<&'a SessionContext>,
+    /// The copy the selection's cost counted for the booked worker.
+    pub(crate) committed_kv_copy: Option<BookedCopy<'a>>,
+    /// The booked worker's best copy source, when the selection committed none.
+    pub(crate) kv_copy_source: Option<BookedCopy<'a>>,
+}
+
+impl HintInputs<'_> {
+    /// The context one policy sees: the copy accessors only for what it declared.
+    fn context(&self, slot: &HintPolicySlot) -> HintContext<'_> {
+        HintContext {
+            request_id: self.request_id,
+            worker: self.worker,
+            isl_tokens: self.isl_tokens,
+            block_size: self.block_size,
+            session_context: self.session_context,
+            committed_kv_copy: self
+                .committed_kv_copy
+                .as_ref()
+                .filter(|_| slot.consumes_kv_copy),
+            kv_copy_source: self
+                .kv_copy_source
+                .as_ref()
+                .filter(|_| slot.reads_copy_source),
+        }
+    }
+}
+
+/// The committed copy went unsent, so the booking fails: the selection's cost assumed it.
+#[derive(Debug, thiserror::Error)]
+#[error("hint policy {policy:?} did not send the committed KV copy: {reason}")]
+pub(crate) struct UndeliveredCommitment {
+    policy: String,
+    reason: String,
+}
+
+/// Compose one booking's KV hint: the router's own fetch, then the policy that sends committed
+/// copies, then the other policies in configured order.
 ///
-/// A policy's output is accepted or dropped whole. Output is dropped when
-/// [`HintPolicy::hint_kv_locality`] fails, an action ID repeats, an action other than the
-/// router's `kv.fetch` uses its ID, a second `kv.fetch` appears, or the hint would exceed
-/// [`MAX_KV_HINT_ACTIONS`]. Dropping one policy's output keeps every other policy's.
+/// Each policy's output is accepted or dropped whole, and numbered `a1`, `a2`, and so on in hint
+/// order. A policy's output is dropped, with a warning, when [`HintPolicy::build_hints`] fails or
+/// the output would take the hint past its action limit; the other policies' output is kept.
+/// When the selection committed a copy, the policy that sends it returning an error or no action
+/// fails the whole booking instead.
 pub(crate) fn compose_kv_hint(
     policies: &[HintPolicySlot],
-    inputs: &ActionInputs<'_>,
+    inputs: &HintInputs<'_>,
     router_fetch: Option<KvHintAction>,
-) -> Option<KvHint> {
-    let context = inputs.context();
-    let mut composer = Composer::new(router_fetch.as_ref());
-    let mut actions: Vec<KvHintAction> = router_fetch.into_iter().collect();
-    for slot in policies {
-        let output = match slot.policy.hint_kv_locality(&context) {
-            Ok(output) => output,
-            Err(error) => {
-                drop_output(slot, inputs, &error.to_string());
-                continue;
+) -> Result<Option<KvHint>, UndeliveredCommitment> {
+    if !inputs.worker_accepts_hints {
+        return Ok(None);
+    }
+    let committed = inputs.committed_kv_copy.is_some();
+    if committed && !policies.iter().any(|slot| slot.consumes_kv_copy) {
+        return Err(UndeliveredCommitment {
+            policy: String::new(),
+            reason: "no hint policy sends committed KV copies".to_string(),
+        });
+    }
+    let mut hint = KvHint::for_request(inputs.request_id);
+    if let Some(fetch) = router_fetch {
+        hint.append_numbered(vec![fetch])
+            .expect("an empty hint has room for one action");
+    }
+    // `resolve_role` already puts the consumer first; keep that order even for hand-built slots.
+    let run_order = policies
+        .iter()
+        .filter(|slot| slot.consumes_kv_copy)
+        .chain(policies.iter().filter(|slot| !slot.consumes_kv_copy));
+    for slot in run_order {
+        let delivering = committed && slot.consumes_kv_copy;
+        let outcome = match slot.policy.build_hints(&inputs.context(slot)) {
+            Ok(actions) if delivering && actions.is_empty() => {
+                Err("it returned no action".to_string())
             }
+            Ok(actions) => hint
+                .append_numbered(actions)
+                .map_err(|error| error.to_string()),
+            Err(error) => Err(error.to_string()),
         };
-        match composer.admit(&output) {
-            Ok(()) => actions.extend(output),
-            Err(reason) => drop_output(slot, inputs, &reason),
+        let Err(reason) = outcome else {
+            continue;
+        };
+        if delivering {
+            return Err(UndeliveredCommitment {
+                policy: slot.name.to_string(),
+                reason,
+            });
         }
+        tracing::warn!(
+            request_id = inputs.request_id,
+            hint_policy = %slot.name,
+            reason,
+            "Dropping hint-policy actions"
+        );
     }
-    (!actions.is_empty()).then(|| KvHint::new(inputs.request_id, actions))
-}
-
-/// The action IDs, fetch, and size of the hint composed so far.
-struct Composer {
-    action_ids: HashSet<String>,
-    has_fetch: bool,
-    len: usize,
-}
-
-impl Composer {
-    fn new(router_fetch: Option<&KvHintAction>) -> Self {
-        Self {
-            action_ids: router_fetch
-                .map(|fetch| fetch.action_id.clone())
-                .into_iter()
-                .collect(),
-            has_fetch: router_fetch.is_some(),
-            len: usize::from(router_fetch.is_some()),
-        }
-    }
-
-    /// Add one policy's output if it composes, or explain why it does not.
-    fn admit(&mut self, output: &[KvHintAction]) -> Result<(), String> {
-        let mut new_ids = HashSet::with_capacity(output.len());
-        let mut fetches = 0;
-        for action in output {
-            let is_fetch = action.action_type == KV_FETCH_ACTION_TYPE;
-            if action.action_id == KV_HINT_FETCH_ACTION_ID && !is_fetch {
-                return Err(format!(
-                    "action ID {KV_HINT_FETCH_ACTION_ID:?} is reserved for the router's kv.fetch"
-                ));
-            }
-            if self.action_ids.contains(&action.action_id)
-                || !new_ids.insert(action.action_id.as_str())
-            {
-                return Err(format!("action ID {:?} is already used", action.action_id));
-            }
-            fetches += usize::from(is_fetch);
-        }
-        if fetches > usize::from(!self.has_fetch) {
-            return Err("a hint carries at most one kv.fetch".to_string());
-        }
-        if self.len + output.len() > MAX_KV_HINT_ACTIONS {
-            return Err(format!(
-                "a hint carries at most {MAX_KV_HINT_ACTIONS} actions"
-            ));
-        }
-        self.has_fetch |= fetches > 0;
-        self.len += output.len();
-        self.action_ids
-            .extend(output.iter().map(|action| action.action_id.clone()));
-        Ok(())
-    }
-}
-
-fn drop_output(policy: &HintPolicySlot, inputs: &ActionInputs<'_>, reason: &str) {
-    tracing::warn!(
-        request_id = inputs.request_id,
-        hint_policy = %policy.name,
-        reason,
-        "Dropping hint-policy actions"
-    );
+    Ok((!hint.is_empty()).then_some(hint))
 }

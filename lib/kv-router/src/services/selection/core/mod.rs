@@ -21,18 +21,15 @@ use crate::identity::RoutingPartitionId;
 use crate::indexer::{
     LowerTierQueryOptions, RoutingDecisionHashes, SharedKvCache, TieredMatchDetails,
 };
-use crate::kv_hints::{
-    KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource, KvTransferCandidates,
-};
+use crate::kv_hints::{KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidates};
+use crate::plugins::RouterResponsibilities;
 use crate::plugins::hint_policy::HintPolicyFactory;
-use crate::plugins::hint_policy::runtime::HintPolicySlot;
-use crate::plugins::worker_selection::WorkerInputs;
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
     WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::queue::SchedulerBookingDescriptor;
-use crate::scheduling::selector::{WorkerSelectionPolicy, WorkerSelector};
+use crate::scheduling::selector::WorkerSelectionPolicy;
 use crate::scheduling::{
     KvSchedulerError, LocalScheduler, LoraWorkerFilter, OverlapAnalysis, OverlapSignals,
     OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, RejectThresholdsProvider,
@@ -131,15 +128,16 @@ struct SelectionEntry {
     workers_tx: watch::Sender<HashMap<WorkerId, SelectionWorkerConfig>>,
     /// Whether a worker in `workers_tx` consumes router hints, set on publish.
     hint_capable_workers: AtomicBool,
-    /// Whether the selection policy scores fetchable prefixes (`KV_TRANSFER`).
-    scores_kv_transfer: bool,
+    /// What the router does for this partition's role, from its plugins' declarations.
+    responsibilities: RouterResponsibilities,
+    /// Warns once when this partition's workers advertise router hints but its KV index can't
+    /// keep the block chain that copy sources need.
+    copy_sources_warning: std::sync::Once,
     scheduler: SelectionScheduler,
     replica_inbox: Option<ReplicaInbox>,
     affinity: OnceCell<SessionAffinity>,
     replica_config: Option<ReplicaSyncConfig>,
     affinity_replication: Option<(u64, Arc<dyn super::affinity::AffinityReplicaSink>)>,
-    /// This partition's hint policies that run at booking, in configured order.
-    hint_policies: Vec<HintPolicySlot>,
 }
 
 impl SelectionEntry {
@@ -190,7 +188,8 @@ pub struct SelectionHost {
 /// Hint policies the core instantiates for every partition.
 #[derive(Clone, Default)]
 pub struct HostHints {
-    /// The resolved hint policies; `None` runs no hint policies.
+    /// The resolved hint policies; `None` runs no hint policies. Each partition's role resolves
+    /// them with its worker-selection policy (see [`crate::plugins::resolve_role`]).
     pub policies: Option<HintPolicyFactory>,
 }
 

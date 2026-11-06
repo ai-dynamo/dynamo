@@ -250,7 +250,7 @@ mod tests {
         let policy = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             policy.path(),
-            "hint_policies:\n  aggregated: [x]\n  instances:\n    - name: x\n      type: test\n",
+            "hint_policies:\n  aggregated:\n    - type: test\n",
         )
         .unwrap();
         let config = KvRouterConfig {

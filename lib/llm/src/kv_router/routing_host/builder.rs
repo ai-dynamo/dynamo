@@ -233,18 +233,26 @@ impl PolicyInputs {
     }
 }
 
+/// The plugin type a routing mode runs as a hosted picker, if it runs as one.
+fn routing_mode_policy_type(mode: RouterMode) -> Option<&'static str> {
+    match mode {
+        RouterMode::RoundRobin => Some(router_modes::ROUND_ROBIN),
+        RouterMode::Random => Some(router_modes::RANDOM),
+        RouterMode::LeastLoaded => Some(router_modes::LEAST_LOADED),
+        _ => None,
+    }
+}
+
 /// Resolve a routing mode to its policy by type name in the linked plugin registry, the same way
 /// a policy file names a type, and take out its picker.
 pub(crate) fn hosted_picker(mode: RouterMode) -> anyhow::Result<HostedWorkerPicker> {
-    let policy_type = match mode {
-        RouterMode::RoundRobin => router_modes::ROUND_ROBIN,
-        RouterMode::Random => router_modes::RANDOM,
+    let policy_type = match (mode, routing_mode_policy_type(mode)) {
+        (_, Some(policy_type)) => policy_type,
         // TODO(v1.9): Remove with the `PowerOfTwoChoices` wire value.
-        RouterMode::PowerOfTwoChoices => anyhow::bail!(
+        (RouterMode::PowerOfTwoChoices, None) => anyhow::bail!(
             "the power-of-two router mode was removed in Dynamo v1.7; use another router mode"
         ),
-        RouterMode::LeastLoaded => router_modes::LEAST_LOADED,
-        mode => anyhow::bail!("{mode:?} routing is not a routing-mode policy"),
+        (mode, None) => anyhow::bail!("{mode:?} routing is not a routing-mode policy"),
     };
     let factory = crate::kv_router::plugins::router_plugin_registry().resolve_type(policy_type)?;
     // Routing-mode policies read neither the role nor the partition.
@@ -256,6 +264,48 @@ pub(crate) fn hosted_picker(mode: RouterMode) -> anyhow::Result<HostedWorkerPick
     policy
         .into_hosted_picker()
         .map_err(|_| anyhow::anyhow!("{policy_type} policy cannot run without KV routing"))
+}
+
+/// Every worker role a frontend routes.
+pub(crate) const EVERY_ROLE: [WorkerType; 4] = [
+    WorkerType::Aggregated,
+    WorkerType::Prefill,
+    WorkerType::Decode,
+    WorkerType::Encode,
+];
+
+/// Reject a non-KV routing mode for `roles` when one of them lists hint policies. Hint policies run
+/// at booking, which only the KV path does, so another mode would drop them silently. Default hint
+/// policies are passive and never require the KV path.
+pub(crate) fn check_hint_policies_route_on_kv_path(
+    router_mode: RouterMode,
+    config: &KvRouterConfig,
+    roles: &[WorkerType],
+) -> anyhow::Result<()> {
+    if router_mode.is_kv_routing() {
+        return Ok(());
+    }
+    let Some(hint_policies) = config.hint_policy_config()? else {
+        return Ok(());
+    };
+    let Some(role) = roles.iter().find(|&&role| {
+        hint_policies
+            .role(role)
+            .is_some_and(|entries| !entries.is_empty())
+    }) else {
+        return Ok(());
+    };
+    let role = role.as_str();
+    let fix = match routing_mode_policy_type(router_mode) {
+        Some(policy_type) => format!(
+            "run --router-mode kv and name {policy_type:?} under worker_selection.{role} in the router policy file, or remove the {role} hint policies"
+        ),
+        None => format!("run --router-mode kv, or remove the {role} hint policies"),
+    };
+    anyhow::bail!(
+        "hint_policies for {role} run only on the KV path, but --router-mode {mode} routes {role} workers without it; {fix}",
+        mode = router_mode.telemetry_label(),
+    )
 }
 
 /// Wire a host over its transport. This is the one place that turns

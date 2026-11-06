@@ -14,6 +14,7 @@ use parking_lot::Mutex;
 
 use crate::identity::RoutingPartitionId;
 use crate::protocols::{LocalBlockHash, WorkerWithDpRank};
+use crate::scheduling::SessionContext;
 
 /// How long a pending selection lives before it is evicted.
 const SELECTION_CACHE_TTL: Duration = Duration::from_secs(120);
@@ -61,6 +62,9 @@ pub(super) struct PendingSelection {
     pub routing_hashes: Option<Vec<LocalBlockHash>>,
     /// The session the selection steered by, bound when the booking replays.
     pub session_id: Option<String>,
+    /// The request's agent session, kept only for a partition with hint policies, which read it
+    /// when the booking replays.
+    pub session_context: Option<SessionContext>,
 }
 
 struct Entry {
@@ -84,6 +88,10 @@ fn entry_bytes(key: &CacheKey, selection: &PendingSelection) -> usize {
         + key.0.routing_group.len()
         + selection.lora_name.as_deref().map_or(0, str::len)
         + selection.session_id.as_deref().map_or(0, str::len)
+        + selection
+            .session_context
+            .as_ref()
+            .map_or(0, |session| session.session_id().len())
 }
 
 struct State {
@@ -278,6 +286,7 @@ mod tests {
             lora_name: None,
             routing_hashes: None,
             session_id: None,
+            session_context: None,
         }
     }
 

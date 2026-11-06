@@ -241,6 +241,22 @@ class KvRouterConfigBase(ConfigBase):
         except ValidationError as exc:
             raise ValueError(f"invalid router settings: {exc}") from exc
 
+    def hint_policy_roles(self) -> list[str]:
+        """Roles that list hint policies in --router-policy-config.
+
+        A role listed with an empty list opts out of the defaults and runs none.
+        """
+        if self.router_policy_config is None:
+            return []
+        with Path(self.router_policy_config).open() as source:
+            document = yaml.safe_load(source)
+        hint_policies = (
+            document.get("hint_policies") if isinstance(document, dict) else None
+        )
+        if not isinstance(hint_policies, dict):
+            return []
+        return [role for role, entries in hint_policies.items() if entries]
+
     def apply_router_config(self) -> None:
         self.apply_load_aware_preset()
         self.apply_conditional_disagg_config()
@@ -627,7 +643,7 @@ class KvRouterArgGroup(ArgGroup):
             default=None,
             help=(
                 "KV Router: Startup-only YAML configuration for shared router settings, "
-                "policy-class queues, and worker-selection instances. "
+                "policy-class queues, worker-selection instances, and hint policies. "
                 "When omitted, router_queue_threshold and router_queue_policy define "
                 "one synthetic policy class; queueing remains disabled unless "
                 "router_queue_threshold is set."
