@@ -151,7 +151,9 @@ def publish_kvcr_hint_capabilities(
     )
     if not endpoints:
         return
-    values = [(KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, str(worker_type))]
+    values: list[tuple[str, object]] = [
+        (KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, str(worker_type))
+    ]
     if publish_source_endpoints:
         values.append(
             (KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY, endpoints)
