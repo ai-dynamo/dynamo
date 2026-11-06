@@ -37,10 +37,12 @@ type GroupPresence = FxHashMap<u32, FxHashMap<u64, u8>>;
 const CHECKPOINT_SHARDS: usize = 256;
 
 type CheckpointShardMap = FxHashMap<u64, Arc<CompleteMembership>>;
+type CapturedCheckpointShards = [OnceCell<Arc<CheckpointShardMap>>; CHECKPOINT_SHARDS];
 
 #[derive(Debug, Default, Clone)]
 struct CompleteMembership {
     owners: [Vec<(ResidencyOwner, u64)>; 4],
+    revision: u64,
 }
 
 impl CompleteMembership {
@@ -66,7 +68,9 @@ impl CompleteMembership {
 #[derive(Debug, Default)]
 struct CheckpointShard {
     entries: ArcSwap<CheckpointShardMap>,
-    writer: Mutex<()>,
+    // Revisions only compare memberships for the same hash, which always maps
+    // to this shard. Retaining the counter across deletion prevents ABA reuse.
+    writer: Mutex<u64>,
 }
 
 #[derive(Debug)]
@@ -101,7 +105,13 @@ impl CheckpointMembershipIndex {
         }
         for (shard_index, updates) in batches {
             let shard = &self.shards[shard_index];
-            let _writer = shard.writer.lock();
+            let mut counter = shard.writer.lock();
+            // Zero permanently disables live hints after counter exhaustion;
+            // mutations still publish, and no revision can wrap or be reused.
+            let revision = counter.checked_add(1).unwrap_or(0);
+            if revision != 0 {
+                *counter = revision;
+            }
             let mut next = (*shard.entries.load_full()).clone();
             for (hash, generation, mask) in updates {
                 let mut membership = next
@@ -109,6 +119,7 @@ impl CheckpointMembershipIndex {
                     .map(|entry| (**entry).clone())
                     .unwrap_or_default();
                 membership.update(owner, generation, mask);
+                membership.revision = revision;
                 if membership.is_empty() {
                     next.remove(&hash);
                 } else {
@@ -290,14 +301,14 @@ impl Default for CapturedLayout {
     }
 }
 
-/// Candidate layouts are captured once. Membership shards are retained lazily
-/// as traversal visits hashes; query creation never copies resident checkpoints.
+/// Candidate layouts are captured once. Legacy membership lookups retain shards
+/// lazily; revision-fenced lookups only hold a shard during each call.
 #[derive(Debug)]
 pub struct CheckpointReadView {
     registry: Arc<OwnerRegistry>,
     layouts: FxHashMap<ResidencyOwner, Option<CapturedLayout>>,
     memberships: Arc<CheckpointMembershipIndex>,
-    shards: [OnceCell<Arc<CheckpointShardMap>>; CHECKPOINT_SHARDS],
+    shards: OnceCell<Box<CapturedCheckpointShards>>,
 }
 
 impl CheckpointReadView {
@@ -335,17 +346,61 @@ impl CheckpointReadView {
     #[inline]
     fn membership(&self, hash: ExternalSequenceBlockHash) -> Option<&CompleteMembership> {
         let index = CheckpointMembershipIndex::shard(hash.0);
+        let shards = self
+            .shards
+            .get_or_init(|| Box::new(std::array::from_fn(|_| OnceCell::new())));
         let shard =
-            self.shards[index].get_or_init(|| self.memberships.shards[index].entries.load_full());
+            shards[index].get_or_init(|| self.memberships.shards[index].entries.load_full());
         shard.get(&hash.0).map(Arc::as_ref)
     }
 
-    /// Tests only whether any owner has a tier entry. Call `owners_at` to validate
-    /// the queried owner and layout generation before granting credit.
+    /// Returns a live hint for any owner in this tier, without retaining a shard.
+    /// This is not proof of owner or generation eligibility. Before granting
+    /// credit, pass the returned revision to `for_each_owner_at_revision`.
     #[inline]
-    pub fn has_checkpoint_hint(&self, hash: ExternalSequenceBlockHash, tier: StorageTier) -> bool {
-        self.membership(hash)
-            .is_some_and(|membership| !membership.owners[tier_index(tier)].is_empty())
+    pub fn checkpoint_hint_revision(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        tier: StorageTier,
+    ) -> Option<u64> {
+        let shard = self.memberships.shards[CheckpointMembershipIndex::shard(hash.0)]
+            .entries
+            .load();
+        let membership = shard.get(&hash.0)?;
+        (membership.revision != 0 && !membership.owners[tier_index(tier)].is_empty())
+            .then_some(membership.revision)
+    }
+
+    /// Visits eligible owners only if this hash still has the observed revision.
+    /// A store, removal, or lifecycle change after the hint cannot introduce
+    /// credit. The shard guard is scoped to this call and is never cached.
+    pub fn for_each_owner_at_revision(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        tier: StorageTier,
+        revision: u64,
+        mut visit: impl FnMut(ResidencyOwner),
+    ) {
+        if revision == 0 {
+            return;
+        }
+        let shard = self.memberships.shards[CheckpointMembershipIndex::shard(hash.0)]
+            .entries
+            .load();
+        let Some(membership) = shard.get(&hash.0) else {
+            return;
+        };
+        if membership.revision != revision {
+            return;
+        }
+        for &(owner, generation) in &membership.owners[tier_index(tier)] {
+            let Some(Some(captured)) = self.layouts.get(&owner) else {
+                continue;
+            };
+            if captured.generation == generation && captured.layout.complete_layout {
+                visit(owner);
+            }
+        }
     }
 
     pub fn owners_at(
@@ -387,7 +442,7 @@ impl KvCacheGroupResidency {
             registry: self.registry.load_full(),
             layouts: FxHashMap::default(),
             memberships: self.memberships.clone(),
-            shards: std::array::from_fn(|_| OnceCell::new()),
+            shards: OnceCell::new(),
         }
     }
 
@@ -797,38 +852,147 @@ mod tests {
         })
     }
 
+    fn owners_at_revision(
+        view: &CheckpointReadView,
+        hash: ExternalSequenceBlockHash,
+        tier: StorageTier,
+        revision: u64,
+    ) -> Vec<ResidencyOwner> {
+        let mut owners = Vec::new();
+        view.for_each_owner_at_revision(hash, tier, revision, |owner| owners.push(owner));
+        owners
+    }
+
     #[test]
-    fn checkpoint_hint_does_not_make_untracked_owners_eligible() {
+    fn live_hints_fence_changed_memberships_without_caching_shards() {
+        let table = KvCacheGroupResidency::new();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let other_worker = WorkerWithDpRank::new(8, 0);
+        let owner = ResidencyOwner::worker(worker);
+        let other = ResidencyOwner::worker(other_worker);
+        let hash = ExternalSequenceBlockHash(11);
+        let sibling = ExternalSequenceBlockHash(266);
+        assert_eq!(
+            CheckpointMembershipIndex::shard(hash.0),
+            CheckpointMembershipIndex::shard(sibling.0)
+        );
+        table.declare_layout(owner, &[0], 1);
+        table.declare_layout(other, &[0], 1);
+        let mut view = table.read_view();
+        view.track_owner(owner);
+        view.track_owner(other);
+        let generation = view.layouts[&other].unwrap().generation;
+        assert_eq!(
+            view.checkpoint_hint_revision(hash, StorageTier::Device),
+            None
+        );
+
+        let mut event = checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1));
+        let KvCacheEventData::Stored(data) = &mut event.event.data else {
+            unreachable!()
+        };
+        data.blocks.push(KvCacheStoredBlockData {
+            block_hash: sibling,
+            tokens_hash: LocalBlockHash(0),
+            mm_extra_info: None,
+        });
+        table.apply(&event);
+        let revision = view
+            .checkpoint_hint_revision(hash, StorageTier::Device)
+            .unwrap();
+        assert_eq!(
+            view.checkpoint_hint_revision(sibling, StorageTier::Device),
+            Some(revision)
+        );
+        assert_eq!(
+            view.checkpoint_hint_revision(hash, StorageTier::HostPinned),
+            None
+        );
+        assert_eq!(
+            view.checkpoint_hint_revision(ExternalSequenceBlockHash(12), StorageTier::Device),
+            None
+        );
+        assert_eq!(
+            owners_at_revision(&view, hash, StorageTier::Device, revision),
+            [owner]
+        );
+        assert!(owners_at_revision(&view, hash, StorageTier::HostPinned, revision).is_empty());
+        table.apply(&event);
+        assert_eq!(
+            view.checkpoint_hint_revision(hash, StorageTier::Device),
+            Some(revision)
+        );
+
+        // A later owner cannot acquire credit using an earlier tree hint.
+        table.apply(&checkpoint(
+            other_worker,
+            StorageTier::Device,
+            0,
+            hash.0,
+            Some(1),
+        ));
+        let changed = view
+            .checkpoint_hint_revision(hash, StorageTier::Device)
+            .unwrap();
+        assert_ne!(changed, revision);
+        assert!(owners_at_revision(&view, hash, StorageTier::Device, revision).is_empty());
+        assert_eq!(
+            owners_at_revision(&view, hash, StorageTier::Device, changed),
+            [owner, other]
+        );
+        // Publishing the same shard does not invalidate unrelated hashes.
+        assert_eq!(
+            view.checkpoint_hint_revision(sibling, StorageTier::Device),
+            Some(revision)
+        );
+        let mut current = table.read_view();
+        current.track_owner(other);
+        assert_eq!(current.layouts[&other].unwrap().generation, generation);
+        assert!(view.shards.get().is_none());
+    }
+
+    #[test]
+    fn live_revision_rejects_remove_readd_aba_without_changing_layout_generation() {
         let table = KvCacheGroupResidency::new();
         let worker = WorkerWithDpRank::new(7, 0);
         let owner = ResidencyOwner::worker(worker);
         let hash = ExternalSequenceBlockHash(11);
-        assert!(
-            !table
-                .read_view()
-                .has_checkpoint_hint(hash, StorageTier::Device)
-        );
-        table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
-
-        let other = ResidencyOwner::worker(WorkerWithDpRank::new(8, 0));
-        table.declare_groups(other, &[0]);
+        let event = checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1));
+        table.apply(&event);
         let mut view = table.read_view();
-        view.track_owner(other);
-        assert!(view.has_checkpoint_hint(hash, StorageTier::Device));
-        assert!(!view.has_checkpoint_hint(hash, StorageTier::HostPinned));
-        assert!(!view.has_checkpoint_hint(ExternalSequenceBlockHash(12), StorageTier::Device));
-        assert!(view.owners_at(hash, StorageTier::Device).next().is_none());
-
         view.track_owner(owner);
+        let generation = view.layouts[&owner].unwrap().generation;
+        let before = view
+            .checkpoint_hint_revision(hash, StorageTier::Device)
+            .unwrap();
+        let mut remove = event.clone();
+        remove.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: vec![hash],
+        });
+        table.apply(&remove);
         assert_eq!(
-            view.owners_at(hash, StorageTier::Device)
-                .collect::<Vec<_>>(),
+            view.checkpoint_hint_revision(hash, StorageTier::Device),
+            None
+        );
+        assert!(owners_at_revision(&view, hash, StorageTier::Device, before).is_empty());
+        table.apply(&event);
+        let after = view
+            .checkpoint_hint_revision(hash, StorageTier::Device)
+            .unwrap();
+        assert_ne!(before, after);
+        assert!(owners_at_revision(&view, hash, StorageTier::Device, before).is_empty());
+        assert_eq!(
+            owners_at_revision(&view, hash, StorageTier::Device, after),
             [owner]
         );
+        let mut current = table.read_view();
+        current.track_owner(owner);
+        assert_eq!(current.layouts[&owner].unwrap().generation, generation);
+        assert!(view.shards.get().is_none());
     }
 
     #[test]
-    fn checkpoint_hint_does_not_bypass_layout_generation_validation() {
+    fn live_revision_still_requires_tracked_current_layout_generation() {
         let table = KvCacheGroupResidency::new();
         let worker = WorkerWithDpRank::new(7, 0);
         let owner = ResidencyOwner::worker(worker);
@@ -836,17 +1000,76 @@ mod tests {
         table.declare_layout(owner, &[0], 1);
         table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
         let mut old = table.read_view();
+        let revision = old
+            .checkpoint_hint_revision(hash, StorageTier::Device)
+            .unwrap();
+        assert!(owners_at_revision(&old, hash, StorageTier::Device, revision).is_empty());
         old.track_owner(owner);
 
         table.declare_layout(owner, &[3], 1);
         table.apply(&checkpoint(worker, StorageTier::Device, 3, hash.0, Some(1)));
-        assert!(old.has_checkpoint_hint(hash, StorageTier::Device));
-        assert!(old.owners_at(hash, StorageTier::Device).next().is_none());
+        let revision = old
+            .checkpoint_hint_revision(hash, StorageTier::Device)
+            .unwrap();
+        assert!(owners_at_revision(&old, hash, StorageTier::Device, revision).is_empty());
         let mut current = table.read_view();
         current.track_owner(owner);
         assert_eq!(
-            current
-                .owners_at(hash, StorageTier::Device)
+            owners_at_revision(&current, hash, StorageTier::Device, revision),
+            [owner]
+        );
+        assert!(old.shards.get().is_none());
+        assert!(current.shards.get().is_none());
+    }
+
+    #[test]
+    fn membership_revision_exhaustion_disables_live_credit_without_wrapping() {
+        let table = KvCacheGroupResidency::new();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let owner = ResidencyOwner::worker(worker);
+        let hash = ExternalSequenceBlockHash(11);
+        table.declare_layout(owner, &[0], 1);
+        let shard = &table.memberships.shards[CheckpointMembershipIndex::shard(hash.0)];
+        *shard.writer.lock() = u64::MAX - 1;
+        let event = checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1));
+        table.apply(&event);
+        let mut view = table.read_view();
+        view.track_owner(owner);
+        assert_eq!(
+            view.checkpoint_hint_revision(hash, StorageTier::Device),
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            owners_at_revision(&view, hash, StorageTier::Device, u64::MAX),
+            [owner]
+        );
+        table.apply(&checkpoint(
+            worker,
+            StorageTier::HostPinned,
+            0,
+            hash.0,
+            Some(1),
+        ));
+        assert_eq!(
+            view.checkpoint_hint_revision(hash, StorageTier::Device),
+            None
+        );
+        assert!(owners_at_revision(&view, hash, StorageTier::Device, u64::MAX).is_empty());
+        assert!(owners_at_revision(&view, hash, StorageTier::Device, 0).is_empty());
+        let mut remove = event.clone();
+        remove.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: vec![hash],
+        });
+        table.apply(&remove);
+        table.apply(&event);
+        assert_eq!(*shard.writer.lock(), u64::MAX);
+        assert_eq!(
+            view.checkpoint_hint_revision(hash, StorageTier::Device),
+            None
+        );
+        // Cached lower-tier lookups continue to expose the actual membership.
+        assert_eq!(
+            view.owners_at(hash, StorageTier::Device)
                 .collect::<Vec<_>>(),
             [owner]
         );
@@ -872,13 +1095,7 @@ mod tests {
 
         let mut view = table.read_view();
         view.track_owner(owner);
-        assert_eq!(
-            view.shards
-                .iter()
-                .filter(|shard| shard.get().is_some())
-                .count(),
-            0
-        );
+        assert!(view.shards.get().is_none());
         assert_eq!(view.layouts.len(), 1);
         for hash in 1..=8 {
             assert_eq!(
@@ -889,6 +1106,8 @@ mod tests {
         }
         assert_eq!(
             view.shards
+                .get()
+                .unwrap()
                 .iter()
                 .filter(|shard| shard.get().is_some())
                 .count(),
@@ -914,6 +1133,12 @@ mod tests {
             block_hashes: vec![ExternalSequenceBlockHash(1)],
         });
         table.apply(&event);
+        // Legacy lookups keep the original per-shard snapshot across writes.
+        assert_eq!(
+            view.owners_at(ExternalSequenceBlockHash(1), StorageTier::Device)
+                .collect::<Vec<_>>(),
+            [owner]
+        );
         assert_eq!(
             before
                 .iter()
