@@ -610,7 +610,7 @@ class TestJsonArrayParserReparse:  # FRONTEND.4 — JSON-array parser reparse pa
         assert choices[-1]["delta"]["content"] == text
         assert choices[-1]["finish_reason"] == "stop"
 
-    @pytest.mark.parametrize("batch_size", [1, 2, 4, 8, 1000])
+    @pytest.mark.parametrize("batch_size", [1, 2, 4, 8, 20, 32, 1000])
     @pytest.mark.parametrize("selected_first", [False, True])
     def test_named_choice_emits_dense_indices(
         self, tokenizer, batch_size, selected_first
@@ -851,23 +851,16 @@ class TestJsonArrayParserReparse:  # FRONTEND.4 — JSON-array parser reparse pa
         assert choice["delta"]["content"] == text
         assert "tool_calls" not in choice["delta"]
 
-    def test_multiple_calls_reparse(self, tokenizer):
-        """Multiple calls in one chunk; re-parse must recover all."""
+    @pytest.mark.parametrize("batch_size", [1, 8, 20, 32, 1000])
+    def test_multiple_calls_reparse(self, tokenizer, batch_size):
+        """A complete first call must not hide subsequent calls at finish."""
         text = (
             '[{"name": "search_gutenberg_books", '
             '"parameters": {"search_terms": ["Joyce"]}}, '
             '{"name": "get_weather", "parameters": {"city": "London"}}]'
         )
-        post = SglangStreamingPostProcessor(
-            tokenizer=tokenizer,
-            tool_call_parser=JsonArrayParser(),
-            reasoning_parser=None,
-            sglang_tools=TOOLS,
-        )
-        token_ids = tokenizer.encode(text)
-        choice = post.process_output({"token_ids": token_ids, "finish_reason": "stop"})
-        assert choice is not None
-        tc = choice.get("delta", {}).get("tool_calls", [])
+        choices = self._run_forced_choice(tokenizer, text, "required", batch_size)
+        tc = choices[-1]["delta"].get("tool_calls", [])
         assert len(tc) == 2
         names = {t["function"]["name"] for t in tc}
         assert names == {"search_gutenberg_books", "get_weather"}

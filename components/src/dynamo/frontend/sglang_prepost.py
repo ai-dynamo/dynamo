@@ -1873,7 +1873,8 @@ class SglangStreamingPostProcessor:
                 idx not in self._tool_call_args for idx in self._tool_call_names
             )
             should_reparse = False
-            if missing_names or missing_args:
+            # A complete early call does not prove streaming saw the whole array.
+            if self._is_json_array_parser or missing_names or missing_args:
                 # Skip the re-parse when the accumulated text has no
                 # tool-call markers.  Avoids wasted `parse_non_stream`
                 # work on plain-text responses (common when tools are
