@@ -88,34 +88,22 @@ def _parse_metrics(data: dict) -> dict:
         return {}
 
 
-def parse_aiperf_into_result(result: RunResult, run_dir: Path) -> None:
+def parse_aiperf_into_result(
+    result: RunResult, run_dir: Path, expected: Optional[int] = None
+) -> None:
     """Parse aiperf results from the run directory into the RunResult."""
     aiperf_root = run_dir / "aiperf"
     aiperf_json = aiperf_root / "profile_export_aiperf.json"
     candidate = aiperf_json
     metrics = {}
     try:
-        expected = result.run_spec.aiperf.num_requests
-        metadata_path = run_dir / "config.json"
-        metadata = {}
-        if metadata_path.exists():
-            with metadata_path.open() as stream:
-                metadata = json.load(stream)
-            # The shell records effective controls after environment and CLI overrides.
-            expected = metadata["num_requests"]
         candidates = [aiperf_json]
         if not aiperf_json.exists():
-            if metadata.get("model_names"):
-                candidates = [
-                    aiperf_root / model / aiperf_json.name
-                    for model in metadata["model_names"]
-                ]
-            else:
-                candidates = [
-                    path
-                    for path in sorted(aiperf_root.rglob(aiperf_json.name))
-                    if "phases" not in path.relative_to(aiperf_root).parts[:-1]
-                ] or candidates
+            candidates = [
+                path
+                for path in sorted(aiperf_root.rglob(aiperf_json.name))
+                if "phases" not in path.relative_to(aiperf_root).parts[:-1]
+            ] or candidates
         for candidate in candidates:
             summary = validate_artifacts(candidate.parent, expected)
             parsed = _parse_metrics(summary)

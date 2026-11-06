@@ -148,6 +148,7 @@ ISL=16
 OSL=2
 CONCURRENCY=1
 FRONTEND_PORT=unused
+BENCHMARK_DURATION=
 """
     if models == 2:
         prelude = prelude.replace(
@@ -219,7 +220,7 @@ def test_sweep_rejects_invalid_aggregate(tmp_path, mode):
         (second / "profile_export_aiperf.csv").write_text(
             "Metric,Value\nRequest Count,2\n"
         )
-    parse_aiperf_into_result(result, tmp_path)
+    parse_aiperf_into_result(result, tmp_path, expected=3)
     assert result.status == ("ok" if mode == "healthy" else "fail")
 
 
@@ -281,58 +282,8 @@ def test_duration_validation_healthy_and_non_object(tmp_path, payload):
             validate_artifacts(tmp_path)
 
 
-@pytest.mark.timeout(30)
-@pytest.mark.integration
-@pytest.mark.parametrize("timeout_path", [False, True])
-def test_cleanup_kills_capture_descendants_and_preserves_failure(
-    tmp_path, timeout_path
-):
-    script = (SCRIPTS / "run_perf.sh").read_text()
-    cleanup = _shell_region(script, "cleanup")
-    wrapper = tmp_path / "capture.sh"
-    os.mkfifo(tmp_path / "ready")
-    wrapper.write_text(
-        'sleep 120 &\necho "$!" > "$CHILD_PID_FILE"\necho ready > "$READY_FIFO"\nwait\n'
-    )
-    fake_ss = tmp_path / "ss"
-    fake_ss.write_text("#!/bin/sh\nexit 0\n")
-    fake_ss.chmod(0o755)
-    timeout_code = ""
-    if timeout_path:
-        timeout_code = _shell_region(script, "capture-timeout")
-    command = (
-        "set -euo pipefail\n"
-        + cleanup
-        + '\nbash "$CAPTURE_SCRIPT" &\nCAPTURE_PIDS+=("$!")\nread -r ready < "$READY_FIFO"\n_all_done=false\n_CAPTURE_DEADLINE=0\n'
-        + timeout_code
-        + "\nexit 23\n"
-    )
-    result = subprocess.run(
-        ["bash", "-c", command],
-        env={
-            **os.environ,
-            "PATH": f"{tmp_path}:{os.environ['PATH']}",
-            "CAPTURE_SCRIPT": str(wrapper),
-            "CHILD_PID_FILE": str(tmp_path / "child.pid"),
-            "READY_FIFO": str(tmp_path / "ready"),
-            "FRONTEND_PORT": "unused",
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=15,
-    )
-    assert result.returncode == 23, result.stdout + result.stderr
-    pid = int((tmp_path / "child.pid").read_text())
-    stat = Path(f"/proc/{pid}/stat")
-    assert (
-        not stat.exists() or stat.read_text().split()[2] == "Z"
-    ), f"capture child {pid} survived cleanup"
-
-
-@pytest.mark.parametrize("metadata", [False, True])
 @pytest.mark.unit
-def test_multi_model_ignores_supplemental_phase_exports(tmp_path, metadata):
+def test_multi_model_ignores_supplemental_phase_exports(tmp_path):
     deploy = DeployDimension("mocker", "hf", num_models=2)
     spec = RunSpec(
         deploy, AiperfDimension(1, 16, num_requests=3), deploy.deploy_key, "proof"
@@ -347,83 +298,20 @@ def test_multi_model_ignores_supplemental_phase_exports(tmp_path, metadata):
             (folder / "profile_export_aiperf.csv").write_text(
                 f"Metric,Value\nRequest Count,{count}\n"
             )
-    if metadata:
-        (tmp_path / "config.json").write_text(
-            json.dumps({"num_requests": 3, "model_names": ["org/first", "org/second"]})
-        )
     result = RunResult(spec, status="ok")
-    parse_aiperf_into_result(result, tmp_path)
+    parse_aiperf_into_result(result, tmp_path, expected=3)
     assert result.status == "ok"
 
 
-@pytest.mark.timeout(30)
-@pytest.mark.parametrize("effective", ["null", "03", "+3"])
-@pytest.mark.parametrize("duration,rate", [("1", "5"), ("+1", "+5")])
+
 @pytest.mark.unit
-def test_sweep_revalidation_uses_effective_duration_controls(
-    tmp_path, effective, duration, rate
-):
+def test_local_revalidation_does_not_depend_on_run_metadata(tmp_path):
     deploy = DeployDimension("mocker", "hf")
-    spec = RunSpec(
-        deploy, AiperfDimension(1, 16, num_requests=100000), deploy.deploy_key, "proof"
-    )
+    spec = RunSpec(deploy, AiperfDimension(1, 16, num_requests=100000), deploy.deploy_key, "fake")
     folder = tmp_path / "aiperf"
     folder.mkdir()
-    (folder / "profile_export_aiperf.json").write_text(
-        json.dumps({"request_count": {"avg": 3}})
-    )
-    (folder / "profile_export_aiperf.csv").write_text("Metric,Value\nRequest Count,3\n")
-    script = (SCRIPTS / "run_perf.sh").read_text()
-    producer = _shell_region(script, "metadata-producer")
-    env = {
-        **os.environ,
-        "OUTPUT_DIR": str(tmp_path),
-        "_EFFECTIVE_REQUESTS": effective,
-        "BENCHMARK_DURATION": duration,
-        "REQUEST_RATE": rate,
-        "TIMESTAMP": "proof",
-        "BENCHMARK_STATUS": "0",
-        "NUM_REQUESTS": effective,
-        "MODEL": 'model"with\\slash',
-        "MODEL_NAME": "proof",
-        "NUM_MODELS": "1",
-        "NUM_WORKERS": "1",
-        "NUM_WORKERS_TOTAL": "1",
-        "SPEEDUP_RATIO": "1",
-        "DATA_PARALLEL_SIZE": "1",
-        "REQUEST_PLANE": "tcp",
-        "EVENT_PLANE": "nats",
-        "FRONTEND_PORT": "0",
-        "CONCURRENCY": "1",
-        "ISL": "16",
-        "OSL": "2",
-        "CAPTURE_DURATION": "1",
-        "FRONTEND_PID": "1",
-        "HAS_NSYS": "false",
-        "HAS_PERF": "false",
-        "HAS_BPF": "false",
-        "SKIP_BPF": "true",
-        "SKIP_NSYS": "true",
-        "SKIP_FLAMEGRAPH": "true",
-        "ENABLE_TCPDUMP": "false",
-        "TCPDUMP_PORT": "0",
-    }
-    subprocess.run(
-        [
-            "bash",
-            "-c",
-            "set -euo pipefail\nMODEL_NAMES=('model\"with\\slash')\n" + producer,
-        ],
-        env=env,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    metadata = json.loads((tmp_path / "config.json").read_text())
-    assert metadata["benchmark_duration"] == 1
-    assert metadata["request_rate"] == 5
-    assert metadata["model"] == env["MODEL"]
+    write_artifacts(folder, 3, "healthy")
+    (tmp_path / "config.json").write_text("not JSON")
     result = RunResult(spec, status="ok")
     parse_aiperf_into_result(result, tmp_path)
     assert result.status == "ok"

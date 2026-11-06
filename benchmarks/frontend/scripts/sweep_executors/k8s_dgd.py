@@ -234,7 +234,7 @@ class K8sDgdExecutor:
         )
 
         # Parse aiperf results
-        parse_aiperf_into_result(result, run_dir)
+        parse_aiperf_into_result(result, run_dir, expected=aiperf.num_requests)
 
         return result
 
