@@ -13,13 +13,16 @@ def write_artifacts(directory: Path, count: int, mode: str) -> None:
     if mode == "missing":
         return
     summary = {"request_count": {"avg": count - 1 if mode == "count" else count}}
+    if mode == "mixed-errors":
+        summary["request_count"]["avg"] = count - 1
+        summary["error_request_count"] = {"avg": 1}
     if mode == "metric-null":
         summary["request_throughput"] = None
     content = "{" if mode == "invalid" else json.dumps(summary)
     (directory / "profile_export_aiperf.json").write_text(content)
     if mode == "csv-missing":
         return
-    csv_count = "" if mode == "csv-empty-count" else str(count)
+    csv_count = "" if mode == "csv-empty-count" else str(summary["request_count"]["avg"])
     csv_content = {
         "csv-invalid": 'Metric,avg\n"unterminated',
         "csv-truncated": "Metric,avg,p99\nLatency\n",

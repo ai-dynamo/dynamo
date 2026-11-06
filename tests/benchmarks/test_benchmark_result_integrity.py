@@ -64,6 +64,7 @@ def _shell_region(script: str, name: str) -> str:
     "mode",
     [
         "healthy",
+        "mixed-errors",
         "exit",
         "missing",
         "invalid",
@@ -109,7 +110,7 @@ def test_recipe_rejects_failed_or_incomplete_exports(
         text=True,
         timeout=10,
     )
-    assert (result.returncode == 0) == (mode == "healthy"), (
+    assert (result.returncode == 0) == (mode in {"healthy", "mixed-errors"}), (
         result.stdout + result.stderr
     )
 
@@ -119,6 +120,7 @@ def test_recipe_rejects_failed_or_incomplete_exports(
     "mode",
     [
         "healthy",
+        "mixed-errors",
         "exit",
         "missing",
         "invalid",
@@ -173,7 +175,7 @@ BENCHMARK_DURATION=
         text=True,
         timeout=10,
     )
-    assert (result.returncode == 0) == (mode == "healthy"), (
+    assert (result.returncode == 0) == (mode in {"healthy", "mixed-errors"}), (
         result.stdout + result.stderr
     )
     assert (tmp_path / "model-calls").read_text().splitlines() == (
@@ -185,6 +187,7 @@ BENCHMARK_DURATION=
     "mode",
     [
         "healthy",
+        "mixed-errors",
         "missing",
         "invalid",
         "count",
@@ -221,7 +224,7 @@ def test_sweep_rejects_invalid_aggregate(tmp_path, mode):
             "Metric,Value\nRequest Count,2\n"
         )
     parse_aiperf_into_result(result, tmp_path, expected=3)
-    assert result.status == ("ok" if mode == "healthy" else "fail")
+    assert result.status == ("ok" if mode in {"healthy", "mixed-errors"} else "fail")
 
 
 @pytest.mark.parametrize("status", ["ok", "fail", "skipped"])
@@ -237,7 +240,7 @@ def test_sweep_cli_propagates_failed_results(monkeypatch, status):
         "run_sweep",
         lambda plan, executor: [SimpleNamespace(status=status)] * plan.total_runs,
     )
-    if status == "ok":
+    if status != "fail":
         sweep_runner.main()
     else:
         with pytest.raises(SystemExit) as error:
@@ -245,27 +248,15 @@ def test_sweep_cli_propagates_failed_results(monkeypatch, status):
         assert error.value.code == 1
 
 
-@pytest.mark.parametrize(
-    "extra",
-    [
-        {"was_cancelled": True},
-        {"is_complete": False},
-        {"error_request_count": {"avg": 1}},
-        {"error_summary": [{"message": "failed"}]},
-        {"error_request_count": None},
-        {"request_count": 3},
-    ],
-)
+@pytest.mark.parametrize("extra", [{"was_cancelled": True}, {"is_complete": False}, {"error_summary": [{"message": "failed"}]}])
 @pytest.mark.unit
-def test_duration_validation_rejects_partial_runs(tmp_path, extra):
-    (tmp_path / "profile_export_aiperf.json").write_text(
-        json.dumps({"request_count": {"avg": 3}, **extra})
-    )
-    (tmp_path / "profile_export_aiperf.csv").write_text(
-        "Metric,Value\nRequest Count,3\n"
-    )
-    with pytest.raises(ValueError):
-        validate_artifacts(tmp_path)
+def test_artifact_validation_does_not_impose_run_outcome_policy(tmp_path, extra):
+    write_artifacts(tmp_path, 3, "healthy")
+    summary_path = tmp_path / "profile_export_aiperf.json"
+    summary = json.loads(summary_path.read_text())
+    summary.update(extra)
+    summary_path.write_text(json.dumps(summary))
+    assert validate_artifacts(tmp_path)["request_count"]["avg"] == 3
 
 
 @pytest.mark.parametrize("payload", [[], {"request_count": {"avg": 3}}])

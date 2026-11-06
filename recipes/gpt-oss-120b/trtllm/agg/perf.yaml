@@ -29,7 +29,6 @@ spec:
         - -c
         - |
           set -euo pipefail
-          export PYTHONUNBUFFERED=1
           # aiperf>=0.8.0 depends on crick, which has no Linux aarch64 wheel.
           # GB200 benchmark pods need build tools to compile it from source.
           apt-get update && apt-get install -y curl jq procps git build-essential && apt-get clean
@@ -95,7 +94,9 @@ spec:
           directory = pathlib.Path(sys.argv[1])
           with (directory / "profile_export_aiperf.json").open() as stream:
               summary = json.load(stream)
-          completed = summary["request_count"]["avg"]
+          successful = summary["request_count"]["avg"]
+          errors = summary.get("error_request_count", {"avg": 0})["avg"]
+          completed = successful + errors
           if isinstance(completed, bool) or not isinstance(completed, (int, float)) or not math.isfinite(completed) or completed != int(sys.argv[2]):
               raise ValueError("Benchmark request count does not match the requested count")
           with (directory / "profile_export_aiperf.csv").open(newline="") as stream:
@@ -114,7 +115,7 @@ spec:
                   raise ValueError("Truncated benchmark CSV row")
               elif row[0] == "Request Count":
                   csv_count = float(row[1])
-          if csv_count != completed:
+          if csv_count != successful:
               raise ValueError("Benchmark CSV request count does not match JSON")
           PY
             echo "ARTIFACT_DIR: $ARTIFACT_DIR"

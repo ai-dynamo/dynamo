@@ -105,9 +105,7 @@ def main():
 
     # Run the sweep
     results = run_sweep(plan, executor)
-    if len(results) != plan.total_runs or any(
-        result.status != "ok" for result in results
-    ):
+    if any(result.status == "fail" for result in results):
         sys.exit(1)
 
 

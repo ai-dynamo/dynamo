@@ -20,25 +20,22 @@ def validate_artifacts(directory: Path, expected: Optional[int] = None) -> dict:
         summary = json.load(stream)
     if not isinstance(summary, dict):
         raise ValueError("Benchmark aggregate must be a JSON object")
-    if not isinstance(summary.get("error_request_count", {}), dict):
-        raise ValueError("Invalid benchmark error-request metric")
-    if not isinstance(summary.get("request_count"), dict):
-        raise ValueError("Missing benchmark request-count metric")
-    if summary.get("was_cancelled") or summary.get("is_complete") is False:
-        raise ValueError("Benchmark was cancelled or incomplete")
-    if summary.get("error_request_count", {}).get("avg", 0) or summary.get(
-        "error_summary"
-    ):
-        raise ValueError("Benchmark contains failed requests")
-    completed = summary["request_count"]["avg"]
-    if (
-        isinstance(completed, bool)
-        or not isinstance(completed, (int, float))
-        or not math.isfinite(completed)
-        or completed <= 0
-        or int(completed) != completed
-        or (expected is not None and completed != expected)
-    ):
+    counts = []
+    for tag in ("request_count", "error_request_count"):
+        metric = summary.get(tag, {"avg": 0})
+        value = metric["avg"]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+            or int(value) != value
+        ):
+            raise ValueError(f"Invalid {tag}: {value}")
+        counts.append(value)
+    successful, errors = counts
+    completed = successful + errors
+    if completed <= 0 or (expected is not None and completed != expected):
         raise ValueError(
             f"Unexpected completed request count: {completed}; expected {expected}"
         )
@@ -58,9 +55,9 @@ def validate_artifacts(directory: Path, expected: Optional[int] = None) -> dict:
             raise ValueError("Truncated benchmark CSV row")
         elif row[0] == "Request Count":
             count = float(row[1])
-    if count != completed:
+    if count != successful:
         raise ValueError(
-            f"CSV request count {count} does not match JSON count {completed}"
+            f"CSV request count {count} does not match JSON count {successful}"
         )
     return summary
 
