@@ -25,6 +25,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import asdict, replace
+from itertools import count
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
@@ -1601,6 +1602,11 @@ def test_fpm_publisher_drops_benchmark_metrics_until_resumed():
     )
     publisher._running = True
     publisher._publishing = threading.Event()
+    publisher._heartbeat_lock = threading.Lock()
+    publisher._heartbeat_state = (
+        instrumented_scheduler_module.QueuedRequestMetrics(),
+        False,
+    )
     publisher._queue = instrumented_scheduler_module.queue.Queue()
     metrics = instrumented_scheduler_module.ForwardPassMetrics()
 
@@ -1644,7 +1650,7 @@ def test_fpm_heartbeat_reports_latest_queued_snapshot(monkeypatch):
         sub.setsockopt(zmq.SUBSCRIBE, b"")
         sub.connect(publisher.endpoint)
         publisher.resume()
-        publisher.set_queued(queued)
+        publisher.set_heartbeat_state(queued, True)
 
         busy, seen = _recv_fpm_until(sub, lambda f: f.queued_requests == queued)
         for frame in seen:
@@ -1656,7 +1662,9 @@ def test_fpm_heartbeat_reports_latest_queued_snapshot(monkeypatch):
         assert busy.worker_id == "w"
         assert not busy.is_idle()
 
-        publisher.set_queued(instrumented_scheduler_module.QueuedRequestMetrics())
+        publisher.set_heartbeat_state(
+            instrumented_scheduler_module.QueuedRequestMetrics(), False
+        )
         idle, _ = _recv_fpm_until(sub, lambda f: f.is_idle())
         assert idle.wall_time == 0.0
     finally:
@@ -1665,73 +1673,66 @@ def test_fpm_heartbeat_reports_latest_queued_snapshot(monkeypatch):
             sub.close(linger=0)
 
 
-def _heartbeat_snapshot_stub(waiting):
+@pytest.fixture
+def heartbeat_scheduler(monkeypatch):
+    """Drive real scheduler instrumentation and publisher frames with a fake clock."""
+    clock = {"now": 10.0}
+    monkeypatch.setattr(
+        instrumented_scheduler_module.time, "monotonic", lambda: clock["now"]
+    )
+    publisher_cls = instrumented_scheduler_module._FpmPublisherThread
+    publisher = publisher_cls.__new__(publisher_cls)
+    publisher._running = True
+    publisher._publishing = threading.Event()
+    publisher._heartbeat_lock = threading.Lock()
+    publisher._heartbeat_state = (
+        instrumented_scheduler_module.QueuedRequestMetrics(),
+        False,
+    )
+    publisher._queue = instrumented_scheduler_module.queue.Queue()
+    publisher._seq = count()
+    publisher._worker_id = "w"
+    publisher._dp_rank = 0
+    publisher._pub = MagicMock()
+    publisher.resume()
+
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub.waiting = waiting
-    stub.skipped_waiting = []
+    stub.waiting = deque()
+    stub.skipped_waiting = deque()
+    stub.running = []
     stub._bench_active = False
     stub._bench_phase = _BenchPhase.IDLE
     stub._schedule_times = deque()
     stub._last_update_time = 0.0
+    stub._inflight_outputs = {}
+    stub._heartbeat_queued = instrumented_scheduler_module.QueuedRequestMetrics()
+    stub._heartbeat_snapshot_time = float("-inf")
     stub._cleanup_finished = MagicMock()
-    stub._publisher = MagicMock()
-    return stub
-
-
-def test_schedule_hands_waiting_queue_to_heartbeats(monkeypatch):
-    """The queue seen at dispatch is what heartbeats report during the pass."""
-    stub = _heartbeat_snapshot_stub(
-        deque([_make_request(RequestStatus.WAITING, num_tokens=30000)])
+    stub._publisher = publisher
+    stub._extract_scheduled = (
+        lambda output: instrumented_scheduler_module.ScheduledRequestMetrics(
+            num_prefill_requests=int(output.total_num_scheduled_tokens > 0),
+            sum_prefill_tokens=output.total_num_scheduled_tokens,
+        )
     )
-    output = SimpleNamespace(total_num_scheduled_tokens=30000)
-    monkeypatch.setattr(
-        instrumented_scheduler_module.AsyncScheduler,
-        "schedule",
-        lambda _self, *_args: output,
-    )
+    stub._compute_queued = MagicMock(wraps=stub._compute_queued)
+    stub._fpm_worker_id = "w"
+    stub._fpm_dp_rank = 0
 
-    assert stub.schedule() is output
-
-    queued = stub._publisher.set_queued.call_args.args[0]
-    assert queued.num_prefill_requests == 1
-    assert queued.sum_prefill_tokens == 30000
-
-
-def test_finish_requests_clears_heartbeat_queue_snapshot(monkeypatch):
-    """An abort that empties the queue must not leave a stale heartbeat."""
-    stub = _heartbeat_snapshot_stub(
-        deque([_make_request(RequestStatus.WAITING, num_tokens=30000)])
-    )
+    def parent_schedule(self, *_args):
+        if self.waiting:
+            self.running.append(self.waiting.popleft())
+        return SimpleNamespace(total_num_scheduled_tokens=30000)
 
     def parent_finish(self, _request_ids, _finished_status):
-        aborted = list(self.waiting)
+        aborted = list(self.waiting) + self.running
         self.waiting.clear()
+        self.skipped_waiting.clear()
+        self.running.clear()
         return aborted
 
     monkeypatch.setattr(
-        instrumented_scheduler_module.AsyncScheduler,
-        "finish_requests",
-        parent_finish,
-    )
-
-    aborted = stub.finish_requests(["r0"], RequestStatus.FINISHED_ABORTED)
-
-    assert len(aborted) == 1
-    stub._publisher.set_queued.assert_called_once_with(
-        instrumented_scheduler_module.QueuedRequestMetrics()
-    )
-
-
-def test_benchmark_requests_never_reach_heartbeat_queue_snapshot(monkeypatch):
-    """Self-benchmark requests stay out of live heartbeats, before and after."""
-    stub = _heartbeat_snapshot_stub(
-        deque([_make_request(RequestStatus.WAITING, num_tokens=4096)])
-    )
-    stub._bench_active = True
-    monkeypatch.setattr(
-        instrumented_scheduler_module.AsyncScheduler,
-        "schedule",
-        lambda _self, *_args: SimpleNamespace(total_num_scheduled_tokens=0),
+        instrumented_scheduler_module.AsyncScheduler, "schedule", parent_schedule
     )
     monkeypatch.setattr(
         instrumented_scheduler_module.AsyncScheduler,
@@ -1739,28 +1740,224 @@ def test_benchmark_requests_never_reach_heartbeat_queue_snapshot(monkeypatch):
         lambda *_: None,
     )
     monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler, "finish_requests", parent_finish
+    )
+    monkeypatch.setattr(
         instrumented_scheduler_module.AsyncScheduler,
-        "finish_requests",
-        lambda *_: [],
+        "add_request",
+        lambda self, request: self.waiting.append(request),
     )
 
+    def heartbeat():
+        """Run the publisher through one timeout and decode every emitted frame."""
+        messages = []
+        while not publisher._queue.empty():
+            messages.append(publisher._queue.get_nowait())
+        steps = iter(messages + [instrumented_scheduler_module.queue.Empty, None])
+
+        def next_message(timeout):
+            item = next(steps)
+            if item is instrumented_scheduler_module.queue.Empty:
+                clock["now"] += publisher.HEARTBEAT_INTERVAL
+                raise instrumented_scheduler_module.queue.Empty
+            return item
+
+        sent_before = len(publisher._pub.send_multipart.call_args_list)
+        with monkeypatch.context() as patch:
+            patch.setattr(publisher._queue, "get", next_message)
+            publisher._run()
+        frames = [
+            decode(args.args[0][2])
+            for args in publisher._pub.send_multipart.call_args_list[sent_before:]
+        ]
+        assert all(frame is not None for frame in frames)
+        return frames
+
+    return stub, clock, heartbeat
+
+
+def test_long_pass_without_waiting_never_emits_idle(heartbeat_scheduler):
+    """One scheduled request must not produce false idle before its output."""
+    stub, _, heartbeat = heartbeat_scheduler
+    stub.add_request(_make_request(RequestStatus.WAITING, num_tokens=30000))
+    output = stub.schedule()
+    assert not stub.waiting
+    assert heartbeat() == []
+    assert heartbeat() == []
+
+    stub.running.clear()
+    stub.update_from_output(output, object())
+    frames = heartbeat()
+    assert frames[0].wall_time > 0
+    assert frames[-1].is_idle()
+
+
+def test_long_pass_reports_waiting_requests(heartbeat_scheduler):
+    """The first long pass reports queued work without a second per-step scan."""
+    stub, _, heartbeat = heartbeat_scheduler
+    for _ in range(2):
+        stub.add_request(_make_request(RequestStatus.WAITING, num_tokens=30000))
+    assert stub._compute_queued.call_count == 0
     stub.schedule()
-    stub.update_from_output(SimpleNamespace(total_num_scheduled_tokens=0), object())
+    frames = heartbeat()
+    assert len(frames) == 1
+    assert not frames[0].is_idle()
+    assert frames[0].wall_time == 0
+    assert (
+        frames[0].scheduled_requests
+        == instrumented_scheduler_module.ScheduledRequestMetrics()
+    )
+    assert frames[0].queued_requests.num_prefill_requests == 1
+    assert frames[0].queued_requests.sum_prefill_tokens == 30000
+
+
+@pytest.mark.parametrize("out_of_order", [False, True])
+def test_async_batches_remain_busy_until_matching_outputs(
+    heartbeat_scheduler, out_of_order
+):
+    """Completing one batch, or a duplicate output, cannot drain another batch."""
+    stub, _, heartbeat = heartbeat_scheduler
+    stub.add_request(_make_request(RequestStatus.WAITING, num_tokens=30000))
+    first, second = stub.schedule(), stub.schedule()
+    if out_of_order:
+        first, second = second, first
+    stub.running.clear()
+    stub.update_from_output(first, object())
+    assert all(not frame.is_idle() for frame in heartbeat())
+    stub.update_from_output(first, object())
+    assert all(not frame.is_idle() for frame in heartbeat())
+    stub.update_from_output(second, object())
+    assert heartbeat()[-1].is_idle()
+
+
+def test_abort_does_not_forget_inflight_batch(heartbeat_scheduler):
+    """Removing all requests cannot report idle until the batch returns."""
+    stub, _, heartbeat = heartbeat_scheduler
+    stub.add_request(_make_request(RequestStatus.WAITING, num_tokens=30000))
+    output = stub.schedule()
+    stub.finish_requests(["r0"], RequestStatus.FINISHED_ABORTED)
+    assert not stub.waiting and not stub.running
+    assert heartbeat() == []
+    stub.update_from_output(output, object())
+    assert heartbeat()[-1].is_idle()
+
+
+def test_failed_output_processing_keeps_heartbeat_busy(
+    heartbeat_scheduler, monkeypatch
+):
+    """A failed output update leaves completion uncertain after an abort."""
+    stub, _, heartbeat = heartbeat_scheduler
+    stub.add_request(_make_request(RequestStatus.WAITING, num_tokens=30000))
+    output = stub.schedule()
     stub.finish_requests(["r0"], RequestStatus.FINISHED_ABORTED)
 
-    stub._publisher.set_queued.assert_not_called()
+    def fail_update(*_):
+        raise RuntimeError("output processing failed")
 
-    publisher = instrumented_scheduler_module._FpmPublisherThread.__new__(
-        instrumented_scheduler_module._FpmPublisherThread
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler, "update_from_output", fail_update
     )
-    publisher._publishing = threading.Event()
-    publisher.set_queued(
-        instrumented_scheduler_module.QueuedRequestMetrics(num_prefill_requests=4)
+    with pytest.raises(RuntimeError, match="output processing failed"):
+        stub.update_from_output(output, object())
+    assert heartbeat() == []
+
+
+def test_waiting_abort_restores_idle_without_a_scheduled_batch(heartbeat_scheduler):
+    """A request aborted before dispatch leaves a genuinely drained scheduler."""
+    stub, _, heartbeat = heartbeat_scheduler
+    stub.add_request(_make_request(RequestStatus.WAITING, num_tokens=30000))
+    # No snapshot is required on arrival: an empty heartbeat is suppressed.
+    assert heartbeat() == []
+    stub.finish_requests(["r0"], RequestStatus.FINISHED_ABORTED)
+    assert heartbeat()[-1].is_idle()
+
+
+@pytest.mark.parametrize(
+    "queue_name", ["skipped_waiting", "kv_holding_waiting", "async_kv_waiting"]
+)
+def test_secondary_waiting_queue_prevents_idle(heartbeat_scheduler, queue_name):
+    """Supported vLLM secondary waiting queues contribute to heartbeats."""
+    stub, _, heartbeat = heartbeat_scheduler
+    setattr(
+        stub,
+        queue_name,
+        deque([_make_request(RequestStatus.WAITING, num_tokens=30000)]),
     )
+    stub.schedule()
+    frames = heartbeat()
+    assert frames and all(not frame.is_idle() for frame in frames)
+    assert frames[-1].queued_requests.num_prefill_requests == 1
 
-    publisher.resume()
 
-    assert publisher._queued == instrumented_scheduler_module.QueuedRequestMetrics()
+def test_new_long_pass_refreshes_recent_empty_snapshot(heartbeat_scheduler):
+    """Waiting load is reported even just after a completed empty snapshot."""
+    stub, clock, heartbeat = heartbeat_scheduler
+    stub.add_request(_make_request(RequestStatus.WAITING, num_tokens=30000))
+    previous = stub.schedule()
+    stub.running.clear()
+    stub.update_from_output(previous, object())
+    clock["now"] += 0.1 * stub._publisher.HEARTBEAT_INTERVAL
+    for _ in range(2):
+        stub.add_request(_make_request(RequestStatus.WAITING, num_tokens=30000))
+    stub.schedule()
+    frames = heartbeat()
+    assert frames[-1].queued_requests.num_prefill_requests == 1
+    assert frames[-1].queued_requests.sum_prefill_tokens == 30000
+    assert not frames[-1].is_idle()
+
+
+def test_heartbeat_extra_scans_are_bounded_and_reuse_output_snapshot(
+    heartbeat_scheduler,
+):
+    """Ordinary scheduling does not scan waiting requests a second time per step."""
+    stub, clock, heartbeat = heartbeat_scheduler
+    stub.waiting.extend(
+        _make_request(RequestStatus.WAITING, num_tokens=30000) for _ in range(30)
+    )
+    outputs = [stub.schedule() for _ in range(10)]
+    assert stub._compute_queued.call_count == 1
+    # Even a reused snapshot cannot send false zero while requests remain.
+    assert all(not frame.is_idle() for frame in heartbeat())
+    stub.schedule()
+    assert stub._compute_queued.call_count == 2
+    stub.update_from_output(outputs[0], object())
+    assert stub._compute_queued.call_count == 3
+    clock["now"] += 0.5 * stub._publisher.HEARTBEAT_INTERVAL
+    stub.schedule()
+    assert stub._compute_queued.call_count == 3
+
+
+def test_benchmark_requests_never_reach_live_heartbeats(
+    heartbeat_scheduler, monkeypatch
+):
+    """Synthetic batches neither publish frames nor poison resumed activity."""
+    stub, _, heartbeat = heartbeat_scheduler
+    stub._bench_active = True
+    stub._bench_active_warmup = None
+    stub._bench_eager_warmup = None
+    stub._bench_synchronize_output = lambda _: None
+    stub._bench_should_record_scheduled = lambda _: False
+    stub._publish_or_record_metrics = MagicMock()
+    stub.waiting.append(_make_request(RequestStatus.WAITING, num_tokens=4096))
+    stub._publisher._publishing.clear()
+    output = stub.schedule()
+    stub.update_from_output(output, object())
+    stub.finish_requests(["r0"], RequestStatus.FINISHED_ABORTED)
+    assert stub._publisher._queue.empty()
+    assert not stub._inflight_outputs
+
+    # Exercise the real paused loop without burning a wall-clock interval.
+    def remain_paused(timeout):
+        stub._publisher._running = False
+        return False
+
+    with monkeypatch.context() as patch:
+        patch.setattr(stub._publisher._publishing, "wait", remain_paused)
+        assert heartbeat() == []
+    stub._publisher._running = True
+    stub._bench_active = False
+    stub._publisher.resume()
+    assert heartbeat()[-1].is_idle()
 
 
 def test_benchmark_fpm_uses_benchmark_id_and_is_not_published():

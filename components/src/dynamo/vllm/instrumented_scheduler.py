@@ -69,13 +69,18 @@ How metrics are measured
 
 Heartbeats are sent when no frame has gone out for ``HEARTBEAT_INTERVAL``,
 including while a long forward pass is running.  They have ``wall_time=0``
-and empty ``scheduled_requests``, and carry the latest waiting-queue snapshot
-the scheduler took in ``schedule()``, ``update_from_output()`` or
-``finish_requests()``.  A heartbeat is all zeros only when nothing is waiting.
+and empty ``scheduled_requests``, and carry the latest waiting-queue snapshot.
+Extra snapshots run on the scheduler thread at most once per heartbeat
+interval, plus when an empty snapshot first gains waiting work. Completed
+passes reuse their existing scan. Empty heartbeats are
+suppressed while scheduler-visible requests or scheduled batches remain.
+This does not establish EngineCore idleness or invalidate an idle frame
+already cached by Planner.
 
 Serialization and ZMQ send are handled by a background thread
 (same approach as vLLM's ZmqEventPublisher) so the scheduler
-hot path only pays for accumulation + queue.put().
+hot path pays for accumulation, bounded snapshots, a constant-time activity
+handoff, and queue.put().
 
 Inject via:
     --scheduler-cls "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
@@ -2119,8 +2124,8 @@ class _FpmPublisherThread:
     """Background thread that serializes and sends ForwardPassMetrics over ZMQ.
 
     Also emits a heartbeat when nothing has been sent for HEARTBEAT_INTERVAL.
-    The heartbeat carries the latest queued snapshot from set_queued(), so a
-    worker busy with a long forward pass does not look idle.
+    Heartbeats carry the latest queue snapshot. Empty heartbeats are suppressed
+    while the scheduler reports activity or uncertain completion.
     """
 
     SHUTDOWN_TIMEOUT: float = 1.0
@@ -2144,9 +2149,8 @@ class _FpmPublisherThread:
         self._publishing = threading.Event()
         if not start_paused:
             self._publishing.set()
-        # Written by the engine thread, read by this thread. Swapping one
-        # reference to a frozen struct is atomic under the GIL, so no lock.
-        self._queued = QueuedRequestMetrics()
+        self._heartbeat_lock = threading.Lock()
+        self._heartbeat_state = (QueuedRequestMetrics(), False)
 
         self._ctx = zmq.Context.instance()
         self._pub = self._ctx.socket(zmq.PUB)
@@ -2168,14 +2172,19 @@ class _FpmPublisherThread:
         except queue.Full:
             pass
 
-    def set_queued(self, queued: QueuedRequestMetrics) -> None:
-        """Set the waiting-queue snapshot that heartbeats report."""
-        self._queued = queued
+    def set_activity(self, active: bool) -> None:
+        """Hand off scheduler activity without scanning its mutable queues."""
+        with self._heartbeat_lock:
+            self._heartbeat_state = (self._heartbeat_state[0], active)
+
+    def set_heartbeat_state(self, queued: QueuedRequestMetrics, active: bool) -> None:
+        """Replace the immutable queue snapshot and activity state together."""
+        with self._heartbeat_lock:
+            self._heartbeat_state = (queued, active)
 
     def resume(self) -> None:
         """Enable live publishing after startup self-benchmarking finishes."""
-        # Never carry a snapshot from before the pause into live heartbeats.
-        self._queued = QueuedRequestMetrics()
+        self.set_heartbeat_state(QueuedRequestMetrics(), False)
         self._publishing.set()
 
     def shutdown(self) -> None:
@@ -2192,8 +2201,7 @@ class _FpmPublisherThread:
             pass
 
     def _run(self) -> None:
-        """Send completed passes and periodic heartbeats with the latest queue."""
-        topic = b""
+        """Send completed passes and heartbeats that do not report false idle."""
         last_publish = time.monotonic()
 
         while self._running or not self._queue.empty():
@@ -2204,28 +2212,40 @@ class _FpmPublisherThread:
                 if metrics is None:
                     break
             except queue.Empty:
-                if time.monotonic() - last_publish >= self.HEARTBEAT_INTERVAL:
-                    # wall_time=0 and no scheduled work mark this as a
-                    # heartbeat, not a finished pass; the queue is still real.
+                if time.monotonic() - last_publish < self.HEARTBEAT_INTERVAL:
+                    continue
+                # Keep the activity handoff and heartbeat send ordered. The
+                # socket is nonblocking; mutable queues stay on the scheduler.
+                with self._heartbeat_lock:
+                    queued, active = self._heartbeat_state
                     metrics = ForwardPassMetrics(
                         worker_id=self._worker_id,
                         dp_rank=self._dp_rank,
-                        queued_requests=self._queued,
+                        queued_requests=queued,
                     )
-                else:
-                    continue
+                    if active and metrics.is_idle():
+                        continue
+                    if self._send(metrics):
+                        last_publish = time.monotonic()
+                continue
 
-            try:
-                seq = next(self._seq)
-                metrics = msgspec.structs.replace(metrics, counter_id=seq)
-                payload = encode(metrics)
-                seq_bytes = seq.to_bytes(8, "big")
-                self._pub.send_multipart((topic, seq_bytes, payload), flags=zmq.NOBLOCK)
+            if self._send(metrics):
                 last_publish = time.monotonic()
-            except zmq.Again:
-                pass
-            except Exception:
-                logger.warning("FPM publisher send failed", exc_info=True)
+
+    def _send(self, metrics: ForwardPassMetrics) -> bool:
+        """Serialize and send one frame, returning whether it reached ZMQ."""
+        try:
+            seq = next(self._seq)
+            metrics = msgspec.structs.replace(metrics, counter_id=seq)
+            payload = encode(metrics)
+            seq_bytes = seq.to_bytes(8, "big")
+            self._pub.send_multipart((b"", seq_bytes, payload), flags=zmq.NOBLOCK)
+            return True
+        except zmq.Again:
+            return False
+        except Exception:
+            logger.warning("FPM publisher send failed", exc_info=True)
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -2264,6 +2284,9 @@ class InstrumentedScheduler(AsyncScheduler):
         self._fpm_worker_id = os.environ.get(ENV_FPM_WORKER_ID, "")
         self._fpm_dp_rank = dp_rank
 
+        self._inflight_outputs: dict[int, SchedulerOutput] = {}
+        self._heartbeat_queued = QueuedRequestMetrics()
+        self._heartbeat_snapshot_time = float("-inf")
         self._schedule_times: deque[float] = deque()
         self._last_update_time: float = 0.0
         self._prompt_len_per_req: dict[str, int] = {}
@@ -2398,7 +2421,8 @@ class InstrumentedScheduler(AsyncScheduler):
     def _schedule_and_record_time(
         self, throttle_prefills: bool = False
     ) -> SchedulerOutput:
-        """Dispatch a step, record its start, and refresh the heartbeat queue."""
+        """Dispatch a step and track it until its matching output is processed."""
+        self._mark_heartbeat_busy()
         # vLLM added `throttle_prefills` to Scheduler.schedule() after some of
         # the runtime images were built; pass it only when the base accepts it
         # so one overlay works across both.
@@ -2419,33 +2443,69 @@ class InstrumentedScheduler(AsyncScheduler):
                     self._bench_abort(error)
                     raise
             self._schedule_times.append(time.monotonic())
-        # A request still waiting here may sit behind a pass longer than the
-        # heartbeat interval; heartbeats must report it.
-        self._refresh_heartbeat_queued()
+        if not self._bench_active and output.total_num_scheduled_tokens > 0:
+            # Retain the output so a missing completion cannot reuse its id.
+            self._inflight_outputs[id(output)] = output
+        self._refresh_heartbeat_state()
         return output
+
+    def add_request(self, request: Request) -> None:
+        """Mark arrivals busy before vLLM changes its scheduling queues."""
+        self._mark_heartbeat_busy()
+        super().add_request(request)
+        self._refresh_heartbeat_state(allow_snapshot=False)
 
     def finish_requests(
         self,
         request_ids: str | Iterable[str] | None,
         finished_status: RequestStatus,
     ) -> list[Request]:
-        """Finish requests and refresh heartbeats even if no later step runs."""
+        """Finish requests without forgetting batches still awaiting output."""
+        self._mark_heartbeat_busy()
         aborted = super().finish_requests(request_ids, finished_status)
-        # An abort can empty the queue and leave the engine idle with no
-        # later schedule() call to clear the heartbeat snapshot.
-        self._refresh_heartbeat_queued()
+        self._refresh_heartbeat_state()
         return aborted
 
-    def _refresh_heartbeat_queued(
-        self, queued: QueuedRequestMetrics | None = None
+    def _mark_heartbeat_busy(self) -> None:
+        """Suppress idle heartbeats while a scheduler mutation is in progress."""
+        if not self._bench_active:
+            self._publisher.set_activity(True)
+
+    def _refresh_heartbeat_state(
+        self, queued: QueuedRequestMetrics | None = None, *, allow_snapshot: bool = True
     ) -> None:
-        """Give the publisher the live waiting queue for its heartbeats."""
-        # Synthetic benchmark requests must never reach live heartbeats.
+        """Reuse completed-pass snapshots and bound additional queue scans."""
         if self._bench_active:
             return
-        if queued is None:
+        if hasattr(self, "kv_holding_waiting"):
+            other_waiting = self.kv_holding_waiting
+        else:
+            other_waiting = self.skipped_waiting
+        waiting = bool(self.waiting) or bool(other_waiting)
+        # Newer vLLM versions park asynchronous KV loads in a third queue.
+        if hasattr(self, "async_kv_waiting"):
+            waiting = waiting or bool(self.async_kv_waiting)
+        now = time.monotonic()
+        if queued is not None:
+            self._heartbeat_snapshot_time = now
+        elif not waiting:
+            queued = QueuedRequestMetrics()
+        elif allow_snapshot and (
+            now - self._heartbeat_snapshot_time >= self._publisher.HEARTBEAT_INTERVAL
+            or (
+                self._heartbeat_queued.num_prefill_requests == 0
+                and self._heartbeat_queued.num_decode_requests == 0
+            )
+        ):
+            # The first waiting work needs a nonempty snapshot before a long
+            # pass. Further steps reuse it until the interval or queue drain.
             queued = self._compute_queued()
-        self._publisher.set_queued(queued)
+            self._heartbeat_snapshot_time = now
+        else:
+            queued = self._heartbeat_queued
+        self._heartbeat_queued = queued
+        active = waiting or bool(self.running) or bool(self._inflight_outputs)
+        self._publisher.set_heartbeat_state(queued, active)
 
     def shutdown(self) -> None:
         if self._bench_active and self._bench_active_req_ids:
@@ -2487,7 +2547,10 @@ class InstrumentedScheduler(AsyncScheduler):
         model_output_arrival = (
             time.monotonic() if scheduler_output.total_num_scheduled_tokens > 0 else 0.0
         )
+        self._mark_heartbeat_busy()
         result = super().update_from_output(scheduler_output, model_runner_output)
+        if not self._bench_active:
+            self._inflight_outputs.pop(id(scheduler_output), None)
 
         if scheduler_output.total_num_scheduled_tokens > 0:
             t_sched = self._schedule_times.popleft() if self._schedule_times else 0.0
@@ -2527,7 +2590,7 @@ class InstrumentedScheduler(AsyncScheduler):
             self._last_update_time = model_output_arrival
 
             queued = self._compute_queued()
-            self._refresh_heartbeat_queued(queued)
+            self._refresh_heartbeat_state(queued)
             metrics = self._extract_metrics(
                 scheduler_output,
                 queued,
@@ -2555,7 +2618,7 @@ class InstrumentedScheduler(AsyncScheduler):
             self._publish_or_record_metrics(metrics, benchmark_sample)
         else:
             self._last_update_time = 0.0
-            self._refresh_heartbeat_queued()
+            self._refresh_heartbeat_state()
 
         self._cleanup_finished(scheduler_output)
         return result
@@ -2715,7 +2778,10 @@ class InstrumentedScheduler(AsyncScheduler):
         else:
             other_waiting = self.skipped_waiting
 
-        for request in chain(self.waiting, other_waiting):
+        waiting_queues = (self.waiting, other_waiting)
+        if hasattr(self, "async_kv_waiting"):
+            waiting_queues += (self.async_kv_waiting,)
+        for request in chain.from_iterable(waiting_queues):
             if request.status in (
                 RequestStatus.PREEMPTED,
                 RequestStatus.WAITING_FOR_REMOTE_KVS,

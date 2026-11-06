@@ -160,9 +160,11 @@ class ForwardPassMetrics(
     One message is emitted per scheduler iteration (one per forward pass).
     A heartbeat is emitted when no message has been sent for about one
     second, which includes while a long forward pass is still running.
-    A heartbeat has wall_time=0 and empty scheduled_requests, and its
-    queued_requests holds the latest waiting-queue snapshot. It is all
-    zeros only when nothing is waiting.
+    A heartbeat has wall_time=0 and empty scheduled_requests. vLLM heartbeats
+    carry its latest waiting-queue snapshot; empty heartbeats are suppressed
+    while scheduler-visible requests or scheduled batches remain. Other
+    publishers may still emit empty heartbeats during work. Heartbeats alone
+    do not establish EngineCore idleness or clear Planner's cached idle frame.
     """
 
     # Schema version. Consumers must check this before interpreting

@@ -255,7 +255,11 @@ Each engine emits per-iteration `ForwardPassMetrics` via ZMQ -> FpmEventRelay ->
 - **scheduled_requests.sum_prefill_tokens**: prefill regression input
 - **scheduled_requests.sum_decode_kv_tokens**: decode regression input
 - **queued_requests**: queued prefill/decode load for TTFT/ITL simulation
-- Heartbeats (wall_time=0) are not added as regression observations, but their `queued_requests` still count as queued load
+- Heartbeats (wall_time=0) are not added as regression observations, but they update moving averages and their `queued_requests` still count as queued load.
+
+The vLLM scheduler suppresses empty heartbeats while requests remain in its running or waiting queues, or a scheduled batch still awaits output processing. Nonempty heartbeats carry the latest queue snapshot. The scheduler reuses completed-pass snapshots and limits extra queue scans to once per heartbeat interval, plus when an empty snapshot first gains waiting work. That transition scan ensures a new long pass reports waiting load; later steps reuse it. Counts can lag changes between snapshots. All mutable queue traversal stays on the scheduler thread.
+
+This is a partial fix for scheduler-visible work. It does not establish EngineCore idleness across input-queue work, data-parallel dummy execution, or independent timing and result lifecycles. Suppressing a new empty heartbeat does not invalidate an idle frame already cached by Planner. Those lifecycles, cached-frame handling, and the Rust publishers used by TensorRT-LLM and the mocker need follow-up work. Heartbeats do not prove end-to-end autoscaling correctness.
 
 ### Diagnostics
 
