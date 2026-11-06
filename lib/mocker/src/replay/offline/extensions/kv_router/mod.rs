@@ -62,7 +62,8 @@ use aisimulate_core::replay::{
 };
 
 mod composition;
-pub(in crate::replay) use composition::{KvReplayComposition, RoundRobinReplayComposition};
+pub use composition::KvReplayComposition;
+pub(in crate::replay) use composition::RoundRobinReplayComposition;
 
 #[derive(Clone, Copy)]
 enum KvEventSummary {
@@ -165,7 +166,7 @@ pub(in crate::replay) fn provider_spec() -> ProviderSpec {
 /// Dynamo-owned metadata used by KV-aware placement. AISimulate only defines
 /// the neutral admission-metadata contract and never imports Router types.
 #[derive(Debug, Default)]
-pub(in crate::replay) struct KvReplayMetadata {
+pub struct KvReplayMetadata {
     hashes: Option<ReplayRequestHashes>,
     max_output_tokens_override: Option<usize>,
 }
@@ -518,7 +519,7 @@ pub(crate) struct OfflineReplayRouter {
     kv_transfer_gate_warned: bool,
 }
 
-pub(in crate::replay) struct KvRouterPlacement {
+pub struct KvRouterPlacement {
     router: OfflineReplayRouter,
 }
 

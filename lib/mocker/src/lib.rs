@@ -16,6 +16,7 @@ pub(crate) mod generalized_live;
 pub mod grouped_scheduler;
 pub mod live;
 pub mod loadgen;
+pub mod placement;
 pub mod replay;
 pub mod scheduler;
 pub mod services;

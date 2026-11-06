@@ -98,7 +98,7 @@ enum KvTopologyConfig {
 }
 
 /// KV-aware placement plus an optional Dynamo Planner scaling policy.
-pub(in crate::replay) struct KvReplayComposition {
+pub struct KvReplayComposition {
     topology: KvTopologyConfig,
     conversation_affinity: Option<ConversationAffinityConfig>,
     router_config: Option<KvRouterConfig>,
@@ -117,7 +117,7 @@ pub(in crate::replay) struct KvReplayComposition {
 }
 
 impl KvReplayComposition {
-    pub(in crate::replay) fn aggregated(
+    pub fn aggregated(
         args: MockerConfig,
         num_workers: usize,
         router_config: Option<KvRouterConfig>,
@@ -142,7 +142,7 @@ impl KvReplayComposition {
         }
     }
 
-    pub(in crate::replay) fn disaggregated(
+    pub fn disaggregated(
         prefill_args: MockerConfig,
         decode_args: MockerConfig,
         num_prefill_workers: usize,
