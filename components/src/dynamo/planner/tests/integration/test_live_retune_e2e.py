@@ -163,6 +163,8 @@ def dgd_object() -> dict[str, Any]:
         {"name": "DYN_REQUEST_TRACE_SINKS", "value": "file"},
         {"name": "DYN_REQUEST_TRACE_FILE_FORMAT", "value": "jsonl_gz"},
         {"name": "DYN_REQUEST_TRACE_FILE_PATH", "value": TRACE_FILE_PATH},
+        {"name": "DYN_ENABLE_FRONTEND_ADMIN_API", "value": "1"},
+        {"name": "DYN_FRONTEND_ADMIN_HOST", "value": "0.0.0.0"},
     ]
     frontend = {
         "name": "Frontend",
@@ -570,6 +572,11 @@ class PlannerHost:
             self._engine.replace_retune(
                 inputs, generation=generation, now_s=self._clock.time()
             )
+
+    def retune_decision_persisted(self, decision):
+        # Router-only retune: no decision carries Planner fields.
+        if decision.planner_changes:
+            raise AssertionError(f"unexpected planner changes {decision}")
 
 
 class Planner:
