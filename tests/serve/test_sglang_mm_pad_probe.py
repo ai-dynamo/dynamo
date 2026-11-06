@@ -3,10 +3,10 @@
 
 import importlib.util
 import sys
+from types import SimpleNamespace
 
 import pytest
 
-from tests.serve.multimodal_profiles import sglang as sglang_profiles
 from tests.serve.multimodal_profiles.sglang import (
     SGLangMmRoutingPayload,
     sglang_source_has_wide_mm_pad_values,
@@ -86,18 +86,25 @@ def test_installed_sglang_source_is_found():
 
 
 @pytest.mark.parametrize(
-    ("source", "expected_floor"), [(WIDE_PAD_SOURCE, 0.0), (SCALAR_PAD_SOURCE, 0.9)]
+    ("source", "expected_floor"),
+    [
+        pytest.param(WIDE_PAD_SOURCE, 0.0, id="wide-pad"),
+        pytest.param(SCALAR_PAD_SOURCE, 0.9, id="scalar-pad"),
+    ],
 )
 def test_bind_environment_floor_ignores_runtime_import_failure(
     monkeypatch, tmp_path, source, expected_floor
 ):
     # The runtime module failing to import must not change the decision.
     monkeypatch.setitem(sys.modules, "sglang.srt.managers.schedule_batch", None)
-    path = _write(tmp_path, source)
+    package_path = tmp_path / "sglang"
+    managers_path = package_path / "srt" / "managers"
+    managers_path.mkdir(parents=True)
+    _write(managers_path, source)
     monkeypatch.setattr(
-        sglang_profiles,
-        "sglang_source_has_wide_mm_pad_values",
-        lambda: sglang_source_has_wide_mm_pad_values(path),
+        importlib.util,
+        "find_spec",
+        lambda name: SimpleNamespace(submodule_search_locations=[str(package_path)]),
     )
     payload = _routing_payload()
     payload.bind_environment({})

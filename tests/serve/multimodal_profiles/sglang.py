@@ -42,7 +42,8 @@ def sglang_source_has_wide_mm_pad_values(
         )
     try:
         tree = ast.parse(
-            schedule_batch_path.read_text(), filename=str(schedule_batch_path)
+            schedule_batch_path.read_text(encoding="utf-8"),
+            filename=str(schedule_batch_path),
         )
     except (OSError, SyntaxError, ValueError) as exc:
         raise RuntimeError(
@@ -172,11 +173,7 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen2-vl-2b",
         topologies={
             "agg_router": TopologyConfig(
-                marks=[
-                    # TODO: revert to pytest.mark.post_merge after pre_merge validation
-                    # on this PR (see .ai/ci-guidelines.md).
-                    pytest.mark.pre_merge,
-                ],
+                marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 profiled_vram_gib=16.0,
                 requested_sglang_kv_tokens=8192,
