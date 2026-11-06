@@ -72,7 +72,8 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 
 # Cubin/JIT-cache wheels are published on FlashInfer's indexes, not PyPI.
 # This command selects those indexes and does not need a GPU at build time.
-RUN python -m flashinfer download-kernels \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=shared \
+    python -m flashinfer download-kernels \
         --cuda-version 13.0 --flashinfer-version {{ context.tokenspeed.flashinfer_version }}
 
 FROM tokenspeed AS runtime
