@@ -35,6 +35,8 @@ use crate::protocols::{
 type GroupPresence = FxHashMap<u32, FxHashMap<u64, u8>>;
 
 const CHECKPOINT_SHARDS: usize = 256;
+const GENERATION_WORD_MASK: u64 = u64::MAX >> 6;
+const GENERATION_TIER_SHIFT: u32 = 62;
 
 type CheckpointShardMap = FxHashMap<u64, Arc<CompleteMembership>>;
 type CapturedCheckpointShards = [OnceCell<Arc<CheckpointShardMap>>; CHECKPOINT_SHARDS];
@@ -54,9 +56,19 @@ fn compare_owners(left: &ResidencyOwner, right: &ResidencyOwner) -> std::cmp::Or
 #[derive(Clone, Copy)]
 pub struct CheckpointMembershipView<'a> {
     owners: &'a [(ResidencyOwner, u64)],
+    generation_words: &'a [(u64, u64)],
+    tier_index: usize,
 }
 
-impl CheckpointMembershipView<'_> {
+impl<'a> CheckpointMembershipView<'a> {
+    fn new(membership: &'a CompleteMembership, tier_index: usize) -> Self {
+        Self {
+            owners: &membership.owners[tier_index],
+            generation_words: &membership.generation_words,
+            tier_index,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.owners.len()
     }
@@ -75,6 +87,34 @@ impl CheckpointMembershipView<'_> {
             .ok()
             .map(|index| self.owners[index].1)
     }
+
+    /// Sorted nonempty generation words for this tier. Disjoint generation sets
+    /// rule out an eligible owner; an intersection still requires exact owner
+    /// and captured-generation validation. The range is found only on demand.
+    pub fn generation_words(&self) -> impl ExactSizeIterator<Item = (u64, u64)> + '_ {
+        let tier_start = (self.tier_index as u64) << GENERATION_TIER_SHIFT;
+        let start = self
+            .generation_words
+            .partition_point(|&(key, _)| key < tier_start);
+        let end = self
+            .generation_words
+            .partition_point(|&(key, _)| key <= (tier_start | GENERATION_WORD_MASK));
+        self.generation_words[start..end]
+            .iter()
+            .map(|&(key, mask)| (key & GENERATION_WORD_MASK, mask))
+    }
+
+    /// Returns this tier's generation bits for one word, or zero if absent.
+    pub fn generation_mask(&self, word: u64) -> u64 {
+        if word > GENERATION_WORD_MASK {
+            return 0;
+        }
+        let key = ((self.tier_index as u64) << GENERATION_TIER_SHIFT) | word;
+        self.generation_words
+            .binary_search_by_key(&key, |&(key, _)| key)
+            .ok()
+            .map_or(0, |index| self.generation_words[index].1)
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -82,20 +122,68 @@ struct CompleteMembership {
     // Sorted by the exact logical owner, with one generation per owner/tier.
     owners: [Vec<(ResidencyOwner, u64)>; 4],
     revision: u64,
+    // One sparse sidecar shared by all tiers. High two key bits encode tier;
+    // low 58 bits encode generation / 64. Positive matches remain owner-exact.
+    generation_words: Vec<(u64, u64)>,
 }
 
 impl CompleteMembership {
     fn update(&mut self, owner: ResidencyOwner, generation: u64, mask: u8) {
         for (index, owners) in self.owners.iter_mut().enumerate() {
             let found = owners.binary_search_by(|entry| compare_owners(&entry.0, &owner));
-            match (found, mask & (1 << index) != 0) {
-                (Ok(position), true) => owners[position].1 = generation,
-                (Err(position), true) => owners.insert(position, (owner, generation)),
+            let present = mask & (1 << index) != 0;
+            let removed_generation = match (found, present) {
+                (Ok(position), true) if owners[position].1 != generation => {
+                    Some(std::mem::replace(&mut owners[position].1, generation))
+                }
+                (Err(position), true) => {
+                    owners.insert(position, (owner, generation));
+                    None
+                }
                 (Ok(position), false) if owners[position].1 == generation => {
                     owners.remove(position);
+                    Some(generation)
                 }
-                _ => {}
+                _ => continue,
+            };
+            // Tests and generation wrap can associate the same token with more
+            // than one owner. Never clear a bit while another exact fact uses it.
+            if let Some(previous) = removed_generation
+                && !owners.iter().any(|&(_, token)| token == previous)
+            {
+                Self::update_generation_word(&mut self.generation_words, index, previous, false);
             }
+            if present {
+                Self::update_generation_word(&mut self.generation_words, index, generation, true);
+            }
+        }
+    }
+
+    fn update_generation_word(
+        words: &mut Vec<(u64, u64)>,
+        tier_index: usize,
+        generation: u64,
+        present: bool,
+    ) {
+        let key = ((tier_index as u64) << GENERATION_TIER_SHIFT) | (generation >> 6);
+        let bit = 1_u64 << (generation & 63);
+        match (words.binary_search_by_key(&key, |&(key, _)| key), present) {
+            (Ok(index), true) => words[index].1 |= bit,
+            (Err(index), true) => {
+                // The common one-word membership needs one payload slot, not
+                // Vec's minimum four-element growth allocation.
+                if words.capacity() == 0 {
+                    words.reserve_exact(1);
+                }
+                words.insert(index, (key, bit));
+            }
+            (Ok(index), false) => {
+                words[index].1 &= !bit;
+                if words[index].1 == 0 {
+                    words.remove(index);
+                }
+            }
+            (Err(_), false) => {}
         }
     }
 
@@ -335,6 +423,12 @@ impl CapturedLayout {
         self.layout
     }
 
+    /// Immutable query token for conservative membership intersection. A token
+    /// match alone grants no credit without exact owner and layout validation.
+    pub fn generation(self) -> u64 {
+        self.generation
+    }
+
     pub fn is_eligible_generation(self, generation: u64) -> bool {
         self.generation == generation && self.layout.complete_layout
     }
@@ -475,9 +569,7 @@ impl CheckpointReadView {
         if membership.revision != revision {
             return;
         }
-        visit(CheckpointMembershipView {
-            owners: &membership.owners[tier_index(tier)],
-        });
+        visit(CheckpointMembershipView::new(membership, tier_index(tier)));
     }
 
     /// Visits raw membership facts only while this hash has the exact observed
@@ -1037,8 +1129,8 @@ mod tests {
         for (index, owner) in insertion_order.into_iter().enumerate() {
             membership.update(owner, index as u64 + 10, 0b1111);
         }
-        for owners in &membership.owners {
-            let indexed = CheckpointMembershipView { owners };
+        for tier in 0..4 {
+            let indexed = CheckpointMembershipView::new(&membership, tier);
             assert_eq!(indexed.len(), expected.len());
             assert!(!indexed.is_empty());
             assert_eq!(
@@ -1070,14 +1162,14 @@ mod tests {
         }
         membership.update(middle, 12, 0b0011);
         membership.update(middle, 11, 0);
-        for owners in &membership.owners[..2] {
-            let indexed = CheckpointMembershipView { owners };
+        for tier in 0..2 {
+            let indexed = CheckpointMembershipView::new(&membership, tier);
             assert_eq!(indexed.len(), 3);
             assert_eq!(indexed.generation_for(middle), Some(12));
         }
         membership.update(middle, 12, 0);
-        for owners in &membership.owners[..2] {
-            let indexed = CheckpointMembershipView { owners };
+        for tier in 0..2 {
+            let indexed = CheckpointMembershipView::new(&membership, tier);
             assert_eq!(indexed.len(), 2);
             assert_eq!(indexed.generation_for(middle), None);
             assert_eq!(indexed.generation_for(first), Some(11));
@@ -1091,17 +1183,195 @@ mod tests {
                 .collect::<Vec<_>>(),
             [first, middle, last],
         );
-        let device = CheckpointMembershipView {
-            owners: &membership.owners[0],
-        };
+        let device = CheckpointMembershipView::new(&membership, 0);
         assert_eq!(device.generation_for(middle), Some(13));
         assert!(
-            CheckpointMembershipView {
-                owners: &membership.owners[1]
-            }
-            .generation_for(middle)
-            .is_none()
+            CheckpointMembershipView::new(&membership, 1)
+                .generation_for(middle)
+                .is_none()
         );
+    }
+
+    fn assert_generation_words_match_facts(membership: &CompleteMembership) {
+        for (tier, owners) in membership.owners.iter().enumerate() {
+            let mut expected = std::collections::BTreeMap::<u64, u64>::new();
+            for &(_, generation) in owners {
+                *expected.entry(generation >> 6).or_default() |= 1_u64 << (generation & 63);
+            }
+            let indexed = CheckpointMembershipView::new(membership, tier);
+            let expected = expected.into_iter().collect::<Vec<_>>();
+            assert_eq!(indexed.generation_words().collect::<Vec<_>>(), expected);
+            assert_eq!(indexed.generation_words().len(), expected.len());
+            for &(word, mask) in &expected {
+                assert_ne!(mask, 0);
+                assert_eq!(indexed.generation_mask(word), mask);
+            }
+            for word in [0, 1, 2, GENERATION_WORD_MASK, GENERATION_WORD_MASK + 1] {
+                let mask = expected
+                    .iter()
+                    .find_map(|&(key, mask)| (key == word).then_some(mask))
+                    .unwrap_or(0);
+                assert_eq!(indexed.generation_mask(word), mask);
+            }
+        }
+    }
+
+    #[test]
+    fn generation_words_preserve_tiers_duplicate_tokens_and_full_u64_range() {
+        let first = ResidencyOwner::worker(WorkerWithDpRank::new(7, 0));
+        let same_worker_other_rank = ResidencyOwner::worker(WorkerWithDpRank::new(7, 1));
+        let third = ResidencyOwner::worker(WorkerWithDpRank::new(9, 0));
+        let mut membership = CompleteMembership::default();
+        membership.update(first, 0, 0b1111);
+        membership.update(same_worker_other_rank, 0, 0b1111);
+        membership.update(third, u64::MAX, 0b1111);
+        assert_generation_words_match_facts(&membership);
+        for tier in 0..4 {
+            assert_eq!(
+                CheckpointMembershipView::new(&membership, tier)
+                    .generation_words()
+                    .collect::<Vec<_>>(),
+                [(0, 1), (GENERATION_WORD_MASK, 1 << 63)],
+            );
+        }
+        // Moving one duplicate to a new generation must retain the old bit.
+        membership.update(first, 63, 0b0101);
+        assert_generation_words_match_facts(&membership);
+        assert_eq!(
+            CheckpointMembershipView::new(&membership, 0).generation_mask(0),
+            1 | (1 << 63),
+        );
+        // A stale removal cannot remove the remapped fact or its sidecar bit.
+        membership.update(first, 0, 0);
+        assert_generation_words_match_facts(&membership);
+        assert_eq!(membership.owners[0][0], (first, 63));
+        membership.update(same_worker_other_rank, 0, 0);
+        assert_generation_words_match_facts(&membership);
+        assert_eq!(
+            CheckpointMembershipView::new(&membership, 0).generation_mask(0),
+            1 << 63,
+        );
+        membership.update(first, 64, 0b1010);
+        assert_generation_words_match_facts(&membership);
+        assert_eq!(
+            CheckpointMembershipView::new(&membership, 1).generation_mask(1),
+            1,
+        );
+        // Remove exact old-tier generations as lifecycle publication does.
+        membership.update(first, 63, 0b1010);
+        membership.update(first, 63, 0);
+        membership.update(third, u64::MAX, 0);
+        assert_generation_words_match_facts(&membership);
+        assert!(membership.is_empty());
+        assert!(membership.generation_words.is_empty());
+    }
+
+    #[test]
+    fn incremental_generation_words_match_exact_facts_through_mixed_updates() {
+        let generations = [0, 1, 2, 63, 64, 65, 127, 128, u64::MAX - 63, u64::MAX];
+        let mut random = 0xa175_c9e3_f62b_840d_u64;
+        let mut membership = CompleteMembership::default();
+        for step in 0..1024 {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            let owner = ResidencyOwner::worker(WorkerWithDpRank::new(
+                random % 8,
+                ((random >> 8) % 3) as u32,
+            ));
+            let generation = generations[(random >> 16) as usize % generations.len()];
+            let mask = ((random >> 24) as u8) & 0b1111;
+            membership.update(owner, generation, mask);
+            assert_generation_words_match_facts(&membership);
+            if step % 17 == 0 {
+                let before = membership.generation_words.clone();
+                membership.update(owner, generation, mask);
+                assert_eq!(membership.generation_words, before);
+                assert_generation_words_match_facts(&membership);
+            }
+        }
+    }
+
+    #[test]
+    fn published_generation_words_follow_tier_expiry_and_layout_remapping() {
+        let table = KvCacheGroupResidency::new();
+        let worker = WorkerWithDpRank::new(7, 2);
+        let owner = ResidencyOwner::worker(worker);
+        let hash = ExternalSequenceBlockHash(11);
+        let tiers = [
+            StorageTier::Device,
+            StorageTier::HostPinned,
+            StorageTier::Disk,
+            StorageTier::External,
+        ];
+        for tier in tiers {
+            table.apply(&checkpoint(worker, tier, 0, hash.0, Some(1)));
+        }
+        let view = table.read_view();
+        let generation = view.capture_layout(owner).unwrap().generation();
+        let revision = view
+            .checkpoint_hint_revision(hash, StorageTier::Device)
+            .unwrap();
+        for tier in tiers {
+            view.with_membership_at_revision(hash, tier, revision, |membership| {
+                assert_eq!(
+                    membership.generation_words().collect::<Vec<_>>(),
+                    [(generation >> 6, 1 << (generation & 63))],
+                );
+            });
+        }
+        let mut removed = checkpoint(worker, StorageTier::HostPinned, 0, hash.0, Some(1));
+        removed.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: vec![hash],
+        });
+        table.apply(&removed);
+        view.with_membership_at_revision(hash, StorageTier::Device, revision, |_| {
+            panic!("tier mutation invalidates the old hash revision")
+        });
+        let current = view
+            .checkpoint_hint_revision(hash, StorageTier::Device)
+            .unwrap();
+        view.with_membership_at_revision(hash, StorageTier::HostPinned, current, |membership| {
+            assert_eq!(membership.generation_words().len(), 0);
+        });
+        table.declare_layout(owner, &[0, 1], 1);
+        assert!(
+            view.checkpoint_hint_revision(hash, StorageTier::Device)
+                .is_none()
+        );
+        for group in [0, 1] {
+            table.apply(&checkpoint(
+                worker,
+                StorageTier::Device,
+                group,
+                hash.0,
+                Some(2),
+            ));
+        }
+        let remapped = view.capture_layout(owner).unwrap().generation();
+        assert_ne!(remapped, generation);
+        let current = view
+            .checkpoint_hint_revision(hash, StorageTier::Device)
+            .unwrap();
+        view.with_membership_at_revision(hash, StorageTier::Device, current, |membership| {
+            assert_eq!(
+                membership.generation_mask(generation >> 6) & (1 << (generation & 63)),
+                0
+            );
+            assert_eq!(membership.generation_for(owner), Some(remapped));
+            assert_eq!(
+                membership.generation_words().collect::<Vec<_>>(),
+                [(remapped >> 6, 1 << (remapped & 63))],
+            );
+        });
+        table.clear_worker(worker);
+        assert!(
+            view.checkpoint_hint_revision(hash, StorageTier::Device)
+                .is_none()
+        );
+        view.with_membership_at_revision(hash, StorageTier::Device, current, |_| {
+            panic!("clear removes the sidecar with the membership")
+        });
     }
 
     #[test]
