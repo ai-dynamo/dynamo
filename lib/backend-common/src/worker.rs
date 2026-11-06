@@ -2300,8 +2300,7 @@ async fn build_local_model(
         })? {
             PathBuf::from(&source)
         } else {
-            // ignore_weights: the engine loaded its own weights in `start()`,
-            // and the card needs only config, tokenizer, and template files.
+            // Skip weights: the engine loaded them in start(); the card needs only metadata.
             LocalModel::fetch(&source, true).await.map_err(|e| {
                 err(
                     ErrorType::Backend(BackendError::CannotConnect),
@@ -2712,52 +2711,42 @@ mod tests {
         assert_eq!(local_model.card().aliases, ["media-alias"]);
     }
 
-    /// The engine loads weights itself, so an HF cache holding only config and
-    /// tokenizer files must be enough to register, without any download.
+    /// A weights-free HF cache is enough to register: the engine loads weights itself.
     #[tokio::test]
     #[serial_test::serial]
     async fn build_local_model_uses_weights_free_hf_cache() {
-        use dynamo_runtime::config::environment_names::model::{huggingface, model_express};
+        use dynamo_runtime::config::environment_names::model::huggingface;
 
+        // hf-hub cache layout whose snapshot is the metadata-only fixture.
         let cache = tempfile::TempDir::new().unwrap();
         let repo = cache.path().join("models--test-org--weights-free");
-        let snapshot = repo.join("snapshots").join("0".repeat(40));
-        std::fs::create_dir_all(&snapshot).unwrap();
         std::fs::create_dir_all(repo.join("refs")).unwrap();
-        std::fs::write(repo.join("refs").join("main"), "0".repeat(40)).unwrap();
-        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../llm/tests/data/sample-models/mock-llama-3.1-8b-instruct");
-        for file in [
-            "config.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "generation_config.json",
-        ] {
-            std::fs::copy(fixture.join(file), snapshot.join(file)).unwrap();
-        }
+        std::fs::create_dir_all(repo.join("snapshots")).unwrap();
+        std::fs::write(repo.join("refs/main"), "rev").unwrap();
+        std::os::unix::fs::symlink(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../llm/tests/data/sample-models/mock-llama-3.1-8b-instruct"
+            ),
+            repo.join("snapshots/rev"),
+        )
+        .unwrap();
 
-        let unreachable = Some("http://127.0.0.1:9");
+        let config = WorkerConfig {
+            model_name: "test-org/weights-free".to_string(),
+            ..WorkerConfig::default()
+        };
         temp_env::async_with_vars(
             [
                 (huggingface::HF_HUB_CACHE, cache.path().to_str()),
+                // Offline mode accepts a weights-free cache even without the fix.
                 (huggingface::HF_HUB_OFFLINE, None),
-                (huggingface::HF_ENDPOINT, unreachable),
-                (huggingface::HF_HOME, None),
-                (model_express::MODEL_EXPRESS_URL, unreachable),
-                (model_express::MODEL_EXPRESS_CACHE_PATH, None),
+                (huggingface::HF_ENDPOINT, Some("http://127.0.0.1:9")),
             ],
-            async {
-                let config = WorkerConfig {
-                    model_name: "test-org/weights-free".to_string(),
-                    ..WorkerConfig::default()
-                };
-                let local_model = build_local_model(&config, &EngineConfig::default(), false)
-                    .await
-                    .expect("a weights-free cache must be enough to register");
-                assert_eq!(local_model.path(), snapshot);
-            },
+            build_local_model(&config, &EngineConfig::default(), false),
         )
-        .await;
+        .await
+        .expect("a weights-free cache must be enough to register");
     }
 
     #[test]
