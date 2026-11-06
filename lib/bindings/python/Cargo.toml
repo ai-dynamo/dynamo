@@ -62,11 +62,11 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 # former AIC crate surface. The `python` feature is required for
 # AicEngineBuilder; this extension supplies the interpreter, so the dependency
 # must not enable `extension-module`.
-aisimulate-core = { package = "aisim-core", path = "/home/anthony/nvidia/projects/ai-dynamo-org/aisimulate/.worktrees/aiperf-owned-runner-proof/crates/core", optional = true, features = ["python"] }
-aisim-aiperf-workload-runner = { package = "aisim-aiperf-workload-runner", path = "/home/anthony/nvidia/projects/ai-dynamo-org/aisimulate/.worktrees/aiperf-owned-runner-proof/crates/tests/aiperf-workload-runner", optional = true }
-aiperf-protocol = { path = "/home/anthony/nvidia/projects/aiperf-rs/.worktrees/prove-simple-execution/crates/config/protocol", optional = true }
-aiperf-clock-runtime = { path = "/home/anthony/nvidia/projects/aiperf-rs/.worktrees/prove-simple-execution/crates/libs/clock-runtime", optional = true }
-aiperf-timing = { path = "/home/anthony/nvidia/projects/aiperf-rs/.worktrees/prove-simple-execution/crates/scheduling/timing", optional = true }
+aisimulate-core = { package = "aisim-core", path = "../../../../../../../ai-dynamo-org/aisimulate/.worktrees/aiperf-owned-runner-proof/crates/core", optional = true, features = ["python"] }
+aisim-aiperf-workload-runner = { package = "aisim-aiperf-workload-runner", path = "../../../../../../../ai-dynamo-org/aisimulate/.worktrees/aiperf-owned-runner-proof/crates/tests/aiperf-workload-runner", optional = true }
+aiperf-protocol = { path = "../../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/config/protocol", optional = true }
+aiperf-clock-runtime = { path = "../../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/libs/clock-runtime", optional = true }
+aiperf-timing = { path = "../../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/scheduling/timing", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "=10.2.2" }
