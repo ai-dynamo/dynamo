@@ -12,6 +12,7 @@ package semanticenv
 import (
 	"container/heap"
 	"fmt"
+	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -154,10 +155,12 @@ func references(value string) []string {
 		case '$':
 			i++
 		case '(':
-			if end := strings.IndexByte(value[i+2:], ')'); end >= 0 {
-				names = append(names, value[i+2:i+2+end])
-				i += end + 2
+			end := strings.IndexByte(value[i+2:], ')')
+			if end < 0 {
+				return names
 			}
+			names = append(names, value[i+2:i+2+end])
+			i += end + 2
 		}
 	}
 	return names
@@ -182,10 +185,8 @@ func cycleError(entries []entry, layers []Layer) error {
 		}
 		state[i] = 1
 		path = append(path, i)
-		for _, next := range entries[i].next {
-			if visit(next) {
-				return true
-			}
+		if slices.ContainsFunc(entries[i].next, visit) {
+			return true
 		}
 		path = path[:len(path)-1]
 		state[i] = 2

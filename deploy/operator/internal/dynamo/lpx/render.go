@@ -15,6 +15,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
@@ -30,12 +31,17 @@ type RenderInput struct {
 	MinAvailable *int32
 	// Stages contains an independently merged LPU template for every projected stage.
 	Stages map[string]corev1.PodTemplateSpec
+	// Environment sources remain separate until all LPX-owned bindings exist.
+	// Nil collectors retain the legacy rendering path.
+	StageEnvironments map[string]semanticenv.ContainerLayers
 	// Conductor supplies a fresh, independently merged template for the shared LPU
 	// conductor when plan.ConductorTemplate is nonempty. Otherwise it is nil;
 	// hybrid pipelines supply their independently rendered Cyborg clique below.
-	Conductor *corev1.PodTemplateSpec
+	Conductor            *corev1.PodTemplateSpec
+	ConductorEnvironment semanticenv.ContainerLayers
 	// Cyborg supplies the GPU clique for hybrid pipelines; nil for LPU-only workloads.
-	Cyborg *grovev1alpha1.PodCliqueTemplateSpec
+	Cyborg            *grovev1alpha1.PodCliqueTemplateSpec
+	CyborgEnvironment semanticenv.ContainerLayers
 }
 
 // WorkloadTemplates contains the clique templates and scaling group contributed by one workload.
@@ -59,9 +65,11 @@ func RenderNodeLocal(
 	// Keep the hybrid GPU clique before the workload's LPU roles.
 	hybrid := projections[0].pipeline == PipelineHybrid
 	rendered := &WorkloadTemplates{}
+	environments := make(map[string]semanticenv.ContainerLayers)
 	cyborg := input.Cyborg
 	if hybrid {
 		rendered.Cliques = append(rendered.Cliques, cyborg)
+		environments[cyborg.Name] = input.CyborgEnvironment
 	}
 
 	workloadDigest := workload.Digest().String()
@@ -93,16 +101,29 @@ func RenderNodeLocal(
 	// Publish model paths to every container before role-specific bindings are prepended.
 	containerLists := make([][]corev1.Container, 0, 2*(len(input.Stages)+2))
 	if conductorTemplate != nil {
+		input.ConductorEnvironment.Capture(&conductorTemplate.Spec)
 		containerLists = append(containerLists, conductorTemplate.Spec.Containers, conductorTemplate.Spec.InitContainers)
 	}
 	if hybrid {
+		input.CyborgEnvironment.Capture(&cyborg.Spec.PodSpec)
 		containerLists = append(containerLists, cyborg.Spec.PodSpec.Containers, cyborg.Spec.PodSpec.InitContainers)
 	}
-	for _, template := range input.Stages {
+	for stage, template := range input.Stages {
+		input.StageEnvironments[stage].Capture(&template.Spec)
 		containerLists = append(containerLists, template.Spec.Containers, template.Spec.InitContainers)
 	}
-	if err := applyModelPaths(containerLists, projections, modelStoragePath); err != nil {
+	paths, err := applyModelPaths(containerLists, projections, modelStoragePath)
+	if err != nil {
 		return nil, err
+	}
+	if conductorTemplate != nil {
+		input.ConductorEnvironment.BindPod(&conductorTemplate.Spec, "operator.lpx.modelPaths", paths)
+	}
+	if hybrid {
+		input.CyborgEnvironment.BindPod(&cyborg.Spec.PodSpec, "operator.lpx.modelPaths", paths)
+	}
+	for stage, template := range input.Stages {
+		input.StageEnvironments[stage].BindPod(&template.Spec, "operator.lpx.modelPaths", paths)
 	}
 
 	// Consume the independently rendered conductor without copying Agent startup or placement.
@@ -122,6 +143,7 @@ func RenderNodeLocal(
 			},
 		}
 		rendered.Cliques = append(rendered.Cliques, conductor)
+		environments[conductor.Name] = input.ConductorEnvironment
 	}
 
 	// Canonical projections keep each component together; consume its last Agent instance.
@@ -141,7 +163,7 @@ func RenderNodeLocal(
 			// Agent template needs no placement or storage validation.
 			if agent.Replicas == 0 {
 				if conductorSpec != nil {
-					configureNodeLocalConductorRuntime(conductorSpec, allocation)
+					configureNodeLocalConductorRuntime(conductorSpec, allocation, input.ConductorEnvironment)
 				}
 				continue
 			}
@@ -158,10 +180,10 @@ func RenderNodeLocal(
 			}
 
 			// Bind the LPX configuration and scheduling to the Agent and any conductor.
-			applyLocalPartitionIDs(common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName), projection)
+			applyLocalPartitionIDs(common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName), projection, input.StageEnvironments[stage])
 			configureAgentScheduling(&template.Spec, projection.configuredBuild.architecture, projection.configuredBuild.devicesPerNode)
 			if conductorSpec != nil {
-				configureNodeLocalConductorRuntime(conductorSpec, allocation)
+				configureNodeLocalConductorRuntime(conductorSpec, allocation, input.ConductorEnvironment)
 			}
 		}
 		if agent.Replicas == 0 {
@@ -177,6 +199,7 @@ func RenderNodeLocal(
 		annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation] = projection.CompilerSnapshotDigest()
 		annotations[WorkloadModeAnnotation] = string(projection.schedulerWorkloadMode())
 		replicas := int32(agent.Replicas)
+		environments[agent.TemplateName] = input.StageEnvironments[stage]
 		rendered.Cliques = append(rendered.Cliques, &grovev1alpha1.PodCliqueTemplateSpec{
 			Name:        agent.TemplateName,
 			Labels:      maps.Clone(template.Labels),
@@ -207,6 +230,7 @@ func RenderNodeLocal(
 			workloadDigest,
 			modelStoragePath,
 			agentTemplateNames,
+			input.CyborgEnvironment,
 		); err != nil {
 			return nil, fmt.Errorf("stage %s conductor: %w", projections[0].stage, err)
 		}
@@ -230,6 +254,9 @@ func RenderNodeLocal(
 	// Keep every LPX role in one backend gang, including the KAI fallback roles.
 	for _, clique := range rendered.Cliques {
 		clique.Spec.PodSpec.SchedulerName = v1alpha1.LPXSchedulerName
+		if err := environments[clique.Name].Apply(&clique.Spec.PodSpec); err != nil {
+			return nil, fmt.Errorf("LPX role %s: %w", clique.Name, err)
+		}
 	}
 
 	return rendered, nil

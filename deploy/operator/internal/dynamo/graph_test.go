@@ -1685,20 +1685,22 @@ func TestMergeEnvsForOrigin(t *testing.T) {
 		{Name: "SHARED", Value: "user"},
 	}
 
-	t.Run("origin 1.7 preserves system then user order and duplicate names", func(t *testing.T) {
-		annotations := map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0"}
+	t.Run("origin 1.8 preserves staged system then user order and duplicate names", func(t *testing.T) {
+		annotations := map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"}
 		require.Equal(t, append(slices.Clone(system), user...), MergeEnvsForOrigin(annotations, system, user))
 	})
 
-	t.Run("older origin preserves legacy sorted and de-duplicated output", func(t *testing.T) {
-		annotations := map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}
-		require.Equal(t, []corev1.EnvVar{
-			{Name: "A_DERIVED", Value: "$(Z_BASE)"},
-			{Name: "SHARED", Value: "user"},
-			{Name: "Z_BASE", Value: "expected"},
-			{Name: "Z_SYSTEM", Value: "system"},
-		}, MergeEnvsForOrigin(annotations, system, user))
-	})
+	for _, origin := range []string{"1.7.99", "1.7.0", "1.6.0", ""} {
+		t.Run("older origin="+origin+" preserves legacy sorted and de-duplicated output", func(t *testing.T) {
+			annotations := map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin}
+			require.Equal(t, []corev1.EnvVar{
+				{Name: "A_DERIVED", Value: "$(Z_BASE)"},
+				{Name: "SHARED", Value: "user"},
+				{Name: "Z_BASE", Value: "expected"},
+				{Name: "Z_SYSTEM", Value: "system"},
+			}, MergeEnvsForOrigin(annotations, system, user))
+		})
+	}
 }
 
 func TestAddStandardEnvVars_NATS(t *testing.T) {
@@ -1897,9 +1899,9 @@ func TestGenerateBasePodSpecEnvironmentOrderByOrigin(t *testing.T) {
 			ComponentName: "worker",
 			ComponentType: v1beta1.ComponentTypeWorker,
 			PodTemplate: &corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				Annotations: map[string]string{
 					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin,
-				}},
+				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{
 					Name:  commonconsts.MainContainerName,
 					Image: "example/engine:1.7.0",
@@ -1926,33 +1928,35 @@ func TestGenerateBasePodSpecEnvironmentOrderByOrigin(t *testing.T) {
 		return podSpec.Containers[0].Env
 	}
 
-	t.Run("origin 1.7 preserves user order and replaces overridden defaults", func(t *testing.T) {
-		env := render(t, "1.7.0", 1)
+	t.Run("origin 1.8 preserves user order and replaces overridden defaults", func(t *testing.T) {
+		env := render(t, "1.8.0", 1)
 		require.GreaterOrEqual(t, len(env), len(userEnv)+1)
 		require.Equal(t, userEnv, env[len(env)-len(userEnv):])
 		require.Len(t, envVarsToMap(env), len(env))
 		require.Equal(t, "nats://user:4222", envVarsToMap(env)["NATS_SERVER"])
 	})
 
-	t.Run("origin 1.7 keeps user order without requiring a fixed system prefix", func(t *testing.T) {
+	t.Run("origin 1.8 keeps user order without requiring a fixed system prefix", func(t *testing.T) {
 		t.Log("Render topology aliases without sorting the authored environment")
-		env := render(t, "1.7.0", 2)
+		env := render(t, "1.8.0", 2)
 		require.Equal(t, userEnv, env[len(env)-len(userEnv)-2:len(env)-2])
 		require.Equal(t, commonconsts.DynamoLeaderAddressEnvVar, env[len(env)-2].Name)
 		require.Equal(t, commonconsts.DynamoRankEnvVar, env[len(env)-1].Name)
 	})
 
-	t.Run("origin 1.6 retains legacy sorted and de-duplicated output", func(t *testing.T) {
-		env := render(t, "1.6.0", 1)
-		require.True(t, sort.SliceIsSorted(env, func(i, j int) bool { return env[i].Name < env[j].Name }))
-		var nats []corev1.EnvVar
-		for _, item := range env {
-			if item.Name == "NATS_SERVER" {
-				nats = append(nats, item)
+	for _, origin := range []string{"1.7.9", "1.7.0", "1.6.0", ""} {
+		t.Run("legacy origin="+origin, func(t *testing.T) {
+			env := render(t, origin, 1)
+			require.True(t, sort.SliceIsSorted(env, func(i, j int) bool { return env[i].Name < env[j].Name }))
+			var nats []corev1.EnvVar
+			for _, item := range env {
+				if item.Name == "NATS_SERVER" {
+					nats = append(nats, item)
+				}
 			}
-		}
-		require.Equal(t, []corev1.EnvVar{{Name: "NATS_SERVER", Value: "nats://user:4222"}}, nats)
-	})
+			require.Equal(t, []corev1.EnvVar{{Name: "NATS_SERVER", Value: "nats://user:4222"}}, nats)
+		})
+	}
 }
 
 func TestGenerateBasePodSpecBackendEnvironmentOrderByOrigin(t *testing.T) {
@@ -1969,9 +1973,9 @@ func TestGenerateBasePodSpecBackendEnvironmentOrderByOrigin(t *testing.T) {
 			ComponentName: "worker",
 			ComponentType: v1beta1.ComponentTypeWorker,
 			PodTemplate: &corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				Annotations: map[string]string{
 					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin,
-				}},
+				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{
 					Name:  commonconsts.MainContainerName,
 					Image: "example/engine:1.7.0",
@@ -1998,8 +2002,8 @@ func TestGenerateBasePodSpecBackendEnvironmentOrderByOrigin(t *testing.T) {
 		return podSpec.Containers[0].Env
 	}
 
-	t.Run("origin 1.7 overrides a backend default without repairing a local forward reference", func(t *testing.T) {
-		environment := render(t, "1.7.0")
+	t.Run("origin 1.8 overrides a backend default without repairing a local forward reference", func(t *testing.T) {
+		environment := render(t, "1.8.0")
 		var relevant []corev1.EnvVar
 		for _, variable := range environment {
 			if variable.Name == "A_DERIVED" || variable.Name == backendEnvironmentName {
@@ -2009,18 +2013,20 @@ func TestGenerateBasePodSpecBackendEnvironmentOrderByOrigin(t *testing.T) {
 		require.Equal(t, userEnvironment, relevant)
 	})
 
-	t.Run("origin 1.6 retains the legacy backend env suffix", func(t *testing.T) {
-		environment := render(t, "1.6.0")
-		require.Equal(t, backendEnvironment, environment[len(environment)-1])
+	for _, origin := range []string{"1.7.9", "1.7.0", "1.6.0", ""} {
+		t.Run("legacy origin="+origin, func(t *testing.T) {
+			environment := render(t, origin)
+			require.Equal(t, backendEnvironment, environment[len(environment)-1])
 
-		var duplicateValues []string
-		for _, variable := range environment {
-			if variable.Name == backendEnvironmentName {
-				duplicateValues = append(duplicateValues, variable.Value)
+			var duplicateValues []string
+			for _, variable := range environment {
+				if variable.Name == backendEnvironmentName {
+					duplicateValues = append(duplicateValues, variable.Value)
+				}
 			}
-		}
-		require.Equal(t, []string{"user", "1"}, duplicateValues)
-	})
+			require.Equal(t, []string{"user", "1"}, duplicateValues)
+		})
+	}
 }
 
 func TestGeneratePodSpecForComponentUsesOnlyDGDOriginForEnvironmentOrder(t *testing.T) {
@@ -2034,19 +2040,25 @@ func TestGeneratePodSpecForComponentUsesOnlyDGDOriginForEnvironmentOrder(t *test
 	}{
 		{
 			name:            "newer DGD origin overrides older component origin",
-			dgdOrigin:       "1.7.0",
+			dgdOrigin:       "1.8.0",
 			componentOrigin: "1.6.0",
 			want:            []corev1.EnvVar{dgdEnvironment, componentEnvironment},
+		},
+		{
+			name: "origin 1.7 ignores a semantic component origin", dgdOrigin: "1.7.0", componentOrigin: "1.8.0",
+			want: []corev1.EnvVar{componentEnvironment, dgdEnvironment},
+		},
+		{
+			name: "missing origin ignores a semantic component origin", componentOrigin: "1.8.0",
+			want: []corev1.EnvVar{componentEnvironment, dgdEnvironment},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dynamoDeployment := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-deployment",
-					Namespace: "default",
-				},
+				Name:      "test-deployment",
+				Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					Env: []corev1.EnvVar{dgdEnvironment},
 				},
@@ -2060,9 +2072,9 @@ func TestGeneratePodSpecForComponentUsesOnlyDGDOriginForEnvironmentOrder(t *test
 				ComponentName: "worker",
 				ComponentType: v1beta1.ComponentTypeWorker,
 				PodTemplate: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+					Annotations: map[string]string{
 						commonconsts.KubeAnnotationDynamoOperatorOriginVersion: tt.componentOrigin,
-					}},
+					},
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{
 						Name:  commonconsts.MainContainerName,
 						Image: "example/engine:1.7.0",

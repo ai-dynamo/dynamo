@@ -14,6 +14,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -31,6 +32,7 @@ func configureHybridCyborg(
 	workloadDigest string,
 	modelStoragePath string,
 	agentTemplateNames []string,
+	environment semanticenv.ContainerLayers,
 ) error {
 	container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
 
@@ -52,9 +54,11 @@ func configureHybridCyborg(
 		return fmt.Errorf("resolve GBuild manifest path: %w", err)
 	}
 	prependEnv(container, corev1.EnvVar{Name: gbuildManifestPathEnv, Value: filepath.Join(buildRoot, gbuildDeploymentV1CapnpFile)})
-	applyLocalPartitionIDs(container, projection)
+	environment.Bind(container.Name, "operator.lpx.manifest", container.Env[:1])
+	applyLocalPartitionIDs(container, projection, environment)
 	if projection.checkpoint != nil {
 		prependEnv(container, corev1.EnvVar{Name: cyborgWeightsPathEnv, Value: projection.checkpoint.SnapshotPath(modelStoragePath)})
+		environment.Bind(container.Name, "operator.lpx.weights", container.Env[:1])
 	}
 
 	cyborg.Annotations = roleAnnotations(
@@ -62,7 +66,7 @@ func configureHybridCyborg(
 		lpxv1alpha1.PodRoleCyborgWorker,
 		workloadDigest,
 	)
-	configureNodeLocalConductorRuntime(&cyborg.Spec.PodSpec, strings.Join(agentTemplateNames, ":"))
+	configureNodeLocalConductorRuntime(&cyborg.Spec.PodSpec, strings.Join(agentTemplateNames, ":"), environment)
 	cyborg.Spec.StartsAfter = slices.Clone(agentTemplateNames)
 	return nil
 }

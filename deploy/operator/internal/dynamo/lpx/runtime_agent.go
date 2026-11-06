@@ -10,6 +10,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -43,13 +44,15 @@ func configureAgentScheduling(agent *corev1.PodSpec, architecture lpuArchitectur
 }
 
 // configureNodeLocalConductorRuntime consumes a fresh conductor PodSpec with a validated main container.
-func configureNodeLocalConductorRuntime(conductorPodSpec *corev1.PodSpec, allocation string) {
+func configureNodeLocalConductorRuntime(conductorPodSpec *corev1.PodSpec, allocation string, environment semanticenv.ContainerLayers) {
 	// Bind placement data without interpreting the template's executable or arguments.
-	prependEnv(common.FindContainerByName(conductorPodSpec.Containers, commonconsts.MainContainerName), corev1.EnvVar{Name: allocationEnvVar, Value: allocation})
+	conductor := common.FindContainerByName(conductorPodSpec.Containers, commonconsts.MainContainerName)
+	prependEnv(conductor, corev1.EnvVar{Name: allocationEnvVar, Value: allocation})
+	environment.Bind(conductor.Name, "operator.lpx.allocation", conductor.Env[:1])
 }
 
 // applyModelPaths resolves nonempty canonical projections and rewrites each container's Env in place.
-func applyModelPaths(containerLists [][]corev1.Container, projections []*ModelProjection, modelStoragePath string) error {
+func applyModelPaths(containerLists [][]corev1.Container, projections []*ModelProjection, modelStoragePath string) ([]corev1.EnvVar, error) {
 	// Single-model workloads publish one path; speculative workloads publish the first draft and final target.
 	type modelPathBinding struct {
 		name       string
@@ -67,7 +70,7 @@ func applyModelPaths(containerLists [][]corev1.Container, projections []*ModelPr
 		projection := binding.projection
 		path, err := projection.buildRuntimePath(modelStoragePath)
 		if err != nil {
-			return fmt.Errorf("resolve %s: %w", binding.name, err)
+			return nil, fmt.Errorf("resolve %s: %w", binding.name, err)
 		}
 		paths = append(paths, corev1.EnvVar{Name: binding.name, Value: path})
 	}
@@ -78,6 +81,5 @@ func applyModelPaths(containerLists [][]corev1.Container, projections []*ModelPr
 			prependEnv(&containers[i], paths...)
 		}
 	}
-
-	return nil
+	return paths, nil
 }

@@ -169,7 +169,7 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
 
 <ParamField path="env" type="[]core/v1.EnvVar">
   General environment defaults for each component's regular `main` container and declared `runtime`
-  init container. Container-specific definitions take precedence. For operator origins 1.7.0 and
+  init container. Container-specific definitions take precedence. For operator origins 1.8.0 and
   later, list order is preserved within each source and references between sources are
   topologically ordered; cycles fail rendering. Generated DCDs preserve this list separately in
   their own `spec.env`. Older or missing origins retain legacy sorted composition.

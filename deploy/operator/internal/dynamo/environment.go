@@ -6,9 +6,10 @@
 package dynamo
 
 import (
-	"fmt"
 	"slices"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	corev1 "k8s.io/api/core/v1"
@@ -17,16 +18,18 @@ import (
 // podEnvironment retains source layers through backend, GMS and failover
 // transformations. A nil collector selects the unchanged legacy render path.
 type podEnvironment struct {
-	general    []corev1.EnvVar
-	containers map[string][]semanticenv.Layer
-	overrides  []map[string]semanticenv.Layer
+	general        []corev1.EnvVar
+	containers     semanticenv.ContainerLayers
+	overrides      []map[string]semanticenv.Layer
+	policyRuntime  string
+	policyAuthored *semanticenv.Layer
 }
 
 func newPodEnvironment(annotations map[string]string, general []corev1.EnvVar) *podEnvironment {
 	if !compatibility.OrderedEnvironmentVariables.Enabled(annotations) {
 		return nil
 	}
-	return &podEnvironment{general: general, containers: make(map[string][]semanticenv.Layer)}
+	return &podEnvironment{general: general, containers: make(semanticenv.ContainerLayers)}
 }
 
 func (p *podEnvironment) register(name, source string, defaults, general, authored []corev1.EnvVar) {
@@ -36,13 +39,67 @@ func (p *podEnvironment) register(name, source string, defaults, general, author
 	p.containers[name] = []semanticenv.Layer{
 		{Source: "operator.defaults." + name, Env: defaults},
 		{Source: "spec.env", Env: general},
-		{Source: source, Env: authored},
+		{Source: source, Env: slices.Clone(authored)},
+	}
+
+	// Only the compiled policy's runtime omits graph-level policy inputs.
+	if name == p.policyRuntime {
+		p.containers[name][1] = p.containers[name][1].Without(workerKvTransferPolicyEnvNames...)
+		var bindings []corev1.EnvVar
+		for _, value := range authored {
+			if slices.Contains(workerKvTransferPolicyEnvNames, value.Name) {
+				bindings = append(bindings, value)
+			}
+		}
+		original := *p.policyAuthored
+		original.Source = source
+		p.containers[name] = append(p.containers[name][:2],
+			semanticenv.Layer{Source: "operator.kvTransferPolicy", Env: bindings}, original)
 	}
 	for _, overrides := range p.overrides {
 		if layer, exists := overrides[name]; exists {
 			p.containers[name] = append(p.containers[name], layer)
 		}
 	}
+}
+
+// DCDHasKVTransferPolicy recognizes a graph-compiled policy from its existing
+// topology-source snapshot, not from standalone DCD topology annotations.
+// dcd must not be nil.
+func DCDHasKVTransferPolicy(dcd *v1beta1.DynamoComponentDeployment) bool {
+	return dcd.GetParentGraphDeploymentName() != "" &&
+		(dcd.Annotations[commonconsts.KubeAnnotationTopologyLabelKey] != "" ||
+			dcd.Annotations[commonconsts.KubeAnnotationTopologyClusterTopologyName] != "")
+}
+
+// ownKVTransferPolicy scopes graph-default removal to the container publishing
+// the compiled policy. Compute-only roles have no such runtime container.
+func (p *podEnvironment) ownKVTransferPolicy(component *v1beta1.DynamoComponentDeploymentSharedSpec, nativeSidecar bool) {
+	if p == nil {
+		return
+	}
+	if GetDynamoSidecar(component) != nil {
+		p.policyRuntime = commonconsts.RuntimeContainerName
+	} else if !nativeSidecar {
+		p.policyRuntime = commonconsts.MainContainerName
+	} else {
+		return
+	}
+	layer := AuthoredRuntimeEnvironment(component).Without(workerKvTransferPolicyEnvNames...)
+	p.policyAuthored = &layer
+}
+
+// AuthoredRuntimeEnvironment captures the selected runtime's source before
+// graph defaults or compiled policy values are inserted. component must not be nil.
+func AuthoredRuntimeEnvironment(component *v1beta1.DynamoComponentDeploymentSharedSpec) semanticenv.Layer {
+	runtime := GetDynamoSidecar(component)
+	if runtime == nil {
+		runtime = GetMainContainer(component)
+	}
+	if runtime == nil {
+		return semanticenv.Layer{}
+	}
+	return semanticenv.Layer{Env: runtime.Env}
 }
 
 func (p *podEnvironment) appendDefaults(name string, values []corev1.EnvVar) {
@@ -62,8 +119,8 @@ func (p *podEnvironment) staged(name string) []corev1.EnvVar {
 }
 
 func (p *podEnvironment) bind(name, source string, values []corev1.EnvVar) {
-	if p != nil && len(values) > 0 {
-		p.containers[name] = append(p.containers[name], semanticenv.Layer{Source: source, Env: values})
+	if p != nil {
+		p.containers.Bind(name, source, values)
 	}
 }
 
@@ -71,40 +128,36 @@ func (p *podEnvironment) clone(from, to string, omitted []string) {
 	if p == nil {
 		return
 	}
-	for _, layer := range p.containers[from] {
-		p.containers[to] = append(p.containers[to], layer.Without(omitted...))
-	}
+	p.containers.Clone(from, to, omitted)
 }
 
 func (p *podEnvironment) omit(name string, omitted ...string) {
 	if p == nil {
 		return
 	}
-	for i, layer := range p.containers[name] {
-		p.containers[name][i] = layer.Without(omitted...)
-	}
+	p.containers.Omit(name, omitted...)
 }
 
-// apply finalizes all registered containers. pod must not be nil. A nil
-// collector leaves the complete legacy rendering unchanged.
-func (p *podEnvironment) apply(pod *corev1.PodSpec) error {
+// capture registers remaining authored containers before provider mutations.
+// pod must not be nil. A nil collector selects legacy rendering.
+func (p *podEnvironment) capture(pod *corev1.PodSpec) semanticenv.ContainerLayers {
 	if p == nil {
 		return nil
 	}
 	for _, containers := range [][]corev1.Container{pod.Containers, pod.InitContainers} {
 		for i := range containers {
 			container := &containers[i]
-			layers, registered := p.containers[container.Name]
+			_, registered := p.containers[container.Name]
 			if !registered {
 				p.register(container.Name, "podTemplate.containers[name="+container.Name+"].env", nil, nil, container.Env)
-				layers = p.containers[container.Name]
 			}
-			env, err := semanticenv.Compose(layers...)
-			if err != nil {
-				return fmt.Errorf("container %q: %w", container.Name, err)
-			}
-			container.Env = env
 		}
 	}
-	return nil
+	return p.containers
+}
+
+// apply finalizes containers when there are no remaining provider mutations.
+// pod must not be nil. A nil collector leaves legacy rendering unchanged.
+func (p *podEnvironment) apply(pod *corev1.PodSpec) error {
+	return p.capture(pod).Apply(pod)
 }

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -549,6 +550,49 @@ func TestDiscoveryUsesPreservedServiceAnnotationsAndHubEnvironment(t *testing.T)
 	}}}}
 	if supported, err := supportsPodDiscovery(&hub, configv1alpha1.DiscoveryBackendKubernetes); err != nil || !supported {
 		t.Fatalf("hub PodTemplate did not override preserved alpha settings: supported=%t err=%v", supported, err)
+	}
+}
+
+func TestDiscoveryUsesEffectiveLayeredDefinitions(t *testing.T) {
+	for _, origin := range []string{"1.8.0", "1.7.0", "1.6.0", ""} {
+		for _, runtimeSidecar := range []bool{false, true} {
+			for _, sourcedOverride := range []bool{false, true} {
+				t.Run(fmt.Sprintf("origin=%s/runtime=%t/sourced=%t", origin, runtimeSidecar, sourcedOverride), func(t *testing.T) {
+					t.Log("A container definition replaces a graph-level valueFrom before discovery is inspected")
+					sourced := &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+						Name: "discovery", Key: "value",
+					}}
+					runtime := corev1.Container{Name: "main", Image: "engine:test", Env: []corev1.EnvVar{
+						{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
+						{Name: "DYN_KUBE_DISCOVERY_MODE", Value: "pod"},
+					}}
+					if sourcedOverride {
+						runtime.Env[1] = corev1.EnvVar{Name: "DYN_KUBE_DISCOVERY_MODE", ValueFrom: sourced.DeepCopy()}
+					}
+					pod := &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{runtime}}}
+					if runtimeSidecar {
+						runtime.Name = "runtime"
+						policy := corev1.ContainerRestartPolicyAlways
+						runtime.RestartPolicy = &policy
+						pod.Spec.Containers = []corev1.Container{{Name: "main", Image: "engine:test"}}
+						pod.Spec.InitContainers = []corev1.Container{runtime}
+					}
+					dgd := &v1beta1.DynamoGraphDeployment{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin},
+						Spec: v1beta1.DynamoGraphDeploymentSpec{
+							Env: []corev1.EnvVar{
+								{Name: commonconsts.DynamoDiscoveryBackendEnvVar, ValueFrom: sourced.DeepCopy()},
+								{Name: "DYN_KUBE_DISCOVERY_MODE", ValueFrom: sourced.DeepCopy()},
+							},
+							Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker, PodTemplate: pod}},
+						},
+					}
+					supported, err := supportsPodDiscovery(dgd, configv1alpha1.DiscoveryBackendKubernetes)
+					if err != nil || supported == sourcedOverride {
+						t.Fatalf("supported=%t, err=%v; want supported=%t", supported, err, !sourcedOverride)
+					}
+				})
+			}
+		}
 	}
 }
 

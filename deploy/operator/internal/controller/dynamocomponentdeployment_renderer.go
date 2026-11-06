@@ -32,6 +32,7 @@ import (
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -140,6 +141,16 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 			dgd,
 			effective,
 		)
+		environmentOptions := dynamo.GenerateBasePodSpecOptions{GeneralEnvironment: dgd.Spec.Env,
+			KVTransferPolicy: podAnnotations[commonconsts.KubeAnnotationTopologyLabelKey] != "" || podAnnotations[commonconsts.KubeAnnotationTopologyClusterTopologyName] != ""}
+		if environmentOptions.KVTransferPolicy && compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations) {
+			raw, err := dynamo.EffectiveComponentForRole(dgd.GetComponentByName(componentName), role)
+			if err != nil {
+				return nil, nil, err
+			}
+			layer := dynamo.AuthoredRuntimeEnvironment(raw)
+			environmentOptions.PolicyAuthored = &layer
+		}
 		podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dgd.Name
 		podLabels[commonconsts.KubeLabelDynamoComponent] = componentName
 		podLabels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
@@ -175,7 +186,7 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 			podLabels,
 			checkpointInfo,
 			containerGPUs,
-			dgd.Spec.Env,
+			environmentOptions,
 		)
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "failed to generate %s pod template", role)
@@ -201,7 +212,7 @@ func (r *dcdWorkloadRenderer) generateComponentRolePodTemplateSpec(
 	labels map[string]string,
 	checkpointInfo *checkpoint.CheckpointInfo,
 	containerGPUs dynamo.ContainerGPUCount,
-	generalEnvironment []corev1.EnvVar,
+	environmentOptions dynamo.GenerateBasePodSpecOptions,
 ) (*corev1.PodTemplateSpec, error) {
 	podTemplate, err := r.generateComponentPodTemplateSpec(
 		ctx,
@@ -218,7 +229,7 @@ func (r *dcdWorkloadRenderer) generateComponentRolePodTemplateSpec(
 		role,
 		checkpointInfo,
 		containerGPUs,
-		generalEnvironment,
+		environmentOptions,
 	)
 	if err != nil {
 		return nil, err
@@ -369,7 +380,8 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		role,
 		checkpointInfo,
 		containerGPUs,
-		dcd.Spec.Env,
+		dynamo.GenerateBasePodSpecOptions{GeneralEnvironment: dcd.Spec.Env,
+			KVTransferPolicy: dynamo.DCDHasKVTransferPolicy(dcd)},
 	)
 }
 
@@ -388,7 +400,7 @@ func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(
 	role dynamo.Role,
 	checkpointInfo *checkpoint.CheckpointInfo,
 	containerGPUs dynamo.ContainerGPUCount,
-	generalEnvironment []corev1.EnvVar,
+	environmentOptions dynamo.GenerateBasePodSpecOptions,
 ) (*corev1.PodTemplateSpec, error) {
 	component = component.DeepCopy()
 	if componentType != "" {
@@ -424,7 +436,7 @@ func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(
 		componentName,
 		nil,
 		containerGPUs,
-		generalEnvironment...,
+		environmentOptions,
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate base pod spec")
