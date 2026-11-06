@@ -431,15 +431,6 @@ impl Indexer {
         Ok(())
     }
 
-    /// Admit one event with backpressure: a `Cleared` event completes only once
-    /// every local tier has applied it (a completion barrier for recovery), a
-    /// device event waits for the primary's queue to accept it, and a lower-tier
-    /// event is enqueued. Unlike [`Self::apply_event_routed`], the first failure
-    /// stops the fan-out.
-    /// Recurrent-group events never enter the attention tree: they are
-    /// per-position state presence. Returns true when the event was consumed
-    /// here. An untagged clear also forgets the rank's recurrent presence and
-    /// then continues to the tier indexes.
     pub fn declare_recurrent_groups(&self, worker: WorkerWithDpRank, groups: &[u32]) {
         if let Self::Single { lower_tier, .. } | Self::Concurrent { lower_tier, .. } = self {
             lower_tier
@@ -463,6 +454,7 @@ impl Indexer {
         }
     }
 
+    /// Consume recurrent events separately; untagged clears invalidate both indexes.
     fn apply_group_residency(&self, event: &RouterEvent) -> bool {
         let (Self::Single { lower_tier, .. } | Self::Concurrent { lower_tier, .. }) = self else {
             return false;
@@ -476,6 +468,11 @@ impl Indexer {
         false
     }
 
+    /// Admit one event with backpressure: a `Cleared` event completes only once
+    /// every local tier has applied it (a completion barrier for recovery), a
+    /// device event waits for the primary's queue to accept it, and a lower-tier
+    /// event is enqueued. Unlike [`Self::apply_event_routed`], the first failure
+    /// stops the fan-out.
     pub async fn try_apply_event(&self, event: RouterEvent) -> Result<(), KvRouterError> {
         if self.apply_group_residency(&event) {
             return Ok(());
