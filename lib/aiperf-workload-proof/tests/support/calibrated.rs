@@ -1047,6 +1047,26 @@ pub(crate) fn calibrated_control() -> Result<()> {
     let run = native_run(&run_fixture::branch_request(directory.path()), &model)
         .context("native strict run with the configured model identity")?;
     let (report, hosted) = host(&run, &prefill, &decode).context("calibrated native proof")?;
+    println!(
+        "CALIBRATED_CONTROL_RECORDS {}",
+        serde_json::to_string(&report.per_request)?
+    );
+    println!(
+        "CALIBRATED_CONTROL_TYPED_MILESTONES {:?}",
+        report
+            .per_request
+            .iter()
+            .map(|row| (
+                &row.uuid,
+                row.prefill_complete_ms,
+                row.source_held_ms,
+                row.destination_reserved_ms,
+                row.destination_activated_ms,
+                row.decode_admit_ms,
+                row.source_released_ms,
+            ))
+            .collect::<Vec<_>>()
+    );
     assert_calibrated_branch(&report, &hosted, &prefill);
 
     let mut ttfts: Vec<f64> = per_request_records(&report)
