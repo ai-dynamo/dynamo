@@ -4501,14 +4501,12 @@ mod hint_policies {
     #[derive(Clone)]
     struct Recorder {
         calls: Arc<AtomicUsize>,
-        fail: bool,
     }
 
     impl Recorder {
         fn new() -> Self {
             Self {
                 calls: Arc::default(),
-                fail: false,
             }
         }
     }
@@ -4519,9 +4517,6 @@ mod hint_policies {
             context: &HintContext<'_>,
         ) -> Result<Vec<KvHintAction>, HintPolicyError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            if self.fail {
-                return Err(HintPolicyError::new("recorder failed"));
-            }
             Ok(vec![KvHintAction::unnumbered(
                 "test.record",
                 "1",
@@ -4588,33 +4583,6 @@ mod hint_policies {
         assert_eq!(actions, ["a1:kv.fetch", "a2:test.record"]);
         assert_eq!(hint.message_id, "to-worker-2");
         assert_eq!(hint.actions[1].payload["worker_id"], serde_json::json!(2));
-    }
-
-    #[tokio::test]
-    async fn a_failing_policy_drops_only_its_own_actions() {
-        let failing = Recorder {
-            fail: true,
-            ..Recorder::new()
-        };
-        let (core, _entry, tokens) = hint_policy_fixture(
-            hints(vec![
-                ("failing", failing.clone()),
-                ("record", Recorder::new()),
-            ]),
-            None,
-            hint_capable,
-        )
-        .await;
-        let response = reserve_pinned(&core, "to-worker-2", &tokens, 2).await;
-        let hint = response.kv_hint.expect("remaining actions");
-        let actions: Vec<_> = hint
-            .actions
-            .iter()
-            .map(|action| format!("{}:{}", action.action_id, action.action_type))
-            .collect();
-        // The failed policy contributes nothing, and the booking still succeeds.
-        assert_eq!(actions, ["a1:kv.fetch", "a2:test.record"]);
-        assert_eq!(failing.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

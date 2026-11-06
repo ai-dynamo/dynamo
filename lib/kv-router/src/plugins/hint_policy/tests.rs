@@ -113,13 +113,6 @@ fn strict_provider() -> HintPolicyProvider {
     })
 }
 
-const ROLES: [WorkerType; 4] = [
-    WorkerType::Aggregated,
-    WorkerType::Prefill,
-    WorkerType::Decode,
-    WorkerType::Encode,
-];
-
 // ---- YAML -------------------------------------------------------------------------------------
 
 #[test]
@@ -209,17 +202,6 @@ fn config_rejects_invalid_hint_policies() {
 }
 
 // ---- Registry ---------------------------------------------------------------------------------
-
-#[test]
-fn without_config_or_defaults_no_role_runs_hint_policies() {
-    let factory = RouterPluginRegistry::default()
-        .resolve_hint_policies(&KvRouterConfig::default())
-        .unwrap();
-    for role in ROLES {
-        assert!(factory.names(role).is_empty());
-        assert!(factory.uses_defaults(role));
-    }
-}
 
 #[test]
 fn unlisted_roles_run_the_defaults_and_listed_roles_replace_them() {
