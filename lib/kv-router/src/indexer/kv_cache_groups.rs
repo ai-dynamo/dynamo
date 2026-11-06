@@ -91,7 +91,11 @@ impl<'a> CheckpointMembershipView<'a> {
     /// Sorted nonempty generation words for this tier. Disjoint generation sets
     /// rule out an eligible owner; an intersection still requires exact owner
     /// and captured-generation validation. The range is found only on demand.
-    pub fn generation_words(&self) -> impl ExactSizeIterator<Item = (u64, u64)> + '_ {
+    /// The returned slice-backed iterator supports O(1) cloning, front/back
+    /// access and `nth`, so callers can skip sparse ranges without scanning.
+    pub fn generation_words(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (u64, u64)> + DoubleEndedIterator + Clone + '_ {
         let tier_start = (self.tier_index as u64) << GENERATION_TIER_SHIFT;
         let start = self
             .generation_words
@@ -1264,6 +1268,49 @@ mod tests {
         assert_generation_words_match_facts(&membership);
         assert!(membership.is_empty());
         assert!(membership.generation_words.is_empty());
+    }
+
+    #[test]
+    fn scoped_generation_words_support_indexed_and_reverse_sparse_range_access() {
+        let table = KvCacheGroupResidency::new();
+        let hash = ExternalSequenceBlockHash(11);
+        let words = [0, 15, 16, 47, 48, GENERATION_WORD_MASK];
+        // Use distinct owners for each sparse word, with identical membership
+        // on two tiers and empty membership between them.
+        for (index, &word) in words.iter().enumerate() {
+            table.memberships.publish(
+                ResidencyOwner::worker(WorkerWithDpRank::new(index as u64 + 8, 0)),
+                vec![(hash.0, word << 6, 0b0101)],
+            );
+        }
+        let view = table.read_view();
+        let revision = view
+            .checkpoint_hint_revision(hash, StorageTier::Device)
+            .unwrap();
+        for tier in [StorageTier::Device, StorageTier::Disk] {
+            view.with_membership_at_revision(hash, tier, revision, |membership| {
+                let indexed = membership.generation_words();
+                assert_eq!(indexed.len(), words.len());
+                assert_eq!(indexed.clone().next(), Some((0, 1)));
+                assert_eq!(indexed.clone().next_back(), Some((GENERATION_WORD_MASK, 1)));
+                for (index, &word) in words.iter().enumerate() {
+                    assert_eq!(indexed.clone().nth(index), Some((word, 1)));
+                    assert_eq!(
+                        indexed.clone().nth_back(words.len() - index - 1),
+                        Some((word, 1))
+                    );
+                }
+                assert_eq!(indexed.clone().nth(words.len()), None);
+                assert_eq!(indexed.clone().nth(usize::MAX), None);
+                assert_eq!(indexed.len(), words.len());
+            });
+        }
+        view.with_membership_at_revision(hash, StorageTier::HostPinned, revision, |membership| {
+            let indexed = membership.generation_words();
+            assert_eq!(indexed.len(), 0);
+            assert_eq!(indexed.clone().next_back(), None);
+            assert_eq!(indexed.clone().nth(indexed.len()), None);
+        });
     }
 
     #[test]
