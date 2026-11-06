@@ -1008,8 +1008,6 @@ fn write_raw_backend_artifact(
             "no typed Dynamo topology, clock, capacity, or parity facts are supplied; this raw artifact does not claim full Dynamo parity",
             "the full pinned corpus remains unfiltered; long-context overflow is backend-owned and is judged by the normal submission verdict",
         ],
-        "backend_report": backend,
-        "typed_phase_report": &typed.phased,
         "prepared_roots": typed.prepared_roots,
         "virtual_end_ns": typed.virtual_end_ns,
         "prefill": {
@@ -1027,12 +1025,33 @@ fn write_raw_backend_artifact(
             "model_config": &decode.model_config,
         },
     });
+    // Serialize borrowed large reports straight to the artifact. Building a
+    // serde_json::Value and a second pretty-printed Vec duplicates every
+    // per-request observation at full-scenario scale.
+    #[derive(serde::Serialize)]
+    struct RawArtifact<'a, T: serde::Serialize> {
+        #[serde(flatten)]
+        provenance: &'a Value,
+        backend_report: &'a ReplayReport,
+        typed_phase_report: &'a T,
+    }
     let path = artifact_dir.join(RAW_BACKEND_ARTIFACT);
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&artifact).context("raw native backend artifact")?,
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .with_context(|| format!("creating raw native backend artifact {}", path.display()))?;
+    let mut writer = std::io::BufWriter::new(file);
+    serde_json::to_writer_pretty(
+        &mut writer,
+        &RawArtifact {
+            provenance: &artifact,
+            backend_report: backend,
+            typed_phase_report: &typed.phased,
+        },
     )
-    .with_context(|| format!("writing raw native backend artifact {}", path.display()))?;
+    .context("streaming raw native backend artifact")?;
+    std::io::Write::flush(&mut writer).context("flushing raw native backend artifact")?;
     Ok(())
 }
 
