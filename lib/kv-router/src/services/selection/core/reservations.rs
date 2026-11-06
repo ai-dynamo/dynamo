@@ -5,9 +5,8 @@
 //! `create_reservation` replay path, and the lifecycle calls that advance or
 //! release them.
 
-use super::hint::compose_kv_hint;
 use super::*;
-use crate::plugins::hint_policy::runtime::ActionInputs;
+use crate::plugins::hint_policy::runtime::{ActionInputs, compose_kv_hint};
 use crate::scheduling::queue::BookingHandle;
 use std::sync::atomic::{AtomicU64, Ordering};
 

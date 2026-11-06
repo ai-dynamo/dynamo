@@ -10,6 +10,7 @@ mod hosted;
 mod policy;
 #[cfg(any(test, feature = "bench"))]
 mod reference;
+mod rows;
 
 pub use hosted::{HostedSelectionRequest, HostedWorkerPicker};
 
@@ -28,12 +29,9 @@ use crate::kv_hints::{
     KvTransferScope, KvTransferSourceChoice, KvTransferSourceSummary, KvTransferTarget,
 };
 use crate::plugins::worker_selection::{
-    CacheSnapshot, CandidateData, WorkerCacheData, WorkerCapacity, WorkerInfo, WorkerInputRows,
-    WorkerTransferInput,
-};
-use crate::plugins::worker_selection::{
     RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
+use crate::plugins::worker_selection::{WorkerCapacity, WorkerInfo, WorkerTransferInput};
 pub use policy::WorkerSelectionPolicy;
 pub(crate) use policy::{CandidatePreparer, PreparedCandidates};
 use policy::{
@@ -42,6 +40,7 @@ use policy::{
 };
 #[cfg(any(test, feature = "bench"))]
 use reference::pick_default_worker;
+pub(crate) use rows::{CacheSnapshot, CandidateData, WorkerCacheData, WorkerInputRows};
 
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{

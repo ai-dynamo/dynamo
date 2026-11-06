@@ -43,8 +43,10 @@
 //!   `dropped_book_selection_during_routing_record_frees_booking_and_claim`).
 
 use super::super::affinity::{SessionAffinityMode, validate_dispatch_target};
-use super::hint::{KV_HINT_FETCH_ACTION_ID, compose_kv_hint, transfer_hint_payload};
-use crate::plugins::hint_policy::runtime::ActionInputs;
+use super::hint::transfer_hint_payload;
+use crate::plugins::hint_policy::runtime::{
+    ActionInputs, KV_HINT_FETCH_ACTION_ID, compose_kv_hint,
+};
 
 /// `try_acquire` then `join_initializing` attempts before a commit that finds
 /// the session initializing routes unpinned (see the module doc).

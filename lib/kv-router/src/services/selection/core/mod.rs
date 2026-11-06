@@ -22,9 +22,10 @@ use crate::indexer::{
     LowerTierQueryOptions, RoutingDecisionHashes, SharedKvCache, TieredMatchDetails,
 };
 use crate::kv_hints::{
-    KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource, KvTransferCandidates,
+    KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource, KvTransferCandidates,
 };
 use crate::plugins::hint_policy::HintPolicyFactory;
+use crate::plugins::hint_policy::runtime::HintPolicySlot;
 use crate::plugins::worker_selection::WorkerInputs;
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
@@ -63,7 +64,6 @@ mod run;
 mod tests;
 mod workers;
 
-use hint::HintPolicySlot;
 use reservations::ReservationIndex;
 
 pub use operation::{

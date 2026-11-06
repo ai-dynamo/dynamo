@@ -23,14 +23,14 @@ use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 
-use crate::plugins::worker_selection::{
-    CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCandidate,
-    WorkerCandidates, WorkerFilter, WorkerInfo, WorkerInputs, WorkerLoadInput, WorkerPicker,
-    WorkerScorer, WorkerSelectionContext,
-};
+use super::{CacheSnapshot, CandidateData, WorkerCacheData};
 use crate::plugins::worker_selection::{
     RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyState,
     RuntimePolicyUpdate,
+};
+use crate::plugins::worker_selection::{
+    ScoredWorkerCandidate, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInfo,
+    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
 };
 
 #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]

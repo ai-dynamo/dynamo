@@ -30,7 +30,8 @@ use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
 use super::request_classifier::ClassificationOverrides;
 use super::selector::{
-    CandidatePreparer, PreparedCandidates, WorkerSelectionInput, WorkerSelector, worker_input_rows,
+    CandidatePreparer, PreparedCandidates, WorkerInputRows, WorkerSelectionInput, WorkerSelector,
+    worker_input_rows,
 };
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, KvSchedulerError,
@@ -41,9 +42,7 @@ use crate::plugins::request_classifier::ClassifyRequest;
 use crate::plugins::worker_selection::{
     RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
-use crate::plugins::worker_selection::{
-    WorkerCapacity, WorkerInputRows, WorkerInputs, WorkerLoadInput,
-};
+use crate::plugins::worker_selection::{WorkerCapacity, WorkerInputs, WorkerLoadInput};
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, SelectionTrace, SelectionTraceSpec, WorkerConfigLike,
     WorkerId, WorkerSelectionResult, WorkerWithDpRank,

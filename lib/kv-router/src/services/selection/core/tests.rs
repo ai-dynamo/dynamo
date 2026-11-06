@@ -4666,9 +4666,12 @@ mod hint_policies {
         }
     }
 
-    fn slot<P: HintPolicy>(name: &str, policy: P) -> super::super::hint::HintPolicySlot {
+    fn slot<P: HintPolicy>(
+        name: &str,
+        policy: P,
+    ) -> crate::plugins::hint_policy::runtime::HintPolicySlot {
         let (name, policy) = HintPolicyInstance::new(name, policy).into_parts();
-        super::super::hint::HintPolicySlot {
+        crate::plugins::hint_policy::runtime::HintPolicySlot {
             name,
             policy: policy.expect("the policy runs at booking"),
         }
@@ -4697,8 +4700,12 @@ mod hint_policies {
             // Would overflow the limit, so it is dropped whole.
             slot("record", Recorder::new("record")),
         ];
-        let hint = super::super::hint::compose_kv_hint(&policies, &inputs, Some(router_fetch))
-            .expect("composed hint");
+        let hint = crate::plugins::hint_policy::runtime::compose_kv_hint(
+            &policies,
+            &inputs,
+            Some(router_fetch),
+        )
+        .expect("composed hint");
         assert_eq!(hint.actions.len(), 32);
         assert_eq!(hint.actions[0].action_id, "a1");
         assert_eq!(hint.actions[0].action_type, "kv.fetch");

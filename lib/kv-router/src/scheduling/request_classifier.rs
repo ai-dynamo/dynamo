@@ -16,8 +16,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::types::KvSchedulerError;
-use crate::plugins::worker_selection::{WorkerInputRows, WorkerInputs};
+use crate::plugins::worker_selection::WorkerInputs;
 use crate::protocols::WorkerWithDpRank;
+use crate::scheduling::selector::WorkerInputRows;
 
 static NEXT_CLASSIFICATION_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_LIFECYCLE_GENERATION: AtomicU64 = AtomicU64::new(1);
