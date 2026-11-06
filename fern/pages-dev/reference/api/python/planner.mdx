@@ -1098,7 +1098,7 @@ get_actual_worker_counts(prefill_component_name: Optional[str] = None, decode_co
 
 Get worker counts without blocking the Planner event loop.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L1049)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L1072)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-power-aware-worker-counts">get_power_aware_worker_counts</h4>
 
@@ -1112,7 +1112,7 @@ One thread dispatch contains the synchronous DGD GET and the single
 DGD-scoped Pod LIST. The returned Pod snapshot is partitioned locally by
 component before terminating-Pod checks run.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L1074)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L1097)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-set-component-replicas">set_component_replicas</h4>
 
@@ -1122,7 +1122,7 @@ set_component_replicas(target_replicas: list[TargetReplica], blocking: bool = Tr
 
 Set the replicas for multiple components at once
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L1187)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L1210)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-acquire-batch-writer-fence">acquire_batch_writer_fence</h4>
 
@@ -1138,7 +1138,7 @@ old process. This CAS annotation then orders any Scale PATCH already
 fetched by that old process: it either commits before the fence (and is
 visible to the refresh below) or conflicts afterward.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L1435)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L1458)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-errors-modelnamenotfounderror" title="ModelNameNotFoundError (class)">
