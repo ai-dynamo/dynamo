@@ -238,6 +238,12 @@ inherits = "release"
 debug = true
 strip = false
 
-# Release-only AISim 0.14.0 RC0 source pin for Dynamo 1.7.0.
+# Release-only AISim 0.14.0 RC1 source pin for Dynamo 1.7.0.
 [patch.crates-io]
-aisim-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "74dcdfcde184070d39e813ba24424b32e9627f00" }
+aisim-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "a420a6d8b26c767b250a145136f8732d75925069" }
+
+# Publication uses the indexed RC matching the normal Git source pin above.
+[workspace.metadata.artifactory.dependencies.aisim-core]
+version = "=0.14.0-rc.1"
+registry = "aisim"
+git-rev = "a420a6d8b26c767b250a145136f8732d75925069"
