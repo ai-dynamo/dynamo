@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -85,6 +86,11 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 		}
 		return ctrl.Result{}, err
 	}
+	// Ensure GVK is set which is required for unstructured SSA
+	gvks, _, err := r.Scheme.ObjectKinds(dgd)
+	if err == nil && len(gvks) == 1 {
+		dgd.SetGroupVersionKind(gvks[0])
+	}
 
 	// 3. Find the target component in the DGD's components list.
 	componentName := adapter.Spec.DGDRef.ComponentName
@@ -111,13 +117,38 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 
 	// 4. Update DGD if replicas changed (DGDSA is the source of truth)
 	if currentReplicas != adapter.Spec.Replicas {
-		// Update the component's replicas in DGD.
-		component.Replicas = &adapter.Spec.Replicas
+		// Use server-side apply to update only the target component's replicas.
+		// This avoids racing with the DGD controller's Status().Update and provides
+		// field-level ownership semantics. The field manager name identifies this
+		// controller as the owner of the specific component's replicas field.
+		apply := &unstructured.Unstructured{
+			Object: map[string]any{
+				"metadata": map[string]any{
+					"name":      dgd.GetName(),
+					"namespace": dgd.GetNamespace(),
+					"uid":       dgd.GetUID(),
+				},
+				"spec": map[string]any{
+					"components": []any{
+						map[string]any{
+							"name":     componentName,
+							"replicas": adapter.Spec.Replicas,
+						},
+					},
+				},
+			},
+		}
+		apply.SetGroupVersionKind(dgd.GroupVersionKind())
 
-		if err := r.Update(ctx, dgd); err != nil {
-			logger.Error(err, "Failed to update DGD")
-			r.Recorder.Eventf(adapter, dgd, corev1.EventTypeWarning, "UpdateFailed", "Update",
-				"Failed to update DGD %s: %v", dgd.Name, err)
+		if err := r.Apply(
+			ctx,
+			client.ApplyConfigurationFromUnstructured(apply),
+			client.FieldOwner("dynamo-operator-dgdsa"),
+			client.ForceOwnership,
+		); err != nil {
+			logger.Error(err, "Failed to apply DGD update")
+			r.Recorder.Eventf(adapter, dgd, corev1.EventTypeWarning, "ApplyFailed", "Apply",
+				"Failed to apply DGD %s: %v", dgd.Name, err)
 			return ctrl.Result{}, err
 		}
 
