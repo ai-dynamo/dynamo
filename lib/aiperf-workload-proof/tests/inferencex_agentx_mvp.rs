@@ -1467,11 +1467,15 @@ fn calibrated_hosted_artifacts_reconcile_every_request() -> Result<()> {
     let (complete_backend, complete_typed) = host_typed(&run, &prefill, &decode, false)?;
     ensure!(
         serde_json::to_value(&backend)? == serde_json::to_value(&complete_backend)?,
-        "compact capture changed physical replay facts"
+        "compact capture changed physical replay facts: compact={} complete={}",
+        serde_json::to_string(&backend)?,
+        serde_json::to_string(&complete_backend)?
     );
     ensure!(
         serde_json::to_value(&typed.phased)? == serde_json::to_value(&complete_typed.phased)?,
-        "compact capture changed native phase results"
+        "compact capture changed native phase results: compact={} complete={}",
+        serde_json::to_string(&typed.phased)?,
+        serde_json::to_string(&complete_typed.phased)?
     );
     let compact_records: Vec<_> = typed
         .records
