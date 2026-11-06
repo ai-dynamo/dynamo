@@ -625,6 +625,31 @@ fn host_typed(
         )),
     )
     .context("shared native lowering hosts the production plans")?;
+    if run.cfg.scenario.as_deref() == Some(AGENTX_SCENARIO) {
+        let lanes = handle.initial_lanes();
+        let cuts = lanes.lanes.iter().map(|lane| {
+            let tree = handle.source_tree_specs().iter()
+                .find(|tree| tree.root == lane.root_id)
+                .context("initial lane must retain its canonical source tree")?;
+            let root_start = tree.recorded_intervals.iter()
+                .filter(|turn| turn.template_id == lane.root_id)
+                .filter_map(|turn| turn.timestamp_ms)
+                .min_by(f64::total_cmp)
+                .context("initial root must have a recorded source start")?;
+            Ok(json!({"source_trace_id": lane.root_id, "absolute_t_star_ms": lane.t_star_ms,
+                "recorded_root_start_ms": root_start, "relative_t_star_ms": lane.t_star_ms - root_start}))
+        }).collect::<Result<Vec<_>>>()?;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(run.artifact_dir.join("initial_snapshot_selections.json"))?;
+        serde_json::to_writer_pretty(
+            file,
+            &json!({"seed": SEED,
+            "sampler_draws": lanes.sampler_draws, "recycle_roots": lanes.recycle_roots,
+            "selections": cuts}),
+        )?;
+    }
     // Complete metric records and backend facts remain retained. Repeated
     // prompt bodies/token arrays and per-token diagnostic JSON are explicitly
     // omitted from dispatch evidence; counts and BLAKE3 witnesses name inputs.
@@ -1072,6 +1097,181 @@ fn create_new_artifact_dir(path: &Path) -> Result<PathBuf> {
     }
 }
 
+fn full_scenario_roles() -> Result<(calibrated::RoleSetup, calibrated::RoleSetup)> {
+    let systems = calibrated::systems_root()?;
+    let identity = calibrated::RoleIdentity {
+        model: MODEL,
+        systems: &systems,
+        hardware: calibrated::HardwareSelection::B200Sxm,
+        precision: calibrated::ProofPrecision::Fp8WeightsKvBfloat16Attention,
+        tensor_parallel_size: 8,
+        role: ForwardPassWorkerType::Prefill,
+        max_num_seqs: usize::try_from(CONCURRENCY)?,
+        prefill: calibrated::PrefillMode::Chunked {
+            max_num_batched_tokens: 4096,
+        },
+    };
+    Ok((
+        calibrated::canonical_role(identity)?,
+        calibrated::canonical_role(calibrated::RoleIdentity {
+            role: ForwardPassWorkerType::Decode,
+            ..identity
+        })?,
+    ))
+}
+
+/// Option-matched speed control over AISim's owning WEKA importer and native
+/// agentic driver, using the same physical factory and real KV-router as MVP.
+/// This is not an oracle or a replacement workload implementation.
+#[test]
+#[ignore = "requires matched snapshot artifact, complete WEKA corpus and canonical models"]
+fn canonical_weka_agentx_with_matched_options() -> Result<()> {
+    use aisimulate_core::replay::loadgen::{
+        AgenticProfileOptions, AgenticSnapshotOptions, AgenticSnapshotSelection,
+        AgenticWarmupPolicy, WekaClient, WekaImportOptions, WorkloadDriver,
+        load_weka_agentic_graph_with_options,
+    };
+    let started = std::time::Instant::now();
+    let artifact_path = mvp_artifact_path()?;
+    let (prefill, decode) = full_scenario_roles()?;
+    let corpus =
+        PathBuf::from(std::env::var_os("MVP_CORPUS_PATH").context("MVP_CORPUS_PATH required")?);
+    let cuts_file = PathBuf::from(
+        std::env::var_os("MVP_INITIAL_SELECTIONS").context("MVP_INITIAL_SELECTIONS required")?,
+    );
+    let cuts: Value = serde_json::from_slice(&std::fs::read(cuts_file)?)?;
+    let tree_idle_cap_seconds = 1e12; // Finite, beyond this profile: no per-tree cap in MVP.
+    let imported_at = std::time::Instant::now();
+    let graph = load_weka_agentic_graph_with_options(
+        &corpus,
+        None,
+        WekaImportOptions {
+            client: WekaClient::Agentx,
+            ..Default::default()
+        },
+    )?;
+    ensure!(
+        graph.play_count() == EXPECTED_PREPARED_ROOTS,
+        "official import must retain every source root"
+    );
+    let selections = cuts["selections"]
+        .as_array()
+        .context("source cuts")?
+        .iter()
+        .map(|cut| {
+            let trace = cut["source_trace_id"].as_str().context("source trace")?;
+            let suffix = format!(":play:{trace}");
+            let mut matches = graph
+                .nodes()
+                .iter()
+                .map(|node| node.play_id())
+                .filter(|id| id.ends_with(&suffix));
+            let play = matches.next().context("official source play missing")?;
+            ensure!(
+                matches.all(|id| id == play),
+                "ambiguous official source play"
+            );
+            Ok(AgenticSnapshotSelection {
+                source_play_id: play.into(),
+                t_star_ms: cut["relative_t_star_ms"]
+                    .as_f64()
+                    .context("relative source cut")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        selections.len() == CONCURRENCY as usize,
+        "one exact cut per lane required"
+    );
+    let prepared = graph.into_prepared_snapshots(
+        CONCURRENCY as usize,
+        AgenticSnapshotOptions {
+            seed: SEED,
+            initial_selections: Some(selections),
+            corpus_cursor: Some(
+                cuts["sampler_draws"]
+                    .as_u64()
+                    .context("initial sampler cursor")?,
+            ),
+        },
+    )?;
+    let mut driver = WorkloadDriver::new_agentic_warmup_with_policy(
+        prepared,
+        calibrated::BLOCK_SIZE,
+        true,
+        1.0,
+        AgenticWarmupPolicy::PrimersOnly,
+        SYSTEM_IDLE_SECONDS * 1000.0,
+    )?;
+    driver.enable_agentic_profile(AgenticProfileOptions {
+        duration_seconds: PROFILE_SECONDS,
+        response_grace_seconds: GRACE_PERIOD_SECONDS,
+        cancel_drain_seconds: 10.0,
+        tree_idle_cap_seconds,
+        global_idle_cap_seconds: SYSTEM_IDLE_SECONDS,
+    })?;
+    let prepared_at = std::time::Instant::now();
+    let composition = KvReplayComposition::disaggregated(
+        prefill.router.clone(),
+        decode.router.clone(),
+        calibrated::PREFILL_WORKERS,
+        calibrated::DECODE_WORKERS,
+        None,
+        None,
+        None,
+    );
+    let report = Replayer::with_composition(
+        calibrated::spec(&prefill, &decode)?,
+        ReplayEngineFactory::with_optional_role_timing_models(
+            Some(prefill.timing.clone()),
+            Some(decode.timing.clone()),
+        ),
+        composition,
+    )?
+    .with_runtime_input(ReplayRuntimeInput::Workload(driver))
+    .with_capture_options(ReplayCaptureOptions {
+        capture_per_request: true,
+        determinism: ReplayDeterminism::CanonicalV1,
+        ..Default::default()
+    })
+    .run()?;
+    let finished_at = std::time::Instant::now();
+    let dir = create_new_artifact_dir(&artifact_path)?;
+    #[derive(serde::Serialize)]
+    struct Evidence<'a> {
+        backend_report: &'a ReplayReport,
+        backend_requests: &'a [aisimulate_core::replay::PerRequestRecord],
+        options: Value,
+        host_seconds: Value,
+    }
+    let evidence = Evidence {
+        backend_report: &report,
+        backend_requests: &report.per_request,
+        options: json!({"client":"agentx","snapshot":"exact shared source cuts",
+            "warmup":"primers_only","lanes":CONCURRENCY,"duration_seconds":PROFILE_SECONDS,
+            "response_grace_seconds":GRACE_PERIOD_SECONDS,"tree_idle_cap_seconds":tree_idle_cap_seconds,
+            "global_idle_cap_seconds":SYSTEM_IDLE_SECONDS,"placement":"same real Dynamo KV composition",
+            "model":"same canonical timing/native geometry from full_scenario_roles",
+            "capture_per_request":true,"determinism":"canonical_v1",
+            "limitations":["native WEKA hash rekeying differs from shared first_turn_prefix representation",
+                "native driver and shared workload are independently owned semantics; matching options is not parity"]}),
+        host_seconds: json!({"model_construction":imported_at.duration_since(started).as_secs_f64(),
+            "source_import_and_prepare":prepared_at.duration_since(imported_at).as_secs_f64(),
+            "replay":finished_at.duration_since(prepared_at).as_secs_f64(),
+            "before_serialization":finished_at.duration_since(started).as_secs_f64()}),
+    };
+    serde_json::to_writer(
+        std::fs::File::create(dir.join("matched_canonical_weka.json"))?,
+        &evidence,
+    )?;
+    ensure!(
+        !report.per_request.is_empty(),
+        "comparison must execute requests"
+    );
+    println!("MATCHED_CANONICAL_WEKA {}", evidence.host_seconds);
+    Ok(())
+}
+
 #[test]
 #[ignore = "requires AISIM_SYSTEMS_ROOT and a new MVP_ARTIFACT_DIR; runs the full 1800s trace-hash scenario over the real Dynamo KV composition"]
 fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> {
@@ -1083,33 +1283,7 @@ fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> 
     assert_mvp_config(&run)?;
     let harness = executable_distribution_id()?;
 
-    let systems = calibrated::systems_root()?;
-    let prefill = calibrated::canonical_role(calibrated::RoleIdentity {
-        model: MODEL,
-        systems: &systems,
-        hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Fp8WeightsKvBfloat16Attention,
-        tensor_parallel_size: 8,
-        role: ForwardPassWorkerType::Prefill,
-        max_num_seqs: usize::try_from(CONCURRENCY)?,
-        prefill: calibrated::PrefillMode::Chunked {
-            max_num_batched_tokens: 4096,
-        },
-    })
-    .context("prefill canonical op-level timing and native geometry")?;
-    let decode = calibrated::canonical_role(calibrated::RoleIdentity {
-        model: MODEL,
-        systems: &systems,
-        hardware: calibrated::HardwareSelection::B200Sxm,
-        precision: calibrated::ProofPrecision::Fp8WeightsKvBfloat16Attention,
-        tensor_parallel_size: 8,
-        role: ForwardPassWorkerType::Decode,
-        max_num_seqs: usize::try_from(CONCURRENCY)?,
-        prefill: calibrated::PrefillMode::Chunked {
-            max_num_batched_tokens: 4096,
-        },
-    })
-    .context("decode canonical op-level timing and native geometry")?;
+    let (prefill, decode) = full_scenario_roles()?;
     for role in [&prefill, &decode] {
         ensure!(
             role.rank.max_model_len == Some(usize::try_from(MODEL_MAX_CONTEXT_TOKENS)?)
