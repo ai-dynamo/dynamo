@@ -104,9 +104,6 @@ func applyLocalPartitionIDs(container *corev1.Container, projection *ModelProjec
 		ids[index] = strconv.Itoa(id)
 	}
 
-	prependEnv(container, corev1.EnvVar{
-		Name:  localPartitionIDsEnv,
-		Value: strings.Join(ids, ","),
-	})
-	environment.Bind(container.Name, "operator.lpx.partitions", container.Env[:1])
+	// Publish the owned selection, including an empty value that clears envFrom defaults.
+	environment.Prepend(container, "operator.lpx.partitions", []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: strings.Join(ids, ",")}})
 }

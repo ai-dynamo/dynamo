@@ -32,7 +32,6 @@ import (
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -141,15 +140,9 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 			dgd,
 			effective,
 		)
-		environmentOptions := dynamo.GenerateBasePodSpecOptions{GeneralEnvironment: dgd.Spec.Env,
-			KVTransferPolicy: podAnnotations[commonconsts.KubeAnnotationTopologyLabelKey] != "" || podAnnotations[commonconsts.KubeAnnotationTopologyClusterTopologyName] != ""}
-		if environmentOptions.KVTransferPolicy && compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations) {
-			raw, err := dynamo.EffectiveComponentForRole(dgd.GetComponentByName(componentName), role)
-			if err != nil {
-				return nil, nil, err
-			}
-			layer := dynamo.AuthoredRuntimeEnvironment(raw)
-			environmentOptions.PolicyAuthored = &layer
+		environmentOptions := dynamo.GenerateBasePodSpecOptions{GeneralEnvironment: dgd.Spec.Env}
+		if podAnnotations[commonconsts.KubeAnnotationTopologyLabelKey] != "" || podAnnotations[commonconsts.KubeAnnotationTopologyClusterTopologyName] != "" {
+			environmentOptions.KVTransferPolicy = dynamo.KVTransferPolicyEnvironment(dgd.Spec.Experimental.KvTransferPolicy)
 		}
 		podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dgd.Name
 		podLabels[commonconsts.KubeLabelDynamoComponent] = componentName
@@ -381,7 +374,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		checkpointInfo,
 		containerGPUs,
 		dynamo.GenerateBasePodSpecOptions{GeneralEnvironment: dcd.Spec.Env,
-			KVTransferPolicy: dynamo.DCDHasKVTransferPolicy(dcd)},
+			KVTransferPolicy: dynamo.DCDKVTransferPolicyEnvironment(dcd, component)},
 	)
 }
 

@@ -262,6 +262,58 @@ func TestEnvironmentDeploymentConfigDuplicateDefinitions(t *testing.T) {
 	}
 }
 
+func TestRoleEnvironmentGraphDeploymentConfigResources(t *testing.T) {
+	for _, origin := range []string{"1.8.0", "1.7.99", ""} {
+		t.Run("origin="+origin, func(t *testing.T) {
+			t.Log("Role templates inherit graph configuration with admission-defaulted replicas")
+			template := corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name: "main", Image: "engine:1.7.0", Command: []string{"python3", "-m", "dynamo.vllm"},
+			}}}}
+			component := v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker, Replicas: new(int32(1)),
+				Multinode: &v1beta1.MultinodeSpec{NodeCount: 2},
+				Roles: []v1beta1.ComponentRoleSpec{
+					{Name: "leader", PodTemplate: template.DeepCopy()},
+					{Name: "worker", PodTemplate: template.DeepCopy()},
+				},
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
+				Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component},
+					Env: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: `{"worker":{"ServiceArgs":{"workers":3,"resources":{"cpu":"2","memory":"8Gi","gpu":"1"}}}}`}},
+				},
+			}
+			original := dgd.DeepCopy()
+
+			t.Log("Both DS normalization and DCD persistence populate every role's resources")
+			normalized, err := NormalizeDynamoGraphDeploymentComponents(dgd, nil, nil, RollingUpdateContext{})
+			require.NoError(t, err)
+			children, err := GenerateDynamoComponentsDeploymentsFromNormalized(dgd, normalized, RollingUpdateContext{})
+			require.NoError(t, err)
+			for _, actual := range []*v1beta1.DynamoComponentDeploymentSharedSpec{normalized["worker"], &children["worker"].Spec.DynamoComponentDeploymentSharedSpec} {
+				require.Nil(t, actual.PodTemplate)
+				require.EqualValues(t, 1, *actual.Replicas, "deployment configuration must not override the admitted replica target")
+				for _, role := range actual.Roles {
+					resources := role.PodTemplate.Spec.Containers[0].Resources
+					for _, values := range []corev1.ResourceList{resources.Requests, resources.Limits} {
+						require.Equal(t, "2", values.Cpu().String(), role.Name)
+						require.Equal(t, "8Gi", values.Memory().String(), role.Name)
+						require.Equal(t, resource.MustParse("1"), values["nvidia.com/gpu"], role.Name)
+					}
+				}
+			}
+			for _, child := range children {
+				if origin == "1.8.0" {
+					require.Equal(t, dgd.Spec.Env, child.Spec.Env)
+				} else {
+					require.Empty(t, child.Spec.Env)
+				}
+			}
+			require.Equal(t, original, dgd)
+		})
+	}
+}
+
 func TestSemanticTopologyBindingsAndMPIExports(t *testing.T) {
 	for _, backend := range []BackendFramework{BackendFrameworkNoop, BackendFrameworkTRTLLM} {
 		t.Run(string(backend), func(t *testing.T) {
@@ -340,6 +392,20 @@ func TestEnvironmentKVPolicyOwnsAbsentGraphSettings(t *testing.T) {
 				pod, err := GeneratePodSpecForComponent(&component, BackendFrameworkVLLM, nil, dgd, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
 				require.NoError(t, err)
 				pods := []*corev1.PodSpec{pod}
+
+				if origin == "1.8.0" {
+					t.Log("DS normalization keeps authored env intact until the final policy binding")
+					normalized, err := NormalizeDynamoGraphDeploymentComponents(dgd, nil, nil, RollingUpdateContext{})
+					require.NoError(t, err)
+					require.Equal(t, component.PodTemplate.Spec.Containers[0].Env, normalized["worker"].PodTemplate.Spec.Containers[0].Env)
+					if runtimeSidecar {
+						require.Equal(t, component.PodTemplate.Spec.InitContainers[0].Env, normalized["worker"].PodTemplate.Spec.InitContainers[0].Env)
+					}
+					pod, err = GenerateBasePodSpec(normalized["worker"], BackendFrameworkVLLM, nil, dgd.Name, dgd.Namespace, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeLWS, "worker", nil, staticContainerGPUCount(0),
+						GenerateBasePodSpecOptions{GeneralEnvironment: dgd.Spec.Env, KVTransferPolicy: KVTransferPolicyEnvironment(dgd.Spec.Experimental.KvTransferPolicy)})
+					require.NoError(t, err)
+					pods = append(pods, pod)
+				}
 
 				t.Log("Materializing and rendering a DCD retains the same policy-owned absence")
 				children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})

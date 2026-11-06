@@ -47,12 +47,13 @@ func configureAgentScheduling(agent *corev1.PodSpec, architecture lpuArchitectur
 func configureNodeLocalConductorRuntime(conductorPodSpec *corev1.PodSpec, allocation string, environment semanticenv.ContainerLayers) {
 	// Bind placement data without interpreting the template's executable or arguments.
 	conductor := common.FindContainerByName(conductorPodSpec.Containers, commonconsts.MainContainerName)
-	prependEnv(conductor, corev1.EnvVar{Name: allocationEnvVar, Value: allocation})
-	environment.Bind(conductor.Name, "operator.lpx.allocation", conductor.Env[:1])
+
+	// Kubernetes expands environment references in order; publish allocation before authored bindings.
+	environment.Prepend(conductor, "operator.lpx.allocation", []corev1.EnvVar{{Name: allocationEnvVar, Value: allocation}})
 }
 
-// applyModelPaths resolves nonempty canonical projections and rewrites each container's Env in place.
-func applyModelPaths(containerLists [][]corev1.Container, projections []*ModelProjection, modelStoragePath string) ([]corev1.EnvVar, error) {
+// modelPaths resolves every binding for nonempty canonical projections before any Pod is changed.
+func modelPaths(projections []*ModelProjection, modelStoragePath string) ([]corev1.EnvVar, error) {
 	// Single-model workloads publish one path; speculative workloads publish the first draft and final target.
 	type modelPathBinding struct {
 		name       string
@@ -75,11 +76,5 @@ func applyModelPaths(containerLists [][]corev1.Container, projections []*ModelPr
 		paths = append(paths, corev1.EnvVar{Name: binding.name, Value: path})
 	}
 
-	// Regular and init containers receive authoritative paths ahead of authored references.
-	for _, containers := range containerLists {
-		for i := range containers {
-			prependEnv(&containers[i], paths...)
-		}
-	}
 	return paths, nil
 }

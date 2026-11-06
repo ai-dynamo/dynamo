@@ -70,20 +70,33 @@ func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Containe
 	}
 
 	bindings := EnsureClient(podSpec, mainContainer)
+	if useV1 {
+		bindings = append(bindings, EnableV1(mainContainer)...)
+	}
+	ensureServerSidecar(podSpec, mainContainer, useV1)
+	return bindings
+}
 
+// EnsureServerSidecarResources attaches the server and client resources without
+// changing the client's environment. podSpec and mainContainer must not be nil.
+func EnsureServerSidecarResources(podSpec *corev1.PodSpec, mainContainer *corev1.Container, useV1 bool) {
+	EnsureClientResources(podSpec, mainContainer)
+	ensureServerSidecar(podSpec, mainContainer, useV1)
+}
+
+// ensureServerSidecar leaves client env composition to the selected caller.
+func ensureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container, useV1 bool) {
 	sidecar := Container(ServerContainerName, ServerModule, mainContainer.Image)
 	if useV1 {
 		EnableV1(&sidecar)
-		bindings = append(bindings, EnableV1(mainContainer)...)
 	}
 	sidecar.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
 	for i := range podSpec.InitContainers {
 		if podSpec.InitContainers[i].Name == sidecar.Name {
-			return bindings
+			return
 		}
 	}
 	podSpec.InitContainers = append(podSpec.InitContainers, sidecar)
-	return bindings
 }
 
 // EnableV1 sets DYN_GMS_USE_V1=true on a GMS process container. Idempotent.
@@ -108,6 +121,23 @@ func EnsureClient(podSpec *corev1.PodSpec, container *corev1.Container) []corev1
 	if podSpec == nil || container == nil {
 		return nil
 	}
+	EnsureClientResources(podSpec, container)
+
+	// Legacy callers replace the first binding in place, preserving list order.
+	sharedEnv := socketEnvironment()
+	for i := range container.Env {
+		if container.Env[i].Name == EnvSocketDir {
+			container.Env[i] = sharedEnv
+			return []corev1.EnvVar{sharedEnv}
+		}
+	}
+	container.Env = append(container.Env, sharedEnv)
+	return []corev1.EnvVar{sharedEnv}
+}
+
+// EnsureClientResources attaches the socket volume, mount and DRA claim without
+// mutating environment sources. podSpec and container must not be nil.
+func EnsureClientResources(podSpec *corev1.PodSpec, container *corev1.Container) {
 	sharedVolume := corev1.Volume{
 		Name:     SharedVolumeName,
 		EmptyDir: &corev1.EmptyDirVolumeSource{},
@@ -137,19 +167,6 @@ func EnsureClient(podSpec *corev1.PodSpec, container *corev1.Container) []corev1
 		container.VolumeMounts = append(container.VolumeMounts, sharedMount)
 	}
 
-	sharedEnv := socketEnvironment()
-	foundEnv := false
-	for i := range container.Env {
-		if container.Env[i].Name == EnvSocketDir {
-			container.Env[i] = sharedEnv
-			foundEnv = true
-			break
-		}
-	}
-	if !foundEnv {
-		container.Env = append(container.Env, sharedEnv)
-	}
-
 	dra.RemoveGPUResources(container.Resources.Limits)
 	dra.RemoveGPUResources(container.Resources.Requests)
 	foundClaim := false
@@ -162,7 +179,6 @@ func EnsureClient(podSpec *corev1.PodSpec, container *corev1.Container) []corev1
 	if !foundClaim {
 		container.Resources.Claims = append(container.Resources.Claims, corev1.ResourceClaim{Name: dra.ClaimName})
 	}
-	return []corev1.EnvVar{sharedEnv}
 }
 
 // Container builds a GMS container with the shared socket volume, env, and DRA claim.

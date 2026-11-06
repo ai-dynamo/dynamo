@@ -53,12 +53,10 @@ func configureHybridCyborg(
 	if err != nil {
 		return fmt.Errorf("resolve GBuild manifest path: %w", err)
 	}
-	prependEnv(container, corev1.EnvVar{Name: gbuildManifestPathEnv, Value: filepath.Join(buildRoot, gbuildDeploymentV1CapnpFile)})
-	environment.Bind(container.Name, "operator.lpx.manifest", container.Env[:1])
+	environment.Prepend(container, "operator.lpx.manifest", []corev1.EnvVar{{Name: gbuildManifestPathEnv, Value: filepath.Join(buildRoot, gbuildDeploymentV1CapnpFile)}})
 	applyLocalPartitionIDs(container, projection, environment)
 	if projection.checkpoint != nil {
-		prependEnv(container, corev1.EnvVar{Name: cyborgWeightsPathEnv, Value: projection.checkpoint.SnapshotPath(modelStoragePath)})
-		environment.Bind(container.Name, "operator.lpx.weights", container.Env[:1])
+		environment.Prepend(container, "operator.lpx.weights", []corev1.EnvVar{{Name: cyborgWeightsPathEnv, Value: projection.checkpoint.SnapshotPath(modelStoragePath)}})
 	}
 
 	cyborg.Annotations = roleAnnotations(

@@ -22,7 +22,7 @@ type podEnvironment struct {
 	containers     semanticenv.ContainerLayers
 	overrides      []map[string]semanticenv.Layer
 	policyRuntime  string
-	policyAuthored *semanticenv.Layer
+	policyBindings []corev1.EnvVar
 }
 
 func newPodEnvironment(annotations map[string]string, general []corev1.EnvVar) *podEnvironment {
@@ -45,16 +45,9 @@ func (p *podEnvironment) register(name, source string, defaults, general, author
 	// Only the compiled policy's runtime omits graph-level policy inputs.
 	if name == p.policyRuntime {
 		p.containers[name][1] = p.containers[name][1].Without(workerKvTransferPolicyEnvNames...)
-		var bindings []corev1.EnvVar
-		for _, value := range authored {
-			if slices.Contains(workerKvTransferPolicyEnvNames, value.Name) {
-				bindings = append(bindings, value)
-			}
-		}
-		original := *p.policyAuthored
-		original.Source = source
+		original := p.containers[name][2].Without(workerKvTransferPolicyEnvNames...)
 		p.containers[name] = append(p.containers[name][:2],
-			semanticenv.Layer{Source: "operator.kvTransferPolicy", Env: bindings}, original)
+			semanticenv.Layer{Source: "operator.kvTransferPolicy", Env: p.policyBindings}, original)
 	}
 	for _, overrides := range p.overrides {
 		if layer, exists := overrides[name]; exists {
@@ -74,8 +67,8 @@ func DCDHasKVTransferPolicy(dcd *v1beta1.DynamoComponentDeployment) bool {
 
 // ownKVTransferPolicy scopes graph-default removal to the container publishing
 // the compiled policy. Compute-only roles have no such runtime container.
-func (p *podEnvironment) ownKVTransferPolicy(component *v1beta1.DynamoComponentDeploymentSharedSpec, nativeSidecar bool) {
-	if p == nil {
+func (p *podEnvironment) ownKVTransferPolicy(component *v1beta1.DynamoComponentDeploymentSharedSpec, nativeSidecar bool, bindings []corev1.EnvVar) {
+	if p == nil || len(bindings) == 0 {
 		return
 	}
 	if GetDynamoSidecar(component) != nil {
@@ -85,27 +78,37 @@ func (p *podEnvironment) ownKVTransferPolicy(component *v1beta1.DynamoComponentD
 	} else {
 		return
 	}
-	layer := AuthoredRuntimeEnvironment(component).Without(workerKvTransferPolicyEnvNames...)
-	p.policyAuthored = &layer
+	p.policyBindings = bindings
 }
 
-// AuthoredRuntimeEnvironment captures the selected runtime's source before
-// graph defaults or compiled policy values are inserted. component must not be nil.
-func AuthoredRuntimeEnvironment(component *v1beta1.DynamoComponentDeploymentSharedSpec) semanticenv.Layer {
+// DCDKVTransferPolicyEnvironment reads the policy snapshot stored in a child
+// DCD's selected runtime. Standalone DCDs do not own graph policy bindings.
+// dcd and component must not be nil.
+func DCDKVTransferPolicyEnvironment(dcd *v1beta1.DynamoComponentDeployment, component *v1beta1.DynamoComponentDeploymentSharedSpec) []corev1.EnvVar {
+	if !DCDHasKVTransferPolicy(dcd) {
+		return nil
+	}
 	runtime := GetDynamoSidecar(component)
 	if runtime == nil {
 		runtime = GetMainContainer(component)
 	}
 	if runtime == nil {
-		return semanticenv.Layer{}
+		return nil
 	}
-	return semanticenv.Layer{Env: runtime.Env}
+	var bindings []corev1.EnvVar
+	for _, value := range runtime.Env {
+		if slices.Contains(workerKvTransferPolicyEnvNames, value.Name) {
+			bindings = append(bindings, value)
+		}
+	}
+	return bindings
 }
 
-func (p *podEnvironment) appendDefaults(name string, values []corev1.EnvVar) {
+func (p *podEnvironment) appendDefaults(container *corev1.Container, values []corev1.EnvVar) {
 	if p != nil {
-		p.containers[name][0].Env = slices.Concat(p.containers[name][0].Env, values)
+		p.containers[container.Name][0].Env = slices.Concat(p.containers[container.Name][0].Env, values)
 	}
+	container.Env = append(container.Env, values...)
 }
 
 // staged exposes raw, last-definition-wins inputs to backend readers without
@@ -118,24 +121,28 @@ func (p *podEnvironment) staged(name string) []corev1.EnvVar {
 	return result
 }
 
-func (p *podEnvironment) bind(name, source string, values []corev1.EnvVar) {
+func (p *podEnvironment) bind(container *corev1.Container, source string, values []corev1.EnvVar) {
+	var layers semanticenv.ContainerLayers
 	if p != nil {
-		p.containers.Bind(name, source, values)
+		layers = p.containers
 	}
+	layers.Bind(container, source, values)
 }
 
-func (p *podEnvironment) clone(from, to string, omitted []string) {
-	if p == nil {
-		return
+func (p *podEnvironment) clone(from, to *corev1.Container, omitted []string) {
+	var layers semanticenv.ContainerLayers
+	if p != nil {
+		layers = p.containers
 	}
-	p.containers.Clone(from, to, omitted)
+	layers.Clone(from, to, omitted)
 }
 
-func (p *podEnvironment) omit(name string, omitted ...string) {
-	if p == nil {
-		return
+func (p *podEnvironment) omit(container *corev1.Container, omitted ...string) {
+	var layers semanticenv.ContainerLayers
+	if p != nil {
+		layers = p.containers
 	}
-	p.containers.Omit(name, omitted...)
+	layers.Omit(container, omitted...)
 }
 
 // capture registers remaining authored containers before provider mutations.
@@ -144,12 +151,15 @@ func (p *podEnvironment) capture(pod *corev1.PodSpec) semanticenv.ContainerLayer
 	if p == nil {
 		return nil
 	}
-	for _, containers := range [][]corev1.Container{pod.Containers, pod.InitContainers} {
-		for i := range containers {
-			container := &containers[i]
+	for _, group := range []struct {
+		name       string
+		containers []corev1.Container
+	}{{"containers", pod.Containers}, {"initContainers", pod.InitContainers}} {
+		for i := range group.containers {
+			container := &group.containers[i]
 			_, registered := p.containers[container.Name]
 			if !registered {
-				p.register(container.Name, "podTemplate.containers[name="+container.Name+"].env", nil, nil, container.Env)
+				p.register(container.Name, "podTemplate.spec."+group.name+"[name="+container.Name+"].env", nil, nil, container.Env)
 			}
 		}
 	}

@@ -58,8 +58,7 @@ func buildColdStartFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, bac
 		}
 
 		// Per-engine bindings remain operator-owned, irrespective of user overrides.
-		c.Env = append(c.Env, bindings...)
-		environment.bind(c.Name, "operator.failover.vllm", bindings)
+		environment.bind(c, "operator.failover.vllm", bindings)
 	}
 	return nil
 }
