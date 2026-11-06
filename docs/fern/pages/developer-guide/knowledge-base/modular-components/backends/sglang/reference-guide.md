@@ -151,9 +151,9 @@ Profiling and weight-update routes use the `/engine/control/` prefix. The four g
 
 Workers expose `pause_generation`, `continue_generation`, `release_memory_occupation`, and `resume_memory_occupation` by default, without `--engine-route`. Each route calls the SGLang tokenizer-manager method of the same name. An `--engine-route` or `DYN_SGLANG_ENGINE_ROUTES` descriptor with the same path replaces the default route.
 
-Start SGLang with `--enable-memory-saver`. Without it, `release_memory_occupation` returns but frees no GPU memory.
+Releasing memory needs SGLang's memory saver. Start SGLang with `--enable-memory-saver`; `--load-format gms` turns it on for you. Without it, `release_memory_occupation` returns but frees no GPU memory.
 
-Releasing memory discards the model weights unless SGLang keeps a copy. With an empty `tags` list, release and resume cover the weights, the KV cache, and CUDA graphs. To keep the weights, start SGLang with `--enable-weights-cpu-backup`. Otherwise, load the weights again with an `/engine/control/update_weights_from_*` route after you resume memory and before you continue generation.
+With an empty `tags` list, release and resume cover the weights, the KV cache, and CUDA graphs. With `--load-format gms`, the GPU Memory Service keeps the weights, and resume maps them back. Without GMS, releasing memory discards the weights. To keep them, start SGLang with `--enable-weights-cpu-backup`. Otherwise, load the weights again with an `/engine/control/update_weights_from_*` route after you resume memory and before you continue generation.
 
 Call the routes in this order:
 
