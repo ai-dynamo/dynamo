@@ -5,6 +5,10 @@ title: Metric Labels
 subtitle: Every label dimension attached to Dynamo metric series — where each one comes from and the values it can take.
 ---
 
+import { EnumStyles } from "@/components/EnumStyles";
+
+<EnumStyles />
+
 Labels are the **dimensions** attached to Dynamo metric series, not metrics in their own right. A single metric such as `dynamo_component_requests_total` becomes many Prometheus time series once it is split by `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, and the labels the scraper adds. This page catalogs those dimensions; for the metrics themselves see the [Metrics Catalog](metrics-catalog.mdx).
 
 A label reaches a series through one of four origins:
