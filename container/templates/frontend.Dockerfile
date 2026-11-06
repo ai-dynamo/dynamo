@@ -67,8 +67,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         git \
         # compliance audit bootstraps syft over HTTPS
         curl \
-        # lets Dynamo processes opt into jemalloc via
-        # LD_PRELOAD; not preloaded by default
+        # lets CPython and C allocations opt into jemalloc via LD_PRELOAD;
+        # not preloaded by default. Rust allocations in dynamo._core already
+        # use a built-in jemalloc.
         libjemalloc2 \
         # Python runtime - required for virtual environment to work
         python${PYTHON_VERSION}-dev \
