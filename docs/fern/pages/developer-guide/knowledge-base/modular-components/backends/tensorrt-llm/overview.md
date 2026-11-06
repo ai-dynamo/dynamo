@@ -139,7 +139,7 @@ yq -i '(.spec.services[].extraPodSpec.mainContainer.image) |= sub(":1\.0\.2", ":
 sed -i.bak 's|:1\.0\.2|:<your-tag>|g' deploy.yaml
 ```
 
-For full Kubernetes deployment instructions, see the [TensorRT-LLM Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md).
+For full Kubernetes deployment instructions, see [Deploy with DGD](../../../../../kubernetes/model-deployment/deploy-with-dgd.md) and the TensorRT-LLM manifests in the [Examples catalog](../../../../../recipes/examples/overview.mdx).
 
 ## Next Steps
 
@@ -148,4 +148,4 @@ For full Kubernetes deployment instructions, see the [TensorRT-LLM Kubernetes De
 - **[KV Cache Transfer](../../../../additional-resources/tensorrt-llm-details/kv-cache-transfer.md)**: KV cache transfer methods for disaggregated serving
 - **[Observability](observability.md)**: Metrics and monitoring
 - **[Multinode Examples](../../../../additional-resources/tensorrt-llm-details/multinode-examples.md)**: Multi-node deployment with SLURM
-- **[Deploying TensorRT-LLM with Dynamo on Kubernetes](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md)**: Kubernetes deployment guide
+- **[Deploying TensorRT-LLM with Dynamo on Kubernetes](../../../../../recipes/examples/overview.mdx)**: Kubernetes deployment examples

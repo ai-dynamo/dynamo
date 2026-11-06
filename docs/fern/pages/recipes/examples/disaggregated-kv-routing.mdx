@@ -60,12 +60,12 @@ import { ExampleSelector } from "@/components/ExampleSelector";
 
 <div className="dynamo-example-variant" data-example-variant="local-tokenspeed-launch-disagg-sh">
 
-**Prerequisites:** [TokenSpeed README](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/tokenspeed/README.md)
+**Prerequisites:** [Disaggregated Serving with TokenSpeed](../../cli/disaggregated-serving/tokenspeed.md)
 
 **Experimental.** Uses three hosts with eight H200 or four GB300 GPUs each, an RDMA fabric, and
 shared etcd and NATS. Run `prefill` on two hosts, `decode` on the third, and `frontend` on the first.
 These commands use the launcher's H200 defaults. On GB300, use the
-[GB300 worker options](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/tokenspeed/README.md#gb300-worker-options)
+[GB300 worker options](../../cli/disaggregated-serving/tokenspeed.md#gb300-worker-options)
 instead.
 
 ```bash

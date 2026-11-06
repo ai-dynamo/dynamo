@@ -107,40 +107,106 @@ operator, and enforced by the Power Agent. The Planner only reads them and
 combines them with `total_gpu_power_limit` (in its config) to project a budget
 and clamp scale-up — it never patches Pods.
 
-The mounted PlannerConfig enables it:
+The [`power-aware-budget/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/power-aware-budget)
+example holds a [`dgd.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/power-aware-budget/dgd.yaml)
+and a [`planner_config.json`](https://github.com/ai-dynamo/dynamo/blob/main/examples/power-aware-budget/planner_config.json)
+that show the contract.
 
-```json
-{
-  "enable_power_awareness": true,
-  "total_gpu_power_limit": 5200
-}
+> [!NOTE]
+> These manifests are a **contract fragment**, not a fully deployable DGD: they
+> show only the power-relevant fields (annotations, GPU limits, Planner config).
+> A runnable deployment also needs container images, model args, env/secrets,
+> and a Frontend. Merge these fields into a complete DGD, such as one from
+> [`examples/backends/vllm/deploy/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy).
+
+> [!IMPORTANT]
+> The budget is a **projected** ceiling over the *requested* per-GPU caps, not a
+> proven hardware limit. The Power Agent applies each requested cap but may
+> clamp it up to the GPU's hardware minimum, and a cap write can fail; neither
+> is fed back to the Planner today. So the Planner prevents an admitted
+> scale-up from pushing `projected_watts` over `total_gpu_power_limit` for the
+> requested caps — it does **not** automatically remediate a deployment that is
+> already over budget (it holds scale-ups and allows scale-downs), and it does
+> not guarantee the *effective* hardware draw stays under the budget.
+> Effective-cap and enforcement-health feedback are deferred to the
+> dynamic-control design.
+
+### Ownership Model
+
+| Value | Source of truth | Consumer |
+| --- | --- | --- |
+| Per-GPU cap (watts, static) | Worker component `podTemplate` annotation `dynamo.nvidia.com/gpu-power-limit` | Operator → Pods; Power Agent (applies NVML/DCGM cap); Planner (reads) |
+| Total DGD power budget (watts) | PlannerConfig `total_gpu_power_limit` | Planner |
+| Replica targets | Planner (after the budget clamp) | Existing scaling adapter |
+| Applied GPU hardware cap | Power Agent | NVML / DCGM |
+
+The Planner **reads** the caps from the DGD; it does **not** patch Pods. New
+replicas created by a scale-up are born with the annotation because the operator
+renders it into the Deployment / LeaderWorkerSet template.
+
+The Planner caches each component's power tuple at startup: the cap, the
+effective main-container `nvidia.com/gpu` count (limit first, request fallback),
+and `multinode.nodeCount` (default `1`). DGD admission rejects updates to that
+tuple for an annotated component. Delete and recreate the DGD to change it.
+Changing `total_gpu_power_limit` also requires restarting the Planner process.
+
+### Author the Caps
+
+1. Put the per-GPU cap on each worker component's `podTemplate.metadata.annotations`.
+   Prefill and decode may differ.
+2. Set the total budget on the Planner's mounted config:
+
+   ```json
+   {
+     "enable_power_awareness": true,
+     "total_gpu_power_limit": 5200
+   }
+   ```
+
+   `enable_power_awareness` requires `environment: "kubernetes"`, a
+   `total_gpu_power_limit > 0`, and `mode` set to `disagg`, `prefill`, or
+   `decode` (`agg` is not currently supported). Per-GPU caps are **not** set
+   here — they live on the worker `podTemplate` annotations only.
+
+3. Enable the Planner's `pods/list` RBAC permission in the Helm installation.
+   Power-annotation settlement reads Pod annotations at startup to verify that
+   power caps have propagated before caching them, which requires this
+   permission. Set it when installing or upgrading the platform chart:
+
+   ```bash
+   helm dependency build deploy/helm/charts/platform
+   helm upgrade --install dynamo deploy/helm/charts/platform \
+     --set dynamo-operator.planner.powerAwareness.enabled=true
+   ```
+
+   Without this flag the Planner's ServiceAccount lacks `pods/list` and the
+   startup settlement check fails with a Kubernetes RBAC error.
+
+### Projection
+
+```text
+projected_watts =
+    prefill_replicas × prefill_gpus_per_replica × prefill_cap_watts
+  + decode_replicas  × decode_gpus_per_replica  × decode_cap_watts
 ```
 
-`enable_power_awareness` requires `environment: "kubernetes"` and
-`mode` set to `disagg`, `prefill`, or `decode` (`agg` is not supported).
-The Planner caches each annotated component's cap, effective main-container GPU
-count, and node count at startup. DGD admission rejects changes to those fields;
-delete and recreate the DGD to change them. Restart the Planner after changing
-`total_gpu_power_limit`.
+For the values in the example (2 prefill replicas × 2 GPU × 350 W + 2 decode
+replicas × 4 GPU × 300 W) the projection is `1400 + 2400 = 3800 W` against a
+`5200 W` budget. A scale-up that would exceed `5200 W` is clamped to fit, and
+the `dynamo_planner_power_budget_utilization` gauge reports the ratio.
 
-You must also enable `pods/list` RBAC for the Planner's ServiceAccount at
-install time. The Planner reads Pod annotations during startup to verify that
-power caps have propagated before caching them. Without the permission the
-startup settlement check fails. Pass this flag when installing or upgrading the
-platform chart:
+### Static-Input Limitations
 
-```bash
-helm dependency build deploy/helm/charts/platform
-helm upgrade --install dynamo deploy/helm/charts/platform \
-  --set dynamo-operator.planner.powerAwareness.enabled=true
-```
+> [!IMPORTANT]
+> You cannot patch a power annotation, effective GPU count, or node count in
+> place on a power-annotated component. Admission rejects the update; delete and
+> recreate the DGD, then start the Planner against the replacement. Restart the
+> Planner after changing `total_gpu_power_limit`.
 
-See the `power-aware-budget/` directory in
-[Dynamo examples](https://github.com/ai-dynamo/dynamo/tree/main/examples) for
-the full annotation + config contract and its limitations (the budget is a
-projected ceiling over requested caps, not a proven hardware limit). Mixed GPU
-generations, dynamic cap retargeting, and DRA-backed GPU allocation are not
-supported.
+Power awareness currently assumes a static, uniform GPU count and cap per
+component. Mixed GPU generations within one component, dynamic cap retargeting,
+and GPU allocation through DRA resource claims are not supported by this
+projection.
 
 ## Virtual Connector
 

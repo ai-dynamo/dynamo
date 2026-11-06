@@ -56,7 +56,6 @@ CMakeCache.txt
 !components/src/dynamo/planner/plugins/proto/v1/plugin_pb2.pyi
 *.svg
 !docs/assets/**/*.svg
-!examples/deployments/batch-gateway/batch-architecture.svg
 
 *pytest_report.md
 *pytest_report.xml
