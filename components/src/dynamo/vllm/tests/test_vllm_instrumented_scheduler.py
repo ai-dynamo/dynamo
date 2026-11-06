@@ -10589,6 +10589,8 @@ def test_prefill_power_window_prepares_the_next_repeat_while_one_runs(monkeypatc
         # Admitted right after the drain, without another round in between.
         assert window["rounds"] == rounds
         assert list(stub.requests) == [f"repeat{repeat}"]
+        # Finished repeats are pruned: only the one in flight stays tracked.
+        assert stub._bench_active_req_ids == {f"repeat{repeat}"}
 
     # Each decision is taken one repeat ahead, while the previous repeat runs:
     # repeats decided at 0.0, 0.0, 0.4 and 0.8 s; the decision at 1.2 s stops,

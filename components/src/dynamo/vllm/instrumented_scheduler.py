@@ -7865,6 +7865,11 @@ class InstrumentedScheduler(AsyncScheduler):
             if window["stopping"]:
                 self._bench_power_close(window)
                 return None
+            # Every earlier repeat has drained and freed; drop its IDs so the
+            # per-pass scans over the active set stay one repeat long instead
+            # of growing with the window (their cost lands inside the
+            # energy window).
+            self._bench_active_req_ids.clear()
             self._bench_admit_requests(window["next"])
             window["next"] = None
             window["dispatched"] += 1
