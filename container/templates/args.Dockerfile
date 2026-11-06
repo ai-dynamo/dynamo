@@ -126,6 +126,12 @@ ARG AWS_SDK_CPP_VERSION={{ context.vllm.aws_sdk_cpp_version }}
 ARG MODELEXPRESS_VERSION={{ context[framework].modelexpress_version }}
 {%- endif -%}
 
+{% if framework == "sglang" and device == "cuda" %}
+
+# MiniMax MSA kernels commit, installed in sglang_runtime.Dockerfile
+ARG MSA_COMMIT={{ context.sglang[device_key].msa_commit }}
+{% endif -%}
+
 {% if framework == "sglang" and device == "xpu" -%}
 # SGLang XPU build: clone and build from source (no pre-built runtime image)
 ARG SGLANG_GIT_URL={{ context.sglang.xpu.sglang_git_url }}

@@ -242,6 +242,48 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     python3 -c "import importlib.metadata as m, re, sys; names={re.sub(r'[-_.]+', '-', n).lower() for d in m.distributions() if (n := (d.metadata or {}).get('Name'))}; sys.exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)"
 {% endif %}
 
+{% if device == "cuda" %}
+# MiniMax MSA kernels (minimax-msa), imported by SGLang's msa_plan.py for
+# MiniMax-M3.1. The -cu130-runtime base omits them; this mirrors the MSA step in
+# upstream SGLang's docker/Dockerfile.cu134 at the same commit. The kernels are
+# CUDA/C++ sources JIT-built on first use against the CUTLASS submodule, which
+# is found relative to the checkout, so the install is editable and the tree
+# stays at /sgl-workspace/minimax-msa. JIT output goes to the user's ~/.cache,
+# never into the tree, so no chown is needed. Installed after the other pip
+# steps in this stage so nothing overwrites its generic top-level packages
+# (inference, datas, msa_v1). The integrations/sglang plugin registers
+# --monokernel-backend msa and is inert unless a server passes that flag.
+#
+# On CUDA < 13.4 SGLang skips the QMUL4 kernels and uses the Q8K8 fallbacks,
+# which still import from inference.*; the two imports checked below are the
+# ones msa_plan.py needs.
+ARG MSA_COMMIT
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    set -eu; \
+    export PIP_CACHE_DIR=/root/.cache/pip; \
+    printf '%s\n' "${MSA_COMMIT}" | grep -Eq '^[0-9a-f]{40}$' || { echo "ERROR: MSA_COMMIT must be a 40-character commit SHA; got '${MSA_COMMIT}'" >&2; exit 1; }; \
+    MSA_DIR=/sgl-workspace/minimax-msa; \
+    git init -q "${MSA_DIR}"; \
+    git -C "${MSA_DIR}" remote add origin https://github.com/MiniMax-AI/MSA.git; \
+    git -C "${MSA_DIR}" fetch -q --depth 1 origin "${MSA_COMMIT}"; \
+    git -C "${MSA_DIR}" checkout -q --detach FETCH_HEAD; \
+    git -C "${MSA_DIR}" submodule update -q --init --recursive --depth 1; \
+    test -f "${MSA_DIR}/third_party/cutlass/include/cutlass/cutlass.h"; \
+    rm -rf "${MSA_DIR}/.git" "${MSA_DIR}/third_party/cutlass/.git"; \
+    pip install --break-system-packages --no-deps -e "${MSA_DIR}"; \
+    python3 -c "import importlib.metadata as m; d = m.packages_distributions(); \
+bad = {k: d.get(k) for k in ('inference', 'datas', 'msa_v1') if d.get(k) != ['minimax-msa']}; \
+assert not bad, f'MSA top-level packages are shadowed or missing: {bad}'"; \
+    python3 -c "import inference.msa_v1.indexer.decode.q8kv4, inference.msa_v1.indexer.decode.q8kv8"; \
+    if [ -f "${MSA_DIR}/integrations/sglang/pyproject.toml" ]; then \
+        pip install --break-system-packages --no-deps -e "${MSA_DIR}/integrations/sglang"; \
+        python3 -c "from importlib.metadata import entry_points; \
+assert any(e.name == 'msa' for e in entry_points(group='sglang.srt.plugins')), 'MSA monokernel plugin not registered'"; \
+    else \
+        echo "MSA ${MSA_COMMIT} has no SGLang monokernel plugin; --monokernel-backend msa is unavailable" >&2; \
+    fi
+{% endif %}
+
 # Remove the codec-bearing video-DECODE components from the upstream SGLang image
 # (PyAV, decord, OpenCV, torchcodec + any base ffmpeg/libav*), then copy the
 # VP9-only in-tree ffmpeg from wheel_builder below for the video-generation
