@@ -818,9 +818,7 @@ class TestImageHandlerResponseFormats:
         assert mock_upload.call_count == 2
 
 
-# =============================================================================
 # Part 6b: PNG Compression Level Tests
-# =============================================================================
 
 PNG_LEVEL_ENV = "DYN_TRTLLM_IMAGE_PNG_COMPRESSION_LEVEL"
 
