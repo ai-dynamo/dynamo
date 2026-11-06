@@ -22,7 +22,7 @@ Image-to-video (I2V) uses the same `/v1/videos` endpoint as [text-to-video](text
 | `Wan-AI/Wan2.2-I2V-A14B-Diffusers` | Dual-expert MoE ([model card](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers)) |
 
 For experimental Cosmos3 Nano reference conditioning, use the
-[Cosmos3 example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/omni/cosmos3/README.md),
+[Cosmos 3 guide](../cosmos3.md),
 which specifies its model revision, runtime requirements, and guardrail settings.
 
 To run a non-default model, pass `--model` to the launch script:

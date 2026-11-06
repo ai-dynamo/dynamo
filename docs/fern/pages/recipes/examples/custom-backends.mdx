@@ -25,7 +25,12 @@ import { ExampleSelector } from "@/components/ExampleSelector";
 
 Deploys a minimal Python backend and frontend without a GPU-backed model.
 
-**Prerequisites:** [Hello World README](https://github.com/ai-dynamo/dynamo/blob/main/examples/custom_backend/hello_world/README.md)
+**Prerequisites:** [Dynamo Kubernetes platform](../../kubernetes/installation/install-dynamo.md)
+
+This example does not demonstrate the standard Dynamo frontend-to-backend deployment. Its `Frontend`
+component runs `client.py`, a one-off function that sends `world,sun,moon,star` to the backend and exits, so only the
+`HelloWorldWorker` pod stays running. To run the backend and client locally, see the
+[Hello World README](https://github.com/ai-dynamo/dynamo/blob/main/examples/custom_backend/hello_world/README.md).
 
 [Source: `hello_world.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/custom_backend/hello_world/deploy/hello_world.yaml)
 
