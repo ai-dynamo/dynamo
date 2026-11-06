@@ -158,8 +158,11 @@ class ForwardPassMetrics(
     """Per-iteration metrics emitted by InstrumentedScheduler.
 
     One message is emitted per scheduler iteration (one per forward pass).
-    An idle heartbeat (all zeros, wall_time=0) is emitted once when the
-    engine transitions from active to idle.
+    A heartbeat is emitted when no message has been sent for about one
+    second, which includes while a long forward pass is still running.
+    A heartbeat has wall_time=0 and empty scheduled_requests, and its
+    queued_requests holds the latest waiting-queue snapshot. It is all
+    zeros only when nothing is waiting.
     """
 
     # Schema version. Consumers must check this before interpreting
@@ -179,7 +182,7 @@ class ForwardPassMetrics(
 
     # Wall-clock time of this iteration: from schedule() to update_from_output().
     # Covers scheduling + model forward pass + output processing.
-    # 0.0 for idle heartbeat messages.
+    # 0.0 for heartbeat messages, which report no finished pass.
     wall_time: float = 0.0
 
     # Requests that were scheduled and executed in this iteration.
