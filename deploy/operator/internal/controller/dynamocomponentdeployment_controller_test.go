@@ -867,10 +867,8 @@ func multinodeLWSTestReconciler(objects ...client.Object) *DynamoComponentDeploy
 	}
 }
 
-// DYN-5478: the StatefulSet controller labels Pods with
-// controller-revision-hash=<statefulset-name>-<hash> (hash up to 10 chars), and
-// LWS names its StatefulSets <lws> (leader) and <lws>-<groupIndex> (workers).
-// Those label values must stay within 63 characters.
+// DYN-5478: controller-revision-hash=<statefulset>-<10-char hash> must fit 63 chars for
+// the leader StatefulSet <lws> and each worker StatefulSet <lws>-<groupIndex>.
 func TestDynamoComponentDeploymentReconciler_LeaderWorkerSetNameFitsStatefulSetRevisionLabels(t *testing.T) {
 	require.NoError(t, leaderworkersetv1.AddToScheme(scheme.Scheme))
 	maxRevisionHash := strings.Repeat("9", 10)
