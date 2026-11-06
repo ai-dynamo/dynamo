@@ -730,6 +730,8 @@ func (r *dcdWorkloadRenderer) getWorkloadComponentType(
 	return componentType, nil
 }
 
+// hasExistingLegacyWorkerSelector checks existing Deployments, both LWS names, and
+// the component Service to preserve the worker identity used by earlier operators.
 func (r *dcdWorkloadRenderer) hasExistingLegacyWorkerSelector(
 	ctx context.Context,
 	namespace string,
