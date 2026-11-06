@@ -125,12 +125,40 @@ struct HardwareNodeYaml {
     p2p_latency: f64,
 }
 
-/// Hardware link provenance plus the exact rate and latency this control uses.
+use sha2::{Digest, Sha256};
+use std::io::Read;
+
+/// SHA-256 of the exact `systems/h100_sxm.yaml` git blob at the pinned
+/// AISimulate revision, frozen from `git cat-file blob HEAD:.../h100_sxm.yaml`.
+const HARDWARE_YAML_SHA256: &str =
+    "bbbe72e97e0271364ec047d94bade25d03f0ef9c43981b0a81cd86ae4fe1f039";
+/// SHA-256 over the complete `data/h100_sxm` subtree, not only the op tables
+/// this control consumes. See `calibration_inventory` for the line format.
+const CALIBRATION_MANIFEST_SHA256: &str =
+    "3282e67f31ba7b914fae069e819299988ef8e06143677418ff3065756e9448c9";
+const CALIBRATION_FILE_COUNT: usize = 328;
+const CALIBRATION_TOTAL_BYTES: u64 = 28_392_736;
+const MAX_HARDWARE_YAML_BYTES: u64 = 1 << 20;
+const MAX_CALIBRATION_FILE_BYTES: u64 = 1 << 30;
+const MAX_MODEL_CONFIG_BYTES: u64 = 1 << 20;
+const HASH_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Hardware link provenance plus the exact content identity and rates this
+/// control uses. The hashes cover the whole canonical calibration root, so a
+/// path alone can never stand in for the bytes that produced the timings.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct HardwareLink {
     pub(crate) topology: &'static str,
     pub(crate) system: &'static str,
     pub(crate) yaml: PathBuf,
+    pub(crate) yaml_sha256: String,
+    pub(crate) calibration_root: PathBuf,
+    pub(crate) calibration_manifest_sha256: String,
+    pub(crate) calibration_file_count: usize,
+    pub(crate) calibration_total_bytes: u64,
+    /// Git HEAD at the assets root, when a checkout is available. Integrity is
+    /// enforced by the content hashes; this is a supplementary source identity.
+    pub(crate) source_revision: Option<String>,
     pub(crate) num_gpus_per_node: u32,
     pub(crate) bandwidth_bytes_per_s: f64,
     /// Seconds.
@@ -159,12 +187,225 @@ pub(crate) struct KvTransferConfig {
     pub(crate) link: HardwareLink,
 }
 
+/// Read one calibration asset with an explicit symlink rejection and byte
+/// bound. `AISIM_SYSTEMS_ROOT` is a trusted test path, but the artifact read
+/// still refuses to follow links out of the owned canonical root.
+fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect calibration asset {}", path.display()))?;
+    ensure!(
+        !metadata.file_type().is_symlink() && metadata.file_type().is_file(),
+        "calibration asset {} must be a regular file; symlinks and special files are rejected",
+        path.display()
+    );
+    ensure!(
+        metadata.len() <= limit,
+        "calibration asset {} is {} bytes, above the {limit}-byte bound",
+        path.display(),
+        metadata.len()
+    );
+    let file = fs::File::open(path)
+        .with_context(|| format!("open calibration asset {}", path.display()))?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read calibration asset {}", path.display()))?;
+    ensure!(
+        bytes.len() as u64 <= limit,
+        "calibration asset {} exceeded the {limit}-byte bound while reading",
+        path.display()
+    );
+    Ok(bytes)
+}
+
+/// Stream one regular file into SHA-256 without loading it whole.
+fn hash_file_bounded(path: &Path, limit: u64) -> Result<(String, u64)> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect calibration asset {}", path.display()))?;
+    ensure!(
+        !metadata.file_type().is_symlink() && metadata.file_type().is_file(),
+        "calibration asset {} must be a regular file; symlinks and special files are rejected",
+        path.display()
+    );
+    ensure!(
+        metadata.len() <= limit,
+        "calibration asset {} is {} bytes, above the {limit}-byte bound",
+        path.display(),
+        metadata.len()
+    );
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("open calibration asset {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; HASH_CHUNK_BYTES];
+    let mut total = 0u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("stream calibration asset {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(read as u64)
+            .context("calibration asset size overflow")?;
+        ensure!(
+            total <= limit,
+            "calibration asset {} exceeded the {limit}-byte bound while reading",
+            path.display()
+        );
+        hasher.update(&buffer[..read]);
+    }
+    Ok((format!("{:x}", hasher.finalize()), total))
+}
+
+fn collect_manifest_files(
+    root: &Path,
+    dir: &Path,
+    files: &mut Vec<(String, PathBuf)>,
+) -> Result<()> {
+    for entry in fs::read_dir(dir)
+        .with_context(|| format!("read calibration directory {}", dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("read entry in {}", dir.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("inspect calibration entry {}", path.display()))?;
+        ensure!(
+            !file_type.is_symlink(),
+            "calibration inventory {} contains a symlink; refusing to follow it",
+            path.display()
+        );
+        if file_type.is_dir() {
+            collect_manifest_files(root, &path, files)?;
+        } else {
+            ensure!(
+                file_type.is_file(),
+                "calibration inventory {} contains a non-regular entry",
+                path.display()
+            );
+            let relative = path
+                .strip_prefix(root)
+                .with_context(|| format!("relativize calibration asset {}", path.display()))?
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            files.push((relative, path));
+        }
+    }
+    Ok(())
+}
+
+/// Hash the complete canonical `data/<system>` subtree, sorted by relative
+/// path, as `sha256(file) + "  " + relative_path + "\n"` lines. Every regular
+/// file is included; symlinks and special files are rejected. The aggregate
+/// is compared with the literal frozen from the pinned AISimulate git object.
+fn calibration_inventory(systems: &Path) -> Result<(PathBuf, String, usize, u64)> {
+    let root = systems.join("data").join(SYSTEM);
+    let metadata = fs::symlink_metadata(&root)
+        .with_context(|| format!("inspect calibration root {}", root.display()))?;
+    ensure!(
+        !metadata.file_type().is_symlink() && metadata.is_dir(),
+        "calibration root {} must be a real directory; symlinks are rejected",
+        root.display()
+    );
+    let mut files = Vec::new();
+    collect_manifest_files(&root, &root, &mut files)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut aggregate = Sha256::new();
+    let mut total_bytes = 0u64;
+    for (relative, path) in &files {
+        let (hash, bytes) = hash_file_bounded(path, MAX_CALIBRATION_FILE_BYTES)?;
+        total_bytes = total_bytes
+            .checked_add(bytes)
+            .context("calibration subtree size overflow")?;
+        aggregate.update(hash.as_bytes());
+        aggregate.update(b"  ");
+        aggregate.update(relative.as_bytes());
+        aggregate.update(b"\n");
+    }
+    let manifest_sha256 = format!("{:x}", aggregate.finalize());
+    ensure!(
+        files.len() == CALIBRATION_FILE_COUNT
+            && total_bytes == CALIBRATION_TOTAL_BYTES
+            && manifest_sha256 == CALIBRATION_MANIFEST_SHA256,
+        "whole calibration root {} changed: {} files/{} bytes/manifest {} vs pinned {}/{} bytes/{}",
+        root.display(),
+        files.len(),
+        total_bytes,
+        manifest_sha256,
+        CALIBRATION_FILE_COUNT,
+        CALIBRATION_TOTAL_BYTES,
+        CALIBRATION_MANIFEST_SHA256
+    );
+    Ok((root, manifest_sha256, files.len(), total_bytes))
+}
+
+/// Supplementary source identity. The content hashes above, not this revision,
+/// are what prove which timing bytes the control consumed.
+fn source_revision(systems: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(systems)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let revision = String::from_utf8(output.stdout).ok()?;
+    let revision = revision.trim();
+    (revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| revision.to_owned())
+}
+
+/// Canonical maximum context length from the pinned model config, not an
+/// engine default. `AISIM_SYSTEMS_ROOT` is `<core>/systems`, so the bundled
+/// model configs are its sibling `model_configs` directory.
+fn canonical_model_max_len(model: &str, systems: &Path) -> Result<usize> {
+    let config = systems
+        .parent()
+        .context("AISIM_SYSTEMS_ROOT must live beside the canonical model_configs directory")?
+        .join("model_configs")
+        .join(format!("{}_config.json", model.replace('/', "--")));
+    let bytes = read_bounded(&config, MAX_MODEL_CONFIG_BYTES)?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse canonical model config {}", config.display()))?;
+    let max = value
+        .get("max_position_embeddings")
+        .or_else(|| value.get("max_seq_len"))
+        .and_then(Value::as_u64)
+        .with_context(|| {
+            format!(
+                "{} does not declare a canonical max_position_embeddings/max_seq_len",
+                config.display()
+            )
+        })?;
+    ensure!(max > 0, "{} max context must be positive", config.display());
+    usize::try_from(max).context("canonical model context exceeds usize")
+}
+
 fn hardware_link(systems: &Path) -> Result<HardwareLink> {
     let yaml = systems.join(format!("{SYSTEM}.yaml"));
-    let text = fs::read_to_string(&yaml)
-        .with_context(|| format!("read AISim hardware spec {}", yaml.display()))?;
-    let parsed: HardwareSystemYaml = serde_yaml::from_str(&text)
+    let bytes = read_bounded(&yaml, MAX_HARDWARE_YAML_BYTES)?;
+    let yaml_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    ensure!(
+        yaml_sha256 == HARDWARE_YAML_SHA256,
+        "{} content SHA-256 {yaml_sha256} does not match the pinned {HARDWARE_YAML_SHA256}",
+        yaml.display()
+    );
+    let text =
+        std::str::from_utf8(&bytes).with_context(|| format!("{} must be UTF-8", yaml.display()))?;
+    let parsed: HardwareSystemYaml = serde_yaml::from_str(text)
         .with_context(|| format!("parse AISim hardware spec {}", yaml.display()))?;
+    let (
+        calibration_root,
+        calibration_manifest_sha256,
+        calibration_file_count,
+        calibration_total_bytes,
+    ) = calibration_inventory(systems)?;
     let node = parsed.node;
     ensure!(
         node.num_gpus_per_node > 0,
@@ -185,6 +426,12 @@ fn hardware_link(systems: &Path) -> Result<HardwareLink> {
         topology: LINK_TOPOLOGY,
         system: SYSTEM,
         yaml,
+        yaml_sha256,
+        calibration_root,
+        calibration_manifest_sha256,
+        calibration_file_count,
+        calibration_total_bytes,
+        source_revision: source_revision(systems),
         num_gpus_per_node: node.num_gpus_per_node,
         bandwidth_bytes_per_s: node.inter_node_bw,
         p2p_latency_s: node.p2p_latency,
@@ -292,7 +539,8 @@ pub(crate) fn canonical_role(
             "extra": {"worker_type": memory_role(role)},
         }))
         .context("complete matching native memory engine identity")?,
-        max_num_tokens: 4096,
+        max_num_tokens: u32::try_from(MAX_NUM_BATCHED_TOKENS)
+            .context("MAX_NUM_BATCHED_TOKENS must fit the native memory request u32")?,
         max_batch_size: u32::try_from(max_num_seqs)?,
         kv_cache_memory_fraction: KvCacheMemoryFraction::OfTotal(0.9),
         gpu_memory_capacity_bytes_override: None,
@@ -375,6 +623,9 @@ pub(crate) fn canonical_role(
     );
 
     let timing_config = serde_json::to_value(&provenance.config)?;
+    // Full GPU modeling must not treat `None` as unlimited: the pinned model
+    // config's native context maximum is the rank's prompt-plus-output limit.
+    let max_model_len = canonical_model_max_len(model, systems)?;
     let rank = EngineConfig {
         // External AIS timing is priced by the role factory supplied below; the
         // rank still names the exact resolved config so the engine and router
@@ -385,6 +636,7 @@ pub(crate) fn canonical_role(
         },
         max_num_seqs,
         max_num_batched_tokens: MAX_NUM_BATCHED_TOKENS,
+        max_model_len: Some(max_model_len),
         block_size: BLOCK_SIZE,
         num_gpu_blocks,
         kv_cache_bytes_per_token: Some(bytes_per_token),
@@ -486,8 +738,20 @@ pub(crate) fn spec(prefill: &RoleSetup, decode: &RoleSetup) -> Result<ReplaySpec
         "every disaggregated role needs positive native KV transfer bytes per token"
     );
     ensure!(
+        prefill.transfer.bytes_per_token == decode.transfer.bytes_per_token,
+        "prefill and decode must price the same native KV transfer bytes per token: {} vs {}",
+        prefill.transfer.bytes_per_token,
+        decode.transfer.bytes_per_token
+    );
+    ensure!(
         prefill.transfer.bandwidth_gbps > 0.0 && decode.transfer.bandwidth_gbps > 0.0,
         "every disaggregated role needs a positive physical transfer bandwidth"
+    );
+    ensure!(
+        prefill.transfer.bandwidth_gbps == decode.transfer.bandwidth_gbps,
+        "prefill and decode must price the same transfer bandwidth: {} vs {}",
+        prefill.transfer.bandwidth_gbps,
+        decode.transfer.bandwidth_gbps
     );
     // AISim applies `handoff_latency_ms` only when a role cannot derive a delay
     // from `kv_transfer_bytes_per_token` + `kv_transfer_bandwidth`. Both roles
@@ -798,6 +1062,7 @@ pub(crate) fn calibrated_control() -> Result<()> {
             "scope": "preparatory GPU provider control; not a full-scenario or tokenizer-equivalence claim",
             "model": model,
             "model_source": model_source,
+            "max_model_len_note": "rank.max_model_len derives from the pinned model config max_position_embeddings; unbounded context is not claimed",
             "system": SYSTEM,
             "backend": "vllm",
             "backend_version": BACKEND_VERSION,
@@ -806,6 +1071,8 @@ pub(crate) fn calibrated_control() -> Result<()> {
                 "topology_assumption": prefill.transfer.link.topology,
                 "system": prefill.transfer.link.system,
                 "hardware_spec": prefill.transfer.link.yaml.display().to_string(),
+                "hardware_yaml_sha256": prefill.transfer.link.yaml_sha256.as_str(),
+                "hardware_yaml_sha256_expected": HARDWARE_YAML_SHA256,
                 "num_gpus_per_node": prefill.transfer.link.num_gpus_per_node,
                 "inter_node_bandwidth_bytes_per_s": prefill.transfer.link.bandwidth_bytes_per_s,
                 "inter_node_bandwidth_decimal_gb_s": prefill.transfer.bandwidth_gbps,
@@ -818,6 +1085,18 @@ pub(crate) fn calibrated_control() -> Result<()> {
                     "decode": decode.transfer.bytes_per_token,
                 },
                 "note": "inter-node hardware link assumption for abstract 2P2D workers; not a measured deployment network claim",
+            },
+            "calibration_inventory": {
+                "scope": "complete canonical data/h100_sxm subtree; all regular files, not only the op tables this control consumes",
+                "root": prefill.transfer.link.calibration_root.display().to_string(),
+                "manifest_algorithm": "SHA-256 over sorted '<file-sha256>  <relative-path>\\n' lines, streamed; symlinks and special files rejected",
+                "manifest_sha256": prefill.transfer.link.calibration_manifest_sha256.as_str(),
+                "manifest_sha256_expected": CALIBRATION_MANIFEST_SHA256,
+                "file_count": prefill.transfer.link.calibration_file_count,
+                "total_bytes": prefill.transfer.link.calibration_total_bytes,
+                "source_revision": prefill.transfer.link.source_revision.as_deref(),
+                "source_revision_note": "git HEAD when a checkout is available; content hashes, not revision identity, enforce integrity",
+                "op_table_inventory": "per-role canonical timing diagnostics below; no separate owner-exposed op-table source-file list was available",
             },
             "tokenizer": serde_json::to_value(&run.cfg.tokenizer).expect("tokenizer descriptor"),
             "tokenizer_note": "fixture builtin tokenizer; main acquires the pinned model tokenizer before a full-scenario claim",
