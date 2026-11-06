@@ -98,7 +98,7 @@ Added by an individual metric family. Each label appears only on the metrics not
 </ParamField>
 
 <ParamField path="policy_class" type="string">
-  `[Shared]` On `dynamo_frontend_router_queue_*` — the resolved policy class. A request that names no class is counted under the default class. A request whose class, after any request-classifier override, is unknown fails before it is queued, so these queue metrics do not count it.
+  `[Shared]` On `dynamo_frontend_router_queue_*` — the resolved policy class. With flat classes, a request that names no class is counted under the default class, and a request whose class, after any request-classifier override, is unknown fails before it is queued, so these queue metrics do not count it. With a deprecated policy-family profile, a request that names an explicit class is counted under that class, and any other request under the class that its family selects for its uncached tokens, using the default family when it names no family. There, only a request-classifier override that names neither a family nor an explicit class fails before it is queued.
 </ParamField>
 
 <ParamField path="reason" type="string">

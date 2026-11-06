@@ -228,6 +228,17 @@ def _run_case(
         return result
 
 
+# Each pair holds the equal-share control and the 4:1 weighted arm. The deprecated pair
+# expresses the same classes in the policy-family/cache-bucket format.
+@pytest.mark.parametrize(
+    ("equal_config", "weighted_config"),
+    [
+        pytest.param("equal_share.yaml", "premium_4x.yaml", id="flat"),
+        pytest.param(
+            "equal_share_deprecated.yaml", "premium_4x_deprecated.yaml", id="deprecated"
+        ),
+    ],
+)
 @pytest.mark.usefixtures(
     "runtime_services_dynamic_ports",
     "predownload_tokenizers",
@@ -236,6 +247,8 @@ def test_weighted_policy_class_client_completion_priority(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
     dynamo_dynamic_ports,
+    equal_config: str,
+    weighted_config: str,
 ) -> None:
     """The client observes weighted premium service without regular starvation."""
 
@@ -266,14 +279,14 @@ def test_weighted_policy_class_client_completion_priority(
             request=request,
             mocker=mocker,
             frontend_port=frontend_ports[0],
-            config_name="equal_share.yaml",
+            config_name=equal_config,
             case_name="equal",
         )
         weighted = _run_case(
             request=request,
             mocker=mocker,
             frontend_port=frontend_ports[1],
-            config_name="premium_4x.yaml",
+            config_name=weighted_config,
             case_name="weighted",
         )
 
