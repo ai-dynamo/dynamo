@@ -25,7 +25,6 @@ pub enum AdapterMode {
     /// `pd_adapter_unavailable`, which is the historical behaviour and the
     /// default, so opting in is an explicit deployment decision.
     None,
-    /// Raw-vLLM NIXL pull handoff adapter.
     VllmNixl,
 }
 

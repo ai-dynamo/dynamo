@@ -665,6 +665,31 @@ async fn c06_unknown_fields_and_tools_survive_both_legs() {
     }
 }
 
+/// C07b: an explicit `"n": null` is the absent-value spelling, not an
+/// unsupported variant; it takes the supported single-handoff path.
+#[tokio::test]
+async fn c07b_n_null_takes_the_supported_path() {
+    let harness = Harness::build(
+        Behaviour::Json(prefill_success()),
+        Behaviour::Json(decode_success()),
+    )
+    .await;
+
+    let mut body = original_request();
+    body["n"] = Value::Null;
+    body["stream"] = json!(false);
+    let response = harness
+        .app
+        .oneshot(pd_request(harness.prefill.address(), &body))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_json(response).await, decode_success());
+    assert_eq!(harness.prefill.call_count(), 1);
+    assert_eq!(harness.decode.call_count(), 1);
+}
+
 /// C07: `n != 1` is rejected before either leg, not silently rewritten.
 #[tokio::test]
 async fn c07_n_greater_than_one_is_rejected_before_any_leg() {
