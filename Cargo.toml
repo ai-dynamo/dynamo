@@ -173,7 +173,8 @@ tempfile = "3"
 thiserror = { version = "2.0.17" }
 tmq = { version = "0.5.0" }
 zmq = { version = "0.10" }
-tokio = { version = "=1.54.0", features = ["full"] }
+# The embedding proof shares AIPerf's locked runtime; 1.54.0 is yanked.
+tokio = { version = "=1.53.1", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7.19", features = ["codec", "net", "rt", "io-util"] }
 tower = { version = "0.5", features = ["util"] }
