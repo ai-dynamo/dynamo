@@ -20,6 +20,7 @@ from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
+import dynamo.frontend.sglang_prepost as sglang_prepost_module
 from dynamo.frontend.sglang_prepost import SglangStreamingPostProcessor
 from dynamo.frontend.sglang_processor import SglangProcessor
 
@@ -588,6 +589,70 @@ class TestJsonArrayParserReparse:  # FRONTEND.4 — JSON-array parser reparse pa
         assert choices[-1]["delta"]["content"] == text
         assert choices[-1]["finish_reason"] == "stop"
         assert all(not choice["delta"].get("tool_calls") for choice in choices)
+
+    @pytest.mark.parametrize("batch_size", [1, 8, 1000])
+    @pytest.mark.parametrize(
+        "text",
+        ["The service is unavailable.", "Service unavailable [503]; retry {later}."],
+    )
+    def test_plain_text_avoids_native_detector_construction(
+        self, tokenizer, monkeypatch, batch_size, text
+    ):
+        def unexpected_parser(*args, **kwargs):
+            pytest.fail(
+                "Ordinary text must not construct the vocabulary-scanning parser"
+            )
+
+        monkeypatch.setattr(
+            sglang_prepost_module, "FunctionCallParser", unexpected_parser
+        )
+        choices = self._run_forced_choice(tokenizer, text, "required", batch_size)
+        assert choices[-1]["delta"]["content"] == text
+        assert choices[-1]["finish_reason"] == "stop"
+
+    @pytest.mark.parametrize("batch_size", [1, 2, 4, 8, 1000])
+    @pytest.mark.parametrize("selected_first", [False, True])
+    def test_named_choice_emits_dense_indices(
+        self, tokenizer, batch_size, selected_first
+    ):
+        from openai.lib.streaming.chat import ChatCompletionStreamState
+        from openai.types.chat import ChatCompletionChunk
+
+        selected = {"name": "get_weather", "parameters": {"city": "NYC"}}
+        other = {
+            "name": "search_gutenberg_books",
+            "parameters": {"search_terms": ["Joyce"]},
+        }
+        payload = [selected, other, selected] if selected_first else [other, selected]
+        choices = self._run_forced_choice(
+            tokenizer,
+            json.dumps(payload),
+            {"type": "function", "function": {"name": "get_weather"}},
+            batch_size,
+        )
+        calls = choices[-1]["delta"]["tool_calls"]
+        count = 2 if selected_first else 1
+        assert [call["index"] for call in calls] == list(range(count))
+        assert all(call["function"]["name"] == "get_weather" for call in calls)
+        assert all(
+            json.loads(call["function"]["arguments"]) == {"city": "NYC"}
+            for call in calls
+        )
+        state = ChatCompletionStreamState()
+        for choice in choices:
+            state.handle_chunk(
+                ChatCompletionChunk(
+                    id="test",
+                    created=0,
+                    model="test",
+                    object="chat.completion.chunk",
+                    choices=[choice],
+                )
+            )
+        assert (
+            len(state.current_completion_snapshot.choices[0].message.tool_calls)
+            == count
+        )
 
     @pytest.mark.parametrize("batch_size", [1, 8, 1000])
     @pytest.mark.parametrize("native", [False, True])

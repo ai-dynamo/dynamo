@@ -1908,6 +1908,12 @@ class SglangStreamingPostProcessor:
                         not final_calls
                         and self._tool_call_parser_name
                         and self._sglang_tools
+                        # Both Hunyuan dialects start with this prefix. Avoid
+                        # scanning the tokenizer vocabulary for ordinary text.
+                        and (
+                            self._tool_call_parser_name != "hunyuan"
+                            or "<tool_calls" in full_text
+                        )
                     ):
                         try:
                             fcp = FunctionCallParser(
@@ -1993,10 +1999,10 @@ class SglangStreamingPostProcessor:
 
         if finish_reason and self._tool_call_names:
             tool_calls_out: list[dict[str, Any]] = []
-            for idx in sorted(self._tool_call_names):
+            for output_index, idx in enumerate(sorted(self._tool_call_names)):
                 tool_calls_out.append(
                     {
-                        "index": idx,
+                        "index": output_index,
                         "id": self._tool_call_ids[idx],
                         "type": "function",
                         "function": {

@@ -677,7 +677,7 @@ class SglangProcessor:
         tool_choice = request.get("tool_choice")
         named_tool = (
             tool_choice["function"]["name"]
-            if _is_named_tool_choice(tool_choice)
+            if isinstance(tool_choice, dict) and _is_named_tool_choice(tool_choice)
             else None
         )
         return SglangStreamingPostProcessor(
