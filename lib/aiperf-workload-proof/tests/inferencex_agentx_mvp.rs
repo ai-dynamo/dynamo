@@ -9,7 +9,7 @@
 //! E2E then hosts the production AIPerf plans on the native AISim `Replayer`
 //! event loop with:
 //!
-//! * canonical H100 BF16 op-level role timing for prefill and decode;
+//! * canonical B200 BF16 op-level role timing for prefill and decode;
 //! * the real Dynamo KV Router composition produced by
 //!   `KvReplayComposition::disaggregated`;
 //! * the caller-owned `HostedTypedReport`, finalized into the normal native-v2
@@ -28,19 +28,16 @@
 //! * trajectory-start ratios 0.0..=1.0 (not the frozen parity preset)
 //! * no request or session caps, finite replay disabled
 //! * no `unsafe_override`, all corpus sources retained
-//! * explicit local Qwen3-8B tokenizer from `MVP_TOKENIZER_ROOT`, verified
-//!   against the exact pinned acquisition at
-//!   `Qwen/Qwen3-8B@b968826d9c46dd6066d109eabc6255188de91218` by byte length
-//!   and SHA-256 for `config.json`, `tokenizer.json`, and
-//!   `tokenizer_config.json`
+//! * direct trace-hash input with no text tokenizer; canonical model-config
+//!   bytes, not tokenizer assets, establish the 1M-token context capacity
 //!
 //! The full E2E deliberately holds no Dynamo parity claim: the normal native
 //! report is finalized with empty `ReportPairRunFacts`, and the raw native
 //! backend evidence plus canonical role geometry are written separately as
 //! `native_backend_report.json` with `dynamo_parity: false`. That file is
 //! provenance, never substituted for typed parity facts, and it records its own
-//! designation as not a frozen parity result together with the exact tokenizer
-//! file hashes and the runner executable identity that produced it.
+//! designation as not a frozen parity result together with the consumed canonical
+//! model-config hashes and the runner executable identity that produced it.
 //!
 //! # Running the full E2E
 //!
@@ -54,13 +51,9 @@
 //!
 //! Required environment:
 //!
-//! * `MVP_TOKENIZER_ROOT`, `MVP_TOKENIZER_REVISION` — the local pinned
-//!   Qwen3-8B tokenizer. The revision must be exactly
-//!   `b968826d9c46dd6066d109eabc6255188de91218`, and the three files must
-//!   match the byte lengths and SHA-256 values recorded in `TOKENIZER_PINS`.
-//!   Files are opened without following links, read under a 12 MiB bound, and
-//!   rejected when they change between inspection and open.
-//! * `AISIM_SYSTEMS_ROOT` — the checked-in H100 system assets.
+//! * `AISIM_SYSTEMS_ROOT` — the checked-in B200 system assets and their sibling
+//!   canonical model configs. The model ID ends in `NVFP4`, but this proof uses
+//!   explicitly selected BF16 timing and memory, not NVFP4 precision.
 //! * `MVP_ARTIFACT_DIR` — a new directory. The test refuses to reuse an
 //!   existing path and never uses a temporary directory, so the complete
 //!   result survives.
@@ -80,7 +73,6 @@ use aiperf_config::model::{
     BenchmarkRun,
     dataset::{CacheBust, CacheBustTarget, Dataset, PublicDataset, Sampling},
     phase::{Phase, PhaseCommon, PhaseKind as ConfigPhaseKind},
-    tokenizer::Tokenizer,
     transport::{AISimulateMode, Transport},
     workload_kind::workload_kind,
 };
@@ -153,10 +145,10 @@ const GRACE_PERIOD_SECONDS: f64 = 30.0;
 const TRAJECTORY_START_MIN_RATIO: f64 = 0.0;
 const TRAJECTORY_START_MAX_RATIO: f64 = 1.0;
 /// Canonical role model identity. Same model on every role and on the run.
-const MODEL: &str = "Qwen/Qwen3-8B";
-/// Qwen3-8B's model maximum context. Calibration metadata only: the full
-/// corpus stays unfiltered, and context overflow is owned by the backend.
-const MODEL_MAX_CONTEXT_TOKENS: u64 = 40960;
+const MODEL: &str = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4";
+/// Canonical model maximum context, cross-checked against the consumed model
+/// config. The model ID does not select precision: both roles explicitly use BF16.
+const MODEL_MAX_CONTEXT_TOKENS: u64 = 1_048_576;
 /// Complete root trees the full pinned corpus prepares.
 const EXPECTED_PREPARED_ROOTS: usize = 393;
 /// Normal native report schema version.
@@ -168,59 +160,6 @@ const SUMMARY_ARTIFACT: &str = "profile_export_aiperf.json";
 /// Separate raw-backend provenance written beside the normal artifacts.
 const RAW_BACKEND_ARTIFACT: &str = "native_backend_report.json";
 
-/// Exact local tokenizer acquisition: `Qwen/Qwen3-8B` at this revision.
-/// `MVP_TOKENIZER_REVISION` must spell it, and [`TOKENIZER_PINS`] must match
-/// byte-for-byte, so identity never rests on a directory name alone.
-const TOKENIZER_REVISION: &str = "b968826d9c46dd6066d109eabc6255188de91218";
-/// Bound applied to every pinned tokenizer file. `tokenizer.json` is the
-/// largest pinned file at 11,422,654 bytes and stays below this.
-const MAX_TOKENIZER_FILE_BYTES: u64 = 12 * 1024 * 1024;
-
-/// One pinned tokenizer file: name, exact byte length, and SHA-256.
-struct TokenizerPin {
-    name: &'static str,
-    bytes: u64,
-    sha256: &'static str,
-}
-
-/// The complete pinned Qwen3-8B tokenizer file set at [`TOKENIZER_REVISION`].
-const TOKENIZER_PINS: [TokenizerPin; 3] = [
-    TokenizerPin {
-        name: "config.json",
-        bytes: 728,
-        sha256: "f7c4eadfbbf522470667b797a3c89be2524832d2d599797248dc304fff447c30",
-    },
-    TokenizerPin {
-        name: "tokenizer.json",
-        bytes: 11_422_654,
-        sha256: "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
-    },
-    TokenizerPin {
-        name: "tokenizer_config.json",
-        bytes: 9_732,
-        sha256: "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101",
-    },
-];
-
-/// Verified tokenizer identity, recorded in the raw backend artifact.
-#[derive(serde::Serialize)]
-struct TokenizerEvidence {
-    repository: &'static str,
-    revision: String,
-    root: String,
-    model_type: String,
-    max_position_embeddings: u64,
-    files: Vec<TokenizerFileEvidence>,
-}
-
-/// One verified tokenizer file as recorded in the raw backend artifact.
-#[derive(serde::Serialize)]
-struct TokenizerFileEvidence {
-    name: &'static str,
-    bytes: u64,
-    sha256: String,
-}
-
 /// Build the exact InferenceX AgentX MVP run from the strict native fixture.
 ///
 /// The base frame is the shared `run_fixture::request`, so every non-dataset
@@ -229,16 +168,9 @@ struct TokenizerFileEvidence {
 /// from `inferencex_agentx_mvp()`; only the documented concurrency and grace
 /// period are authored here because the scenario default does not carry them.
 ///
-/// Also returns the verified tokenizer provenance. This call writes nothing
-/// into `directory`, so it runs as a preflight before the artifact directory
-/// is created.
-fn full_mvp_run(directory: &Path) -> Result<(BenchmarkRun, TokenizerEvidence)> {
-    let tokenizer_root = std::env::var_os("MVP_TOKENIZER_ROOT").context(
-        "MVP_TOKENIZER_ROOT must identify the local pinned Qwen3-8B tokenizer; \
-         no builtin or remote fallback is permitted",
-    )?;
-    let tokenizer = tokenizer_evidence(&PathBuf::from(tokenizer_root))?;
-
+/// This call writes nothing into `directory` and needs no external tokenizer
+/// assets, so it runs as a preflight before the artifact directory is created.
+fn full_mvp_run(directory: &Path) -> Result<BenchmarkRun> {
     let scenario = aiperf_agentx::scenario::inferencex_agentx_mvp();
     ensure!(
         scenario.name == AGENTX_SCENARIO,
@@ -350,15 +282,9 @@ fn full_mvp_run(directory: &Path) -> Result<(BenchmarkRun, TokenizerEvidence)> {
         .context("base fixture must name at least one model")?;
     item.name = MODEL.to_owned();
 
-    // Explicit local tokenizer; no builtin and no remote acquisition.
-    run.cfg.tokenizer = Some(Tokenizer {
-        name: Some(tokenizer.root.clone()),
-        revision: tokenizer.revision.clone(),
-        trust_remote_code: false,
-        apply_chat_template: false,
-        server_url: None,
-        per_model: Default::default(),
-    });
+    // TraceHashes consumes the authored hash IDs directly. The native wire
+    // permits tokenizer:null; no local, remote, or builtin text tokenizer is used.
+    run.cfg.tokenizer = None;
 
     let endpoint = run
         .cfg
@@ -444,174 +370,7 @@ fn full_mvp_run(directory: &Path) -> Result<(BenchmarkRun, TokenizerEvidence)> {
     aiperf_engine_input::execution_input::factory_workload_input_resolved(&decoded.run)
         .context("exact MVP frame must project to a native workload input")?;
     assert_mvp_config(&decoded.run)?;
-    Ok((decoded.run, tokenizer))
-}
-
-/// Verify the local acquisition is exactly the pinned Qwen3-8B tokenizer and
-/// return the provenance the raw artifact records. The exact file hashes, not
-/// the directory name, establish identity.
-fn tokenizer_evidence(root: &Path) -> Result<TokenizerEvidence> {
-    let revision = std::env::var("MVP_TOKENIZER_REVISION")
-        .context("MVP_TOKENIZER_REVISION must pin the Qwen3-8B tokenizer revision")?;
-    ensure!(
-        revision == TOKENIZER_REVISION,
-        "MVP_TOKENIZER_REVISION is {revision}, expected exactly {TOKENIZER_REVISION}"
-    );
-    ensure!(
-        root.is_dir(),
-        "MVP_TOKENIZER_ROOT is not a directory: {}",
-        root.display()
-    );
-
-    let mut files = Vec::with_capacity(TOKENIZER_PINS.len());
-    let mut config = None;
-    for pin in TOKENIZER_PINS {
-        let bytes = read_pinned_file(root, &pin)?;
-        let digest = sha256_hex(&bytes);
-        ensure!(
-            digest == pin.sha256,
-            "pinned tokenizer file {} has SHA-256 {digest}, expected {}",
-            pin.name,
-            pin.sha256
-        );
-        if pin.name == "config.json" {
-            config = Some(bytes);
-        }
-        files.push(TokenizerFileEvidence {
-            name: pin.name,
-            bytes: pin.bytes,
-            sha256: digest,
-        });
-    }
-
-    let config: Value = serde_json::from_slice(
-        config
-            .as_deref()
-            .context("config.json must be part of the pinned file set")?,
-    )
-    .context("pinned config.json must parse as JSON")?;
-    let model_type = config["model_type"]
-        .as_str()
-        .context("pinned config.json must declare model_type")?;
-    ensure!(
-        model_type == "qwen3",
-        "pinned tokenizer must be Qwen3, got model_type {model_type}"
-    );
-    // The pinned `config.json` carries no model name; the verified file hashes
-    // above are the identity, so no name is required or invented here.
-    let max_position = config["max_position_embeddings"]
-        .as_u64()
-        .context("pinned config.json must declare max_position_embeddings")?;
-    ensure!(
-        max_position == MODEL_MAX_CONTEXT_TOKENS,
-        "pinned Qwen3-8B max_position_embeddings is {max_position}, \
-         expected {MODEL_MAX_CONTEXT_TOKENS}"
-    );
-
-    Ok(TokenizerEvidence {
-        repository: MODEL,
-        revision,
-        root: root.to_string_lossy().into_owned(),
-        model_type: model_type.to_owned(),
-        max_position_embeddings: max_position,
-        files,
-    })
-}
-
-/// Read one pinned tokenizer file without following links, under the exact byte
-/// bound, and prove the opened handle is the file that was inspected.
-fn read_pinned_file(root: &Path, pin: &TokenizerPin) -> Result<Vec<u8>> {
-    let path = root.join(pin.name);
-    let inspected = std::fs::symlink_metadata(&path)
-        .with_context(|| format!("inspecting pinned tokenizer file {}", path.display()))?;
-    ensure!(
-        !inspected.file_type().is_symlink(),
-        "pinned tokenizer file {} must not be a symlink",
-        path.display()
-    );
-    ensure!(
-        inspected.is_file(),
-        "pinned tokenizer file {} must be a regular file",
-        path.display()
-    );
-    ensure!(
-        inspected.len() == pin.bytes,
-        "pinned tokenizer file {} is {} bytes, expected exactly {}",
-        path.display(),
-        inspected.len(),
-        pin.bytes
-    );
-    ensure!(
-        inspected.len() <= MAX_TOKENIZER_FILE_BYTES,
-        "pinned tokenizer file {} exceeds the {MAX_TOKENIZER_FILE_BYTES}-byte bound",
-        path.display()
-    );
-
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // `O_NOFOLLOW` from the Linux asm-generic `fcntl.h`. Spelling the
-        // constant here keeps this proof crate free of a `libc` dependency for
-        // a single flag; every other platform falls back to the stable-open
-        // check below.
-        options.custom_flags(0o400000);
-    }
-    let file = options
-        .open(&path)
-        .with_context(|| format!("opening pinned tokenizer file {}", path.display()))?;
-    let opened = file
-        .metadata()
-        .with_context(|| format!("inspecting open handle for {}", path.display()))?;
-    ensure_stable_open(&path, &inspected, &opened)?;
-
-    let mut bytes = Vec::with_capacity(pin.bytes as usize);
-    let mut limited = file.take(MAX_TOKENIZER_FILE_BYTES + 1);
-    limited
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("reading pinned tokenizer file {}", path.display()))?;
-    ensure!(
-        bytes.len() as u64 == pin.bytes,
-        "pinned tokenizer file {} read {} bytes, expected exactly {}",
-        path.display(),
-        bytes.len(),
-        pin.bytes
-    );
-    Ok(bytes)
-}
-
-/// Reject a file that was swapped between inspection and open. The source path
-/// is operator-supplied, but the no-follow boundary still has to hold.
-fn ensure_stable_open(
-    path: &Path,
-    inspected: &std::fs::Metadata,
-    opened: &std::fs::Metadata,
-) -> Result<()> {
-    ensure!(
-        opened.is_file() && opened.len() == inspected.len(),
-        "pinned tokenizer file {} changed between inspection and open",
-        path.display()
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        ensure!(
-            opened.dev() == inspected.dev() && opened.ino() == inspected.ino(),
-            "pinned tokenizer file {} was replaced between inspection and open",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
-/// Lowercase hexadecimal SHA-256 of `bytes`.
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    Ok(decoded.run)
 }
 
 /// Assert the exact scenario invariants directly on the strict run.
@@ -838,26 +597,9 @@ pub fn assert_mvp_config(run: &BenchmarkRun) -> Result<()> {
         run.cfg.profiling_request_cap().is_none(),
         "no profiling request cap may truncate the corpus"
     );
-    let tokenizer = run
-        .cfg
-        .tokenizer
-        .as_ref()
-        .context("MVP run must carry the explicit tokenizer policy")?;
     ensure!(
-        tokenizer.name.as_deref() != Some("builtin"),
-        "the MVP run requires the explicit local tokenizer"
-    );
-    ensure!(
-        tokenizer
-            .name
-            .as_deref()
-            .is_some_and(|name| !name.trim().is_empty()),
-        "the MVP tokenizer must name the local acquisition"
-    );
-    ensure!(
-        tokenizer.revision == TOKENIZER_REVISION,
-        "the MVP tokenizer revision must be exactly {TOKENIZER_REVISION}, got {}",
-        tokenizer.revision
+        run.cfg.tokenizer.is_none(),
+        "trace-hash input must not require a text tokenizer policy"
     );
     Ok(())
 }
@@ -988,7 +730,7 @@ fn report_run_metadata(run: &BenchmarkRun, harness: &str) -> Result<ReportRunMet
     Ok(metadata)
 }
 
-/// Preserve the raw native backend report, the verified tokenizer identity, the
+/// Preserve the raw native backend report, trace-hash input designation, the
 /// runner executable, and canonical role provenance as a separate, explicitly
 /// non-parity artifact. The normal report's typed pair facts stay empty, so
 /// nothing here can be mistaken for `ReportDynamoRunInfo`.
@@ -998,7 +740,6 @@ fn write_raw_backend_artifact(
     typed: &HostedTypedReport,
     prefill: &calibrated::RoleSetup,
     decode: &calibrated::RoleSetup,
-    tokenizer: &TokenizerEvidence,
     harness: &str,
 ) -> Result<()> {
     let artifact = json!({
@@ -1010,14 +751,15 @@ fn write_raw_backend_artifact(
         "dynamo_clock": Value::Null,
         "parity_designation": "not a frozen parity designation: this artifact is \
                                provenance for one host, one runner executable, and \
-                               one verified tokenizer acquisition, and is never \
+                               one trace-hash input projection, and is never \
                                compared against or substituted for frozen Dynamo \
                                parity facts",
         "harness": {
             "label": "inferencex_agentx_mvp::full_scenario",
             "executable_distribution_id": harness,
         },
-        "tokenizer": tokenizer,
+        "input_representation": "trace_hashes",
+        "text_tokenizer_used": false,
         "transport": "aisimulate",
         "workload": "graph",
         "model_max_context_tokens": MODEL_MAX_CONTEXT_TOKENS,
@@ -1031,6 +773,7 @@ fn write_raw_backend_artifact(
         "prefill": {
             "timing": &prefill.diagnostics,
             "native_kv_geometry": &prefill.geometry,
+            "state_geometry": &prefill.state_geometry,
             "replay_rank": &prefill.rank,
             "transfer": &prefill.transfer,
             "model_config": &prefill.model_config,
@@ -1038,6 +781,7 @@ fn write_raw_backend_artifact(
         "decode": {
             "timing": &decode.diagnostics,
             "native_kv_geometry": &decode.geometry,
+            "state_geometry": &decode.state_geometry,
             "replay_rank": &decode.rank,
             "transfer": &decode.transfer,
             "model_config": &decode.model_config,
@@ -1125,8 +869,8 @@ fn assert_full_scenario(
         "profiling phase ran {}ns, expected at least the full {profile_seconds}s",
         end_ns - start_ns
     );
-    // Long-context rejections are part of the full Qwen scenario and are
-    // classified by the backend. The scenario's own submission verdict (the
+    // Context rejections, if any, are classified by the backend. The
+    // scenario's own submission verdict (the
     // 1% failure threshold) is the acceptance contract, so this proof does not
     // assert a zero general request-error count.
 
@@ -1305,43 +1049,52 @@ fn create_new_artifact_dir(path: &Path) -> Result<PathBuf> {
 }
 
 #[test]
-#[ignore = "requires the exact pinned MVP_TOKENIZER_ROOT/MVP_TOKENIZER_REVISION acquisition, AISIM_SYSTEMS_ROOT and a new MVP_ARTIFACT_DIR; runs the full 1800s scenario over the real Dynamo KV composition"]
+#[ignore = "requires AISIM_SYSTEMS_ROOT and a new MVP_ARTIFACT_DIR; runs the full 1800s trace-hash scenario over the real Dynamo KV composition"]
 fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> {
     // Static preflight first: the retained directory is created only after the
-    // tokenizer, the scenario frame, the system assets, and the canonical roles
+    // scenario frame, the system assets, and the canonical roles
     // are proven, so a failing check cannot leave a half-built result behind.
     let artifact_path = mvp_artifact_path()?;
-    let (run, tokenizer) =
-        full_mvp_run(&artifact_path).context("exact InferenceX AgentX MVP run")?;
+    let run = full_mvp_run(&artifact_path).context("exact InferenceX AgentX MVP run")?;
     assert_mvp_config(&run)?;
     let harness = executable_distribution_id()?;
 
     let systems = calibrated::systems_root()?;
-    let prefill = calibrated::canonical_role(
-        MODEL,
-        &systems,
-        ForwardPassWorkerType::Prefill,
-        usize::try_from(CONCURRENCY)?,
-    )
+    let prefill = calibrated::canonical_role(calibrated::RoleIdentity {
+        model: MODEL,
+        systems: &systems,
+        hardware: calibrated::HardwareSelection::B200Sxm,
+        precision: calibrated::ProofPrecision::Bfloat16,
+        tensor_parallel_size: 1,
+        role: ForwardPassWorkerType::Prefill,
+        max_num_seqs: usize::try_from(CONCURRENCY)?,
+        prefill: calibrated::PrefillMode::Chunked {
+            max_num_batched_tokens: 4096,
+        },
+    })
     .context("prefill canonical op-level timing and native geometry")?;
-    let decode = calibrated::canonical_role(
-        MODEL,
-        &systems,
-        ForwardPassWorkerType::Decode,
-        usize::try_from(CONCURRENCY)?,
-    )
+    let decode = calibrated::canonical_role(calibrated::RoleIdentity {
+        model: MODEL,
+        systems: &systems,
+        hardware: calibrated::HardwareSelection::B200Sxm,
+        precision: calibrated::ProofPrecision::Bfloat16,
+        tensor_parallel_size: 1,
+        role: ForwardPassWorkerType::Decode,
+        max_num_seqs: usize::try_from(CONCURRENCY)?,
+        prefill: calibrated::PrefillMode::Chunked {
+            max_num_batched_tokens: 4096,
+        },
+    })
     .context("decode canonical op-level timing and native geometry")?;
     for role in [&prefill, &decode] {
         ensure!(
-            role.rank.max_model_len == Some(usize::try_from(tokenizer.max_position_embeddings)?),
-            "canonical role context capacity disagrees with the verified tokenizer model config"
+            role.rank.max_model_len == Some(usize::try_from(MODEL_MAX_CONTEXT_TOKENS)?)
+                && role.model_config.max_model_len == usize::try_from(MODEL_MAX_CONTEXT_TOKENS)?,
+            "canonical role context capacity disagrees with the consumed 1M model config"
         );
         ensure!(
-            tokenizer
-                .files
-                .iter()
-                .any(|file| file.name == "config.json" && file.sha256 == role.model_config.sha256),
-            "canonical role model config bytes disagree with the verified tokenizer acquisition"
+            prefill.model_config.sha256 == decode.model_config.sha256,
+            "canonical roles must consume the same pinned model config bytes"
         );
     }
     let metadata = report_run_metadata(&run, &harness)?;
@@ -1358,7 +1111,6 @@ fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> 
         &typed,
         &prefill,
         &decode,
-        &tokenizer,
         &harness,
     )?;
 
@@ -1390,11 +1142,9 @@ fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> 
 }
 
 #[test]
-#[ignore = "requires the exact pinned MVP_TOKENIZER_ROOT/MVP_TOKENIZER_REVISION acquisition; no builtin tokenizer fallback"]
 fn inferencex_agentx_mvp_run_is_the_exact_user_scenario() -> Result<()> {
     let directory = tempfile::tempdir().context("artifact directory")?;
-    let (run, _tokenizer) =
-        full_mvp_run(directory.path()).context("exact InferenceX AgentX MVP run")?;
+    let run = full_mvp_run(directory.path()).context("exact InferenceX AgentX MVP run")?;
     assert_mvp_config(&run)?;
     Ok(())
 }
@@ -1411,18 +1161,30 @@ fn calibrated_hosted_rejections_reconcile_every_request() -> Result<()> {
     )?
     .run;
     let systems = calibrated::systems_root()?;
-    let mut prefill = calibrated::canonical_role(
-        MODEL,
-        &systems,
-        ForwardPassWorkerType::Prefill,
-        CONCURRENCY as usize,
-    )?;
-    let mut decode = calibrated::canonical_role(
-        MODEL,
-        &systems,
-        ForwardPassWorkerType::Decode,
-        CONCURRENCY as usize,
-    )?;
+    let mut prefill = calibrated::canonical_role(calibrated::RoleIdentity {
+        model: MODEL,
+        systems: &systems,
+        hardware: calibrated::HardwareSelection::B200Sxm,
+        precision: calibrated::ProofPrecision::Bfloat16,
+        tensor_parallel_size: 1,
+        role: ForwardPassWorkerType::Prefill,
+        max_num_seqs: CONCURRENCY as usize,
+        prefill: calibrated::PrefillMode::Chunked {
+            max_num_batched_tokens: 4096,
+        },
+    })?;
+    let mut decode = calibrated::canonical_role(calibrated::RoleIdentity {
+        model: MODEL,
+        systems: &systems,
+        hardware: calibrated::HardwareSelection::B200Sxm,
+        precision: calibrated::ProofPrecision::Bfloat16,
+        tensor_parallel_size: 1,
+        role: ForwardPassWorkerType::Decode,
+        max_num_seqs: CONCURRENCY as usize,
+        prefill: calibrated::PrefillMode::Chunked {
+            max_num_batched_tokens: 4096,
+        },
+    })?;
     prefill.rank.max_model_len = Some(16);
     decode.rank.max_model_len = Some(16);
     let (backend, typed) = host_typed(&run, &prefill, &decode, true)?;
@@ -1449,9 +1211,9 @@ fn calibrated_hosted_rejections_reconcile_every_request() -> Result<()> {
 /// Small boundary control, never acceptance for the full corpus or duration.
 /// Exercise the exact calibrated host, typed reconciliation, and artifact
 /// finalizer before spending full-corpus resources. Deliberately use the
-/// existing branch fixture and builtin tokenizer, with no scenario designation.
+/// existing branch fixture's trace hashes, with no scenario designation.
 #[test]
-#[ignore = "requires AISIM_SYSTEMS_ROOT and pinned MVP_TOKENIZER_ROOT/MVP_TOKENIZER_REVISION; four-request calibrated artifact control, not full MVP acceptance"]
+#[ignore = "requires AISIM_SYSTEMS_ROOT; four-request calibrated trace-hash artifact control, not full MVP acceptance"]
 fn calibrated_hosted_artifacts_reconcile_every_request() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let mut run = aiperf_protocol::runner_v2::decode_run_request_v2(
@@ -1466,18 +1228,30 @@ fn calibrated_hosted_artifacts_reconcile_every_request() -> Result<()> {
     export.genai_perf.enabled = true;
     export.genai_perf.json = true;
     let systems = calibrated::systems_root()?;
-    let prefill = calibrated::canonical_role(
-        MODEL,
-        &systems,
-        ForwardPassWorkerType::Prefill,
-        CONCURRENCY as usize,
-    )?;
-    let decode = calibrated::canonical_role(
-        MODEL,
-        &systems,
-        ForwardPassWorkerType::Decode,
-        CONCURRENCY as usize,
-    )?;
+    let prefill = calibrated::canonical_role(calibrated::RoleIdentity {
+        model: MODEL,
+        systems: &systems,
+        hardware: calibrated::HardwareSelection::B200Sxm,
+        precision: calibrated::ProofPrecision::Bfloat16,
+        tensor_parallel_size: 1,
+        role: ForwardPassWorkerType::Prefill,
+        max_num_seqs: CONCURRENCY as usize,
+        prefill: calibrated::PrefillMode::Chunked {
+            max_num_batched_tokens: 4096,
+        },
+    })?;
+    let decode = calibrated::canonical_role(calibrated::RoleIdentity {
+        model: MODEL,
+        systems: &systems,
+        hardware: calibrated::HardwareSelection::B200Sxm,
+        precision: calibrated::ProofPrecision::Bfloat16,
+        tensor_parallel_size: 1,
+        role: ForwardPassWorkerType::Decode,
+        max_num_seqs: CONCURRENCY as usize,
+        prefill: calibrated::PrefillMode::Chunked {
+            max_num_batched_tokens: 4096,
+        },
+    })?;
     let (mut backend, typed) = host_typed(&run, &prefill, &decode, true)?;
     let (complete_backend, complete_typed) = host_typed(&run, &prefill, &decode, false)?;
     let mut compact_physical = serde_json::to_value(&backend)?;
@@ -1584,14 +1358,12 @@ fn calibrated_hosted_artifacts_reconcile_every_request() -> Result<()> {
         summary["schema_version"] == json!(SUMMARY_SCHEMA),
         "summary artifact schema mismatch"
     );
-    let (_, tokenizer) = full_mvp_run(directory.path())?;
     write_raw_backend_artifact(
         directory.path(),
         &backend,
         &typed,
         &prefill,
         &decode,
-        &tokenizer,
         &executable_distribution_id()?,
     )?;
     let raw: Value =
