@@ -272,9 +272,7 @@ def project_pod(document: dict, lws_name: str, namespace: str, operation: str) -
         bad(operation)
     projected = {
         "kind": "Pod",
-        "metadata": metadata(
-            document, "Pod", namespace, operation, label=lws_name
-        ),
+        "metadata": metadata(document, "Pod", namespace, operation, label=lws_name),
     }
     spec, status = document.get("spec"), document.get("status")
     if not isinstance(spec, dict):
@@ -300,7 +298,10 @@ def project_pod(document: dict, lws_name: str, namespace: str, operation: str) -
 
 def project_pods(document, lws_name, namespace, operation) -> list:
     """kubectl get -o json uses kind List. PodList is accepted too."""
-    if not isinstance(document, dict) or document.get("kind") not in ("List", "PodList"):
+    if not isinstance(document, dict) or document.get("kind") not in (
+        "List",
+        "PodList",
+    ):
         bad(operation)
     items = document.get("items")
     if not isinstance(items, list):
@@ -686,7 +687,13 @@ def main(argv: list[str] | None = None) -> int:
         return 130
     except KeyboardInterrupt:
         write_status(
-            config, "interrupted", "interrupted", "collection", None, started_at, started
+            config,
+            "interrupted",
+            "interrupted",
+            "collection",
+            None,
+            started_at,
+            started,
         )
         return 130
     except CollectionFailure as exc:
