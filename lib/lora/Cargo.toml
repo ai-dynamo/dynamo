@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-lora"
+description = "LoRA identity, placement, allocation, and adapter sources"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[features]
+testing = []
+
+[dependencies]
+dynamo-router-protocol = { workspace = true }
+dynamo-runtime = { workspace = true }
+dynamo-slot-tracker = { workspace = true }
+dynamo-worker-selection = { workspace = true }
+anyhow = { workspace = true }
+arc-swap = "1.9.1"
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+aws-config = "1.8.11"
+aws-credential-types = "1.2.12"
+aws-types = "1.3.12"
+dashmap = { workspace = true }
+futures = { workspace = true }
+hf-hub = { workspace = true, features = ["tokio", "rustls-tls", "ureq"] }
+object_store = { version = "0.12.4", features = ["aws", "gcp", "azure", "http"] }
+parking_lot = { workspace = true }
+prometheus = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+thiserror = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }
+mockito = "1"
+serial_test = "3.3"
+temp-env = { version = "0.3.6", features = ["async_closure"] }
+tokio = { workspace = true, features = ["test-util"] }
+
+[[test]]
+name = "lora_simulation"
+path = "tests/lora_simulation/main.rs"

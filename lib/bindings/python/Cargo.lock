@@ -2296,9 +2296,6 @@ dependencies = [
  "async-nats",
  "async-stream",
  "async-trait",
- "aws-config",
- "aws-credential-types",
- "aws-types",
  "axum",
  "base64 0.22.1",
  "bincode 2.0.1",
@@ -2323,6 +2320,7 @@ dependencies = [
  "dynamo-kv-hints",
  "dynamo-kv-indexer",
  "dynamo-kv-router",
+ "dynamo-lora",
  "dynamo-memory",
  "dynamo-mocker",
  "dynamo-parsers",
@@ -2409,6 +2407,38 @@ dependencies = [
  "video-rs",
  "xxhash-rust",
  "zmq",
+]
+
+[[package]]
+name = "dynamo-lora"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-types",
+ "blake3",
+ "dashmap",
+ "dynamo-router-protocol",
+ "dynamo-runtime",
+ "dynamo-slot-tracker",
+ "dynamo-worker-selection",
+ "futures",
+ "hf-hub 0.4.3",
+ "object_store 0.12.5",
+ "parking_lot",
+ "prometheus",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
 ]
 
 [[package]]
