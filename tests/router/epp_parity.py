@@ -4246,14 +4246,9 @@ class EppFrontendRoutingParityStack:
         return True
 
 
-PRIORITY_POLICY_YAML = """default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+PRIORITY_POLICY_YAML = """default_policy_class: default
 policy_classes:
   - name: default
-    policy_family: standard
-    cache_bucket: all
     queue_policy: fcfs
     quantum: 1
     prefill_busy_threshold_frac: 0.0

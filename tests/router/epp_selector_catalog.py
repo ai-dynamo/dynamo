@@ -51,7 +51,25 @@ worker_selection:
 """
 STOCK_EPP_UNKNOWN_TYPE_DIAGNOSTIC = (
     'unknown worker-selection policy type "dynamo-default-cost-fn"; '
-    "linked policy types: <none>"
+    "linked policy types: least-loaded, random, round-robin"
+)
+# Const name, source path, and the literal available_policy_types sorts.
+_STOCK_EPP_ROUTING_MODE_CONSTS = (
+    (
+        "LEAST_LOADED",
+        "lib/router-plugins/builtin/src/router_modes/least_loaded.rs",
+        "least-loaded",
+    ),
+    (
+        "RANDOM",
+        "lib/router-plugins/builtin/src/router_modes/random.rs",
+        "random",
+    ),
+    (
+        "ROUND_ROBIN",
+        "lib/router-plugins/builtin/src/router_modes/round_robin.rs",
+        "round-robin",
+    ),
 )
 
 # Closed immutable scope specs: key, repo-relative path, declaration regex.
@@ -77,7 +95,7 @@ NAMED_POLICY_SCOPE_SPECS: tuple[NamedPolicyScopeSpec, ...] = (
         "runner_run",
         "deploy/inference-gateway/ext-proc/src/runner.rs",
         r"pub\s+async\s+fn\s+run\s*\(\s*policy_registry\s*:\s*"
-        r"Option<WorkerSelectionPolicyRegistry>\s*\)\s*->\s*Result<\(\)>\s*\{",
+        r"Option<RouterPluginRegistry>\s*\)\s*->\s*Result<\(\)>\s*\{",
         "ext-proc runner::run",
     ),
     NamedPolicyScopeSpec(
@@ -132,27 +150,47 @@ NAMED_POLICY_SCOPE_SPECS: tuple[NamedPolicyScopeSpec, ...] = (
         r"->\s*PotentialLoadMaps\s*\{",
         "PromptRegistry::project_loads_from_membership",
     ),
+    NamedPolicyScopeSpec(
+        "builtin_default_registry",
+        "lib/router-plugins/builtin/src/lib.rs",
+        r"pub\s+fn\s+default_registry\s*\(\s*\)\s*->\s*RouterPluginRegistry\s*\{",
+        "builtin default_registry",
+    ),
+    NamedPolicyScopeSpec(
+        "builtin_with_defaults",
+        "lib/router-plugins/builtin/src/lib.rs",
+        r"pub\s+fn\s+with_defaults\s*\(\s*registry\s*:\s*"
+        r"RouterPluginRegistry\s*\)\s*->\s*RouterPluginRegistry\s*\{",
+        "builtin with_defaults",
+    ),
+    NamedPolicyScopeSpec(
+        "builtin_register_missing_modes",
+        "lib/router-plugins/builtin/src/router_modes.rs",
+        r"pub\(crate\)\s+fn\s+register_missing\s*\(\s*registry\s*:\s*"
+        r"&mut\s+RouterPluginRegistry\s*\)\s*\{",
+        "router_modes::register_missing",
+    ),
 )
 
 NAMED_POLICY_SCOPE_DIGESTS: dict[str, str] = {
     "ext_proc_bin_main": (
         "00907d269c362a5389b8108d4df466181db0f6af21e0994be44870aa4a3e91c3"
     ),
-    "runner_run": ("6d22a6da9425aa16130484abb1df00d07a93fe5e863e5502590ddce3d9bc047f"),
+    "runner_run": ("3e1ea187f2608c5aa171320b381ccce5f92cb1356662aaaad8b0f3b43457fe20"),
     "router_plugin_registry_fallback": (
-        "2c37fe0b1868665985b240f764fbae503b37ceb4db76c282b1d7ce810d1177f5"
+        "ce97f88ce842c2791bf902e593b8b58320d9de39608bffffeb4e44390cf5001f"
     ),
     "selected_worker_selection_policy_instances_from": (
         "95279f9ecb0c3703fff5a9e6c446089e088417ea04fad8005abf2b5abc699289"
     ),
     "registry_resolve_selected": (
-        "f8bb13389df5f8538a2495986730d8c87cd55e936d7fca4d138c53581faeddfe"
+        "525e41c4a2f1f81426f61ee7c92237bc30b94eca6fb8f9b836e7208a346d7cd4"
     ),
     "preferred_taint_multiplier": (
         "dff08a0e830e1f0dfa4d4e3e9127de26927bb85d5caec4e559ffd749079e21fe"
     ),
     "default_aggregated_score": (
-        "7abd5902f204151aac4b276d4521389445cc3c4596456e13359e2a9780312954"
+        "408544b9ab37a4461ba6e3c2318bb479258a5cb400b9830a6c8db88c2bc65157"
     ),
     "scheduler_get_potential_loads": (
         "53bb389284eca17cf7575431d5ab7249abd3bbd17b936d8d47908071c539cc5f"
@@ -160,7 +198,105 @@ NAMED_POLICY_SCOPE_DIGESTS: dict[str, str] = {
     "incoming_footprint_projection": (
         "379a71b281ccfb8006ad866f3d47affd4f4dc3281c9617ccc3cce865640ef2b1"
     ),
+    "builtin_default_registry": (
+        "45d9424660246b6d107bbf79b96cfdabc9d27fb2dab94fcac5a3ced6f09aa243"
+    ),
+    "builtin_with_defaults": (
+        "ee7b28f1051ce41415f71031ef1b8a9399c4830238328bd999d3e5fdbfabcbc4"
+    ),
+    "builtin_register_missing_modes": (
+        "d562315afcb24a707494764cad1f6b90fb0b7d7e1d7c25632d79490812464705"
+    ),
 }
+
+
+def _named_policy_scope(key: str) -> NamedPolicyScopeSpec:
+    found = [spec for spec in NAMED_POLICY_SCOPE_SPECS if spec.key == key]
+    if len(found) != 1:
+        raise AssertionError(f"named-policy scope {key!r} count {len(found)} != 1")
+    return found[0]
+
+
+def _assert_stock_epp_routing_mode_catalog(file_text: dict[Path, str]) -> None:
+    """Three routing modes are linked; the optional cost-fn catalog is not."""
+    # epp_config_contract loads this module at top level before defining its
+    # source extractors, so this import stays function-local.
+    from tests.router.epp_config_contract import (
+        REPO_ROOT,
+        _fn_decl_and_body,
+        _strip_rust_comments,
+    )
+
+    values: list[str] = []
+    for const_name, rel_path, value in _STOCK_EPP_ROUTING_MODE_CONSTS:
+        path = REPO_ROOT / rel_path
+        if not path.is_file():
+            raise AssertionError(f"missing routing-mode const source: {path}")
+        text = _strip_rust_comments(path.read_text(encoding="utf-8"))
+        literal = re.findall(
+            rf'pub\s+const\s+{const_name}\s*:\s*&str\s*=\s*"([^"]*)"\s*;',
+            text,
+        )
+        declared = re.findall(rf"\bconst\s+{const_name}\b", text)
+        if literal != [value] or len(declared) != 1:
+            raise AssertionError(
+                f"{rel_path} {const_name} literal {literal!r} "
+                f"declarations {len(declared)} != {value!r}"
+            )
+        values.append(value)
+
+    def body(key: str) -> str:
+        spec = _named_policy_scope(key)
+        return _fn_decl_and_body(
+            file_text[REPO_ROOT / spec.rel_path],
+            re.compile(spec.declaration_regex),
+            spec.label,
+        )
+
+    default_registry = re.sub(r"\s+", "", body("builtin_default_registry"))
+    if "with_defaults(RouterPluginRegistry::default())" not in default_registry:
+        raise AssertionError(
+            "default_registry no longer calls with_defaults on an empty registry"
+        )
+    if re.search(r"\bregister\s*\(", default_registry):
+        raise AssertionError(
+            "default_registry now calls the optional named-policy register()"
+        )
+    with_defaults = body("builtin_with_defaults")
+    if "registry.with_default_factory(default_factory())" not in with_defaults:
+        raise AssertionError("with_defaults no longer attaches the default factory")
+    if "router_modes::register_missing(&mut registry)" not in with_defaults:
+        raise AssertionError("with_defaults no longer calls register_missing")
+    if re.search(r"\bregister\s*\(", with_defaults.replace("register_missing", "")):
+        raise AssertionError(
+            "with_defaults now calls the optional named-policy register()"
+        )
+    missing = body("builtin_register_missing_modes")
+    if "[(&str, WorkerSelectionPolicyProvider); 3]" not in missing:
+        raise AssertionError(
+            "register_missing no longer registers exactly three routing modes"
+        )
+    for const_name, _rel_path, _value in _STOCK_EPP_ROUTING_MODE_CONSTS:
+        if missing.count(const_name) != 1:
+            raise AssertionError(
+                f"register_missing no longer names {const_name} exactly once"
+            )
+    if re.search(
+        r"\bregister\s*\(", missing.replace("register_worker_selection", "")
+    ):
+        raise AssertionError(
+            "register_missing now calls the optional named-policy register()"
+        )
+    linked = ", ".join(sorted(values))
+    expected = (
+        'unknown worker-selection policy type "dynamo-default-cost-fn"; '
+        f"linked policy types: {linked}"
+    )
+    if STOCK_EPP_UNKNOWN_TYPE_DIAGNOSTIC != expected:
+        raise AssertionError(
+            "stock EPP UnknownType diagnostic "
+            f"{STOCK_EPP_UNKNOWN_TYPE_DIAGNOSTIC!r} != mode constants {expected!r}"
+        )
 
 
 def assert_named_policy_source_contract() -> None:
@@ -254,10 +390,32 @@ def assert_named_policy_source_contract() -> None:
         re.compile(NAMED_POLICY_SCOPE_SPECS[2].declaration_regex),
         NAMED_POLICY_SCOPE_SPECS[2].label,
     )
-    if "dynamo_custom_policy_builtin::default_registry" not in registry_body:
+    host_fallback = (
+        "dynamo_router_policies::default_registry()"
+        ".with_default_factory(host_default_factory())"
+    )
+    if host_fallback not in registry_body:
         raise AssertionError(
-            "uninstalled host registry fallback no longer uses "
-            "dynamo_custom_policy_builtin::default_registry"
+            "uninstalled host registry fallback no longer calls "
+            f"{host_fallback}"
+        )
+    if "dynamo_custom_policy_builtin::default_registry" in registry_body:
+        raise AssertionError(
+            "host registry fallback still uses the removed "
+            "dynamo_custom_policy_builtin::default_registry alias"
+        )
+    host_default = _fn_decl_and_body(
+        file_text[REPO_ROOT / "lib/llm/src/kv_router/plugins.rs"],
+        re.compile(
+            r"fn\s+host_default_factory\s*\(\s*\)\s*"
+            r"->\s*WorkerSelectionPolicyFactory\s*\{"
+        ),
+        "host_default_factory",
+    )
+    if "dynamo_router_policies::default_factory()" not in host_default:
+        raise AssertionError(
+            "host_default_factory no longer returns "
+            "dynamo_router_policies::default_factory()"
         )
 
     selections_body = _fn_decl_and_body(
@@ -318,10 +476,12 @@ def assert_named_policy_source_contract() -> None:
         re.compile(r"fn\s+available_policy_types\s*\(\s*&self\s*\)\s*->\s*String\s*\{"),
         "available_policy_types",
     )
-    if '"<none>"' not in available_body:
+    if '"<none>"' not in available_body or "sort_unstable()" not in available_body:
         raise AssertionError(
-            "empty linked policy catalog no longer reports available=<none>"
+            "empty linked policy catalog no longer reports available=<none> "
+            "or no longer sorts linked type names"
         )
+    _assert_stock_epp_routing_mode_catalog(file_text)
 
     taint_body = _fn_decl_and_body(
         file_text[REPO_ROOT / "lib/kv-router/src/protocols.rs"],
@@ -475,7 +635,7 @@ def assert_named_policy_source_contract() -> None:
         ),
         "register_core_with_router_plugins",
     )
-    if "dynamo_custom_policy_builtin::register" not in register_body:
+    if "dynamo_router_policies::register" not in register_body:
         raise AssertionError(
             "Python custom-policy startup no longer registers shipped builtin "
             "providers"
@@ -1019,7 +1179,7 @@ def run_named_policy_catalog(stack, *, tmp_path) -> dict[str, Any]:
             )
         if STOCK_EPP_UNKNOWN_TYPE_DIAGNOSTIC != (
             'unknown worker-selection policy type "dynamo-default-cost-fn"; '
-            "linked policy types: <none>"
+            "linked policy types: least-loaded, random, round-robin"
         ):
             raise AssertionError(
                 "stock EPP UnknownType diagnostic constant drifted from source"

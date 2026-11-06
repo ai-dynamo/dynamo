@@ -18,7 +18,13 @@ parser contracts. The five conditional scalar envs and
 ``positional_search_mode`` are separate not-FE-honored rows.
 ``use_remote_indexer`` binds the existing first-selection query-counter
 observer. ``session_affinity_ttl_secs`` binds TTL enable-presence only on
-the existing session_id gap. ``overlap_refresh_after_secs`` is a
+the existing session_id gap. ``session_affinity_max_entries`` is
+``unsupported_capability`` on stock Runtime EPP: that profile has no session
+context, so it does not install the affinity-table limit. Native FE exports
+the env into a real table that rejects a new session at the limit. Capacity
+exhaustion and rejection are not runtime-measured, and the table does not
+evict. The Hard/TTL gap is same-feature evidence only.
+``overlap_refresh_after_secs`` is a
 supported_candidate dual-process queue-construction INFO plus plain-chat
 token-parity observer. ``router_tracking_hash`` and
 ``router_tracking_key_id`` bind the keyed-tracking runtime Item.
@@ -38,8 +44,9 @@ is not-FE-honored Dynamic worker-card geometry: independent CLI 8/64 did
 not override card 32, and the card 16 control yielded 16.
 ``serve_indexer``, ``router_mode``, and both prefill-admission threshold
 rows are source-backed ``unsupported_input`` on the stock Runtime EPP
-profile. ``min_initial_workers``, ``session_affinity_mode``, and
-``router_prefill_load_model`` are source-backed ``unsupported_capability``
+profile. ``min_initial_workers``, ``session_affinity_mode``,
+``session_affinity_max_entries``, and ``router_prefill_load_model`` are
+source-backed ``unsupported_capability``
 (min-worker env parses, but stock EPP bypasses the N-worker gate). Prefill
 abs/frac also bind three ordinary FE admin ``/busy_threshold`` boundary
 Items. The four native active-sequence envs are ``supported_candidate``
@@ -301,6 +308,7 @@ SERVE_INDEXER_ROW = "serve_indexer"
 MIN_INITIAL_WORKERS_ROW = "min_initial_workers"
 ROUTER_MODE_ROW = "router_mode"
 SESSION_AFFINITY_MODE_ROW = "session_affinity_mode"
+SESSION_AFFINITY_MAX_ENTRIES_ROW = "session_affinity_max_entries"
 PREFILL_ABS_THRESHOLD_ROW = "active_prefill_tokens_threshold"
 PREFILL_FRAC_THRESHOLD_ROW = "active_prefill_tokens_threshold_frac"
 PREFILL_LOAD_MODEL_ROW = "router_prefill_load_model"
@@ -434,6 +442,7 @@ UNSUPPORTED_CAPABILITY_ROWS = frozenset(
     {
         MIN_INITIAL_WORKERS_ROW,
         SESSION_AFFINITY_MODE_ROW,
+        SESSION_AFFINITY_MAX_ENTRIES_ROW,
         PREFILL_LOAD_MODEL_ROW,
         ROUTER_PREFILL_POLICY_ROW,
         ROUTER_DECODE_POLICY_ROW,
@@ -458,16 +467,16 @@ RUST_QUEUE = REPO_ROOT / "lib/kv-router/src/scheduling/queue.rs"
 # declaration+body for each decisive shared scope.
 SOURCE_SCOPE_DIGESTS: dict[str, str] = {
     "epp_from_discovery": "fe9ffe7d2862b80c79b4d7150ceea4efd76b45463917adbd60bc77395ff197a5",
-    "epp_route_decode": "e80ec535ef961ec3b966e10602d5c5adefd54b9ea7dfeab39ae2bd5f32e30d03",
+    "epp_route_decode": "766bbc37337744174b81ed79a93880941af4a9e7c74d7ffcfeb14408d2cca99f",
     "managed_kv_router_for_with_policy": "480f353836bc5cbb248dfbfb7556a99dff7fbaa121a83d2101fc3c4793ecb8e9",
     "kv_chooser_for_with_policy_and_client": "f099fc885a7fc79d7811caed7c37d770ad9cc885229f3e4276a275427e8a0925",
-    "prefill_router_new": "c6104e64711807f0ee9ce4bc589a110f2dc2f40956a2b8e87addbb9872f1c02b",
+    "prefill_router_new": "dc7b77ccc9ff50a3c0d2a097434a087f87ca04b9a44e429ef657d28768018103",
     "embedded_selection_start": "9187ac406b6dc9a4d6a6819e657032332136c3a18a5c9c49f69daf4115a4f100",
     "min_initial_workers_from_env": "73ba458edd8425a67b46dc97ef7d571f3bef9dd13641b9dee15ab7a050a4db2f",
     "ensure_served_indexer_service": "a6972ad24be7ebb2a1d7cc7ca0bc4b36cf4f073f7fbd2efe14ad3b84512aede9",
     "managed_kv_router_for_with_worker_role": "42c2a89cf5eb69d40f854fb3a21dc3cee5b8e5ce00db115a620955f21448c4cf",
     "kv_router_new_with_worker_role_and_scheduler_load": "271eeb24f45fc969465323b5dec871bef4fd7db3d3f2c0e740dd8e5244d91fc9",
-    "prefill_router_new_with_selection_policy": "433ea1f40644175e4be7a39df1c48a0bfc8d01fa8f9d6ac28d1293908133b2ce",
+    "prefill_router_new_with_selection_policy": "311b3097807629722f4fdb482377073f3bf4ecbc4f1bdd4d2b291a8171036868",
     "prefill_build_binding": "25365899cbf3cbf36ecddd31cc5938ee015ca6a4435c69b5c04f9f15fcb19e31",
     "kv_router_config_from_lookup": "af0fecf97c0bd382e3b9c6230410850b1a0625256c08023a382ca36a0305dd34",
     "router_settings_apply": "1e8b69e3e9ebb2c7774eda7a732ba76a1b065996d343ec793e2e78a6dd4f025e",
@@ -589,6 +598,27 @@ KV_ROUTER_LIB = REPO_ROOT / "lib/kv-router/src/lib.rs"
 LLM_INDEXER_MOD = REPO_ROOT / "lib/llm/src/kv_router/indexer/mod.rs"
 INDEXER_TESTS_RS = REPO_ROOT / "lib/kv-router/src/indexer/tests.rs"
 INDEXER_DELEGATE_TESTS_RS = REPO_ROOT / "lib/kv-router/src/indexer/delegate_tests.rs"
+ZMQ_WIRE_MOD = REPO_ROOT / "lib/kv-router/src/zmq_wire/mod.rs"
+ZMQ_MM_EXCLUSION_TESTS_RS = (
+    REPO_ROOT / "lib/kv-router/src/zmq_wire/mm_exclusion_tests.rs"
+)
+# Positional-bearing external test modules. Exclude a file only after its
+# parent shows exactly one `#[cfg(test)] mod <name>;`.
+_POSITIONAL_CFG_TEST_EXCLUSIONS = (
+    (KV_INDEXER_MOD, INDEXER_TESTS_RS, "tests", "indexer/mod.rs"),
+    (
+        KV_INDEXER_MOD,
+        INDEXER_DELEGATE_TESTS_RS,
+        "delegate_tests",
+        "indexer/mod.rs",
+    ),
+    (
+        ZMQ_WIRE_MOD,
+        ZMQ_MM_EXCLUSION_TESTS_RS,
+        "mm_exclusion_tests",
+        "zmq_wire/mod.rs",
+    ),
+)
 POSITIONAL_LIB_EXPORTS = (
     "pub use indexer::positional as nested_map;",
     "pub use nested_map::PositionalIndexer;",
@@ -1491,6 +1521,23 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         "measured.",
     ),
     SettingDecision(
+        SESSION_AFFINITY_MAX_ENTRIES_ROW,
+        ("--router-session-affinity-max-entries",),
+        ("DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES",),
+        (SESSION_AFFINITY_MAX_ENTRIES_ROW,),
+        STATUS_UNSUPPORTED_CAPABILITY,
+        INPUT_STARTUP_SOURCE_OBSERVER,
+        (),
+        (SESSION_AFFINITY_MAX_ENTRIES_ROW,),
+        "Unsupported stock EPP session-capacity subconfiguration: source has "
+        "no session context, so this profile does not install or use the "
+        "affinity-table max_entries limit. Native FE exports the env into a "
+        "real table that rejects a new session at the limit "
+        "(ResourceExhausted), not by evicting an existing one. Capacity "
+        "exhaustion and rejection are not runtime-measured. Same-feature "
+        "Hard/TTL300 evidence already binds SESSION_TTL_ITEM.",
+    ),
+    SettingDecision(
         "router_tracking_hash",
         ("--router-tracking-hash",),
         ("DYN_ROUTER_TRACKING_HASH",),
@@ -1966,8 +2013,8 @@ def assert_decision_identifier_ownership() -> None:
                 f"{row.name} may not use {STATUS_NOT_FE_HONORED}; only "
                 f"{sorted(NOT_FE_HONORED_ROWS)} may"
             )
-        if row.name in _SEVEN_ROW_BINDINGS:
-            wanted_observer = _SEVEN_ROW_BINDINGS[row.name]["observer"]
+        if row.name in _INPUT_STARTUP_BINDINGS:
+            wanted_observer = _INPUT_STARTUP_BINDINGS[row.name]["observer"]
             if row.observer != wanted_observer:
                 raise AssertionError(
                     f"{row.name} observer={row.observer!r} != {wanted_observer!r}"
@@ -1977,8 +2024,8 @@ def assert_decision_identifier_ownership() -> None:
             PREFILL_ADMISSION_OBSERVER,
         }:
             raise AssertionError(
-                f"{row.name} may not use {row.observer!r}; only closed seven-row "
-                f"names {sorted(_SEVEN_ROW_BINDINGS)} may"
+                f"{row.name} may not use {row.observer!r}; only closed "
+                f"input/startup names {sorted(_INPUT_STARTUP_BINDINGS)} may"
             )
         if row.observer == REMOTE_INDEXER_OBSERVER and row.name != REMOTE_INDEXER_ROW:
             raise AssertionError(
@@ -2799,8 +2846,8 @@ def _assert_named_policy_catalog_binding(
     _assert_ordinary_collected_item(NAMED_POLICY_CATALOG_ITEM, item)
 
 
-# Closed seven-row binding oracle: status/observer/ids/items only.
-_SEVEN_ROW_BINDINGS: dict[str, dict[str, Any]] = {
+# Closed input/startup binding oracle: status/observer/ids/items only.
+_INPUT_STARTUP_BINDINGS: dict[str, dict[str, Any]] = {
     SERVE_INDEXER_ROW: {
         "status": STATUS_UNSUPPORTED_INPUT,
         "observer": INPUT_STARTUP_SOURCE_OBSERVER,
@@ -2837,6 +2884,15 @@ _SEVEN_ROW_BINDINGS: dict[str, dict[str, Any]] = {
         "items": (INPUT_STARTUP_SOURCE_ITEM,),
         "require_session_ttl": True,
     },
+    SESSION_AFFINITY_MAX_ENTRIES_ROW: {
+        "status": STATUS_UNSUPPORTED_CAPABILITY,
+        "observer": INPUT_STARTUP_SOURCE_OBSERVER,
+        "flags": ("--router-session-affinity-max-entries",),
+        "env": ("DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES",),
+        "schema_fields": (SESSION_AFFINITY_MAX_ENTRIES_ROW,),
+        "items": (INPUT_STARTUP_SOURCE_ITEM,),
+        "require_session_ttl": True,
+    },
     PREFILL_LOAD_MODEL_ROW: {
         "status": STATUS_UNSUPPORTED_CAPABILITY,
         "observer": INPUT_STARTUP_SOURCE_OBSERVER,
@@ -2867,11 +2923,11 @@ _SEVEN_ROW_BINDINGS: dict[str, dict[str, Any]] = {
 }
 
 
-def _assert_seven_row_binding(row: SettingDecision, items: Iterable[Any]) -> None:
-    spec = _SEVEN_ROW_BINDINGS.get(row.name)
+def _assert_input_startup_binding(row: SettingDecision, items: Iterable[Any]) -> None:
+    spec = _INPUT_STARTUP_BINDINGS.get(row.name)
     if spec is None:
         raise AssertionError(
-            f"{row.name} is not in the closed seven-row binding oracle"
+            f"{row.name} is not in the closed input/startup binding oracle"
         )
     for field in ("status", "observer", "flags", "env", "schema_fields"):
         got = getattr(row, field)
@@ -2931,10 +2987,13 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
     one unconditional strict xfail of SessionPrefixIndexConfigMismatch.
     shared_cache_type binds only its ordinary owned HiCache
     client-construction Item. kv_cache_block_size binds the three ordinary
-    Dynamic worker-card cross-input Items. The five input/startup/capability
-    source rows bind only ordinary test_input_startup_capability_decisions;
-    session_affinity_mode additionally requires the existing SESSION_TTL_ITEM
-    Hard/TTL300 strict marker. Prefill abs/frac unsupported_input rows bind
+    Dynamic worker-card cross-input Items. The input/startup source rows bind
+    ordinary test_input_startup_capability_decisions.
+    session_affinity_mode and session_affinity_max_entries additionally
+    require the existing SESSION_TTL_ITEM Hard/TTL300 strict marker as
+    same-feature evidence. Capacity exhaustion and rejection are not
+    runtime-measured; the table rejects a new session rather than evicting
+    one. Prefill abs/frac unsupported_input rows bind
     that source Item plus the three ordinary
     test_prefill_admission_input_boundaries profiles. The four native
     active-sequence rows bind only their consuming
@@ -3037,8 +3096,8 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
         if row.name in set(NAMED_POLICY_CATALOG_ROWS):
             _assert_named_policy_catalog_binding(row, item_list)
             continue
-        if row.name in _SEVEN_ROW_BINDINGS:
-            _assert_seven_row_binding(row, item_list)
+        if row.name in _INPUT_STARTUP_BINDINGS:
+            _assert_input_startup_binding(row, item_list)
             continue
         unbound = [name for name in row.profiles if name not in collected]
         if row.observer != IMPLEMENTED_OBSERVER or not row.profiles or unbound:
@@ -4385,23 +4444,34 @@ def assert_session_inputs_stack_uses_ttl_300() -> None:
         raise AssertionError("RuntimeEppProcess lost extra_env=epp_env")
 
 
-def _assert_indexer_test_modules_are_cfg_gated() -> None:
-    if not KV_INDEXER_MOD.is_file():
-        raise AssertionError(f"missing kv-router indexer module: {KV_INDEXER_MOD}")
-    text = _strip_rust_comments(KV_INDEXER_MOD.read_text(encoding="utf-8"))
-    if re.search(r"#\[cfg\(test\)\]\s*mod\s+tests;", text) is None:
+def _assert_unique_cfg_test_module(parent: Path, module: str, label: str) -> None:
+    if not parent.is_file():
+        raise AssertionError(f"missing {label}: {parent}")
+    text = _strip_rust_comments(parent.read_text(encoding="utf-8"))
+    gated = re.findall(
+        rf"#\[cfg\(test\)\]\s*mod\s+{re.escape(module)}\s*;",
+        text,
+    )
+    declared = re.findall(rf"\bmod\s+{re.escape(module)}\s*;", text)
+    if len(gated) != 1 or len(declared) != 1:
         raise AssertionError(
-            "indexer/mod.rs no longer gates tests.rs with #[cfg(test)]"
-        )
-    if re.search(r"#\[cfg\(test\)\]\s*mod\s+delegate_tests;", text) is None:
-        raise AssertionError(
-            "indexer/mod.rs no longer gates delegate_tests.rs with #[cfg(test)]"
+            f"{label} cfg(test) mod {module}; count {len(gated)} "
+            f"and mod declarations {len(declared)} are not exactly one"
         )
 
 
 def _positional_excluded_rust_paths() -> frozenset[Path]:
-    _assert_indexer_test_modules_are_cfg_gated()
-    return frozenset({INDEXER_TESTS_RS, INDEXER_DELEGATE_TESTS_RS})
+    excluded: set[Path] = set()
+    for parent, path, module, label in _POSITIONAL_CFG_TEST_EXCLUSIONS:
+        if parent != path.parent / "mod.rs" or path.name != f"{module}.rs":
+            raise AssertionError(
+                f"{label} exclusion {path} is not {module}.rs under {parent}"
+            )
+        _assert_unique_cfg_test_module(parent, module, label)
+        if not path.is_file():
+            raise AssertionError(f"missing cfg(test) module file: {path}")
+        excluded.add(path)
+    return frozenset(excluded)
 
 
 def _remove_unique_statement(text: str, statement: str, label: str) -> str:
@@ -5557,8 +5627,210 @@ def _require_attr(
         raise AssertionError(f"{label} {name}={mapping[name]!r} != {expected!r}")
 
 
+_SESSION_CAPACITY_BOUNDARIES: tuple[tuple[Path, str, str], ...] = (
+    (
+        REPO_ROOT / "lib/llm/src/session_affinity/mod.rs",
+        r"pub\(crate\)\s+fn\s+affinity_config\s*\([^;{]*?\)\s*(?:->[^;{]+)?\s*\{",
+        "session_affinity::affinity_config",
+    ),
+    (
+        REPO_ROOT / "lib/llm/src/session_affinity/mod.rs",
+        r"fn\s+max_entries_from\s*\([^;{]*?\)\s*(?:->[^;{]+)?\s*\{",
+        "session_affinity::max_entries_from",
+    ),
+    (
+        REPO_ROOT / "lib/llm/src/kv_router/embedded.rs",
+        r"pub\(crate\)\s+fn\s+affinity_coordinator\s*\([^;{]*?\)\s*"
+        r"(?:->[^;{]+)?\s*\{",
+        "affinity_coordinator",
+    ),
+    (
+        REPO_ROOT / "lib/kv-router/src/services/selection/core/mod.rs",
+        r"fn\s+session_affinity\s*\([^;{]*?\)\s*->\s*"
+        r"Result<&SessionAffinity,\s*SelectionError>\s*\{",
+        "SelectionEntry::session_affinity",
+    ),
+    (
+        REPO_ROOT / "lib/kv-router/src/services/selection/affinity.rs",
+        r"pub\s+fn\s+with_config\s*\(\s*config\s*:\s*SessionAffinityConfig\s*\)\s*"
+        r"->\s*Result<Self,\s*AffinityError>\s*\{",
+        "SessionAffinity::with_config",
+    ),
+    (
+        REPO_ROOT / "lib/kv-router/src/services/selection/affinity.rs",
+        r"fn\s+build\s*\(\s*config\s*:\s*SessionAffinityConfig\s*,\s*"
+        r"manual_now\s*:\s*Option<Instant>\s*,?\s*\)\s*"
+        r"->\s*Result<Self,\s*AffinityError>\s*\{",
+        "SessionAffinity::build",
+    ),
+    (
+        REPO_ROOT / "lib/kv-router/src/services/selection/affinity.rs",
+        r"pub\s+fn\s+try_acquire\s*\([^;{]*?\)\s*"
+        r"->\s*Result<AcquireStep,\s*AffinityError>\s*\{",
+        "SessionAffinity::try_acquire",
+    ),
+    (
+        REPO_ROOT / "lib/kv-router/src/services/selection/affinity.rs",
+        r"fn\s+reserve_entry\s*\(\s*&self\s*\)\s*"
+        r"->\s*Result<\(\),\s*AffinityError>\s*\{",
+        "SessionAffinity::reserve_entry",
+    ),
+    (
+        REPO_ROOT / "lib/kv-router/src/services/selection/affinity.rs",
+        r"fn\s+reserve_entry\s*\(\s*&self\s*\)\s*->\s*bool\s*\{",
+        "Inner::reserve_entry",
+    ),
+)
+
+
+def _assert_frontend_exports_session_capacity_env() -> None:
+    path = FRONTEND_ARGS.parent / "main.py"
+    if not path.is_file():
+        raise AssertionError(f"missing frontend main: {path}")
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    constants = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "SESSION_AFFINITY_MAX_ENTRIES_ENV"
+        and isinstance(node.value, ast.Constant)
+        and node.value.value == "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES"
+    ]
+    if len(constants) != 1:
+        raise AssertionError(
+            "frontend main SESSION_AFFINITY_MAX_ENTRIES_ENV constant count "
+            f"{len(constants)} != 1"
+        )
+    async_main = _unique_ast(
+        [
+            node
+            for node in tree.body
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_main"
+        ],
+        "frontend async_main",
+    )
+    exports = [
+        node
+        for node in ast.walk(async_main)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Subscript)
+        and _expr_eq(node.targets[0].value, "os.environ")
+        and _expr_eq(node.targets[0].slice, "SESSION_AFFINITY_MAX_ENTRIES_ENV")
+        and _expr_eq(node.value, "str(config.session_affinity_max_entries)")
+    ]
+    if len(exports) != 1:
+        raise AssertionError(
+            "async_main session-capacity env export count "
+            f"{len(exports)} != 1"
+        )
+
+
+def _assert_session_capacity_source_chain(file_text: dict[Path, str]) -> None:
+    """Named session-capacity sites. Not a runtime exhaustion or eviction proof."""
+    _assert_frontend_exports_session_capacity_env()
+    bodies: dict[str, str] = {}
+    for path, pattern, label in _SESSION_CAPACITY_BOUNDARIES:
+        if label in bodies:
+            raise AssertionError(f"duplicate session-capacity boundary {label}")
+        bodies[label] = _fn_decl_and_body(
+            _cached_stripped_file(path, file_text),
+            re.compile(pattern),
+            label,
+        )
+    affinity_config = bodies["session_affinity::affinity_config"]
+    if (
+        "config.max_entries = max_entries_from(std::env::var("
+        "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES))?;"
+        not in affinity_config
+    ):
+        raise AssertionError(
+            "affinity_config no longer assigns max_entries from "
+            "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES"
+        )
+    parser = bodies["session_affinity::max_entries_from"]
+    if "parse::<NonZeroUsize>()" not in parser:
+        raise AssertionError(
+            "max_entries_from no longer parses a positive NonZeroUsize"
+        )
+    coordinator = re.sub(r"\s+", "", bodies["affinity_coordinator"])
+    if (
+        "self.partition.session_affinity(crate::session_affinity::affinity_config("
+        "ttl,mode)?)?"
+        not in coordinator
+        or "AffinityCoordinator::wrap(table)" not in coordinator
+    ):
+        raise AssertionError(
+            "affinity_coordinator no longer builds the config and wraps the table"
+        )
+    entry = bodies["SelectionEntry::session_affinity"]
+    if (
+        ".get_or_try_init(|| -> Result<_, SelectionError>" not in entry
+        or "SessionAffinity::with_config(config)" not in entry
+    ):
+        raise AssertionError(
+            "SelectionEntry::session_affinity no longer initializes the table "
+            "with SessionAffinity::with_config(config)"
+        )
+    with_config = bodies["SessionAffinity::with_config"]
+    if with_config.count("Self::build(config, None)") != 1:
+        raise AssertionError(
+            "SessionAffinity::with_config no longer delegates to build(config, None)"
+        )
+    build = bodies["SessionAffinity::build"]
+    if build.count("max_entries: config.max_entries") != 1:
+        raise AssertionError(
+            "SessionAffinity::build no longer stores config.max_entries"
+        )
+    vacant = _unique_scoped_rust_body(
+        bodies["SessionAffinity::try_acquire"],
+        re.compile(r"Entry::Vacant\s*\(\s*entry\s*\)\s*=>\s*\{"),
+        "try_acquire Entry::Vacant",
+    )
+    if "self.reserve_entry()?;" not in vacant:
+        raise AssertionError(
+            "try_acquire Vacant branch no longer rejects via reserve_entry"
+        )
+    limited = bodies["SessionAffinity::reserve_entry"]
+    if (
+        "self.inner.reserve_entry()" not in limited
+        or "AffinityError::ResourceExhausted" not in limited
+    ):
+        raise AssertionError(
+            "SessionAffinity::reserve_entry no longer maps a failed reservation "
+            "to ResourceExhausted"
+        )
+    inner = bodies["Inner::reserve_entry"]
+    if "fetch_update" not in inner or "count < self.max_entries" not in inner:
+        raise AssertionError(
+            "Inner::reserve_entry no longer admits only while count < max_entries"
+        )
+    route_prefill = _fn_decl_and_body(
+        _cached_stripped_file(RUST_EPP, file_text),
+        re.compile(
+            r"pub\s+async\s+fn\s+route_prefill\s*\([^;{]*?\)\s*"
+            r"(?:->[^;{]+)?\s*\{"
+        ),
+        "EPP Router::route_prefill",
+    )
+    prefill_call = _require_unique_callee_args(
+        "route_prefill",
+        route_prefill,
+        re.compile(r"reserve_prefill_worker\s*\("),
+        "route_prefill reserve_prefill_worker call",
+        10,
+    )
+    if prefill_call[2:4] != ["None", "None"]:
+        raise AssertionError(
+            "route_prefill session/expected "
+            f"{prefill_call[2:4]!r} != ['None', 'None']"
+        )
+
+
 def assert_input_startup_capability_source_contracts() -> None:
-    """Named support-boundary checks for the seven input/startup rows.
+    """Named support-boundary checks for the input/startup rows.
 
     Digests and scoped call/field facts protect known factory and env/YAML
     boundaries. This is conservative coverage of those named scopes, not a
@@ -5691,20 +5963,25 @@ def assert_input_startup_capability_source_contracts() -> None:
         pub_new,
         re.compile(r"new_with_selection_policy\s*\("),
         "PrefillRouter::new→new_with_selection_policy",
-        14,
+        15,
     )
+    if delegated[3] != "false":
+        raise AssertionError(
+            "PrefillRouter::new lost decode_supports_prefill_cancellation "
+            f"literal false at delegated[3]={delegated[3]!r}"
+        )
     if (
-        delegated[6:9]
+        delegated[7:10]
         != [
             "prefill_load_estimator",
             "session_affinity_ttl_secs",
             "session_affinity_mode",
         ]
-        or delegated[11] != "load_thresholds"
+        or delegated[12] != "load_thresholds"
     ):
         raise AssertionError(
             "PrefillRouter::new lost estimator/TTL/mode/handle forwards: "
-            f"{delegated[6:9]!r}/{delegated[11]!r}"
+            f"{delegated[7:10]!r}/{delegated[12]!r}"
         )
 
     selection = cached["prefill_router_new_with_selection_policy"]
@@ -5918,6 +6195,7 @@ def assert_input_startup_capability_source_contracts() -> None:
         if "None => None," not in hint and "None => None" not in hint:
             raise AssertionError(f"{label} lost absent-estimator => no duration")
 
+    _assert_session_capacity_source_chain(file_text)
     assert_session_inputs_stack_uses_ttl_300()
 
 
