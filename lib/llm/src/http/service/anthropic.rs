@@ -634,11 +634,13 @@ async fn anthropic_messages(
         0
     };
 
-    // Check if the Anthropic request explicitly disabled thinking.
-    let thinking_explicitly_disabled = orig_request
-        .thinking
-        .as_ref()
-        .is_some_and(|t| t.thinking_type == "disabled");
+    // Explicit adaptive/between-tools modes must not force an up-front thinking prefix.
+    let thinking_defers_prompt_injection = orig_request.thinking.as_ref().is_some_and(|t| {
+        matches!(
+            t.thinking_type.as_str(),
+            "disabled" | "adaptive" | "between_tools"
+        )
+    });
 
     // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
     let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
@@ -672,8 +674,8 @@ async fn anthropic_messages(
         return Err(AnthropicHandlerError::validation(error.message())
             .into_marked_response(&mut inflight_guard));
     }
-    // When a reasoning parser is configured and the client hasn't explicitly
-    // disabled thinking, assume the model's chat template will inject `<think>`.
+    // When a reasoning parser is configured, infer an injected thinking prefix
+    // unless the client disables thinking or delegates its timing to the model.
     //
     // Two things must be aligned:
     //   1. chat_template_args must include enable_thinking=true so the backend's
@@ -690,13 +692,20 @@ async fn anthropic_messages(
     // prompt_injected_reasoning accordingly. The Anthropic path bypasses the
     // preprocessor, so we infer prompt injection from the reasoning parser config.
     let prompt_injected_reasoning =
-        parsing_options.reasoning_parser.is_some() && !thinking_explicitly_disabled;
+        parsing_options.reasoning_parser.is_some() && !thinking_defers_prompt_injection;
 
     apply_anthropic_template_args(
         &mut chat_request,
         prompt_injected_reasoning,
         state.chat_template_defaults(),
     );
+
+    chat_request
+        .normalize_reasoning_template_args()
+        .map_err(|error| {
+            AnthropicHandlerError::validation(error.to_string())
+                .into_marked_response(&mut inflight_guard)
+        })?;
 
     let mut request = context.map(|_req| chat_request);
 

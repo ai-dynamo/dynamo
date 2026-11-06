@@ -936,6 +936,25 @@ Before conversion, the frontend validates these
 - `top_k` must fit the backend's signed 32-bit field (at most 2,147,483,647).
 
 For `system`, `metadata`, `tool_choice`, and `thinking`, `null` is treated as omission.
+These checks validate admission. Backend forwarding and enforcement are described below.
+
+#### Reasoning Controls
+
+Dynamo forwards
+`output_config.effort` (`low`, `medium`, `high`, `xhigh`, or `max`) as the existing
+`reasoning_effort` field. Enabled-thinking `budget_tokens` becomes
+`thinking_token_budget`, which feeds the existing thinking stop condition. Explicit
+`adaptive` mode continues to let the model decide whether to think, including when an
+API client such as Claude Code also sends effort `high`. `between_tools` maps to
+no up-front template thinking, including when effort is supplied; it does not enable
+model-specific progress updates or hosted tool execution.
+
+Forwarding does not guarantee identical behavior across models. Effort needs a model
+and chat template that understand the selected grade. Budget enforcement needs backend
+support: vLLM uses its thinking-budget sampling field when available; SGLang requires
+`--enable-strict-thinking` and a reasoning parser. Other backend configurations
+may ignore the budget. This endpoint does not implement Anthropic's hosted reasoning
+or interleaved-turn execution lifecycle. Omitting controls preserves the model defaults.
 
 ### Infrastructure
 

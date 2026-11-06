@@ -174,6 +174,45 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             })
             .transpose()?;
 
+        let reasoning_effort = req
+            .output_config
+            .as_ref()
+            .and_then(|config| config.get("effort"))
+            .filter(|effort| !effort.is_null())
+            .map(|effort| {
+                if !matches!(
+                    effort.as_str(),
+                    Some("low" | "medium" | "high" | "xhigh" | "max")
+                ) {
+                    anyhow::bail!("output_config.effort: must be low, medium, high, xhigh, or max");
+                }
+                serde_json::from_value(effort.clone()).map_err(anyhow::Error::from)
+            })
+            .transpose()?;
+        let thinking_token_budget = req
+            .thinking
+            .as_ref()
+            .and_then(|thinking| thinking.budget_tokens);
+        let thinking = req
+            .thinking
+            .as_ref()
+            .filter(|thinking| {
+                matches!(
+                    thinking.thinking_type.as_str(),
+                    "enabled" | "disabled" | "adaptive" | "between_tools"
+                )
+            })
+            .map(|thinking| {
+                // The existing worker contract can disable up-front thinking;
+                // model-specific progress updates are not implemented here.
+                let mode = if thinking.thinking_type == "between_tools" {
+                    "disabled"
+                } else {
+                    &thinking.thinking_type
+                };
+                serde_json::json!({"type": mode})
+            });
+
         Ok(NvCreateChatCompletionRequest {
             preserve_thinking: None,
             responses_tools: None,
@@ -188,6 +227,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 tool_choice,
                 parallel_tool_calls,
                 response_format,
+                reasoning_effort,
                 stream: Some(true), // Always stream internally
                 // Request cumulative usage on every chunk (not just the final
                 // one) so the Anthropic stream converter can stamp an
@@ -202,7 +242,11 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 ..Default::default()
             },
             common: CommonExt {
-                top_k: req.top_k.map(|k| k as i32),
+                top_k: req
+                    .top_k
+                    .map(i32::try_from)
+                    .transpose()
+                    .map_err(|_| anyhow::anyhow!("top_k: must be at most 2147483647"))?,
                 ..Default::default()
             },
             nvext: crate::protocols::common::extensions::parse_nvext(req.nvext)?,
@@ -214,7 +258,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             chat_template_args: req.thinking.as_ref().and_then(|thinking| {
                 let enabled = match thinking.thinking_type.as_str() {
                     "enabled" => true,
-                    "disabled" => false,
+                    "disabled" | "between_tools" => false,
                     _ => return None,
                 };
                 let mut args = std::collections::HashMap::new();
@@ -224,8 +268,8 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 );
                 Some(args)
             }),
-            thinking: None,
-            thinking_token_budget: None,
+            thinking,
+            thinking_token_budget,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -3305,6 +3349,10 @@ mod thinking_control_tests {
             serde_json::from_value::<AnthropicCreateMessageRequest>(value).unwrap(),
         )
         .unwrap();
+        // Match the production handler: fold canonical thinking into template
+        // arguments before comparing the unaffected history and tool fields.
+        disabled.normalize_reasoning_template_args().unwrap();
+        assert!(disabled.thinking.is_none());
         assert_eq!(
             disabled.chat_template_args.as_ref().unwrap()["enable_thinking"],
             false
