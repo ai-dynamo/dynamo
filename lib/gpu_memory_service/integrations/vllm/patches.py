@@ -104,6 +104,10 @@ def patch_request_memory() -> None:
     # vLLM 0.32+ CUDA workers pass external_weight_memory positionally; the
     # default keeps two-argument callers (XPU worker, vLLM <= 0.31) working.
     def patched_request_memory(init_snapshot, cache_config, external_weight_memory=0):
+        """Return the engine's GPU budget without checking available memory.
+
+        Positive external weight memory is subtracted from the requested budget.
+        """
         requested_memory = int(
             init_snapshot.total_memory * cache_config.gpu_memory_utilization
         )
