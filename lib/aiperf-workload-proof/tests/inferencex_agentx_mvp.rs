@@ -1009,11 +1009,15 @@ fn write_raw_backend_artifact(
             "timing": &prefill.diagnostics,
             "native_kv_geometry": &prefill.geometry,
             "replay_rank": &prefill.rank,
+            "transfer": &prefill.transfer,
+            "model_config": &prefill.model_config,
         },
         "decode": {
             "timing": &decode.diagnostics,
             "native_kv_geometry": &decode.geometry,
             "replay_rank": &decode.rank,
+            "transfer": &decode.transfer,
+            "model_config": &decode.model_config,
         },
     });
     let path = artifact_dir.join(RAW_BACKEND_ARTIFACT);
@@ -1283,6 +1287,19 @@ fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> 
         usize::try_from(CONCURRENCY)?,
     )
     .context("decode canonical op-level timing and native geometry")?;
+    for role in [&prefill, &decode] {
+        ensure!(
+            role.rank.max_model_len == Some(usize::try_from(tokenizer.max_position_embeddings)?),
+            "canonical role context capacity disagrees with the verified tokenizer model config"
+        );
+        ensure!(
+            tokenizer
+                .files
+                .iter()
+                .any(|file| file.name == "config.json" && file.sha256 == role.model_config.sha256),
+            "canonical role model config bytes disagree with the verified tokenizer acquisition"
+        );
+    }
     let metadata = report_run_metadata(&run, &harness)?;
 
     let artifact_dir = create_new_artifact_dir(&artifact_path)?;

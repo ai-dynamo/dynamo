@@ -145,7 +145,7 @@ const HASH_CHUNK_BYTES: usize = 64 * 1024;
 /// Hardware link provenance plus the exact content identity and rates this
 /// control uses. The hashes cover the whole canonical calibration root, so a
 /// path alone can never stand in for the bytes that produced the timings.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub(crate) struct HardwareLink {
     pub(crate) topology: &'static str,
     pub(crate) system: &'static str,
@@ -179,7 +179,7 @@ impl HardwareLink {
 
 /// Per-role KV-transfer configuration derived from native memory geometry and
 /// one hardware link, kept beside the timing model so both cannot drift.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub(crate) struct KvTransferConfig {
     pub(crate) bytes_per_token: usize,
     pub(crate) bandwidth_gbps: f64,
@@ -363,7 +363,7 @@ fn source_revision(systems: &Path) -> Option<String> {
 /// Canonical maximum context length from the pinned model config, not an
 /// engine default. `AISIM_SYSTEMS_ROOT` is `<core>/systems`, so the bundled
 /// model configs are its sibling `model_configs` directory.
-fn canonical_model_max_len(model: &str, systems: &Path) -> Result<usize> {
+fn canonical_model_config(model: &str, systems: &Path) -> Result<ModelConfigEvidence> {
     let config = systems
         .parent()
         .context("AISIM_SYSTEMS_ROOT must live beside the canonical model_configs directory")?
@@ -383,7 +383,29 @@ fn canonical_model_max_len(model: &str, systems: &Path) -> Result<usize> {
             )
         })?;
     ensure!(max > 0, "{} max context must be positive", config.display());
-    usize::try_from(max).context("canonical model context exceeds usize")
+    let max_model_len = usize::try_from(max).context("canonical model context exceeds usize")?;
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    if model == DEFAULT_MODEL {
+        ensure!(
+            sha256 == "f7c4eadfbbf522470667b797a3c89be2524832d2d599797248dc304fff447c30",
+            "canonical Qwen3-8B model config changed: {sha256}"
+        );
+    }
+    Ok(ModelConfigEvidence {
+        path: config,
+        sha256,
+        bytes: bytes.len(),
+        max_model_len,
+    })
+}
+
+/// Exact model metadata consumed for physical capacity and context limits.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct ModelConfigEvidence {
+    pub(crate) path: PathBuf,
+    pub(crate) sha256: String,
+    pub(crate) bytes: usize,
+    pub(crate) max_model_len: usize,
 }
 
 fn hardware_link(systems: &Path) -> Result<HardwareLink> {
@@ -476,6 +498,7 @@ pub(crate) struct RoleSetup {
     pub(crate) router: MockerConfig,
     pub(crate) diagnostics: Value,
     pub(crate) geometry: Value,
+    pub(crate) model_config: ModelConfigEvidence,
     /// Physical KV payload and hardware link used for the P/D handoff.
     pub(crate) transfer: KvTransferConfig,
 }
@@ -624,7 +647,8 @@ pub(crate) fn canonical_role(
     let timing_config = serde_json::to_value(&provenance.config)?;
     // Full GPU modeling must not treat `None` as unlimited: the pinned model
     // config's native context maximum is the rank's prompt-plus-output limit.
-    let max_model_len = canonical_model_max_len(model, systems)?;
+    let model_config = canonical_model_config(model, systems)?;
+    let max_model_len = model_config.max_model_len;
     let rank = EngineConfig {
         // External AIS timing is priced by the role factory supplied below; the
         // rank still names the exact resolved config so the engine and router
@@ -664,6 +688,7 @@ pub(crate) fn canonical_role(
         router,
         diagnostics,
         geometry: serde_json::to_value(&memory)?,
+        model_config,
         transfer: KvTransferConfig {
             bytes_per_token,
             bandwidth_gbps,
