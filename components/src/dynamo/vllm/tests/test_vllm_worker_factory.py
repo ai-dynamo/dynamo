@@ -1978,6 +1978,64 @@ async def test_embedding_worker_registration_and_cleanup(
     assert shutdown_endpoints == [endpoint]
 
 
+@pytest.mark.asyncio
+async def test_embedding_worker_cleans_up_when_metrics_setup_fails() -> None:
+    cleanup_order: list[str] = []
+    endpoint = Mock()
+    endpoint.connection_id.return_value = "embedding-worker-id"
+    endpoint.serve_endpoint = AsyncMock(return_value=None)
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    engine_client = Mock()
+    engine_client.shutdown.side_effect = lambda: cleanup_order.append("client")
+    engine_cleanup_resource = Mock()
+    engine_cleanup_resource.cleanup.side_effect = lambda: cleanup_order.append(
+        "resource"
+    )
+    register_vllm_model = AsyncMock(return_value=None)
+    factory = WorkerFactory(
+        setup_vllm_engine_fn=Mock(
+            return_value=(
+                engine_client,
+                Mock(),
+                Mock(),
+                engine_cleanup_resource,
+                Mock(),
+            )
+        ),
+        setup_kv_event_publisher_fn=Mock(),
+        register_vllm_model_fn=register_vllm_model,
+        setup_fpm_relay_fn=Mock(),
+        setup_metrics_collection_fn=Mock(side_effect=RuntimeError("metrics")),
+    )
+    handler = Mock()
+    handler.cleanup.side_effect = lambda: cleanup_order.append("handler")
+    config = _make_config(
+        embedding_worker=True,
+        namespace="dynamo",
+        component="backend",
+        endpoint="generate",
+        model="test-model",
+    )
+
+    with patch(
+        "dynamo.vllm.worker_factory.EmbeddingWorkerHandler",
+        return_value=handler,
+    ):
+        with pytest.raises(RuntimeError, match="metrics"):
+            await factory._create_embedding_worker(
+                runtime,
+                config,
+                asyncio.Event(),
+                [],
+            )
+
+    endpoint.serve_endpoint.assert_not_called()
+    register_vllm_model.assert_not_awaited()
+    assert cleanup_order == ["handler", "client", "resource"]
+
+
 def _rank_artifact(dp_rank: int, regime: str) -> dict:
     point = {
         "point_type": "decode",

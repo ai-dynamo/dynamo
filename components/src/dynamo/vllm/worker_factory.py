@@ -2207,12 +2207,12 @@ class WorkerFactory:
             model_name=config.served_model_name or config.model
         ).to_dict()
 
-        # vLLM's own Prometheus stat logger still records pooling requests;
-        # forward its vllm:* families to this process's system port.
-        self.setup_metrics_collection(config, generate_endpoint, logger)
         register_model_taint_route(runtime, generate_endpoint)
         logger.info("Starting to serve the embedding worker endpoint...")
         try:
+            # vLLM's own Prometheus stat logger still records pooling requests;
+            # forward its vllm:* families to this process's system port.
+            self.setup_metrics_collection(config, generate_endpoint, logger)
             await asyncio.gather(
                 generate_endpoint.serve_endpoint(
                     handler.generate,
