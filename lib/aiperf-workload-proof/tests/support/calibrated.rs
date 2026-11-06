@@ -615,6 +615,7 @@ fn role_config(identity: RoleIdentity<'_>) -> Result<ForwardPassPerfModelConfig>
 pub(crate) struct RoleSetup {
     pub(crate) timing: Arc<CanonicalTimingModel>,
     pub(crate) tensor_parallel_size: u32,
+    pub(crate) num_gpu_blocks_is_explicit: bool,
     /// Recurrent-state modeling limitations are separate from attention KV.
     pub(crate) state_geometry: Value,
     pub(crate) rank: EngineConfig,
@@ -624,6 +625,106 @@ pub(crate) struct RoleSetup {
     pub(crate) model_config: ModelConfigEvidence,
     /// Physical KV payload and hardware link used for the P/D handoff.
     pub(crate) transfer: KvTransferConfig,
+}
+
+/// Consume a role resolved by the official Python compiler/runner. No caller
+/// capacity margin, transfer-size estimate or alternate role defaults are applied.
+/// Native memory and compiler transfer footprints remain separate labelled facts.
+pub(crate) fn resolved_canonical_role(
+    descriptor: ReplayRoleConfig,
+    geometry: Value,
+    systems: &Path,
+) -> Result<RoleSetup> {
+    let rank = descriptor.rank;
+    let TimingModelConfig::External { provider, config } = &rank.timing_model else {
+        anyhow::bail!("canonical descriptor requires the real AIS timing provider");
+    };
+    ensure!(
+        provider == "aic" || provider == "ais",
+        "canonical AIS provider required"
+    );
+    let mut timing_config = config.clone();
+    let object = timing_config
+        .as_object_mut()
+        .context("canonical timing identity")?;
+    // The runner carries memory allocation controls beside FPM identity. They
+    // remain in rank.timing_model/provenance; the FPM DTO has no such members.
+    for key in [
+        "gpu_memory_utilization",
+        "mem_fraction_static",
+        "free_gpu_memory_fraction",
+        "cuda_graph_reserved_bytes",
+    ] {
+        object.remove(key);
+    }
+    let config: ForwardPassPerfModelConfig = serde_json::from_value(timing_config.clone())?;
+    ensure!(
+        descriptor.dp_size == config.attention_dp && descriptor.tensor_parallel_size == config.tp,
+        "resolved replay topology conflicts with canonical model identity"
+    );
+    ensure!(
+        geometry["source"] == "native"
+            && geometry["estimated_num_gpu_blocks"].as_u64() == Some(rank.num_gpu_blocks as u64),
+        "official native geometry and resolved rank capacity must agree"
+    );
+    let model_config = canonical_model_config(&config.model, systems)?;
+    ensure!(
+        rank.max_model_len == Some(model_config.max_model_len),
+        "resolved context must match canonical model config"
+    );
+    ensure!(
+        model_config.recurrent_layers == 0,
+        "resolved canonical recurrent state is unsupported by this control"
+    );
+    let timing = CanonicalTimingModel::new(config)?;
+    let diagnostics = serde_json::to_value(timing.diagnostics())?;
+    let link = hardware_link(systems, HardwareSelection::B200Sxm)?;
+    let transfer_bytes = rank
+        .kv_transfer_bytes_per_token
+        .context("canonical transfer footprint required")?;
+    let bandwidth = rank
+        .kv_transfer_bandwidth
+        .context("canonical transfer bandwidth required")?;
+    ensure!(
+        bandwidth == link.bandwidth_gbps(),
+        "resolved transfer bandwidth conflicts with hardware link"
+    );
+    let num_gpu_blocks_is_explicit = descriptor
+        .num_gpu_blocks_is_explicit
+        .context("resolved capacity source required")?;
+    // The router must carry the exact resolved rank identity, not a second
+    // serialization of the stripped FPM-only DTO.
+    let router = canonical_router_config(
+        &rank,
+        descriptor.tensor_parallel_size as usize,
+        num_gpu_blocks_is_explicit,
+        &rank_timing_config(&rank)?,
+        timing.clone(),
+    )?;
+    Ok(RoleSetup {
+        timing,
+        tensor_parallel_size: descriptor.tensor_parallel_size,
+        num_gpu_blocks_is_explicit,
+        state_geometry: json!({"required":false,"supported":true,
+            "reason":"canonical non-recurrent model metadata"}),
+        rank,
+        router,
+        diagnostics,
+        geometry,
+        model_config,
+        transfer: KvTransferConfig {
+            bytes_per_token: transfer_bytes,
+            bandwidth_gbps: bandwidth,
+            link,
+        },
+    })
+}
+
+fn rank_timing_config(rank: &EngineConfig) -> Result<Value> {
+    match &rank.timing_model {
+        TimingModelConfig::External { config, .. } => Ok(config.clone()),
+        _ => anyhow::bail!("canonical timing descriptor absent"),
+    }
 }
 
 /// Router-side adapter over the exact canonical estimator used by the engine.
@@ -836,8 +937,13 @@ pub(crate) fn canonical_role(identity: RoleIdentity<'_>) -> Result<RoleSetup> {
         },
         ..Default::default()
     };
-    let router =
-        canonical_router_config(&rank, tensor_parallel_size, &timing_config, timing.clone())?;
+    let router = canonical_router_config(
+        &rank,
+        tensor_parallel_size,
+        true,
+        &timing_config,
+        timing.clone(),
+    )?;
 
     let state_geometry = if model_config.recurrent_layers > 0 {
         json!({
@@ -854,6 +960,7 @@ pub(crate) fn canonical_role(identity: RoleIdentity<'_>) -> Result<RoleSetup> {
     Ok(RoleSetup {
         timing,
         tensor_parallel_size: u32::try_from(tensor_parallel_size)?,
+        num_gpu_blocks_is_explicit: true,
         state_geometry,
         rank,
         router,
@@ -875,6 +982,7 @@ pub(crate) fn canonical_role(identity: RoleIdentity<'_>) -> Result<RoleSetup> {
 fn canonical_router_config(
     rank: &EngineConfig,
     tensor_parallel_size: usize,
+    num_gpu_blocks_is_explicit: bool,
     timing_config: &Value,
     timing: Arc<CanonicalTimingModel>,
 ) -> Result<MockerConfig> {
@@ -882,7 +990,7 @@ fn canonical_router_config(
         engine: rank.clone(),
         dp_size: 1,
         tensor_parallel_size,
-        num_gpu_blocks_is_explicit: true,
+        num_gpu_blocks_is_explicit,
         ..Default::default()
     };
     let mut router = MockerConfig::from_value(serde_json::to_value(&launch)?)
@@ -932,7 +1040,7 @@ pub(crate) fn role_descriptor(setup: &RoleSetup) -> ReplayRoleConfig {
         dp_size: 1,
         tensor_parallel_size: setup.tensor_parallel_size,
         prefill_context_parallel_size: 1,
-        num_gpu_blocks_is_explicit: Some(true),
+        num_gpu_blocks_is_explicit: Some(setup.num_gpu_blocks_is_explicit),
         rank: setup.rank.clone(),
     }
 }
@@ -995,7 +1103,7 @@ pub(crate) fn spec(prefill: &RoleSetup, decode: &RoleSetup) -> Result<ReplaySpec
             dp_size: 1,
             tensor_parallel_size: prefill.tensor_parallel_size,
             prefill_context_parallel_size: 1,
-            num_gpu_blocks_is_explicit: Some(true),
+            num_gpu_blocks_is_explicit: Some(prefill.num_gpu_blocks_is_explicit),
             rank: prefill.rank.clone(),
             prefill: Some(role_descriptor(prefill)),
             decode: Some(role_descriptor(decode)),

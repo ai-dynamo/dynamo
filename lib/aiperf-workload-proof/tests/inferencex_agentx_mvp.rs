@@ -847,6 +847,9 @@ fn write_raw_backend_artifact(
         ],
         "prepared_roots": typed.prepared_roots,
         "virtual_end_ns": typed.virtual_end_ns,
+        "physical_configuration_source": if std::env::var_os("MVP_CANONICAL_RESOLVED_CONFIG").is_some() {
+            "official compiler/runner resolved descriptors; native memory capacity without extra margin; compiler auto transfer footprint"
+        } else { "native memory geometry with explicit proof safety margin" },
         "prefill": {
             "timing": &prefill.diagnostics,
             "native_kv_geometry": &prefill.geometry,
@@ -1151,6 +1154,23 @@ fn create_new_artifact_dir(path: &Path) -> Result<PathBuf> {
 
 fn full_scenario_roles() -> Result<(calibrated::RoleSetup, calibrated::RoleSetup)> {
     let systems = calibrated::systems_root()?;
+    if let Some(path) = std::env::var_os("MVP_CANONICAL_RESOLVED_CONFIG") {
+        let resolved: Value = serde_json::from_slice(&std::fs::read(PathBuf::from(path))?)?;
+        let engine: aisimulate_core::replay::ReplayEngineConfig =
+            serde_json::from_value(resolved["resolved"]["spec"]["engine"].clone())?;
+        return Ok((
+            calibrated::resolved_canonical_role(
+                engine.prefill.context("canonical prefill role")?,
+                resolved["memory"]["prefill"].clone(),
+                &systems,
+            )?,
+            calibrated::resolved_canonical_role(
+                engine.decode.context("canonical decode role")?,
+                resolved["memory"]["decode"].clone(),
+                &systems,
+            )?,
+        ));
+    }
     let identity = calibrated::RoleIdentity {
         model: MODEL,
         systems: &systems,
