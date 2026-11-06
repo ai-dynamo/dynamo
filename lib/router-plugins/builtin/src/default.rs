@@ -3,6 +3,7 @@
 
 //! The default KV policy, composed from a scorer and a picker using the public plugin API.
 
+mod kvcr;
 mod parameters;
 mod picker;
 mod scorer;
@@ -105,7 +106,7 @@ fn policy_with_rng(
     ));
     let scorer = match preset {
         Preset::Default => scorer::build(&parameters, worker_label),
-        Preset::Kvcr => scorer::build_kvcr(&parameters, worker_label),
+        Preset::Kvcr => kvcr::build(&parameters, worker_label),
     };
     WorkerSelectionPolicy::new(config, worker_label, vec![scorer], picker)
         .with_exclusive_affinity(true)
