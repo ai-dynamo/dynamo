@@ -26,6 +26,7 @@ def write_artifacts(directory: Path, count: int, mode: str) -> None:
     csv_content = {
         "csv-invalid": 'Metric,avg\n"unterminated',
         "csv-truncated": "Metric,avg,p99\nLatency\n",
+        "csv-count-truncated": "Metric,Value\nRequest Count\n",
     }.get(
         mode,
         f"Metric,avg,p99\nLatency,1,2\n\nMetric,Value\nRequest Count,{csv_count}\n",

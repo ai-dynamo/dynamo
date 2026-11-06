@@ -77,7 +77,7 @@ def parse_aiperf_into_result(
                 raise ValueError(f"Malformed benchmark metrics: {candidate}")
             if not metrics:
                 metrics = parsed
-    except (OSError, ValueError, KeyError, TypeError, csv.Error) as exc:
+    except (OSError, ValueError, KeyError, IndexError, TypeError, csv.Error) as exc:
         result.status = "fail"
         print(f"    Invalid benchmark artifacts at {candidate}: {exc}")
         return

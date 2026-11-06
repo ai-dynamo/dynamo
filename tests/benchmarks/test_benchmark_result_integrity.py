@@ -192,6 +192,7 @@ BENCHMARK_DURATION=
         "csv-missing",
         "csv-invalid",
         "csv-truncated",
+        "csv-count-truncated",
         "csv-empty-count",
     ],
 )
