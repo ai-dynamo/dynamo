@@ -540,9 +540,9 @@ jobs:
         cargo test --locked -p dynamo-llm --no-default-features \
           --features kv-router-stress --bench kv_router_bench --no-run
     - name: Run NVTX feature tests
-      # Every other Rust job here builds dynamo-runtime with the nvtx feature off.
-      # The image builds compile the feature but run no tests, so this step is
-      # the only one that runs the feature-on tests in lib/runtime/src/nvtx.rs.
+      # Only this step and "Lint the NVTX feature" turn on the nvtx feature here.
+      # The lint step and the image builds compile it but run no tests. So this
+      # step is the only one that runs the feature-on tests in lib/runtime/src/nvtx.rs.
       run: "cargo test --locked -p dynamo-runtime --features nvtx --lib nvtx::"
 
   rust-clippy:
