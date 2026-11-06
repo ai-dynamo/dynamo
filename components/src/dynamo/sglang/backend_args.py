@@ -254,6 +254,7 @@ class DynamoSGLangConfig(ConfigBase):
     served_model_aliases: Optional[List[str]] = None
 
     def validate(self) -> None:
+        """Reject incompatible worker modes and invalid configuration values."""
         _reject_removed_multimodal_env_vars()
         if self.rerank_worker and (
             self.embedding_worker

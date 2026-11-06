@@ -430,6 +430,7 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
 
     def _add_diffusion_request_arguments(self, parser: argparse.ArgumentParser) -> None:
+        """Add defaults for diffusion requests and PNG response encoding."""
         # Check TRT-LLM's public VisualGenParams for the list of fields. Note that
         # we only add the fields that can be set in request, otherwise we use
         # TRT-LLM's default values by not setting them at all.

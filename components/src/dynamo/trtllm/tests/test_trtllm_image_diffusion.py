@@ -19,8 +19,10 @@ import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
+from PIL import Image
 
 from dynamo.common.protocols.image_protocol import (
     ImageData,
@@ -821,8 +823,7 @@ class TestImageHandlerResponseFormats:
 
 
 def _png_test_image():
-    import numpy as np
-
+    """Create compressible pixels whose PNG size varies with the level."""
     rng = np.random.default_rng(0)
     # Smooth gradient plus noise, so the zlib level changes the size.
     y, x = np.mgrid[0:256, 0:256]
@@ -835,12 +836,12 @@ class TestPngCompressionLevel:
 
     @pytest.mark.parametrize("level", [-1, 10])
     def test_diffusion_config_rejects_out_of_range_level(self, level):
+        """Reject PNG levels outside the supported range at config creation."""
         with pytest.raises(ValueError, match="--image-png-compression-level"):
             DiffusionConfig(image_png_compression_level=level)
 
     def test_levels_keep_pixels_and_trade_size(self):
-        import numpy as np
-        from PIL import Image
+        """Check that compression reduces size while preserving every pixel."""
 
         array = _png_test_image()
         sizes = {}
@@ -853,8 +854,7 @@ class TestPngCompressionLevel:
         assert sizes[0] > sizes[1] >= sizes[6] >= sizes[9]
 
     def test_default_level_matches_plain_pillow_png(self):
-        from PIL import Image
-
+        """Check that the default level produces the same bytes as Pillow."""
         array = _png_test_image()
         expected = io.BytesIO()
         Image.fromarray(array).save(expected, format="PNG")
@@ -865,6 +865,7 @@ class TestPngCompressionLevel:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("response_format", ["url", "b64_json"])
     async def test_handler_passes_configured_level(self, tmp_path, response_format):
+        """Check that URL and base64 responses use the configured PNG level."""
         handler = TestImageHandlerResponseFormats()._make_handler(
             tmp_path, image_png_compression_level=0
         )

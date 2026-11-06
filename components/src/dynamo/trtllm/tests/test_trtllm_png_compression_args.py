@@ -33,6 +33,7 @@ PNG_LEVEL_ENV = "DYN_TRTLLM_IMAGE_PNG_COMPRESSION_LEVEL"
 
 
 def _parse_png_level(argv: list[str]) -> int:
+    """Parse the PNG level from CLI and environment values and validate it."""
     parser = argparse.ArgumentParser()
     DynamoTrtllmArgGroup().add_arguments(parser)
     level = parser.parse_args(argv).image_png_compression_level
@@ -53,6 +54,7 @@ def _parse_png_level(argv: list[str]) -> int:
     ],
 )
 def test_config_from_cli_and_env(monkeypatch, env_value, argv, expected):
+    """Check the default level, environment values, and CLI precedence."""
     monkeypatch.delenv(PNG_LEVEL_ENV, raising=False)
     if env_value is not None:
         monkeypatch.setenv(PNG_LEVEL_ENV, env_value)
@@ -62,6 +64,7 @@ def test_config_from_cli_and_env(monkeypatch, env_value, argv, expected):
 
 @pytest.mark.parametrize("value", ["-1", "10", "1.5"])
 def test_config_rejects_invalid_level_from_env(monkeypatch, value):
+    """Reject out-of-range and non-integer levels from the environment."""
     monkeypatch.setenv(PNG_LEVEL_ENV, value)
 
     with pytest.raises(ValueError):

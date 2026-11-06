@@ -9,6 +9,7 @@ import io
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
+import numpy as np
 import pytest
 from PIL import Image
 
@@ -686,6 +687,7 @@ PNG_LEVEL_ENV = "DYN_SGL_IMAGE_PNG_COMPRESSION_LEVEL"
 
 
 def _parse_sglang_config(argv: list[str]) -> DynamoSGLangConfig:
+    """Parse CLI and environment settings, then validate the worker config."""
     parser = argparse.ArgumentParser()
     DynamoSGLangArgGroup().add_arguments(parser)
     config = DynamoSGLangConfig.from_cli_args(parser.parse_args(argv))
@@ -705,6 +707,7 @@ def _parse_sglang_config(argv: list[str]) -> DynamoSGLangConfig:
     ],
 )
 def test_image_png_compression_config(monkeypatch, env_value, argv, expected):
+    """Check the default level, environment values, and CLI precedence."""
     monkeypatch.delenv(PNG_LEVEL_ENV, raising=False)
     if env_value is not None:
         monkeypatch.setenv(PNG_LEVEL_ENV, env_value)
@@ -714,6 +717,7 @@ def test_image_png_compression_config(monkeypatch, env_value, argv, expected):
 
 @pytest.mark.parametrize("value", ["-1", "10", "1.5"])
 def test_image_png_compression_config_rejects_invalid_level(monkeypatch, value):
+    """Reject out-of-range and non-integer levels from the environment."""
     monkeypatch.setenv(PNG_LEVEL_ENV, value)
 
     with pytest.raises(ValueError):
@@ -725,8 +729,7 @@ class TestPngCompressionLevel:
 
     @staticmethod
     def _frames(kind):
-        import numpy as np
-
+        """Create compressible pixels as either a PIL image or a NumPy array."""
         rng = np.random.default_rng(0)
         # Smooth gradient plus noise, so the zlib level changes the size.
         y, x = np.mgrid[0:256, 0:256]
@@ -736,6 +739,7 @@ class TestPngCompressionLevel:
 
     @staticmethod
     async def _encode(handler, frame):
+        """Return PNG bytes produced by the handler for one generated frame."""
         handler.generator.generate = Mock(return_value=SimpleNamespace(frames=[frame]))
         images = await handler._generate_images(
             prompt="test",
@@ -753,8 +757,7 @@ class TestPngCompressionLevel:
     async def test_level_changes_size_and_keeps_pixels(
         self, mock_generator, mock_config, mock_fs, kind
     ):
-        import numpy as np
-
+        """Check that both frame types use the level without changing pixels."""
         array, frame = self._frames(kind)
         sizes = {}
         for level in (0, 9):

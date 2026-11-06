@@ -107,6 +107,7 @@ class DiffusionConfig:
     dit_cfg_size: int = 1
 
     def __post_init__(self) -> None:
+        """Reject invalid image counts and PNG compression levels."""
         # The image request model bounds `n` to 1..10 (OpenAI's documented
         # range). The default used when a request omits `n` obeys the same rule.
         if not 1 <= self.default_num_images_per_prompt <= 10:
@@ -132,6 +133,7 @@ class DiffusionConfig:
         return cls(**kwargs)
 
     def __str__(self) -> str:
+        """Summarize worker settings for logging, including PNG compression."""
         return (
             f"DiffusionConfig("
             f"namespace={self.namespace}, "

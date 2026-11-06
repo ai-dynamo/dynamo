@@ -214,6 +214,7 @@ class ImageGenerationHandler(BaseGenerativeHandler):
             emit_count = min(images.shape[0], num_images_per_prompt)
 
             async def _encode_one(i: int) -> ImageData:
+                """Encode one image with the configured level and return its response data."""
                 image_np = images[i].cpu().numpy()
                 logger.debug(
                     f"Request {request_id}: encoding image {i + 1}/{emit_count} "
