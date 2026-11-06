@@ -4472,8 +4472,8 @@
         {
           "id": 58,
           "type": "timeseries",
-          "title": "Tokio Worker Busy Ratio",
-          "description": "DYN: dynamo_tokio_worker_busy_ratio \u2014 async runtime saturation; >0.9 sustained means runtime is starved",
+          "title": "Tokio Worker Mean Poll Time",
+          "description": "DYN: dynamo_tokio_worker_mean_poll_time_ns \u2014 mean task poll time per runtime thread; sustained values near 1 ms or more mean the runtime is starved",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -4486,7 +4486,7 @@
           },
           "fieldConfig": {
             "defaults": {
-              "unit": "percentunit",
+              "unit": "ns",
               "color": {
                 "mode": "palette-classic"
               },
@@ -4544,7 +4544,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "avg by (worker) (dynamo_tokio_worker_busy_ratio)",
+              "expr": "avg by (worker) (dynamo_tokio_worker_mean_poll_time_ns)",
               "legendFormat": "{{worker}}",
               "range": true,
               "refId": "A"
