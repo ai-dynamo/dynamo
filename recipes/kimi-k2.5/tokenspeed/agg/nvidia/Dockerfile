@@ -25,24 +25,30 @@
 #     .
 #
 # The default BASE_IMAGE pins lightseekorg/tokenspeed-runner at an immutable
-# CUDA-13 digest (matches B200's CUDA 13.x driver, ~4.66 GB). To target a
-# different TokenSpeed runtime build, override it:
-#   --build-arg BASE_IMAGE=docker.io/lightseekorg/tokenspeed-runner:cu129-torch-2.11.0
-# or for arm64 base images:
+# CUDA-13 multi-arch digest (matches B200/GB300's CUDA 13.x driver). Build for
+# arm64 (GB200/GB300) with:
 #   --build-arg ARCH=arm64
 #
-# The runner image is the runtime base only; this Dockerfile installs the
-# TokenSpeed engine itself from github.com/lightseekorg/tokenspeed, following
-# the upstream guide at lightseek.org/tokenspeed/guides/getting-started. Pin
-# the TokenSpeed source ref via --build-arg TOKENSPEED_GIT_REF=<ref>.
-ARG BASE_IMAGE=docker.io/lightseekorg/tokenspeed-runner:cu130-torch-2.11.0@sha256:516a14ed701184d224e8e8700b41b8e116a687ac4c3481e13020ed5fd49e7061
+# The runner image is the runtime base only. This Dockerfile installs the
+# TokenSpeed nightly wheels that SemiAnalysisAI/InferenceX#4780 pins: the
+# Python runtime, kernel, and Rust engine (`tokenspeed_engine`, which carries
+# the msgpack wire frontend the Dynamo worker uses) built from upstream
+# revision 0e6ee353d7bd, with scheduler 0.1.49 and FlashInfer 0.7.2.post1.
+# Each wheel is pinned by SHA256. The Dynamo worker drives the headless engine
+# over that wire, so a TokenSpeed older than this rewrite (any revision that
+# still ships an in-process `Engine` with a `tokenizer_manager`) cannot work.
+ARG BASE_IMAGE=ghcr.io/lightseekorg/tokenspeed-runner:cu130-torch-2.14.0-flashinfer-0.7.1rc2@sha256:1086943cd27a22b7d414c64ca088bee24f53a971fdae78e231c182c50b4e43d2
 ARG ARCH=amd64
 ARG CARGO_BUILD_JOBS=16
 
 FROM ${BASE_IMAGE} AS tokenspeed_base
 ARG ARCH
-ARG TOKENSPEED_GIT_REF=886baafaa30f95d9a9e1b781c5906b0a89a64e98
-ARG FLASHINFER_WHEEL_INDEX=https://flashinfer.ai/whl/cu130
+ARG TOKENSPEED_WHL=https://github.com/lightseekorg/whl/releases/download
+ARG TOKENSPEED_VERSION=0.1.1.post20261102
+ARG TOKENSPEED_KERNEL_VERSION=0.1.4.post20261102
+ARG TOKENSPEED_ENGINE_VERSION=0.1.0.post20261102
+ARG TOKENSPEED_SCHEDULER_VERSION=0.1.49
+ARG TOKENSPEED_FLASHINFER_VERSION=0.7.2.post1
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 USER root
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -55,22 +61,30 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         git; \
     rm -rf /var/lib/apt/lists/*
 
-# Install TokenSpeed from upstream source. The public lightseekorg/tokenspeed-runner
-# image ships only the runtime base (CUDA, PyTorch, mooncake); the engine itself
-# is not yet published on PyPI. Mirrors the upstream guide at
-# https://lightseek.org/tokenspeed/guides/getting-started.
-# Override the source ref (a branch / tag / commit SHA) with --build-arg TOKENSPEED_GIT_REF=<ref>.
+# Install the pinned TokenSpeed nightly wheels (CPython 3.12, as the runner
+# ships), then the matching precompiled FlashInfer kernels so startup does not
+# rebuild them. The SHA256 pins cover the three wheels for each architecture;
+# change them together with the versions above.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     set -eux; \
-    git clone https://github.com/lightseekorg/tokenspeed.git /opt/tokenspeed; \
-    cd /opt/tokenspeed; \
-    git checkout --detach "${TOKENSPEED_GIT_REF}"; \
-    pip install -e "./python" --no-build-isolation; \
-    FLASHINFER_VERSION="$(sed -n 's/^flashinfer-python==//p' tokenspeed-kernel/python/requirements/cuda.txt)"; \
-    test -n "${FLASHINFER_VERSION}"; \
-    pip install "flashinfer-jit-cache==${FLASHINFER_VERSION}" --index-url "${FLASHINFER_WHEEL_INDEX}"; \
-    pip install -e tokenspeed-kernel/python/ --no-build-isolation; \
-    pip install -e tokenspeed-scheduler/
+    case "${ARCH}" in \
+        amd64) \
+            KERNEL_PLATFORM=manylinux_2_28_x86_64; ENGINE_PLATFORM=linux_x86_64; \
+            KERNEL_SHA256=6c9ac7ad2e2295b45b84168dd77de43aef8d3e1c39a285784ae07c232c70249f; \
+            ENGINE_SHA256=ec830b44ea494ee4942e5db97b650466db9e9d63970cee1824a0f5c9447d00af ;; \
+        arm64) \
+            KERNEL_PLATFORM=manylinux_2_28_aarch64; ENGINE_PLATFORM=linux_aarch64; \
+            KERNEL_SHA256=efaa5239fb7bbd55374ce8af056b9ca7b113e591d71ad480c084d0262656fdcb; \
+            ENGINE_SHA256=c4fbfdbda25db1495a01431d3e115da235faa94b1050c2558762f5f468402b2e ;; \
+        *) echo "unsupported ARCH=${ARCH}" >&2; exit 1 ;; \
+    esac; \
+    python3 -m pip install --upgrade --index-url https://pypi.org/simple \
+        "${TOKENSPEED_WHL}/tokenspeed-nightly-v${TOKENSPEED_VERSION}/tokenspeed-${TOKENSPEED_VERSION}-py3-none-any.whl#sha256=82ada30115b34ba4580305e31d0bcb5c790cf319beef7cbe6deb855490e6590d" \
+        "${TOKENSPEED_WHL}/tokenspeed-kernel-nightly-v${TOKENSPEED_KERNEL_VERSION}-cu130/tokenspeed_kernel-${TOKENSPEED_KERNEL_VERSION}-cp312-cp312-${KERNEL_PLATFORM}.whl#sha256=${KERNEL_SHA256}" \
+        "${TOKENSPEED_WHL}/tokenspeed-engine-nightly-v${TOKENSPEED_ENGINE_VERSION}/tokenspeed_engine-${TOKENSPEED_ENGINE_VERSION}-cp312-cp312-${ENGINE_PLATFORM}.whl#sha256=${ENGINE_SHA256}" \
+        "tokenspeed-scheduler==${TOKENSPEED_SCHEDULER_VERSION}"; \
+    python3 -m flashinfer download-kernels \
+        --cuda-version 13.0 --flashinfer-version "${TOKENSPEED_FLASHINFER_VERSION}"
 
 # NOTE: discovery uses the in-cluster Kubernetes API (`--discovery-backend kubernetes`)
 # and the event-plane connects to a separate `nats:2.12.4` Deployment, so the worker

@@ -42,15 +42,12 @@ Kimi K2.5 / K2.6.
 There is **no public `nvcr.io/nvidia/ai-dynamo/tokenspeed-runtime` image** at the time
 this recipe was written; TokenSpeed integration in Dynamo is still in flight. This
 directory ships a [`Dockerfile`](Dockerfile) that builds a Dynamo+TokenSpeed image
-on top of `docker.io/lightseekorg/tokenspeed-runner:cu130-torch-2.11.0` (the upstream
-TokenSpeed runtime base, pinned by digest for reproducibility).
+on top of `ghcr.io/lightseekorg/tokenspeed-runner:cu130-torch-2.14.0-flashinfer-0.7.1rc2`
+(the upstream TokenSpeed runtime base, pinned by digest for reproducibility).
 
-The lightseek runner image is the **runtime base only** — it ships CUDA 13, PyTorch
-2.11, and mooncake, but not the TokenSpeed engine itself (the engine is not yet
-published on PyPI; only a name-reservation placeholder exists). This Dockerfile
-installs TokenSpeed from upstream source per the official guide at
-[lightseek.org/tokenspeed/guides/getting-started](https://lightseek.org/tokenspeed/guides/getting-started),
-then layers Dynamo on top.
+The lightseek runner image is the **runtime base only**: it ships CUDA 13, PyTorch
+2.14, and Mooncake, but not the TokenSpeed engine itself. The Dockerfile installs the
+TokenSpeed nightly wheels, each pinned by SHA256, then layers Dynamo on top.
 
 Run the build, push the result to a registry your cluster can pull from, then
 update the `image:` fields in [`deploy.yaml`](deploy.yaml).
@@ -69,27 +66,26 @@ docker build \
   .
 ```
 
-The Dockerfile defaults `BASE_IMAGE` to a public TokenSpeed runtime tag pinned to
-an immutable digest:
+The Dockerfile defaults `BASE_IMAGE` to the TokenSpeed runtime image that
+[SemiAnalysisAI/InferenceX#4780](https://github.com/SemiAnalysisAI/InferenceX/pull/4780)
+pins, by its multi-arch digest:
 
 ```
-docker.io/lightseekorg/tokenspeed-runner:cu130-torch-2.11.0@sha256:516a14ed701184d224e8e8700b41b8e116a687ac4c3481e13020ed5fd49e7061
+ghcr.io/lightseekorg/tokenspeed-runner:cu130-torch-2.14.0-flashinfer-0.7.1rc2@sha256:1086943cd27a22b7d414c64ca088bee24f53a971fdae78e231c182c50b4e43d2
 ```
 
-This image is CUDA-13-based (matches B200's CUDA 13.x driver) and ships PyTorch 2.11.0.
-Sibling tags on the same repo: `cu130`, `cu129-torch-2.11.0`, `cu129`, `latest`. To
-target a different runtime, override the build arg:
+TokenSpeed is pinned to the same build as that pull request: the November 2, 2026
+nightly wheels `tokenspeed` `0.1.1.post20261102`, `tokenspeed-kernel`
+`0.1.4.post20261102`, and `tokenspeed-engine` `0.1.0.post20261102`, all built from
+upstream revision
+[`0e6ee353d7bd`](https://github.com/lightseekorg/tokenspeed/commit/0e6ee353d7bdc7afeb1c5795d839533eab7ecb9a),
+with `tokenspeed-scheduler` `0.1.49` and the FlashInfer `0.7.2.post1` CUDA 13 kernel
+caches. The `TOKENSPEED_*_VERSION` build args select another nightly; update the
+SHA256 pins in the Dockerfile with them.
 
-```bash
---build-arg BASE_IMAGE=docker.io/lightseekorg/tokenspeed-runner:cu129-torch-2.11.0
-```
-
-TokenSpeed is pinned to commit `886baafaa30f95d9a9e1b781c5906b0a89a64e98` by
-default. Override `TOKENSPEED_GIT_REF` to test another branch, tag, or commit. The
-build reads TokenSpeed's pinned `flashinfer-python` version and installs the matching
-JIT cache before compiling the TokenSpeed kernel. When overriding the base image for
-a different CUDA release, also set `FLASHINFER_WHEEL_INDEX` to that release's
-FlashInfer wheel index.
+The Dynamo worker drives TokenSpeed's headless engine over its msgpack ZMQ wire
+(`tokenspeed_engine`). TokenSpeed revisions from before that rewrite, which ship an
+in-process `Engine` with a `tokenizer_manager`, cannot run this worker.
 
 The Dockerfile has two reachable targets:
 

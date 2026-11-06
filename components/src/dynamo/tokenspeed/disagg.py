@@ -37,16 +37,6 @@ def attention_dp_size(server_args: Any) -> int:
     )
 
 
-def cache_block_size(server_args: Any) -> int | None:
-    # TokenSpeed renamed block_size to prefix_granularity when physical pages
-    # and reusable-prefix identity became separate concepts. Router blocks track
-    # the prefix identity carried by KV events, not physical allocation pages.
-    value = getattr(server_args, "prefix_granularity", None)
-    if value is None:
-        value = getattr(server_args, "block_size", None)
-    return int(value) if value is not None else None
-
-
 def validate_disagg_compatibility(mode: DisaggregationMode, server_args: Any) -> None:
     if mode == DisaggregationMode.AGGREGATED:
         return
@@ -61,10 +51,6 @@ def validate_disagg_compatibility(mode: DisaggregationMode, server_args: Any) ->
         raise ValueError(
             "Dynamo TokenSpeed disaggregation requires attention DP=1; "
             "use independent workers for multiple prefill/decode replicas"
-        )
-    if (cache_block_size(server_args) or 0) <= 0:
-        raise ValueError(
-            "TokenSpeed disaggregation requires a positive --prefix-granularity (--block-size)"
         )
 
 
