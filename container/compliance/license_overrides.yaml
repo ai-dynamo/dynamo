@@ -1051,8 +1051,7 @@ overrides:
   - { ecosystem: python, name: sigstore-models, license: "MIT", source: "https://github.com/astral-sh/sigstore-models/blob/v0.0.6/LICENSE" }
   - { ecosystem: rust, name: tsp-asn1, license: "Apache-2.0", source: "https://github.com/trailofbits/rfc3161-client/blob/v1.0.8/LICENSE" }
 
-  # --- MiniMax MSA kernels (sglang-runtime; installed from github.com/MiniMax-AI/MSA,
-  #     whose pyproject.toml files declare no license, so the generator reports
-  #     UNKNOWN). Both distributions come from the same MIT-licensed repository. ---
-  - { ecosystem: python, name: minimax-msa,     license: "MIT", source: "pyproject.toml declares no license; verified at https://github.com/MiniMax-AI/MSA/blob/1e7bf76f26a5f53cfc2d4d297e1ec2e40955e431/LICENSE (MIT)" }
-  - { ecosystem: python, name: sglang-msa-mono, license: "MIT", source: "MSA integrations/sglang plugin; pyproject.toml declares no license; verified at https://github.com/MiniMax-AI/MSA/blob/1e7bf76f26a5f53cfc2d4d297e1ec2e40955e431/LICENSE (MIT)" }
+  # --- MiniMax MSA kernels (sglang-runtime; installed from github.com/MiniMax-AI/MSA).
+  #     The one distribution installed, minimax-msa, declares no license in its
+  #     pyproject.toml, so the generator reports UNKNOWN; the repository is MIT. ---
+  - { ecosystem: python, name: minimax-msa, license: "MIT", source: "pyproject.toml declares no license; verified at https://github.com/MiniMax-AI/MSA/blob/1e7bf76f26a5f53cfc2d4d297e1ec2e40955e431/LICENSE (MIT)" }

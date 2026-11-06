@@ -251,8 +251,10 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
 # stays at /sgl-workspace/minimax-msa. JIT output goes to the user's ~/.cache,
 # never into the tree, so no chown is needed. Installed after the other pip
 # steps in this stage so nothing overwrites its generic top-level packages
-# (inference, datas, msa_v1). The integrations/sglang plugin registers
-# --monokernel-backend msa and is inert unless a server passes that flag.
+# (inference, datas, msa_v1). Unlike upstream's cu134 image, the
+# integrations/sglang plugin (sglang-msa-mono) is deliberately not installed: it
+# imports sglang.srt.monokernels, which SGLang 0.5.23 lacks. Revisit on the next
+# SGLang bump.
 #
 # On CUDA < 13.4 SGLang skips the QMUL4 kernels and uses the Q8K8 fallbacks,
 # which still import from inference.*; the two imports checked below are the
@@ -274,14 +276,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     python3 -c "import importlib.metadata as m; d = m.packages_distributions(); \
 bad = {k: d.get(k) for k in ('inference', 'datas', 'msa_v1') if d.get(k) != ['minimax-msa']}; \
 assert not bad, f'MSA top-level packages are shadowed or missing: {bad}'"; \
-    python3 -c "import inference.msa_v1.indexer.decode.q8kv4, inference.msa_v1.indexer.decode.q8kv8"; \
-    if [ -f "${MSA_DIR}/integrations/sglang/pyproject.toml" ]; then \
-        pip install --break-system-packages --no-deps -e "${MSA_DIR}/integrations/sglang"; \
-        python3 -c "from importlib.metadata import entry_points; \
-assert any(e.name == 'msa' for e in entry_points(group='sglang.srt.plugins')), 'MSA monokernel plugin not registered'"; \
-    else \
-        echo "MSA ${MSA_COMMIT} has no SGLang monokernel plugin; --monokernel-backend msa is unavailable" >&2; \
-    fi
+    python3 -c "import inference.msa_v1.indexer.decode.q8kv4, inference.msa_v1.indexer.decode.q8kv8"
 {% endif %}
 
 # Remove the codec-bearing video-DECODE components from the upstream SGLang image
