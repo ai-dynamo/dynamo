@@ -69,7 +69,7 @@ dynamo-generate-format-catalog = { path = "lib/generate-format-catalog", version
 # Published separately by https://github.com/ai-dynamo/aisimulate.
 # Original pin: aisimulate-core = { version = "=0.13.0-dev.202610290000000087" }
 # Proof override: candidate AISim package aisim-core (lib name aisimulate_core).
-aisimulate-core = { package = "aisim-core", path = "/home/anthony/nvidia/projects/ai-dynamo-org/aisimulate/.worktrees/aiperf-owned-runner-proof/crates/core" }
+aisimulate-core = { package = "aisim-core", path = "../../../aisimulate/.worktrees/aiperf-owned-runner-proof/crates/core" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.7.0" }

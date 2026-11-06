@@ -24,6 +24,7 @@ aiperf-config = { path = "../../../../../../aiperf-rs/.worktrees/prove-simple-ex
 aiperf-engine-input = { path = "../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/engine/input" }
 aiperf-protocol = { path = "../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/config/protocol" }
 aiperf-timing = { path = "../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/scheduling/timing" }
+aiperf-rng = { path = "../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/libs/rng" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
