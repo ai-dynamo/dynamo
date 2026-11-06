@@ -3,7 +3,7 @@
 
 """One CPU-only Request → Run → AISimulate/publisher → Candidate smoke test.
 
-Run against a Helm installation with dynamo-operator.dgdrV1Beta2.enabled=true
+Run against a default Helm installation with the Experimental DGDR v1beta2 API
 and controllerManager.manager.dgdrDefaultImage set to the matching planner image.
 The CI workflow owns the vCluster lifecycle, including cleanup after failures.
 """

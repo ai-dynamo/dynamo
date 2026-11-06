@@ -39,7 +39,9 @@ spec:
       name: v1beta2
       schema:
         openAPIV3Schema:
-          description: DynamoGraphDeploymentRun is one immutable accepted DGDR request and its execution status.
+          description: |-
+            DynamoGraphDeploymentRun is one immutable accepted DGDR request and its execution status.
+            Experimental. Available without a feature gate; this API may change incompatibly in future releases.
           properties:
             apiVersion:
               description: |-

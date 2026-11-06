@@ -33,7 +33,9 @@ spec:
       name: v1beta2
       schema:
         openAPIV3Schema:
-          description: DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
+          description: |-
+            DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
+            Experimental. Available without a feature gate; this API may change incompatibly in future releases.
           properties:
             apiVersion:
               description: |-
