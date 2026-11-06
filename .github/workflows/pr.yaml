@@ -1522,8 +1522,10 @@ jobs:
           operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           test_name: gaie
+          # One pytest-xdist worker per case, so the cases' image pulls overlap.
           extra_pytest_args: >-
             -m framework_with_gaie
+            -n 4
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
 
   # Serialize checkpoint lifecycles through cleanup: each Snapshot install
