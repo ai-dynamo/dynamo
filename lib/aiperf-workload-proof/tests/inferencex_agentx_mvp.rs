@@ -857,6 +857,7 @@ fn host_typed(
     prefill: &calibrated::RoleSetup,
     decode: &calibrated::RoleSetup,
 ) -> Result<(ReplayReport, HostedTypedReport)> {
+    eprintln!("MVP stage: preparing complete shared workload");
     let (participant, handle) = native_hosted(
         run,
         RunCancellation::new(),
@@ -881,6 +882,7 @@ fn host_typed(
         None,
         None,
     );
+    eprintln!("MVP stage: prepared; entering native simulator event loop");
     let report = Replayer::with_composition(
         calibrated::spec(prefill, decode)?,
         ReplayEngineFactory::with_optional_role_timing_models(
@@ -898,6 +900,7 @@ fn host_typed(
     })
     .run()
     .context("native Replayer event loop hosts the full AIPerf scenario")?;
+    eprintln!("MVP stage: native simulator drained; retaining typed report");
     let typed = handle
         .into_typed_report()
         .context("AIPerf typed phase report")?;
@@ -1307,6 +1310,7 @@ fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> 
     let metadata = report_run_metadata(&run, &harness)?;
 
     let artifact_dir = create_new_artifact_dir(&artifact_path)?;
+    eprintln!("MVP stage: exact input and calibrated physical roles verified");
 
     let (backend, typed) = host_typed(&run, &prefill, &decode)?;
     let reconciliation = reconcile_hosted::reconcile(&backend, &typed)
@@ -1336,10 +1340,12 @@ fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> 
     // Ordinary scheduled/graph runs carry no backend parity facts. The raw
     // backend evidence is the separate, explicitly non-parity artifact above.
     let facts = ReportPairRunFacts::new();
+    eprintln!("MVP stage: request reconciliation passed; finalizing normal artifacts");
     let finalized = finalize_hosted_run_report(&run, &typed, metadata, facts, &artifact_dir)
         .context("finalizing the normal hosted run report")?;
 
     assert_full_scenario(&run, &typed, &finalized, &artifact_dir)?;
+    eprintln!("MVP stage: full scenario assertions passed");
     Ok(())
 }
 
