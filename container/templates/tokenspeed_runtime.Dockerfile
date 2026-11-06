@@ -57,10 +57,10 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
         "{{ context.tokenspeed.wheel_base_url }}/tokenspeed-nightly-v{{ context.tokenspeed.version }}/tokenspeed-{{ context.tokenspeed.version }}-py3-none-any.whl#sha256={{ context.tokenspeed.runtime_sha256 }}" \
         "{{ context.tokenspeed.wheel_base_url }}/tokenspeed-kernel-nightly-v{{ context.tokenspeed.kernel_version }}-cu130/tokenspeed_kernel-{{ context.tokenspeed.kernel_version }}-cp312-cp312-${KERNEL_PLATFORM}.whl#sha256=${KERNEL_SHA256}" \
         "{{ context.tokenspeed.wheel_base_url }}/tokenspeed-engine-nightly-v{{ context.tokenspeed.engine_version }}/tokenspeed_engine-{{ context.tokenspeed.engine_version }}-cp312-cp312-${ENGINE_PLATFORM}.whl#sha256=${ENGINE_SHA256}" \
-        'tokenspeed-scheduler=={{ context.tokenspeed.scheduler_version }}' \
-        'flashinfer-cubin=={{ context.tokenspeed.flashinfer_version }}'
+        'tokenspeed-scheduler=={{ context.tokenspeed.scheduler_version }}'
 
-# Populate the matching precompiled kernels without requiring a GPU at build time.
+# Cubin/JIT-cache wheels are published on FlashInfer's indexes, not PyPI.
+# This command selects those indexes and does not need a GPU at build time.
 RUN python -m flashinfer download-kernels \
         --cuda-version 13.0 --flashinfer-version {{ context.tokenspeed.flashinfer_version }}
 
