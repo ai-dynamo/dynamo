@@ -37,8 +37,9 @@ ENV PATH=/usr/local/bin/etcd:$PATH
 # Install the TurboJPEG runtime used by frontend JPEG decoding and bring
 # base-image OS packages up to the current patch releases. --only-upgrade skips
 # anything not already installed while keeping both operations in one layer.
-# libjemalloc2 lets Dynamo processes opt into jemalloc via
-# LD_PRELOAD; it is not preloaded by default.
+# libjemalloc2 lets CPython and C allocations opt into jemalloc via LD_PRELOAD;
+# it is not preloaded by default. Rust allocations in dynamo._core already use
+# a built-in jemalloc.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libturbojpeg \
@@ -62,8 +63,9 @@ RUN apt-get update && \
     ldconfig -p | grep -q 'libturbojpeg.so.0'
 {% else %}
 # Install the TurboJPEG runtime used by frontend JPEG decoding.
-# libjemalloc2 lets Dynamo processes opt into jemalloc via
-# LD_PRELOAD; it is not preloaded by default.
+# libjemalloc2 lets CPython and C allocations opt into jemalloc via LD_PRELOAD;
+# it is not preloaded by default. Rust allocations in dynamo._core already use
+# a built-in jemalloc.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libturbojpeg \

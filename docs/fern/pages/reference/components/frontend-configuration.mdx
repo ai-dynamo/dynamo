@@ -804,7 +804,7 @@ The built-in configuration suits a long-running server:
 
 | Option | Value | Effect |
 |---|---|---|
-| `background_thread` | `true` | A background thread returns unused pages to the operating system on a schedule, including while the frontend is idle. Without it, pages are returned only when the process allocates again. |
+| `background_thread` | `true` | A background thread returns unused pages to the operating system on a schedule, including while the frontend is idle. Without it, pages are returned only when the process allocates again. Not set on macOS, where jemalloc has no background threads. |
 | `dirty_decay_ms` | `10000` | Unused pages are returned after about 10 seconds. Pages that still hold live allocations stay resident. |
 | `muzzy_decay_ms` | `0` | Pages skip the intermediate "muzzy" state. |
 | `narenas` | `16` | Caps the number of arenas; the jemalloc default is four per CPU. |
