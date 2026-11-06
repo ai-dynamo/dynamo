@@ -181,7 +181,7 @@ fn canonical_role(model: &str, systems: &Path, role: ForwardPassWorkerType) -> R
             "database_mode": DatabaseMode::Silicon,
             // Canonical geometry rejects a disaggregated role that silently
             // inherits the aggregated worker default.
-            "worker_type": memory_role(role),
+            "extra": {"worker_type": memory_role(role)},
         }))
         .context("complete matching native memory engine identity")?,
         max_num_tokens: 4096,
