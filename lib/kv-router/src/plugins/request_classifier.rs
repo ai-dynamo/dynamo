@@ -127,18 +127,26 @@ impl ClassifyRequest {
         self
     }
 
+    fn uncached_tokens(&self) -> usize {
+        QueueSnapshot::new(self.input_tokens, self.initial_cached_tokens).uncached_tokens
+    }
+
     /// Busy thresholds of the policy class this request resolves to now, including a class
     /// set with [`set_policy_class`](Self::set_policy_class). The queue holds the request
     /// while every eligible worker is past them. A name that matches no configured class
     /// reads the default class's thresholds; the request fails before it is queued unless
-    /// its class is then set to a configured one.
+    /// its class is then set to a configured one. With deprecated policy families, the
+    /// class is resolved for this request's uncached tokens.
     pub fn queue_thresholds(&self) -> BusyThresholds {
         self.busy_thresholds
             .as_ref()
             .map(|thresholds| {
                 let profile = &thresholds.profile;
                 profile
-                    .resolve_class_index(self.policy_class())
+                    .resolve_class_index_for_uncached_tokens(
+                        self.policy_class(),
+                        self.uncached_tokens(),
+                    )
                     .map_or(profile.default_class(), |index| profile.class(index))
                     .busy_thresholds
             })
@@ -146,11 +154,12 @@ impl ClassifyRequest {
     }
 
     /// Busy thresholds of the policy class named `policy_class`, or `None` when the router
-    /// does not know the class.
+    /// does not know the class. A deprecated policy family resolves to its class for this
+    /// request's uncached tokens, as [`set_policy_class`](Self::set_policy_class) would.
     pub fn queue_thresholds_for(&self, policy_class: &str) -> Option<BusyThresholds> {
         let profile = &self.busy_thresholds.as_ref()?.profile;
         profile
-            .resolve_class_index_strict(policy_class)
+            .resolve_class_index_strict(policy_class, self.uncached_tokens())
             .map(|index| profile.class(index).busy_thresholds)
     }
 

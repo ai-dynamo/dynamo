@@ -289,6 +289,11 @@ policy_classes:
     slo_ttft_ms: 3000
 ```
 
+The rest of this section describes flat classes. A profile in the deprecated
+policy-family and cache-bucket format still loads; see
+[Migrate from Policy Families and Cache Buckets](#migrate-from-policy-families-and-cache-buckets)
+for how it selects classes and how to migrate it.
+
 Clients select a class by sending its exact name in
 `x-dynamo-meta-policy-class`. A request without the header uses
 `default_policy_class`. A name that matches no configured class fails the
@@ -416,16 +421,52 @@ it does not exclude the entire router instance.
 
 #### Migrate from Policy Families and Cache Buckets
 
-Policy classes no longer form a family and cache-bucket matrix.
-`default_policy_family`, `uncached_isl_buckets`, `policy_family`, and
-`cache_bucket` are removed. A profile that still sets any of them, even to
-`null` or an empty value, fails to load with an error naming the field.
+> [!WARNING]
+> **Deprecated; removal planned for 1.8.0.**
+> `default_policy_family`, `uncached_isl_buckets`, `policy_family`, and
+> `cache_bucket` still load, and the router selects their classes by policy family and cache
+> bucket as described below. Each time the router loads a policy file in which any profile uses
+> them, it logs one deprecation warning. Migrate to flat policy classes.
 
-Every class name is now a direct selector. Previously, requests named a family,
-the router chose that family's class from the observed cache bucket, and a
-class bound to a family could not be requested by its own name. Now requests and
-classifiers name the class itself. When each family had a single bucket, delete
-the bucket fields and name the default family's class in
+Each profile, the root or one model's, uses one format. A profile that sets
+any of these keys, even to `null` or an empty value, uses the deprecated
+format: it must set `default_policy_family`, `uncached_isl_buckets`, and
+`policy_classes`, and it cannot set `default_policy_class`, or the file fails
+to load. A root that sets no `policy_classes` and sets these keys only to
+`null` defines no root profile. Other profiles in the same file can use flat
+classes.
+
+In a deprecated profile, a class that sets both `policy_family` and
+`cache_bucket` serves that family for that bucket, and every family needs
+exactly one class for each bucket. A class that sets neither is an explicit
+class; setting only one is invalid. Bucket floors in `uncached_isl_buckets`
+begin at `min_tokens: 0` and increase strictly. The router computes a
+request's uncached input sequence length (ISL) as its ISL minus the best cached
+tokens across eligible workers, then uses the bucket with the highest floor at
+or below it. A request that names an explicit class enters that class and
+bypasses cache-based selection. A request that names a configured family
+enters that family's class for its bucket, even when a family-bound class has
+the same name. A request whose name identifies neither an explicit class nor a
+configured family uses `default_policy_family` the same way: no name, an empty
+or unknown name, and the name of a family-bound class that is not also a
+family name. Such a request does not fail, and a client cannot bypass
+bucketing by naming a family-bound class. A request classifier's
+`set_policy_class` must name a family or an explicit class; any other name
+fails the request.
+
+An omitted `queue_policy` is `fcfs` in a deprecated profile and `edf` for flat
+classes. A deprecated profile accepts `fcfs` or `wspt`; `edf`, `slo_ttft_ms`,
+and `controlled_delay` need flat classes, and a deprecated profile that sets
+any of them fails to load. Busy thresholds, queue limits, quanta, and model
+profiles work the same in both formats.
+
+To migrate, rewrite each deprecated profile as flat classes. Every class name
+then selects its class directly, and a name that matches no class fails the
+request with HTTP 400 instead of using a default family. Set `queue_policy` on
+each class to keep its ordering: an omitted value that meant `fcfs` means
+`edf` after migration. When each family had a single bucket, delete
+`default_policy_family`, `uncached_isl_buckets`, and each class's
+`policy_family` and `cache_bucket`, then name the default family's class in
 `default_policy_class`. This profile:
 
 ```yaml
@@ -450,17 +491,22 @@ becomes:
 default_policy_class: regular
 policy_classes:
   - name: premium
+    queue_policy: fcfs
     quantum: 512
   - name: regular
+    queue_policy: fcfs
     quantum: 128
 ```
 
 Here each class already has its family's name, so clients keep sending the same
-values.
+values. To adopt `edf` ordering instead, omit `queue_policy`. A class budget
+is optional: an `edf` class orders a request by its explicit deadline, else by
+router ingress plus `slo_ttft_ms` when the class sets it, and requests with
+neither follow in enqueue order.
 
 When a family had several buckets, choose the classes you want, then update
 the `x-dynamo-meta-policy-class` values that clients or gateways send and the
-names your request classifiers set. The router does not reproduce cache-based
+names your request classifiers set. Flat classes do not reproduce cache-based
 bucketing: to keep separate queues for cached and uncached traffic, give each
 queue its own class and select it upstream or with a
 [custom request classifier](custom-admission-control.md).
