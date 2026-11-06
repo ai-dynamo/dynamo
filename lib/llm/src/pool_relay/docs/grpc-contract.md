@@ -173,7 +173,7 @@ local block hashing, and rolling sequence hashing. Compute hashes separately for
 its declared semantics; Prefill and Decode formats can differ. Unknown or unspecified formats
 must not fall back to a known format.
 
-The shared [hashing implementation and test vectors](../../../../kv-router/src/protocols.rs)
+The shared [hashing implementation and test vectors](../../../../kv-hashing/src/routing.rs)
 define `compute_block_hash_for_seq` and `compute_seq_hash_for_block`. CBI1 transports bucket
 images; it does not replace this token-to-sequence-hash pipeline.
 

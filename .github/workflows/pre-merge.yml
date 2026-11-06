@@ -506,9 +506,9 @@ jobs:
       run: |
         cargo-hack --version || cargo install cargo-hack@0.6.45 --locked
         cargo hack check --locked -p dynamo-kv-router --each-feature --all-targets
-    - name: Run standalone slot-tracker feature tests
-      # No workspace member requests the slot-tracker service alone, so it needs an explicit run here.
-      run: cargo test --locked -p dynamo-kv-router --features http,replica-sync-zmq --lib 'services::'
+    - name: Run kv-router adapter feature tests
+      # No workspace member enables the http adapter, so these tests run only here.
+      run: cargo test --locked -p dynamo-kv-router --features http,ingest-zmq,replica-sync-zmq,peer-recovery,metrics --lib --tests
     - name: Run canonical replay feature tests
       run: |
         cargo test --locked -p dynamo-bench --features replay-bench \

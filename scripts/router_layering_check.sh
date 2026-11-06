@@ -287,7 +287,7 @@ while read -r c; do
   grep -qE "^$c v" "$tmp/ws.txt" || die "$c missing from the workspace graph"
 done <"$tmp/table_crates.txt"
 crate_alt="$(paste -sd'|' "$tmp/table_crates.txt")"
-feature_alt="$(words "$ROUTER_TEST_FEATURES" | paste -sd'|')"
+feature_alt="$(words "$ROUTER_TEST_FEATURES" | paste -sd'|' -)"
 grep -E "^($crate_alt) feature \"($feature_alt)\"" "$tmp/ws.txt" | sort -u >"$tmp/ws_hits.txt" || true
 if [ ! -s "$tmp/ws_hits.txt" ]; then
   ok "workspace: no normal dependency enables $(words "$ROUTER_TEST_FEATURES" | show) on a router crate"
@@ -316,7 +316,7 @@ else
   bad "router crates: #[doc(hidden)] items ($(wc -l <"$tmp/hidden_bad.txt") lines):"
   sed 's/^/        /' "$tmp/hidden_bad.txt"
 fi
-exempt_re="^($(words "$GLOB_EXEMPT_DIRS" | paste -sd'|'))/"
+exempt_re="^($(words "$GLOB_EXEMPT_DIRS" | paste -sd'|' -))/"
 mapfile -t glob_files < <(printf '%s\n' "${src_files[@]}" | grep -vE -- "$exempt_re" || true)
 [ "${#glob_files[@]}" -gt 0 ] || die "no .rs files left after exempting $GLOB_EXEMPT_DIRS"
 rc=0

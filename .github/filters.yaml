@@ -519,10 +519,11 @@ rust:
   # changes.
   - 'lib/bindings/python/codegen/templates/prometheus_names.py.template'
   - 'lib/bindings/python/src/dynamo/prometheus_names.py'
-  # The rust-clippy job runs the router crate layering check; it reads the
-  # whole lib/router tree.
+  # The rust-clippy job runs the router crate layering check.
   - 'scripts/router_layering_check.sh'
+  # Router crate files. Their markdown docs do not need the Rust jobs.
   - 'lib/router/**'
+  - '!lib/router/**/*.md'
 
 benchmarks:
   - 'benchmarks/**'
