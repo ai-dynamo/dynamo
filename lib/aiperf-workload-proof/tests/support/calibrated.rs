@@ -925,9 +925,9 @@ fn assert_calibrated_branch(report: &ReplayReport, hosted: &Value, prefill: &Rol
         // The handoff is a real transfer, not an instant metadata hop: the
         // source must hold KV, the destination must reserve and then activate,
         // and activation must follow source-held by positive modeled time.
-        let prefill_complete_ms = record["prefill_complete_ms"]
+        let prefill_admit_ms = record["prefill_admit_ms"]
             .as_f64()
-            .expect("disaggregated prefill completion timestamp");
+            .expect("disaggregated prefill admission timestamp");
         let source_held_ms = record["source_held_ms"]
             .as_f64()
             .expect("disaggregated source-held timestamp");
@@ -943,9 +943,21 @@ fn assert_calibrated_branch(report: &ReplayReport, hosted: &Value, prefill: &Rol
              destination_activated={destination_activated_ms}"
         );
         assert!(
-            prefill_complete_ms <= source_held_ms,
-            "source cannot hold KV before prefill completes"
+            prefill_admit_ms <= source_held_ms,
+            "source cannot hold KV before prefill admission"
         );
+        // PerRequestRecord exposes this only for a modeled host scheduler
+        // thread. Its absence is not a missing physical handoff; do not invent
+        // a completion milestone for the ordinary canonical engine path.
+        if let Some(prefill_complete) = record.get("prefill_complete_ms") {
+            let prefill_complete_ms = prefill_complete
+                .as_f64()
+                .expect("emitted host-scheduler completion must be numeric");
+            assert!(
+                prefill_admit_ms <= prefill_complete_ms && prefill_complete_ms <= source_held_ms,
+                "host prefill completion must lie between admission and source-held"
+            );
+        }
         assert!(
             source_held_ms <= destination_reserved_ms,
             "vLLM source-first handoff must reserve the destination after the source held"
