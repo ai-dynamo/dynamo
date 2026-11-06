@@ -214,6 +214,7 @@ tokenspeed:
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     runtime_image: nvcr.io/nvidia/cuda
     runtime_image_tag: 13.0.3-runtime-ubuntu24.04
+    baseline_sbom: cuda@76f46f3e
   # Match the CUDA compiler/header packages in TokenSpeed's runner without
   # inheriting the larger CUDA DL development image in the final runtime.
   cuda_jit_packages:

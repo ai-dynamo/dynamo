@@ -76,7 +76,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=shared \
     python -m flashinfer download-kernels \
         --cuda-version 13.0 --flashinfer-version {{ context.tokenspeed.flashinfer_version }}
 
-FROM tokenspeed AS runtime
+FROM tokenspeed AS pre_runtime
 
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
@@ -113,3 +113,8 @@ ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 USER dynamo
 ENTRYPOINT []
 CMD ["/bin/bash"]
+
+{% include "templates/compliance.Dockerfile" %}
+
+FROM pre_runtime AS runtime
+COPY --from=licenses /legal /legal
