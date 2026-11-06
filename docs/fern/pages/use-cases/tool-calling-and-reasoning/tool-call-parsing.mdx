@@ -178,7 +178,7 @@ truncated input.
 
 Choose a model family, then expand the matching model option to see its parser name and configuration details.
 
-The **Upstream name** column shows where the vLLM or SGLang parser name differs from Dynamo’s — relevant when using `--dyn-chat-processor vllm` or `sglang` (see [Parser Engine Fallback](chat-processors.mdx)). Upstream names are engine-version dependent. A `Dynamo-only` label describes this catalog's Dynamo entry; it is not a claim that no engine release can implement the format.
+The **Upstream name** field shows where the vLLM or SGLang parser name differs from Dynamo’s — relevant when using `--dyn-chat-processor vllm` or `sglang` (see [Parser Engine Fallback](chat-processors.mdx)). Upstream names are engine-version dependent. A `Dynamo-only` label describes this catalog's Dynamo entry; it is not a claim that no engine release can implement the format.
 
 <AccordionGroup>
   <Accordion title="Kimi">
@@ -186,7 +186,7 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
       <Accordion title="Kimi K3">
         **Parser:** `kimi_k3` (alias `kimi-k3`)
 
-        **Notes:** XTML tools and reasoning. Pair with `--dyn-reasoning-parser kimi_k3`. A named `tool_choice` forces `thinking=false` and `enable_thinking=false` before rendering, overriding an explicit request to enable thinking; `reasoning_effort` is retained. This override is specific to the K3 tool parser.
+        **Notes:** XTML tools and reasoning. Pair with `--dyn-reasoning-parser kimi_k3`. A named `tool_choice` forces `thinking=false` and `enable_thinking=false` before rendering, overriding an explicit request to enable thinking; `reasoning_effort` is retained. This override is specific to the K3 tool parser. See the [Kimi K3 recipe](../../recipes/model-recipes/kimi-k3.mdx).
       </Accordion>
 
       <Accordion title="Kimi K2 Instruct/Thinking and Kimi K2.5">
@@ -224,7 +224,7 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
       <Accordion title="DeepSeek V4.1">
         **Parser:** `deepseek_v41`
 
-        **Notes:** Unified V4.1 reasoning and spaced DSML calls with JSON bodies or typed parameter tags. Use the same reasoning selector when setting both. V1 does not provide this selector.
+        **Notes:** Unified V4.1 reasoning and spaced DSML calls with JSON bodies or typed parameter tags. Use the same reasoning selector when setting both. V1 does not provide this selector. See the [DeepSeek V4.1 Flash recipe](../../recipes/model-recipes/deepseek-v4-1-flash.mdx).
       </Accordion>
 
       <Accordion title="DeepSeek V4 Pro / Flash">
@@ -334,7 +334,15 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
 
         **Notes:** Channel grammar: reasoning in `<\|channel\|>analysis<\|message\|>...<\|end\|>`, the answer in `<\|channel\|>final<\|message\|>...<\|return\|>`, and one `<\|start\|>assistant to=NAME<\|channel\|>analysis <\|constrain\|>xml<\|message\|>...<\|call\|>` message per tool call with `<rfl:parameter name="KEY">VALUE</rfl:parameter>` arguments typed from the tool schema. Pair with `--dyn-reasoning-parser beam`; both flags are required and the pair routes to the unified parser without `DYN_PARSER_VERSION=2`. The route accepts the request field `preserve_thinking` (supplied prior assistant reasoning always stays in the rendered history; `true` and omitted are the same, `false` is accepted and has no effect — omit `reasoning_content` to drop it) and defaults `allow_missing_thinking=true` so history turns without reasoning render an empty analysis block instead of failing and `chat_template_kwargs.builtin_tools` (names resolved against `tools` for rendering only).
 
-        **Per-turn grammar:** on the Beam route the frontend holds every chat turn to this channel grammar with a structural tag (a non-empty analysis channel, then either tool calls whose `rfl:parameter` values are held to their JSON-schema types or the final answer), mirroring the model builder's SGLang serving layer; `required` and named tool choices reuse the same tag, so they are enforced on the Harmony wire. A `response_format` (`json_object` or `json_schema`) is held inside the final channel behind the analysis, so the response keeps its reasoning and the channel structure the parser expects; a forced tool choice ignores `response_format`, and the `nvext` guided-decoding fields (`guided_json`, `guided_regex`, ...) stay bare constraints from the first token. Set `DYN_BEAM_TURN_GRAMMAR=0` on the frontend to disable it for automatic tool choice (forced choices keep theirs; `response_format` then falls back to the bare JSON constraint). A tool declared `strict: true` whose schema is outside OpenAI's strict subset is served as non-strict on this route (logged as a warning) instead of the HTTP 400 other routes return; the grammar holds every typeable tool either way.
+        **Per-turn grammar:** on the Beam route the frontend holds every chat turn to this channel grammar with a structural tag (a non-empty analysis channel, then either tool calls whose `rfl:parameter` values are held to their JSON-schema types or the final answer), mirroring the model builder's SGLang serving layer; `required` and named tool choices reuse the same tag, so they are enforced on the Harmony wire. A `response_format` (`json_object` or `json_schema`) is held inside the final channel behind the analysis, so the response keeps its reasoning and the channel structure the parser expects; a forced tool choice ignores `response_format`, and the `nvext` guided-decoding fields (`guided_json`, `guided_regex`, ...) stay bare constraints from the first token. Set `DYN_BEAM_TURN_GRAMMAR=0` on the frontend to disable it for automatic tool choice (forced choices keep theirs; `response_format` then falls back to the bare JSON constraint).
+
+        **Rejected requests** (`Beam cannot enforce the requested tool constraints with this schema and prompt configuration`): the frontend returns HTTP 400 with this message instead of serving the request best-effort when the request asks for tool enforcement that the turn grammar cannot provide. That happens when the request has:
+
+        - a forced tool choice (`required` or a named function), but the last assistant message you send as a prefill has already started the final answer, so a tool call can no longer be forced;
+        - an applicable `strict: true` tool (any strict tool under `auto` or `required`, the named one under a named choice; `tool_choice: "none"` makes none applicable) whose schema the grammar cannot hold, for example one using keywords outside its JSON-schema subset such as `pattern`;
+        - `parallel_tool_calls: false` with usable tools together with an `nvext` guided-decoding field (`guided_json`, `guided_regex`, ...), which takes the output away from the grammar.
+
+        To resolve it, drop `strict` or fix the schema, remove the assistant prefill before forcing a call, or drop the guided-decoding field. Independently of the grammar, a `strict: true` tool whose schema is outside OpenAI's strict subset is rejected with HTTP 400 on this route as on every other.
       </Accordion>
     </AccordionGroup>
   </Accordion>
@@ -407,26 +415,40 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
     </AccordionGroup>
   </Accordion>
 
-  <Accordion title="Muse Glimmer">
-    **Parser:** `muse_glimmer` (Dynamo alias `muse`)
+  <Accordion title="Muse">
+    <AccordionGroup>
+      <Accordion title="Muse Glimmer">
+        **Parser:** `muse_glimmer` (Dynamo alias `muse`)
 
-    **Notes:** Recipient-routed ATEM channels and calls. Unified owns reasoning, visible text, and tool output; no V1 selector exists.
+        **Upstream name:** Check your engine version's `--help`
+
+        **Notes:** Recipient-routed ATEM channels and calls. Unified owns reasoning, visible text, and tool output; no V1 selector exists.
+      </Accordion>
+
+      <Accordion title="Muse Spark">
+        **Parser:** `muse_spark` (alias `muse_spark_open`)
+
+        **Upstream name:** Check your engine version's `--help`
+
+        **Notes:** Recipient-routed ATEM calls with visible `commentary` output. Unified owns the whole response; no V1 tool parser exists.
+      </Accordion>
+    </AccordionGroup>
   </Accordion>
 
-  <Accordion title="Muse Spark">
-    **Parser:** `muse_spark` (alias `muse_spark_open`)
+  <Accordion title="Inkling">
+    <AccordionGroup>
+      <Accordion title="Inkling">
+        **Parser:** `inkling`
 
-    **Notes:** Recipient-routed ATEM calls with visible `commentary` output. Unified owns the whole response; no V1 tool parser exists.
+        **Upstream name:** Check your engine version's `--help`
+
+        **Notes:** V1 channel-framed JSON tool calls using `name` and `args`. Pair with the `inkling` reasoning parser. Auto uses the legacy route; explicit V2 rejects this name.
+      </Accordion>
+    </AccordionGroup>
   </Accordion>
 
   <Accordion title="Additional Unified registry entries">
     The pinned library also registers `beam`, `nemotron_v3` / `nemotron3`, and `gpt_oss` / `harmony`. See the [routing table](troubleshooting-tool-calls.md#parser-generation-routing).
-  </Accordion>
-
-  <Accordion title="Inkling">
-    **Parser:** `inkling`
-
-    **Notes:** V1 channel-framed JSON tool calls using `name` and `args`. Pair with the `inkling` reasoning parser. Auto uses the legacy route; explicit V2 rejects this name.
   </Accordion>
 
   <Accordion title="Fallback">
