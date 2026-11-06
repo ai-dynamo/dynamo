@@ -78,9 +78,8 @@ def register_gms_v1_plugin() -> None:
         return
 
     def around_create_adapter(original, *args, **kwargs):
-        # CUDA graph backends ask for a disabled adapter unless
-        # SGLANG_MEMORY_SAVER_CUDA_GRAPH is set, and the breakable prefill
-        # backend rejects an enabled one.
+        # Without SGLANG_MEMORY_SAVER_CUDA_GRAPH, graph backends ask for a
+        # disabled adapter; the breakable prefill backend rejects an enabled one.
         enable = kwargs["enable"] if "enable" in kwargs else args[0]
         if enable:
             return _adapter()
