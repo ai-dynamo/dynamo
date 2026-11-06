@@ -105,6 +105,7 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         self.assertIn("trtllm_num_aborted_requests_total", output)
 
     def test_supported_metrics_are_exported_before_the_first_event(self):
+        """Startup samples are zero before recording events on the same labels."""
         labels = {
             "model_name": "test-model",
             "disaggregation_mode": "prefill_and_decode",

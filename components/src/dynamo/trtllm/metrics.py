@@ -117,6 +117,7 @@ class AdditionalMetricsCollector:
     """
 
     def __init__(self, labels: dict):
+        """Register metrics and expose their configured label values before events."""
         self._labelnames = list(labels.keys())
         self._labelvalues = list(labels.values())
 
