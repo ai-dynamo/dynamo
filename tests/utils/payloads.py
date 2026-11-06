@@ -2207,7 +2207,9 @@ class ResponsesPayloadWithLogprobs(ResponsesPayload):
             len(entries) == output_tokens
         ), f"Expected {output_tokens} logprob entries, got {len(entries)}"
         logger.info(
-            f"Responses logprobs validation passed: {len(entries)} entries, top_logprobs={top_logprobs}"
+            "Responses logprobs validation passed: %d entries, top_logprobs=%d",
+            len(entries),
+            top_logprobs,
         )
 
 
@@ -2221,8 +2223,6 @@ class ResponsesStreamPayloadWithLogprobs(ResponsesStreamPayload):
     """
 
     def response_handler(self, response: Any) -> str:
-        import json
-
         response.raise_for_status()
         events: list[tuple[str, Any]] = []
         event_type = ""
@@ -2269,8 +2269,9 @@ class ResponsesStreamPayloadWithLogprobs(ResponsesStreamPayload):
             len(done_tokens) == output_tokens
         ), f"Expected {output_tokens} logprob entries, got {len(done_tokens)}"
         logger.info(
-            f"Responses stream logprobs validation passed: {len(delta_tokens)} on deltas, "
-            f"{len(done_tokens)} total"
+            "Responses stream logprobs validation passed: %d on deltas, %d total",
+            len(delta_tokens),
+            len(done_tokens),
         )
         return "".join(d["delta"] for d in deltas)
 

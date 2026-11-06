@@ -1628,6 +1628,28 @@ pub fn chat_completion_to_response(
                 .and_then(|lp| lp.content.as_deref())
         {
             text_logprobs = chat_logprobs_to_output_text(entries);
+            // Scores on reasoning or tool-call chunks are not output text. The
+            // phase path drops them while placing scores; a response without
+            // phases carries only the score bookkeeping and is filtered here.
+            if !response_events.is_empty()
+                && response_events
+                    .iter()
+                    .all(super::chat_completions::ResponseOutputEvent::is_score)
+            {
+                let mut record = std::mem::take(&mut text_logprobs).into_iter();
+                for event in &response_events {
+                    match event {
+                        super::chat_completions::ResponseOutputEvent::Scores(count) => {
+                            text_logprobs.extend(record.by_ref().take(*count));
+                        }
+                        super::chat_completions::ResponseOutputEvent::HiddenScores(count) => {
+                            record.by_ref().take(*count).for_each(drop);
+                        }
+                        _ => {}
+                    }
+                }
+                text_logprobs.extend(record);
+            }
         }
 
         // Reasoning precedes tool calls so output order matches the decoded turn.
@@ -1705,7 +1727,7 @@ pub fn chat_completion_to_response(
             }));
         }
 
-        if !response_events.is_empty() {
+        if response_events.iter().any(|event| !event.is_score()) {
             // Batch parsing can supply boundaries without ordered reasoning
             // events. Preserve its aggregate reasoning in that case; explicit
             // ordered events are authoritative and must not duplicate it.
@@ -1755,6 +1777,10 @@ pub fn chat_completion_to_response(
                     ResponseOutputEvent::Scores(count) => {
                         saw_scores = true;
                         pending_scores.extend(scores.by_ref().take(count));
+                    }
+                    ResponseOutputEvent::HiddenScores(count) => {
+                        saw_scores = true;
+                        scores.by_ref().take(count).for_each(drop);
                     }
                     ResponseOutputEvent::Boundary(MessageBoundary::Start(next)) => {
                         flush(
@@ -2256,6 +2282,7 @@ mod tests {
         chat_resp.inner.choices[0].logprobs = Some(
             serde_json::from_value(serde_json::json!({
                 "content": [
+                    {"token": "think", "logprob": -0.1, "bytes": [116], "top_logprobs": []},
                     {"token": "Checking.", "logprob": -0.25, "bytes": [67], "top_logprobs": []},
                     {"token": "Done.", "logprob": -0.5, "bytes": [68], "top_logprobs": []},
                     {"token": "", "logprob": -0.75, "bytes": null, "top_logprobs": []}
@@ -2265,6 +2292,8 @@ mod tests {
             .unwrap(),
         );
         chat_resp.response_events = vec![
+            ResponseOutputEvent::Reasoning("think".into()),
+            ResponseOutputEvent::HiddenScores(1),
             ResponseOutputEvent::Boundary(MessageBoundary::Start(MessagePhase::Commentary)),
             ResponseOutputEvent::Text("Checking.".into()),
             ResponseOutputEvent::Scores(1),
@@ -2303,6 +2332,50 @@ mod tests {
             })
             .collect();
         assert_eq!(scores, [vec!["Checking."], vec!["Done.", ""]]);
+    }
+
+    /// Without message phases the score bookkeeping still drops reasoning scores
+    /// from the single text part.
+    #[test]
+    fn hidden_scores_are_dropped_without_phases() {
+        use crate::protocols::openai::chat_completions::ResponseOutputEvent;
+
+        let mut chat_resp = make_chat_resp_with_text("hi");
+        chat_resp.inner.choices[0].logprobs = Some(
+            serde_json::from_value(serde_json::json!({
+                "content": [
+                    {"token": "think", "logprob": -0.1, "bytes": [116], "top_logprobs": []},
+                    {"token": "hi", "logprob": -0.25, "bytes": [104, 105], "top_logprobs": []},
+                    {"token": "", "logprob": -0.75, "bytes": null, "top_logprobs": []}
+                ],
+                "refusal": null
+            }))
+            .unwrap(),
+        );
+        chat_resp.response_events = vec![
+            ResponseOutputEvent::HiddenScores(1),
+            ResponseOutputEvent::Scores(2),
+        ];
+        let params = ResponseParams {
+            include: Some(vec![IncludeEnum::MessageOutputTextLogprobs]),
+            ..Default::default()
+        };
+
+        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        let OutputItem::Message(message) = &resp.inner.output[0] else {
+            panic!("expected message output");
+        };
+        let OutputMessageContent::OutputText(text) = &message.content[0] else {
+            panic!("expected text content");
+        };
+        let tokens: Vec<_> = text
+            .logprobs
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.token.as_str())
+            .collect();
+        assert_eq!(tokens, ["hi", ""]);
     }
 
     #[test]

@@ -8,7 +8,8 @@ use std::sync::Arc;
 use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize;
 
 use super::{
-    NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse, ResponseOutputEvent,
+    MessageBoundary, NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
+    ResponseOutputEvent,
 };
 use crate::protocols::{
     Annotated,
@@ -329,6 +330,22 @@ impl Default for DeltaAggregator {
     }
 }
 
+/// The last event that shapes output items, looking past score bookkeeping, so a
+/// reasoning or text run merges the same way whether or not scores were requested.
+fn last_content_event(events: &mut [ResponseOutputEvent]) -> Option<&mut ResponseOutputEvent> {
+    events.iter_mut().rev().find(|event| !event.is_score())
+}
+
+/// Record `count` more scores, folding into a trailing event of the same kind.
+fn push_score_event(events: &mut Vec<ResponseOutputEvent>, count: usize, hidden: bool) {
+    match (events.last_mut(), hidden) {
+        (Some(ResponseOutputEvent::Scores(total)), false)
+        | (Some(ResponseOutputEvent::HiddenScores(total)), true) => *total += count,
+        (_, false) => events.push(ResponseOutputEvent::Scores(count)),
+        (_, true) => events.push(ResponseOutputEvent::HiddenScores(count)),
+    }
+}
+
 /// Merge an incoming chunk into the per-index accumulator.
 ///
 /// #8640: the prior implementation required `id`, `name`, and `arguments`
@@ -535,20 +552,27 @@ impl DeltaAggregator {
 
                     merge_response_nvext(&mut aggregator.nvext, delta.nvext);
 
-                    if let Some(boundary) = delta.message_boundary {
+                    // A `Start` boundary opens the message before this chunk's events; an
+                    // `End` boundary closes it after them, so scores carried on the
+                    // ending chunk still belong to the message that ends.
+                    let boundary = delta.message_boundary;
+                    if boundary.is_some() {
                         aggregator.has_message_phases = true;
-                        aggregator.response_events.push(ResponseOutputEvent::Boundary(boundary));
+                    }
+                    if let Some(MessageBoundary::Start(_)) = &boundary {
+                        aggregator.response_events.push(ResponseOutputEvent::Boundary(boundary.clone().unwrap()));
                     }
                     for choice in delta.inner.choices.iter().filter(|choice| choice.index == 0) {
                         if let Some(reasoning) = &choice.delta.reasoning_content {
-                            if let Some(ResponseOutputEvent::Reasoning(previous)) = aggregator.response_events.last_mut() {
+                            if let Some(ResponseOutputEvent::Reasoning(previous)) = last_content_event(&mut aggregator.response_events) {
                                 previous.push_str(reasoning);
                             } else {
                                 aggregator.response_events.push(ResponseOutputEvent::Reasoning(reasoning.clone()));
                             }
                         }
+                        let has_text = matches!(&choice.delta.content, Some(ChatCompletionMessageContent::Text(text)) if !text.is_empty());
                         if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
-                            if let Some(ResponseOutputEvent::Text(previous)) = aggregator.response_events.last_mut() {
+                            if let Some(ResponseOutputEvent::Text(previous)) = last_content_event(&mut aggregator.response_events) {
                                 previous.push_str(text);
                             } else {
                                 aggregator.response_events.push(ResponseOutputEvent::Text(text.clone()));
@@ -561,11 +585,18 @@ impl DeltaAggregator {
                         }
                         // Record only the count: the entries themselves are appended to
                         // the choice's aggregated logprobs below, in the same order.
+                        // Scores on reasoning or tool-call chunks are not output text.
                         if let Some(content) = choice.logprobs.as_ref().and_then(|lp| lp.content.as_ref())
                             && !content.is_empty()
                         {
-                            aggregator.response_events.push(ResponseOutputEvent::Scores(content.len()));
+                            let hidden = !has_text
+                                && (choice.delta.reasoning_content.as_deref().is_some_and(|text| !text.is_empty())
+                                    || choice.delta.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()));
+                            push_score_event(&mut aggregator.response_events, content.len(), hidden);
                         }
+                    }
+                    if let Some(MessageBoundary::End) = boundary {
+                        aggregator.response_events.push(ResponseOutputEvent::Boundary(MessageBoundary::End));
                     }
                     if let Some(prompt_logprobs) = delta.prompt_logprobs {
                         aggregator.prompt_logprobs = Some(prompt_logprobs);
@@ -962,10 +993,16 @@ impl DeltaAggregator {
 
         // Construct the final response object.
         let response = NvCreateChatCompletionResponse {
+            // Without message phases only the score bookkeeping is kept, so a
+            // Responses projection can still drop reasoning and tool-call scores.
             response_events: if aggregator.has_message_phases {
                 aggregator.response_events
             } else {
-                Vec::new()
+                aggregator
+                    .response_events
+                    .into_iter()
+                    .filter(ResponseOutputEvent::is_score)
+                    .collect()
             },
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: aggregator.id,
@@ -1110,7 +1147,17 @@ mod tests {
             delta.data.as_mut().unwrap().message_boundary = Some(boundary);
             delta
         };
+        let reasoning = |text: &str, logprob: f32| {
+            let mut delta = create_test_delta(0, "", None, None, Some(logprob), None);
+            let choice = &mut delta.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.reasoning_content = Some(text.to_string());
+            delta
+        };
         let deltas = vec![
+            // Two scored reasoning chunks still merge into one reasoning event.
+            reasoning("Let me ", -0.05),
+            reasoning("think.", -0.06),
             boundary(
                 create_test_delta(
                     0,
@@ -1122,8 +1169,9 @@ mod tests {
                 ),
                 MessageBoundary::Start(MessagePhase::Commentary),
             ),
+            // The ending chunk carries the message's own scores.
             boundary(
-                create_test_delta(0, "", None, None, None, None),
+                create_test_delta(0, "", None, None, Some(-0.15), None),
                 MessageBoundary::End,
             ),
             boundary(
@@ -1155,9 +1203,11 @@ mod tests {
         assert_eq!(
             events,
             vec![
+                ResponseOutputEvent::Reasoning("Let me think.".into()),
+                ResponseOutputEvent::HiddenScores(2),
                 ResponseOutputEvent::Boundary(MessageBoundary::Start(MessagePhase::Commentary)),
                 ResponseOutputEvent::Text("Checking.".into()),
-                ResponseOutputEvent::Scores(1),
+                ResponseOutputEvent::Scores(2),
                 ResponseOutputEvent::Boundary(MessageBoundary::End),
                 ResponseOutputEvent::Boundary(MessageBoundary::Start(MessagePhase::FinalAnswer)),
                 ResponseOutputEvent::Text("Done.".into()),
@@ -1171,7 +1221,46 @@ mod tests {
             .as_ref()
             .and_then(|lp| lp.content.as_ref())
             .map(Vec::len);
-        assert_eq!(scored, Some(3));
+        assert_eq!(scored, Some(6));
+    }
+
+    /// Without message phases the response still carries the score bookkeeping, and
+    /// nothing else, so hidden scores can be dropped from a Responses projection.
+    #[tokio::test]
+    async fn plain_responses_keep_only_score_events() {
+        let mut thinking = create_test_delta(0, "", None, None, Some(-0.05), None);
+        let choice = &mut thinking.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.reasoning_content = Some("Thinking.".to_string());
+        let deltas = vec![
+            thinking,
+            create_test_delta(
+                0,
+                "Hello",
+                Some(dynamo_protocols::types::Role::Assistant),
+                None,
+                Some(-0.1),
+                None,
+            ),
+            create_test_delta(
+                0,
+                "",
+                None,
+                Some(dynamo_protocols::types::FinishReason::Stop),
+                Some(-0.3),
+                None,
+            ),
+        ];
+        let resp = DeltaAggregator::apply(stream::iter(deltas), ParsingOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.response_events,
+            vec![
+                ResponseOutputEvent::HiddenScores(1),
+                ResponseOutputEvent::Scores(2),
+            ]
+        );
     }
 
     #[tokio::test]

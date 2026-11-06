@@ -230,11 +230,27 @@ impl ResponseStreamConverter {
         }
     }
 
-    /// Chat scores every generated token, whatever the parser made of it.
     /// Queue a choice's scores in arrival order; the next text delta, or the
-    /// close of the open message, carries them.
+    /// close of the open message, carries them. Scores on reasoning or tool-call
+    /// chunks are not output text and are dropped; scores on chunks without
+    /// content (the hidden EOS) stay with the text they end.
     fn queue_choice_logprobs(&mut self, choice: &ChatChoiceStream) {
+        let delta = &choice.delta;
+        let has_text = matches!(
+            delta.content.as_ref(),
+            Some(ChatCompletionMessageContent::Text(text)) if !text.is_empty()
+        );
+        let hidden = !has_text
+            && (delta
+                .reasoning_content
+                .as_deref()
+                .is_some_and(|text| !text.is_empty())
+                || delta
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty()));
         if self.params.logprobs_requested()
+            && !hidden
             && let Some(entries) = choice
                 .logprobs
                 .as_ref()
@@ -1084,8 +1100,12 @@ impl ResponseStreamConverter {
     }
 
     /// The open message's parts for the close events; the token record moves
-    /// out instead of being copied.
+    /// out instead of being copied. A message closed again (an error after its
+    /// completion) republishes the content it already published.
     fn take_message_content(&mut self) -> Vec<OutputMessageContent> {
+        if let Some(finished) = &self.finished_message {
+            return finished.content.clone();
+        }
         let mut parts = Vec::with_capacity(2);
         if let Some(index) = self.text_content_index {
             parts.push((
@@ -2062,7 +2082,7 @@ mod tests {
 
         let mut conv = ResponseStreamConverter::new("test-model".into(), logprob_params());
         let _ = conv.emit_start_events();
-        // Reasoning is not surfaced without a summary request, but its score is.
+        // Reasoning is not output text: neither its text nor its score is published.
         assert!(
             conv.process_chunk(&scored(reasoning_chunk("think"), "A"))
                 .is_empty()
@@ -2073,7 +2093,7 @@ mod tests {
             .iter()
             .find(|event| event_type(event) == "response.output_text.delta")
             .expect("text delta");
-        assert_eq!(logprob_tokens(&event_json(delta)["logprobs"]), ["A", "B"]);
+        assert_eq!(logprob_tokens(&event_json(delta)["logprobs"]), ["B"]);
 
         let events = conv.process_chunk(&scored(text_chunk("!"), "C"));
         assert_eq!(logprob_tokens(&event_json(&events[0])["logprobs"]), ["C"]);
@@ -2084,15 +2104,15 @@ mod tests {
         let events = conv.emit_end_events();
         let done = event_json(&events[0]);
         assert_eq!(done["type"], "response.output_text.done");
-        assert_eq!(logprob_tokens(&done["logprobs"]), ["A", "B", "C", "D"]);
-        assert_eq!(done["logprobs"][0]["top_logprobs"][0]["token"], "A");
+        assert_eq!(logprob_tokens(&done["logprobs"]), ["B", "C", "D"]);
+        assert_eq!(done["logprobs"][0]["top_logprobs"][0]["token"], "B");
 
         let completed = event_json(events.last().unwrap());
         assert_eq!(completed["response"]["top_logprobs"], 1);
         let text = &completed["response"]["output"][0]["content"][0];
         assert_eq!(text["text"], "hi!");
-        assert_eq!(logprob_tokens(&text["logprobs"]), ["A", "B", "C", "D"]);
-        assert_eq!(text["logprobs"][1]["bytes"], serde_json::json!([66]));
+        assert_eq!(logprob_tokens(&text["logprobs"]), ["B", "C", "D"]);
+        assert_eq!(text["logprobs"][0]["bytes"], serde_json::json!([66]));
     }
 
     /// Scores on the chunk that ends a message belong to that message, and scores
@@ -2184,6 +2204,37 @@ mod tests {
         assert_eq!(
             logprob_tokens(&completed["response"]["output"][0]["content"][0]["logprobs"]),
             ["A", "E"]
+        );
+    }
+
+    /// An error after the message completed closes it again; the republished
+    /// message keeps the scores it already published instead of an empty record.
+    #[test]
+    fn error_after_completion_keeps_published_scores() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), logprob_params());
+        let _ = conv.emit_start_events();
+        conv.process_chunk(&scored(text_chunk("Checking."), "A"));
+        conv.process_chunk(&finish_chunk(FinishReason::Stop));
+        let events = conv.emit_end_events();
+        let completed = event_json(events.last().unwrap());
+        assert_eq!(
+            logprob_tokens(&completed["response"]["output"][0]["content"][0]["logprobs"]),
+            ["A"]
+        );
+
+        let events = conv.emit_error_events(ResponseError {
+            misalignment: None,
+            code: ResponseErrorCode::ServerError,
+            message: "tool arguments were malformed".into(),
+        });
+        let done = event_json(&events[0]);
+        assert_eq!(done["type"], "response.output_text.done");
+        assert_eq!(logprob_tokens(&done["logprobs"]), ["A"]);
+        let failed = event_json(events.last().unwrap());
+        assert_eq!(failed["type"], "response.failed");
+        assert_eq!(
+            logprob_tokens(&failed["response"]["output"][0]["content"][0]["logprobs"]),
+            ["A"]
         );
     }
 
