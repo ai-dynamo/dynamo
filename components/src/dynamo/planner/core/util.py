@@ -13,6 +13,7 @@ _MDC_REFRESH_FIELDS = (
     "kv_cache_block_size",
     "max_num_seqs",
     "max_num_batched_tokens",
+    "max_num_scheduled_tokens",
     "context_length",
     "speculative_nextn",
 )

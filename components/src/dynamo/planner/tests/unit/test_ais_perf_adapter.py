@@ -3,6 +3,8 @@
 
 """Unit tests for Planner's AISimulate performance-model adapter."""
 
+from dataclasses import replace
+
 import pytest
 
 try:
@@ -136,6 +138,39 @@ def _caps(*, speculative_nextn: int | None = None) -> EngineCapabilities:
         kv_cache_block_size=16,
         speculative_nextn=speculative_nextn,
     )
+
+
+def test_scheduling_change_rebuilds_queries_without_shrinking_ais_capacity(
+    fake_engine_factory,
+):
+    first = _FakeEngineModel(diagnostics={"readiness": "ready"})
+    _install_fake_engine(fake_engine_factory, first)
+    caps = replace(_caps(), max_num_scheduled_tokens=128)
+    model = PlannerEnginePerfModel(
+        worker_type="prefill", config=_config(), capabilities=caps
+    )
+    model.add_observations({("w0", 0): _prefill_fpm(scheduled_tokens=64)})
+
+    second = _FakeEngineModel(diagnostics={"readiness": "ready"})
+    _install_fake_engine(fake_engine_factory, second)
+    model.update_capabilities(replace(caps, max_num_scheduled_tokens=64))
+
+    assert model._engine_model is second
+    assert fake_engine_factory.last_kwargs["limits"].scheduling_token_budget == 64
+    assert fake_engine_factory.last_kwargs["limits"].max_num_batched_tokens == 1024
+    assert model._build_options()["max_num_tokens"] == 1024
+    assert second.tuned_iterations
+
+
+@pytest.mark.parametrize("limit", [0, -1, "64", True, 1 << 32])
+def test_invalid_scheduling_metadata_keeps_estimator_unavailable(limit):
+    model = PlannerEnginePerfModel(
+        worker_type="prefill",
+        config=_config(),
+        capabilities=replace(_caps(), max_num_scheduled_tokens=limit),
+    )
+    assert not model.has_valid_engine_limits()
+    assert model._engine_model is None
 
 
 def _prefill_fpm(
