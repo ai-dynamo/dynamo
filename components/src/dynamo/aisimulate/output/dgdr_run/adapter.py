@@ -62,7 +62,7 @@ from aisimulate.output_adapter import (
     OUTPUT_ADAPTER_API_VERSION,
     RecommendationOutputCallbacks,
 )
-from aisimulate.sweeper.config import OptimizationTarget, SmartSearchConfig
+from aisimulate.sweeper.config import Candidate as AISCandidate, OptimizationTarget, SmartSearchConfig
 from aisimulate.sweeper.result import SweepResult
 from aisimulate.sweeper.score import pareto_front as ais_pareto_front
 from aisimulate_core.sdk.perf_database import load_system_spec
@@ -179,31 +179,20 @@ def _is_feasible(record: CandidateRecordLike) -> bool:
     return str(getattr(record.status, "value", record.status)) == "feasible"
 
 
-def _pareto_dominates(
-    a: dict[str, float],
-    b: dict[str, float],
-    objectives: list[OptimizationTarget],
-) -> bool:
-    """True iff ``a`` Pareto-dominates ``b``: at least as good on every objective, strictly better on one."""
-    strictly_better = False
-    for t in objectives:
-        av = a.get(t.value) or 0.0
-        bv = b.get(t.value) or 0.0
-        better = av > bv if t.maximize else av < bv
-        worse = av < bv if t.maximize else av > bv
-        if worse:
-            return False
-        if better:
-            strictly_better = True
-    return strictly_better
+def _retained_to_candidate(retained: "_Retained") -> AISCandidate:
+    """Build a minimal proxy for ais_pareto_front from a retained evaluation.
 
-
-def _capped_from_front(
-    front: dict[str, "_Retained"], max_candidates: int
-) -> dict[str, "_Retained"]:
-    """Return a rank-ordered bounded subset of a full Pareto front."""
-    ordered = sorted(front.values(), key=lambda r: r.rank_key)
-    return {r.id: r for r in ordered[:max_candidates]}
+    Only config, used_gpus, score and objectives matter to ais_pareto_front;
+    the metrics field is left empty to avoid type conflicts with the nested
+    'objectives' dict stored there.
+    """
+    return AISCandidate(
+        config=retained.parameters,
+        used_gpus=retained.used_gpus,
+        score=retained.score if math.isfinite(retained.score) else 0.0,
+        metrics={},
+        objectives=retained.metrics.get("objectives"),
+    )
 
 
 @dataclass(frozen=True)
@@ -455,6 +444,40 @@ class DGDRRunOutputAdapter:
         except Exception:  # a callback must not break the search
             logger.exception("dgdr_run: ignoring candidate that could not be read")
             retained = None
+
+        # For Pareto mode, compute the new front from the proposed pool outside the lock,
+        # reusing ais_pareto_front for the same dominance and sort semantics as on_round().
+        # Callbacks are sequential so _live_pareto_front cannot change concurrently with this.
+        pareto_update: tuple[dict[str, _Retained], dict[str, _Retained]] | None = None
+        if (
+            retained is not None
+            and self._is_pareto
+            and self._pareto_objectives
+            and retained.id not in self._retained
+            and retained.id not in self._live_pareto_front
+            and (retained.metrics.get("objectives") or {})
+        ):
+            pool = list(self._live_pareto_front.values()) + [retained]
+            by_id = {r.id: r for r in pool}
+            try:
+                front_items = ais_pareto_front(
+                    [_retained_to_candidate(r) for r in pool],
+                    self._pareto_objectives,
+                )
+            except Exception:
+                logger.exception(
+                    "dgdr_run: Pareto front selection failed in on_candidate; skipping candidate"
+                )
+                front_items = []
+            if front_items:
+                # Preserve ais_pareto_front's sort order so the capped subset matches on_round().
+                ordered_front = [by_id[candidate_id_for(c.config)] for c in front_items]
+                new_live_front = {r.id: r for r in ordered_front}
+                pareto_update = (
+                    new_live_front,
+                    dict(list(new_live_front.items())[: self._max_candidates]),
+                )
+
         with self._lock:
             if not self._accepting:
                 return
@@ -463,45 +486,18 @@ class DGDRRunOutputAdapter:
             # re-evaluation of the same point never changes what was published.
             # For Pareto mode, _live_pareto_front tracks the full unbounded front;
             # a point capped out of _retained may still be in _live_pareto_front.
-            already_seen = retained is not None and (
-                retained.id in self._retained or retained.id in self._live_pareto_front
-            )
-            if retained is not None and not already_seen:
-                if self._is_pareto and self._pareto_objectives:
-                    new_obj = retained.metrics.get("objectives") or {}
-                    if not new_obj:
-                        # No objectives vector; this point will be incorporated via on_round().
-                        pass
-                    elif any(
-                        _pareto_dominates(
-                            ex.metrics.get("objectives") or {},
-                            new_obj,
-                            self._pareto_objectives,
-                        )
-                        for ex in self._live_pareto_front.values()
-                        if ex.metrics.get("objectives")
-                    ):
-                        pass  # dominated by a known full-front member; excluded
-                    else:
-                        # Remove any full-front members now dominated by the new candidate,
-                        # then add it and rederive the capped publication set from the full front.
-                        dominated = [
-                            eid
-                            for eid, ex in self._live_pareto_front.items()
-                            if (exobj := ex.metrics.get("objectives") or {})
-                            and _pareto_dominates(new_obj, exobj, self._pareto_objectives)
-                        ]
-                        for eid in dominated:
-                            del self._live_pareto_front[eid]
-                        self._live_pareto_front[retained.id] = retained
-                        self._retained = _capped_from_front(
-                            self._live_pareto_front, self._max_candidates
-                        )
-                else:
-                    self._retained[retained.id] = retained
-                    if len(self._retained) > self._max_candidates:
-                        worst = max(self._retained.values(), key=lambda r: r.rank_key)
-                        del self._retained[worst.id]
+            if retained is not None:
+                already_seen = retained.id in self._retained or retained.id in self._live_pareto_front
+                if not already_seen:
+                    if pareto_update is not None:
+                        self._live_pareto_front, self._retained = pareto_update
+                    elif not (self._is_pareto and self._pareto_objectives):
+                        # Scalar path.
+                        self._retained[retained.id] = retained
+                        if len(self._retained) > self._max_candidates:
+                            worst = max(self._retained.values(), key=lambda r: r.rank_key)
+                            del self._retained[worst.id]
+                    # else: Pareto mode but no objectives — point deferred to on_round().
             self._wake.set()
 
     def on_round(self, round_number: int, candidates: list[Any]) -> None:
