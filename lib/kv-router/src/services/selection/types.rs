@@ -348,7 +348,7 @@ pub struct WorkerRequest {
     pub kv_event_source_mode: Option<String>,
     /// The KV event source derives multimodal pad values from engine identities
     /// (SGLang after sgl-project/sglang#43043). Unset means a legacy source.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "strict_bool")]
     pub engine_owned_mm_identity: Option<bool>,
 }
 
@@ -377,7 +377,7 @@ pub struct WorkerPatchRequest {
     pub router_hint_source_control_endpoints: Option<HashMap<u32, String>>,
     #[serde(default)]
     pub kv_event_source_mode: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "strict_bool")]
     pub engine_owned_mm_identity: Option<bool>,
 }
 
