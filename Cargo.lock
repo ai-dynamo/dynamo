@@ -3498,6 +3498,7 @@ dependencies = [
  "dynamo-sidecar-common",
  "dynamo-vllm-generate",
  "futures",
+ "pep440_rs",
  "prost-types 0.14.3",
  "reqwest 0.12.28",
  "serde",
