@@ -170,7 +170,7 @@ spec:
 
 | Component | `nsightToolArgs` | NVTX environment |
 |---|---|---|
-| Frontend | `-t nvtx,osrt --python-sampling=true` | `DYN_NVTX=1` adds per-request ranges: `frontend.http.*`, `preprocess.*`, `transport.*`, `detokenize`, and `route.*` with KV routing. On Dynamo 1.6.x, set `DYN_ENABLE_RUST_NVTX=1` instead. |
+| Frontend | `-t nvtx,osrt --python-sampling=true` | `DYN_NVTX=1` adds per-request ranges: `preprocess.*`, `transport.*`, `detokenize`, and `route.*` with KV routing. Builds newer than v1.7.0 also add `frontend.http.*`. On Dynamo 1.6.x, set `DYN_ENABLE_RUST_NVTX=1` instead; 1.6.x has the same ranges without `frontend.http.*`. |
 | Workers | `-t cuda,nvtx,osrt --cuda-graph-trace=node --python-sampling=true` | `DYN_NVTX=1` adds the `worker.*` and `pybridge.*` ranges. vLLM: `VLLM_NVTX_SCOPES_FOR_PROFILING=1` adds scheduler ranges. On Dynamo 1.6.x, leave `DYN_NVTX` unset (see [Limitations](#limitations)). |
 
 - `--cuda-graph-trace=node` shows every kernel inside CUDA graphs and costs the most. For lower overhead, use

@@ -24,8 +24,10 @@ DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o worker.nsys-rep \
   python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
 ```
 
-The Rust runtime logs `NVTX annotations enabled (DYN_NVTX)` at startup when the switch takes
-effect. If that line is missing, the build does not include the `nvtx` feature; see
+When the switch takes effect, the Rust runtime logs `NVTX annotations enabled (DYN_NVTX)` at INFO
+level. The line appears only if the build includes the `nvtx` feature and `DYN_LOG` lets INFO
+messages through. If it is missing, check the log level first. If other INFO messages appear and
+this one does not, the build does not include the feature; see
 [Build Requirements](#build-requirements).
 
 To profile on Kubernetes, see [Profiling with Nsight Operator](../../kubernetes/operations/nsight-operator-profiling.mdx).
