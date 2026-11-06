@@ -3894,8 +3894,26 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 
     @pytest.mark.parametrize("native_encoder", [False, True])
     def test_reasoning_segments_render_as_text_without_mutating_request(
-        self, native_encoder
+        self, native_encoder, monkeypatch
     ):
+        if native_encoder:
+            fake_module = types.ModuleType(
+                "sglang.srt.entrypoints.openai.encoding_dsv4"
+            )
+
+            def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+                assert thinking_mode == "thinking"
+                assert reasoning_effort == "high"
+                assistant = next(m for m in messages if m["role"] == "assistant")
+                return "<think>" + assistant["reasoning_content"] + "</think>"
+
+            fake_module.encode_messages = fake_encode_messages
+            monkeypatch.setitem(
+                sys.modules,
+                "sglang.srt.entrypoints.openai.encoding_dsv4",
+                fake_module,
+            )
+
         class Tokenizer:
             chat_template = (
                 None
