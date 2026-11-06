@@ -116,6 +116,9 @@ mod run_fixture;
 #[path = "support/calibrated.rs"]
 mod calibrated;
 
+#[path = "support/reconcile_hosted.rs"]
+mod reconcile_hosted;
+
 /// `aiperf_agentx::scenario::AGENTX_SCENARIO`.
 const AGENTX_SCENARIO: &str = "inferencex-agentx-mvp";
 /// `aiperf_agentx::scenario::inferencex_agentx_mvp()` corpus alias.
@@ -1285,6 +1288,12 @@ fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> 
     let artifact_dir = create_new_artifact_dir(&artifact_path)?;
 
     let (backend, typed) = host_typed(&run, &prefill, &decode)?;
+    let reconciliation = reconcile_hosted::reconcile(&backend, &typed)
+        .context("reconciling every backend occurrence against native records")?;
+    std::fs::write(
+        artifact_dir.join("request_reconciliation.json"),
+        serde_json::to_vec_pretty(&reconciliation)?,
+    )?;
     write_raw_backend_artifact(
         &artifact_dir,
         &backend,
@@ -1320,5 +1329,81 @@ fn inferencex_agentx_mvp_run_is_the_exact_user_scenario() -> Result<()> {
     let (run, _tokenizer) =
         full_mvp_run(directory.path()).context("exact InferenceX AgentX MVP run")?;
     assert_mvp_config(&run)?;
+    Ok(())
+}
+
+/// Small boundary control, never acceptance for the full corpus or duration.
+/// Exercise the exact calibrated host, typed reconciliation, and artifact
+/// finalizer before spending full-corpus resources. Deliberately use the
+/// existing branch fixture and builtin tokenizer, with no scenario designation.
+#[test]
+#[ignore = "requires AISIM_SYSTEMS_ROOT; four-request calibrated artifact control, not full MVP acceptance"]
+fn calibrated_hosted_artifacts_reconcile_every_request() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut run = aiperf_protocol::runner_v2::decode_run_request_v2(
+        run_fixture::branch_request(directory.path()).as_bytes(),
+    )?
+    .run;
+    run.cfg.transport = Some(serde_json::from_value(json!({
+        "type": "aisimulate", "mode": "offline"
+    }))?);
+    run.cfg.models.as_mut().context("fixture models")?.items[0].name = MODEL.to_owned();
+    let export = run.cfg.export.as_mut().context("fixture export")?;
+    export.genai_perf.enabled = true;
+    export.genai_perf.json = true;
+    let systems = calibrated::systems_root()?;
+    let prefill = calibrated::canonical_role(
+        MODEL,
+        &systems,
+        ForwardPassWorkerType::Prefill,
+        CONCURRENCY as usize,
+    )?;
+    let decode = calibrated::canonical_role(
+        MODEL,
+        &systems,
+        ForwardPassWorkerType::Decode,
+        CONCURRENCY as usize,
+    )?;
+    let (mut backend, typed) = host_typed(&run, &prefill, &decode)?;
+    let reconciliation = reconcile_hosted::reconcile(&backend, &typed)?;
+    ensure!(
+        reconciliation.backend_requests == 4,
+        "branch control must retain all four requests"
+    );
+    ensure!(
+        reconciliation.native_records == 4,
+        "all four native records must reconcile"
+    );
+    let metadata = report_run_metadata(&run, &executable_distribution_id()?)?;
+    let finalized = finalize_hosted_run_report(
+        &run,
+        &typed,
+        metadata,
+        ReportPairRunFacts::new(),
+        directory.path(),
+    )?;
+    ensure!(
+        finalized.native_report.run.facts().dynamo.is_none(),
+        "control must not invent parity facts"
+    );
+    let report: Value = serde_json::from_slice(&std::fs::read(directory.path().join(
+        aiperf_config::model::artifacts::report_artifact_name(run.cfg.artifacts.as_ref()),
+    ))?)?;
+    ensure!(
+        report["schema_version"] == json!(NATIVE_REPORT_SCHEMA),
+        "native artifact schema mismatch"
+    );
+    let summary: Value =
+        serde_json::from_slice(&std::fs::read(directory.path().join(SUMMARY_ARTIFACT))?)?;
+    ensure!(
+        summary["schema_version"] == json!(SUMMARY_SCHEMA),
+        "summary artifact schema mismatch"
+    );
+    // A validator that only counts rows would miss this corruption.
+    backend.per_request[0].terminal_time_ms += 1.0;
+    ensure!(
+        reconcile_hosted::reconcile(&backend, &typed).is_err(),
+        "reconciliation must reject timestamp drift"
+    );
     Ok(())
 }
