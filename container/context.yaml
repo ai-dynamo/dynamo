@@ -119,7 +119,7 @@ vllm:
     # Omni v0.33.0rc1 still requires Transformers <5.20, and the v0.33.0 image
     # ships 5.20.2. 5.19.0 is the newest in both.
     transformers_version: "5.19.0"
-    tokenizers_version: "0.23.2"
+    tokenizers_version: "0.23.3"
     baseline_sbom: vllm-openai-xpu@be3a9aea
     # vLLM 0.33's NIXL connector requires NIXL >= 1.5.0 (check_nixl_version).
     nixl_ref: v1.5.0
@@ -132,7 +132,7 @@ vllm:
     # vLLM 0.33 requires Transformers >=5.16.1,<5.21 and tokenizers >=0.23.2;
     # Omni v0.33.0rc1 still requires Transformers <5.20. 5.19.0 is the newest in both.
     transformers_version: "5.19.0"
-    tokenizers_version: "0.23.2"
+    tokenizers_version: "0.23.3"
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
     nixl_ref: v1.5.0
     nixl_ucx_ref: v1.23.0-rc1
