@@ -15659,11 +15659,27 @@ responses_tools: None,
                                 Some(parser),
                                 Some("glm47"),
                             );
-                            let (common, _, prefill) = preprocessor
-                                .preprocess_request(&request, None)
-                                .await
-                                .unwrap();
+                            let result = preprocessor.preprocess_request(&request, None).await;
                             let case = format!("{parser} {tail:?} {control}={requested} {fields}");
+                            if !requested && reasoning_open {
+                                let error =
+                                    result.err().expect("open thinking-off prefill must fail");
+                                let error = error.downcast_ref::<DynamoError>().unwrap();
+                                assert_eq!(
+                                    error.error_type(),
+                                    ErrorType::InvalidArgument,
+                                    "{case}"
+                                );
+                                assert!(
+                                    error
+                                        .public_message()
+                                        .unwrap()
+                                        .contains("closed reasoning prefill"),
+                                    "{case}"
+                                );
+                                continue;
+                            }
+                            let (common, _, prefill) = result.unwrap();
                             assert_eq!(
                                 common.require_reasoning,
                                 reasoning_open && needs_gate,
@@ -15704,10 +15720,22 @@ responses_tools: None,
                         "add_generation_prompt": add_generation_prompt,
                     }))
                     .unwrap();
-                let (common, _, _) = preprocessor
-                    .preprocess_request(&request, None)
-                    .await
-                    .unwrap();
+                let result = preprocessor.preprocess_request(&request, None).await;
+                if !requested && !tail.trim_end().ends_with("</think>") {
+                    let error = result
+                        .err()
+                        .expect("unknown thinking-off prefill must fail");
+                    let error = error.downcast_ref::<DynamoError>().unwrap();
+                    assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+                    assert!(
+                        error
+                            .public_message()
+                            .unwrap()
+                            .contains("closed reasoning prefill")
+                    );
+                    continue;
+                }
+                let (common, _, _) = result.unwrap();
                 assert_eq!(common.require_reasoning, requested, "{tail:?} {requested}");
                 let extra = common.extra_args.as_ref().unwrap();
                 assert!(
