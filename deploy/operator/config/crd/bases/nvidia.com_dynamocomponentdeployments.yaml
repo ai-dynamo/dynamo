@@ -11269,8 +11269,6 @@ spec:
                       format: int32
                       minimum: 2
                       type: integer
-                  required:
-                    - nodeCount
                   type: object
                 readinessProbe:
                   description: ReadinessProbe to signal when the container is ready to receive traffic.
