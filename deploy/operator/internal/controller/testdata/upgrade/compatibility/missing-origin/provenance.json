@@ -1,0 +1,37 @@
+{
+  "captureSources": {
+    "hack/capture_missing_origin.py": "6b4ffb46cbed9520f1556201dca3105adb5fced2dc86f3955e314d7f157c6a8a",
+    "hack/normalize_upgrade_snapshot/main.go": "5e8f3247947b384c93c79b4681d6389ca3d00c63aa0b85054a254f4d1ea1192b",
+    "hack/upgrade_capture_test.go.tmpl": "6d2e0b9bcb266ad0b72d719434f06b3686d230423486491493fb52c78e242206",
+    "internal/testing/golden/capture.go": "73425c5e21c3f3da45cb79549f0e1d23ef43eee21a85981c0b4f3703b5d845cd",
+    "internal/testing/golden/snapshot.go": "f63c723b093b2bf6b8fe760e043e09e471cc7e1da80077da3b75b9e636b1db35"
+  },
+  "creation": "1.4.0 CREATE before mutating admission is enabled",
+  "harness": {
+    "1.4.0": "14feff4cde9d86596feaf159b735c84762526c6362460821f69e4ed76ac890de",
+    "1.5.0": "ae270b7978a5eadfe7d6aa623de4b53af3ac6c7e7e087222aedd78dfcc1ecd6e",
+    "1.6.0": "c545971a751d5803a5129454831836887d67ad862669308322272d54fecca0b9"
+  },
+  "inputSHA256": "cb1ffc0f6529e1d3535a62917ec560f1868fbd8f1563c19d95902a1e5397c193",
+  "observations": {
+    "1.4.0": {
+      "sha256": "e4fbd6df5ed9f5b488e7e5ab15a9251bb8c4818da90d818c5e052f3bc8aeed33",
+      "workerHash": "7df86e24"
+    },
+    "1.5.0": {
+      "sha256": "2e98093182b6a95878fb8f116fd2b3e85174565ac398ae231c11f5a80a44ddfe",
+      "workerHash": "7df86e24"
+    },
+    "1.6.0": {
+      "sha256": "902d2cbbcfef1c881ba6987d9f545d8411735b9b47a15de8362480ef3d66fb71",
+      "workerHash": "7df86e24"
+    }
+  },
+  "reconcileBarrierSHA256": "5a2ce05158262546c9950a9a35cdf64b19131dfc7187f29c52c59361efbb6183",
+  "releases": {
+    "1.4.0": "03014943323e78feb5bd672ef08b72caea0918ac",
+    "1.5.0": "b83b1d9304ebfc624709ac46db32b1b6f1ff1615",
+    "1.6.0": "701da25292ecca8f64d770cc0b17d389200019a1"
+  },
+  "scope": "installation-level missing origin; not pre-0.7.1 ancestry"
+}

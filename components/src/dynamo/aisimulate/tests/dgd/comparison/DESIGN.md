@@ -13,10 +13,9 @@ The comparison suite generates DynamoGraphDeployments for the same deployment in
 - AI Simulate Sweeper followed by the AI Configurator renderer; and
 - AI Simulate Sweeper followed by the standalone direct renderer.
 
-An existing recipe may be deployed as a fourth, independently maintained variant. The suite learns
-whether each result is runnable; it does not require the generators to choose identical topologies.
-The issue #8469 suite retains all 29 recipe-matrix rows. Every row has native v1beta1 and Sweeper
-inputs, even when a known renderer or deployment failure is documented by the suite.
+The runner generates manifests for inspection; it does not deploy them or require the generators to
+choose identical topologies. The issue #8469 suite retains the recipe-matrix rows. Every row has
+native v1beta1 and Sweeper inputs, including rows with documented renderer failures.
 
 ## Attribution
 
@@ -56,8 +55,8 @@ components/src/dynamo/aisimulate/tests/dgd/comparison/
 │   └── qwen3-32b-vllm-disagg/
 │       ├── dgdr-v1beta1.yaml
 │       ├── sweeper.yaml
-│       ├── recipe.yaml                  # optional
-│       └── recipe.new.yaml              # ignored discovery result
+│       ├── recipe.yaml                  # optional provenance
+│       └── recipe.new.yaml              # ignored requirement proposal
 ├── hardware/
 │   └── h200-sxm-16gpu/
 │       ├── dgdr-v1beta1.patch.yaml
@@ -166,9 +165,12 @@ The normal row stays intentionally small:
   hardware: h200-sxm-16gpu
 ```
 
-Known exceptions are opt-in. `skipped` never runs the selected scope. `broken` runs it, records the
-failure as expected, and reports an unexpected pass without failing the suite. Every exception
-requires a concrete reason; evidence links are optional.
+Known exceptions are opt-in. `skipped` never runs the selected scope. `broken` runs it and only
+accepts failures whose message matches its `match` regex. Every exception requires a concrete
+reason; evidence links are optional. A historical `broken` entry with no `match` documents the
+problem but does not suppress failures. Record an observed error before adding a matcher: an
+unrelated import, schema or runtime error must still fail the suite. Successful formerly broken
+variants are reported as unexpected passes.
 
 ```yaml
 - case: gpt-oss-120b-trtllm-agg
@@ -178,12 +180,9 @@ requires a concrete reason; evidence links are optional.
       sweeper-direct:
         status: broken
         reason: Direct rendering does not support the selected TRT-LLM topology.
+        match: 'TEP \(Tensor Expert Parallelism\) is not implemented for TrtLLM backend'
         links:
           - https://github.com/ai-dynamo/dynamo/issues/8469
-    deploy:
-      recipe:
-        status: skipped
-        reason: The historical recipe is no longer present in the repository.
 ```
 
 Supported exception scopes are:
@@ -191,14 +190,10 @@ Supported exception scopes are:
 | Phase | Variant |
 | --- | --- |
 | `render` | `profiler-v1beta1`, `sweeper`, `sweeper-aic`, `sweeper-direct` |
-| `deploy` | `profiler-v1beta1`, `sweeper-aic`, `sweeper-direct`, `recipe` |
-
-The current runner implements only the `render` phase. The `deploy` scope is reserved for a
-follow-up live-deployment runner.
 
 For the exceptional case where none of its variants should run, a row may put `status`, `reason`,
-and optional `links` directly beside `case` and `hardware`. A row cannot combine that case-wide
-status with narrower `exceptions`.
+and optional `links` directly beside `case` and `hardware`. A case-wide `broken` status may also
+specify `match`. A row cannot combine case-wide status with narrower `exceptions`.
 
 ## Optional recipes
 
@@ -212,15 +207,27 @@ requirements:
     gpus: 16
 ```
 
-Recipe requirements only control whether that recipe is eligible for live deployment. A missing
-recipe or requirement never prevents either generator from running. Normal execution tries recipes
-only on hardware already listed in `requirements`.
+Recipe files retain provenance and known hardware requirements for human comparison. A missing
+recipe or requirement never prevents either generator from running. The runner does not deploy
+recipes or infer GPU requirements.
 
 A future live-deployment runner may try a recipe on otherwise unknown suite hardware. Only a
-successful recipe deployment and inference request would prove the combination. That follow-up must
-leave `recipe.yaml` unchanged and write proposed merged requirements to the ignored adjacent
-`recipe.new.yaml`; a failed generated DGD does not establish recipe support. No live deployment or
+successful recipe deployment and inference request would prove the combination; a generated DGD
+alone does not establish recipe support. The existing `load_recipe` and
+`write_discovered_recipe_requirement` helpers support recording that evidence without changing
+the maintained `recipe.yaml`. They write an adjacent ignored `recipe.new.yaml` that retains the
+source and existing requirements and accumulates successive hardware proposals. A requirement
+already matching `recipe.yaml` does not create or rewrite a proposal. No live-deployment or
 hardware-discovery CLI flag is implemented by the current comparison runner.
+
+Review and accept each proposal individually:
+
+```bash
+case_dir=components/src/dynamo/aisimulate/tests/dgd/comparison/cases/qwen3-32b-vllm-disagg
+diff -u "$case_dir/recipe.yaml" "$case_dir/recipe.new.yaml"
+# After reviewing the evidence and proposed requirements for this case:
+mv "$case_dir/recipe.new.yaml" "$case_dir/recipe.yaml"
+```
 
 ## Composition
 
@@ -279,6 +286,10 @@ status.
 Exact Sweeper goldens require reproducible search inputs and search ordering. Until that is proven,
 CI must distinguish deterministic renderer checks from end-to-end search evidence rather than make
 a stochastic search an exact-diff gate.
+
+The comparison runner is a manual corpus-generation tool. Its unit tests cover composition and
+failure isolation. The automatic public Recommend-to-DGD coverage lives in the
+[DGD CLI E2E table](../e2e/test_dgd_cli.py), using small fixed searches.
 
 ## Non-goals
 

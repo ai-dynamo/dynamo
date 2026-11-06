@@ -33,6 +33,7 @@ from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
+from .responses_history import responses_history_recipients, responses_tools_request
 from .structural_tag_policy import (
     ToolChoiceKind,
     effective_tool_strict,
@@ -165,6 +166,11 @@ def resolve_request_force_reasoning(
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )
 
+    if reasoning_parser_name == "hunyuan":
+        # Native Hunyuan serving opens thinking unless explicitly disabled.
+        effort = request.get("reasoning_effort", kwargs.get("reasoning_effort"))
+        return effort not in ("none", "no_think")
+
     if reasoning_parser_name == "minimax-m3":
         return kwargs.get("thinking_mode") != "disabled"
 
@@ -224,17 +230,24 @@ def convert_tools(
     sglang_tools = []
     for tool in tools:
         func = tool.get("function", {})
+        # Retain the chat extension when rebuilding tools for template rendering.
+        # An explicit function-level false takes precedence over the wrapper alias.
+        defer_loading = func.get("defer_loading")
+        if defer_loading is None:
+            defer_loading = tool.get("defer_loading")
         strict = func.get("strict", False)
         if structural_tag_schema is not None:
             strict = effective_tool_strict(func.get("strict"), structural_tag_schema)
         sglang_tools.append(
             SglangTool(
                 type=tool.get("type", "function"),
+                defer_loading=tool.get("defer_loading"),
                 function=SglangFunction(
                     name=func.get("name", ""),
                     description=func.get("description"),
                     parameters=func.get("parameters"),
                     strict=strict,
+                    defer_loading=defer_loading,
                 ),
             )
         )
@@ -439,11 +452,16 @@ def _filter_template_tools(
 
     if _is_named_tool_choice(tool_choice):
         chosen_name = tool_choice["function"]["name"]
-        return [
+        selected = [
             tool.model_dump()
             for tool in sglang_tools
             if tool.function.name == chosen_name
         ]
+        # The forced function renders eagerly, matching the Rust preprocessor.
+        for tool in selected:
+            tool.pop("defer_loading", None)
+            tool["function"].pop("defer_loading", None)
+        return selected
 
     return [tool.model_dump() for tool in sglang_tools]
 
@@ -887,9 +905,25 @@ def preprocess_chat_request(
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
+    resolved_responses_template = None
+    if request.get("responses_native_tools") and not (
+        exclude_tools_when_tool_choice_none and request.get("tool_choice") == "none"
+    ):
+        resolved_responses_template = tokenizer.get_chat_template(
+            chat_template=request.get("chat_template"), tools=request.get("tools")
+        )
+        request = responses_tools_request(request, resolved_responses_template)
     request = _with_thinking_template_kwargs(request, default_thinking_mode)
     legacy_guidance = legacy_guided_decoding(request)
     messages = _materialize_messages(request.get("messages", []))
+    # Materialization copied caller-owned messages. Restore Responses phases by
+    # assistant ordinal, including tool-only messages, before template rendering.
+    recipients = responses_history_recipients(request.get("responses_history_phases"))
+    for index, message in enumerate(
+        m for m in messages if m.get("role") == "assistant"
+    ):
+        if recipient := recipients.get(str(index)):
+            message["recipient"] = recipient
 
     # Generation mode is independent of whether the client wants reasoning
     # separated into reasoning_content or retained in content.
@@ -955,8 +989,12 @@ def preprocess_chat_request(
             "add_generation_prompt": True,
             "tokenize": True,
         }
+        if resolved_responses_template is not None:
+            template_kwargs["chat_template"] = resolved_responses_template
         if template_tools:
-            template_kwargs["tools"] = template_tools
+            template_kwargs["tools"] = request.get(
+                "responses_template_tools", template_tools
+            )
 
         chat_template_kwargs = (
             request.get("chat_template_kwargs")
@@ -1246,6 +1284,8 @@ class SglangStreamingPostProcessor:
         self._pending_stop_text = ""
         self._locally_finished = False
         self._local_stop_reason: str | None = None
+        # Decode context, decoded IDs, stop text and hidden stop-token count.
+        self._local_stop_boundary: tuple[list[int], list[int], str, int] | None = None
 
         # Keep a small, known-complete prompt suffix as decode context. Generated
         # tokens are promoted to context only after they decode without a
@@ -1351,6 +1391,25 @@ class SglangStreamingPostProcessor:
         self._decode_context_ids = self._pending_decode_ids
         self._pending_decode_ids = []
         return delta_text
+
+    def _count_tokens_through(
+        self, context_ids: list[int], token_ids: list[int], text: str
+    ) -> int:
+        """Count leading ``token_ids`` whose incremental decode covers ``text``.
+
+        Once a decoded prefix covers ``text``, every longer one does, so bisect
+        instead of decoding every prefix.
+        """
+        context_text = self._decode_ids(context_ids)
+        low, high = 0, len(token_ids)
+        while low < high:
+            count = (low + high) // 2
+            decoded = self._decode_ids(context_ids + token_ids[:count])
+            if decoded[len(context_text) :].startswith(text):
+                high = count
+            else:
+                low = count + 1
+        return low
 
     def _build_openai_logprobs(
         self,
@@ -1494,6 +1553,18 @@ class SglangStreamingPostProcessor:
     def local_stop_reason(self) -> str | None:
         return self._local_stop_reason
 
+    def post_stop_token_count(self) -> int:
+        """Count the latest generated IDs that follow a local stop string.
+
+        The token completing the stop is kept. The count spans IDs withheld by
+        incremental decoding and is computed on demand by re-decoding them.
+        """
+        if self._local_stop_boundary is None:
+            return 0
+        context_ids, decoded_ids, stop_text, hidden_count = self._local_stop_boundary
+        kept = self._count_tokens_through(context_ids, decoded_ids, stop_text)
+        return len(decoded_ids) - kept + hidden_count
+
     @property
     def has_pending_stop_text(self) -> bool:
         return bool(self._pending_stop_text)
@@ -1538,8 +1609,10 @@ class SglangStreamingPostProcessor:
         text: str,
         finish_reason: str | None,
         stop_reason: Any,
-    ) -> tuple[str, bool]:
-        text = self._pending_stop_text + text
+    ) -> tuple[str, int | None]:
+        """Return visible text and, after a local stop, the stop's end in ``text``."""
+        held_text = self._pending_stop_text
+        text = held_text + text
         self._pending_stop_text = ""
 
         match = self._find_stop_string(text, stop_reason)
@@ -1554,16 +1627,17 @@ class SglangStreamingPostProcessor:
                 del self._pending_logprobs_content[-suppressed_count:]
             self._locally_finished = True
             self._local_stop_reason = matched_stop_string
-            return text[:retained_end], True
+            stop_end = match_index + len(matched_stop_string) - len(held_text)
+            return text[:retained_end], stop_end
 
         if finish_reason or not text or not self._stop_strings:
-            return text, False
+            return text, None
 
         pending_len = trailing_stop_prefix_len(text, self._stop_strings)
         if pending_len:
             self._pending_stop_text = text[-pending_len:]
-            return text[:-pending_len], False
-        return text, False
+            return text[:-pending_len], None
+        return text, None
 
     def _parse_reasoning_delta(
         self, delta_text: str, finish_reason: str | None
@@ -1636,33 +1710,45 @@ class SglangStreamingPostProcessor:
         stop_terminated = engine_response.get(
             "stop_terminated", finish_reason == "stop"
         )
+        generated_ids = token_ids
         if stop_terminated:
-            raw_token_count = len(token_ids)
             token_ids = self._strip_matched_stop_token_ids(list(token_ids), stop_reason)
-            retained_token_count = len(token_ids)
-            if log_probs is not None and len(log_probs) == raw_token_count:
-                log_probs = log_probs[:retained_token_count]
-            if top_logprobs is not None and len(top_logprobs) == raw_token_count:
-                top_logprobs = top_logprobs[:retained_token_count]
 
-        delta_text = (
+        context_ids = self._decode_context_ids
+        held_ids = list(self._pending_decode_ids)
+        decoded_text = (
             self._incremental_decode(token_ids, flush=finish_reason is not None)
             if token_ids or finish_reason is not None
             else ""
         )
-        openai_logprobs = None
+        # A hidden stop token is generated output: score it, but do not display it.
+        stop_logprobs: list[dict[str, Any]] = []
         if log_probs is not None:
+            scored_ids = (
+                generated_ids if len(log_probs) == len(generated_ids) else token_ids
+            )
             openai_logprobs = self._build_openai_logprobs(
-                log_probs, top_logprobs, token_ids
+                log_probs, top_logprobs, scored_ids
             )
             if openai_logprobs is not None:
-                self._pending_logprobs_content.extend(openai_logprobs["content"])
+                content = openai_logprobs["content"]
+                self._pending_logprobs_content.extend(content[: len(token_ids)])
+                stop_logprobs = content[len(token_ids) :]
         self._logprob_context_ids = (self._logprob_context_ids + token_ids)[-4:]
-        delta_text, locally_finished = self._filter_stop_string_delta(
-            delta_text, finish_reason, stop_reason
+        delta_text, stop_end = self._filter_stop_string_delta(
+            decoded_text, finish_reason, stop_reason
         )
-        if locally_finished:
+        if stop_end is None:
+            # Queued after stop-string suppression, which matches display text.
+            self._pending_logprobs_content.extend(stop_logprobs)
+        else:
             finish_reason = "stop"
+            self._local_stop_boundary = (
+                context_ids,
+                held_ids + token_ids,
+                decoded_text[:stop_end],
+                len(generated_ids) - len(token_ids),
+            )
 
         if self._fast_plain_text:
             if delta_text:

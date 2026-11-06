@@ -244,9 +244,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
 			}), wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.components[1].experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
-		{name: "native sidecar beta rejects multinode", deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+		{name: "native sidecar beta multinode requires role templates", deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-		}), wantWebhookErrs: []string{`spec.components[1].multinode: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
+		}), wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
 		{name: "native sidecar alpha rejects gms create",
 			deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
@@ -267,9 +267,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
 				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
 			}), wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`, `spec.components[1].experimental.failover: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
-		{name: "native sidecar alpha rejects multinode", deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+		{name: "native sidecar alpha multinode requires role templates", deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-		}), wantWebhookErrs: []string{`spec.components[1].multinode: Forbidden: is not currently supported for component "worker" with a runtime init container; support is planned for a future release`}},
+		}), wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
 		{name: "native sidecar requires engine main", deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.Containers[0].Name = "engine"
 		}), wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Required value: main engine container is required for component "worker" with a runtime init container`}},
@@ -301,6 +301,61 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				c.PodTemplate.Spec.InitContainers[0].Image = customSidecarImage
 			}),
 			wantWebhookErrs: []string{`spec.services[worker].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
+		},
+		{
+			name: "sglang sidecar multinode requires a leader runtime",
+			deployment: func() runtime.Object {
+				dgd := multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, true, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				betaWorkerComponent(dgd).Roles[0].PodTemplate.Spec.InitContainers = nil
+				return dgd
+			}(),
+			wantWebhookErrs: []string{`spec.components[1].roles: Required value: the leader template must declare runtime to select sidecar mode`, `spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
+		},
+		{
+			name: "sglang beta accepts multinode sidecar with runtime on both roles and opaque engine configuration",
+			deployment: func() runtime.Object {
+				dgd := multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, true, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				for i := range betaWorkerComponent(dgd).Roles {
+					main := &betaWorkerComponent(dgd).Roles[i].PodTemplate.Spec.Containers[0]
+					main.Command = []string{"/launch.sh"}
+					main.Args = []string{"--config", "/engine.yaml", "--attn-dp-size", "$(DP)"}
+				}
+				return dgd
+			}(),
+		},
+		{
+			name: "sglang combined runtime still accepts a multinode component template",
+			deployment: func() runtime.Object {
+				dgd := multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				component := betaWorkerComponent(dgd)
+				component.PodTemplate.Spec.InitContainers = nil
+				component.PodTemplate.Spec.Containers[0].Image = "runtime:1.6.0"
+				component.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.sglang"}
+				return dgd
+			}(),
+		},
+		{
+			name: "sglang sidecar rejects switching combined component template to native sidecar",
+			oldDeployment: func() runtime.Object {
+				dgd := multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, false, false).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				component := betaWorkerComponent(dgd)
+				component.PodTemplate.Spec.InitContainers = nil
+				component.PodTemplate.Spec.Containers[0].Image = "runtime:1.6.0"
+				component.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.sglang"}
+				return dgd
+			}(),
+			deployment:      multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, false, false),
+			wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`},
+		},
+
+		{
+			name: "sglang sidecar multinode worker runtime needs version override",
+			deployment: func() runtime.Object {
+				dgd := multinodeSidecarDGDForAdmission(t, admissionSGLangBackend, false, true, true).(*nvidiacomv1beta1.DynamoGraphDeployment)
+				betaWorkerComponent(dgd).Roles[1].PodTemplate.Spec.InitContainers[0].Image = "runtime:custom"
+				return dgd
+			}(),
+			wantWebhookErrs: []string{`spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
 		},
 		// Native-sidecar admission, including alpha conversion and unchanged update invariants.
 		{name: "native sidecar beta create", deployment: nativeDGDForAdmission(t, false, nil)},
@@ -388,6 +443,131 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				dgd.Spec.Services[dgdAdmissionWorkerName].ExtraPodSpec = nil
 			}),
 			wantWebhookErrs: []string{"spec.services[worker].extraPodSpec.mainContainer.image: Required value: is required"},
+		},
+		// Helper images do not describe Dynamo versions; selecting a Dynamo role restores the contract.
+		{
+			name: "beta untyped helper accepts a non-semver image without override",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = "busybox:latest"
+			}),
+		},
+		{
+			name: "beta untyped helper image can change without override",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = "busybox:latest"
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = "busybox:stable"
+			}),
+		},
+		{
+			name: "beta assigning a Dynamo role requires a runtime version",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = "busybox:latest"
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = "worker"
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = "busybox:latest"
+			}),
+			wantWebhookErrs: []string{"spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag"},
+		},
+		{
+			name: "beta untyped helper still requires an image",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = ""
+			}),
+			wantWebhookErrs: []string{"spec.components[1].podTemplate.spec.containers[0].image: Required value: is required"},
+		},
+		{
+			name: "alpha untyped helper accepts a non-semver image without override",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+		},
+		{
+			name: "alpha untyped helper image can change without override",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:stable"
+			}),
+		},
+		{
+			name: "alpha assigning a Dynamo role requires a runtime version",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = "worker"
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+			wantWebhookErrs: []string{"spec.services[worker].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag"},
+		},
+		{
+			name: "alpha untyped helper still requires an image",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = ""
+			}),
+			wantWebhookErrs: []string{"spec.services[worker].extraPodSpec.mainContainer.image: Required value: is required"},
+		},
+		{
+			name: "alpha custom-type helper accepts a non-semver image without override",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = "helper"
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+		},
+		{
+			name: "alpha custom-type helper image can change without override",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = "helper"
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = "helper"
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:stable"
+			}),
 		},
 		{
 			name: "component custom image requires runtime version override",
@@ -679,7 +859,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "inter-pod GMS requires vLLM backend",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.BackendFramework = "sglang"
+				dgd.Spec.BackendFramework = sglangBackendFramework
 				enableBetaInterPodGMS(betaWorkerComponent(dgd))
 			}),
 			wantWebhookErrs: []string{"spec.components[1].experimental.gpuMemoryService.mode: Invalid value: \"InterPod\": the inter-pod GMS layout is currently supported only for vLLM (detected backend: sglang)"},
@@ -1678,8 +1858,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "role pod templates reject native sidecars in unsupported multinode layouts",
+			name: "role pod templates with a leader runtime are admitted without backendFramework",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = ""
 				worker := betaWorkerComponent(dgd)
 				setBetaExplicitMultinodeRoleTemplates(worker, 4)
 				worker.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{
@@ -1687,7 +1868,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways),
 				}}
 			}),
-			wantWebhookErrs: []string{`spec.components[1].roles[0].podTemplate.spec.initContainers[0].name: Forbidden: Dynamo sidecar mode is not supported in multinode or LPX role pod templates`},
 		},
 		{
 			name: "role pod templates require a 1.6 or later Planner",
@@ -4074,6 +4254,18 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	t.Log("Add the LPX scenarios to the same DGD admission table")
 	tests = append(tests, lpxDGDAdmissionCases()...)
 
+	t.Log("Add the explicit-role multinode sidecar cases shared by every supported backend and both API versions")
+	for _, backend := range []string{admissionSGLangBackend, admissionVLLMBackend, admissionTRTLLMBackend} {
+		tests = append(tests,
+			dgdAdmissionTestCase{name: backend + " beta rejects multinode sidecar without role templates", deployment: multinodeSidecarDGDForAdmission(t, backend, false, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+			dgdAdmissionTestCase{name: backend + " beta accepts multinode sidecar with compute-only worker", deployment: multinodeSidecarDGDForAdmission(t, backend, false, true, false)},
+			dgdAdmissionTestCase{name: backend + " beta accepts multinode sidecar with runtime on both roles", deployment: multinodeSidecarDGDForAdmission(t, backend, false, true, true)},
+			dgdAdmissionTestCase{name: backend + " alpha rejects multinode sidecar without role templates", deployment: multinodeSidecarDGDForAdmission(t, backend, true, false, false), wantWebhookErrs: []string{`spec.components[1].roles: Required value: multinode sidecars require complete leader and worker podTemplates`}},
+			dgdAdmissionTestCase{name: backend + " alpha accepts multinode sidecar with compute-only worker", deployment: multinodeSidecarDGDForAdmission(t, backend, true, true, false)},
+			dgdAdmissionTestCase{name: backend + " alpha accepts multinode sidecar with runtime on both roles", deployment: multinodeSidecarDGDForAdmission(t, backend, true, true, true)},
+		)
+	}
+
 	t.Log("Own one topology fixture for all DGD admission scenarios")
 	createTestClusterTopology(t, admissionEnv.ForTest(t))
 
@@ -4819,4 +5011,71 @@ func assertDGDAdmissionDefaults(t *testing.T, actual *unstructured.Unstructured,
 		)
 	}
 
+}
+
+// multinodeSidecarDGDForAdmission authors either complete role sources or one shared
+// template for a native multinode engine of the given backend. workerRuntime selects
+// a layout where every node publishes KV events or serves requests.
+func multinodeSidecarDGDForAdmission(t *testing.T, backend string, alpha, roles, workerRuntime bool) runtime.Object {
+	t.Helper()
+	dgd := nativeDGDForAdmission(t, false, nil).(*nvidiacomv1beta1.DynamoGraphDeployment)
+	dgd.Spec.BackendFramework = backend
+	component := betaWorkerComponent(dgd)
+	component.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+	main := &component.PodTemplate.Spec.Containers[0]
+	switch backend {
+	case admissionSGLangBackend:
+		main.Command = []string{"python3", "-m", "sglang.launch_server"}
+		main.Args = []string{"--model-path", "model", "--tp-size", "2", "--kv-events-config", `{"publisher":"zmq"}`}
+		if workerRuntime {
+			main.Args = append(main.Args, "--enable-dp-attention", "--dp-size", "2")
+		}
+	case admissionVLLMBackend:
+		main.Command = []string{"vllm", "serve", "model"}
+		main.Args = []string{"--grpc-port", "30001", "--tensor-parallel-size", "2"}
+		if workerRuntime {
+			main.Args = append(main.Args, "--data-parallel-hybrid-lb", "--data-parallel-size", "4", "--data-parallel-size-local", "2")
+		}
+	case admissionTRTLLMBackend:
+		// The authored launch is an opaque shell script around mpirun and trtllm-serve.
+		main.Command = []string{"/bin/bash", "-c"}
+		main.Args = []string{"mpirun -n 2 bash -c 'trtllm-llmapi-launch trtllm-serve model --grpc --grpc-protocol openengine --extra_llm_api_options /config/config.yaml'"}
+	default:
+		t.Fatalf("unsupported multinode sidecar backend %q", backend)
+	}
+	if roles {
+		for _, name := range []string{"leader", "worker"} {
+			template := component.PodTemplate.DeepCopy()
+			template.Spec.Containers[0].Command = []string{"/custom-launcher"}
+			if name == "worker" && !workerRuntime {
+				template.Spec.InitContainers = nil
+			}
+			component.Roles = append(component.Roles, nvidiacomv1beta1.ComponentRoleSpec{Name: name, PodTemplate: template})
+		}
+		component.PodTemplate = nil
+	}
+	if alpha {
+		spoke := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+		if err := spoke.ConvertFrom(dgd); err != nil {
+			t.Fatal(err)
+		}
+		return spoke
+	}
+	return dgd
+}
+
+func multinodeSidecarDCDForAdmission(t *testing.T, backend string, alpha, roles, workerRuntime bool) runtime.Object {
+	t.Helper()
+	dgd := multinodeSidecarDGDForAdmission(t, backend, false, roles, workerRuntime).(*nvidiacomv1beta1.DynamoGraphDeployment)
+	dcd := betaDCDForAdmission(nil)
+	dcd.Spec.BackendFramework = backend
+	dcd.Spec.DynamoComponentDeploymentSharedSpec = *betaWorkerComponent(dgd).DeepCopy()
+	if alpha {
+		spoke := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+		if err := spoke.ConvertFrom(dcd); err != nil {
+			t.Fatal(err)
+		}
+		return spoke
+	}
+	return dcd
 }

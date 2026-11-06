@@ -91,9 +91,10 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// runtime image. Paths below are relative to the component spec.
 	// Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar
 	// is present, otherwise extraPodSpec.mainContainer.image, or the main image in each
-	// selected role PodTemplate. DGD admission requires it when any selected runtime image has no parseable
-	// semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
-	// not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
+	// selected role PodTemplate. For frontend, worker, prefill, decode, planner, and epp components,
+	// DGD admission requires it when any selected runtime image has no parseable semantic-version tag;
+	// controller-generated DCDs may omit it. Untyped components and custom component types do not require it.
+	// Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
 	// It does not change the image. Setting or changing an override that resolves to version 1.5.0 or
 	// later may trigger a rollout. Keep it consistent with every selected template's runtime version.
 	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
@@ -184,9 +185,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// preserves the implicit multinode role layout.
 	//
 	// LPX components each require an agent role. A DGD may contain independent
-	// LPX components, each with its own conductor role, or a shared draft and
-	// target pair with a conductor role only on the target. Every LPX role
-	// requires its own podTemplate.
+	// LPX components, each serving through its own conductor role or agent
+	// runtime init container, or a draft and target pair in which only the
+	// target serves. Every LPX role requires its own podTemplate.
 	// +optional
 	// +kubebuilder:validation:MaxItems=2
 	// +listType=map
