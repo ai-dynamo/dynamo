@@ -648,7 +648,9 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             );
             coalesced.extend(coalescer.push(key, placement_event).into_iter().flatten());
         }
-        coalesced.extend(coalescer.flush());
+        while let Some(event) = coalescer.flush() {
+            coalesced.push(event);
+        }
         let event_worker_id = attachment_worker.worker_id;
         let mut output = Vec::with_capacity(coalesced.len());
         let mut cleared_domains = Vec::new();
@@ -2194,19 +2196,11 @@ mod tests {
                 ResidencyDomain::CacheOwner
             );
             assert_eq!(normalized.events[0].placement.kv_cache_group, None);
-            if kind == "mamba" {
-                // The placeholder store (no block geometry) is dropped, but
-                // its group is learned, so the removal is tagged for the
-                // presence table instead of reaching the attention index.
-                assert_eq!(normalized.events.len(), 2, "{medium} {kind}");
-                assert!(normalized.events[1].placement.kv_cache_group.is_some());
-                assert!(matches!(
-                    normalized.events[1].event.data,
-                    KvCacheEventData::Removed(_)
-                ));
-            } else {
-                assert_eq!(normalized.events.len(), 1, "{medium} {kind}");
-            }
+            assert_eq!(
+                normalized.events.len(),
+                1,
+                "{medium} {kind}: recurrent publishing is default-off"
+            );
         }
     }
 

@@ -1394,6 +1394,7 @@ mod tests_startup_helpers {
                 heartbeat_source.then_some((0, std::time::Duration::from_millis(500))),
                 false,
                 Some(vec![0, 1, 2]),
+                1,
                 None,
             )
         });
@@ -1469,6 +1470,8 @@ mod tests_startup_helpers {
             Some(dynamo_kv_router::protocols::KvCacheGroupTag {
                 group_idx: 1,
                 kind: dynamo_kv_router::protocols::KvCacheGroupKind::Mamba,
+                expected_group_count: Some(3),
+                alignment_blocks: Some(1),
             })
         );
         let KvCacheEventData::Stored(KvCacheStoreData { blocks, .. }) = &mamba.event.data else {
@@ -1620,6 +1623,7 @@ mod tests_startup_helpers {
                 None,
                 false,
                 Some(vec![0, 1, 2]),
+                1,
                 None,
             )
         });
@@ -1724,6 +1728,7 @@ mod tests_startup_helpers {
                 None,
                 false,
                 Some(vec![0, 1, 2]),
+                1,
                 None,
             )
         });
@@ -1823,6 +1828,7 @@ mod tests_startup_helpers {
                 None,
                 false,
                 Some(vec![0, 1, 2]),
+                1,
                 None,
             )
         });

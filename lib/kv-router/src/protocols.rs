@@ -979,6 +979,8 @@ pub struct KvCacheGroupTag {
     pub kind: KvCacheGroupKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_group_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alignment_blocks: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -2119,12 +2121,44 @@ mod tests {
         }
 
         #[test]
+        fn unknown_recurrent_kind_preserves_the_rest_of_a_wire_batch() {
+            let dense = RouterEvent::new(
+                7,
+                KvCacheEvent {
+                    event_id: 1,
+                    dp_rank: 0,
+                    data: KvCacheEventData::Cleared,
+                },
+            );
+            let tagged = dense.clone().with_kv_cache_group(KvCacheGroupTag {
+                group_idx: 0,
+                kind: KvCacheGroupKind::Mamba,
+                expected_group_count: Some(1),
+                alignment_blocks: Some(1),
+            });
+            let mut wire = serde_json::to_value(vec![tagged, dense]).unwrap();
+            wire[0]["kv_cache_group"]["kind"] = serde_json::json!("future_recurrent_kind");
+            let decoded: Vec<RouterEvent> = serde_json::from_value(wire).unwrap();
+            assert_eq!(decoded.len(), 2);
+            assert_eq!(
+                decoded[0].kv_cache_group.unwrap().kind,
+                KvCacheGroupKind::Unknown
+            );
+            assert!(!decoded[0].targets_primary().unwrap());
+            assert!(decoded[1].targets_primary().unwrap());
+            let mut malformed = decoded[0].clone();
+            malformed.kv_cache_group = None;
+            assert!(malformed.targets_primary().is_err());
+        }
+
+        #[test]
         fn tagged_events_are_unsupported_for_pre_tag_consumers_and_parsed_by_new_ones() {
             let tagged = RouterEvent::with_storage_tier(7, stored(1), StorageTier::HostPinned)
                 .with_kv_cache_group(KvCacheGroupTag {
                     group_idx: 1,
                     kind: KvCacheGroupKind::Mamba,
                     expected_group_count: Some(1),
+                    alignment_blocks: Some(1),
                 });
             let bytes = rmp_serde::to_vec_named(&tagged).unwrap();
 

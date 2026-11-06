@@ -343,7 +343,15 @@ fn reconcile_recurrent_layouts(indexer: &Indexer, workers: &HashMap<WorkerId, Mo
             continue;
         };
         for rank in ranks {
-            indexer.declare_recurrent_groups(WorkerWithDpRank::new(worker_id, rank), &groups);
+            indexer.declare_recurrent_layout(
+                WorkerWithDpRank::new(worker_id, rank),
+                &groups,
+                layout
+                    .get("alignment_blocks")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .unwrap_or(1),
+            );
         }
     }
 }

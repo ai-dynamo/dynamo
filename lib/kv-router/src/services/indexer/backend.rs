@@ -448,6 +448,21 @@ impl Indexer {
         }
     }
 
+    pub fn declare_recurrent_layout(
+        &self,
+        worker: WorkerWithDpRank,
+        groups: &[u32],
+        alignment_blocks: u32,
+    ) {
+        if let Self::Single { lower_tier, .. } | Self::Concurrent { lower_tier, .. } = self {
+            lower_tier.group_residency().declare_layout(
+                crate::protocols::ResidencyOwner::worker(worker),
+                groups,
+                alignment_blocks,
+            );
+        }
+    }
+
     fn apply_group_residency(&self, event: &RouterEvent) -> bool {
         let (Self::Single { lower_tier, .. } | Self::Concurrent { lower_tier, .. }) = self else {
             return false;
@@ -744,7 +759,7 @@ impl Indexer {
             } => {
                 lower_tier
                     .group_residency()
-                    .clear_worker(WorkerWithDpRank::new(worker_id, dp_rank));
+                    .remove_worker_rank(WorkerWithDpRank::new(worker_id, dp_rank));
                 for indexer in lower_tier.all() {
                     indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
                 }
@@ -757,7 +772,7 @@ impl Indexer {
             } => {
                 lower_tier
                     .group_residency()
-                    .clear_worker(WorkerWithDpRank::new(worker_id, dp_rank));
+                    .remove_worker_rank(WorkerWithDpRank::new(worker_id, dp_rank));
                 for indexer in lower_tier.all() {
                     indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
                 }
@@ -1107,6 +1122,7 @@ mod tests {
             group_idx: 2,
             kind: KvCacheGroupKind::Mamba,
             expected_group_count: Some(1),
+            alignment_blocks: Some(1),
         });
         indexer.try_apply_event(tagged).await.unwrap();
         if let Indexer::Single {
@@ -1138,7 +1154,15 @@ mod tests {
             .await
             .unwrap();
         if let Indexer::Single { lower_tier, .. } = &indexer {
-            assert!(!lower_tier.group_residency().is_active());
+            assert!(lower_tier.group_residency().is_active());
+            assert_eq!(
+                lower_tier.group_residency().reusable_blocks(
+                    worker,
+                    &[ExternalSequenceBlockHash(77)],
+                    1
+                ),
+                Some(0)
+            );
         }
     }
 

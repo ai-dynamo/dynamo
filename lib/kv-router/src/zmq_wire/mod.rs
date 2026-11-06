@@ -95,6 +95,7 @@ pub struct ZmqEventNormalizer {
     /// misconfiguration, and is filtered quietly instead of warned about.
     full_block_workers: FxHashSet<WorkerWithDpRank>,
     recurrent_groups: Option<Vec<u32>>,
+    recurrent_alignment_blocks: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +155,7 @@ impl ZmqEventNormalizer {
             engine_mm: mm_exclusion::EngineMmState::new(false),
             full_block_workers: FxHashSet::default(),
             recurrent_groups: None,
+            recurrent_alignment_blocks: 1,
         }
     }
 
@@ -168,6 +170,7 @@ impl ZmqEventNormalizer {
             engine_mm: mm_exclusion::EngineMmState::new(false),
             full_block_workers: FxHashSet::default(),
             recurrent_groups: None,
+            recurrent_alignment_blocks: 1,
         }
     }
 
@@ -175,6 +178,11 @@ impl ZmqEventNormalizer {
     /// The complete group list also classifies removals received before stores.
     pub fn with_recurrent_groups(mut self, groups: Option<Vec<u32>>) -> Self {
         self.recurrent_groups = groups;
+        self
+    }
+
+    pub fn with_recurrent_alignment_blocks(mut self, blocks: u32) -> Self {
+        self.recurrent_alignment_blocks = blocks.max(1);
         self
     }
 
@@ -624,6 +632,7 @@ impl ZmqEventNormalizer {
                 .recurrent_groups
                 .as_ref()
                 .map(|groups| groups.len() as u32),
+            alignment_blocks: Some(self.recurrent_alignment_blocks),
         })
     }
 

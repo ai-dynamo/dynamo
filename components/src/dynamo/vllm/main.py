@@ -69,7 +69,11 @@ from .args import (
     parse_args_with_model_fetch,
 )
 from .backend_args import _configured_artifact_router_profile
-from .cache_info import get_configured_kv_event_block_size, recurrent_kv_groups
+from .cache_info import (
+    get_configured_kv_event_block_size,
+    recurrent_alignment_blocks,
+    recurrent_kv_groups,
+)
 from .capacity import (
     get_metrics_model_name,
     get_spec_decode_runtime_data,
@@ -588,7 +592,14 @@ def setup_kv_event_publisher(
             image_token_id=image_token_id,
             kv_state_endpoint=config.kv_state_endpoint,
             video_token_id=video_token_id,
-            recurrent_groups=recurrent_kv_groups(vllm_config),
+            recurrent_groups=recurrent_kv_groups(
+                vllm_config, enabled=env_bool("DYN_VLLM_RECURRENT_KV_EVENTS")
+            ),
+            recurrent_alignment_blocks=(
+                recurrent_alignment_blocks(vllm_config)
+                if env_bool("DYN_VLLM_RECURRENT_KV_EVENTS")
+                else 1
+            ),
         )
         kv_publishers.append(kv_publisher)
 
@@ -807,9 +818,9 @@ def setup_vllm_engine(
         bench = config._benchmark_additional_config
         if fpm_worker_id and bench["output_path"] == "/tmp/benchmark_results.json":
             short_id = fpm_worker_id[-8:]
-            os.environ[
-                ENV_FPM_BENCHMARK_OUTPUT_PATH
-            ] = f"/tmp/benchmark_results_{short_id}.json"
+            os.environ[ENV_FPM_BENCHMARK_OUTPUT_PATH] = (
+                f"/tmp/benchmark_results_{short_id}.json"
+            )
         vllm_config.additional_config["benchmark"] = bench
         logger.info("Benchmark config injected into additional_config")
 
@@ -951,9 +962,19 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
-    groups = recurrent_kv_groups(vllm_config)
+    groups = recurrent_kv_groups(
+        vllm_config, enabled=env_bool("DYN_VLLM_RECURRENT_KV_EVENTS")
+    )
     if groups is not None:
-        runtime_config.set_engine_specific("kv_cache_group_layout_v1", json.dumps({"recurrent_groups": groups}))
+        runtime_config.set_engine_specific(
+            "kv_cache_group_layout_v1",
+            json.dumps(
+                {
+                    "recurrent_groups": groups,
+                    "alignment_blocks": recurrent_alignment_blocks(vllm_config),
+                }
+            ),
+        )
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)

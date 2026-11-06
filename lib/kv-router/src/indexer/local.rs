@@ -333,6 +333,19 @@ impl LocalKvIndexer {
             .declare_groups(ResidencyOwner::worker(worker), groups);
     }
 
+    pub fn declare_recurrent_layout(
+        &self,
+        worker: WorkerWithDpRank,
+        groups: &[u32],
+        alignment_blocks: u32,
+    ) {
+        self.group_residency.declare_layout(
+            ResidencyOwner::worker(worker),
+            groups,
+            alignment_blocks,
+        );
+    }
+
     #[cfg(test)]
     pub fn get_all_events_in_buffer(&self) -> Vec<RouterEvent> {
         self.recovery.lock().buffer.iter().cloned().collect()
@@ -771,7 +784,7 @@ impl KvIndexerInterface for LocalKvIndexer {
 
     async fn remove_worker_dp_rank(&self, worker: WorkerId, dp_rank: DpRank) {
         self.group_residency
-            .clear_worker(WorkerWithDpRank::new(worker, dp_rank));
+            .remove_worker_rank(WorkerWithDpRank::new(worker, dp_rank));
         for indexer in self.all_lower_tier_indexers() {
             KvIndexerInterface::remove_worker_dp_rank(&*indexer, worker, dp_rank).await;
         }
@@ -850,6 +863,7 @@ mod tests {
                 group_idx: 0,
                 kind: KvCacheGroupKind::Mamba,
                 expected_group_count: Some(2),
+                alignment_blocks: Some(1),
             });
         local.apply_event_with_buffer(event.clone()).await.unwrap();
         event.residency_domain =

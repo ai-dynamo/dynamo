@@ -1,11 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import logging
-from typing import Any
+from __future__ import annotations
 
-from vllm.config import VllmConfig
-from vllm.v1.engine.async_llm import AsyncLLM
+import logging
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+    from vllm.v1.engine.async_llm import AsyncLLM
 
 logger = logging.getLogger(__name__)
 
@@ -73,13 +76,39 @@ async def configure_kv_event_block_size(
     return kv_event_block_size
 
 
-def recurrent_kv_groups(vllm_config: VllmConfig) -> list[int] | None:
-    """Enable checkpoint events only after the operator upgrades all consumers."""
-    from dynamo.common.utils.env import env_bool
-
-    if not env_bool("DYN_VLLM_RECURRENT_KV_EVENTS", default=False):
+def recurrent_kv_groups(
+    vllm_config: VllmConfig, *, enabled: bool = False
+) -> list[int] | None:
+    """Return the complete recurrent layout for an explicitly enabled publisher."""
+    if not enabled:
         return None
     metadata = (vllm_config.additional_config or {}).get(DYNAMO_KV_CACHE_GROUPS_KEY)
     if not isinstance(metadata, list) or not metadata:
         raise ValueError("Recurrent KV events require engine KV cache group metadata")
-    return [int(group["group_idx"]) for group in metadata if group.get("kind") == "mamba"]
+    groups = [group["group_idx"] for group in metadata if group.get("kind") == "mamba"]
+    if any(
+        type(group) is not int or not 0 <= group <= 0xFFFFFFFF for group in groups
+    ) or len(set(groups)) != len(groups):
+        raise ValueError(
+            "Recurrent KV cache group ids must be unique unsigned integers"
+        )
+    return groups
+
+
+def recurrent_alignment_blocks(vllm_config: VllmConfig) -> int:
+    """Align reuse to the least common multiple of the engine's group block sizes."""
+    from math import lcm
+
+    metadata = (vllm_config.additional_config or {}).get(
+        DYNAMO_KV_CACHE_GROUPS_KEY
+    ) or []
+    sizes = [group["block_size"] for group in metadata]
+    if not sizes or any(type(size) is not int or size <= 0 for size in sizes):
+        raise ValueError("Recurrent KV events require positive group block sizes")
+    unit = get_configured_kv_event_block_size(vllm_config)
+    alignment = lcm(*sizes)
+    if alignment % unit:
+        raise ValueError(
+            "KV cache group alignment must be divisible by the event block size"
+        )
+    return alignment // unit

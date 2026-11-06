@@ -115,7 +115,9 @@ def validate_state_agent_worker(config: Any) -> None:
     from dynamo.common.utils.env import env_bool
 
     if env_bool("DYN_VLLM_RECURRENT_KV_EVENTS", default=False):
-        raise ValueError("Recurrent KV events require a direct publisher; state-agent capability negotiation is not supported yet")
+        raise ValueError(
+            "Recurrent KV events require a direct publisher; state-agent capability negotiation is not supported yet"
+        )
     unsupported = None
     if config.headless:
         unsupported = "headless"

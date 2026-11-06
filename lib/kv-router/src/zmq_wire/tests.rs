@@ -917,6 +917,7 @@ fn test_normalizer_keeps_map_serialized_mamba_kind() {
             group_idx: 1,
             kind: KvCacheGroupKind::Mamba,
             expected_group_count: Some(3),
+            alignment_blocks: Some(1),
         })
     );
 }
@@ -1270,6 +1271,7 @@ fn test_normalizer_tags_mamba_group_store_and_learned_removal() {
         group_idx: 0,
         kind: KvCacheGroupKind::Mamba,
         expected_group_count: Some(3),
+        alignment_blocks: Some(1),
     });
 
     let stored = normalizer.preprocess(raw_event, worker).expect("kept");
@@ -2151,4 +2153,30 @@ fn declared_mamba_group_zero_removal_is_tagged_before_first_store() {
         .unwrap();
     assert_eq!(event.kv_cache_group.unwrap().group_idx, 0);
     assert!(!event.targets_primary().unwrap());
+}
+
+#[test]
+fn recurrent_gate_covers_framework_storage_events() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(4);
+    for payload in [
+        serde_json::json!({"type":"BlockStored", "block_hashes":[11], "token_ids":[], "block_size":4, "medium":"STORAGE", "group_idx":0, "kv_cache_spec_kind":"mamba"}),
+        serde_json::json!({"type":"BlockRemoved", "block_hashes":[11], "medium":"STORAGE", "group_idx":0}),
+    ] {
+        let raw: RawKvEvent = from_slice(&rmp_serde::to_vec_named(&payload).unwrap()).unwrap();
+        assert!(normalizer.preprocess(raw, worker).is_none());
+    }
+}
+
+#[test]
+fn malformed_checkpoint_keeps_its_allocated_event_id_as_a_noop() {
+    let raw: RawKvEvent = from_slice(&rmp_serde::to_vec_named(&serde_json::json!({"type":"BlockStored", "block_hashes":[11], "parent_block_hash":11, "token_ids":[], "block_size":4, "group_idx":0, "kv_cache_spec_kind":"mamba"})).unwrap()).unwrap();
+    let mut normalizer = ZmqEventNormalizer::new(4).with_recurrent_groups(Some(vec![0]));
+    let event = normalizer
+        .normalize(raw, 77, WorkerWithDpRank::new(7, 0))
+        .unwrap();
+    assert_eq!(event.event.event_id, 77);
+    assert!(
+        matches!(&event.event.data, crate::protocols::KvCacheEventData::Removed(data) if data.block_hashes.is_empty())
+    );
 }
