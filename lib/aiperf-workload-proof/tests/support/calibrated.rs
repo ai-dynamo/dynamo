@@ -537,6 +537,11 @@ pub(crate) fn canonical_role(
     role: ForwardPassWorkerType,
     max_num_seqs: usize,
 ) -> Result<RoleSetup> {
+    let model_config = canonical_model_config(model, systems)?;
+    // This serving configuration deliberately uses unchunked prefill. Every
+    // model-admissible prompt must fit one complete pass; a smaller permanent
+    // batch budget would leave the FIFO head waiting with no physical producer.
+    let max_num_batched_tokens = MAX_NUM_BATCHED_TOKENS.max(model_config.max_model_len);
     let config = role_config(model, systems, role);
     let memory = KvCacheEstimateRequest {
         engine: serde_json::from_value(json!({
@@ -561,8 +566,8 @@ pub(crate) fn canonical_role(
             "extra": {"worker_type": memory_role(role)},
         }))
         .context("complete matching native memory engine identity")?,
-        max_num_tokens: u32::try_from(MAX_NUM_BATCHED_TOKENS)
-            .context("MAX_NUM_BATCHED_TOKENS must fit the native memory request u32")?,
+        max_num_tokens: u32::try_from(max_num_batched_tokens)
+            .context("model-admissible unchunked batch budget must fit u32")?,
         max_batch_size: u32::try_from(max_num_seqs)?,
         kv_cache_memory_fraction: KvCacheMemoryFraction::OfTotal(0.9),
         gpu_memory_capacity_bytes_override: None,
@@ -647,7 +652,6 @@ pub(crate) fn canonical_role(
     let timing_config = serde_json::to_value(&provenance.config)?;
     // Full GPU modeling must not treat `None` as unlimited: the pinned model
     // config's native context maximum is the rank's prompt-plus-output limit.
-    let model_config = canonical_model_config(model, systems)?;
     let max_model_len = model_config.max_model_len;
     let rank = EngineConfig {
         // External AIS timing is priced by the role factory supplied below; the
@@ -658,7 +662,7 @@ pub(crate) fn canonical_role(
             config: timing_config.clone(),
         },
         max_num_seqs,
-        max_num_batched_tokens: MAX_NUM_BATCHED_TOKENS,
+        max_num_batched_tokens,
         max_model_len: Some(max_model_len),
         block_size: BLOCK_SIZE,
         num_gpu_blocks,
