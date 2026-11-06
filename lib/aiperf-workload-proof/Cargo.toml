@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Standalone proof package (own workspace root, intentionally NOT a member of the
+# Dynamo workspace): proves the AISim-owned AIPerf workload runner drives the real
+# Dynamo KV Router placement via dynamo-mocker::placement. The dependency edge is
+# proof -> {mocker, runner, core}; the runner must never depend on Dynamo.
+[workspace]
+resolver = "3"
+
+[package]
+name = "dynamo-aiperf-workload-proof"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[dev-dependencies]
+dynamo-mocker = { path = "../mocker", features = ["replay-bench"] }
+aisim-aiperf-workload-runner = { path = "../../../../../aisimulate/.worktrees/aiperf-owned-runner-proof/crates/tests/aiperf-workload-runner" }
+aisimulate-core = { package = "aisim-core", path = "../../../../../aisimulate/.worktrees/aiperf-owned-runner-proof/crates/core", default-features = false }
+aiperf-clock-runtime = { path = "../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/libs/clock-runtime" }
+aiperf-config = { path = "../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/config/config" }
+aiperf-engine-input = { path = "../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/engine/input" }
+aiperf-protocol = { path = "../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/config/protocol" }
+aiperf-timing = { path = "../../../../../../aiperf-rs/.worktrees/prove-simple-execution/crates/scheduling/timing" }
+serde_json = "1"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+
+[[test]]
+name = "kv_router_proof"
+path = "tests/kv_router_proof.rs"
