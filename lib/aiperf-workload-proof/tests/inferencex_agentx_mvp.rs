@@ -1332,12 +1332,8 @@ fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> 
     eprintln!("MVP stage: exact input and calibrated physical roles verified");
 
     let (backend, typed) = host_typed(&run, &prefill, &decode)?;
-    let reconciliation = reconcile_hosted::reconcile(&backend, &typed)
-        .context("reconciling every backend occurrence against native records")?;
-    std::fs::write(
-        artifact_dir.join("request_reconciliation.json"),
-        serde_json::to_vec_pretty(&reconciliation)?,
-    )?;
+    // Retain complete physical evidence before any acceptance assertion can
+    // fail, so a population or metric defect never erases the run's output.
     write_raw_backend_artifact(
         &artifact_dir,
         &backend,
@@ -1359,9 +1355,16 @@ fn inferencex_agentx_mvp_full_scenario_runs_on_native_dynamo_kv() -> Result<()> 
     // Ordinary scheduled/graph runs carry no backend parity facts. The raw
     // backend evidence is the separate, explicitly non-parity artifact above.
     let facts = ReportPairRunFacts::new();
-    eprintln!("MVP stage: request reconciliation passed; finalizing normal artifacts");
+    eprintln!("MVP stage: retaining normal artifacts before acceptance assertions");
     let finalized = finalize_hosted_run_report(&run, &typed, metadata, facts, &artifact_dir)
         .context("finalizing the normal hosted run report")?;
+    let reconciliation = reconcile_hosted::reconcile(&backend, &typed)
+        .context("reconciling every backend occurrence against native records")?;
+    std::fs::write(
+        artifact_dir.join("request_reconciliation.json"),
+        serde_json::to_vec_pretty(&reconciliation)?,
+    )?;
+    eprintln!("MVP stage: request reconciliation passed");
 
     assert_full_scenario(&run, &typed, &finalized, &artifact_dir)?;
     eprintln!("MVP stage: full scenario assertions passed");
