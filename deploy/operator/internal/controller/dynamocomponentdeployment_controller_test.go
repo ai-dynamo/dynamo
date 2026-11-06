@@ -976,7 +976,7 @@ func Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSe
 			}
 			replacement := &leaderworkersetv1.LeaderWorkerSet{Name: leaderWorkerSetName(dcd), Namespace: "default"}
 			r := multinodeLWSTestReconciler(dcd, legacy)
-			if !tt.wantLegacyGone && !tt.failReplacementLWS {
+			if tt.ownedByDCD && !tt.wantLegacyGone && !tt.failReplacementLWS {
 				r = multinodeLWSTestReconciler(dcd, legacy, replacement)
 			}
 			if tt.failReplacementLWS {
