@@ -281,9 +281,7 @@ def _assert_stock_epp_routing_mode_catalog(file_text: dict[Path, str]) -> None:
             raise AssertionError(
                 f"register_missing no longer names {const_name} exactly once"
             )
-    if re.search(
-        r"\bregister\s*\(", missing.replace("register_worker_selection", "")
-    ):
+    if re.search(r"\bregister\s*\(", missing.replace("register_worker_selection", "")):
         raise AssertionError(
             "register_missing now calls the optional named-policy register()"
         )
@@ -396,8 +394,7 @@ def assert_named_policy_source_contract() -> None:
     )
     if host_fallback not in registry_body:
         raise AssertionError(
-            "uninstalled host registry fallback no longer calls "
-            f"{host_fallback}"
+            "uninstalled host registry fallback no longer calls " f"{host_fallback}"
         )
     if "dynamo_custom_policy_builtin::default_registry" in registry_body:
         raise AssertionError(

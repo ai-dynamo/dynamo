@@ -5723,8 +5723,7 @@ def _assert_frontend_exports_session_capacity_env() -> None:
     ]
     if len(exports) != 1:
         raise AssertionError(
-            "async_main session-capacity env export count "
-            f"{len(exports)} != 1"
+            "async_main session-capacity env export count " f"{len(exports)} != 1"
         )
 
 
@@ -5743,8 +5742,7 @@ def _assert_session_capacity_source_chain(file_text: dict[Path, str]) -> None:
     affinity_config = bodies["session_affinity::affinity_config"]
     if (
         "config.max_entries = max_entries_from(std::env::var("
-        "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES))?;"
-        not in affinity_config
+        "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES))?;" not in affinity_config
     ):
         raise AssertionError(
             "affinity_config no longer assigns max_entries from "
@@ -5758,8 +5756,7 @@ def _assert_session_capacity_source_chain(file_text: dict[Path, str]) -> None:
     coordinator = re.sub(r"\s+", "", bodies["affinity_coordinator"])
     if (
         "self.partition.session_affinity(crate::session_affinity::affinity_config("
-        "ttl,mode)?)?"
-        not in coordinator
+        "ttl,mode)?)?" not in coordinator
         or "AffinityCoordinator::wrap(table)" not in coordinator
     ):
         raise AssertionError(
@@ -5810,8 +5807,7 @@ def _assert_session_capacity_source_chain(file_text: dict[Path, str]) -> None:
     route_prefill = _fn_decl_and_body(
         _cached_stripped_file(RUST_EPP, file_text),
         re.compile(
-            r"pub\s+async\s+fn\s+route_prefill\s*\([^;{]*?\)\s*"
-            r"(?:->[^;{]+)?\s*\{"
+            r"pub\s+async\s+fn\s+route_prefill\s*\([^;{]*?\)\s*" r"(?:->[^;{]+)?\s*\{"
         ),
         "EPP Router::route_prefill",
     )
@@ -6131,19 +6127,52 @@ def assert_input_startup_capability_source_contracts() -> None:
     if "ensure_served_indexer_service(" not in ingress:
         raise AssertionError("RuntimeIngress::start lost ensure_served_indexer_service")
 
+    watcher_text = _cached_stripped_file(RUST_WATCHER, file_text)
     prepare = _fn_decl_and_body(
-        _cached_stripped_file(RUST_WATCHER, file_text),
+        watcher_text,
         re.compile(
             r"async\s+fn\s+prepare_worker_set\s*\([^;{]*?\)\s*(?:->[^;{]+)?\s*\{"
         ),
         "prepare_worker_set",
     )
-    if (
-        "LoadThresholdHandle::new(router_config.load_threshold_config.clone())"
-        not in prepare
+    prepare_norm = re.sub(r"\s+", "", prepare)
+    router_assignment = (
+        "letrouter_config=effective_router_config("
+        "card.router_config.as_ref(),&self.router_config);"
+    )
+    if prepare_norm.count(router_assignment) != 1:
+        raise AssertionError(
+            "prepare_worker_set lost its single effective_router_config assignment"
+        )
+    threshold_call = "letload_thresholds=load_threshold_handle(&router_config);"
+    if prepare_norm.count(threshold_call) != 2:
+        raise AssertionError(
+            "prepare_worker_set no longer calls load_threshold_handle exactly twice"
+        )
+    helper = _fn_decl_and_body(
+        watcher_text,
+        re.compile(
+            r"fn\s+load_threshold_handle\s*\(\s*router_config\s*:\s*"
+            r"&RouterConfig\s*\)\s*->\s*LoadThresholdHandle\s*\{"
+        ),
+        "load_threshold_handle",
+    )
+    direct_branch = _unique_scoped_rust_body(
+        helper,
+        re.compile(r"if\s*!\s*router_config\.router_mode\.is_direct_routing\(\)\s*\{"),
+        "load_threshold_handle non-direct branch",
+    )
+    normalized_branch = re.sub(r"\s+", " ", direct_branch).strip()
+    if normalized_branch != (
+        "return LoadThresholdHandle::new(router_config.load_threshold_config.clone());"
     ):
         raise AssertionError(
-            "prepare_worker_set lost original RouterConfig LoadThresholdHandle"
+            "load_threshold_handle non-direct branch lost "
+            "LoadThresholdHandle::new(router_config.load_threshold_config.clone())"
+        )
+    if re.search(r"LoadThresholdHandle::disabled\(\)\s*\}\s*$", helper) is None:
+        raise AssertionError(
+            "load_threshold_handle no longer ends in LoadThresholdHandle::disabled()"
         )
 
     ais_text = _cached_stripped_file(RUST_AIS_CALLBACK, file_text)
