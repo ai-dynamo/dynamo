@@ -1316,6 +1316,52 @@ class TestGenerateLocally:
         handler._initiate_shutdown.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.core
+    async def test_guided_decoding_error_after_output_keeps_error_chunk(self):
+        """After a token is emitted, a guided decoding error is engine-side."""
+        handler = self._make_handler()
+        error = RequestError(
+            "Guided decoding error: Request 7 failed to accept last new token: 42."
+        )
+        output = MagicMock()
+        output.token_ids = [42]
+        output.finish_reason = None
+        output.stop_reason = None
+        output.request_perf_metrics = None
+        output.prompt_logprobs = []
+        res = MagicMock()
+        res.outputs = [output]
+        res.finished = False
+        generation_result = MagicMock()
+        generation_result.abort = MagicMock()
+
+        async def yield_then_raise(self_mock):
+            yield res
+            raise error
+
+        generation_result.__aiter__ = yield_then_raise
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+        handler._initiate_shutdown = mock.AsyncMock()
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert len(chunks) == 2
+        assert chunks[0]["token_ids"] == [42]
+        assert chunks[1] == {
+            "finish_reason": {"error": str(error)},
+            "token_ids": [],
+        }
+        handler._initiate_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
     @pytest.mark.timeout(10)
     async def test_engine_dead_error_exits_without_engine_teardown(self, monkeypatch):
         """After an MPI rank dies, TRT-LLM teardown can block forever on IPC to
