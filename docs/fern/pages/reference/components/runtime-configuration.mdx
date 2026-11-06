@@ -260,7 +260,7 @@ address.
 </ParamField>
 
 <ParamField path="--connector" type="string" default="null">
-  KV-cache transfer connector. Accepts zero or more values. Deprecated for vLLM — use `--kv-transfer-config` instead. For TRT-LLM, valid options are `nixl`, `lmcache`, `kvbm`, `null`, and `none`.
+  KV-cache transfer connector. Accepts zero or more values. Deprecated for vLLM — use `--kv-transfer-config` instead. TensorRT-LLM supports only `none`.
 
   Environment variable: `DYN_CONNECTOR`
 </ParamField>
@@ -294,7 +294,7 @@ address.
 </ParamField>
 
 <ParamField path="--dyn-structural-tag" type="boolean or JSON object" default="enabled">
-  Structural tags default to enabled with scope `always` and schema mode `auto` for regular workers. Pass `false` to disable optional guidance, or provide a JSON object for advanced options. Rust retains native tags for Kimi K2 required/named and Kimi K3 named choices; Python vLLM and SGLang respect the opt-out. Of the native Rust sidecars, only SGLang shares this default; the vLLM and TensorRT-LLM sidecars default to `false` until their engines compile these tags. See [Structural Tag](../../use-cases/tool-calling-and-reasoning/structural-tag.md) for configuration and backend compatibility limitations.
+  Structural tags default to enabled with scope `always` and schema mode `auto` for regular workers. Pass `false` to disable optional guidance, or provide a JSON object for advanced options. Rust retains native tags for Kimi K2 required/named and Kimi K3 named choices; Python vLLM and SGLang respect the opt-out. Of the native Rust sidecars, SGLang shares this default, and vLLM shares it on vLLM 0.33 or later, including release candidates and development builds; the vLLM sidecar on older vLLM and the TensorRT-LLM sidecar default to `false` because their engines reject these tags. See [Structural Tag](../../use-cases/tool-calling-and-reasoning/structural-tag.md) for configuration and backend compatibility limitations.
 
   Environment variable: `DYN_STRUCTURAL_TAG`
 </ParamField>

@@ -63,6 +63,17 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
         self.state_source = state_source
         self.namespace_source = namespace_source
 
+    def set_max_fpm_age_seconds(self, max_fpm_age_seconds: float) -> None:
+        """Change the FPM freshness window of both subscribers in place.
+
+        Tracked samples are kept; reads and the subscribers' clean-up use the
+        new age from now on. Subscribers created later start with it.
+        """
+        for subscriber in (self._prefill_fpm_sub, self._decode_fpm_sub):
+            if subscriber is not None:
+                subscriber.set_max_age(max_age_seconds=max_fpm_age_seconds)
+        self.max_fpm_age_seconds = max_fpm_age_seconds
+
     async def async_init(self, namespace: Optional[str] = None) -> None:
         del namespace
         await self._rebind_subscribers()
