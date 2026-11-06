@@ -1212,6 +1212,36 @@ def test_mistral_force_reasoning_uses_reasoning_effort(request_data, expected):
     )
 
 
+@pytest.mark.parametrize("template_default", [False, True])
+@pytest.mark.parametrize(
+    ("request_data", "expected"),
+    [
+        ({}, True),
+        ({"reasoning_effort": "high"}, True),
+        ({"reasoning_effort": "none"}, False),
+        ({"reasoning_effort": "no_think"}, False),
+        ({"chat_template_kwargs": {"reasoning_effort": "none"}}, False),
+        ({"chat_template_args": {"reasoning_effort": "no_think"}}, False),
+        (
+            {
+                "reasoning_effort": "high",
+                "chat_template_kwargs": {"reasoning_effort": "none"},
+            },
+            True,
+        ),
+    ],
+)
+def test_hunyuan_force_reasoning_uses_reasoning_effort(
+    request_data, expected, template_default
+):
+    assert (
+        resolve_request_force_reasoning(
+            request_data, "hunyuan", template_default=template_default
+        )
+        is expected
+    )
+
+
 def _mistral_guided_request(tool_choice):
     return {
         "model": MODEL,

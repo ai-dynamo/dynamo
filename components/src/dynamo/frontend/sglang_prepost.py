@@ -167,6 +167,11 @@ def resolve_request_force_reasoning(
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )
 
+    if reasoning_parser_name == "hunyuan":
+        # Native Hunyuan serving opens thinking unless explicitly disabled.
+        effort = request.get("reasoning_effort", kwargs.get("reasoning_effort"))
+        return effort not in ("none", "no_think")
+
     if reasoning_parser_name == "minimax-m3":
         return kwargs.get("thinking_mode") != "disabled"
 

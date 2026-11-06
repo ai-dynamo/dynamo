@@ -136,12 +136,18 @@ func TestResolveWorkloadDerivesRuntimeShapeFromExecutionDevices(t *testing.T) {
 		require.ErrorContains(t, err, "localPartitions requires a hybrid build with a Cyborg conductor")
 	}
 
-	t.Log("Require resources on the independently authored hybrid conductor")
+	t.Log("Require the LPX sidecar on the hybrid conductor")
 	source := staticModelRegistry{"build": acquireHybridTestSnapshot(t)}
 	_, err = ResolveWorkload(t.Context(), reader, dgd, singleGroupComponents(t, dgd), source)
-	require.ErrorContains(t, err, "requires a positive GPU count")
+	require.ErrorIs(t, err, ErrUnsupportedRuntime)
+	require.EqualError(t, err, `unsupported LPX runtime: component "LPX" conductor of a hybrid build requires the LPX sidecar; declare the "runtime" init container`)
+
+	t.Log("Require resources on the independently authored hybrid conductor")
 	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
 	conductor.PodTemplate = testLPXPodTemplate("cyborg-runtime")
+	conductor.PodTemplate.Spec.InitContainers = []corev1.Container{
+		{Name: commonconsts.RuntimeContainerName, Image: "sidecar", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways)},
+	}
 	_, err = ResolveWorkload(t.Context(), reader, dgd, singleGroupComponents(t, dgd), source)
 	require.ErrorContains(t, err, "requires a positive GPU count")
 
