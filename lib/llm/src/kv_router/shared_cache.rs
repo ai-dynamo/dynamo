@@ -279,6 +279,8 @@ enum QueryToken {
     Bigram(u32, u32),
 }
 
+#[cfg(test)]
+type GroupVerificationHook = Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>;
 type TenantKey = (Arc<str>, String);
 
 /// Event-driven shared KV cache index for SGLang HiCache (L3) state.
@@ -289,11 +291,16 @@ pub struct HicacheSharedKvCache {
     /// Linker layout: logical page keys with at least one stored component object.
     present_pages: Arc<DashSet<TenantKey>>,
     group_states: Arc<DashMap<TenantKey, (u64, bool)>>,
+    next_group_revision: Arc<AtomicU64>,
     last_sequence: Arc<AtomicU64>,
     has_sequence: Arc<AtomicBool>,
     last_layout: Arc<ArcSwapOption<SglangHicacheMooncakeConfig>>,
     cancellation_token: CancellationToken,
     frontend_kv_events_endpoint: Option<String>,
+    #[cfg(test)]
+    before_group_verification: GroupVerificationHook,
+    #[cfg(test)]
+    after_group_store: GroupVerificationHook,
     session_index: Arc<ArcSwapOption<SessionPrefixIndexer>>,
 }
 
@@ -319,11 +326,16 @@ impl HicacheSharedKvCache {
             present_keys: Arc::new(DashSet::new()),
             present_pages: Arc::new(DashSet::new()),
             group_states: Arc::new(DashMap::new()),
+            next_group_revision: Arc::new(AtomicU64::new(0)),
             last_sequence: Arc::new(AtomicU64::new(0)),
             has_sequence: Arc::new(AtomicBool::new(false)),
             last_layout: Arc::new(ArcSwapOption::empty()),
             cancellation_token,
             frontend_kv_events_endpoint,
+            #[cfg(test)]
+            before_group_verification: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            after_group_store: Arc::new(std::sync::Mutex::new(None)),
             session_index: Arc::new(ArcSwapOption::empty()),
         }
     }
@@ -500,7 +512,18 @@ impl HicacheSharedKvCache {
             match event.event_type.as_str() {
                 "stored" => {
                     if let Some(group_id) = group_id {
-                        self.group_states.insert(group_id, (sequence, false));
+                        // Wire sequences may repeat after reconnect, or identify
+                        // several mutations of this group in the same batch.
+                        // Keep revisions unique across clears and cache clones.
+                        let revision = self.next_group_revision.fetch_add(1, Ordering::Relaxed);
+                        self.group_states.insert(group_id, (revision, false));
+                        #[cfg(test)]
+                        {
+                            let hook = self.after_group_store.lock().unwrap().take();
+                            if let Some(hook) = hook {
+                                hook();
+                            }
+                        }
                     }
                 }
                 "removed" => {
@@ -745,6 +768,13 @@ impl SharedKvCache for HicacheSharedKvCache {
                         .into_iter()
                         .all(|key| self.present_keys.contains(&(Arc::clone(&tenant), key)))
                 };
+                #[cfg(test)]
+                if hit {
+                    let hook = self.before_group_verification.lock().unwrap().take();
+                    if let Some(hook) = hook {
+                        hook();
+                    }
+                }
                 if hit
                     && let Some((generation, _)) = generation
                     && let Some(mut state) = self.group_states.get_mut(&group_id)
@@ -956,6 +986,202 @@ mod tests {
 
     fn runtime_watch_with_config(config: SglangHicacheMooncakeConfig) -> RuntimeConfigWatch {
         runtime_watch_with_config_and_sender(config).0
+    }
+
+    async fn stale_group_verification_after_reconnect(restarted_sequence: u64) {
+        let config = mooncake_config();
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config.clone()));
+        let tokens = [1, 2, 3, 4];
+        let hash = logical_page_hashes(&tokens, config.page_size, config.is_eagle)
+            .pop()
+            .unwrap();
+        let group_id = sglang_group_id(&hash, &config);
+        let tenant: Arc<str> = config.tenant_id().into();
+        let keys = expand_actual_query_keys(&hash, &config);
+        assert!(keys.len() > 1);
+        let stored = |object_key: String| MooncakeObjectEvent {
+            event_type: "stored".to_string(),
+            object_key: Some(object_key),
+            tenant_id: "default".to_string(),
+            group_id: Some(group_id.clone()),
+            ..Default::default()
+        };
+        cache.apply_batch(
+            &tenant,
+            MooncakeKeyLayout::Hicache,
+            1,
+            keys.iter().cloned().map(stored).collect(),
+        );
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        *cache.before_group_verification.lock().unwrap() = Some(Box::new(move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }));
+        let query_cache = cache.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let query = std::thread::spawn(move || {
+            runtime.block_on(query_cache.check_blocks(&tokens, 4, None))
+        });
+        let reached_verification = entered_rx.recv_timeout(Duration::from_secs(5));
+        if reached_verification.is_ok() {
+            // Subscriber reconnect clears the old evidence before receiving
+            // a new publisher's first, still-incomplete group.
+            cache.clear();
+            cache.apply_batch(
+                &tenant,
+                MooncakeKeyLayout::Hicache,
+                restarted_sequence,
+                vec![stored(keys[0].clone())],
+            );
+        }
+        let _ = release_tx.send(());
+        let previous_hit = query.join().unwrap().unwrap();
+        reached_verification.expect("query did not reach verification gate");
+        assert_eq!(previous_hit.total_hits, 1);
+        assert!(
+            !cache
+                .present_keys
+                .contains(&(Arc::clone(&tenant), keys[1].clone()))
+        );
+        assert_eq!(
+            cache
+                .check_blocks(&tokens, 4, None)
+                .await
+                .unwrap()
+                .total_hits,
+            0
+        );
+        assert!(
+            cache
+                .group_states
+                .get(&(Arc::clone(&tenant), group_id.clone()))
+                .is_some_and(|state| !state.1)
+        );
+
+        cache.apply_batch(
+            &tenant,
+            MooncakeKeyLayout::Hicache,
+            restarted_sequence + 1,
+            keys.into_iter().skip(1).map(stored).collect(),
+        );
+        assert_eq!(
+            cache
+                .check_blocks(&tokens, 4, None)
+                .await
+                .unwrap()
+                .total_hits,
+            1
+        );
+        assert!(
+            cache
+                .group_states
+                .get(&(Arc::clone(&tenant), group_id.clone()))
+                .is_some_and(|state| state.1)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_group_verification_rejects_reused_sequence_after_reconnect() {
+        stale_group_verification_after_reconnect(1).await;
+    }
+
+    #[tokio::test]
+    async fn test_group_verification_rejects_replacement_within_batch() {
+        let config = mooncake_config();
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config.clone()));
+        let tokens = [1, 2, 3, 4];
+        let hash = logical_page_hashes(&tokens, config.page_size, config.is_eagle)
+            .pop()
+            .unwrap();
+        let group_id = sglang_group_id(&hash, &config);
+        let tenant: Arc<str> = config.tenant_id().into();
+        let keys = expand_actual_query_keys(&hash, &config);
+        assert_eq!(keys.len(), 2);
+        let event = |kind: &str, key: &str| MooncakeObjectEvent {
+            event_type: kind.to_string(),
+            object_key: Some(key.to_string()),
+            tenant_id: "default".to_string(),
+            group_id: Some(group_id.clone()),
+            ..Default::default()
+        };
+        cache.apply_batch(
+            &tenant,
+            MooncakeKeyLayout::Hicache,
+            0,
+            keys.iter().map(|key| event("stored", key)).collect(),
+        );
+
+        let (stored_tx, stored_rx) = std::sync::mpsc::sync_channel(1);
+        let (continue_batch_tx, continue_batch_rx) = std::sync::mpsc::sync_channel(1);
+        *cache.after_group_store.lock().unwrap() = Some(Box::new(move || {
+            stored_tx.send(()).unwrap();
+            continue_batch_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+        }));
+        let (queried_tx, queried_rx) = std::sync::mpsc::sync_channel(1);
+        let (continue_query_tx, continue_query_rx) = std::sync::mpsc::sync_channel(1);
+        *cache.before_group_verification.lock().unwrap() = Some(Box::new(move || {
+            queried_tx.send(()).unwrap();
+            continue_query_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+        }));
+        let batch = vec![
+            event("stored", &keys[0]),
+            event("removed", &keys[1]),
+            event("stored", &keys[0]),
+        ];
+        let publisher_cache = cache.clone();
+        let publisher_tenant = Arc::clone(&tenant);
+        let publisher = std::thread::spawn(move || {
+            publisher_cache.apply_batch(&publisher_tenant, MooncakeKeyLayout::Hicache, 1, batch)
+        });
+        let stored = stored_rx.recv_timeout(Duration::from_secs(5));
+        let query_cache = cache.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let query = std::thread::spawn(move || {
+            runtime.block_on(query_cache.check_blocks(&tokens, 4, None))
+        });
+        let queried = queried_rx.recv_timeout(Duration::from_secs(5));
+        let _ = continue_batch_tx.send(());
+        let published = publisher.join();
+        let _ = continue_query_tx.send(());
+        let previous_hit = query.join().unwrap().unwrap();
+        stored.expect("publisher did not reach store gate");
+        queried.expect("query did not reach verification gate");
+        published.unwrap();
+        assert_eq!(previous_hit.total_hits, 1);
+        assert!(
+            !cache
+                .present_keys
+                .contains(&(Arc::clone(&tenant), keys[1].clone()))
+        );
+        assert_eq!(
+            cache
+                .check_blocks(&tokens, 4, None)
+                .await
+                .unwrap()
+                .total_hits,
+            0
+        );
+
+        cache.apply_batch(
+            &tenant,
+            MooncakeKeyLayout::Hicache,
+            2,
+            vec![event("stored", &keys[1])],
+        );
+        assert_eq!(
+            cache
+                .check_blocks(&tokens, 4, None)
+                .await
+                .unwrap()
+                .total_hits,
+            1
+        );
     }
 
     async fn hits(cache: &HicacheSharedKvCache) -> u32 {
