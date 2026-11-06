@@ -1465,11 +1465,29 @@ fn calibrated_hosted_artifacts_reconcile_every_request() -> Result<()> {
     )?;
     let (mut backend, typed) = host_typed(&run, &prefill, &decode, true)?;
     let (complete_backend, complete_typed) = host_typed(&run, &prefill, &decode, false)?;
+    let mut compact_physical = serde_json::to_value(&backend)?;
+    let mut complete_physical = serde_json::to_value(&complete_backend)?;
+    // Host execution cost is real elapsed time (including cold FPM work), not
+    // simulated physics. Keep it in raw outputs; exclude exactly that clock
+    // and its two derived rates from this semantic equivalence assertion.
+    for report in [&mut compact_physical, &mut complete_physical] {
+        let fields = report.as_object_mut().context("backend report object")?;
+        for field in [
+            "wall_time_ms",
+            "processed_tokens_per_s",
+            "processed_output_tokens_per_s",
+        ] {
+            ensure!(
+                fields.remove(field).is_some(),
+                "host cost field {field} missing"
+            );
+        }
+    }
     ensure!(
-        serde_json::to_value(&backend)? == serde_json::to_value(&complete_backend)?,
+        compact_physical == complete_physical,
         "compact capture changed physical replay facts: compact={} complete={}",
-        serde_json::to_string(&backend)?,
-        serde_json::to_string(&complete_backend)?
+        compact_physical,
+        complete_physical
     );
     ensure!(
         serde_json::to_value(&typed.phased)? == serde_json::to_value(&complete_typed.phased)?,
