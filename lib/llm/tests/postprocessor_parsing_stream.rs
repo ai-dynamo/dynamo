@@ -494,6 +494,7 @@ fn mock_content_chunk(content: &str) -> NvCreateChatCompletionStreamResponse {
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -540,6 +541,7 @@ fn mock_multi_choice_content_chunk(
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -583,6 +585,7 @@ fn mock_reasoning_only_chunk(reasoning: &str) -> NvCreateChatCompletionStreamRes
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -621,6 +624,7 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -652,6 +656,7 @@ fn mock_usage_only_chunk() -> NvCreateChatCompletionStreamResponse {
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
@@ -695,6 +700,7 @@ fn mock_multi_choice_final_chunk(indices: &[u32]) -> NvCreateChatCompletionStrea
         prompt_logprobs: None,
         llm_metrics: None,
         tool_call_completion: Vec::new(),
+        model_eos: Vec::new(),
     }
 }
 
