@@ -12,7 +12,7 @@ The NVIDIA Dynamo project uses containerized development and deployment to maint
 
 ### Core Components
 
-- **`render.py`** - A render script used to generate Dockerfiles for AI inference frameworks (vLLM, TensorRT-LLM, SGLang, Triton Inference Server) and the frontend image. The generated Dockerfile includes the needed multi-stage steps for development vs production configurations.
+- **`render.py`** - A render script used to generate Dockerfiles for AI inference frameworks (vLLM, TensorRT-LLM, SGLang, Triton Inference Server, TokenSpeed) and the frontend image. The generated Dockerfile includes the needed multi-stage steps for development vs production configurations.
 
 - **`run.sh`** - A container runtime manager that launches Docker containers with proper GPU access, volume mounts, and environment configurations. It supports different development workflows from root-based legacy setups to user-based development environments.
 
@@ -154,7 +154,7 @@ The `render.py` script is responsible for generating Dockerfiles for different A
 - Configures development vs production targets
 
 **Key Features:**
-- **Framework Support**: vLLM (default when --framework not specified), TensorRT-LLM, SGLang, or NONE (standalone Dynamo)
+- **Framework Support**: vLLM (default when --framework not specified), TensorRT-LLM, SGLang, Triton Inference Server, TokenSpeed, or NONE (standalone Dynamo)
 - **Multi-stage Builds**: Build process with base images
 - **Development Targets**: Supports `dev`, `runtime`, and `local-dev` targets via `render.py`.
 - **Build Caching**: Docker layer caching and sccache support
@@ -255,7 +255,19 @@ docker build -t dynamo:latest-sglang-xpu-runtime -f container/sglang-runtime-xpu
 # (defaults to 26.09-py3); pick any nvcr.io/nvidia/tritonserver:<tag>.
 container/render.py --framework=triton --target=runtime --output-short-filename
 docker build --network=host --build-arg RUNTIME_IMAGE_TAG=26.09-py3 -t dynamo:latest-triton-runtime -f container/rendered.Dockerfile .
+
+# Build TokenSpeed on an NVIDIA CUDA base with the pinned nightly wheels.
+container/render.py --framework=tokenspeed --target=runtime --platform=linux/amd64,linux/arm64
+docker buildx build --platform=linux/amd64,linux/arm64 -t <registry>/dynamo:tokenspeed-runtime --push -f container/tokenspeed-runtime-cuda13.0-multi-rendered.Dockerfile .
 ```
+
+**TokenSpeed runtime**
+
+The TokenSpeed target starts from NVIDIA's `nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04`, installs TokenSpeed's published CUDA 13.0 wheels, and adds Dynamo wheels from the shared `wheel_builder` stage. The CUDA development toolkit stays in the runtime because TokenSpeed compiles kernels at runtime. It supports CPython 3.12 on amd64 and arm64; `runtime` is the only supported target, and EFA is not configured.
+
+The pins and wheel SHA256 values live in `context.yaml`. The initial pin is the November 6, 2026 **nightly**: `tokenspeed==0.1.1.post20261106`, `tokenspeed-kernel==0.1.4.post20261106`, and `tokenspeed-engine==0.1.0.post20261106`, all built from upstream commit `ee5b468f165af2ec33e6a581d683b7d4a396e00f`. The latest stable release at that time, `0.1.1`, predates the headless engine integration in [#18328](https://github.com/ai-dynamo/dynamo/pull/18328). That worker update is required to serve requests with this image. These date-stamped `.post` wheels are published as nightlies by TokenSpeed, even though Python version tools classify them as post-releases rather than prereleases. Update the three wheels and hashes together; the Dockerfile never resolves a moving `latest` nightly.
+
+PyTorch `2.14.0+cu130`, torchvision `0.29.0+cu130`, scheduler `0.1.49`, and FlashInfer `0.7.2.post1` are pinned to the wheel set's requirements. Dependencies are resolved when installing TokenSpeed and Dynamo, with constraints preserving that stack. The image includes NATS and etcd for local bring-up and matching FlashInfer precompiled kernels. To build only the framework layer for dependency validation, pass `--target tokenspeed` to `docker buildx build`. Image publication in Dynamo's release pipelines and scheduled GPU tests are separate work.
 
 The `--device` flag selects the accelerator backend. It defaults to `cuda`; pass `--device=xpu`
 to produce an Intel XPU image (currently supported for `--framework=sglang`).

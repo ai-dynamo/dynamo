@@ -65,7 +65,7 @@ def parse_args():
         "--framework",
         type=str,
         default="vllm",
-        choices=["dynamo", "vllm", "sglang", "trtllm", "triton"],
+        choices=["dynamo", "vllm", "sglang", "trtllm", "triton", "tokenspeed"],
         help="Dockerfile framework to use",
     )
 
@@ -157,6 +157,11 @@ def validate_args(args):
             ],
             "cuda_version": ["13.0"],
         },
+        "tokenspeed": {
+            "device": ["cuda"],
+            "target": ["runtime"],
+            "cuda_version": ["13.0"],
+        },
         "triton": {
             "device": ["cuda"],
             # Triton is runtime-only: Dynamo is installed from prebuilt PyPI wheels
@@ -181,6 +186,9 @@ def validate_args(args):
             "cuda_version": ["13.0"],
         },
     }
+
+    if args.framework == "tokenspeed" and args.make_efa:
+        raise ValueError("TokenSpeed EFA builds are not supported.")
 
     # Triton's CUDA family is fixed by its release image, so it cannot be chosen
     # by the user: reject an explicitly-passed --cuda-version (detected from argv
