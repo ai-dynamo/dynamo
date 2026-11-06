@@ -3628,6 +3628,7 @@ impl OpenAIPreprocessor {
 
         // apply ignore eos if not already set
         stop_conditions.apply_ignore_eos();
+        self.apply_single_tool_call_stop(request, &mut stop_conditions)?;
 
         if !stop_conditions.ignore_eos.unwrap_or(false) {
             builder.eos_token_ids(eos_token_ids);
@@ -3754,6 +3755,37 @@ impl OpenAIPreprocessor {
         }
 
         Ok(builder)
+    }
+
+    fn apply_single_tool_call_stop<R: OAIChatLikeRequest + CommonExtProvider>(
+        &self,
+        request: &R,
+        stop_conditions: &mut crate::protocols::common::StopConditions,
+    ) -> Result<()> {
+        if request.get_parallel_tool_calls() == Some(false)
+            && Self::request_has_effective_tools(request)
+            && request
+                .tool_choice()
+                .as_ref()
+                .and_then(|choice| choice.as_str())
+                != Some("none")
+            && self
+                .runtime_config
+                .get_engine_specific::<bool>(
+                    crate::local_model::runtime_config::VISIBLE_STOP_STRINGS_CAPABILITY,
+                )?
+                .unwrap_or(false)
+        {
+            let boundary = match self.tool_call_parser.as_deref() {
+                Some("kimi_k3" | "kimi-k3") => Some("<|close|>call<|sep|>"),
+                Some("glm4" | "glm47") => Some("</tool_call>"),
+                _ => None,
+            };
+            if let Some(boundary) = boundary {
+                stop_conditions.stop_visible = Some(vec![boundary.to_string()]);
+            }
+        }
+        Ok(())
     }
 
     fn remove_tool_parser_end_tokens_from_hidden_stops<R: OAIChatLikeRequest>(
@@ -12780,6 +12812,39 @@ responses_tools: None,
             .unwrap();
         assert!(none_visible.is_empty());
         assert_eq!(none_hidden, [HARMONY_CALL_TOKEN_ID, 7]);
+    }
+
+    #[test]
+    fn single_call_boundary_requires_worker_support_and_explicit_false() {
+        use crate::local_model::runtime_config::VISIBLE_STOP_STRINGS_CAPABILITY;
+        let mut preprocessor = hidden_stop_preprocessor();
+        preprocessor.tool_call_parser = Some("kimi_k3".into());
+        for supported in [false, true] {
+            preprocessor
+                .runtime_config
+                .set_engine_specific(VISIBLE_STOP_STRINGS_CAPABILITY, supported)
+                .unwrap();
+            for parallel in [None, Some(true), Some(false)] {
+                for choice in ["auto", "none"] {
+                    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+                        "model":"m", "messages":[{"role":"user","content":"test"}],
+                        "tools":[{"type":"function","function":{"name":"exec","parameters":{"type":"object"}}}],
+                        "tool_choice":choice, "parallel_tool_calls":parallel
+                    })).unwrap();
+                    let mut stops = crate::protocols::common::StopConditions::default();
+                    preprocessor
+                        .apply_single_tool_call_stop(&request, &mut stops)
+                        .unwrap();
+                    assert_eq!(
+                        stops.stop_visible.is_some(),
+                        supported && parallel == Some(false) && choice != "none"
+                    );
+                    if let Some(stops) = stops.stop_visible {
+                        assert_eq!(stops, ["<|close|>call<|sep|>"]);
+                    }
+                }
+            }
+        }
     }
 
     async fn apply_kimi_k3_no_tools(

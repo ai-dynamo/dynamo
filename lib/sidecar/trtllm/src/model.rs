@@ -30,6 +30,11 @@ impl ConfiguredModel {
             serde_json::Value::String("openengine.v1.Inference".to_string()),
         );
 
+        runtime_data.insert(
+            dynamo_llm::local_model::runtime_config::VISIBLE_STOP_STRINGS_CAPABILITY.to_string(),
+            serde_json::Value::Bool(true),
+        );
+
         EngineConfig {
             model: self.source.clone(),
             served_model_name: None,

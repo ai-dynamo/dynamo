@@ -11,6 +11,7 @@ pub struct ResponsesToolContext {
     pub tools: Vec<RequestTool>,
     pub declared_tools: Vec<RequestTool>,
     pub(super) native: bool,
+    pub(super) kimi_replay: bool,
     pub names: ToolNameMap,
     pub(super) legacy_history: Option<Vec<ChatCompletionRequestMessage>>,
     pub(super) phase_history: Option<(
@@ -322,6 +323,49 @@ impl NvCreateChatCompletionRequest {
         validate_tools(&Some(definitions.as_slice()))
     }
 
+    /// Preserve Kimi call spelling and result binding when agent history is replayed.
+    pub(crate) fn normalize_kimi_replay(&mut self) -> anyhow::Result<()> {
+        self.inner.messages = super::request_compat::kimi_history(&self.inner.messages)?;
+        if let Some(context) = &mut self.responses_tools {
+            context.kimi_replay = true;
+            for (call_id, spellings) in &mut context.history_tool_names {
+                if call_id.ends_with("_bare") {
+                    continue;
+                }
+                for spelling in spellings {
+                    let (namespace, leaf) = context.names.decode(spelling);
+                    if namespace.is_some() {
+                        continue;
+                    }
+                    let mut owners = Vec::new();
+                    let mut bare_declared = false;
+                    for tool in &context.tools {
+                        match &tool.inner {
+                            Tool::Function(tool) if tool.name == leaf => bare_declared = true,
+                            Tool::Custom(tool) if tool.name == leaf => bare_declared = true,
+                            Tool::Namespace(namespace)
+                                if namespace
+                                    .tools
+                                    .iter()
+                                    .any(|member| namespace_member_name(member) == leaf) =>
+                            {
+                                owners.push(namespace.name.as_str());
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !bare_declared && owners.len() == 1 {
+                        *spelling = format!("{}.{}", owners[0], leaf);
+                    }
+                }
+            }
+            if let Some(history) = &mut context.legacy_history {
+                *history = super::request_compat::kimi_history(history)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Phase replay is a model capability, independent of namespace rendering.
     pub(crate) fn normalize_responses_history_phases(&mut self, enabled: bool) {
         if let Some(context) = &mut self.responses_tools
@@ -381,7 +425,11 @@ impl NvCreateChatCompletionRequest {
                         .get(&call.id)
                         .and_then(|names| names.get(*occurrence))
                         .unwrap_or(&call.function.name);
-                    call.function.name = resolve(original);
+                    call.function.name = if context.kimi_replay && call.id.ends_with("_bare") {
+                        context.names.decode(original).1.to_string()
+                    } else {
+                        resolve(original)
+                    };
                     *occurrence += 1;
                 }
             }
@@ -623,6 +671,15 @@ impl ResponseParams {
             )?);
         }
         let (name, namespace, custom) = self.tool_identity(emitted);
+        let call_id = if self.preserve_tool_spelling
+            && namespace.is_some()
+            && emitted == name
+            && !call_id.ends_with("_bare")
+        {
+            format!("{call_id}_bare")
+        } else {
+            call_id
+        };
         if custom {
             let input = if (arguments.is_empty() && status == OutputStatus::InProgress)
                 || (status == OutputStatus::Incomplete

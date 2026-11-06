@@ -6,6 +6,8 @@ use dynamo_renderer::response_tools::{
     native_tools_for_chat_template,
 };
 
+mod reasoning_replay;
+pub(crate) mod request_compat;
 pub mod stream_converter;
 mod template_tools;
 mod tool_names;
@@ -687,7 +689,16 @@ fn convert_input_items_to_messages(
                             .map(|SummaryPart::SummaryText(part)| part.text.as_str())
                             .collect::<String>()
                     };
-                    let text = content.unwrap_or_else(summary);
+                    let decoded = if content.is_none() {
+                        r.encrypted_content
+                            .as_deref()
+                            .map(reasoning_replay::decode)
+                            .transpose()?
+                            .flatten()
+                    } else {
+                        None
+                    };
+                    let text = content.or(decoded).unwrap_or_else(summary);
                     pending.push_reasoning(&text);
                 }
                 other => {
@@ -1321,6 +1332,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 .collect()
         });
         let responses_tools = Some(ResponsesToolContext {
+            kimi_replay: false,
             tools: effective_tools,
             declared_tools: resp.inner.tools.clone().unwrap_or_default(),
             native: false,
@@ -1383,6 +1395,8 @@ fn convert_top_logprobs(input: Option<u8>) -> Option<u8> {
 pub struct ResponseParams {
     /// Includes historical tool identities so response aliases match request conversion.
     pub tool_names: Option<ToolNameMap>,
+    /// Preserve a Kimi model's bare spelling across namespaced tool replay.
+    pub preserve_tool_spelling: bool,
     pub model: Option<String>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
@@ -1432,11 +1446,19 @@ pub(crate) fn responses_incomplete_reason(
 }
 
 impl ResponseParams {
-    fn reasoning_summary_requested(&self) -> bool {
-        self.reasoning
+    fn reasoning_encrypted_content_requested(&self) -> bool {
+        self.include
             .as_ref()
-            .and_then(|reasoning| reasoning.summary)
-            .is_some()
+            .is_some_and(|include| include.contains(&IncludeEnum::ReasoningEncryptedContent))
+    }
+
+    fn reasoning_summary_requested(&self) -> bool {
+        self.reasoning_encrypted_content_requested()
+            || self
+                .reasoning
+                .as_ref()
+                .and_then(|reasoning| reasoning.summary)
+                .is_some()
     }
 
     /// Borrow the retained history-aware map, or rebuild from current tool definitions
@@ -1559,10 +1581,12 @@ pub fn chat_completion_to_response(
                 summary: vec![],
                 content: Some(vec![ReasoningItemContent::ReasoningText(
                     ReasoningTextContent {
-                        text: reasoning_text,
+                        text: reasoning_text.clone(),
                     },
                 )]),
-                encrypted_content: None,
+                encrypted_content: params
+                    .reasoning_encrypted_content_requested()
+                    .then(|| reasoning_replay::encode(&reasoning_text)),
                 status: Some(OutputStatus::Completed),
             }));
         }
@@ -1693,9 +1717,13 @@ pub fn chat_completion_to_response(
                                 id: Some(format!("rs_{}", Uuid::new_v4().simple())),
                                 summary: vec![],
                                 content: Some(vec![ReasoningItemContent::ReasoningText(
-                                    ReasoningTextContent { text: reasoning },
+                                    ReasoningTextContent {
+                                        text: reasoning.clone(),
+                                    },
                                 )]),
-                                encrypted_content: None,
+                                encrypted_content: params
+                                    .reasoning_encrypted_content_requested()
+                                    .then(|| reasoning_replay::encode(&reasoning)),
                                 status: Some(OutputStatus::Completed),
                             }));
                         }
@@ -4544,6 +4572,130 @@ mod tests {
             prompt_logprobs: None,
             nvext: None,
         }
+    }
+
+    #[test]
+    fn kimi_replay_restores_dropped_namespace_unless_model_used_a_bare_name() {
+        for (id, expected) in [("call_1", "functions.exec"), ("call_1_bare", "exec")] {
+            let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+                "model":"m", "tools":[{"type":"namespace","name":"functions","tools":[
+                    {"type":"function","name":"exec","parameters":{"type":"object"}}
+                ]}], "input":[{"type":"function_call","call_id":id,"name":"exec","arguments":"{}"}]
+            }))
+            .unwrap();
+            let mut chat: NvCreateChatCompletionRequest = request.try_into().unwrap();
+            chat.normalize_kimi_replay().unwrap();
+            chat.normalize_responses_history_phases(false);
+            chat.normalize_responses_tools(true).unwrap();
+            let ChatCompletionRequestMessage::Assistant(assistant) = &chat.inner.messages[0] else {
+                panic!("missing assistant");
+            };
+            assert_eq!(
+                assistant.tool_calls.as_ref().unwrap()[0].function.name,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn kimi_bare_tool_name_survives_namespaced_client_replay() {
+        let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model":"m", "input":"run pwd", "tools":[{"type":"namespace", "name":"functions", "tools":[
+                {"type":"function", "name":"exec", "parameters":{"type":"object"}}
+            ]}]
+        })).unwrap();
+        let tools = request
+            .inner
+            .tools
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|tool| tool.inner.clone())
+            .collect();
+        let params = ResponseParams {
+            tools: Some(tools),
+            preserve_tool_spelling: true,
+            ..Default::default()
+        };
+        let item = params
+            .tool_output(
+                "fc_1".into(),
+                "call_1".into(),
+                "exec",
+                "{}",
+                OutputStatus::Completed,
+            )
+            .unwrap();
+        let OutputItem::FunctionCall(call) = &item else {
+            panic!("missing function call");
+        };
+        assert_eq!(call.call_id, "call_1_bare");
+        assert_eq!(call.namespace.as_deref(), Some("functions"));
+        let mut body = serde_json::to_value(request).unwrap();
+        body["input"] = serde_json::json!([item]);
+        let replay: NvCreateResponse = serde_json::from_value(body).unwrap();
+        let mut chat: NvCreateChatCompletionRequest = replay.try_into().unwrap();
+        chat.normalize_kimi_replay().unwrap();
+        chat.normalize_responses_tools(true).unwrap();
+        let ChatCompletionRequestMessage::Assistant(assistant) = &chat.inner.messages[0] else {
+            panic!("missing assistant");
+        };
+        let call = &assistant.tool_calls.as_ref().unwrap()[0];
+        assert_eq!(call.function.name, "exec");
+        assert_eq!(call.id, "call_1_bare");
+    }
+
+    #[test]
+    fn encoded_reasoning_round_trips_without_readable_content() {
+        let text = " exact\n工具 ";
+        let params = ResponseParams {
+            include: Some(vec![IncludeEnum::ReasoningEncryptedContent]),
+            ..Default::default()
+        };
+        let response =
+            chat_completion_to_response(make_chat_resp_with_reasoning(text), &params, None)
+                .unwrap();
+        let OutputItem::Reasoning(item) = &response.inner.output[0] else {
+            panic!("missing reasoning");
+        };
+        assert_eq!(
+            item.encrypted_content.as_deref(),
+            Some(reasoning_replay::encode(text).as_str())
+        );
+        let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model":"m", "input":[{"type":"reasoning", "summary":[], "encrypted_content":item.encrypted_content}]
+        })).unwrap();
+        let chat: NvCreateChatCompletionRequest = request.try_into().unwrap();
+        let ChatCompletionRequestMessage::Assistant(assistant) = &chat.inner.messages[0] else {
+            panic!("missing assistant");
+        };
+        assert_eq!(
+            assistant.reasoning_content.as_ref(),
+            Some(&ReasoningContent::Text(text.into()))
+        );
+    }
+
+    #[test]
+    fn malformed_encoded_reasoning_is_a_validation_error() {
+        let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model":"m", "input":[{"type":"reasoning", "summary":[], "encrypted_content":"trtllm-reasoning-v1:!!!"}]
+        })).unwrap();
+        let error = NvCreateChatCompletionRequest::try_from(request).unwrap_err();
+        assert!(error.downcast_ref::<ResponsesConversionError>().is_some());
+        let readable: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model":"m", "input":[{"type":"reasoning", "summary":[],
+                "content":[{"text":"exact readable history"}],
+                "encrypted_content":"trtllm-reasoning-v1:!!!"}]
+        }))
+        .unwrap();
+        let chat = NvCreateChatCompletionRequest::try_from(readable).unwrap();
+        let ChatCompletionRequestMessage::Assistant(assistant) = &chat.inner.messages[0] else {
+            panic!("missing assistant");
+        };
+        assert_eq!(
+            assistant.reasoning_content.as_ref(),
+            Some(&ReasoningContent::Text("exact readable history".into()))
+        );
     }
 
     fn make_chat_resp_with_reasoning(reasoning: &str) -> NvCreateChatCompletionResponse {

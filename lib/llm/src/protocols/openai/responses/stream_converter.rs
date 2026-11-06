@@ -19,13 +19,14 @@ use dynamo_protocols::types::responses::{
     OutputTokenDetails, ReasoningItem, ReasoningItemContent, ReasoningTextContent, RefusalContent,
     RequestToolChoiceParam, Response, ResponseCompletedEvent, ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent, ResponseCreatedEvent, ResponseCustomToolCallInputDeltaEvent,
-    ResponseCustomToolCallInputDoneEvent, ResponseError, ResponseErrorCode, ResponseFailedEvent,
-    ResponseFunctionCallArgumentsDeltaEvent, ResponseFunctionCallArgumentsDoneEvent,
-    ResponseInProgressEvent, ResponseIncompleteEvent, ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent, ResponseReasoningTextDeltaEvent, ResponseReasoningTextDoneEvent,
-    ResponseRefusalDeltaEvent, ResponseRefusalDoneEvent, ResponseStreamEvent,
-    ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam, ResponseUsage,
-    ServiceTierResponses, Status, TextResponseFormatConfiguration, ToolChoiceOptions, Truncation,
+    ResponseCustomToolCallInputDoneEvent, ResponseError, ResponseErrorCode, ResponseErrorEvent,
+    ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent, ResponseIncompleteEvent,
+    ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent, ResponseReasoningTextDeltaEvent,
+    ResponseReasoningTextDoneEvent, ResponseRefusalDeltaEvent, ResponseRefusalDoneEvent,
+    ResponseStreamEvent, ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam,
+    ResponseUsage, ServiceTierResponses, Status, TextResponseFormatConfiguration,
+    ToolChoiceOptions, Truncation,
 };
 use serde::{
     Serialize,
@@ -87,7 +88,11 @@ struct ReasoningState {
 }
 
 impl ReasoningState {
-    fn completed_item(&self, output_status: OutputStatus) -> ReasoningItem {
+    fn completed_item(
+        &self,
+        output_status: OutputStatus,
+        include_encrypted: bool,
+    ) -> ReasoningItem {
         ReasoningItem {
             id: Some(self.item_id.clone()),
             summary: vec![],
@@ -96,7 +101,8 @@ impl ReasoningState {
                     text: self.accumulated_text.clone(),
                 },
             )]),
-            encrypted_content: None,
+            encrypted_content: include_encrypted
+                .then(|| super::reasoning_replay::encode(&self.accumulated_text)),
             status: Some(self.output_status.unwrap_or(output_status)),
         }
     }
@@ -321,7 +327,10 @@ impl ResponseStreamConverter {
                 state.item_id.clone(),
                 state.output_index,
                 state.accumulated_text.clone(),
-                state.completed_item(output_status),
+                state.completed_item(
+                    output_status,
+                    self.params.reasoning_encrypted_content_requested(),
+                ),
             )
         };
 
@@ -1066,7 +1075,10 @@ impl ResponseStreamConverter {
         for reasoning in &self.reasoning_items {
             output.push((
                 reasoning.output_index,
-                OutputItem::Reasoning(reasoning.completed_item(output_status)),
+                OutputItem::Reasoning(reasoning.completed_item(
+                    output_status,
+                    self.params.reasoning_encrypted_content_requested(),
+                )),
             ));
         }
         if self.message_started {
@@ -1267,6 +1279,21 @@ impl ResponseStreamConverter {
         self.close_open_message_item(events, output_status);
         self.append_pending_function_call_done_events(events, output_status, false);
 
+        let wire_code = serde_json::to_value(&error.code)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned));
+        // Overflow recovery consumes response.failed; do not precede it with
+        // a standalone error that may end the client's read loop.
+        if !matches!(&error.code, ResponseErrorCode::Other(code) if code == "context_length_exceeded")
+        {
+            let error_event = ResponseStreamEvent::ResponseError(ResponseErrorEvent {
+                sequence_number: self.next_seq(),
+                code: wire_code,
+                message: error.message.clone(),
+                param: None,
+            });
+            events.push(self.make_sse_event(&error_event));
+        }
         let mut response =
             self.make_response(Status::Failed, self.output_with_status(output_status));
         response.error = Some(error);
@@ -1606,6 +1633,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn requested_encoded_reasoning_matches_done_and_terminal_snapshot() {
+        let params = ResponseParams {
+            include: Some(vec![super::super::IncludeEnum::ReasoningEncryptedContent]),
+            ..Default::default()
+        };
+        let mut converter = ResponseStreamConverter::new("m".into(), params);
+        converter.process_chunk(&reasoning_chunk(" exact\n"));
+        converter.process_chunk(&reasoning_chunk("工具 "));
+        converter.emit_end_events();
+        let output = converter.completed_output();
+        let OutputItem::Reasoning(item) = &output[0] else {
+            panic!("missing reasoning");
+        };
+        assert_eq!(
+            item.encrypted_content.as_deref(),
+            Some(super::super::reasoning_replay::encode(" exact\n工具 ").as_str())
+        );
+        assert_eq!(reasoning_text(item), " exact\n工具 ");
+    }
+
     fn reasoning_text(item: &ReasoningItem) -> &str {
         let Some(ReasoningItemContent::ReasoningText(content)) =
             item.content.as_ref().and_then(|content| content.first())
@@ -1924,6 +1972,7 @@ mod tests {
                 "response.reasoning_text.done".to_string(),
                 "response.content_part.done".to_string(),
                 "response.output_item.done".to_string(),
+                "error".to_string(),
                 "response.failed".to_string(),
             ]
         );
@@ -1957,7 +2006,10 @@ mod tests {
             code: ResponseErrorCode::ServerError,
             message: "backend error".to_string(),
         });
-        assert_eq!(event_types(&events), vec!["response.failed".to_string()]);
+        assert_eq!(
+            event_types(&events),
+            vec!["error".to_string(), "response.failed".to_string()]
+        );
 
         let output = conv.output_with_status(OutputStatus::Incomplete);
         let OutputItem::FunctionCall(call) = &output[0] else {
@@ -1983,6 +2035,7 @@ mod tests {
                 "response.output_text.done".to_string(),
                 "response.content_part.done".to_string(),
                 "response.output_item.done".to_string(),
+                "error".to_string(),
                 "response.failed".to_string(),
             ]
         );
