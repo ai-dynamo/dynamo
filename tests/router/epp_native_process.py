@@ -211,9 +211,7 @@ async def _dispatch(state: dict[str, Any], message: Mapping[str, Any]) -> Any:
             event_plane=spec["event_plane"],
         )
         state["runtime"] = runtime
-        endpoint = runtime.endpoint(
-            f"{spec['namespace']}.{spec['component']}.generate"
-        )
+        endpoint = runtime.endpoint(f"{spec['namespace']}.{spec['component']}.generate")
         config = KvRouterConfig(**spec["config_kwargs"])
         os.environ["DYN_ROUTER_MIN_INITIAL_WORKERS"] = str(spec["num_workers"])
         state["router"] = await asyncio.wait_for(

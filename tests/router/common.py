@@ -6393,9 +6393,7 @@ def _prepare_first_selection_snapshot(
                         break
                     try:
                         scores = await asyncio.wait_for(
-                            stack.provider_overlap_async(
-                                probe, timeout_s=query_budget
-                            ),
+                            stack.provider_overlap_async(probe, timeout_s=query_budget),
                             timeout=query_budget,
                         )
                     except asyncio.TimeoutError:

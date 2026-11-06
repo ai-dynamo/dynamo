@@ -17,7 +17,6 @@ production port overrides.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import multiprocessing
@@ -2785,9 +2784,7 @@ def _overlap_payload(
     }
 
 
-def _load_payload(
-    token_ids: list[int], cache_namespace: str | None
-) -> dict[str, Any]:
+def _load_payload(token_ids: list[int], cache_namespace: str | None) -> dict[str, Any]:
     return {"token_ids": list(token_ids), "cache_namespace": cache_namespace}
 
 
@@ -4050,7 +4047,9 @@ class EppFrontendRoutingParityStack:
         )
         raw = self._provider_call("dump_events", {}, budget, "provider dump_events")
         if not isinstance(raw, str):
-            raise AssertionError("provider dump_events did not return the native JSON string")
+            raise AssertionError(
+                "provider dump_events did not return the native JSON string"
+            )
         return raw
 
     def provider_best_worker(
@@ -4079,9 +4078,7 @@ class EppFrontendRoutingParityStack:
         cache_namespace: str | None = None,
         timeout_s: float = READINESS_DEADLINE_S,
     ):
-        budget = _require_positive_timeout_s(
-            timeout_s, label="provider_overlap_scores"
-        )
+        budget = _require_positive_timeout_s(timeout_s, label="provider_overlap_scores")
         return self._provider_call(
             "get_overlap_scores",
             _overlap_payload(token_ids, cache_namespace),
@@ -4177,7 +4174,9 @@ class EppFrontendRoutingParityStack:
             "provider free",
         )
 
-    def _provider_call(self, op: str, payload: Any, timeout_s: float, label: str) -> Any:
+    def _provider_call(
+        self, op: str, payload: Any, timeout_s: float, label: str
+    ) -> Any:
         owner = self._provider_owner
         if owner is None:
             raise RuntimeError("routing parity stack has not started")

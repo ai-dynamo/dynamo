@@ -10,7 +10,6 @@ function-local so ordinary collection does not require grpc_tools.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import math
@@ -1227,9 +1226,7 @@ def _require_hosting_provider_native_policy(stack) -> dict[str, float]:
         )
     encoded = stack.provider_config_json
     if not isinstance(encoded, str) or not encoded:
-        raise AssertionError(
-            "routing parity stack has no child provider config JSON"
-        )
+        raise AssertionError("routing parity stack has no child provider config JSON")
     raw = json.loads(encoded)
     if "router_prefill_load_model" not in raw:
         raise AssertionError("native provider JSON missing router_prefill_load_model")
@@ -1542,9 +1539,7 @@ def _owner_potential_loads(
         return stack.provider_potential_loads(tokens, timeout_s=timeout_s)
     peer_owner = owner.get("owner")
     if peer_owner is None:
-        raise AssertionError(
-            "peer router owner was cleared before get_potential_loads"
-        )
+        raise AssertionError("peer router owner was cleared before get_potential_loads")
     try:
         return peer_owner.call(
             "get_potential_loads",
