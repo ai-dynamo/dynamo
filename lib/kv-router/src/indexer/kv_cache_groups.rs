@@ -53,40 +53,43 @@ fn compare_owners(left: &ResidencyOwner, right: &ResidencyOwner) -> std::cmp::Or
 
 /// Read-only complete membership for one hash and tier inside a scoped callback.
 /// Facts still require the caller's captured owner layout/generation before credit.
-/// The private slice borrows the immutable shard held by that callback.
+/// The private membership reference borrows the immutable shard held by that callback.
 #[derive(Clone, Copy)]
 pub struct CheckpointMembershipView<'a> {
-    owners: &'a [(ResidencyOwner, u64)],
-    generation_words: &'a [(u64, u64)],
+    membership: &'a CompleteMembership,
     tier_index: usize,
 }
 
 impl<'a> CheckpointMembershipView<'a> {
     fn new(membership: &'a CompleteMembership, tier_index: usize) -> Self {
         Self {
-            owners: &membership.owners[tier_index],
-            generation_words: &membership.generation_words,
+            membership,
             tier_index,
         }
     }
 
+    fn owners(&self) -> &[(ResidencyOwner, u64)] {
+        &self.membership.owners[self.tier_index]
+    }
+
     pub fn len(&self) -> usize {
-        self.owners.len()
+        self.owners().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.owners.is_empty()
+        self.owners().is_empty()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (ResidencyOwner, u64)> + '_ {
-        self.owners.iter().copied()
+        self.owners().iter().copied()
     }
 
     pub fn generation_for(&self, owner: ResidencyOwner) -> Option<u64> {
-        self.owners
+        let owners = self.owners();
+        owners
             .binary_search_by(|entry| compare_owners(&entry.0, &owner))
             .ok()
-            .map(|index| self.owners[index].1)
+            .map(|index| owners[index].1)
     }
 
     /// Sorted unique nonempty generation words for this tier. Disjoint generation sets
@@ -117,13 +120,10 @@ impl<'a> CheckpointMembershipView<'a> {
         let tier_start = ((self.tier_index as u64) << GENERATION_TIER_SHIFT)
             | (u64::from(level) << GENERATION_LEVEL_SHIFT);
         let word_mask = GENERATION_WORD_MASK >> (6 * level);
-        let start = self
-            .generation_words
-            .partition_point(|&(key, _)| key < tier_start);
-        let end = self
-            .generation_words
-            .partition_point(|&(key, _)| key <= (tier_start | word_mask));
-        self.generation_words[start..end]
+        let words = &self.membership.generation_words;
+        let start = words.partition_point(|&(key, _)| key < tier_start);
+        let end = words.partition_point(|&(key, _)| key <= (tier_start | word_mask));
+        words[start..end]
             .iter()
             .map(move |&(key, mask)| (key & word_mask, mask))
     }
@@ -145,18 +145,22 @@ impl<'a> CheckpointMembershipView<'a> {
         let key = ((self.tier_index as u64) << GENERATION_TIER_SHIFT)
             | (u64::from(level) << GENERATION_LEVEL_SHIFT)
             | word;
-        self.generation_words
+        self.membership
+            .generation_words
             .binary_search_by_key(&key, |&(key, _)| key)
             .ok()
-            .map_or(0, |index| self.generation_words[index].1)
+            .map_or(0, |index| self.membership.generation_words[index].1)
     }
 }
 
+// Keep the revision and Device owner header together, ahead of cold summaries.
+// Rust's default field reordering puts the revision behind those summaries.
 #[derive(Debug, Default, Clone)]
+#[repr(C)]
 struct CompleteMembership {
+    revision: u64,
     // Sorted by the exact logical owner, with one generation per owner/tier.
     owners: [Vec<(ResidencyOwner, u64)>; 4],
-    revision: u64,
     // One sparse sidecar shared by all tiers. High two key bits encode tier;
     // bit 60 encodes fine words or their occupancy groups. Low 58/52 bits
     // encode generation / 64 or / 4096. Positive matches remain owner-exact.
