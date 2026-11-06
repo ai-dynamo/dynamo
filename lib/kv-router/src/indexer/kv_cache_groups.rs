@@ -39,8 +39,47 @@ const CHECKPOINT_SHARDS: usize = 256;
 type CheckpointShardMap = FxHashMap<u64, Arc<CompleteMembership>>;
 type CapturedCheckpointShards = [OnceCell<Arc<CheckpointShardMap>>; CHECKPOINT_SHARDS];
 
+fn compare_owners(left: &ResidencyOwner, right: &ResidencyOwner) -> std::cmp::Ordering {
+    match (left, right) {
+        (ResidencyOwner::Worker(left), ResidencyOwner::Worker(right)) => left.cmp(right),
+        (ResidencyOwner::CacheOwner(left), ResidencyOwner::CacheOwner(right)) => left.cmp(right),
+        (ResidencyOwner::Worker(_), ResidencyOwner::CacheOwner(_)) => std::cmp::Ordering::Less,
+        (ResidencyOwner::CacheOwner(_), ResidencyOwner::Worker(_)) => std::cmp::Ordering::Greater,
+    }
+}
+
+/// Read-only complete membership for one hash and tier inside a scoped callback.
+/// Facts still require the caller's captured owner layout/generation before credit.
+/// The private slice borrows the immutable shard held by that callback.
+#[derive(Clone, Copy)]
+pub struct CheckpointMembershipView<'a> {
+    owners: &'a [(ResidencyOwner, u64)],
+}
+
+impl CheckpointMembershipView<'_> {
+    pub fn len(&self) -> usize {
+        self.owners.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.owners.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (ResidencyOwner, u64)> + '_ {
+        self.owners.iter().copied()
+    }
+
+    pub fn generation_for(&self, owner: ResidencyOwner) -> Option<u64> {
+        self.owners
+            .binary_search_by(|entry| compare_owners(&entry.0, &owner))
+            .ok()
+            .map(|index| self.owners[index].1)
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct CompleteMembership {
+    // Sorted by the exact logical owner, with one generation per owner/tier.
     owners: [Vec<(ResidencyOwner, u64)>; 4],
     revision: u64,
 }
@@ -48,14 +87,14 @@ struct CompleteMembership {
 impl CompleteMembership {
     fn update(&mut self, owner: ResidencyOwner, generation: u64, mask: u8) {
         for (index, owners) in self.owners.iter_mut().enumerate() {
-            if mask & (1 << index) != 0 {
-                if let Some(entry) = owners.iter_mut().find(|entry| entry.0 == owner) {
-                    entry.1 = generation;
-                } else {
-                    owners.push((owner, generation));
+            let found = owners.binary_search_by(|entry| compare_owners(&entry.0, &owner));
+            match (found, mask & (1 << index) != 0) {
+                (Ok(position), true) => owners[position].1 = generation,
+                (Err(position), true) => owners.insert(position, (owner, generation)),
+                (Ok(position), false) if owners[position].1 == generation => {
+                    owners.remove(position);
                 }
-            } else {
-                owners.retain(|entry| *entry != (owner, generation));
+                _ => {}
             }
         }
     }
@@ -402,17 +441,27 @@ impl CheckpointReadView {
             .then_some(membership.revision)
     }
 
-    /// Visits raw membership facts only while this hash has the exact observed
-    /// revision. A fact alone grants no credit: the caller must match the owner
-    /// to its first captured layout and validate generation and completeness
-    /// with `CapturedLayout::is_eligible_generation` before granting credit.
-    /// The immutable shard guard is scoped to this call and is never cached.
-    pub fn for_each_membership_at_revision(
+    /// Borrows indexed raw membership only for the exact nonzero hash revision.
+    /// The view cannot outlive this call's immutable shard guard. A fact alone
+    /// grants no credit: validate the owner's captured layout and generation.
+    ///
+    /// ```compile_fail
+    /// use dynamo_kv_router::indexer::KvCacheGroupResidency;
+    /// use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, StorageTier};
+    /// let residency = KvCacheGroupResidency::new();
+    /// let view = residency.read_view();
+    /// let mut escaped = None;
+    /// view.with_membership_at_revision(
+    ///     ExternalSequenceBlockHash(1), StorageTier::Device, 1,
+    ///     |membership| escaped = Some(membership),
+    /// );
+    /// ```
+    pub fn with_membership_at_revision(
         &self,
         hash: ExternalSequenceBlockHash,
         tier: StorageTier,
         revision: u64,
-        mut visit: impl FnMut(ResidencyOwner, u64),
+        mut visit: impl for<'a> FnMut(CheckpointMembershipView<'a>),
     ) {
         if revision == 0 {
             return;
@@ -426,9 +475,28 @@ impl CheckpointReadView {
         if membership.revision != revision {
             return;
         }
-        for &(owner, generation) in &membership.owners[tier_index(tier)] {
-            visit(owner, generation);
-        }
+        visit(CheckpointMembershipView {
+            owners: &membership.owners[tier_index(tier)],
+        });
+    }
+
+    /// Visits raw membership facts only while this hash has the exact observed
+    /// revision. A fact alone grants no credit: the caller must match the owner
+    /// to its first captured layout and validate generation and completeness
+    /// with `CapturedLayout::is_eligible_generation` before granting credit.
+    /// The immutable shard guard is scoped to this call and is never cached.
+    pub fn for_each_membership_at_revision(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        tier: StorageTier,
+        revision: u64,
+        mut visit: impl FnMut(ResidencyOwner, u64),
+    ) {
+        self.with_membership_at_revision(hash, tier, revision, |membership| {
+            for (owner, generation) in membership.iter() {
+                visit(owner, generation);
+            }
+        });
     }
 
     /// Visits eligible owners only if this hash still has the observed revision.
@@ -912,6 +980,211 @@ mod tests {
         let mut owners = Vec::new();
         view.for_each_owner_at_revision(hash, tier, revision, |owner| owners.push(owner));
         owners
+    }
+
+    #[test]
+    fn indexed_membership_sorts_exact_owner_identity_and_dp_rank() {
+        use crate::identity::{
+            CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
+            RoutingScopeId, StableDpSlotId,
+        };
+        use IdentitySource::{DefaultDerived, Explicit};
+
+        let cache_owner = |semantics_source, routing_source, cluster, slot, slot_source| {
+            ResidencyOwner::cache_owner(CacheOwnerId::new(
+                PoolId::new(
+                    IndexerDomainId::new(
+                        CacheSemanticsId::new([1; 16], semantics_source),
+                        RoutingScopeId::new([2; 16], routing_source),
+                    ),
+                    ClusterId::new(cluster),
+                ),
+                StableDpSlotId::new([slot; 16], slot_source),
+            ))
+        };
+        let rank0 = ResidencyOwner::worker(WorkerWithDpRank::new(7, 0));
+        let rank2 = ResidencyOwner::worker(WorkerWithDpRank::new(7, 2));
+        let later_worker = ResidencyOwner::worker(WorkerWithDpRank::new(u64::MAX, 0));
+        let semantics_derived = cache_owner(DefaultDerived, Explicit, 3, 4, Explicit);
+        let routing_derived = cache_owner(Explicit, DefaultDerived, 3, 4, Explicit);
+        let slot_derived = cache_owner(Explicit, Explicit, 3, 4, DefaultDerived);
+        let explicit = cache_owner(Explicit, Explicit, 3, 4, Explicit);
+        let later_slot = cache_owner(Explicit, Explicit, 3, 5, Explicit);
+        let later_cluster = cache_owner(Explicit, Explicit, 4, 0, Explicit);
+        let expected = [
+            rank0,
+            rank2,
+            later_worker,
+            semantics_derived,
+            routing_derived,
+            slot_derived,
+            explicit,
+            later_slot,
+            later_cluster,
+        ];
+        let insertion_order = [
+            later_cluster,
+            rank2,
+            explicit,
+            semantics_derived,
+            later_worker,
+            later_slot,
+            rank0,
+            routing_derived,
+            slot_derived,
+        ];
+        let mut membership = CompleteMembership::default();
+        for (index, owner) in insertion_order.into_iter().enumerate() {
+            membership.update(owner, index as u64 + 10, 0b1111);
+        }
+        for owners in &membership.owners {
+            let indexed = CheckpointMembershipView { owners };
+            assert_eq!(indexed.len(), expected.len());
+            assert!(!indexed.is_empty());
+            assert_eq!(
+                indexed.iter().map(|(owner, _)| owner).collect::<Vec<_>>(),
+                expected,
+            );
+            for (index, owner) in insertion_order.into_iter().enumerate() {
+                assert_eq!(indexed.generation_for(owner), Some(index as u64 + 10));
+            }
+            assert_eq!(
+                indexed.generation_for(ResidencyOwner::worker(WorkerWithDpRank::new(7, 1))),
+                None,
+            );
+            assert_eq!(
+                indexed.generation_for(cache_owner(Explicit, Explicit, 3, 3, Explicit)),
+                None,
+            );
+        }
+    }
+
+    #[test]
+    fn indexed_membership_removal_requires_the_matching_generation() {
+        let first = ResidencyOwner::worker(WorkerWithDpRank::new(7, 0));
+        let middle = ResidencyOwner::worker(WorkerWithDpRank::new(8, 0));
+        let last = ResidencyOwner::worker(WorkerWithDpRank::new(9, 0));
+        let mut membership = CompleteMembership::default();
+        for owner in [last, first, middle] {
+            membership.update(owner, 11, 0b0011);
+        }
+        membership.update(middle, 12, 0b0011);
+        membership.update(middle, 11, 0);
+        for owners in &membership.owners[..2] {
+            let indexed = CheckpointMembershipView { owners };
+            assert_eq!(indexed.len(), 3);
+            assert_eq!(indexed.generation_for(middle), Some(12));
+        }
+        membership.update(middle, 12, 0);
+        for owners in &membership.owners[..2] {
+            let indexed = CheckpointMembershipView { owners };
+            assert_eq!(indexed.len(), 2);
+            assert_eq!(indexed.generation_for(middle), None);
+            assert_eq!(indexed.generation_for(first), Some(11));
+            assert_eq!(indexed.generation_for(last), Some(11));
+        }
+        membership.update(middle, 13, 0b0001);
+        assert_eq!(
+            membership.owners[0]
+                .iter()
+                .map(|&(owner, _)| owner)
+                .collect::<Vec<_>>(),
+            [first, middle, last],
+        );
+        let device = CheckpointMembershipView {
+            owners: &membership.owners[0],
+        };
+        assert_eq!(device.generation_for(middle), Some(13));
+        assert!(
+            CheckpointMembershipView {
+                owners: &membership.owners[1]
+            }
+            .generation_for(middle)
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn indexed_revision_view_fences_updates_and_preserves_cached_snapshots() {
+        let table = KvCacheGroupResidency::new();
+        let first = WorkerWithDpRank::new(7, 0);
+        let second = WorkerWithDpRank::new(9, 2);
+        let first_owner = ResidencyOwner::worker(first);
+        let second_owner = ResidencyOwner::worker(second);
+        let hash = ExternalSequenceBlockHash(11);
+        for worker in [second, first] {
+            table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
+        }
+        let mut view = table.read_view();
+        for owner in [first_owner, second_owner] {
+            view.track_owner(owner);
+        }
+        let original = view
+            .owners_at(hash, StorageTier::Device)
+            .collect::<Vec<_>>();
+        assert_eq!(original, [first_owner, second_owner]);
+        let revision = view
+            .checkpoint_hint_revision(hash, StorageTier::Device)
+            .unwrap();
+        let mut first_generation = None;
+        view.with_membership_at_revision(hash, StorageTier::Device, revision, |membership| {
+            assert_eq!(membership.len(), 2);
+            first_generation = membership.generation_for(first_owner);
+            assert_eq!(
+                membership
+                    .iter()
+                    .map(|(owner, _)| owner)
+                    .collect::<Vec<_>>(),
+                original,
+            );
+        });
+        assert!(first_generation.is_some());
+        view.with_membership_at_revision(hash, StorageTier::HostPinned, revision, |membership| {
+            assert!(membership.is_empty());
+            assert_eq!(membership.generation_for(first_owner), None);
+        });
+        for invalid in [0, revision + 1] {
+            view.with_membership_at_revision(hash, StorageTier::Device, invalid, |_| {
+                panic!("invalid revision must not expose membership")
+            });
+        }
+        view.with_membership_at_revision(
+            ExternalSequenceBlockHash(12),
+            StorageTier::Device,
+            revision,
+            |_| panic!("unknown hash must not expose membership"),
+        );
+
+        table.clear_worker(first);
+        view.with_membership_at_revision(hash, StorageTier::Device, revision, |_| {
+            panic!("old revision must not survive a clear")
+        });
+        let cleared = view
+            .checkpoint_hint_revision(hash, StorageTier::Device)
+            .unwrap();
+        view.with_membership_at_revision(hash, StorageTier::Device, cleared, |membership| {
+            assert_eq!(membership.len(), 1);
+            assert_eq!(membership.generation_for(first_owner), None);
+            assert!(membership.generation_for(second_owner).is_some());
+        });
+        table.apply(&checkpoint(first, StorageTier::Device, 0, hash.0, Some(1)));
+        let readded = view
+            .checkpoint_hint_revision(hash, StorageTier::Device)
+            .unwrap();
+        assert_ne!(readded, cleared);
+        view.with_membership_at_revision(hash, StorageTier::Device, cleared, |_| {
+            panic!("clear/readd must not reuse a revision")
+        });
+        view.with_membership_at_revision(hash, StorageTier::Device, readded, |membership| {
+            assert_eq!(membership.len(), 2);
+            assert_ne!(membership.generation_for(first_owner), first_generation);
+        });
+        assert_eq!(
+            view.owners_at(hash, StorageTier::Device)
+                .collect::<Vec<_>>(),
+            original,
+        );
     }
 
     #[test]
