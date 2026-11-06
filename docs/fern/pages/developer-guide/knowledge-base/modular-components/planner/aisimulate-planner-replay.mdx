@@ -473,7 +473,7 @@ searches from the point it applied. To predict what an active Planner does, repl
 <Warning>
 **Experimental.** This section covers replay retune, `retune.executor: local` (the default), which
 runs only in offline simulation; a live Planner rejects it at startup. To retune a live deployment
-on Kubernetes, which uses `executor: dgdr` and is for development clusters only, see
+on Kubernetes, use `executor: dgdr`. Live retune is not feature complete; see
 [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
 </Warning>
 

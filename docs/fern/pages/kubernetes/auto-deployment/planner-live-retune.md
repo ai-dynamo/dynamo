@@ -6,11 +6,10 @@ subtitle: Let the Planner tune the KV router and its own scaling parameters on a
 ---
 
 > [!CAUTION]
-> **Experimental, development clusters only.** Live retune is disabled by default and requires
+> **Experimental.** Live retune is not feature complete. It is disabled by default and requires
 > the separate `dgdrV1Beta2.plannerLiveRetune` Helm opt-in plus Planner configuration. It uses
 > the Experimental DGDR v1beta2 API, which is available without an API feature gate, and writes
-> router parameters through the frontend admin API, which has no authentication. Do not enable it
-> on a cluster that serves production traffic.
+> router parameters through the frontend admin API, which has no authentication.
 
 Live retune is the Kubernetes form of [Periodic Retune](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md#periodic-retune-experimental).
 Every `retune.interval_seconds`, the Planner cuts the window of request traces that just ended,

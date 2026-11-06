@@ -124,7 +124,7 @@ dynamo-operator:
         unsupportedDowngradeOverride: ""
 
   dgdrV1Beta2:
-    # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Opt in to Planner live retune by granting every
+    # -- EXPERIMENTAL, NOT FEATURE COMPLETE: Opt in to Planner live retune by granting every
     # Planner ServiceAccount what Planner live retune (retune.executor: dgdr) needs:
     # create, read and delete DGDR v1beta2 Requests, read their Runs and Candidates,
     # and read, create, update and delete any Lease in the namespace.
