@@ -26,7 +26,7 @@ use serde_json::Value;
 use tracing::Instrument;
 
 use super::disconnect::{
-    ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_error,
+    ConnectionHandle, create_http_connection_monitor, monitor_for_disconnects_with_error,
 };
 use super::metrics::{CancellationLabels, ErrorType, HttpQueueGuard, ResponseMetricCollector};
 use super::openai::{
@@ -374,7 +374,7 @@ async fn handler(
         endpoint: super::metrics::Endpoint::Generate.to_string(),
         request_type: if streaming { "streaming" } else { "unary" }.to_string(),
     };
-    let (mut connection_handle, stream_handle) = create_connection_monitor(
+    let (mut connection_handle, stream_handle) = create_http_connection_monitor(
         context.context(),
         Some(state.metrics_clone()),
         cancellation_labels,

@@ -24,7 +24,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::{
     decision_lifecycle::{self, run_until_killed, spawn_blocking_with_permit},
-    disconnect::create_connection_monitor,
+    disconnect::create_http_connection_monitor,
     metrics::{CancellationLabels, Endpoint, Metrics, SystemOnePhase},
     service_v2,
 };
@@ -339,7 +339,7 @@ async fn handle_request(
         endpoint: metric_endpoint(dialect).to_string(),
         request_type: "unary".to_string(),
     };
-    let (mut connection_handle, _stream_handle) = create_connection_monitor(
+    let (mut connection_handle, _stream_handle) = create_http_connection_monitor(
         parent_context.clone(),
         Some(state.metrics_clone()),
         cancellation_labels,
