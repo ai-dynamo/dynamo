@@ -59,6 +59,12 @@
 //! * `MVP_ARTIFACT_DIR` — a new directory. The test refuses to reuse an
 //!   existing path and never uses a temporary directory, so the complete
 //!   result survives.
+//!
+//! A separate `shared_agentx_legacy_polynomial_round_robin_comparison` test
+//! consumes `MVP_COMPARISON_AISIM_CONFIG` through the owning AISim config path.
+//! It uses polynomial timing, native round-robin placement and legacy client
+//! counts, with explicit non-calibrated/TraceHashes-versus-Text limitations.
+//! It never selects or weakens the accepted calibrated full-scenario admission.
 
 #![cfg(feature = "calibrated-proof")]
 
@@ -659,6 +665,32 @@ fn host_typed(
     decode: &calibrated::RoleSetup,
     compact_evidence: bool,
 ) -> Result<(ReplayReport, HostedTypedReport)> {
+    host_typed_using(run, compact_evidence, || {
+        let composition = KvReplayComposition::disaggregated(
+            prefill.router.clone(),
+            decode.router.clone(),
+            calibrated::PREFILL_WORKERS,
+            calibrated::DECODE_WORKERS,
+            None,
+            None,
+            None,
+        );
+        Replayer::with_composition(
+            calibrated::spec(prefill, decode)?,
+            prefill.factory.clone(),
+            composition,
+        )
+        .context("real Dynamo KV composition accepts the disaggregated calibrated spec")
+    })
+}
+
+/// Only the physical composition varies; preparation, phase futures, capture,
+/// clock ownership and typed report collection stay in this one shared path.
+fn host_typed_using<C: aisimulate_core::replay::ReplayComposition>(
+    run: &BenchmarkRun,
+    compact_evidence: bool,
+    create_replayer: impl FnOnce() -> Result<Replayer<C>>,
+) -> Result<(ReplayReport, HostedTypedReport)> {
     init_debug_tracing();
     eprintln!("MVP stage: preparing complete shared workload");
     let (participant, handle) = native_hosted(
@@ -702,30 +734,16 @@ fn host_typed(
     if compact_evidence {
         handle.use_compact_dispatch_evidence()?;
     }
-    let composition = KvReplayComposition::disaggregated(
-        prefill.router.clone(),
-        decode.router.clone(),
-        calibrated::PREFILL_WORKERS,
-        calibrated::DECODE_WORKERS,
-        None,
-        None,
-        None,
-    );
     eprintln!("MVP stage: prepared; entering native simulator event loop");
-    let report = Replayer::with_composition(
-        calibrated::spec(prefill, decode)?,
-        prefill.factory.clone(),
-        composition,
-    )
-    .context("real Dynamo KV composition accepts the disaggregated calibrated spec")?
-    .with_runtime_input(ReplayRuntimeInput::External(Box::new(participant)))
-    .with_capture_options(ReplayCaptureOptions {
-        capture_per_request: true,
-        determinism: ReplayDeterminism::CanonicalV1,
-        ..Default::default()
-    })
-    .run()
-    .context("native Replayer event loop hosts the full AIPerf scenario")?;
+    let report = create_replayer()?
+        .with_runtime_input(ReplayRuntimeInput::External(Box::new(participant)))
+        .with_capture_options(ReplayCaptureOptions {
+            capture_per_request: true,
+            determinism: ReplayDeterminism::CanonicalV1,
+            ..Default::default()
+        })
+        .run()
+        .context("native Replayer event loop hosts the full AIPerf scenario")?;
     eprintln!("MVP stage: native simulator drained; retaining typed report");
     let typed = handle
         .into_typed_report()
@@ -854,6 +872,15 @@ fn write_raw_backend_artifact(
             "model_config": &decode.model_config,
         },
     });
+    write_raw_backend_with_provenance(artifact_dir, backend, typed, &artifact)
+}
+
+fn write_raw_backend_with_provenance(
+    artifact_dir: &Path,
+    backend: &ReplayReport,
+    typed: &HostedTypedReport,
+    artifact: &Value,
+) -> Result<()> {
     // Serialize borrowed large reports straight to the artifact. Building a
     // serde_json::Value and a second pretty-printed Vec duplicates every
     // per-request observation at full-scenario scale.
@@ -886,7 +913,7 @@ fn write_raw_backend_artifact(
     serde_json::to_writer_pretty(
         &mut writer,
         &RawArtifact {
-            provenance: &artifact,
+            provenance: artifact,
             backend_report: backend,
             backend_requests: &backend.per_request,
             native_records: typed
@@ -1243,6 +1270,220 @@ fn calibrated_full_scenario_rejects_mismatched_physical_identity() -> Result<()>
     ensure!(
         format!("{error:#}").contains("sequence budget"),
         "negative control failed before its intended physical-identity assertion: {error:#}"
+    );
+    Ok(())
+}
+
+/// Separate functional comparison only. These are admission checks against
+/// the pinned legacy control, not configuration lowering or GPU calibration.
+fn validate_polynomial_comparison_spec(spec: &aisimulate_core::replay::ReplaySpec) -> Result<()> {
+    use aisimulate_core::{
+        engine::{Backend, PreemptionMode, TimingModelConfig, TransferTimingMode},
+        replay::{ReplayEngineConfig, ReplayTopology, WorkerStage},
+    };
+    ensure!(
+        matches!(&spec.topology, ReplayTopology::Disaggregated { prefill, decode, .. }
+        if prefill.initial_workers == 2 && decode.initial_workers == 2),
+        "polynomial comparison requires the legacy 2P2D topology"
+    );
+    ensure!(
+        spec.adapters.placement.provider == "round_robin",
+        "polynomial comparison must retain native round-robin placement, not Dynamo KV routing"
+    );
+    let engine: ReplayEngineConfig = serde_json::from_value(spec.engine.clone())?;
+    for stage in [WorkerStage::Prefill, WorkerStage::Decode] {
+        let role = engine.role(stage);
+        let rank = role.rank;
+        ensure!(
+            role.dp_size == 1
+                && role.tensor_parallel_size == 1
+                && role.prefill_context_parallel_size == 1,
+            "old polynomial factory has DP1/TP1 accounting, not calibrated TP8 GPUs"
+        );
+        ensure!(
+            rank.timing_model == TimingModelConfig::Polynomial && rank.backend == Backend::Vllm,
+            "separate comparison requires the owning built-in polynomial timing on vLLM"
+        );
+        ensure!(
+            rank.block_size == 8
+                && rank.num_gpu_blocks == 135335
+                && rank.max_model_len == Some(1048576)
+                && rank.max_num_batched_tokens == 4096
+                && rank.max_num_seqs == 32
+                && rank.enable_prefix_caching
+                && rank.enable_chunked_prefill
+                && rank.async_scheduling == Some(false),
+            "polynomial comparison differs from the explicit legacy serving limits"
+        );
+        ensure!(
+            rank.kv_transfer_bytes_per_token == Some(44928)
+                && rank.kv_transfer_bandwidth == Some(50.0)
+                && rank.kv_transfer_timing_mode == TransferTimingMode::FullPrompt,
+            "polynomial comparison differs from the explicit legacy transfer assumption"
+        );
+        ensure!(
+            rank.speedup_ratio == 1.0
+                && rank.decode_speedup_ratio == 1.0
+                && rank.prefill_schedule_interval == 1
+                && rank.prefill_decode_interval == 0
+                && rank.preemption_mode == PreemptionMode::Lifo,
+            "polynomial comparison differs from pinned legacy scheduling defaults"
+        );
+        ensure!(
+            rank.kv_cache_groups.is_empty()
+                && rank.kv_cache_capacity_bytes.is_none()
+                && rank.native_host_offload.is_none()
+                && rank.g3_offload.is_none()
+                && rank.kvcr.is_none()
+                && rank.state_cache.is_none()
+                && rank.prefix_match_unit.is_none()
+                && rank.aic_nextn.is_none()
+                && !rank.vision,
+            "polynomial comparison must not add grouped/state/offload/speculative/vision physics"
+        );
+    }
+    Ok(())
+}
+
+fn polynomial_comparison_prepared() -> Result<aisimulate_core::replay::PreparedReplay> {
+    let path = PathBuf::from(std::env::var_os("MVP_COMPARISON_AISIM_CONFIG").context(
+        "MVP_COMPARISON_AISIM_CONFIG must name the separate polynomial comparison YAML",
+    )?);
+    let bytes = aiperf_fsio::artifact_file::read_no_follow_bounded(&path, 1 << 20)?;
+    let config: Value = serde_yaml::from_slice(&bytes)?;
+    let prepared = aisimulate_core::replay::PreparedReplay::from_prediction_config(
+        &serde_json::to_string(&config)?,
+    )?;
+    validate_polynomial_comparison_spec(&prepared.spec)?;
+    Ok(prepared)
+}
+
+#[test]
+#[ignore = "requires MVP_COMPARISON_AISIM_CONFIG; bounded polynomial/RR comparison admission"]
+fn polynomial_comparison_rejects_nonmatching_identity() -> Result<()> {
+    let prepared = polynomial_comparison_prepared()?;
+    let mut changed = prepared.spec.clone();
+    let mut engine: aisimulate_core::replay::ReplayEngineConfig =
+        serde_json::from_value(changed.engine.clone())?;
+    engine
+        .prefill
+        .as_mut()
+        .context("prefill role")?
+        .rank
+        .timing_model = aisimulate_core::engine::TimingModelConfig::Fixed {
+        prefill_ms: 1.0,
+        decode_ms: 2.0,
+    };
+    changed.engine = serde_json::to_value(engine)?;
+    ensure!(
+        validate_polynomial_comparison_spec(&changed).is_err(),
+        "fixed timing must not qualify as polynomial"
+    );
+    let mut changed = prepared.spec;
+    let mut engine: aisimulate_core::replay::ReplayEngineConfig =
+        serde_json::from_value(changed.engine.clone())?;
+    engine
+        .decode
+        .as_mut()
+        .context("decode role")?
+        .rank
+        .num_gpu_blocks += 1;
+    changed.engine = serde_json::to_value(engine)?;
+    ensure!(
+        validate_polynomial_comparison_spec(&changed).is_err(),
+        "changed capacity must not qualify as legacy-matched"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires MVP_COMPARISON_AISIM_CONFIG; four-request polynomial/RR launch, no full corpus"]
+fn polynomial_comparison_bounded_shared_workload() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut run = aiperf_protocol::runner_v2::decode_run_request_v2(
+        run_fixture::branch_request(directory.path()).as_bytes(),
+    )?
+    .run;
+    run.cfg.transport = Some(serde_json::from_value(
+        json!({"type":"aisimulate","mode":"offline"}),
+    )?);
+    run.cfg
+        .endpoint
+        .as_mut()
+        .context("fixture endpoint")?
+        .use_server_token_count = false;
+    let prepared = polynomial_comparison_prepared()?;
+    let (backend, typed) = host_typed_using(&run, true, || {
+        Replayer::new(prepared.spec, prepared.factory).context("native polynomial/RR composition")
+    })?;
+    ensure!(
+        backend.per_request.len() == 4,
+        "bounded comparison must execute all four shared requests"
+    );
+    let _ = reconcile_hosted::reconcile(&backend, &typed)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "separate full shared AgentX polynomial/RR functional comparison; requires MVP_COMPARISON_AISIM_CONFIG and new MVP_ARTIFACT_DIR"]
+fn shared_agentx_legacy_polynomial_round_robin_comparison() -> Result<()> {
+    let artifact_path = mvp_artifact_path()?;
+    let mut run = full_mvp_run(&artifact_path)?;
+    // Verify the accepted shared workload first; only this explicitly labelled
+    // comparison selects the legacy client-count policy afterward.
+    assert_mvp_config(&run)?;
+    run.cfg
+        .endpoint
+        .as_mut()
+        .context("scenario endpoint")?
+        .use_server_token_count = false;
+    let prepared = polynomial_comparison_prepared()?;
+    let physical_spec = prepared.spec.clone();
+    let harness = executable_distribution_id()?;
+    let metadata = report_run_metadata(&run, &harness)?;
+    let artifact_dir = create_new_artifact_dir(&artifact_path)?;
+    let (backend, typed) = host_typed_using(&run, true, || {
+        Replayer::new(prepared.spec, prepared.factory).context("native polynomial/RR comparison")
+    })?;
+    let provenance = json!({
+        "scope":"separate legacy-matched polynomial/RR functional comparison; not calibrated acceptance or parity",
+        "comparison":"shared-agentx-polynomial-round-robin", "dynamo_parity":false,
+        "gpu_calibration":false, "physical_gpu_count_claimed":false,
+        "physical_configuration_source":"existing AISim canonical config/compiler/PreparedReplay",
+        "physical_spec":physical_spec, "executable_distribution_id":harness,
+        "input_representation":"trace_hashes", "legacy_input_representation":"text",
+        "projection_difference_explicit":true, "text_tokenizer_used":false,
+        "use_server_token_count":false, "prepared_roots":typed.prepared_roots,
+        "virtual_end_ns":typed.virtual_end_ns,
+        "limitations":["same polynomial source does not prove all-engine or workload parity",
+            "explicit copied capacity and transfer assumptions are not independently GPU-calibrated",
+            "legacy text preparation and shared TraceHashes preparation remain different",
+            "client-count policy is a comparison exception; calibrated full proof keeps server counts"]
+    });
+    write_raw_backend_with_provenance(&artifact_dir, &backend, &typed, &provenance)?;
+    let finalized = finalize_hosted_run_report(
+        &run,
+        &typed,
+        metadata,
+        ReportPairRunFacts::new(),
+        &artifact_dir,
+    )?;
+    let reconciliation = reconcile_hosted::reconcile(&backend, &typed)?;
+    std::fs::write(
+        artifact_dir.join("request_reconciliation.json"),
+        serde_json::to_vec_pretty(&reconciliation)?,
+    )?;
+    ensure!(
+        typed.prepared_roots == EXPECTED_PREPARED_ROOTS && !backend.per_request.is_empty(),
+        "comparison must retain the complete corpus and actual shared request population"
+    );
+    ensure!(
+        finalized.native_report.run.facts().dynamo.is_none(),
+        "no Dynamo parity facts may be fabricated"
+    );
+    ensure!(
+        artifact_dir.join(SUMMARY_ARTIFACT).is_file(),
+        "normal GenAI-Perf summary must be retained"
     );
     Ok(())
 }
