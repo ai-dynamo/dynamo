@@ -27,7 +27,6 @@ from argparse import Namespace
 from typing import TYPE_CHECKING, Any, Optional
 
 import uvloop
-from packaging.version import Version
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
@@ -52,6 +51,7 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
+SESSION_AFFINITY_MAX_ENTRIES_ENV = "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES"
 FRONTEND_ROUTE_ENTRYPOINT_GROUP = "dynamo.frontend.routes"
 
 # The frontend's TCP listener can exhaust the default soft RLIMIT_NOFILE (1024 on
@@ -242,6 +242,20 @@ def load_frontend_route_extensions(extension_names: list[str]) -> list[FrontendR
     return routes
 
 
+def _fold_vllm_default_chat_template_kwargs(
+    config: FrontendConfig, vllm_flags: Namespace
+) -> None:
+    # vLLM's parser also takes the underscore and dotted spellings. Its value always comes
+    # from the command line, so it wins over DYN_DEFAULT_CHAT_TEMPLATE_KWARGS.
+    vllm_defaults = getattr(vllm_flags, "default_chat_template_kwargs", None) or {}
+    if vllm_defaults:
+        config.default_chat_template_kwargs = {
+            **(config.default_chat_template_kwargs or {}),
+            **vllm_defaults,
+        }
+        config.validate_default_chat_template_kwargs()
+
+
 def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]:
     """Parse command-line arguments for the Dynamo frontend.
 
@@ -303,10 +317,13 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
 
-            if Version(importlib.metadata.version("vllm")).release >= (0, 29):
+            try:
+                from vllm.entrypoints.common.cli_args import FrontendArgs
+            except ModuleNotFoundError as exc:
+                if exc.name != "vllm.entrypoints.common.cli_args":
+                    raise
+                # vLLM 0.32 (CPU and XPU images); remove once they ship 0.33.
                 from vllm.entrypoints.launchers.cli_args import FrontendArgs
-            else:
-                from vllm.entrypoints.openai.cli_args import FrontendArgs
         except ModuleNotFoundError:
             logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
             sys.exit(1)
@@ -316,6 +333,7 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
         vllm_parser = AsyncEngineArgs.add_cli_args(vllm_parser)
         # the result is returned as Namespace object rather than AsyncEngineArgs object to avoid import error for non-vllm users.
         vllm_flags = vllm_parser.parse_args(unknown)
+        _fold_vllm_default_chat_template_kwargs(config, vllm_flags)
     elif config.chat_processor == "sglang":
         sglang_parser = argparse.ArgumentParser(add_help=False)
         sglang_parser.add_argument("--tool-call-parser", default=None)
@@ -422,6 +440,9 @@ async def async_main():
         loop.add_signal_handler(sig, signal_handler)
 
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
+    os.environ[SESSION_AFFINITY_MAX_ENTRIES_ENV] = str(
+        config.session_affinity_max_entries
+    )
     # Shared with the backends so a worker's advertised config is built from the
     # same flags and semantics. --router-mode always has a default here, so this
     # never returns None.
@@ -450,6 +471,7 @@ async def async_main():
         "reasoning_field_name": config.reasoning_field_name,
         "tokenizer_backend": config.tokenizer_backend,
         "tokenizer_fallback": config.tokenizer_fallback,
+        "default_chat_template_kwargs": config.default_chat_template_kwargs,
     }
     if config.migration_max_seq_len is not None:
         kwargs["migration_max_seq_len"] = config.migration_max_seq_len

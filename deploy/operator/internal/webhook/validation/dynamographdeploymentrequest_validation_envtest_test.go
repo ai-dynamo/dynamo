@@ -128,6 +128,51 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			discovered: discoveredH100,
 		},
 		{
+			name: "v1beta2 accepts a partial beta DGD override",
+			request: beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				setBeta2AdmissionHardware(request)
+				request.Spec.Overrides = &nvidiacomv1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(`{"apiVersion":"nvidia.com/v1beta1","kind":"DynamoGraphDeployment","spec":{"components":[{"name":"worker","replicas":2}]}}`)}}
+			}),
+		},
+		{
+			name: "v1beta2 rejects alpha overrides and incorrect kind independently",
+			request: beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				setBeta2AdmissionHardware(request)
+				request.Spec.Overrides = &nvidiacomv1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(`{"apiVersion":"nvidia.com/v1alpha1","kind":"ConfigMap","spec":{}}`)}}
+			}),
+			wantWebhook: []string{
+				`spec.overrides.dgd.apiVersion: Unsupported value: "nvidia.com/v1alpha1": supported values: "nvidia.com/v1beta1"`,
+				`spec.overrides.dgd.kind: Unsupported value: "ConfigMap": supported values: "DynamoGraphDeployment"`,
+			},
+		},
+		{
+			name: "v1beta2 rejects a DGD status override",
+			request: beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				setBeta2AdmissionHardware(request)
+				request.Spec.Overrides = &nvidiacomv1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(`{"apiVersion":"nvidia.com/v1beta1","kind":"DynamoGraphDeployment","status":{}}`)}}
+			}),
+			wantWebhook: []string{`spec.overrides.dgd.status: Forbidden: DGD status cannot be overridden`},
+		},
+		{
+			name:       "v1beta2 update rejects an alpha override",
+			oldRequest: beta2DGDRForAdmission(setBeta2AdmissionHardware),
+			request: beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				setBeta2AdmissionHardware(request)
+				request.Spec.Overrides = &nvidiacomv1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(`{"apiVersion":"nvidia.com/v1alpha1","kind":"DynamoGraphDeployment","spec":{}}`)}}
+			}),
+			discovered:  discoveredH100,
+			wantWebhook: []string{`spec.overrides.dgd.apiVersion: Unsupported value: "nvidia.com/v1alpha1": supported values: "nvidia.com/v1beta1"`},
+		},
+		{
+			name:       "v1beta2 update accepts a beta override",
+			oldRequest: beta2DGDRForAdmission(setBeta2AdmissionHardware),
+			request: beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				setBeta2AdmissionHardware(request)
+				request.Spec.Overrides = &nvidiacomv1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(`{"apiVersion":"nvidia.com/v1beta1","kind":"DynamoGraphDeployment","spec":{"components":[{"name":"worker","replicas":2}]}}`)}}
+			}),
+			discovered: discoveredH100,
+		},
+		{
 			name: "v1beta1 empty native representation is rejected by envelope validation",
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Model = ""
@@ -547,6 +592,121 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 
+		// Generated AISimulate schema validates the merged input and ratchets the whole spec.
+		{
+			name:       "v1beta2 merged input rejects a nonpositive trial budget",
+			request:    beta2SchemaDGDRForAdmission(`{"optimizer":{"max_trials":-1}}`, nil),
+			discovered: discoveredH100,
+			wantWebhook: []string{
+				`spec: Invalid value: "<redacted>": generated AISimulate input at /optimizer/max_trials violates JSON Schema keyword exclusiveMinimum`,
+			},
+		},
+		{
+			name:       "v1beta2 merged input rejects unknown root fields without exposing values",
+			request:    beta2SchemaDGDRForAdmission(`{"unknown_field":"private-value"}`, nil),
+			discovered: discoveredH100,
+			wantWebhook: []string{
+				`spec: Invalid value: "<redacted>": generated AISimulate input at / violates JSON Schema keyword additionalProperties: unknown unknown_field`,
+			},
+		},
+		{
+			name:       "v1beta2 merged input rejects deletion of the required model",
+			request:    beta2SchemaDGDRForAdmission(`{"engine":{"model":null}}`, nil),
+			discovered: discoveredH100,
+			wantWebhook: []string{
+				`spec: Invalid value: "<redacted>": generated AISimulate input at /engine violates JSON Schema keyword required: missing model`,
+			},
+		},
+		{
+			name:       "v1beta2 merged input rejects an invalid nested load union",
+			request:    beta2SchemaDGDRForAdmission(`{"traffic":{"load":{"concurrency":false}}}`, nil),
+			discovered: discoveredH100,
+			wantWebhook: []string{
+				`spec: Invalid value: "<redacted>": generated AISimulate input at /traffic violates JSON Schema keyword anyOf; alternatives reject /traffic/load, /traffic/load/concurrency`,
+			},
+		},
+		{
+			name:       "v1beta2 merged input aggregates independent schema errors",
+			request:    beta2SchemaDGDRForAdmission(`{"engine":{"model":false},"optimizer":{"max_trials":-1}}`, nil),
+			discovered: discoveredH100,
+			wantWebhook: []string{
+				`spec: Invalid value: "<redacted>": generated AISimulate input at /engine/model violates JSON Schema keyword type`,
+				`spec: Invalid value: "<redacted>": generated AISimulate input at /optimizer/max_trials violates JSON Schema keyword exclusiveMinimum`,
+			},
+		},
+		{
+			name:       "v1beta2 structural and generated input errors are aggregated",
+			request:    beta2SchemaDGDRForAdmission(`{"dgdr_run":{"namespace":"other"},"optimizer":{"max_trials":-1}}`, nil),
+			discovered: discoveredH100,
+			wantWebhook: []string{
+				"spec.aisim.inputOverrides.dgdr_run.namespace: Forbidden: is managed by the operator and cannot be overridden",
+				`spec: Invalid value: "<redacted>": generated AISimulate input at /optimizer/max_trials violates JSON Schema keyword exclusiveMinimum`,
+			},
+		},
+		{
+			name:       "v1beta2 valid merged input may override typed model and load",
+			request:    beta2SchemaDGDRForAdmission(`{"engine":{"model":"org/override-model"},"traffic":{"load":{"concurrency":3}}}`, nil),
+			discovered: discoveredH100,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if got := v1beta2String(t, result, "spec", "model", "name"); got != v1beta2AdmissionModel {
+					t.Fatalf("typed model = %q, want %q; input overrides must not rewrite it", got, v1beta2AdmissionModel)
+				}
+			},
+		},
+		{
+			name:               "v1beta2 unchanged invalid input remains metadata-updatable after a schema upgrade",
+			seedWithoutWebhook: true,
+			oldRequest:         beta2SchemaDGDRForAdmission(`{"optimizer":{"max_trials":-1}}`, nil),
+			request: beta2SchemaDGDRForAdmission(`{"optimizer":{"max_trials":-1}}`, func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				request.Labels = map[string]string{"updated": "true"}
+			}),
+			discovered: discoveredH100,
+			check: func(t *testing.T, result *unstructured.Unstructured) {
+				if result.GetGeneration() != 1 {
+					t.Fatalf("generation = %d, want 1 for unchanged spec", result.GetGeneration())
+				}
+			},
+		},
+		{
+			name:               "v1beta2 unchanged spec ratchets only upstream schema errors",
+			seedWithoutWebhook: true,
+			oldRequest:         beta2SchemaDGDRForAdmission(`{"dgdr_run":{"namespace":"other"},"optimizer":{"max_trials":-1}}`, nil),
+			request: beta2SchemaDGDRForAdmission(`{"dgdr_run":{"namespace":"other"},"optimizer":{"max_trials":-1}}`, func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				request.Labels = map[string]string{"updated": "true"}
+			}),
+			discovered: discoveredH100,
+			wantWebhook: []string{
+				"spec.aisim.inputOverrides.dgdr_run.namespace: Forbidden: is managed by the operator and cannot be overridden",
+			},
+		},
+		{
+			name:               "v1beta2 an unrelated spec edit requires repair of old invalid input",
+			seedWithoutWebhook: true,
+			oldRequest:         beta2SchemaDGDRForAdmission(`{"optimizer":{"max_trials":-1}}`, nil),
+			request: beta2SchemaDGDRForAdmission(`{"optimizer":{"max_trials":-1}}`, func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				request.Spec.Recommendation.MaxCandidates = 2
+			}),
+			discovered: discoveredH100,
+			wantWebhook: []string{
+				`spec: Invalid value: "<redacted>": generated AISimulate input at /optimizer/max_trials violates JSON Schema keyword exclusiveMinimum`,
+			},
+		},
+		{
+			name:               "v1beta2 old invalid input can be repaired",
+			seedWithoutWebhook: true,
+			oldRequest:         beta2SchemaDGDRForAdmission(`{"optimizer":{"max_trials":-1}}`, nil),
+			request:            beta2SchemaDGDRForAdmission(`{"optimizer":{"max_trials":1}}`, nil),
+			discovered:         discoveredH100,
+		},
+		{
+			name:       "v1beta2 a rollback cannot reintroduce invalid input",
+			oldRequest: beta2SchemaDGDRForAdmission(`{"optimizer":{"max_trials":1}}`, nil),
+			request:    beta2SchemaDGDRForAdmission(`{"optimizer":{"max_trials":-1}}`, nil),
+			discovered: discoveredH100,
+			wantWebhook: []string{
+				`spec: Invalid value: "<redacted>": generated AISimulate input at /optimizer/max_trials violates JSON Schema keyword exclusiveMinimum`,
+			},
+		},
 		{
 			name: "v1beta2 unknown hardware without capacity or topology recommends the manual override",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
@@ -601,7 +761,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			check: func(t *testing.T, result *unstructured.Unstructured) {
-				if got := v1beta2String(t, result, "spec", "aisimulate", "inputOverrides", "dgdr_run", "generator"); got != "aic" {
+				if got := v1beta2String(t, result, "spec", "aisim", "inputOverrides", "dgdr_run", "generator"); got != "aic" {
 					t.Fatalf("dgdr_run.generator = %q, want aic", got)
 				}
 			},
@@ -623,14 +783,14 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantWebhook: []string{
-				"spec.aisimulate.inputOverrides.dgdr_run.derive_runtime_images: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisimulate.inputOverrides.dgdr_run.max_candidates: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisimulate.inputOverrides.dgdr_run.name: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisimulate.inputOverrides.dgdr_run.namespace: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisimulate.inputOverrides.dgdr_run.num_gpus_per_node: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisimulate.inputOverrides.dgdr_run.runtime_image: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisimulate.inputOverrides.dgdr_run.runtime_version_override: Forbidden: is managed by the operator and cannot be overridden",
-				"spec.aisimulate.inputOverrides.dgdr_run.snapshot_dir: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides.dgdr_run.derive_runtime_images: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides.dgdr_run.max_candidates: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides.dgdr_run.name: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides.dgdr_run.namespace: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides.dgdr_run.num_gpus_per_node: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides.dgdr_run.runtime_image: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides.dgdr_run.runtime_version_override: Forbidden: is managed by the operator and cannot be overridden",
+				"spec.aisim.inputOverrides.dgdr_run.snapshot_dir: Forbidden: is managed by the operator and cannot be overridden",
 			},
 		},
 		{
@@ -641,7 +801,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantWebhook: []string{
-				"spec.aisimulate.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
+				"spec.aisim.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
 			},
 		},
 		{
@@ -652,7 +812,8 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantWebhook: []string{
-				"spec.aisimulate.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
+				"spec.aisim.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
+				`spec: Invalid value: "<redacted>": generated AISimulate input at /dgdr_run violates JSON Schema keyword type`,
 			},
 		},
 		{
@@ -663,7 +824,8 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			wantWebhook: []string{
-				"spec.aisimulate.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
+				"spec.aisim.inputOverrides.dgdr_run: Forbidden: must be an object because the operator owns required execution fields within it",
+				`spec: Invalid value: "<redacted>": generated AISimulate input at /dgdr_run violates JSON Schema keyword type`,
 			},
 		},
 		{
@@ -881,26 +1043,39 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["workload"] = map[string]any{"trace": v1beta2TraceForAdmission("w.jsonl")}
 				setV1beta2InputOverrides(spec, map[string]any{"traffic": map[string]any{
-					"source": map[string]any{"type": "synthetic", "format": "mooncake", "paths": []any{"/etc/passwd"}},
-					"load":   map[string]any{"speedup": 2.0},
+					"source": map[string]any{"type": "synthetic", "format": nil, "paths": nil, "input_tokens": 512, "output_tokens": 64},
+					"load":   map[string]any{"type": "constant_rate", "requests_per_second": 2.0},
+					"stop":   map[string]any{"requests": 8},
 				}})
 			}),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			check: func(t *testing.T, result *unstructured.Unstructured) {
-				if got := v1beta2String(t, result, "spec", "aisimulate", "inputOverrides", "traffic", "source", "format"); got != "mooncake" {
-					t.Fatalf("inputOverrides.traffic.source.format = %q, want the override kept", got)
+				if got := v1beta2String(t, result, "spec", "aisim", "inputOverrides", "traffic", "source", "type"); got != "synthetic" {
+					t.Fatalf("inputOverrides.traffic.source.type = %q, want the override kept", got)
 				}
+			},
+		},
+		{
+			name: "v1beta2 source replacement must remove fields unsupported by the selected source",
+			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
+				spec["workload"] = map[string]any{"trace": v1beta2TraceForAdmission("w.jsonl")}
+				setV1beta2InputOverrides(spec, map[string]any{"traffic": map[string]any{
+					"source": map[string]any{"type": "synthetic", "format": "mooncake", "paths": []any{"/etc/passwd"}},
+				}})
+			}),
+			gpuDiscovery: true,
+			discovered:   discoveredH200,
+			wantWebhook: []string{
+				`spec: Invalid value: "<redacted>": generated AISimulate input at /traffic violates JSON Schema keyword anyOf; alternatives reject /traffic/source, /traffic/source/type`,
 			},
 		},
 		// A v1beta2 trace in a v1beta1 carrier stored without admission: CEL ratchets the unchanged
 		// trace on the next v1beta2 write, so the structural webhook recursion rejects it.
 		{
-			name:       "v1beta2 carrier trace subPath with a NUL character",
-			oldRequest: v1beta1CarrierForAdmission(map[string]any{"trace": v1beta2TraceForAdmission("retune/w\x00.jsonl")}),
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["workload"] = map[string]any{"trace": v1beta2TraceForAdmission("retune/w\x00.jsonl")}
-			}),
+			name:               "v1beta2 carrier trace subPath with a NUL character",
+			oldRequest:         v1beta1CarrierForAdmission(map[string]any{"trace": v1beta2TraceForAdmission("retune/w\x00.jsonl")}),
+			request:            v1beta2TraceRequestForAdmission(map[string]any{"trace": v1beta2TraceForAdmission("retune/w\x00.jsonl")}),
 			seedWithoutWebhook: true,
 			gpuDiscovery:       true,
 			discovered:         discoveredH200,
@@ -913,11 +1088,9 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:       "v1beta2 carrier trace subPath longer than its limit",
-			oldRequest: v1beta1CarrierForAdmission(map[string]any{"trace": v1beta2TraceForAdmission(strings.Repeat("a", 1025))}),
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["workload"] = map[string]any{"trace": v1beta2TraceForAdmission(strings.Repeat("a", 1025))}
-			}),
+			name:               "v1beta2 carrier trace subPath longer than its limit",
+			oldRequest:         v1beta1CarrierForAdmission(map[string]any{"trace": v1beta2TraceForAdmission(strings.Repeat("a", 1025))}),
+			request:            v1beta2TraceRequestForAdmission(map[string]any{"trace": v1beta2TraceForAdmission(strings.Repeat("a", 1025))}),
 			seedWithoutWebhook: true,
 			gpuDiscovery:       true,
 			discovered:         discoveredH200,
@@ -926,11 +1099,9 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:       "v1beta2 carrier trace without a format receives the default on the next write",
-			oldRequest: v1beta1CarrierForAdmission(map[string]any{"trace": map[string]any{"source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "request-traces", "subPath": "w.jsonl"}}}}),
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["workload"] = map[string]any{"trace": map[string]any{"source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "request-traces", "subPath": "w.jsonl"}}}}
-			}),
+			name:               "v1beta2 carrier trace without a format receives the default on the next write",
+			oldRequest:         v1beta1CarrierForAdmission(map[string]any{"trace": map[string]any{"source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "request-traces", "subPath": "w.jsonl"}}}}),
+			request:            v1beta2TraceRequestForAdmission(map[string]any{"trace": map[string]any{"source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "request-traces", "subPath": "w.jsonl"}}}}),
 			seedWithoutWebhook: true,
 			gpuDiscovery:       true,
 			discovered:         discoveredH200,
@@ -941,16 +1112,15 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:       "v1beta2 carrier trace source without a persistentVolumeClaim",
-			oldRequest: v1beta1CarrierForAdmission(map[string]any{"trace": map[string]any{"format": "Dynamo", "source": map[string]any{}}}),
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["workload"] = map[string]any{"trace": map[string]any{"format": "Dynamo", "source": map[string]any{}}}
-			}),
+			name:               "v1beta2 carrier trace source without a persistentVolumeClaim",
+			oldRequest:         v1beta1CarrierForAdmission(map[string]any{"trace": map[string]any{"format": "Dynamo", "source": map[string]any{}}}),
+			request:            v1beta2TraceRequestForAdmission(map[string]any{"trace": map[string]any{"format": "Dynamo", "source": map[string]any{}}}),
 			seedWithoutWebhook: true,
 			gpuDiscovery:       true,
 			discovered:         discoveredH200,
 			wantWebhook: []string{
 				`spec.workload.trace.source.persistentVolumeClaim: Required value`,
+				`spec: Invalid value: "<redacted>": generated AISimulate input at /traffic violates JSON Schema keyword anyOf; alternatives reject /traffic/source, /traffic/source/type`,
 			},
 			// CEL ratchets the unchanged trace and reports what it tolerated as a warning.
 			wantWarnings: []string{
@@ -958,11 +1128,9 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:       "v1beta2 carrier trace errors are reported together in field order",
-			oldRequest: v1beta1CarrierForAdmission(map[string]any{"static": map[string]any{}, "trace": map[string]any{"format": "mooncake", "source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "Bad_Claim", "subPath": "../w.jsonl"}}, "replay": map[string]any{"arrivalSpeedupRatio": 0.0}}}),
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["workload"] = map[string]any{"static": map[string]any{}, "trace": map[string]any{"format": "mooncake", "source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "Bad_Claim", "subPath": "../w.jsonl"}}, "replay": map[string]any{"arrivalSpeedupRatio": 0.0}}}
-			}),
+			name:               "v1beta2 carrier trace errors are reported together in field order",
+			oldRequest:         v1beta1CarrierForAdmission(map[string]any{"static": map[string]any{}, "trace": map[string]any{"format": "mooncake", "source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "Bad_Claim", "subPath": "../w.jsonl"}}, "replay": map[string]any{"arrivalSpeedupRatio": 0.0}}}),
+			request:            v1beta2TraceRequestForAdmission(map[string]any{"static": map[string]any{}, "trace": map[string]any{"format": "mooncake", "source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "Bad_Claim", "subPath": "../w.jsonl"}}, "replay": map[string]any{"arrivalSpeedupRatio": 0.0}}}),
 			seedWithoutWebhook: true,
 			gpuDiscovery:       true,
 			discovered:         discoveredH200,
@@ -996,7 +1164,9 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			name: "v1beta2 source overrides stay allowed without a trace",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				setV1beta2InputOverrides(spec, map[string]any{"traffic": map[string]any{
-					"source": map[string]any{"type": "trace", "format": "dynamo", "paths": []any{"/x"}},
+					"source": map[string]any{"type": "trace", "format": "dynamo", "paths": []any{"/x"}, "input_tokens": nil, "output_tokens": nil},
+					"load":   map[string]any{"type": "trace_timestamps", "concurrency": nil},
+					"stop":   map[string]any{"requests": nil},
 				}})
 			}),
 			gpuDiscovery: true,
@@ -1012,13 +1182,16 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			discovered:   discoveredH200,
 		},
 		{
-			name: "v1beta2 a null source override may delete the source a trace lowers",
+			name: "v1beta2 deleting a trace source without replacement fails input validation",
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
 				spec["workload"] = map[string]any{"trace": v1beta2TraceForAdmission("w.jsonl")}
 				setV1beta2InputOverrides(spec, map[string]any{"traffic": map[string]any{"source": nil}})
 			}),
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
+			wantWebhook: []string{
+				`spec: Invalid value: "<redacted>": generated AISimulate input at /traffic violates JSON Schema keyword anyOf`,
+			},
 		},
 		{
 			name:       "v1beta2 update to duplicate backends is rejected",
@@ -1067,137 +1240,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				}
 				if image != tt.wantImage {
 					t.Fatalf("defaulted spec.image = %q, want %q", image, tt.wantImage)
-				}
-			}
-		})
-	}
-}
-
-func TestDynamoGraphDeploymentRunSpecIsImmutable(t *testing.T) {
-	tests := []struct {
-		name       string
-		oldRun     *nvidiacomv1beta2.DynamoGraphDeploymentRun
-		run        *nvidiacomv1beta2.DynamoGraphDeploymentRun
-		wantCELErr string
-	}{
-		{
-			name:   "metadata-only update keeps the immutable spec",
-			oldRun: v1beta2RunForAdmission(v1beta2AdmissionModel, nil),
-			run:    v1beta2RunForAdmission(v1beta2AdmissionModel, map[string]string{"updated": "true"}),
-		},
-		{
-			name:       "spec update is rejected by the API server",
-			oldRun:     v1beta2RunForAdmission(v1beta2AdmissionModel, nil),
-			run:        v1beta2RunForAdmission(alternateAdmissionModel, nil),
-			wantCELErr: `<nil>: Invalid value: spec is immutable`,
-		},
-		{
-			name:       "model-only Run is rejected before controller reconciliation",
-			run:        v1beta2ModelOnlyRunForAdmission(v1beta2AdmissionModel),
-			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
-		},
-		{
-			name: "empty hardware is an accepted resolved opt-out",
-			run: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
-				run := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
-				run.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{}
-				return run
-			}(),
-		},
-		{
-			name: "partial hardware is rejected",
-			run: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
-				run := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
-				run.Spec.Hardware = &nvidiacomv1beta2.HardwareSpec{GPU: &nvidiacomv1beta2.GPUHardwareSpec{
-					SKU: new("h200_sxm"), Budget: new(int32(8)),
-				}}
-				return run
-			}(),
-			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
-		},
-		{
-			name: "partial static workload is rejected",
-			run: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
-				run := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
-				run.Spec.Workload.Static.InputTokens = new(int32(1024))
-				return run
-			}(),
-			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
-		},
-		{
-			name: "missing SLA snapshot is rejected",
-			run: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
-				run := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
-				run.Spec.Objective.SLA = nil
-				return run
-			}(),
-			wantCELErr: `spec: Invalid value: spec must be a fully resolved Request admission snapshot`,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			test := admissionTestCase{
-				object:       tt.run,
-				wantCELError: tt.wantCELErr,
-			}
-			if tt.oldRun != nil {
-				test.oldObject = tt.oldRun
-			}
-			actual := runAdmissionTest(t, test)
-			if tt.wantCELErr == "" && actual.GetGeneration() != 1 {
-				t.Fatalf("generation = %d, want 1 for a metadata-only update", actual.GetGeneration())
-			}
-		})
-	}
-}
-
-// A Run has no admission webhook, so the trace rules it shares with the Request must hold in its
-// own CRD schema: a directly created Run cannot name a file outside its claim, and its omitted
-// format receives the same default.
-func TestDynamoGraphDeploymentRunTraceIsValidatedByTheCRD(t *testing.T) {
-	tests := []struct {
-		name       string
-		subPath    string
-		withStatic bool
-		wantCELErr string
-	}{
-		{name: "a valid trace is stored with the default format", subPath: "retune/w-1.jsonl.gz"},
-		{
-			name:       "a subPath that leaves the claim is rejected",
-			subPath:    "../w.jsonl",
-			wantCELErr: `spec.workload.trace.source.persistentVolumeClaim.subPath: Invalid value: "string": subPath must be relative to the claim root without empty, '.' or '..' segments`,
-		},
-		{
-			name:       "a subPath with a NUL character is rejected",
-			subPath:    "retune/w\x00.jsonl",
-			wantCELErr: `spec.workload.trace.source.persistentVolumeClaim.subPath: Invalid value: "string": subPath must not contain a NUL character`,
-		},
-		{
-			name:       "static beside a trace is rejected",
-			subPath:    "retune/w-1.jsonl.gz",
-			withStatic: true,
-			wantCELErr: `spec.workload: Invalid value: static and trace are mutually exclusive`,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			run := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
-			run.Spec.Workload = &nvidiacomv1beta2.WorkloadSpec{Trace: &nvidiacomv1beta2.TraceWorkloadSpec{
-				Source: nvidiacomv1beta2.TraceSourceSpec{PersistentVolumeClaim: &nvidiacomv1beta2.TracePVCSource{
-					ClaimName: "request-traces", SubPath: tt.subPath,
-				}},
-			}}
-			if tt.withStatic {
-				run.Spec.Workload.Static = &nvidiacomv1beta2.StaticWorkloadSpec{}
-			}
-			actual := runAdmissionTest(t, admissionTestCase{object: run, wantCELError: tt.wantCELErr})
-			if tt.wantCELErr == "" {
-				if got := v1beta2String(t, actual, "spec", "workload", "trace", "source", "persistentVolumeClaim", "subPath"); got != "retune/w-1.jsonl.gz" {
-					t.Fatalf("stored workload.trace.source.persistentVolumeClaim.subPath = %q, want the trace kept", got)
-				}
-				if got := v1beta2String(t, actual, "spec", "workload", "trace", "format"); got != "Dynamo" {
-					t.Fatalf("stored workload.trace.format = %q, want the Dynamo default", got)
 				}
 			}
 		})
@@ -1398,34 +1440,31 @@ func beta2DGDRForAdmission(
 	return request
 }
 
-func v1beta2RunForAdmission(model string, labels map[string]string) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
-	metric := nvidiacomv1beta2.ObjectiveMetric("ThroughputPerGPU")
-	return &nvidiacomv1beta2.DynamoGraphDeploymentRun{
-		APIVersion: nvidiacomv1beta2.GroupVersion.String(),
-		Kind:       "DynamoGraphDeploymentRun",
-		Name:       "test-v1beta2-dgdr-run", Namespace: "default", Labels: labels,
-		Spec: nvidiacomv1beta2.DynamoGraphDeploymentRunSpec{NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
-			Model:    &nvidiacomv1beta2.ModelSpec{Name: model},
-			Backends: []nvidiacomv1beta2.Backend{nvidiacomv1beta2.BackendVLLM},
-			Hardware: &nvidiacomv1beta2.HardwareSpec{
-				GPU:            &nvidiacomv1beta2.GPUHardwareSpec{SKU: new("h200_sxm"), Budget: new(int32(8))},
-				NumGPUsPerNode: new(int32(8)),
-			},
-			Workload: &nvidiacomv1beta2.WorkloadSpec{Static: &nvidiacomv1beta2.StaticWorkloadSpec{}},
-			Objective: &nvidiacomv1beta2.ObjectiveSpec{
-				Mode: nvidiacomv1beta2.ObjectiveModeOptimize, Metric: &metric, SLA: &nvidiacomv1beta2.ObjectiveSLASpec{},
-			},
-			Recommendation: &nvidiacomv1beta2.RecommendationSpec{MaxCandidates: 1},
-		}},
+// beta2SchemaDGDRForAdmission constructs explicit native input, including a tiny
+// workload, so legacy seeds remain unchanged when current defaulting runs on UPDATE.
+func beta2SchemaDGDRForAdmission(
+	overrides string,
+	mutate func(*nvidiacomv1beta2.DynamoGraphDeploymentRequest),
+) *nvidiacomv1beta2.DynamoGraphDeploymentRequest {
+	request := beta2DGDRForAdmission(setBeta2AdmissionHardware)
+	request.Spec.Backends = []nvidiacomv1beta2.Backend{nvidiacomv1beta2.BackendVLLM}
+	request.Spec.Workload = &nvidiacomv1beta2.WorkloadSpec{Static: &nvidiacomv1beta2.StaticWorkloadSpec{
+		InputTokens: new(int32(2)), OutputTokens: new(int32(1)),
+		Load: &nvidiacomv1beta2.StaticLoadSpec{Concurrency: new(int32(1))},
+	}}
+	request.Spec.Objective = &nvidiacomv1beta2.ObjectiveSpec{
+		Mode:   nvidiacomv1beta2.ObjectiveModeOptimize,
+		Metric: new(nvidiacomv1beta2.ObjectiveMetric("Throughput")),
+		SLA:    &nvidiacomv1beta2.ObjectiveSLASpec{},
 	}
-}
-
-func v1beta2ModelOnlyRunForAdmission(model string) *nvidiacomv1beta2.DynamoGraphDeploymentRun {
-	run := v1beta2RunForAdmission(model, nil)
-	run.Spec.NativeSearchInput = nvidiacomv1beta2.NativeSearchInput{
-		Model: &nvidiacomv1beta2.ModelSpec{Name: model},
+	request.Spec.Recommendation = &nvidiacomv1beta2.RecommendationSpec{MaxCandidates: 1}
+	request.Spec.AISim = &nvidiacomv1beta2.AISimSpec{
+		InputOverrides: &runtime.RawExtension{Raw: []byte(overrides)},
 	}
-	return run
+	if mutate != nil {
+		mutate(request)
+	}
+	return request
 }
 
 const v1beta2AdmissionModel = "Qwen/Qwen3-0.6B"
@@ -1452,15 +1491,19 @@ func v1beta2DGDRForAdmission(mutate func(spec map[string]any)) *unstructured.Uns
 // name v1beta2DGDRForAdmission uses. Only conversion writes such a carrier, so seed it without the
 // webhook.
 func v1beta1CarrierForAdmission(workload map[string]any) *unstructured.Unstructured {
-	return &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "nvidia.com/v1beta1",
-		"kind":       "DynamoGraphDeploymentRequest",
-		"metadata":   map[string]any{"name": "test-v1beta2-dgdr", "namespace": "default"},
-		"spec": map[string]any{"v1beta2": map[string]any{
-			"model":    map[string]any{"name": v1beta2AdmissionModel},
-			"workload": workload,
-		}},
-	}}
+	request := v1beta2TraceRequestForAdmission(workload)
+	request.SetAPIVersion("nvidia.com/v1beta1")
+	request.Object["spec"] = map[string]any{"v1beta2": request.Object["spec"]}
+	return request
+}
+
+func v1beta2TraceRequestForAdmission(workload map[string]any) *unstructured.Unstructured {
+	return v1beta2DGDRForAdmission(func(spec map[string]any) {
+		spec["workload"] = workload
+		spec["hardware"] = map[string]any{
+			"gpu": map[string]any{"sku": "h200_sxm", "budget": int64(8)}, "numGpusPerNode": int64(8),
+		}
+	})
 }
 
 func v1beta2TraceForAdmission(subPath string) map[string]any {
@@ -1494,12 +1537,12 @@ func v1beta2String(t *testing.T, obj *unstructured.Unstructured, path ...string)
 
 // setV1beta2InputOverrides replaces any input overrides the fixture carried.
 func setV1beta2InputOverrides(spec map[string]any, overrides map[string]any) {
-	aisimulate, _ := spec["aisimulate"].(map[string]any)
-	if aisimulate == nil {
-		aisimulate = map[string]any{}
-		spec["aisimulate"] = aisimulate
+	aisim, _ := spec["aisim"].(map[string]any)
+	if aisim == nil {
+		aisim = map[string]any{}
+		spec["aisim"] = aisim
 	}
-	aisimulate["inputOverrides"] = overrides
+	aisim["inputOverrides"] = overrides
 }
 
 // setBeta2AdmissionHardware names the hardware, so fixtures do not depend on GPU discovery.

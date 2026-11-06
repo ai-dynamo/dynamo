@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1014" height="347" viewBox="22 29 1014 347" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Each codec has its own decoder</title>
+  <desc id="desc">H.264 and H.265 are decoded by NVDEC on the GPU. VP8 and VP9 are decoded by FFmpeg on the frontend CPU. Without frontend decoding, the backend's Python library decodes the video.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-blue-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
+  <rect x="22" y="29" width="1014" height="347" fill="#FFFFFF"/>
+  <text x="36" y="66" font-size="25.0" font-weight="700" fill="#1A1A1A">Each codec has its own decoder</text>
+  <rect x="36" y="196" width="130" height="100" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="85.0" y="220.0" width="32" height="24" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><polygon points="97.0,226.0 108.0,232.0 97.0,238.0" fill="#76B900"/>
+  <text x="101.0" y="280" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">Video</text>
+  <line x1="168" y1="246" x2="296" y2="131" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <rect x="298" y="100" width="280" height="62" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <text x="438" y="137" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">H.264, H.265</text>
+  <line x1="580" y1="131" x2="690" y2="131" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <rect x="692" y="100" width="330" height="62" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="714.0" y="119.0" width="24" height="24" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><rect x="720.0" y="125.0" width="12.0" height="12.0" fill="#76B900"/><line x1="721.2" y1="114.0" x2="721.2" y2="119.0" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="721.2" y1="143.0" x2="721.2" y2="148.0" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="709.0" y1="126.2" x2="714.0" y2="126.2" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="738.0" y1="126.2" x2="743.0" y2="126.2" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="730.8" y1="114.0" x2="730.8" y2="119.0" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="730.8" y1="143.0" x2="730.8" y2="148.0" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="709.0" y1="135.8" x2="714.0" y2="135.8" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="738.0" y1="135.8" x2="743.0" y2="135.8" stroke="#76B900" stroke-width="2" stroke-linecap="round"/>
+  <text x="758" y="137.0" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">NVDEC on the GPU</text>
+  <line x1="168" y1="246" x2="296" y2="231" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <rect x="298" y="200" width="280" height="62" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <text x="438" y="237" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">VP8, VP9</text>
+  <line x1="580" y1="231" x2="690" y2="231" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <rect x="692" y="200" width="330" height="62" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="711.0" y="219.0" width="30" height="24" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><line x1="711.0" y1="226.0" x2="741.0" y2="226.0" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><circle cx="716" cy="222.5" r="1.3" fill="#76B900"/><circle cx="721" cy="222.5" r="1.3" fill="#76B900"/><circle cx="726" cy="222.5" r="1.3" fill="#76B900"/><line x1="718.0" y1="234.0" x2="734.0" y2="234.0" stroke="#76B900" stroke-width="2" stroke-linecap="round"/>
+  <text x="758" y="237.0" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">Frontend CPU (FFmpeg)</text>
+  <line x1="168" y1="246" x2="296" y2="331" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <rect x="298" y="300" width="280" height="62" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <text x="438" y="337" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">Without --frontend-decoding</text>
+  <line x1="580" y1="331" x2="690" y2="331" stroke="#D97706" stroke-width="2.5" marker-end="url(#arrow-amber)"/>
+  <rect x="692" y="300" width="330" height="62" rx="10" fill="#FFF7E6" stroke="#D97706" stroke-width="2"/>
+  <line x1="721.0" y1="317.0" x2="721.0" y2="325.0" stroke="#D97706" stroke-width="2.6" stroke-linecap="round"/><line x1="731.0" y1="317.0" x2="731.0" y2="325.0" stroke="#D97706" stroke-width="2.6" stroke-linecap="round"/><rect x="716.0" y="325.0" width="20" height="12" rx="4" fill="#FFFFFF" stroke="#D97706" stroke-width="2"/><path d="M726,337.0 v5 a4,4 0 0 0 4,4 h8" fill="none" stroke="#D97706" stroke-width="2.2" stroke-linecap="round"/>
+  <text x="758" y="337.0" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">Backend Python library</text>
+</svg>

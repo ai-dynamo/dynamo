@@ -884,6 +884,10 @@ class TestMapFinishReason:  # FRONTEND.5 — finish_reason remap (frontend layer
         """Unknown reasons pass through unchanged."""
         assert _map_finish_reason("tool_calls") == "tool_calls"
 
+    def test_structured_error_returns_none(self):
+        """A non-string finish_reason is not used as a map key."""
+        assert _map_finish_reason({"error": "kv transfer failed"}) is None
+
 
 # ---------------------------------------------------------------------------
 # convert_tools
@@ -1203,6 +1207,36 @@ def test_mistral_force_reasoning_uses_reasoning_effort(request_data, expected):
     """Mistral follows SGLang's explicit non-none reasoning-effort rule."""
     assert (
         resolve_request_force_reasoning(request_data, "mistral", template_default=False)
+        is expected
+    )
+
+
+@pytest.mark.parametrize("template_default", [False, True])
+@pytest.mark.parametrize(
+    ("request_data", "expected"),
+    [
+        ({}, True),
+        ({"reasoning_effort": "high"}, True),
+        ({"reasoning_effort": "none"}, False),
+        ({"reasoning_effort": "no_think"}, False),
+        ({"chat_template_kwargs": {"reasoning_effort": "none"}}, False),
+        ({"chat_template_args": {"reasoning_effort": "no_think"}}, False),
+        (
+            {
+                "reasoning_effort": "high",
+                "chat_template_kwargs": {"reasoning_effort": "none"},
+            },
+            True,
+        ),
+    ],
+)
+def test_hunyuan_force_reasoning_uses_reasoning_effort(
+    request_data, expected, template_default
+):
+    assert (
+        resolve_request_force_reasoning(
+            request_data, "hunyuan", template_default=template_default
+        )
         is expected
     )
 
@@ -5481,10 +5515,10 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert chunk["nvext"]["stop_reason"] == "END"
         assert "stop_reason" not in chunk["choices"][0]
 
-    def _run_stream(self, tokenizer, items):
+    def _run_stream(self, tokenizer, items, engine=None):
         processor = SglangProcessor(
             tokenizer=tokenizer,
-            routed_engine=FakeRoutedEngine(items=items),
+            routed_engine=engine or FakeRoutedEngine(items=items),
             tool_call_parser_name=None,
             reasoning_parser_name=None,
             eos_token_ids=None,
@@ -5530,6 +5564,41 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             "event": "error",
             "comment": ["backend disconnected"],
         }
+
+    @pytest.mark.parametrize(
+        "finish_reason",
+        [{"error": "kv transfer failed"}, "error: kv transfer failed"],
+    )
+    @pytest.mark.parametrize("after_output", [False, True])
+    def test_finish_reason_error_ends_stream_with_error_envelope(
+        self, after_output, finish_reason
+    ):
+        """An error finish_reason ends the stream with one error frame."""
+        prefix = [{"token_ids": [ord("A")]}] if after_output else []
+        engine = FakeRoutedEngine(
+            items=[
+                *prefix,
+                {"token_ids": [], "finish_reason": finish_reason},
+                {"token_ids": [ord("B")], "finish_reason": None},
+            ]
+        )
+        items = self._run_stream(self.ByteTokenizer(), [], engine=engine)
+        assert len(items) == len(prefix) + 1
+        if after_output:
+            assert items[0]["choices"][0]["delta"]["content"] == "A"
+            assert items[0]["choices"][0]["finish_reason"] is None
+        assert items[-1] == {
+            "_dynamo_annotated": True,
+            "event": "error",
+            "comment": ["kv transfer failed"],
+        }
+        assert not any(
+            choice.get("finish_reason") == "error"
+            for item in items
+            for choice in item.get("choices", [])
+        )
+        # The chunk after the error was never read from the routed stream.
+        assert engine.yielded == len(prefix) + 1
 
     @pytest.mark.parametrize("after_output", [False, True])
     def test_routed_validation_exception_preserves_type_and_message(self, after_output):

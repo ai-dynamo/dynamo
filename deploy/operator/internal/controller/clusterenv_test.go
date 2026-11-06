@@ -37,6 +37,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -507,8 +508,8 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 
 			t.Log("Verify the Job consumed the immutable input recorded in Run status")
 			require.NotNil(t, completedRun.Status.JobRef, "completed Run has no Job reference")
-			require.NotNil(t, completedRun.Status.AISimulate, "completed Run has no AISimulate status")
-			require.NotNil(t, completedRun.Status.AISimulate.Input, "completed Run has no effective AISimulate input")
+			require.NotNil(t, completedRun.Status.AISim, "completed Run has no AISimulate status")
+			require.NotNil(t, completedRun.Status.AISim.Input, "completed Run has no effective AISimulate input")
 			key := types.NamespacedName{Namespace: env.Namespace(), Name: completedRun.Status.JobRef.Name}
 			var executionConfig corev1.ConfigMap
 			require.NoError(t, env.Client().Get(ctx, key, &executionConfig))
@@ -532,8 +533,8 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			})
 			configInput, err := dgdrRunStatusInput(executionConfig.Data[dgdrRunInputKey])
 			require.NoError(t, err)
-			require.JSONEq(t, string(completedRun.Status.AISimulate.Input.Raw), string(configInput.Raw))
-			require.Equal(t, int64(8), aisimulateHardwareBudget(t, completedRun.Status.AISimulate.Input.Raw),
+			require.JSONEq(t, string(completedRun.Status.AISim.Input.Raw), string(configInput.Raw))
+			require.Equal(t, int64(8), aisimulateHardwareBudget(t, completedRun.Status.AISim.Input.Raw),
 				"lowered AISimulate input lost the selected-shape budget")
 
 			t.Log("Verify the Candidate is a real API object controlled by the immutable Run")
@@ -543,7 +544,10 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			require.Len(t, candidates.Items, 1)
 			require.True(t, metav1.IsControlledBy(&candidates.Items[0], &completedRun), "Candidate is not controlled by its Run")
 			require.Equal(t, completedRun.Status.CandidateRefs[0].Name, candidates.Items[0].Name)
-			require.NotEmpty(t, candidates.Items[0].Spec.Components, "Candidate has no materialized DGD components")
+			var candidateSpec nvidiacomv1beta1.DynamoGraphDeploymentSpec
+			require.NoError(t, json.Unmarshal(candidates.Items[0].Spec.Raw, &candidateSpec))
+			require.NotEmpty(t, candidateSpec.Components, "Candidate has no materialized DGD components")
+			require.True(t, meta.IsStatusConditionTrue(candidates.Items[0].Status.Conditions, nvidiacomv1beta2.DGDCConditionValid))
 			require.LessOrEqual(t, candidateUsedGPUs(t, candidates.Items[0].Status.Metrics), int64(8),
 				"Candidate exceeds the selected-shape GPU budget")
 

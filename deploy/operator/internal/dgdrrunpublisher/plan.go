@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // SnapshotFileName is the file the Sweeper container writes.
@@ -34,7 +36,7 @@ const SnapshotFileName = "dgdr_run_snapshot.yaml"
 const maxObjectName = 253
 
 // RunStatus is the part of DynamoGraphDeploymentRun.status the publisher owns: the
-// ordered candidate references, the published-candidate count
+// publication condition, ordered candidate references, the published-candidate count
 // (status.progress.candidates.published), the Pareto-front count
 // (status.progress.candidates.paretoFront), and the coarse progress time.
 // CandidateNames is in rank order (best first for scalar searches). Published always
@@ -53,6 +55,7 @@ type RunStatus struct {
 	ParetoFront    int32
 	LastProgress   time.Time
 	CandidateNames []string
+	Publication    *metav1.Condition
 }
 
 // DesiredState is what one snapshot says should exist in the cluster.
@@ -71,9 +74,10 @@ type DesiredState struct {
 	// FirstFailure is the bounded "id: error" of the first candidate whose
 	// materialization failed, for the run-failed diagnostics.
 	FirstFailure string
-	// Failed counts the candidates whose materialization failed. They are not created;
-	// the count is logged and prevents an empty terminal projection from succeeding.
+	// Failed counts renderer failures and published Candidates with Valid=False.
 	Failed int
+	// Valid counts Candidates whose complete DGD passed publisher preparation.
+	Valid int
 }
 
 // CandidateName is the DGDC name for a candidate id. It depends only on the run
@@ -171,5 +175,6 @@ func (desired RunStatus) NeedsUpdate(observed RunStatus) bool {
 	if !desired.LastProgress.IsZero() && !desired.LastProgress.Equal(observed.LastProgress) {
 		return true
 	}
-	return !slices.Equal(desired.CandidateNames, observed.CandidateNames)
+	return !slices.Equal(desired.CandidateNames, observed.CandidateNames) ||
+		!apiequality.Semantic.DeepEqual(desired.Publication, observed.Publication)
 }
