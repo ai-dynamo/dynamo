@@ -17,7 +17,7 @@ use axum::{
     Router as AxumRouter, http::StatusCode, http::header::CONTENT_TYPE, response::IntoResponse,
     routing::get,
 };
-use dynamo_llm::http::service::metrics::generate_log_buckets;
+use dynamo_llm::http::service::metrics::input_sequence_buckets;
 use prometheus::{Encoder, HistogramOpts, HistogramVec, Registry, TEXT_FORMAT, TextEncoder};
 
 /// Port the `/metrics` endpoint binds to unless `DYN_EPP_METRICS_PORT` says
@@ -63,7 +63,8 @@ fn served_model_label() -> &'static str {
 ///
 /// This is the *observed* cache hit, as opposed to the overlap estimate the KV
 /// router computes at selection time. Buckets mirror the frontend's
-/// `dynamo_frontend_cached_tokens` defaults so the two can share a dashboard.
+/// `dynamo_frontend_cached_tokens` defaults so the two can share a dashboard;
+/// the frontend's `DYN_METRICS_INPUT_SEQUENCE_*` overrides do not apply here.
 static CACHED_TOKENS: LazyLock<HistogramVec> = LazyLock::new(|| {
     let histogram = HistogramVec::new(
         HistogramOpts::new(
@@ -71,7 +72,7 @@ static CACHED_TOKENS: LazyLock<HistogramVec> = LazyLock::new(|| {
             "Prompt tokens served from the model server's KV cache per request, \
              as reported in usage.prompt_tokens_details.cached_tokens",
         )
-        .buckets(generate_log_buckets(50.0, 128_000.0, 12)),
+        .buckets(input_sequence_buckets(&|_| None)),
         &["model"],
     )
     .expect("cached_tokens histogram options are statically valid");
