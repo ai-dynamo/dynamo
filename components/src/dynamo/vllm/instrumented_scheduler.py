@@ -2259,6 +2259,8 @@ _BASE_SCHEDULE_TAKES_THROTTLE = (
 
 
 class InstrumentedScheduler(AsyncScheduler):
+    running: list[Request]
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -2779,7 +2781,7 @@ class InstrumentedScheduler(AsyncScheduler):
         else:
             other_waiting = self.skipped_waiting
 
-        waiting_queues = (self.waiting, other_waiting)
+        waiting_queues: tuple[Iterable[Request], ...] = (self.waiting, other_waiting)
         if hasattr(self, "async_kv_waiting"):
             waiting_queues += (self.async_kv_waiting,)
         for request in chain.from_iterable(waiting_queues):
