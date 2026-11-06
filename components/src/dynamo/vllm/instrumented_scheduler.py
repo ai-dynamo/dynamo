@@ -2134,6 +2134,7 @@ class _FpmPublisherThread:
         max_queue_size: int = 10_000,
         start_paused: bool = False,
     ) -> None:
+        """Bind the metrics socket and start publishing, optionally paused."""
         self._queue: queue.Queue[ForwardPassMetrics | None] = queue.Queue(
             maxsize=max_queue_size
         )
@@ -2191,6 +2192,7 @@ class _FpmPublisherThread:
             pass
 
     def _run(self) -> None:
+        """Send completed passes and periodic heartbeats with the latest queue."""
         topic = b""
         last_publish = time.monotonic()
 
@@ -2396,6 +2398,7 @@ class InstrumentedScheduler(AsyncScheduler):
     def _schedule_and_record_time(
         self, throttle_prefills: bool = False
     ) -> SchedulerOutput:
+        """Dispatch a step, record its start, and refresh the heartbeat queue."""
         # vLLM added `throttle_prefills` to Scheduler.schedule() after some of
         # the runtime images were built; pass it only when the base accepts it
         # so one overlay works across both.
@@ -2426,6 +2429,7 @@ class InstrumentedScheduler(AsyncScheduler):
         request_ids: str | Iterable[str] | None,
         finished_status: RequestStatus,
     ) -> list[Request]:
+        """Finish requests and refresh heartbeats even if no later step runs."""
         aborted = super().finish_requests(request_ids, finished_status)
         # An abort can empty the queue and leave the engine idle with no
         # later schedule() call to clear the heartbeat snapshot.
@@ -2479,6 +2483,7 @@ class InstrumentedScheduler(AsyncScheduler):
         scheduler_output: SchedulerOutput,
         model_runner_output: "ModelRunnerOutput",
     ):
+        """Process a step's output and update its metrics and heartbeat queue."""
         model_output_arrival = (
             time.monotonic() if scheduler_output.total_num_scheduled_tokens > 0 else 0.0
         )
