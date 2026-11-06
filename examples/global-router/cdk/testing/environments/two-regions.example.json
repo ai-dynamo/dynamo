@@ -44,7 +44,6 @@
           "relayReplicas": 2,
           "frontendServiceName": "blue-frontend",
           "discoveryMode": "registrations",
-          "exportServices": false,
           "workload": {
             "image": "example.invalid/dynamo-runtime:tested-revision",
             "model": "Qwen/Qwen3-0.6B",
@@ -91,7 +90,6 @@
           "relayReplicas": 2,
           "frontendServiceName": "blue-frontend",
           "discoveryMode": "registrations",
-          "exportServices": false,
           "workload": {
             "image": "example.invalid/dynamo-runtime:tested-revision",
             "model": "Qwen/Qwen3-0.6B",

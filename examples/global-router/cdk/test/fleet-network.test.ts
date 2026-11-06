@@ -20,19 +20,18 @@ import { test } from "node:test";
 import { App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import {
-  McsFleet,
-  McsMemberStack,
-  McsPeeringsStack,
-  McsRoutesStack,
-  validateMcsFleet,
-} from "../lib/foundation/mcs-fleet";
+  FleetConfig,
+  FleetMemberStack,
+  FleetPeeringsStack,
+  FleetRoutesStack,
+  validateFleet,
+} from "../lib/foundation/fleet-network";
 
 const names = ["ohio", "west", "tokyo", "saopaulo"];
 const regions = ["us-east-2", "us-west-2", "ap-northeast-1", "sa-east-1"];
-const fleet: McsFleet = {
+const fleet: FleetConfig = {
   members: names.map((id, i) => ({
     id,
-    siteId: `aws-${id}`,
     region: regions[i],
     clusterName: `example-${id}`,
     vpcId: `vpc-0000000000000000${i}`,
@@ -55,19 +54,19 @@ const fleet: McsFleet = {
 const env = { account: "111111111111", region: "us-east-2" };
 
 test("four members require six direct links and nonoverlapping private pod networks", () => {
-  validateMcsFleet(fleet);
+  validateFleet(fleet);
   assert.throws(
-    () => validateMcsFleet({ ...fleet, links: fleet.links.slice(1) }),
+    () => validateFleet({ ...fleet, links: fleet.links.slice(1) }),
     /every member pair/,
   );
   assert.throws(
     () =>
-      validateMcsFleet({ ...fleet, links: [...fleet.links, fleet.links[0]] }),
+      validateFleet({ ...fleet, links: [...fleet.links, fleet.links[0]] }),
     /duplicate/,
   );
   assert.throws(
     () =>
-      validateMcsFleet({
+      validateFleet({
         ...fleet,
         members: fleet.members.map((m, i) =>
           i === 1 ? { ...m, cidr: fleet.members[0].cidr } : m,
@@ -77,7 +76,7 @@ test("four members require six direct links and nonoverlapping private pod netwo
   );
   assert.throws(
     () =>
-      validateMcsFleet({
+      validateFleet({
         ...fleet,
         members: fleet.members.map((m, i) =>
           i === 1 ? { ...m, cidr: "0.0.0.0/0" } : m,
@@ -89,11 +88,11 @@ test("four members require six direct links and nonoverlapping private pod netwo
 test("mesh leaves existing Ohio-West connection and route ownership untouched", () => {
   const props = { env, fleet, member: fleet.members[0] };
   const peering = Template.fromStack(
-    new McsPeeringsStack(new App(), "Peerings", props),
+    new FleetPeeringsStack(new App(), "Peerings", props),
   );
   peering.resourceCountIs("AWS::EC2::VPCPeeringConnection", 2);
   const routes = Template.fromStack(
-    new McsRoutesStack(new App(), "Routes", props),
+    new FleetRoutesStack(new App(), "Routes", props),
   );
   routes.resourceCountIs("AWS::EC2::Route", 4);
   const values = Object.values(routes.findResources("AWS::EC2::Route"));
@@ -103,7 +102,7 @@ test("mesh leaves existing Ohio-West connection and route ownership untouched", 
   );
   assert.throws(
     () =>
-      new McsRoutesStack(new App(), "MissingId", {
+      new FleetRoutesStack(new App(), "MissingId", {
         ...props,
         fleet: {
           ...fleet,
@@ -113,14 +112,11 @@ test("mesh leaves existing Ohio-West connection and route ownership untouched", 
     /populate peering IDs/,
   );
 });
-test("member setup never owns cluster, node groups, or the running hub", () => {
-  const stack = new McsMemberStack(new App(), "Member", {
+test("member networking never owns compute or installs discovery resources", () => {
+  const stack = new FleetMemberStack(new App(), "Member", {
     env,
     fleet,
-    member: {
-      ...fleet.members[0],
-      hubApiService: { name: "karmada-apiserver", namespace: "karmada-system" },
-    },
+    member: fleet.members[0],
   });
   const t = Template.fromStack(stack);
   for (const type of [
@@ -129,13 +125,15 @@ test("member setup never owns cluster, node groups, or the running hub", () => {
     "AWS::EC2::Instance",
     "AWS::IAM::Role",
     "Custom::AWSCDK-EKS-HelmChart",
+    "Custom::AWSCDK-EKS-KubernetesResource",
   ])
     t.resourceCountIs(type, 0);
   t.resourceCountIs("AWS::EC2::SecurityGroupIngress", 6);
   const patches = Object.values(
     t.findResources("Custom::AWSCDK-EKS-KubernetesPatch"),
   );
-  assert.equal(patches.length, 2);
+  assert.equal(patches.length, 1);
+  assert.doesNotMatch(JSON.stringify(t.toJSON()), /karmada|multicluster\.x-k8s\.io|ServiceExport|ServiceImport/i);
   assert.ok(
     JSON.stringify(patches).includes("AWS_VPC_K8S_CNI_EXCLUDE_SNAT_CIDRS"),
   );

@@ -27,7 +27,7 @@ const global: GlobalLayerConfig = { name: "gr", namespace: "global", cluster, st
   ingress: { sourceCidrs: ["10.0.0.0/8"] } };
 const pool: PoolConfig = { name: "blue", namespace: "pools", cluster, clusterId: "test-east",
   discoveryUrl: "http://gr-discovery.global.svc:8080", relayImage: "example/runtime:v1", relayReplicas: 2,
-  discoveryMode: "registrations", exportServices: false, frontendServiceName: "blue-frontend",
+  discoveryMode: "registrations", frontendServiceName: "blue-frontend",
   frontendUrls: ["http://blue.example.invalid:8000"],
   dgdSpec: mockerDgdSpec({ image: "example/runtime:v1", model: "test/model", workers: 2, speedup: 1 }) };
 const app = () => new App({ context: { "aws-cdk-lib:enablePartitionLiterals": true } });
@@ -98,7 +98,7 @@ test("global stack has local-table-only IAM and no pools, cluster, compute or ta
   ]);
 });
 
-test("each pool owns just its DGD and relay without MCS resources; recipe is preserved", () => {
+test("each pool owns just its DGD and relay; recipe is preserved", () => {
   const rs = resources(Template.fromStack(new PoolStack(app(), "Pool", { env: { account, region }, config: pool })));
   assert.ok(rs.every(r => r.Type === "Custom::AWSCDK-EKS-KubernetesResource"));
   assert.equal(rs.length, 2);
@@ -172,7 +172,6 @@ test("reject incomplete regional storage and discovery configurations before dep
   assert.throws(() => globalManifests({ ...global, stores: { ...stores, discoveryTableName: stores.affinityTableName } }), /separate tables/);
   assert.throws(() => globalManifests({ ...global, stores: { ...stores, replicaRegions: [region] } }), /unique/);
   assert.throws(() => poolManifests({ ...pool, frontendUrls: [] }), /frontendUrls/);
-  assert.throws(() => poolManifests({ ...pool, exportServices: true } as unknown as PoolConfig), /exportServices=false/);
   assert.throws(() => poolManifests({ ...pool, relayImage: "runtime:latest" }), /explicit version/);
   assert.throws(() => new GlobalStoresStack(app(), "Stores", { env: { account, region: "us-west-2" }, config: stores }), /homeRegion/);
 });
@@ -194,7 +193,7 @@ test("test composition selects independent lifecycles using the same application
   assert.throws(() => testEnvironmentStack(app(), config, "global", "missing"), /configured -c member/);
 });
 
-test("new deployment path refuses MCS or Karmada and static router membership", () => {
+test("global and pool layers reject non-DynamoDB discovery and static router membership", () => {
   for (const discoveryMode of ["mcs", "karmada", "memory"]) {
     assert.throws(() => globalManifests({ ...global, discoveryMode } as GlobalLayerConfig), /backed by DynamoDB/);
     assert.throws(() => poolManifests({ ...pool, discoveryMode } as PoolConfig), /backed by DynamoDB/);

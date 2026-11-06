@@ -12,7 +12,7 @@ export function poolManifests(config: PoolConfig): { dgd: Record<string, any>; r
   pinnedImage(config.relayImage); positive(config.relayReplicas, "relayReplicas");
   httpUrl(config.discoveryUrl, "discoveryUrl");
   if (config.discoveryMode !== "registrations") {
-    throw new Error("Pool discovery must use registrations backed by DynamoDB; MCS/Karmada is not supported by this deployment path");
+    throw new Error("Pool discovery must use registrations backed by DynamoDB");
   }
   if (config.frontendEndpoint) {
     if (config.frontendUrls?.length) throw new Error("Choose frontendUrls or a managed frontendEndpoint");
@@ -21,9 +21,6 @@ export function poolManifests(config: PoolConfig): { dgd: Record<string, any>; r
     }
   } else if (!config.frontendUrls?.length) {
     throw new Error("Registrations mode needs frontendUrls or a managed frontendEndpoint reachable from all Global Routers");
-  }
-  if (config.exportServices !== false) {
-    throw new Error("DynamoDB discovery requires exportServices=false; ServiceExports are not used");
   }
   for (const url of config.frontendUrls ?? []) httpUrl(url, "frontendUrl");
   if (!Array.isArray(config.dgdSpec?.components) || config.dgdSpec.components.length === 0) {

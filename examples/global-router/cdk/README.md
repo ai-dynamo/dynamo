@@ -99,13 +99,13 @@ configuration does not delete it. Do not install another operator over an existi
 For an existing operator, set `manageOperator=false` in the services configuration to create
 only the new workload namespaces. Upgrade the operator through its existing owner stack;
 the new services stack will not create or take ownership of its Helm release or namespace.
-MCS/Karmada installation or membership is not needed for this deployment path.
+Global discovery uses DynamoDB registrations; no cluster federation is installed.
 
 **Phase 2:** deploy `layer=stores` once and wait for both tables and their replicas. Then
 deploy `layer=global` in each region. Every router uses `--router-policy affinity` and
 `--affinity-store dynamodb`; every discovery service uses `--pool-discovery registrations`
 and `--registration-storage dynamodb`, plus `--router-discovery registrations`. Each
-router registers its pod endpoint automatically. MCS/Karmada configurations are rejected
+router registers its pod endpoint automatically. Other discovery backends are rejected
 at synthesis.
 Global stacks own their service accounts and optionally an internal ALB ingress restricted
 to configured CIDRs. Without a certificate the optional ingress uses HTTP. The router's
@@ -117,7 +117,7 @@ reachable discovery-service URL. Supply `frontendUrls` reachable from every regi
 or set `frontendEndpoint.sourceCidrs` to create a pool-owned internal NLB. The stack waits
 for the NLB hostname before configuring PoolRelay registration; the endpoint is removed
 with that pool. These two endpoint options are mutually exclusive.
-Set `exportServices=false`: neither ServiceExports nor ServiceImports are used. PoolRelays
+PoolRelays
 register through the discovery API; discovery writes the shared DynamoDB table. Pools need
 no DynamoDB credentials. A custom DGD recipe must enable frontend serving-load publication
 (`DYN_SERVING_LOAD_PUBLISH=1`); the stack preserves the supplied recipe.
@@ -143,8 +143,7 @@ Decommission foundations only after their consumers are removed.
 
 ## DynamoDB discovery and endpoint requirements
 
-The new path uses DynamoDB-backed **pool registrations exclusively**, without MCS/Karmada,
-EndpointSlice-based global discovery, ServiceExports, or ServiceImports. Kubernetes discovery
+Global discovery uses DynamoDB-backed **pool registrations exclusively**. Kubernetes discovery
 inside an individual DGD remains local to that pool; it is not the global discovery backend.
 
 DynamoDB records addresses; it does not provide network connectivity. Foundation must supply
@@ -197,11 +196,15 @@ and ownership, not live convergence or cross-region reachability.
 See [testing](testing/README.md) for a two-region mocker environment and request smoke runner.
 The runner targets an existing endpoint; it never provisions or deletes infrastructure.
 
-The original entrypoints (`bin/dynamo-mocker-cpu.ts`, `bin/cpu-fleet.ts`, `bin/gpu-compute.ts`,
-`bin/mcs-fleet.ts`) remain available. The old combined CPU/POC code and charts now live under
+CPU and GPU entrypoints (`bin/dynamo-mocker-cpu.ts`, `bin/cpu-fleet.ts`, `bin/gpu-compute.ts`)
+remain available. [Fleet networking](NETWORK_FLEET.md) uses `bin/network-fleet.ts`. The old combined CPU/POC code and charts now live under
 `testing/legacy/`; its [original runbook](testing/legacy/README.md) remains available.
 `cdk.json` retains its original default app so existing commands do not silently select a new
 stack. Select `bin/deploy.ts` or `bin/test-environment.ts` explicitly for new deployments.
+
+For local configurations, replace `multiCluster` with `peerNetworking: { peerCidrs: [...] }`
+and the CPU fleet's `mcs` field with `network`. The `exportServices` option is removed.
+Global and pool deployments use DynamoDB registrations.
 
 This source cleanup does not migrate CloudFormation ownership of running resources. Keep
 existing stack IDs, configuration and entrypoints for those resources. Introduce new stacks

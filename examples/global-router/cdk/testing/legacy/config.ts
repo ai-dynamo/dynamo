@@ -15,14 +15,9 @@
  * limitations under the License.
  */
 
-import type { ClusterConfig, DynamoPlatformConfig, ComputeGroupConfig, MultiClusterConfig } from "../../lib/foundation/config";
+import type { ClusterConfig, DynamoPlatformConfig, ComputeGroupConfig, PeerNetworkingConfig } from "../../lib/foundation/config";
 export * from "../../lib/foundation/config";
 export type { ComputeGroupConfig as DgdPoolConfig, ComputeSubnetSlot as DgdPoolSubnetSlot } from "../../lib/foundation/config";
-
-
-
-
-
 
 export interface DgdConfig {
   readonly dgdName: string;
@@ -35,25 +30,6 @@ export interface DgdConfig {
   readonly modelName: string;
   readonly mockerSpeedupRatio: number;
 }
-
-
-
-
-
-
-
-
-
-
-
-/** IDs from the already-deployed regional stacks used by peering-only mode. */
-
-
-/** Karmada control plane, installed in the hub cluster only. */
-
-
-/** Karmada and SIG Multicluster (MCS) support for one cluster. */
-
 
 export interface DeploymentConfig {
   readonly clusterConfig: ClusterConfig;
@@ -68,6 +44,6 @@ export interface DeploymentConfig {
   readonly dynamoPlatformConfig: DynamoPlatformConfig;
   readonly dgdPools: readonly [ComputeGroupConfig, ...ComputeGroupConfig[]];
   readonly dgds: readonly [DgdConfig, ...DgdConfig[]];
-  /** Karmada and MCS support; omit for a single-cluster deployment. */
-  readonly multiCluster?: MultiClusterConfig;
+  /** Peer pod ingress and source-address preservation for private routing. */
+  readonly peerNetworking?: PeerNetworkingConfig;
 }

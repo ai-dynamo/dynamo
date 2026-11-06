@@ -28,7 +28,12 @@ import {
 } from "aws-cdk-lib";
 import { CfnAccessEntry } from "aws-cdk-lib/aws-eks";
 import { DynamoMockerCpuStack } from "../testing/legacy/dynamo-mocker-cpu-stack";
-import { McsFleet, McsPeeringsStack, McsRoutesStack } from "../lib/foundation/mcs-fleet";
+import {
+  FleetConfig,
+  FleetPeeringsStack,
+  FleetRoutesStack,
+  validateFleet,
+} from "../lib/foundation/fleet-network";
 import { DeploymentConfig } from "../testing/legacy/config";
 
 const app = new App();
@@ -40,7 +45,7 @@ const config = JSON.parse(readFileSync(configPath, "utf8")) as {
   accountId: string;
   sshSourceCidr: string;
   deployments: Record<string, DeploymentConfig>;
-  mcs?: McsFleet;
+  network?: FleetConfig;
 };
 if (
   !/^[a-z](?:[a-z0-9-]{0,14}[a-z0-9])?$/.test(config.prefix) ||
@@ -116,7 +121,7 @@ if (mode === "assets") {
   const ohio = config.deployments.ohio;
   if (!ohio)
     throw new Error(
-      "Temporary fleet administration requires a configured Ohio hub",
+      "Temporary fleet administration requires a configured Ohio admin host",
     );
   const stack = new Stack(app, "FleetAdmin", {
     ...base,
@@ -135,18 +140,19 @@ if (mode === "assets") {
     ],
   });
 } else if (mode === "peerings" || mode === "routes") {
-  if (!config.mcs)
+  if (!config.network)
     throw new Error("Collect new fleet metadata before networking");
-  const m = config.mcs.members.find((v) => v.id === member);
+  validateFleet(config.network);
+  const m = config.network.members.find((v) => v.id === member);
   if (!m || !m.clusterName.startsWith(config.prefix + "-"))
-    throw new Error("Invalid prefixed MCS member");
+    throw new Error("Invalid prefixed network member");
   const props = {
     ...base,
     stackName: `${config.prefix}-global-router-${member}-${mode}`,
     synthesizer: credentials,
-    fleet: config.mcs,
+    fleet: config.network,
     member: m,
   };
-  if (mode === "peerings") new McsPeeringsStack(app, "Peerings", props);
-  else new McsRoutesStack(app, "Routes", props);
+  if (mode === "peerings") new FleetPeeringsStack(app, "Peerings", props);
+  else new FleetRoutesStack(app, "Routes", props);
 } else throw new Error("Choose mode=assets/foundation/admin/peerings/routes");

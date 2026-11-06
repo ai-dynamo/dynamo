@@ -18,34 +18,34 @@
 import { readFileSync } from "node:fs";
 import { App, CliCredentialsStackSynthesizer } from "aws-cdk-lib";
 import {
-  McsFleet,
-  McsMemberStack,
-  McsPeeringsStack,
-  McsRoutesStack,
-  validateMcsFleet,
-} from "../lib/foundation/mcs-fleet";
+  FleetConfig,
+  FleetMemberStack,
+  FleetPeeringsStack,
+  FleetRoutesStack,
+  validateFleet,
+} from "../lib/foundation/fleet-network";
 
 const app = new App();
-const file: unknown = app.node.tryGetContext("mcsConfigPath");
+const file: unknown = app.node.tryGetContext("networkConfigPath");
 if (typeof file !== "string" || !file.endsWith(".local.json"))
-  throw new Error("Select ignored mcsConfigPath=config/mcs-fleet.local.json");
-const fleet: McsFleet = JSON.parse(readFileSync(file, "utf8"));
-validateMcsFleet(fleet);
+  throw new Error("Select ignored networkConfigPath=config/network-fleet.local.json");
+const fleet: FleetConfig = JSON.parse(readFileSync(file, "utf8"));
+validateFleet(fleet);
 const member = fleet.members.find(
-  (m) => m.id === app.node.tryGetContext("mcsMember"),
+  (m) => m.id === app.node.tryGetContext("networkMember"),
 );
-if (!member) throw new Error("Choose a configured mcsMember");
-const mode = app.node.tryGetContext("mcsMode");
+if (!member) throw new Error("Choose a configured networkMember");
+const mode = app.node.tryGetContext("networkMode");
 const props = {
   fleet,
   member,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: member.region },
-  stackName: `global-router-mcs-${member.id}-${mode}`,
+  stackName: `global-router-network-${member.id}-${mode}`,
   synthesizer: new CliCredentialsStackSynthesizer({
     fileAssetsBucketName: `global-router-cdk-assets-${process.env.CDK_DEFAULT_ACCOUNT}-${member.region}`,
   }),
 };
-if (mode === "peerings") new McsPeeringsStack(app, "McsPeerings", props);
-else if (mode === "routes") new McsRoutesStack(app, "McsRoutes", props);
-else if (mode === "member") new McsMemberStack(app, "McsMember", props);
-else throw new Error("Choose mcsMode=peerings, routes or member");
+if (mode === "peerings") new FleetPeeringsStack(app, "FleetPeerings", props);
+else if (mode === "routes") new FleetRoutesStack(app, "FleetRoutes", props);
+else if (mode === "member") new FleetMemberStack(app, "FleetMember", props);
+else throw new Error("Choose networkMode=peerings, routes or member");

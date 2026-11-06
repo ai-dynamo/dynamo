@@ -33,6 +33,12 @@ test("selects Ohio when explicitly requested and rejects unknown deployments", (
   assert.throws(() => selectDeployment(1), /Unknown deployment 1/);
 });
 
+test("removed federation config cannot silently discard peer connectivity", () => {
+  assert.throws(() => constructStack({
+    ...VALID_CONFIG, multiCluster: { peerCidrs: ["10.43.0.0/16"] },
+  } as DeploymentConfig), /Replace multiCluster with peerNetworking/);
+});
+
 test("synthesizes a deployment-specific Mocker image override", () => {
   const config: DeploymentConfig = {
     ...selectDeployment("west"),

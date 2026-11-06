@@ -29,7 +29,7 @@ use `pnpm exec cdk diff` and then `pnpm exec cdk deploy` with
 `--app 'node --require ts-node/register bin/test-environment.ts'` and the same context flags.
 Phase 2 deploys stores once, then global services for each member (`east`, `west`).
 Phase 3 deploys each member's pools. All examples select DynamoDB-backed registrations,
-with no MCS/Karmada dependency. Supply private frontend URLs reachable from both regions,
+with no cluster-federation dependency. Supply private frontend URLs reachable from both regions,
 or use `frontendEndpoint.sourceCidrs` for a pool-owned internal NLB whose address is registered
 automatically. Supply private pod connectivity for router/relay state traffic. Routers register their pod
 UID/IP automatically; select images containing the router-registration runtime change.

@@ -20,5 +20,4 @@ which is not yet merged. Unmodified `main` images do not support these deploymen
 Deployment requires your own AWS account, networking, compatible Dynamo runtime
 images and operator. Example configurations use placeholder resource identifiers.
 
-Licensed under [Apache-2.0](LICENSE). Vendored CRD attribution is preserved in
-[cdk/crds/README.md](cdk/crds/README.md).
+Licensed under [Apache-2.0](LICENSE).

@@ -23,7 +23,6 @@ import type { DeploymentConfig } from "../testing/legacy/config";
 import { loadGlobalRouterDeployment } from "../testing/legacy/global-router-deployment";
 import { DynamoMockerCpuStack } from "../testing/legacy/dynamo-mocker-cpu-stack";
 import { addInterRegionPeering } from "../lib/foundation/inter-region-peering";
-import { withKarmadaControlPlane } from "../lib/foundation/multi-cluster";
 
 const app = new App();
 const deploymentName = app.node.tryGetContext("deployment") ?? "ohio";
@@ -32,13 +31,9 @@ const globalRouter = loadGlobalRouterDeployment(
   app.node.tryGetContext("routerImage"),
   app.node.tryGetContext("routerConfigPath"),
 );
-const installKarmada = contextFlag("karmada");
 if (deploymentName === "both") {
   if (globalRouter !== undefined) {
     throw new Error("Deploy the Global Router with -c deployment=ohio after peering.");
-  }
-  if (installKarmada) {
-    throw new Error("Install Karmada with -c deployment=ohio.");
   }
   // Existing regional stacks are deployed separately. This mode changes only
   // the connection and routes between their VPCs.
@@ -54,21 +49,9 @@ if (deploymentName === "both") {
   }
   createStack(
     "DynamoMockerCpu",
-    withKarmadaControlPlane(selectDeployment(deploymentName, settings.deployments), installKarmada),
+    selectDeployment(deploymentName, settings.deployments),
     globalRouter,
   );
-}
-
-/** `-c <name>=true` or `false`; unset means false. */
-function contextFlag(name: string): boolean {
-  const value: unknown = app.node.tryGetContext(name);
-  if (value === undefined || value === false || value === "false") {
-    return false;
-  }
-  if (value === true || value === "true") {
-    return true;
-  }
-  throw new Error(`-c ${name} must be true or false.`);
 }
 
 function createStack(

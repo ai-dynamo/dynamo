@@ -52,13 +52,7 @@ import {
   PURPOSE_LABEL_KEY,
   PURPOSE_LABEL_VALUE,
 } from "./helm-values";
-import {
-  KARMADA_API_PORT,
-  KARMADA_API_SERVICE,
-  KARMADA_KUBECONFIG_SECRET,
-  KARMADA_NAMESPACE,
-  MultiClusterSupport,
-} from "../../lib/foundation/multi-cluster";
+import { PeerNetworking } from "../../lib/foundation/pod-networking";
 import { MAX_DGD_POOL_SUBNET_SLOTS, MockerVpc } from "../../lib/foundation/vpc";
 
 const DYNAMO_PLATFORM_RELEASE = "dynamo-platform";
@@ -356,13 +350,11 @@ export class DynamoMockerCpuStack extends Stack {
       }
     }
 
-    if (config.multiCluster !== undefined) {
-      new MultiClusterSupport(this, "MultiCluster", {
+    if (config.peerNetworking !== undefined) {
+      new PeerNetworking(this, "PeerNetworking", {
         cluster,
-        config: config.multiCluster,
-        region: clusterConfig.region,
+        config: config.peerNetworking,
         vpcCidr: clusterConfig.vpcConfig.cidrBlock,
-        nodeGroups: poolNodeGroups.map(({ nodeGroup }) => nodeGroup),
       });
     }
 
@@ -428,28 +420,6 @@ export class DynamoMockerCpuStack extends Stack {
           )
           .join("; "),
       });
-    }
-    if (config.multiCluster !== undefined) {
-      new CfnOutput(this, "KarmadaMemberName", {
-        description: "Use with karmadactl register --cluster-name.",
-        value: config.multiCluster.memberName,
-      });
-      if (config.multiCluster.karmadaControlPlane !== undefined) {
-        new CfnOutput(this, "KarmadaApiEndpointCommand", {
-          description:
-            `Run on the bastion: prints the internal Karmada API load balancer hostname (port ${KARMADA_API_PORT}).`,
-          value:
-            `kubectl get service -n ${KARMADA_NAMESPACE} ${KARMADA_API_SERVICE} ` +
-            "-o jsonpath='{.status.loadBalancer.ingress[0].hostname}'",
-        });
-        new CfnOutput(this, "KarmadaKubeconfigCommand", {
-          description:
-            "Run on the bastion: writes the Karmada admin kubeconfig. Point its server at the load balancer.",
-          value:
-            `kubectl get secret -n ${KARMADA_NAMESPACE} ${KARMADA_KUBECONFIG_SECRET} ` +
-            "-o jsonpath='{.data.kubeconfig}' | base64 -d > karmada-apiserver.config",
-        });
-      }
     }
     new CfnOutput(this, "PortForwardFrontends", {
       description: "Semicolon-separated DGD-to-port-forward commands.",
@@ -523,6 +493,9 @@ function compareNames(left: string, right: string): number {
 }
 
 function assertCompatibleDeployment(config: DeploymentConfig): void {
+  if ("multiCluster" in config) {
+    throw new Error("Replace multiCluster with peerNetworking.peerCidrs; global discovery uses DynamoDB registrations.");
+  }
   const { clusterConfig, dgdPools, dgds, dynamoPlatformConfig } = config;
   const { bastionConfig, vpcConfig } = clusterConfig;
   if (dgdPools.length === 0) {

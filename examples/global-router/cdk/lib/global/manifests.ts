@@ -15,7 +15,7 @@ export function validateGlobal(config: GlobalLayerConfig): void {
   if (!config.affinityScope?.trim()) throw new Error("affinityScope is required and must match across replicas");
   if (config.affinityTimeoutMs !== undefined) positive(config.affinityTimeoutMs, "affinityTimeoutMs");
   if (config.discoveryMode !== "registrations") {
-    throw new Error("Global discovery must use registrations backed by DynamoDB; MCS/Karmada is not supported by this deployment path");
+    throw new Error("Global discovery must use registrations backed by DynamoDB");
   }
   if (config.routers !== undefined) throw new Error("Remove routers: each replica registers its own endpoint through DynamoDB discovery");
   if (config.podAddressFamily !== undefined && !["ipv4", "ipv6"].includes(config.podAddressFamily)) {

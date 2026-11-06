@@ -14,7 +14,7 @@ asset buckets, and private regional mesh. Global Frontend/Discovery workloads
 are deployed separately from this infrastructure entry point.
 
 The regional foundation includes the existing Dynamo operator, a CPU Mocker DGD,
-its local Frontend and Relay, and optional fresh Karmada control plane. Mockers
+its local Frontend and Relay. Mockers
 simulate a model; they do not load GPU model weights.
 
 ## Private configuration
@@ -26,8 +26,8 @@ Keep account identifiers, AMIs, images and deployment metadata in an ignored
 - `accountId`: the target AWS account ID.
 - `deployments`: member IDs mapped to complete `DeploymentConfig` objects from
   `testing/legacy/config.ts`. Use `ohio`, `west`, `tokyo` and `saopaulo` for a four-region fleet.
-- `mcs`: after foundations exist, the `members` and `links` schema described in
-  [MCS on existing clusters](MCS_FLEET.md), populated exclusively from this fleet.
+- `network`: after foundations exist, the `members` and `links` schema described in
+  [Networking for existing clusters](NETWORK_FLEET.md), populated exclusively from this fleet.
 
 Every cluster name and bastion IAM role name must start with the prefix. Use
 unique private VPC CIDRs and prefixed DGD, runtime and capacity pool names.
@@ -47,9 +47,8 @@ The NAT instance admits forwarded traffic only from its own VPC. Without these
 options, the shared VPC construct retains its managed NAT gateway behavior.
 NAT instances are a development option with one-instance availability limits.
 
-Configure `multiCluster` per member with only the other new VPC CIDRs. A fresh
-Ohio hub may set `karmadaControlPlane`; this entry point installs it directly.
-Never point a second fleet at an existing fleet's hub or reinitialize that hub.
+Configure `peerNetworking` per member with only the other new VPC CIDRs. Discovery
+uses the DynamoDB backend in the separately deployed global services.
 
 ## Deploy in independent phases
 
@@ -68,20 +67,18 @@ this does not bootstrap or modify an existing deployment's asset stack.
 Foundation stack names are `<clusterName>-cdk` and enable termination protection.
 
 After the new foundations complete, collect their VPC IDs, route tables, cluster
-security groups and kubectl provider tokens into the local `mcs` configuration.
+security groups and kubectl provider tokens into the local `network` configuration.
 Deploy `peerings` for the members owning links, fill the returned IDs, then deploy
 `routes` for every member. A four-region mesh needs six links. The last member
 owns no links and does not need an empty peering stack. The networking stack names
 include the fleet prefix.
 
-Administration can use each member's own SSM host. For bounded registration from
-the new Ohio host, `mode=admin` creates an independent access-entry stack granting
-that host's role administration in a selected new member. Ohio already grants its
-own host access. Remove these temporary admin stacks immediately after registration
-and validation, including on failure. Disable termination protection only for the
-specific temporary admin stack being removed, not for the foundations or mesh.
-Follow the token lifetime, agent namespace and certificate-rotation instructions
-in [the MCS runbook](MCS_FLEET.md).
+Administration can use each member's own SSM host. For temporary administration
+from the new Ohio host, `mode=admin` creates an independent access-entry stack
+granting that host's role administration in a selected new member. Ohio already
+grants its own host access. Remove these temporary admin stacks after validation,
+including on failure. Disable termination protection only for the specific
+temporary admin stack being removed, not for the foundations or mesh.
 
 ## Validate actual runtime state
 
@@ -95,8 +92,8 @@ Refresh the binding after worker-spec rollouts that change the generation.
 Do not use a Relay's open TCP ports as proof of discovery. Check its pool catalogue
 and serving-readiness stream for the expected model and worker namespace.
 The operator owns `<dgdName>-frontend`; use that Service without adopting it into
-a second application stack. Propagate ServiceExports and dependent imports, not
-the regional Services themselves.
+a second application stack. Validate the private routes using the
+[networking runbook](NETWORK_FLEET.md).
 
 For Global Router validation, require only this fleet's four pools and all of its
 router replicas, exercise both streaming and unary inference, and verify the

@@ -30,7 +30,6 @@ import {
   US_EAST_2_BASTION_KEY_PAIR,
   US_WEST_2_BASTION_KEY_PAIR,
 } from "../../lib/foundation/keypairs";
-import { KARMADA_VERSION } from "../../lib/foundation/multi-cluster";
 
 const US_EAST_2 = "us-east-2";
 const US_EAST_2A = "us-east-2a";
@@ -147,17 +146,8 @@ export const US_EAST2_DEPLOYMENT = {
   dynamoPlatformConfig: DYNAMO_PLATFORM_1_4_0,
   dgdPools: [MOCKER_OHIO_1_POOL],
   dgds: [MOCKER_OHIO_1_DGD],
-  // Ohio is the Karmada hub. Member names match the Router's site IDs.
-  multiCluster: {
-    memberName: "aws-ohio",
+  peerNetworking: {
     peerCidrs: [MOCKER_VPC_US_WEST_2.cidrBlock],
-    karmadaControlPlane: {
-      version: KARMADA_VERSION,
-      apiSourceCidrs: [
-        MOCKER_VPC_US_EAST_2.cidrBlock,
-        MOCKER_VPC_US_WEST_2.cidrBlock,
-      ],
-    },
   },
 } satisfies DeploymentConfig;
 
@@ -194,8 +184,7 @@ export const US_WEST2_DEPLOYMENT = {
   dynamoPlatformConfig: DYNAMO_PLATFORM_1_4_0,
   dgdPools: [MOCKER_WEST_1_POOL],
   dgds: [MOCKER_WEST_1_DGD],
-  multiCluster: {
-    memberName: "aws-west",
+  peerNetworking: {
     peerCidrs: [MOCKER_VPC_US_EAST_2.cidrBlock],
   },
 } satisfies DeploymentConfig;

@@ -76,29 +76,15 @@ export interface PeeringRegionConfig {
   readonly privateRouteTableIds: readonly [string, ...string[]];
   /**
    * Public subnet route tables. Routing them over the peering lets each
-   * bastion reach the other VPC, for example to join Karmada.
+   * bastion reach the other VPC for administration and connectivity checks.
    */
   readonly publicRouteTableIds?: readonly string[];
 }
 
-export interface KarmadaControlPlaneConfig {
+export interface PeerNetworkingConfig {
   /**
-   * Karmada release, which pins the chart and its images. It must be
-   * `KARMADA_VERSION`, the release that `crds/` comes from.
-   */
-  readonly version: string;
-  /** VPC ranges allowed to reach the internal Karmada API load balancer. */
-  readonly apiSourceCidrs: readonly [string, ...string[]];
-}
-
-export interface MultiClusterConfig {
-  /** Karmada member name. The Global Router uses it as the pool site ID. */
-  readonly memberName: string;
-  /**
-   * VPC ranges of the other member clusters. Their pods may reach pods in
-   * this cluster, and traffic from pods here to them keeps its pod address.
+   * VPC ranges of the other clusters. Their pods may reach pods in this
+   * cluster, and traffic from pods here to them keeps its pod address.
    */
   readonly peerCidrs: readonly [string, ...string[]];
-  /** Set in the hub cluster only. */
-  readonly karmadaControlPlane?: KarmadaControlPlaneConfig;
 }

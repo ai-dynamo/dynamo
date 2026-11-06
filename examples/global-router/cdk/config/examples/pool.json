@@ -17,7 +17,6 @@
     "relayReplicas": 2,
     "frontendServiceName": "blue-frontend",
     "discoveryMode": "registrations",
-    "exportServices": false,
     "dgdSpec": {
       "components": [
         {

@@ -26,11 +26,10 @@ import {
 import * as eks from "aws-cdk-lib/aws-eks-v2";
 import { Construct } from "constructs";
 import { cidrsOverlap, isValidVpcCidr } from "./cidr";
-import { MultiClusterSupport } from "./multi-cluster";
+import { PeerNetworking } from "./pod-networking";
 
-export interface McsMember {
+export interface FleetMember {
   readonly id: string;
-  readonly siteId: string;
   readonly region: string;
   readonly clusterName: string;
   readonly vpcId: string;
@@ -38,49 +37,39 @@ export interface McsMember {
   readonly routeTableIds: readonly string[];
   readonly clusterSecurityGroupId: string;
   readonly kubectlServiceToken: string;
-  /** Existing hub only. Changes API source ranges, never installs or replaces its control plane. */
-  readonly hubApiService?: {
-    readonly name: string;
-    readonly namespace: string;
-  };
 }
-export interface McsLink {
+export interface FleetLink {
   readonly left: string;
   readonly right: string;
   readonly peeringId?: string;
   /** Another stack owns both this connection and its routes. */
   readonly external?: boolean;
 }
-export interface McsFleet {
-  readonly members: readonly McsMember[];
-  readonly links: readonly McsLink[];
+export interface FleetConfig {
+  readonly members: readonly FleetMember[];
+  readonly links: readonly FleetLink[];
 }
 
-export function validateMcsFleet(f: McsFleet): void {
+export function validateFleet(f: FleetConfig): void {
   if (
     !Array.isArray(f?.members) ||
     f.members.length < 2 ||
     f.members.length > 4 ||
     !Array.isArray(f.links)
   )
-    throw new Error("Configure two to four MCS members and their links");
+    throw new Error("Configure two to four fleet members and their links");
   const ids = new Set<string>(),
-    sites = new Set<string>(),
     regions = new Set<string>();
   for (const m of f.members) {
     if (
       !/^[a-z][a-z0-9]{0,20}$/.test(m.id) ||
       ids.has(m.id) ||
-      sites.has(m.siteId) ||
       regions.has(m.region)
     )
-      throw new Error("Member IDs, site IDs and regions must be unique");
+      throw new Error("Member IDs and regions must be unique");
     ids.add(m.id);
-    sites.add(m.siteId);
     regions.add(m.region);
     if (
-      !/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(m.siteId) ||
-      m.siteId.length > 48 ||
       !/^[a-z]{2}-[a-z]+-\d$/.test(m.region) ||
       !isValidVpcCidr(m.cidr)
     )
@@ -101,8 +90,6 @@ export function validateMcsFleet(f: McsFleet): void {
     )
       throw new Error("Specify unique regional route table IDs");
   }
-  if (f.members.filter((m) => m.hubApiService).length > 1)
-    throw new Error("Configure at most one existing hub");
   const expected = new Set<string>();
   for (let i = 0; i < f.members.length; i++)
     for (let j = i + 1; j < f.members.length; j++) {
@@ -125,16 +112,16 @@ export function validateMcsFleet(f: McsFleet): void {
   }
   if (actual.size !== expected.size)
     throw new Error(
-      "MCS direct pod connectivity requires every member pair; VPC peering is not transitive",
+      "Direct pod connectivity requires every member pair; VPC peering is not transitive",
     );
 }
 
 /** New peerings only; existing connections stay with their original stack. */
-export class McsPeeringsStack extends Stack {
+export class FleetPeeringsStack extends Stack {
   constructor(
     scope: Construct,
     id: string,
-    props: StackProps & { fleet: McsFleet; member: McsMember },
+    props: StackProps & { fleet: FleetConfig; member: FleetMember },
   ) {
     super(scope, id, { ...props, terminationProtection: true });
     for (const l of props.fleet.links.filter(
@@ -148,7 +135,7 @@ export class McsPeeringsStack extends Stack {
           vpcId: props.member.vpcId,
           peerVpcId: right.vpcId,
           peerRegion: right.region,
-          tags: [{ key: "Project", value: "global-router-mcs" }],
+          tags: [{ key: "Project", value: "global-router-network" }],
         },
       );
       connection.applyRemovalPolicy(RemovalPolicy.RETAIN);
@@ -160,11 +147,11 @@ export class McsPeeringsStack extends Stack {
 }
 
 /** Literal peering IDs from the first phase avoid cross-region export/provider dependencies. */
-export class McsRoutesStack extends Stack {
+export class FleetRoutesStack extends Stack {
   constructor(
     scope: Construct,
     id: string,
-    props: StackProps & { fleet: McsFleet; member: McsMember },
+    props: StackProps & { fleet: FleetConfig; member: FleetMember },
   ) {
     super(scope, id, { ...props, terminationProtection: true });
     for (const l of props.fleet.links.filter(
@@ -189,12 +176,12 @@ export class McsRoutesStack extends Stack {
   }
 }
 
-/** Add MCS to existing clusters without owning their compute or their Karmada control plane. */
-export class McsMemberStack extends Stack {
+/** Configure peer pod access on existing clusters without owning their compute. */
+export class FleetMemberStack extends Stack {
   constructor(
     scope: Construct,
     id: string,
-    props: StackProps & { fleet: McsFleet; member: McsMember },
+    props: StackProps & { fleet: FleetConfig; member: FleetMember },
   ) {
     super(scope, id, { ...props, terminationProtection: true });
     const m = props.member;
@@ -211,34 +198,14 @@ export class McsMemberStack extends Stack {
     const peers = props.fleet.members
       .filter((p) => p.id !== m.id)
       .map((p) => p.cidr) as [string, ...string[]];
-    new MultiClusterSupport(this, "Mcs", {
+    new PeerNetworking(this, "PeerNetworking", {
       cluster,
-      config: { memberName: m.siteId, peerCidrs: peers },
-      region: m.region,
+      config: { peerCidrs: peers },
       vpcCidr: m.cidr,
-      nodeGroups: [],
     });
-    if (m.hubApiService) {
-      const cidrs = props.fleet.members.map((p) => p.cidr);
-      new eks.KubernetesPatch(this, "HubPrivateApiSources", {
-        cluster,
-        resourceName: `service/${m.hubApiService.name}`,
-        resourceNamespace: m.hubApiService.namespace,
-        applyPatch: {
-          spec: { loadBalancerSourceRanges: cidrs },
-          metadata: {
-            annotations: {
-              "service.beta.kubernetes.io/load-balancer-source-ranges":
-                cidrs.join(","),
-            },
-          },
-        },
-        restorePatch: {},
-      });
-    }
-    // These resources may predate this stack. Never remove their CRDs, CNI settings or peer access on rollback.
+    // These resources may predate this stack. Never remove their CNI settings or peer access on rollback.
     for (const c of this.node.findAll())
       if (c instanceof CfnResource) c.applyRemovalPolicy(RemovalPolicy.RETAIN);
-    new CfnOutput(this, "MemberName", { value: m.siteId });
+    new CfnOutput(this, "ClusterName", { value: m.clusterName });
   }
 }

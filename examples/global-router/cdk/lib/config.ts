@@ -54,8 +54,6 @@ export interface PoolConfig {
   readonly relayImage: string;
   readonly relayReplicas: number;
   readonly frontendServiceName: string;
-  /** This deployment path never depends on MCS/Karmada. */
-  readonly exportServices: false;
   /** Required in registrations mode; each URL must be reachable from every router. */
   readonly frontendUrls?: readonly string[];
   /** Alternatively, provision a pool-owned internal NLB and register its resolved hostname. */
