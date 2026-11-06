@@ -121,7 +121,8 @@ spec:
             requests:
               cpu: '16'
               ephemeral-storage: 64Gi
-              memory: 128Gi
+              # Above the default; matches the validated benchmark configuration.
+              memory: 512Gi
               nvidia.com/gpu: '4'
           securityContext:
             allowPrivilegeEscalation: false

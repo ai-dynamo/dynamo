@@ -137,9 +137,11 @@ spec:
             limits:
               nvidia.com/gpu: '4'
             requests:
-              cpu: '16'
+              # Above the default; matches the validated benchmark configuration.
+              cpu: '72'
               ephemeral-storage: 64Gi
-              memory: 128Gi
+              # Above the default; matches the validated benchmark configuration.
+              memory: 512Gi
               nvidia.com/gpu: '4'
           securityContext:
             allowPrivilegeEscalation: false
@@ -247,9 +249,11 @@ spec:
             limits:
               nvidia.com/gpu: '4'
             requests:
-              cpu: '16'
+              # Above the default; matches the validated benchmark configuration.
+              cpu: '72'
               ephemeral-storage: 64Gi
-              memory: 128Gi
+              # Above the default; matches the validated benchmark configuration.
+              memory: 512Gi
               nvidia.com/gpu: '4'
           securityContext:
             allowPrivilegeEscalation: false

@@ -59,11 +59,11 @@ spec:
             requests:
               cpu: '16'
               memory: 128Gi
-  - name: Worker
+  - multinode:
+      nodeCount: 2
+    name: Worker
     type: worker
     replicas: 1
-    multinode:
-      nodeCount: 2
     sharedMemorySize: 64Gi
     podTemplate:
       spec:
@@ -72,14 +72,7 @@ spec:
           resourceClaimTemplateName: kimi-k3-1-pro-vllm-gb300-agg-agentic-compute-domain-channel
         terminationGracePeriodSeconds: 60
         containers:
-        - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
-          imagePullPolicy: IfNotPresent
-          command:
-          - python3
-          - -m
-          - dynamo.vllm
-          args:
+        - args:
           - --reasoning-parser
           - kimi_k3
           - --model
@@ -107,6 +100,13 @@ spec:
           - --load-format
           - fastsafetensors
           - --no-enable-flashinfer-autotune
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
+          imagePullPolicy: IfNotPresent
+          name: main
           env:
           - name: HF_HOME
             value: /shared-model-cache
@@ -148,8 +148,10 @@ spec:
             claims:
             - name: compute-domain-channel
             requests:
-              cpu: '16'
-              memory: 128Gi
+              # Above the default; matches the validated benchmark configuration.
+              cpu: '72'
+              # Above the default; matches the validated benchmark configuration.
+              memory: 512Gi
               ephemeral-storage: 64Gi
               nvidia.com/gpu: '4'
             limits:

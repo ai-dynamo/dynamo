@@ -62,11 +62,11 @@ spec:
             requests:
               cpu: '16'
               memory: 128Gi
-  - name: PrefillWorker
+  - multinode:
+      nodeCount: 2
+    name: PrefillWorker
     type: prefill
     replicas: 2
-    multinode:
-      nodeCount: 2
     sharedMemorySize: 64Gi
     podTemplate:
       spec:
@@ -75,14 +75,7 @@ spec:
           resourceClaimTemplateName: kimi-k3-1-pro-vllm-gb300-disagg-agentic-compute-domain-channel
         terminationGracePeriodSeconds: 60
         containers:
-        - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
-          imagePullPolicy: IfNotPresent
-          command:
-          - python3
-          - -m
-          - dynamo.vllm
-          args:
+        - args:
           - --reasoning-parser
           - kimi_k3
           - --model
@@ -112,6 +105,13 @@ spec:
           - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
+          imagePullPolicy: IfNotPresent
+          name: main
           env:
           - name: HF_HOME
             value: /shared-model-cache
@@ -153,8 +153,10 @@ spec:
             claims:
             - name: compute-domain-channel
             requests:
-              cpu: '16'
-              memory: 128Gi
+              # Above the default; matches the validated benchmark configuration.
+              cpu: '72'
+              # Above the default; matches the validated benchmark configuration.
+              memory: 512Gi
               ephemeral-storage: 64Gi
               nvidia.com/gpu: '4'
             limits:
@@ -175,11 +177,11 @@ spec:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-  - name: DecodeWorker
+  - multinode:
+      nodeCount: 2
+    name: DecodeWorker
     type: decode
     replicas: 1
-    multinode:
-      nodeCount: 2
     sharedMemorySize: 64Gi
     podTemplate:
       spec:
@@ -188,14 +190,7 @@ spec:
           resourceClaimTemplateName: kimi-k3-1-pro-vllm-gb300-disagg-agentic-compute-domain-channel
         terminationGracePeriodSeconds: 60
         containers:
-        - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
-          imagePullPolicy: IfNotPresent
-          command:
-          - python3
-          - -m
-          - dynamo.vllm
-          args:
+        - args:
           - --reasoning-parser
           - kimi_k3
           - --model
@@ -229,6 +224,13 @@ spec:
           - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
+          imagePullPolicy: IfNotPresent
+          name: main
           env:
           - name: HF_HOME
             value: /shared-model-cache
@@ -270,8 +272,10 @@ spec:
             claims:
             - name: compute-domain-channel
             requests:
-              cpu: '16'
-              memory: 128Gi
+              # Above the default; matches the validated benchmark configuration.
+              cpu: '72'
+              # Above the default; matches the validated benchmark configuration.
+              memory: 512Gi
               ephemeral-storage: 64Gi
               nvidia.com/gpu: '4'
             limits:
