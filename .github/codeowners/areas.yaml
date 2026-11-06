@@ -29,6 +29,8 @@ areas:
   - lib/llm/src/http/service/
   - lib/llm/src/lora.rs
   - lib/llm/src/lora/
+  - lib/llm/src/lora_routing.rs
+  - lib/lora/
   - lib/llm/src/preprocessor.rs
   - lib/llm/src/preprocessor/
   - lib/llm/src/preprocessor/tools/
@@ -64,6 +66,7 @@ areas:
   - lib/kv-router/tests/
   - lib/llm/src/kv_router.rs
   - lib/llm/src/kv_router/
+  - lib/llm/src/routing_policy.rs
   - lib/llm/src/kv_router/indexer/
   - lib/llm/src/kv_router/prefill_router/
   - lib/llm/src/kv_router/publisher/
@@ -287,7 +290,9 @@ areas:
   - lib/llm/src/discovery/
   - lib/llm/src/kernels/
   - lib/llm/src/local_model/
-  - lib/llm/src/lora/routing/
+  - lib/lora/src/huggingface.rs
+  - lib/lora/src/routing/
+  - lib/lora/tests/
   - lib/llm/src/model_card.rs
   - lib/llm/src/perf/
   - lib/llm/src/utils/
@@ -1046,6 +1051,10 @@ shared:
   owners:
   - observability
   - kv-memory
+- glob: examples/router/custom-policy-example/epp/
+  owners:
+  - router
+  - epp
 - glob: lib/backend-common/src/metrics.rs
   owners:
   - runtime
@@ -1063,6 +1072,19 @@ shared:
   - performance
   - router
   - global-router
+- glob: lib/kv-router/src/plugins/registry.rs
+  owners:
+  - router
+  - epp
+- glob: lib/kv-router/src/scheduling/config.rs
+  owners:
+  - router
+  - epp
+# Top-level files only: the selection core in core/ stays router-only.
+- glob: lib/kv-router/src/services/selection/*
+  owners:
+  - router
+  - epp
 - glob: lib/kv-router/src/services/shared_cache/
   owners:
   - router
@@ -1095,10 +1117,23 @@ shared:
   owners:
   - kv-memory
   - observability
+- glob: lib/llm/src/discovery/worker_monitor.rs
+  owners:
+  - runtime
+  - epp
+- glob: lib/llm/src/entrypoint.rs
+  owners:
+  - frontend
+  - epp
 - glob: lib/llm/src/http/service/busy_threshold.rs
   owners:
   - frontend
   - kv-memory
+  - epp
+- glob: lib/llm/src/http/service/error.rs
+  owners:
+  - frontend
+  - epp
 - glob: lib/llm/src/http/service/metrics.rs
   owners:
   - frontend
@@ -1107,10 +1142,26 @@ shared:
   owners:
   - frontend
   - observability
+- glob: lib/llm/src/kv_router/README.md
+  owners:
+  - router
+  - epp
+- glob: lib/llm/src/kv_router/prefill_router/query.rs
+  owners:
+  - router
+  - epp
+- glob: lib/llm/src/kv_router/routing_load.rs
+  owners:
+  - router
+  - epp
 - glob: lib/llm/src/kv_router/shared_cache.rs
   owners:
   - router
   - kv-memory
+- glob: lib/llm/src/lora_routing.rs
+  owners:
+  - frontend
+  - router
 - glob: lib/llm/src/preprocessor/mm_routing/
   owners:
   - frontend
@@ -1138,6 +1189,10 @@ shared:
   - performance
   - backend-trtllm
   - sidecar
+- glob: lib/router-plugins/builtin/src/lib.rs
+  owners:
+  - router
+  - epp
 - glob: lib/runtime/src/nvtx.rs
   owners:
   - runtime

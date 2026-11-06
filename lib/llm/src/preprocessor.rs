@@ -7254,11 +7254,13 @@ impl OpenAIPreprocessor {
     /// frames on an opt-in path rather than a silent stream — and closing it
     /// needs the guided-output derivation lifted out of the stream builder.
     ///
-    /// Known gap, the other direction: for MiniMax M3 the stream builder also
-    /// reads the rendered prompt, which the HTTP layer does not have. A
-    /// thinking-disabled request whose chat template does not render
-    /// `thinking_mode` still runs the reasoning parser, which may withhold
-    /// output, yet this predicate returns false for it.
+    /// MiniMax M3 keeps the heartbeat even when the request disables thinking.
+    /// The stream builder decides whether its parser runs from the rendered
+    /// prompt, which the HTTP layer does not have: a template that does not
+    /// render `thinking_mode` leaves reasoning open, so the parser still runs
+    /// and may withhold output. This is conservative in the same direction as
+    /// the guided-JSON gap: a template that does close the prompt gets extra
+    /// comment frames on an opt-in path.
     pub(crate) fn stream_can_defer_all_output(
         tool_call_parser: Option<&str>,
         reasoning_parser: Option<&str>,
@@ -7279,7 +7281,8 @@ impl OpenAIPreprocessor {
                 && Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args);
         has_reasoning_decoder
             && Self::wants_reasoning_as_content_when_empty(chat_template_args)
-            && !reasoning_disabled_by_request
+            && (Self::is_minimax_m3_reasoning_parser(reasoning_parser)
+                || !reasoning_disabled_by_request)
     }
 
     /// Parsers that begin streaming in reasoning mode (force_reasoning=true).
@@ -8584,11 +8587,6 @@ impl
         );
         Self::normalize_kimi_k3_named_tool_choice(&mut request, self.tool_call_parser.as_deref());
         crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
-            &mut request,
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-        );
-        crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
             &mut request,
             self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
@@ -19801,6 +19799,56 @@ responses_tools: None,
             None,
             Some("gemma4"),
             Some(&args),
+        ));
+    }
+
+    #[test]
+    fn minimax_m3_disabled_thinking_force_nonempty_stream_can_defer_all_output() {
+        let args = |pairs: &[(&str, serde_json::Value)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        let force = ("force_nonempty_content", serde_json::Value::Bool(true));
+        let disabled = ("thinking_mode", serde_json::json!("disabled"));
+
+        // The HTTP layer has no rendered prompt, and a template that ignores
+        // `thinking_mode` keeps the M3 parser on, so disabled still defers.
+        for parser in ["minimax_m3", "minimax-m3"] {
+            for template_args in [
+                args(&[force.clone(), disabled.clone()]),
+                args(std::slice::from_ref(&force)),
+                args(&[
+                    force.clone(),
+                    ("thinking_mode", serde_json::json!("adaptive")),
+                ]),
+            ] {
+                assert!(
+                    OpenAIPreprocessor::stream_can_defer_all_output(
+                        None,
+                        Some(parser),
+                        Some(&template_args),
+                    ),
+                    "{parser} {template_args:?}",
+                );
+            }
+            // Without force_nonempty_content nothing is held back.
+            assert!(!OpenAIPreprocessor::stream_can_defer_all_output(
+                None,
+                Some(parser),
+                Some(&args(std::slice::from_ref(&disabled))),
+            ));
+        }
+
+        // Other parsers still trust the request-only gate.
+        assert!(!OpenAIPreprocessor::stream_can_defer_all_output(
+            None,
+            Some("kimi_k25"),
+            Some(&args(&[
+                force.clone(),
+                ("enable_thinking", serde_json::Value::Bool(false)),
+            ])),
         ));
     }
 

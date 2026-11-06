@@ -71,7 +71,15 @@ from dynamo.frontend.frontend_args import build_frontend_parser
 from dynamo.llm import KvRouterConfig
 from dynamo.planner.retune.controller import startup_router_domain
 from dynamo.planner.retune.domains import expand_router_domain
-from dynamo.planner.retune.live.contracts import FrontendStartup, PremiseReport
+from dynamo.planner.retune.live.contracts import (
+    ENV_FRONTEND_ADMIN_API,
+    ENV_FRONTEND_ADMIN_HOST,
+    ENV_FRONTEND_ADMIN_PORT,
+    FrontendStartup,
+    PremiseReport,
+    is_truthy,
+    parse_u16,
+)
 
 if TYPE_CHECKING:
     from dynamo.planner.config.planner_config import PlannerConfig, RetuneConfig
@@ -154,8 +162,7 @@ ENV_TRACE_SINKS = "DYN_REQUEST_TRACE_SINKS"
 ENV_TRACE_FORMAT = "DYN_REQUEST_TRACE_FILE_FORMAT"
 ENV_TRACE_RECORDS = "DYN_REQUEST_TRACE_RECORDS"
 ENV_TRACE_PATH = "DYN_REQUEST_TRACE_FILE_PATH"
-# lib/truthy is_truthy; lib/llm/src/request_trace/config.rs parse_file_format.
-_TRUTHY = frozenset({"1", "true", "on", "yes"})
+# lib/llm/src/request_trace/config.rs parse_file_format.
 _GZ_FORMATS = frozenset({"jsonl_gz", "jsonl.gz"})
 
 ENV_WORKER_SELECTION_POLICY = "DYN_ROUTER_WORKER_SELECTION_POLICY"
@@ -477,7 +484,8 @@ def evaluate_premises(
             )
     others.extend(_planner_replica_errors(components, warnings))
 
-    # P10: the frontend records request_end traces onto the claim.
+    # P10: the frontend records request_end traces onto the claim and
+    # serves /router_policy on an admin listener the planner can reach.
     if analysis.component is not None and analysis.env is not None:
         others.extend(
             _trace_recipe_errors(
@@ -488,6 +496,7 @@ def evaluate_premises(
                 warnings=warnings,
             )
         )
+        others.extend(_admin_listener_errors(analysis.env, warnings))
 
     # P6 (warn only): AISimulate resolves the model by its HF id.
     warning = _model_warning(dgdr.model)
@@ -2130,7 +2139,7 @@ def _trace_recipe_errors(
         return str(entry.get("value") or "")
 
     trace = literal(ENV_TRACE)
-    if trace is None or trace.strip().lower() not in _TRUTHY:
+    if not is_truthy(trace):
         errors.append(f"P10: the frontend must set {ENV_TRACE}=1")
 
     sinks = _csv(literal(ENV_TRACE_SINKS))
@@ -2183,6 +2192,91 @@ def _trace_recipe_errors(
                 f"P10: {ENV_TRACE_PATH}={path!r} must be a file prefix directly "
                 f"under {prefixes[0]!r} (no further '/')"
             )
+    return errors
+
+
+def _admin_listener_errors(env: _Env, warnings: list[str]) -> list[str]:
+    """P10: the frontend serves /router_policy where the planner reaches it.
+
+    The frontend serves the router policy API only on its admin listener
+    (``lib/llm/src/http/service/service_v2.rs``), which is off unless
+    ``DYN_ENABLE_FRONTEND_ADMIN_API`` is truthy and binds
+    ``DYN_FRONTEND_ADMIN_HOST`` (default ``127.0.0.1``, unreachable from the
+    planner pod) on ``DYN_FRONTEND_ADMIN_PORT`` (default 8002). The planner
+    reads the port from each frontend pod's spec, where Kubernetes has not
+    expanded ``$(VAR)`` references yet, so the values must be literal. The
+    host must be a wildcard address or the pod IP through ``fieldRef``: a
+    literal pod IP in a pod template cannot match every pod.
+    """
+
+    entries = env.entries
+    errors: list[str] = []
+
+    def literal(name: str) -> tuple[bool, Optional[str]]:
+        """(readable, value); an unset name is readable with value None."""
+        entry = entries.get(name)
+        if entry is None:
+            return True, None
+        value = entry.get("value")
+        if entry.get("valueFrom") is not None or "$(" in str(value or ""):
+            return False, None
+        return True, str(value or "")
+
+    readable, enabled = literal(ENV_FRONTEND_ADMIN_API)
+    if not readable or not is_truthy(enabled):
+        errors.append(
+            f"P10: the frontend must set {ENV_FRONTEND_ADMIN_API}=1 as a literal "
+            "value: the planner sets the router policies through /router_policy, "
+            "which the frontend serves only on its admin listener"
+        )
+
+    host_entry = entries.get(ENV_FRONTEND_ADMIN_HOST)
+    readable, host = literal(ENV_FRONTEND_ADMIN_HOST)
+    if host_entry is None:
+        errors.append(
+            f"P10: the frontend must set {ENV_FRONTEND_ADMIN_HOST} to an address "
+            "the planner can reach, such as 0.0.0.0: its admin listener binds "
+            "127.0.0.1 by default"
+        )
+    elif readable:
+        stripped = (host or "").strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            stripped = stripped[1:-1]
+        if stripped not in ("0.0.0.0", "::"):
+            errors.append(
+                f"P10: {ENV_FRONTEND_ADMIN_HOST}={host!r} must be 0.0.0.0, :: or "
+                "the pod IP (fieldRef status.podIP): the planner calls each "
+                "frontend pod at its pod IP"
+            )
+    else:
+        field_ref = (host_entry.get("valueFrom") or {}).get("fieldRef") or {}
+        if field_ref.get("fieldPath") != "status.podIP":
+            errors.append(
+                f"P10: {ENV_FRONTEND_ADMIN_HOST} must be a literal address or "
+                "fieldRef status.podIP"
+            )
+
+    readable, port = literal(ENV_FRONTEND_ADMIN_PORT)
+    if not readable:
+        errors.append(
+            f"P10: {ENV_FRONTEND_ADMIN_PORT} must be a literal value: the planner "
+            "reads it from each frontend pod"
+        )
+    elif port is not None:
+        # Exactly digits: the frontend falls back to 8002 for anything its
+        # u16 parse rejects (whitespace included), and 0 picks a random port.
+        number = parse_u16(port) if re.fullmatch(r"[0-9]+", port) else None
+        if not number:
+            errors.append(
+                f"P10: {ENV_FRONTEND_ADMIN_PORT}={port!r} must be a port number "
+                "from 1 to 65535"
+            )
+    elif _env_from_may_define(ENV_FRONTEND_ADMIN_PORT, env.env_from_prefixes):
+        warnings.append(
+            f"P10: the frontend uses envFrom, which the planner cannot read; it "
+            f"assumes envFrom sets no {ENV_FRONTEND_ADMIN_PORT} and calls port "
+            f"8002. Set {ENV_FRONTEND_ADMIN_PORT} in the container's env to be sure"
+        )
     return errors
 
 
