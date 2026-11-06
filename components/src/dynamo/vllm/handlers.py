@@ -5138,7 +5138,11 @@ class EmbeddingWorkerHandler:
                 if tokenization_kwargs and isinstance(encode_arg, str):
                     encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
 
-                async for out in self.engine_client.encode(**encode_kwargs):
+                # Input vLLM rejects here (e.g. a conversation that renders
+                # to an empty prompt) is a client error, as with ``vllm serve``.
+                async for out in _translate_vllm_client_errors(
+                    self.engine_client.encode(**encode_kwargs)
+                ):
                     final_output = out
             if final_output is None:
                 raise RuntimeError(

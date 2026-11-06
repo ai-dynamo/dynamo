@@ -3352,6 +3352,40 @@ class TestEmbeddingWorkerHandlerChatInput:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
+    async def test_engine_rejection_is_a_client_error(self):
+        """A conversation that renders but that the engine rejects (e.g. an
+        embedding template that renders roles it doesn't know as an empty
+        prompt) is a 400, as with ``vllm serve``, not a 500."""
+        from vllm.exceptions import VLLMValidationError
+
+        error = VLLMValidationError(
+            "The decoder prompt cannot be empty", parameter="prompt"
+        )
+        handler, _ = self._make_handler()
+        handler.engine_client.renderer.render_chat_async = AsyncMock(
+            side_effect=lambda convs, *_: self._rendered(convs)
+        )
+
+        async def rejecting_encode(**_kwargs):
+            raise error
+            yield  # pragma: no cover - makes this an async generator
+
+        handler.engine_client.encode = rejecting_encode
+
+        with pytest.raises(HttpError) as exc_info:
+            await self._generate(
+                handler,
+                {
+                    "model": "test-model",
+                    "messages": [{"role": "query", "content": "hello"}],
+                },
+            )
+        assert exc_info.value.code == 400
+        assert str(error) in str(exc_info.value)
+        assert exc_info.value.__cause__ is error
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
     @pytest.mark.parametrize("signal", ["request_stopped", "worker_shutdown"])
     async def test_stop_during_render_cancels_it_and_skips_encoding(self, signal):
         """A client disconnect or worker shutdown while the media is still
