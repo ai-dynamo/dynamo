@@ -11,14 +11,13 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
-#[cfg(any(test, feature = "bench"))]
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use super::{
     AnchorRef, AnchorTask, EventKind, EventWarningKind, KvIndexerMetrics, KvRouterError,
     MatchDetails, PreBoundEventCounters, SyncIndexer, WorkerLookupStats, WorkerTask,
 };
-use crate::cleanup::{CleanupGuard, CleanupState};
 use crate::protocols::*;
 
 mod block_lookup;
@@ -33,6 +32,7 @@ use lane_lookup::LaneLookup;
 use node::*;
 use types::*;
 use worker_set::WorkerSet;
+pub(crate) use worker_set::mix_worker;
 
 mod dump;
 mod matches;
@@ -50,10 +50,44 @@ pub struct ConcurrentRadixTreeCompressed {
     root: SharedNode,
 
     anchor_nodes: DashMap<ExternalSequenceBlockHash, SharedNode, FxBuildHasher>,
-    cleanup: CleanupState,
     lifecycle: super::HashLifecycle,
+    sweep_schedule: SweepSchedule,
+    /// Nodes that lost their last holder since the last stale-leaf sweep began.
+    deaths_since_sweep: AtomicU64,
+    /// When the last stale-leaf sweep began, and how many nodes it visited.
+    last_sweep: parking_lot::Mutex<LastSweep>,
     #[cfg(any(test, feature = "bench"))]
     bench_metrics: CrtcBenchMetrics,
+}
+
+/// How often the background maintenance thread checks whether a stale-leaf sweep is due.
+const SWEEP_TICK: Duration = Duration::from_millis(50);
+/// A sweep is due once this many nodes have died since the last one began...
+const SWEEP_AFTER_DEATHS: u64 = 1024;
+/// ...or once this long has passed, for nodes no death was counted for.
+const SWEEP_MAX_INTERVAL: Duration = Duration::from_secs(30);
+/// A sweep walks the whole tree, so it also waits for one death per this many nodes the
+/// last sweep visited. That keeps the walk near this many visits per death, and the dead
+/// leaves the lanes miss to a small share of the tree.
+const SWEEP_VISITS_PER_DEATH: u64 = 8;
+
+/// Most queued dead leaves an idle event lane unlinks before it checks for new events.
+const IDLE_UNLINK_LIMIT: usize = 256;
+/// Dead leaves an event lane queues before it drains some without waiting to go idle.
+const PENDING_UNLINK_LIMIT: usize = 4096;
+
+/// When the background maintenance thread sweeps stale leaves.
+struct SweepSchedule {
+    /// How often the thread checks, or `None` for no maintenance thread.
+    tick: Option<Duration>,
+    after_deaths: u64,
+    max_interval: Duration,
+}
+
+struct LastSweep {
+    began: Instant,
+    /// Nodes the sweep's walk visited; zero before the first sweep.
+    nodes: u64,
 }
 
 #[cfg(any(test, feature = "bench"))]
@@ -61,6 +95,9 @@ struct CrtcBenchMetrics {
     node_splits: AtomicU64,
     lookup_repair_scans: AtomicU64,
     lookup_repair_entries: AtomicU64,
+    /// Stores appended by the one-lock tail path.
+    #[cfg(test)]
+    tail_appends: AtomicU64,
 }
 
 #[cfg(any(test, feature = "bench"))]
@@ -70,6 +107,8 @@ impl CrtcBenchMetrics {
             node_splits: AtomicU64::new(0),
             lookup_repair_scans: AtomicU64::new(0),
             lookup_repair_entries: AtomicU64::new(0),
+            #[cfg(test)]
+            tail_appends: AtomicU64::new(0),
         }
     }
 }
@@ -121,11 +160,69 @@ impl ConcurrentRadixTreeCompressed {
         Self {
             root: Arc::new(Node::new()),
             anchor_nodes: DashMap::with_hasher(FxBuildHasher),
-            cleanup: CleanupState::new(),
             lifecycle: super::HashLifecycle::default(),
+            sweep_schedule: SweepSchedule {
+                tick: Some(SWEEP_TICK),
+                after_deaths: SWEEP_AFTER_DEATHS,
+                max_interval: SWEEP_MAX_INTERVAL,
+            },
+            deaths_since_sweep: AtomicU64::new(0),
+            last_sweep: parking_lot::Mutex::new(LastSweep {
+                began: Instant::now(),
+                nodes: 0,
+            }),
             #[cfg(any(test, feature = "bench"))]
             bench_metrics: CrtcBenchMetrics::new(),
         }
+    }
+
+    /// Overrides when stale leaves are swept; `tick: None` runs no maintenance thread.
+    #[cfg(test)]
+    pub(crate) fn with_sweep_schedule(
+        mut self,
+        tick: Option<Duration>,
+        after_deaths: u64,
+        max_interval: Duration,
+    ) -> Self {
+        self.sweep_schedule = SweepSchedule {
+            tick,
+            after_deaths,
+            max_interval,
+        };
+        self
+    }
+
+    /// Counts a node that lost its last holder toward the next stale-leaf sweep. Call
+    /// only after dropping every reference to it, so a sweep that sees the count can
+    /// unlink it.
+    fn note_death(&self) {
+        self.deaths_since_sweep.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One maintenance tick: sweeps stale leaves once enough nodes have died or the
+    /// schedule's longest interval has passed.
+    fn sweep_if_due(&self) {
+        let schedule = &self.sweep_schedule;
+        let mut last = self.last_sweep.lock();
+        let after_deaths = schedule
+            .after_deaths
+            .max(last.nodes / SWEEP_VISITS_PER_DEATH);
+        let due = self.deaths_since_sweep.load(Ordering::Relaxed) >= after_deaths
+            || last.began.elapsed() >= schedule.max_interval;
+        if !due {
+            return;
+        }
+        // Deaths during the sweep count toward the next one.
+        self.deaths_since_sweep.store(0, Ordering::Relaxed);
+        last.began = Instant::now();
+        // Only the maintenance thread sweeps on schedule, so holding the lock blocks no one.
+        let sweep = self.sweep_stale_children();
+        tracing::debug!(
+            visited = sweep.visited,
+            unlinked = sweep.unlinked,
+            "Swept stale index leaves"
+        );
+        last.nodes = sweep.visited;
     }
 
     #[cfg(test)]
@@ -234,6 +331,10 @@ impl ConcurrentRadixTreeCompressed {
         self.bench_metrics
             .node_splits
             .fetch_add(1, Ordering::Relaxed);
+        // A split racing an eviction on another lane can leave the suffix with no holder
+        // and no children from birth. No removal will kill it, so queue it here, where its
+        // parent is known.
+        self.queue_split_born_dead_leaf(lookup, prefix, &split.suffix);
         if !lookup.names(prefix) {
             return;
         }
@@ -255,12 +356,16 @@ impl ConcurrentRadixTreeCompressed {
     ) -> bool {
         let changed =
             lookup.upsert_all(worker, blocks.iter().map(|block| block.block_hash), node) > 0;
+        self.insert_lifecycle_hashes(worker, blocks);
+        changed
+    }
+
+    fn insert_lifecycle_hashes(&self, worker: WorkerWithDpRank, blocks: &[KvCacheStoredBlockData]) {
         if self.lifecycle.is_enabled() {
             for block in blocks {
                 self.lifecycle.insert(worker, block.block_hash);
             }
         }
-        changed
     }
 
     // ------------------------------------------------------------------

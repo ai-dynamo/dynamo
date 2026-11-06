@@ -22,6 +22,8 @@ from dynamo.planner.offline.trace_data import (
     detect_trace_format,
     extract_metrics_from_mooncake,
     extract_metrics_from_trace,
+    extract_traffic_observations_from_bytes,
+    extract_traffic_observations_from_trace,
 )
 
 pytestmark = [
@@ -64,6 +66,24 @@ def _dynamo_rec(timestamp_ms, isl, osl, *, wrapped=False):
         },
     }
     return {"timestamp": timestamp_ms + 1_000, "event": event} if wrapped else event
+
+
+@pytest.mark.parametrize("record", [_rec, _dynamo_rec])
+def test_bounded_bytes_input_matches_file_windows_and_rejects_large_gaps(
+    tmp_path, record
+):
+    rows = [
+        record(100_000, 100, 10),
+        record(105_000, 300, 30),
+        record(135_000, 500, 50),
+    ]
+    path = _write_trace(tmp_path, rows)
+    payload = (tmp_path / "trace.jsonl").read_bytes()
+    assert extract_traffic_observations_from_bytes(
+        payload, 10, max_intervals=4
+    ) == extract_traffic_observations_from_trace(path, 10)
+    with pytest.raises(ValueError, match="aggregation intervals"):
+        extract_traffic_observations_from_bytes(payload, 10, max_intervals=3)
 
 
 def test_middle_empty_windows_are_preserved(tmp_path):

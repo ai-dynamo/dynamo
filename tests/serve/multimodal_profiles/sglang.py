@@ -10,6 +10,22 @@ from tests.utils.multimodal import (
     make_image_payload,
     make_image_payload_cached_tokens,
 )
+from tests.utils.payloads import CachedTokensChatPayload
+
+
+class SGLangMmRoutingPayload(CachedTokensChatPayload):
+    def bind_environment(self, env: dict[str, str]) -> None:
+        """Keep router observations while relaxing the floor on wide-pad builds."""
+        # Defer the optional backend import until this test runs.
+        from dynamo.sglang._compat import sglang_has_wide_mm_pad_values
+
+        super().bind_environment(env)
+        if sglang_has_wide_mm_pad_values():
+            # Wide-pad SGLang builds route media by text prefix only (#17653),
+            # so exact media overlap is required only on scalar-pad builds.
+            # The router must still report hit-rate observations.
+            self.min_avg_kv_hit_rate = 0.0
+
 
 # pd = multimodal prefill+decode on one GPU, no separate encode worker.
 SGLANG_TOPOLOGY_SCRIPTS: dict[str, str] = {
@@ -62,6 +78,7 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                             ["green"],
                             require_rust_processor_init=True,
                             min_avg_kv_hit_rate=0.9,
+                            payload_cls=SGLangMmRoutingPayload,
                         )
                     )
                 ],
@@ -94,6 +111,7 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                             ["green"],
                             require_rust_processor_init=True,
                             min_avg_kv_hit_rate=0.9,
+                            payload_cls=SGLangMmRoutingPayload,
                         )
                     )
                 ],
@@ -116,6 +134,7 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                             ["green"],
                             require_rust_processor_init=True,
                             min_avg_kv_hit_rate=0.9,
+                            payload_cls=SGLangMmRoutingPayload,
                         )
                     )
                 ],

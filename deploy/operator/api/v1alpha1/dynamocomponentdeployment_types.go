@@ -21,7 +21,6 @@ package v1alpha1
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -92,9 +91,10 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// runtime image. Paths below are relative to the component spec.
 	// Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar
 	// is present, otherwise extraPodSpec.mainContainer.image, or the main image in each
-	// selected role PodTemplate. DGD admission requires it when any selected runtime image has no parseable
-	// semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
-	// not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
+	// selected role PodTemplate. For frontend, worker, prefill, decode, planner, and epp components,
+	// DGD admission requires it when any selected runtime image has no parseable semantic-version tag;
+	// controller-generated DCDs may omit it. Untyped components and custom component types do not require it.
+	// Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
 	// It does not change the image. Setting or changing an override that resolves to version 1.5.0 or
 	// later may trigger a rollout. Keep it consistent with every selected template's runtime version.
 	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
@@ -504,18 +504,10 @@ func (s *DynamoComponentDeployment) GetDynamoNamespace() string {
 	return ComputeDynamoNamespace(s.Spec.GlobalDynamoNamespace, s.GetNamespace(), s.GetParentGraphDeploymentName())
 }
 
-// ComputeDynamoNamespace is the single source of truth for computing the Dynamo namespace.
-// If globalDynamoNamespace is true, returns "dynamo" (global constant).
-// Otherwise, returns {k8sNamespace}-{dgdName}.
+// ComputeDynamoNamespace uses the hub API's namespace computation so both API
+// versions preserve the same runtime identity and Kubernetes label value.
 func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName string) string {
-	if globalDynamoNamespace {
-		return commonconsts.GlobalDynamoNamespace
-	}
-	// The dynamo namespace is used as the first segment of endpoint paths
-	// (e.g. "namespace.component.endpoint"). Dots in resource names (from model
-	// version strings like "Qwen3-0.6B") would break that parsing, so replace them.
-	sanitized := strings.ReplaceAll(dgdName, ".", "-")
-	return fmt.Sprintf("%s-%s", k8sNamespace, sanitized)
+	return v1beta1.ComputeDynamoNamespace(globalDynamoNamespace, k8sNamespace, dgdName)
 }
 
 // ModelReference identifies a model served by this component

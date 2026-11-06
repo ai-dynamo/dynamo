@@ -1,0 +1,26 @@
+{
+  "prompt": "A cat on a windowsill.",
+  "model": "black-forest-labs/FLUX.1-dev",
+  "n": 2,
+  "quality": "high",
+  "response_format": "b64_json",
+  "output_format": "webp",
+  "output_compression": 80,
+  "stream": false,
+  "partial_images": 0,
+  "size": "1024x1024",
+  "moderation": "low",
+  "background": "transparent",
+  "style": "natural",
+  "user": "user-1",
+  "input_reference": "https://example.com/reference.png",
+  "nvext": {
+    "annotations": [
+      "request_id"
+    ],
+    "negative_prompt": "blurry",
+    "num_inference_steps": 28,
+    "guidance_scale": 3.5,
+    "seed": 7
+  }
+}

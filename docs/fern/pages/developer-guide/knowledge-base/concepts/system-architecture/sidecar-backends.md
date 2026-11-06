@@ -6,14 +6,52 @@ subtitle: Run Dynamo beside a stock inference engine through its native gRPC API
 ---
 
 > [!WARNING]
-> **Experimental.** Sidecar packaging, launchers, and API coverage are still
-> evolving. The sidecar path does not yet match every feature of the in-process
-> backends.
+> **Experimental.** Sidecar integration is under active development, so this page and the linked support notes may become stale. The sidecar path does not yet match every feature of the in-process backends.
 
 A Dynamo sidecar runs beside the inference engine process. It registers the
 engine with Dynamo discovery, forwards engine events into the Dynamo event
 plane, and serves requests from the Dynamo frontend by calling the engine's
 native gRPC API.
+
+## Backend Support Matrix
+
+**Legend:** Supported = available through the sidecar; Limited = available with restrictions; Engine-configured = enabled in the native engine; No = unavailable. See the linked backend support notes for details.
+
+| Capability | [vLLM](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/SUPPORT_NOTES.md#vllm) | [SGLang](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/SUPPORT_NOTES.md#sglang) | [TensorRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/SUPPORT_NOTES.md#tensorrt-llm) |
+|---|---|---|---|
+| Text generation, streaming, and cancellation | Supported | Supported | Supported |
+| Tool calling through the Dynamo frontend | Supported | Supported | Supported |
+| Disaggregated prefill/decode serving | Supported | Supported | Supported |
+| KV-aware routing | Supported | Supported | Supported |
+| Multimodal input | Supported: image, video, audio | Supported: image, video, audio | Limited: images and video |
+| Separate multimodal encoder workers | Supported | No | No |
+| LoRA adapters | Supported | No | No |
+| Structured output and logprobs | Supported | Supported | Supported: no prompt logprobs |
+| Embedding endpoints | No | No | No |
+| Runtime weight updates and sleep/wake controls | Limited | No | No |
+
+### Deployment
+
+| Capability | vLLM | SGLang | TensorRT-LLM |
+|---|---|---|---|
+| Kubernetes single-node deployment | Supported | Supported | Supported |
+| Kubernetes multinode deployment | Supported | Supported | Supported |
+
+### Operations and Recovery
+
+| Capability | vLLM | SGLang | TensorRT-LLM |
+|---|---|---|---|
+| Observability: metrics, logs, and tracing | Limited | Limited | Limited |
+| SLA-based planner and autoscaling | No | No | No |
+| Native engine cache offloading | Engine-configured | Engine-configured | Engine-configured |
+| GPU Memory Service (GMS) | Requires separate integration | Requires separate integration | Requires separate integration |
+| Checkpoint/restore | Requires separate integration | Requires separate integration | Requires separate integration |
+| Shadow-engine failover | Requires separate integration | Requires separate integration | Requires separate integration |
+| In-flight request migration | Supported: opt-in token replay | Supported: opt-in token replay | Supported: opt-in token replay |
+| Graceful shutdown and draining | Limited: bounded drain | Limited: bounded drain | Limited: bounded drain |
+| Speculative decoding | Engine-configured | Engine-configured | Engine-configured |
+
+For engine-version requirements and launch examples, see [vLLM](../../modular-components/backends/vllm/sidecar.md), [SGLang](../../modular-components/backends/sglang/sidecar.md), and [TensorRT-LLM](../../modular-components/backends/tensorrt-llm/sidecar.md).
 
 ## Design Goals
 
@@ -44,7 +82,7 @@ API and streams responses back.
 
 ## Container Packaging
 
-The sidecar Dockerfile builds all three engine-specific sidecar executables into
+The sidecar Dockerfile builds all four engine-specific sidecar executables into
 one CPU-only image. Deployments select an engine by setting the container
 `command`:
 
@@ -53,12 +91,13 @@ one CPU-only image. Deployments select an engine by setting the container
 | vLLM | `dynamo-vllm-sidecar` |
 | SGLang | `dynamo-sglang-sidecar` |
 | TensorRT-LLM | `dynamo-trtllm-sidecar` |
+| LPX | `dynamo-lpx-sidecar` |
 
 The image's default entrypoint, `dynamo-sidecar`, maps the short names `vllm`,
-`sglang`, and `trtllm` onto those executables. It is a convenience for ad-hoc
+`sglang`, `trtllm`, and `lpx` onto those executables. It is a convenience for ad-hoc
 `docker run`; the deployment manifests override it with `command`. The inference
 engine remains in a separate GPU container, so the sidecar image does not
-include vLLM, SGLang, TensorRT-LLM, CUDA, or engine-specific Python
+include vLLM, SGLang, TensorRT-LLM, LPX engines, CUDA, or engine-specific Python
 dependencies. The image runs as the non-root `dynamo` user with numeric user ID
 `1000` and declares port `9090` for Dynamo system endpoints, so Kubernetes can
 enforce `runAsNonRoot`.
@@ -85,7 +124,7 @@ The engine and sidecar share one worker pod. The engine is the `main`
 container; the sidecar is a
 [native sidecar](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/):
 an init container named `runtime` with `restartPolicy: Always`, which requires
-Kubernetes 1.29 or later. The two connect over loopback.
+Kubernetes 1.29 or later. The two connect over loopback or a Unix socket.
 
 ```yaml
 podTemplate:
@@ -94,7 +133,7 @@ podTemplate:
     - name: runtime
       image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:<version>
       command: [dynamo-vllm-sidecar]
-      args: [--grpc-endpoint, 127.0.0.1:50051]
+      args: [--grpc-endpoint, 127.0.0.1:30001]
       restartPolicy: Always
     containers:
     - name: main
@@ -104,9 +143,17 @@ podTemplate:
 Kubernetes starts the sidecar before the engine and keeps it running for the
 life of the pod. Declaring the `runtime` init container enables sidecar mode in
 the Dynamo operator, which gives the sidecar `/live` and `/health` probes on
-port `9090`. These probes do not track engine loading, so keep the engine's own
-probes on `main`. Sidecar mode supports worker, prefill, and decode components;
-multinode deployments are not yet supported.
+port `9090`; in host-network LPX Agent Pods the sidecar keeps only the probes its
+template declares. These probes do not track engine loading, so keep the engine's own
+probes on `main`. Sidecar mode supports worker, prefill, and decode components,
+and LPX components through their role templates.
+SGLang, vLLM, and TensorRT-LLM multinode deployments require explicit leader and
+worker role PodTemplates. Set `backendFramework` explicitly, as the examples do: the
+operator does not infer a backend from a native engine command. The leader declares
+`runtime`. Worker placement depends on the engine topology. See the
+[SGLang guide](../../modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes),
+the [vLLM guide](../../modular-components/backends/vllm/sidecar.md#deploy-on-kubernetes),
+and the [TensorRT-LLM guide](../../modular-components/backends/tensorrt-llm/sidecar.md#deploy-on-kubernetes).
 
 ## Topologies
 

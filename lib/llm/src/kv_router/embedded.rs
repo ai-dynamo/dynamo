@@ -17,11 +17,12 @@ use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
 use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
     NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, QueueLimitKind, QueueRejection,
-    WorkerAvailabilityProvider,
+    RejectThresholdsProvider, WorkerAvailabilityProvider,
 };
 use dynamo_kv_router::sequences::{LocalWorkerLoad, ReplicaWorkerPolicy};
 use dynamo_kv_router::services::selection::{
@@ -30,7 +31,7 @@ use dynamo_kv_router::services::selection::{
     SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler, SelectionService,
     SelectionServiceBuilder, WorkerCatalogSource, WorkerRequest,
 };
-use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
+use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator};
 use tokio_util::sync::CancellationToken;
 
 use crate::discovery::RuntimeConfigWatch;
@@ -50,6 +51,8 @@ pub(crate) struct EmbeddedSelectionArgs {
     pub is_eagle: bool,
     pub prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     pub overloaded_worker_provider: OverloadedWorkerProvider,
+    /// Live busy thresholds the queue applies at selection.
+    pub reject_thresholds: Option<RejectThresholdsProvider>,
     pub available_worker_provider: WorkerAvailabilityProvider,
     pub registration_availability_provider: RegistrationAvailabilityProvider,
     pub shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>>,
@@ -100,7 +103,11 @@ fn update_queue_metrics(
             );
             continue;
         };
-        handles.update_admission(stats.received_total, stats.rejected_due_time_passed_total);
+        handles.update_admission(
+            stats.received_total,
+            stats.rejected_due_time_passed_total,
+            stats.rejected_queue_size_exceeded_total,
+        );
         handles.pending_requests.set(stats.pending_count as i64);
         handles
             .pending_isl_tokens
@@ -267,6 +274,7 @@ impl EmbeddedSelection {
                 prefill_estimator: args.prefill_load_estimator,
                 overloaded_workers: Some(args.overloaded_worker_provider),
                 available_workers: Some(args.available_worker_provider),
+                reject_thresholds: args.reject_thresholds,
             },
             cache: HostCache {
                 shared: args.shared_cache,
@@ -295,6 +303,11 @@ impl EmbeddedSelection {
             .core()
             .ensure_partition(key.clone(), args.block_size, args.is_eagle)
             .context("failed to create embedded selection partition")?;
+        if let Some(spec) = crate::request_trace::router_selection_spec()
+            && !partition.scheduler().set_selection_trace(spec)
+        {
+            anyhow::bail!("selection trace spec is already installed");
+        }
 
         // Same profile the partition scheduler resolved, so class indices align.
         let profile = args
@@ -344,6 +357,12 @@ impl EmbeddedSelection {
             tracing::warn!(%error, "embedded selection: initial membership reconcile failed");
         }
         tokio::spawn(reconciler.run(source, cancellation_token.child_token()));
+        crate::kv_router::sequence::start_scheduler_load_publisher(
+            &args.endpoint,
+            Arc::clone(&service),
+            args.kv_router_config.router_replica_sync,
+            cancellation_token.child_token(),
+        );
 
         tracing::info!(
             worker_type = %worker_type,
@@ -377,10 +396,9 @@ impl EmbeddedSelection {
         ttl: Duration,
         mode: crate::session_affinity::SessionAffinityMode,
     ) -> Result<crate::session_affinity::AffinityCoordinator> {
-        let table = self.partition.session_affinity(
-            dynamo_kv_router::services::selection::affinity::SessionAffinityConfig::new(ttl)
-                .with_mode(mode),
-        )?;
+        let table = self
+            .partition
+            .session_affinity(crate::session_affinity::affinity_config(ttl, mode)?)?;
         Ok(self
             .affinity
             .get_or_init(|| crate::session_affinity::AffinityCoordinator::wrap(table))
@@ -511,6 +529,7 @@ mod tests {
             dynamo_kv_router::queue::ClassQueueStats {
                 received_total: 10,
                 rejected_due_time_passed_total: 1,
+                rejected_queue_size_exceeded_total: 4,
                 pending_count: 2,
                 pending_isl_tokens: 128,
                 pending_cached_tokens: 64,
@@ -518,6 +537,7 @@ mod tests {
             dynamo_kv_router::queue::ClassQueueStats {
                 received_total: 20,
                 rejected_due_time_passed_total: 3,
+                rejected_queue_size_exceeded_total: 0,
                 pending_count: 3,
                 pending_isl_tokens: 384,
                 pending_cached_tokens: 192,
@@ -531,6 +551,10 @@ mod tests {
             assert_eq!(
                 handles.rejected_due_time_passed_total.get(),
                 stats.rejected_due_time_passed_total
+            );
+            assert_eq!(
+                handles.rejected_queue_size_exceeded_total.get(),
+                stats.rejected_queue_size_exceeded_total
             );
             assert_eq!(handles.pending_requests.get(), stats.pending_count as i64);
             assert_eq!(

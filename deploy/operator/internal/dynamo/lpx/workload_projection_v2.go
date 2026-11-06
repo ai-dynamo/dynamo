@@ -17,11 +17,11 @@ const v2ProjectionVersion = "v2-xt-node-local/v1"
 
 //nolint:gocyclo // V2 projection validates one complete transformation.
 func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
-	configured := *intent.BuildSnapshot.build
+	configured := *intent.Build
 	usesResolvedRuntime := intent.Pipeline == PipelineSingle ||
 		intent.Pipeline == PipelineSpecDecode
-	ioFPGACount, ioFanoutFactor := configured.IOFPGACount, configured.IOFanoutFactor
-	connectorBuild := intent.BuildSnapshot.build
+	ioFPGACount, ioFanoutFactor := configured.ioFPGACount, configured.ioFanoutFactor
+	connectorBuild := intent.Build
 
 	// Apply the selected chain and CPU embedding placement before deriving scheduler requests.
 	if usesResolvedRuntime {
@@ -33,8 +33,8 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	allocationMetadata := json.RawMessage(`{}`)
 
 	// Combine packed physical reservations without changing the runtime's logical stages.
-	partitions := configured.Partitions
-	if usesResolvedRuntime && len(connectorBuild.SelectedPropSyncChains) != 0 {
+	partitions := configured.partitions
+	if usesResolvedRuntime && len(connectorBuild.selectedPropSyncChains) != 0 {
 		partitions = packPropSyncPartitions(partitions)
 	}
 
@@ -54,17 +54,18 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		for index := range transcripts {
 			transcripts[index].field("local-partition-ids", encoded)
 		}
-		configured.Partitions = partitions
+		configured.partitions = partitions
 	}
 
 	// Bind validated physical partitions into projection identity while counting runtime endpoints.
 	agentReplicas := 0
 	for index, partition := range partitions {
-		compilerID := uint32(partition.SourcePartitionID)
-		shape, endpoints, shapeErr := xtShape(partition)
+		compilerID := uint32(partition.sourcePartitionID)
+		shape, shapeErr := xtShape(partition)
 		if shapeErr != nil {
 			return nil, shapeErr
 		}
+		endpoints := int64(partition.effectiveNodeCount())
 		agentReplicas += int(endpoints)
 		for modelIndex := range transcripts {
 			transcripts[modelIndex].uint32Field("compiler-partition-id", compilerID)
@@ -80,15 +81,15 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	}
 
 	// Preserve physical scheduler partitions while collapsing selected chains only in LPU runtime state.
-	if intent.Pipeline == PipelineLPX && len(configured.SelectedPropSyncChains) != 0 {
-		runtimeChainByRoot := make(map[int][]int, len(connectorBuild.SelectedPropSyncChains))
-		for _, chain := range connectorBuild.SelectedPropSyncChains {
+	if intent.Pipeline == PipelineHybrid && len(configured.selectedPropSyncChains) != 0 {
+		runtimeChainByRoot := make(map[int][]int, len(connectorBuild.selectedPropSyncChains))
+		for _, chain := range connectorBuild.selectedPropSyncChains {
 			runtimeChainByRoot[chain[0]] = chain
 		}
-		collapsed := make([]BuildPartition, 0, len(partitions))
+		collapsed := make([]buildPartition, 0, len(partitions))
 		for partitionIndex := 0; partitionIndex < len(partitions); {
 			partition := partitions[partitionIndex]
-			chain, selected := runtimeChainByRoot[partition.SourcePartitionID]
+			chain, selected := runtimeChainByRoot[partition.sourcePartitionID]
 			if !selected {
 				collapsed = append(collapsed, partition)
 				partitionIndex++
@@ -101,8 +102,8 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 			collapsed = append(collapsed, partition)
 			partitionIndex = chainEnd
 		}
-		configured.Partitions = collapsed
-		configured.SelectedPropSyncChains = nil
+		configured.partitions = collapsed
+		configured.selectedPropSyncChains = nil
 	}
 
 	// Encode shared connectors once without changing any model's digest field order.
@@ -120,7 +121,8 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 
 		dst = append(dst, &ModelProjection{
 			digest:                 transcript.sum(),
-			compilerSnapshotDigest: intent.BuildSnapshot.contentID,
+			compilerSnapshotDigest: intent.Build.contentID,
+			contractFormat:         intent.Build.contractFormat,
 			runtimeBuildRef:        intent.RuntimeBuildRef,
 			model:                  intent.Models[index],
 			pipeline:               intent.Pipeline,
@@ -135,14 +137,14 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	return dst, nil
 }
 
-func xtShape(partition BuildPartition) (lpxv1alpha1.Xt8888PartitionShape, int64, error) {
+func xtShape(partition buildPartition) (lpxv1alpha1.Xt8888PartitionShape, error) {
 	// These chip capacities name registered XT shapes; node width comes from the manifest.
-	chips := max(partition.Topology.ChipCount, partition.DevicesPerNode)
+	chips := max(partition.numChips, partition.devicesPerNode)
 	switch chips {
 	case 8, 16, 24, 32, 40, 48, 56, 64, 96, 128:
-		return lpxv1alpha1.Xt8888PartitionShape(fmt.Sprintf("c%d", chips)), int64(partition.effectiveNodeCount()), nil
+		return lpxv1alpha1.Xt8888PartitionShape(fmt.Sprintf("c%d", chips)), nil
 	default:
-		return "", 0, fmt.Errorf("partition %d has unregistered XT shape c%d", uint32(partition.SourcePartitionID), chips)
+		return "", fmt.Errorf("partition %d has unregistered XT shape c%d", uint32(partition.sourcePartitionID), chips)
 	}
 }
 
@@ -152,17 +154,17 @@ func xtShape(partition BuildPartition) (lpxv1alpha1.Xt8888PartitionShape, int64,
 // packed chain's non-root members and GPU-local partitions produce no edge.
 func v2Connectors(
 	build *Build,
-	partitions []BuildPartition,
+	partitions []buildPartition,
 ) ([]lpxv1alpha1.PropSyncConnectorRequest, error) {
 	// Only compiler-selected relationships impose placement constraints.
-	if len(build.SelectedPropSyncChains) == 0 {
+	if len(build.selectedPropSyncChains) == 0 {
 		return []lpxv1alpha1.PropSyncConnectorRequest{}, nil
 	}
 
 	// Validate explicit chains before ordering their scheduler edges.
 	edgePositions, err := validateSelectedPropSyncGraph(
-		build.Partitions,
-		build.SelectedPropSyncChains,
+		build.partitions,
+		build.selectedPropSyncChains,
 		"selected prop-sync chain",
 	)
 	if err != nil {
@@ -174,12 +176,12 @@ func v2Connectors(
 
 	retainedOrdinal := make(map[int]int, len(partitions))
 	for ordinal, partition := range partitions {
-		retainedOrdinal[partition.SourcePartitionID] = ordinal
+		retainedOrdinal[partition.sourcePartitionID] = ordinal
 	}
 	connectors := make([]lpxv1alpha1.PropSyncConnectorRequest, 0, len(edgePositions))
 	for _, position := range edgePositions {
-		from, fromRetained := retainedOrdinal[build.Partitions[position].SourcePartitionID]
-		to, toRetained := retainedOrdinal[build.Partitions[position+1].SourcePartitionID]
+		from, fromRetained := retainedOrdinal[build.partitions[position].sourcePartitionID]
+		to, toRetained := retainedOrdinal[build.partitions[position+1].sourcePartitionID]
 		if !fromRetained || !toRetained {
 			continue
 		}

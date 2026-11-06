@@ -24,6 +24,9 @@ anyhow = { workspace = true }
 
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
+# Not `workspace = true`: the workspace pin is exact, and lib/bindings/python
+# (its own workspace, which depends on this crate) locks a newer 0.1.x.
+hyper-util = { version = "0.1.17", features = ["client-legacy", "tokio"] }
 prost-types = { workspace = true }
 prost-types-v14 = { workspace = true, optional = true }
 serde_json = { workspace = true }
@@ -37,7 +40,11 @@ url = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 temp-env = { version = "0.3.6", features = ["async_closure"] }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+tokio-stream = { workspace = true, features = ["net"] }
+tonic-health = { workspace = true }
+tower = { workspace = true }
 
 [features]
 # The v14 protobuf/tonic surface, for sidecars generated against prost 0.14.
