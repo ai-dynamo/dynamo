@@ -2156,11 +2156,6 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-frontend",
 					Namespace:  "default",
 					Generation: 1,
-					Spec: v1alpha1.DynamoComponentDeploymentSpec{
-						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
-						},
-					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 1,
 						Conditions: []metav1.Condition{
