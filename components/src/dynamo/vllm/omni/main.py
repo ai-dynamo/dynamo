@@ -5,7 +5,6 @@
 
 import asyncio
 import logging
-import os
 
 import uvloop
 from vllm_omni.model_extras import get_model_class_name
