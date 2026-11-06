@@ -33,6 +33,7 @@ from aisimulate.sweeper.replay import (
 
 from dynamo.llm import AisPerfConfig, KvRouterConfig
 from dynamo.mocker.config import normalize_mocker_config
+from dynamo.planner.core.types import TrafficObservation
 from dynamo.replay.api import (
     TelemetryOptions,
     run_synthetic_trace_replay,
@@ -145,6 +146,7 @@ class DynamoReplayRunner:
             ais_perf_config,
             conversation_affinity,
         ) = self._resolve_hooks(spec.runtime_hooks)
+        planner_warmup = self._planner_warmup(spec.runtime_hooks)
         common: dict[str, Any] = {
             "router_mode": router_mode,
             "router_config": router_config,
@@ -170,6 +172,12 @@ class DynamoReplayRunner:
             **self._goodput_sla_kwargs(spec),
         }
 
+        if planner_warmup is not None:
+            # A live retune sweep's candidate warms its load predictor with
+            # the recorded history before the window.
+            if not self._is_trace(spec):
+                raise ValueError("planner warmup observations require a trace replay")
+            common["_planner_warmup_observations"] = planner_warmup
         if conversation_affinity is not None:
             if not self._is_trace(spec):
                 raise ValueError("conversation_affinity requires an agentic trace")
@@ -202,6 +210,27 @@ class DynamoReplayRunner:
         The current replay entry points are call-scoped and retain no resources
         between candidates.
         """
+
+    @staticmethod
+    def _planner_warmup(
+        hooks: tuple[RuntimeHookSpec, ...],
+    ) -> list[TrafficObservation] | None:
+        """The Planner hook's ``warmup_observations`` rows, if it has any."""
+
+        for hook in hooks:
+            if not _PLANNER_HOOK.supports(hook):
+                continue
+            rows = hook.config.get("warmup_observations")
+            if rows is None:
+                return None
+            if not isinstance(rows, list) or not all(
+                isinstance(row, list) for row in rows
+            ):
+                raise TypeError(
+                    "Dynamo Planner hook warmup_observations must be a list of rows"
+                )
+            return [TrafficObservation(*row) for row in rows]
+        return None
 
     @staticmethod
     def _resolve_hooks(
@@ -537,6 +566,11 @@ class DynamoReplayRunner:
             ),
             "inter_turn_delay_ms": _float_value(
                 workload.get("inter_turn_delay_ms", 0.0), "inter_turn_delay_ms"
+            ),
+            # Session sources author each turn's new input; replay prefixes it
+            # with the earlier turns, as AISimulate's engine stack does.
+            "accumulate_session_deltas": (
+                workload.get("source_type") == "synthetic-session"
             ),
         }
 

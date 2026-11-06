@@ -81,6 +81,14 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         false
     }
 
+    /// Whether the selector can reject workers that [`RoutingEligibility`] accepts.
+    ///
+    /// The host measures affinity selections against the best eligible worker only when
+    /// this is `false`, so cache metrics never count a worker the policy would reject.
+    fn applies_worker_filters(&self) -> bool {
+        true
+    }
+
     fn select_worker(
         &self,
         input: WorkerSelectionInput<'_, C>,
@@ -562,6 +570,7 @@ pub(crate) fn log_selection(request_id: Option<&str>, response: &SchedulingRespo
         worker_type,
         logit,
         pinned,
+        session_affinity,
         host_pinned_blocks,
         disk_blocks,
         total_kv_blocks,
@@ -573,17 +582,15 @@ pub(crate) fn log_selection(request_id: Option<&str>, response: &SchedulingRespo
     let worker = response.best_worker;
     let effective_overlap_blocks = response.effective_overlap_blocks;
 
-    if pinned {
-        tracing::info!(
-            request_id,
-            "Selected pinned worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}",
-            worker_type,
-            worker.worker_id,
-            worker.dp_rank,
-            logit,
-            effective_overlap_blocks,
-        );
-    } else if worker_type == "decode" {
+    let selection = if session_affinity {
+        "session_affinity"
+    } else if pinned {
+        "pinned"
+    } else {
+        "kv"
+    };
+
+    if worker_type == "decode" {
         tracing::info!(
             router_mode = "kv",
             request_id,
@@ -593,6 +600,7 @@ pub(crate) fn log_selection(request_id: Option<&str>, response: &SchedulingRespo
             logit,
             host_pinned_blocks,
             disk_blocks,
+            selection,
             "Selected worker"
         );
     } else {
@@ -607,6 +615,7 @@ pub(crate) fn log_selection(request_id: Option<&str>, response: &SchedulingRespo
             host_pinned_blocks,
             disk_blocks,
             total_kv_blocks = ?total_kv_blocks,
+            selection,
             "Selected worker"
         );
     }
@@ -751,6 +760,9 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         worker_type,
         logit: cost,
         pinned: request.pinned_worker == Some(worker),
+        session_affinity: request
+            .affinity_target
+            .is_some_and(|target| target.matches(worker)),
         host_pinned_blocks: tiers.host_pinned.get(&worker).copied().unwrap_or(0),
         disk_blocks: tiers.disk.get(&worker).copied().unwrap_or(0),
         total_kv_blocks: workers

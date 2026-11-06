@@ -2996,7 +2996,7 @@ func TestLPXPublishedWorkloadCleanupAfterFailure(t *testing.T) {
 			require.NoError(t, reconciler.Get(ctx, pcsKey, pcsBefore))
 
 			t.Log("Fail the actual snapshot dependency or break cross-role model storage")
-			message := "must use the Conductor model-storage mount path"
+			message := "must use the serving model-storage mount path"
 			if test.snapshotError != nil {
 				reconciler.modelRegistry = &snapshotFailureRegistry{ModelRegistry: registry, err: test.snapshotError}
 				message = test.snapshotError.Error()
