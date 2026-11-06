@@ -70,8 +70,8 @@ dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "=10.2.2" }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sidecar-common = { path = "../../sidecar/common" }
-dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }
-dynamo-trtllm-sidecar = { path = "../../sidecar/trtllm" }
+dynamo-sglang-sidecar = { path = "../../sidecar/sglang", default-features = false }
+dynamo-trtllm-sidecar = { path = "../../sidecar/trtllm", default-features = false }
 dynamo-vllm-sidecar = { path = "../../sidecar/vllm", default-features = false }
 
 anyhow = { version = "1" }

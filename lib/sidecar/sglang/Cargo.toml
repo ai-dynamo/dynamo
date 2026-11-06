@@ -19,6 +19,11 @@ ignored = ["prost", "prost-types"]
 name = "dynamo-sglang-sidecar"
 path = "src/main.rs"
 
+[features]
+default = ["jemalloc"]
+# jemalloc as the binary's global allocator. The Python bindings turn it off.
+jemalloc = ["dynamo-sidecar-common/jemalloc"]
+
 [dependencies]
 dynamo-sglang-generate = { workspace = true }
 dynamo-backend-common = { workspace = true }
