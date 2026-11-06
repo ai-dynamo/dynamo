@@ -774,7 +774,7 @@ class MultimodalRequestProcessor:
                 processed_mm_data["audio"] = [
                     await self._load_audio(item) for item in audio_items
                 ]
-                logging.info("Loaded %d audio clip(s)", len(audio_items))
+                logging.debug("Loaded %d audio clip(s)", len(audio_items))
 
             if loaded_embeddings:
                 # For TRT-LLM MM embeddings, the currently

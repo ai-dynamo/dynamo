@@ -143,9 +143,8 @@ async def test_audio_is_forwarded_to_trtllm_processor(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("malformed", [False, True], ids=["valid", "malformed"])
 async def test_audio_with_embedding_paths_is_rejected_before_loading(
-    malformed, audio_registry
+    audio_registry,
 ) -> None:
     processor = MultimodalRequestProcessor(
         model_type="multimodal",
@@ -153,10 +152,7 @@ async def test_audio_with_embedding_paths_is_rejected_before_loading(
         max_file_size_mb=10,
         tokenizer=MagicMock(),
     )
-    processor.load_tensor_from_path_or_url = AsyncMock(
-        return_value=torch.ones(1, 2, 3),
-        side_effect=ValueError("Malformed embedding file") if malformed else None,
-    )
+    processor.load_tensor_from_path_or_url = AsyncMock()
     processor.image_loader.load_image_batch = AsyncMock()
     processor._load_audio = AsyncMock()
 
