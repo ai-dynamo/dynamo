@@ -3035,7 +3035,11 @@ class KvRouter:
             cache_namespace: Optional cache namespace used in block hash computation.
             policy_class: Requested policy class name. An omitted name uses
                           the configured default class; a name that matches no
-                          configured class raises an error.
+                          configured class raises an error. With a deprecated
+                          policy-family profile, an explicit class name selects
+                          that class; a family name selects that family's class,
+                          and any other name the default family's, for the
+                          request's uncached tokens.
 
         Returns:
             A tuple of (worker_id, dp_rank, overlap_blocks) where:
