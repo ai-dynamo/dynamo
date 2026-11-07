@@ -827,6 +827,11 @@ EnableGPUDiscovery controls whether the operator attempts to discover GPU hardwa
 AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, only the spec is generated and stored in status. Users can then manually create a DGD using the generated spec.
 </ParamField>
 
+<ParamField path="unauthenticated" type="boolean">
+Unauthenticated indicates that the model does not require Hugging Face credentials. When true, the profiling job and the generated DynamoGraphDeployment omit every hf-token-secret reference entirely, so their pods start without waiting for the Secret. When absent or false, both reference the Secret as required and pods block until it exists.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="deploymentOverrides" type="DeploymentOverridesSpec">
 DeploymentOverrides allows customizing metadata for the auto-created DGD. Only applicable when AutoApply is true.
 See [DeploymentOverridesSpec](#deploymentoverridesspec).
@@ -921,6 +926,11 @@ EnableGPUDiscovery controls whether the operator attempts to discover GPU hardwa
 
 <ParamField path="autoApply" type="boolean">
 AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, only the spec is generated and stored in status. Users can then manually create a DGD using the generated spec.
+</ParamField>
+
+<ParamField path="unauthenticated" type="boolean">
+Unauthenticated indicates that the model does not require Hugging Face credentials. When true, the profiling job and the generated DynamoGraphDeployment omit every hf-token-secret reference entirely, so their pods start without waiting for the Secret. When absent or false, both reference the Secret as required and pods block until it exists.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="deploymentOverrides" type="DeploymentOverridesSpec">
@@ -3250,6 +3260,11 @@ See [SearchStrategy](#searchstrategy).
 AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, the generated spec is stored in status for manual review and application.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
+
+<ParamField path="unauthenticated" type="boolean">
+Unauthenticated indicates that the model does not require Hugging Face credentials. When true, the profiling job and the generated DynamoGraphDeployment omit every hf-token-secret reference entirely, so their pods start without waiting for the Secret. When absent or false, both reference the Secret as required and pods block until it exists.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
 </Accordion>
 
 <Accordion id="v1beta1-dynamographdeploymentrequestnativestatus" title="v1beta1 DynamoGraphDeploymentRequestNativeStatus">
@@ -3378,6 +3393,11 @@ See [SearchStrategy](#searchstrategy).
 
 <ParamField path="autoApply" type="boolean">
 AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, the generated spec is stored in status for manual review and application.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="unauthenticated" type="boolean">
+Unauthenticated indicates that the model does not require Hugging Face credentials. When true, the profiling job and the generated DynamoGraphDeployment omit every hf-token-secret reference entirely, so their pods start without waiting for the Secret. When absent or false, both reference the Secret as required and pods block until it exists.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 

@@ -28,6 +28,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 )
 
 const testDGDName = "my-dgd"
@@ -86,6 +87,7 @@ func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 			Backend:                "vllm",
 			RuntimeVersionOverride: "1.2.3",
 			AutoApply:              true,
+			Unauthenticated:        &trueVal,
 			UseMocker:              true,
 			ProfilingConfig: &ProfilingConfigSpec{
 				ProfilerImage: "nvcr.io/nvidia/dynamo:latest",
@@ -125,6 +127,7 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 	rawDGD, _ := json.Marshal(map[string]any{"apiVersion": "nvidia.com/v1alpha1", "kind": "DynamoGraphDeployment"})
 	rawPlanner, _ := json.Marshal(map[string]any{"enable_load_scaling": false})
 	autoApplyFalse := false
+	unauthenticatedTrue := true
 
 	return &v1beta1.DynamoGraphDeploymentRequest{
 		Name:      "hub-dgdr",
@@ -133,6 +136,7 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 			Model:                  "Qwen/Qwen3-32B",
 			Backend:                v1beta1.BackendTypeVllm,
 			AutoApply:              &autoApplyFalse,
+			Unauthenticated:        &unauthenticatedTrue,
 			Image:                  "nvcr.io/nvidia/dynamo:custom",
 			RuntimeVersionOverride: "1.2.3",
 			SLA: &v1beta1.SLASpec{
@@ -186,6 +190,9 @@ func TestConvertTo_SpecFields(t *testing.T) {
 	}
 	if dst.Spec.AutoApply == nil || *dst.Spec.AutoApply != src.Spec.AutoApply {
 		t.Errorf("AutoApply: got %v, want %v", dst.Spec.AutoApply, src.Spec.AutoApply)
+	}
+	if !ptr.Equal(dst.Spec.Unauthenticated, src.Spec.Unauthenticated) {
+		t.Errorf("Unauthenticated: got %v, want %v", dst.Spec.Unauthenticated, src.Spec.Unauthenticated)
 	}
 	if dst.Spec.RuntimeVersionOverride != src.Spec.RuntimeVersionOverride {
 		t.Errorf("RuntimeVersionOverride: got %q, want %q", dst.Spec.RuntimeVersionOverride, src.Spec.RuntimeVersionOverride)

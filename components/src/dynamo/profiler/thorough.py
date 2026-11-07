@@ -39,6 +39,7 @@ from dynamo.profiler.utils.aiperf import (
 )
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
+from dynamo.profiler.utils.dgd_generation import apply_unauthenticated_mode
 from dynamo.profiler.utils.dgd_materialization import (
     DGDMaterializationPurpose,
     materialize_dgd,
@@ -444,6 +445,7 @@ async def run_thorough(
             model_name_or_path=local_or_hf_model,
             trust_remote_code=trust_remote_code,
         )
+        apply_unauthenticated_mode(dgdr, candidate.dgd_config)
 
     if backend == "trtllm":
         _enable_chunked_prefill_for_trtllm_candidates(
