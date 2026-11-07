@@ -477,6 +477,9 @@ impl PositionalIndexer {
             KvCacheEventError::BlockNotFound
         })?;
 
+        // A missing hash skips only itself, as in the other indexers: returning early
+        // would leave every later block of the batch indexed for this worker.
+        let mut result = Ok(());
         for seq_hash in seq_hashes {
             let Some((position, local_hash)) = worker_map.remove(seq_hash) else {
                 tracing::warn!(
@@ -487,7 +490,8 @@ impl PositionalIndexer {
                     "Failed to find block to remove; skipping remove operation"
                 );
 
-                return Err(KvCacheEventError::BlockNotFound);
+                result = Err(KvCacheEventError::BlockNotFound);
+                continue;
             };
 
             if let Some(mut entry) = self.index.get_mut(&(position, local_hash)) {
@@ -496,7 +500,7 @@ impl PositionalIndexer {
             self.lifecycle.remove(worker, *seq_hash);
         }
 
-        Ok(())
+        result
     }
 
     fn remove_worker_dp_rank_impl(
