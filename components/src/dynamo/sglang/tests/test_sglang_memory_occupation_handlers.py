@@ -238,3 +238,16 @@ async def test_clear_kv_blocks_reports_flush_exception(handler):
     chunks = [chunk async for chunk in handler.clear_kv_blocks({})]
 
     assert chunks == [{"status": "error", "message": "flush crashed"}]
+
+
+@pytest.mark.asyncio
+async def test_manual_drain_survives_native_engine_route_discovery_sync(handler):
+    handler._worker_drain = SimpleNamespace(withdrawn=True)
+    handler.engine.tokenizer_manager.is_pause = False
+
+    async def engine_control(body):
+        return {"status": "success"}
+
+    await handler._invoke_engine_route(engine_control, {})
+    handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
+    handler.generate_endpoint.register_endpoint_instance.assert_not_called()

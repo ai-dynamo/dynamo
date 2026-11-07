@@ -48,6 +48,7 @@ pub async fn run(
             let grpc_service = grpc_service_builder.build()?;
             let router_config = model.router_config();
             let migration_limit = model.migration_limit();
+            let migration_limit_draining = model.migration_limit_draining();
             let migration_max_seq_len = model.migration_max_seq_len();
             // Listen for models registering themselves, add them to gRPC service
             let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
@@ -61,6 +62,7 @@ pub async fn run(
                 grpc_service.state().manager_clone(),
                 router_config.clone(),
                 migration_limit,
+                migration_limit_draining,
                 migration_max_seq_len,
                 namespace_filter,
                 prefill_load_estimator.clone(),
@@ -133,6 +135,7 @@ async fn run_watcher(
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
     migration_limit: u32,
+    migration_limit_draining: Option<u32>,
     migration_max_seq_len: Option<u32>,
     namespace_filter: NamespaceFilter,
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
@@ -160,6 +163,7 @@ async fn run_watcher(
         prefill_load_estimator,
         metrics,
     );
+    watch_obj.set_migration_limit_draining(migration_limit_draining);
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
     watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);

@@ -19,13 +19,18 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 def test_reads_only_the_given_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DYN_ROUTER_MODE", "kv")
     monkeypatch.setenv("DYN_ROUTER_TEMPERATURE", "0.9")
+    monkeypatch.setenv("DYN_MIGRATION_LIMIT_DRAINING", "9")
     before = dict(os.environ)
 
-    parser, env_dests = build_frontend_parser({"DYN_ROUTER_MODE": "random"})
+    parser, env_dests = build_frontend_parser(
+        {"DYN_ROUTER_MODE": "random", "DYN_MIGRATION_LIMIT_DRAINING": "5"}
+    )
     namespace = parser.parse_args([])
 
     assert namespace.router_mode == "random"
     assert namespace.router_temperature == 0.0
+    assert namespace.migration_limit_draining == 5
+    assert env_dests["DYN_MIGRATION_LIMIT_DRAINING"] == "migration_limit_draining"
     assert env_dests["DYN_ROUTER_MODE"] == "router_mode"
     assert env_dests["DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT"] == "overlap_score_credit"
     assert dict(os.environ) == before
