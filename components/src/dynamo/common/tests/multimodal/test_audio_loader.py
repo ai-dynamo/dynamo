@@ -319,6 +319,28 @@ async def test_load_audio_batch_rejects_decoded_variant_without_frontend_decodin
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("bad_item", "match"),
+    [
+        ({}, "index 1"),
+        ({"Decoded": {"shape": [16000]}}, "enable_frontend_decoding=False"),
+    ],
+)
+async def test_load_audio_batch_rejects_later_invalid_item_before_loading(
+    bad_item, match
+):
+    loader = AudioLoader(enable_frontend_decoding=False)
+    loader.load_audio = AsyncMock()  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match=match):
+        await loader.load_audio_batch(
+            [{"Url": "https://example.com/one.wav"}, bad_item]
+        )
+
+    loader.load_audio.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_load_audio_batch_reads_decoded_variant(monkeypatch):
     # Construct with enable_frontend_decoding=False to skip real NIXL init,
     # then set the flags directly so the decoded path is exercised.
