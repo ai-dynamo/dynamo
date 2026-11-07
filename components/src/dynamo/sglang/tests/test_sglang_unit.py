@@ -602,6 +602,8 @@ def _dcp_server_args_stub(**overrides):
         attention_backend=None,
         prefill_attention_backend=None,
         decode_attention_backend=None,
+        dsa_prefill_backend=None,
+        dsa_decode_backend=None,
         use_mla_backend=lambda: False,
         get_model_config=lambda: SimpleNamespace(is_multimodal=False),
     )
@@ -864,7 +866,7 @@ async def test_parse_args_rejects_mla_dcp_on_dsa_backend(
     # Pin that condition so the test does not depend on the installed SGLang.
     monkeypatch.setattr(
         "dynamo.sglang.args.sglang_dsa_supports_decode_context_parallel",
-        lambda: False,
+        lambda _: False,
     )
     hf_config = SimpleNamespace(
         architectures=["DeepseekV32ForCausalLM"], index_topk=2048
@@ -941,11 +943,16 @@ async def test_kimi_k3_dcp_defers_automatic_backend_until_engine_resolution(
 async def test_parse_args_accepts_sparse_mla_dcp_when_engine_supports_it(
     monkeypatch, mock_sglang_cli, tmp_path, backend
 ):
+    monkeypatch.setattr(sglang_compat, "_sglang_has_dsa_dcp_module", lambda _: True)
     monkeypatch.setattr(
-        sglang_args, "sglang_dsa_supports_decode_context_parallel", lambda: True
+        sglang_compat, "sglang_get_platform", lambda: SimpleNamespace(device_sm=100)
     )
     server_args = _dcp_server_args_stub(
-        dcp_size=8, use_mla_backend=lambda: True, attention_backend=backend
+        dcp_size=8,
+        use_mla_backend=lambda: True,
+        attention_backend=backend,
+        dsa_prefill_backend="trtllm",
+        dsa_decode_backend="trtllm",
     )
     monkeypatch.setattr(sglang_args.ServerArgs, "from_cli_args", lambda _: server_args)
     mock_sglang_cli(model=str(tmp_path), attention_backend=backend)
@@ -957,7 +964,7 @@ async def test_parse_args_accepts_sparse_mla_dcp_when_engine_supports_it(
 
 
 @pytest.mark.parametrize("probe_result", [object(), None, ModuleNotFoundError()])
-def test_dsa_dcp_capability_depends_on_installed_engine(monkeypatch, probe_result):
+def test_dsa_dcp_module_probe_handles_older_engines(monkeypatch, probe_result):
     def find_spec(module_name):
         assert module_name == "sglang.srt.layers.attention.dsa.dsa_dcp"
         if isinstance(probe_result, Exception):
@@ -965,14 +972,102 @@ def test_dsa_dcp_capability_depends_on_installed_engine(monkeypatch, probe_resul
         return probe_result
 
     monkeypatch.setattr(sglang_compat.importlib.util, "find_spec", find_spec)
-    probe = sglang_compat.sglang_dsa_supports_decode_context_parallel
+    probe = sglang_compat._sglang_has_dsa_dcp_module
     probe.cache_clear()
     try:
-        assert probe() is (
+        assert probe("sglang.srt.layers.attention.dsa.dsa_dcp") is (
             probe_result is not None and not isinstance(probe_result, Exception)
         )
     finally:
         probe.cache_clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prefill,decode,sm,kimi_k31,sharded,supported",
+    [
+        ("fa3", "fa3", 90, False, False, False),
+        ("flashmla_kv", "flashmla_kv", 90, False, False, False),
+        (None, "fa3", 90, False, False, False),
+        ("fa3", None, 90, False, False, False),
+        ("trtllm", "trtllm", 90, False, False, False),
+        (None, "trtllm", 90, False, False, False),
+        (None, "flashmla_kv", 100, False, False, False),
+        ("trtllm", "trtllm", 100, False, False, True),
+        ("trtllm", "trtllm", 103, False, False, True),
+        ("trtllm", "trtllm", 107, False, False, False),
+        ("flashmla_kv", "flashmla_kv", 107, True, False, False),
+        ("flashmla_kv", "flashmla_kv", 107, True, True, True),
+        ("flashmla_kv", "flashmla_kv", 90, True, True, True),
+        ("trtllm", "trtllm", 107, True, True, True),
+        ("trtllm", "flashmla_kv", 107, True, True, False),
+        ("flashmla_kv", "trtllm", 100, True, True, False),
+    ],
+)
+async def test_dsa_dcp_requires_supported_kernel_pair(
+    monkeypatch,
+    mock_sglang_cli,
+    tmp_path,
+    prefill,
+    decode,
+    sm,
+    kimi_k31,
+    sharded,
+    supported,
+):
+    monkeypatch.setattr(
+        sglang_compat,
+        "_sglang_has_dsa_dcp_module",
+        lambda name: not name.endswith("dsa_dcp_sharded") or sharded,
+    )
+    monkeypatch.setattr(
+        sglang_compat, "sglang_get_platform", lambda: SimpleNamespace(device_sm=sm)
+    )
+    architecture = (
+        "KimiK31ForConditionalGeneration" if kimi_k31 else "DeepseekV32ForCausalLM"
+    )
+    server_args = _dcp_server_args_stub(
+        dcp_size=8,
+        use_mla_backend=lambda: True,
+        attention_backend="dsa",
+        dsa_prefill_backend=prefill,
+        dsa_decode_backend=decode,
+        get_model_config=lambda: SimpleNamespace(
+            is_multimodal=False, hf_config=SimpleNamespace(architectures=[architecture])
+        ),
+    )
+    monkeypatch.setattr(sglang_args.ServerArgs, "from_cli_args", lambda _: server_args)
+    mock_sglang_cli(model=str(tmp_path), attention_backend="dsa")
+
+    if supported:
+        config = await parse_args(sys.argv[1:])
+        resolved = config.use_resolved_server_args(server_args)
+        assert resolved.dsa_prefill_backend == prefill
+        assert resolved.dsa_decode_backend == decode
+    else:
+        with pytest.raises(ValueError, match="selected DSA kernels"):
+            await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+async def test_dsa_dcp_rechecks_unresolved_kernels_after_engine_selection(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    monkeypatch.setattr(sglang_compat, "_sglang_has_dsa_dcp_module", lambda _: True)
+    monkeypatch.setattr(
+        sglang_compat, "sglang_get_platform", lambda: SimpleNamespace(device_sm=100)
+    )
+    raw_args = _dcp_server_args_stub(
+        dcp_size=8, use_mla_backend=lambda: True, attention_backend="dsa"
+    )
+    monkeypatch.setattr(sglang_args.ServerArgs, "from_cli_args", lambda _: raw_args)
+    mock_sglang_cli(model=str(tmp_path), attention_backend="dsa")
+    config = await parse_args(sys.argv[1:])
+
+    engine_args = SimpleNamespace(**vars(raw_args))
+    engine_args.dsa_prefill_backend = engine_args.dsa_decode_backend = "fa3"
+    with pytest.raises(ValueError, match="selected DSA kernels"):
+        config.use_resolved_server_args(engine_args)
 
 
 def _raise_runtime_error(*_):

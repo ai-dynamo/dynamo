@@ -397,11 +397,19 @@ def _validate_mla_dcp_decode_backend(
         backend = sglang_default_mla_attention_backend(server_args)
     if backend not in MLA_DCP_UNSUPPORTED_DECODE_BACKENDS:
         return
-    if (
-        backend in MLA_SPARSE_ATTENTION_BACKENDS
-        and sglang_dsa_supports_decode_context_parallel()
-    ):
-        return
+    if backend in MLA_SPARSE_ATTENTION_BACKENDS:
+        # Unresolved kernel choices are checked again on the engine's config.
+        support = sglang_dsa_supports_decode_context_parallel(server_args)
+        if support is not False:
+            return
+        raise ValueError(
+            f"--dcp-size {dcp_size} is not supported with the decode attention "
+            f"backend '{backend}' and the selected DSA kernels "
+            f"(prefill={getattr(resolved, 'dsa_prefill_backend', None)!r}, "
+            f"decode={getattr(resolved, 'dsa_decode_backend', None)!r}) "
+            "on this SGLang build and GPU. Use --dcp-size 1. Otherwise, select "
+            "matching DCP-capable DSA kernels supported by the engine and GPU."
+        )
 
     selected = (
         " SGLang selects it automatically for this model and GPU because no "
@@ -410,9 +418,7 @@ def _validate_mla_dcp_decode_backend(
         else ""
     )
     remedy = (
-        "Use --dcp-size 1. Alternatively, upgrade SGLang to a build with DSA DCP support."
-        if backend in MLA_SPARSE_ATTENTION_BACKENDS
-        else "Use --attention-backend flashinfer (or trtllm_mla / cutedsl_mla "
+        "Use --attention-backend flashinfer (or trtllm_mla / cutedsl_mla "
         "on Blackwell), or --dcp-size 1."
     )
     raise ValueError(
