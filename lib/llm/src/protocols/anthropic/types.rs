@@ -594,26 +594,29 @@ fn convert_anthropic_tool_choice(
 /// Convert Dynamo's OpenAI-compatible usage into Anthropic's non-overlapping
 /// input-token accounting.
 ///
-/// Dynamo backends report `prompt_tokens` as the complete prompt and
-/// `cached_tokens` as a subset of it. Anthropic reports the cached subset
-/// separately, so `input_tokens` must exclude it.
+/// Cache reads and writes are subsets of `prompt_tokens`; Anthropic reports them separately,
+/// so `input_tokens` excludes both, and each is clamped so the parts never exceed the prompt.
 pub(super) fn completion_usage_to_anthropic(usage: &CompletionUsage) -> AnthropicUsage {
-    let cache_read_input_tokens = usage
-        .prompt_tokens_details
-        .as_ref()
+    let details = usage.prompt_tokens_details.as_ref();
+    let cache_read_input_tokens = details
         .and_then(|details| details.cached_tokens)
-        // A backend must not be able to produce an Anthropic usage breakdown
-        // whose cached subset exceeds the complete prompt.
         .map(|tokens| tokens.min(usage.prompt_tokens))
         .filter(|&tokens| tokens > 0);
+    let uncached_tokens = usage
+        .prompt_tokens
+        .saturating_sub(cache_read_input_tokens.unwrap_or(0));
+    // `cache_write_tokens` is `i64`; clamping in `i64` keeps the cast lossless.
+    let cache_creation_input_tokens = details
+        .and_then(|details| details.cache_write_tokens)
+        .map_or(0, |tokens| {
+            tokens.clamp(0, i64::from(uncached_tokens)) as u32
+        });
 
     AnthropicUsage {
-        input_tokens: usage
-            .prompt_tokens
-            .saturating_sub(cache_read_input_tokens.unwrap_or(0)),
+        input_tokens: uncached_tokens.saturating_sub(cache_creation_input_tokens),
         output_tokens: usage.completion_tokens,
-        // OpenAI-compatible usage has no cache-write count; keep the Anthropic key present.
-        cache_creation_input_tokens: Some(0),
+        // Always present, as zero when the backend reports no cache writes.
+        cache_creation_input_tokens: Some(cache_creation_input_tokens),
         cache_read_input_tokens,
     }
 }
@@ -1739,6 +1742,125 @@ mod tests {
         assert_eq!(usage.input_tokens, 0);
         assert_eq!(usage.cache_read_input_tokens, Some(12));
         assert_eq!(usage.output_tokens, 5);
+    }
+
+    #[allow(deprecated)]
+    #[test]
+    fn test_anthropic_response_usage_defaults_and_preserves_cache_write_tokens() {
+        use dynamo_protocols::types::PromptTokensDetails;
+
+        // (details, input_tokens, cache_read_input_tokens, cache_creation_input_tokens)
+        for (prompt_tokens_details, expected_input, expected_read, expected_write) in [
+            (None, 13, None, 0),
+            (
+                Some(PromptTokensDetails {
+                    cached_tokens: Some(3),
+                    ..Default::default()
+                }),
+                10,
+                Some(3),
+                0,
+            ),
+            (
+                Some(PromptTokensDetails {
+                    cached_tokens: Some(3),
+                    cache_write_tokens: Some(7),
+                    ..Default::default()
+                }),
+                3,
+                Some(3),
+                7,
+            ),
+        ] {
+            let chat_resp = NvCreateChatCompletionResponse {
+                response_events: Vec::new(),
+                inner: dynamo_protocols::types::CreateChatCompletionResponse {
+                    id: "chatcmpl-cache-write".into(),
+                    choices: vec![dynamo_protocols::types::ChatChoice {
+                        index: 0,
+                        message: dynamo_protocols::types::ChatCompletionResponseMessage {
+                            content: Some(
+                                dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                                    "Hi!".to_string(),
+                                ),
+                            ),
+                            refusal: None,
+                            tool_calls: None,
+                            role: dynamo_protocols::types::Role::Assistant,
+                            function_call: None,
+                            audio: None,
+                            reasoning_content: None,
+                        },
+                        finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
+                        logprobs: None,
+                    }],
+                    created: 1726000000,
+                    model: "test-model".into(),
+                    service_tier: None,
+                    system_fingerprint: None,
+                    object: "chat.completion".to_string(),
+                    usage: Some(CompletionUsage {
+                        prompt_tokens: 13,
+                        completion_tokens: 2,
+                        total_tokens: 15,
+                        prompt_tokens_details,
+                        completion_tokens_details: None,
+                    }),
+                },
+                prompt_logprobs: None,
+                nvext: None,
+            };
+
+            let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
+            let serialized = serde_json::to_value(&response.usage).expect("usage serializes");
+            assert_eq!(serialized["input_tokens"], expected_input);
+            assert_eq!(
+                serialized
+                    .get("cache_read_input_tokens")
+                    .and_then(|v| v.as_u64()),
+                expected_read
+            );
+            assert_eq!(serialized["cache_creation_input_tokens"], expected_write);
+            assert_eq!(serialized["output_tokens"], 2);
+        }
+    }
+
+    #[test]
+    fn test_anthropic_usage_clamps_cache_write_tokens_to_remaining_prompt() {
+        use dynamo_protocols::types::PromptTokensDetails;
+
+        // (cached_tokens, cache_write_tokens, input, cache_read, cache_creation), 12-token prompt.
+        // Reads take precedence; writes fill at most the rest and never go negative or wrap.
+        for (cached, write, expected_input, expected_read, expected_write) in [
+            (Some(5), Some(20), 0, Some(5), 7),
+            (Some(20), Some(4), 0, Some(12), 0),
+            (None, Some(-3), 12, None, 0),
+            (None, Some(i64::MAX), 0, None, 12),
+        ] {
+            let usage = CompletionUsage {
+                prompt_tokens: 12,
+                completion_tokens: 5,
+                total_tokens: 17,
+                prompt_tokens_details: Some(PromptTokensDetails {
+                    cached_tokens: cached,
+                    cache_write_tokens: write,
+                    ..Default::default()
+                }),
+                completion_tokens_details: None,
+            };
+
+            let usage = completion_usage_to_anthropic(&usage);
+            assert_eq!(usage.input_tokens, expected_input, "{cached:?}/{write:?}");
+            assert_eq!(usage.cache_read_input_tokens, expected_read);
+            assert_eq!(usage.cache_creation_input_tokens, Some(expected_write));
+            assert_eq!(
+                usage.input_tokens
+                    + usage.cache_read_input_tokens.unwrap_or(0)
+                    + usage.cache_creation_input_tokens.unwrap_or(0),
+                12,
+                "input fields must add up to prompt_tokens"
+            );
+        }
     }
 
     #[allow(deprecated)]

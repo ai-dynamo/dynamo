@@ -2142,6 +2142,81 @@ mod tests {
         }
     }
 
+    /// Streaming usage reports cache writes as `cache_creation_input_tokens` (zero when
+    /// absent), excluded from `input_tokens`; `total_tokens` stays prompt plus completion.
+    #[tokio::test]
+    async fn test_stream_usage_defaults_and_preserves_cache_write_tokens() {
+        use dynamo_protocols::types::PromptTokensDetails;
+
+        // (details, input_tokens, cache_read_input_tokens, cache_creation_input_tokens)
+        for (prompt_tokens_details, expected_input, expected_read, expected_write) in [
+            (None, 13, None, 0),
+            (
+                Some(PromptTokensDetails {
+                    cached_tokens: Some(3),
+                    ..Default::default()
+                }),
+                10,
+                Some(3),
+                0,
+            ),
+            (
+                Some(PromptTokensDetails {
+                    cached_tokens: Some(3),
+                    cache_write_tokens: Some(7),
+                    ..Default::default()
+                }),
+                3,
+                Some(3),
+                7,
+            ),
+        ] {
+            let mut conv = AnthropicStreamConverter::new("test-model".into(), 19);
+            let mut chunk = text_chunk("hi");
+            chunk.inner.usage = usage_chunk(13, None, 2).inner.usage;
+            chunk
+                .inner
+                .usage
+                .as_mut()
+                .expect("usage_chunk sets usage")
+                .prompt_tokens_details = prompt_tokens_details;
+            let mut events = Vec::new();
+            conv.append_chunk_events(&chunk, &mut events);
+
+            let values = sse_values(events).await;
+            let delta = values
+                .iter()
+                .find(|v| v["type"] == "content_block_delta")
+                .expect("content_block_delta present");
+            assert_eq!(delta["usage"]["input_tokens"], expected_input);
+            assert_eq!(
+                delta["usage"]["cache_read_input_tokens"],
+                serde_json::json!(expected_read)
+            );
+            assert_eq!(
+                delta["usage"]["cache_creation_input_tokens"],
+                expected_write
+            );
+            assert_eq!(delta["usage"]["total_tokens"], 13 + 2);
+
+            let end = sse_values(conv.emit_end_events()).await;
+            let message_delta = end
+                .iter()
+                .find(|v| v["type"] == "message_delta")
+                .expect("message_delta present");
+            assert_eq!(message_delta["usage"]["input_tokens"], expected_input);
+            assert_eq!(
+                message_delta["usage"]["cache_read_input_tokens"],
+                serde_json::json!(expected_read)
+            );
+            assert_eq!(
+                message_delta["usage"]["cache_creation_input_tokens"],
+                expected_write
+            );
+            assert_eq!(message_delta["usage"]["output_tokens"], 2);
+        }
+    }
+
     /// Backends that never populate per-chunk `usage` (the `ModelInput::Text`
     /// path) still get a running output-token estimate that advances *before*
     /// each token chunk is serialized, so every `content_block_delta` carries a
