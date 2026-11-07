@@ -143,6 +143,37 @@ RUN git clone ${SGLANG_GIT_URL} sglang && \
     pip3 install "xgrammar==0.1.33" --no-deps && \
     pip3 install msgspec blake3 py-cpuinfo compressed_tensors gguf partial_json_parser einops tabulate ftfy
 
+# torch_memory_saver for GMS; no XPU wheel on PyPI, so build from source (TMS_PLATFORM=xpu).
+# --no-build-isolation lets it match the installed torch's libsycl. Ref is v0.0.10.
+ARG TORCH_MEMORY_SAVER_REF=9026084a4ea65b75fd6126a6a0665a88a810d172
+RUN source /opt/intel/oneapi/setvars.sh --force && \
+    TMS_PLATFORM=xpu pip3 install --no-build-isolation --no-deps \
+        "torch_memory_saver @ git+https://github.com/fzyzcjy/torch_memory_saver.git@${TORCH_MEMORY_SAVER_REF}"
+
+# Fail the build unless only the XPU hook .so was built and it loads. Needs no GPU;
+# torch is imported first so its libsycl is the one loaded.
+RUN source /opt/intel/oneapi/setvars.sh --force && python3 - <<'PY'
+import ctypes
+from pathlib import Path
+
+import torch  # noqa: F401
+import torch_memory_saver
+
+pkg = Path(torch_memory_saver.__file__).parent
+libs = sorted(
+    p
+    for d in (pkg, pkg.parent)
+    for p in d.glob("torch_memory_saver_hook_mode_*.so")
+)
+names = [p.name for p in libs]
+if len(libs) != 1 or not names[0].startswith("torch_memory_saver_hook_mode_torch."):
+    raise RuntimeError(
+        f"expected only the XPU torch_memory_saver_hook_mode_torch.*.so, found {names}"
+    )
+ctypes.CDLL(str(libs[0]))
+print(f"torch_memory_saver XPU build OK: {libs[0]}")
+PY
+
 # Multimodal + accelerate runtime deps that pyproject_xpu.toml does NOT pull in
 # via the `[diffusion]` extra above:
 #   - decord: dropped from pyproject_xpu.toml entirely (CUDA pyproject.toml
