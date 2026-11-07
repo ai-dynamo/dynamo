@@ -13,11 +13,16 @@
 #             PLATFORM_ARCH, PARALLEL_MODE (auto | none | 0 | <workers>),
 #             JOB_CHECK_RUN_ID
 #   Optional: ENABLE_COVERAGE=true, GPU_TESTS=true, VERIFY_GPU=false (skips the
-#             MinIO and GPU checks), MAX_VRAM_GIB, PYTEST_DD_FLAKY_RETRY_ENABLED
+#             MinIO and GPU checks), MAX_VRAM_GIB, PYTEST_DD_FLAKY_RETRY_ENABLED,
+#             GPU_PARALLEL_STAGE_TIMEOUT_MINUTES (the calling step's timeout)
 #
 # The distroless planner test image ships only the tools listed in
 # container/Dockerfile.test, so stay on bash builtins and those tools.
 set -euo pipefail
+
+# Count setup against the step timeout. The distroless planner test image
+# ships no date, so use the bash clock builtin.
+printf -v STEP_START_EPOCH '%(%s)T' -1
 
 for var in PYTEST_MARKS CONTAINER_WORKSPACE TEST_SUITE_NAME TEST_TYPE \
   PLATFORM_ARCH PARALLEL_MODE JOB_CHECK_RUN_ID; do
@@ -150,6 +155,15 @@ if [[ -n "${MAX_VRAM_GIB:-}" ]]; then
   # runs tests as VRAM-aware subprocesses, so --dist=loadscope is omitted.
   pytest_args+=("--max-vram-gib=${MAX_VRAM_GIB}")
   echo "🧮 GPU-parallel mode: --max-vram-gib=${MAX_VRAM_GIB} (xdist replaced by VRAM-aware orchestrator)"
+  # Leave ten minutes for process cleanup and results before the step timeout.
+  if [[ -n "${GPU_PARALLEL_STAGE_TIMEOUT_MINUTES:-}" ]]; then
+    STAGE_MARGIN_MINUTES=10
+    if (( GPU_PARALLEL_STAGE_TIMEOUT_MINUTES > STAGE_MARGIN_MINUTES )); then
+      export DYN_GPU_PARALLEL_STAGE_DEADLINE=$(( STEP_START_EPOCH + (GPU_PARALLEL_STAGE_TIMEOUT_MINUTES - STAGE_MARGIN_MINUTES) * 60 ))
+      printf -v NOW_EPOCH '%(%s)T' -1
+      echo "⏱️ GPU-parallel stage deadline: $(( (DYN_GPU_PARALLEL_STAGE_DEADLINE - NOW_EPOCH) / 60 )) minutes from now"
+    fi
+  fi
 else
   # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
   pytest_args+=(--dist=loadscope)

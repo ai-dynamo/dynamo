@@ -6,19 +6,28 @@
 Covers the pure scheduling core (``_select_launches`` / ``_priority_key``) and a
 discrete-event makespan simulation on the real ``job-log.txt`` workload, showing
 the VRAM-aware ordering beats the legacy timeout-sorted first-fit. No GPU or
-``pynvml`` required -- the scheduler core is pure arithmetic.
+``pynvml`` required -- the scheduler core is pure arithmetic, and the
+``run_parallel`` stage-deadline test fakes GPU detection and runs tiny
+generated tests as real subprocesses.
 """
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import time
+
+import psutil
 import pytest
 
-from tests.utils import vram_utils
+from tests.utils import pytest_parallel_gpu, vram_utils
 from tests.utils.pytest_parallel_gpu import (
     _GpuState,
     _priority_key,
     _select_launches,
     _TestEntry,
+    run_parallel,
 )
 from tests.utils.vram_utils import VRAM_MULTI_PROC_MARGIN
 
@@ -450,3 +459,233 @@ def test_simulation_conserves_work_and_respects_budget():
 
     assert makespan >= longest
     assert makespan >= total_work / 8 - 1e-6
+
+
+# --- run_parallel stage deadline ---
+_SLEEPER_TEST = """
+import os
+import signal
+import subprocess
+import sys
+
+
+def test_sleeper():
+    # Same shape as an engine started by ManagedProcess: its own session, so
+    # it is not in the child pytest's process group.
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import signal; signal.pause()"],
+        start_new_session=True,
+    )
+    with open(os.environ["GRANDCHILD_PID_FILE"], "w") as f:
+        f.write(str(proc.pid))
+    signal.pause()
+"""
+
+_MARKER_TEST = """
+import os
+
+
+def test_marker():
+    open(os.environ["QUEUED_MARKER_FILE"], "w").close()
+"""
+
+
+@pytest.mark.timeout(180)
+def test_stage_deadline_kills_running_tree_and_skips_queued(tmp_path, monkeypatch):
+    """Check that the deadline kills detached descendants and leaves work queued."""
+    # The generated tests live outside the repository, with their own
+    # pytest.ini as rootdir, so the children do not load tests/conftest.py.
+    (tmp_path / "pytest.ini").write_text("[pytest]\n")
+    sleeper = tmp_path / "test_sleeper.py"
+    sleeper.write_text(_SLEEPER_TEST)
+    marker_test = tmp_path / "test_marker.py"
+    marker_test.write_text(_MARKER_TEST)
+    pid_file = tmp_path / "grandchild.pid"
+    marker = tmp_path / "queued.marker"
+    junit_dir = tmp_path / "junit"
+    junit_dir.mkdir()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GRANDCHILD_PID_FILE", str(pid_file))
+    monkeypatch.setenv("QUEUED_MARKER_FILE", str(marker))
+    monkeypatch.setattr(
+        pytest_parallel_gpu,
+        "detect_gpus",
+        lambda: [{"index": 0, "name": "fake", "total_mib": 80 * 1024}],
+    )
+    monkeypatch.setattr(pytest_parallel_gpu, "_get_gpu_used_gib", lambda gi=0: 0.0)
+    monkeypatch.setattr(pytest_parallel_gpu, "_JUNIT_DIR", str(junit_dir))
+    monkeypatch.setattr(
+        pytest_parallel_gpu, "_JUNIT_COMBINED", str(junit_dir / "combined.xml")
+    )
+    deadline_s = 15
+    monkeypatch.setenv("DYN_GPU_PARALLEL_STAGE_DEADLINE", str(time.time() + deadline_s))
+
+    sleeper_id = f"{sleeper}::test_sleeper"
+    marker_id = f"{marker_test}::test_marker"
+    # Zero-VRAM entries need no KV marker. The longer timeout schedules the
+    # sleeper first; one slot keeps the marker test queued behind it.
+    meta = {
+        sleeper_id: {"profiled_vram_gib": 0, "timeout": 90},
+        marker_id: {"profiled_vram_gib": 0, "timeout": 30},
+    }
+
+    start = time.monotonic()
+    try:
+        rc = run_parallel(
+            test_ids=[sleeper_id, marker_id],
+            meta=meta,
+            max_vram_gib=0,
+            num_slots=1,
+            extra_pytest_args=["-p", "no:cacheprovider"],
+        )
+        elapsed = time.monotonic() - start
+
+        assert pid_file.exists(), "sleeper test never started its grandchild"
+        grandchild_pid = int(pid_file.read_text())
+        assert not _pid_alive(
+            grandchild_pid
+        ), "grandchild in its own session survived the deadline"
+    finally:
+        # The grandchild blocks until signalled, so never leave it behind.
+        if pid_file.exists():
+            _kill_if_alive(int(pid_file.read_text()))
+    assert not marker.exists(), "queued test started after the deadline"
+    assert rc != 0
+    assert elapsed < deadline_s + 45
+
+
+_IGNORE_SIGTERM = (
+    "import os, signal, subprocess, sys, time\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "open(os.path.join(sys.argv[1], str(os.getpid())), 'w').close()\n"
+    "if sys.argv[2:] == ['parent']:\n"
+    "    subprocess.Popen([sys.executable, __file__, sys.argv[1]],"
+    " start_new_session=True)\n"
+    "time.sleep(600)\n"
+)
+
+# The middle process exits at once, so the sleeper is orphaned before the
+# kill starts and is no longer in the root's tree.
+_ORPHAN_TREE = (
+    "import subprocess, sys, time\n"
+    "if sys.argv[1] == 'root':\n"
+    "    subprocess.Popen([sys.executable, __file__, 'middle', sys.argv[2]])\n"
+    "    time.sleep(600)\n"
+    "elif sys.argv[1] == 'middle':\n"
+    "    p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'],"
+    " start_new_session=True)\n"
+    "    open(sys.argv[2], 'w').write(str(p.pid))\n"
+)
+
+
+def _wait_for(cond, timeout_s: float = 15) -> None:
+    """Wait for process readiness, failing if the condition stays false."""
+    deadline = time.monotonic() + timeout_s
+    while not cond():
+        assert time.monotonic() < deadline, "timed out waiting for test processes"
+        time.sleep(0.05)
+
+
+@pytest.mark.timeout(60)
+def test_kill_process_trees_shares_one_wait(tmp_path):
+    """Check that four trees share the grace period after ignoring SIGTERM."""
+    # Each process ignores SIGTERM, so each tree needs the full grace period.
+    # Killing them one at a time would take at least four grace periods.
+    script = tmp_path / "ignore_term.py"
+    script.write_text(_IGNORE_SIGTERM)
+    ready = tmp_path / "ready"
+    ready.mkdir()
+    keep = frozenset(c.pid for c in psutil.Process().children())
+    parents = [
+        subprocess.Popen([sys.executable, str(script), str(ready), "parent"])
+        for _ in range(4)
+    ]
+    procs: list[psutil.Process] = []
+    try:
+        # Each process writes its ready file after it starts ignoring SIGTERM.
+        _wait_for(lambda: len(list(ready.iterdir())) == 8)
+        procs = [psutil.Process(int(f.name)) for f in ready.iterdir()]
+
+        grace_s = 2.0
+        start = time.monotonic()
+        pytest_parallel_gpu._kill_process_trees(
+            [p.pid for p in parents], grace_s=grace_s, keep=keep
+        )
+        elapsed = time.monotonic() - start
+
+        for parent in parents:
+            parent.wait(timeout=5)
+        assert not any(_pid_alive(p.pid) for p in procs)
+        assert grace_s <= elapsed < 2 * grace_s + 1
+    finally:
+        for f in ready.iterdir():
+            _kill_if_alive(int(f.name))
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="child subreaper is Linux only"
+)
+@pytest.mark.timeout(60)
+def test_kill_process_trees_kills_adopted_orphan(tmp_path):
+    """Check that cleanup kills a descendant after its middle process exits."""
+    script = tmp_path / "orphan_tree.py"
+    script.write_text(_ORPHAN_TREE)
+    pid_file = tmp_path / "orphan.pid"
+    keep = frozenset(c.pid for c in psutil.Process().children())
+    assert pytest_parallel_gpu._set_child_subreaper(True)
+    root = None
+    try:
+        root = subprocess.Popen([sys.executable, str(script), "root", str(pid_file)])
+        _wait_for(lambda: pid_file.exists() and pid_file.read_text())
+        orphan = psutil.Process(int(pid_file.read_text()))
+        # The orphan reparents to this test process once the middle exits.
+        _wait_for(lambda: orphan.ppid() == os.getpid())
+        assert orphan.pid not in {
+            c.pid for c in psutil.Process(root.pid).children(recursive=True)
+        }
+
+        pytest_parallel_gpu._kill_process_trees([root.pid], grace_s=2.0, keep=keep)
+
+        root.wait(timeout=5)
+        assert not _pid_alive(orphan.pid)
+    finally:
+        pytest_parallel_gpu._set_child_subreaper(False)
+        if root is not None and root.poll() is None:
+            root.kill()
+        if pid_file.exists() and pid_file.read_text():
+            _kill_if_alive(int(pid_file.read_text()))
+
+
+def _kill_if_alive(pid: int) -> None:
+    """Kill a test process if it has not already exited."""
+    try:
+        psutil.Process(pid).kill()
+    except psutil.NoSuchProcess:
+        pass
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return whether a PID still identifies a process that is not a zombie."""
+    # An orphan killed inside a container may stay a zombie when PID 1 does
+    # not reap; it holds no resources, so count it as gone.
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+
+
+@pytest.mark.parametrize("raw", ["soon", "nan", "inf"])
+def test_stage_deadline_rejects_invalid_values(monkeypatch, raw):
+    """Reject malformed and non-finite deadlines instead of disabling the limit."""
+    monkeypatch.setenv("DYN_GPU_PARALLEL_STAGE_DEADLINE", raw)
+    with pytest.raises(ValueError):
+        pytest_parallel_gpu._stage_deadline()
+
+
+def test_stage_deadline_unset_or_valid(monkeypatch):
+    """Accept an unset deadline or a finite epoch value with whitespace."""
+    monkeypatch.delenv("DYN_GPU_PARALLEL_STAGE_DEADLINE", raising=False)
+    assert pytest_parallel_gpu._stage_deadline() is None
+    monkeypatch.setenv("DYN_GPU_PARALLEL_STAGE_DEADLINE", " 1700000000.5 ")
+    assert pytest_parallel_gpu._stage_deadline() == 1700000000.5
