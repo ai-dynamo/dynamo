@@ -816,10 +816,6 @@ jobs:
 
   # ============================================================================
   # TEST PIPELINES
-  # Whole-job placement uses successful mean runtimes from Oct 2-9, 2026.
-  # A full GPU-test run contributes about 111.3 job-minutes east and 103.9
-  # west, requesting up to 6/5 GPUs respectively if all jobs run concurrently.
-  # Keep each backend suite intact to avoid repeating container/setup work.
   # ============================================================================
 
   vllm-test:
@@ -831,8 +827,7 @@ jobs:
       test_suite_name: vllm
       framework: vllm  # matches the framework passed to vllm-build
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # ARM uses the CPU runner
-      amd_runner_labels: '["gpu-1","amd64","v2","us-east-1"]'
+      amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -849,7 +844,7 @@ jobs:
       gpu_test_markers: pre_merge and vllm and gpu_1 and not sidecar
       gpu_test_timeout_minutes: 45
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
-      # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
+      # 24 GiB admits all profiled vLLM tests on the smallest GPU fallback.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
     secrets: inherit
@@ -867,8 +862,7 @@ jobs:
       test_suite_name: vllm
       framework: vllm  # matches the framework passed to vllm-build
       test_type: 2-GPU Test
-      amd_runner: prod-tester-amd-gpu-2-v2
-      amd_runner_labels: '["gpu-2","amd64","v2","us-east-1"]'
+      amd_runner_labels: '["gpu-2","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -886,8 +880,7 @@ jobs:
       test_suite_name: sglang
       framework: sglang  # matches the framework passed to sglang-build
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # ARM uses the CPU runner
-      amd_runner_labels: '["gpu-1","amd64","v2","us-east-1"]'
+      amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -896,8 +889,8 @@ jobs:
       # Plain runtime images do not include sidecar binaries.
       gpu_test_markers: pre_merge and sglang and gpu_1 and not sidecar
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
-      # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
-      # while yielding one auto slot today. Larger runners will get more slots from the same markers.
+      # Keep the per-test cap compatible with the smallest GPU fallback.
+      # Larger GPUs get more slots from the same markers.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
     secrets: inherit
@@ -915,8 +908,7 @@ jobs:
       test_suite_name: sglang
       framework: sglang  # matches the framework passed to sglang-build
       test_type: 2-GPU Test
-      amd_runner: prod-tester-amd-gpu-2-v2
-      amd_runner_labels: '["gpu-2","amd64","v2","us-east-1"]'
+      amd_runner_labels: '["gpu-2","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -934,8 +926,7 @@ jobs:
       test_suite_name: trtllm
       framework: trtllm  # matches the framework passed to trtllm-build
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # ARM uses the CPU runner
-      amd_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
+      amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -963,8 +954,7 @@ jobs:
       test_suite_name: trtllm
       framework: trtllm  # matches the framework passed to trtllm-build
       test_type: 2-GPU Test
-      amd_runner: prod-tester-amd-gpu-2-v2
-      amd_runner_labels: '["gpu-2","amd64","v2","us-west-2"]'
+      amd_runner_labels: '["gpu-2","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -1002,8 +992,7 @@ jobs:
   #   with:
   #     test_suite_name: triton
   #     test_type: QA Test
-  #     amd_runner: prod-tester-amd-gpu-v2
-  #     amd_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
+  #     amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
   #     target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
   #     cuda_version: '[""]'
   #     platform: '["amd64"]' # @whoisj to enable ARM64 support in a future patch.
@@ -1092,7 +1081,7 @@ jobs:
       needs.changed-files.outputs.benchmarks == 'true'
     uses: $/.github/workflows/dynamo-pipeline.yml
     with:
-      gpu_runner_labels: '["gpu-1","amd64","v2","us-west-2"]'
+      gpu_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
       # `defaulted` is applied by the repository-root conftest.py to any test that
