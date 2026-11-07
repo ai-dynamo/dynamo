@@ -97,7 +97,7 @@ dynamo-parsers = { version = "=10.2.2" }
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
 #   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
-dynamo-parsers-v2 = { version = "=0.9.6" }
+dynamo-parsers-v2 = { version = "=0.10.0" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.7.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.7.0" }
 
@@ -248,3 +248,8 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
+
+# TODO(hy4): drop this patch and pin the released dynamo-parsers-v2 0.10.0 once
+# ai-dynamo/frontend-crates#554 merges and publishes.
+[patch.crates-io]
+dynamo-parsers-v2 = { git = "https://github.com/ai-dynamo/frontend-crates", rev = "22c33e5279dae15c9e3e91b998eadad69def9a32" }
