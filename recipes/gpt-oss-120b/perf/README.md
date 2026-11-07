@@ -58,6 +58,18 @@ This is the default `TRACE_FILE` in `perf.yaml`. The full trace and 30% subset (
 > The rejected set is identical on every run, so comparisons across configs and concurrencies remain valid — just expect
 > the error count in the aiperf export to be non-zero.
 
+> **Note:** The vLLM deploy YAMLs enable the harmony reasoning parser (`--dyn-reasoning-parser gpt_oss`), which
+> routes generated tokens into `reasoning_content` until the model emits the harmony `final`-channel marker. A request
+> whose `output_length` runs out before that transition returns an empty `content`, and aiperf discards the whole
+> record as `InvalidInferenceResultError` ("No responses with actual content were received from the server").
+> On the agentic trace (median OSL 400) this can void roughly a fifth of all requests. Their decode work still counts
+> toward `benchmark_duration` but is excluded from `total_output_tokens`, so reported throughput is **understated**,
+> and because the transition point shifts with batch composition the undercount is not stable across runs.
+>
+> Check `Processed N valid requests and M errors` in the Job log: if `M` materially exceeds the ~7% context-overflow
+> set above, this is why. To measure raw throughput, drop `--dyn-reasoning-parser` from the worker args so all tokens
+> land in `content` — that changes response shaping only, not the GPU work.
+
 ## KV-cache setup
 
 KV-offload defaults differ by SKU: **B200 agg ships prefix-caching only** (net-neutral there) while **H200 agg ships CPU offload ON** (`--kv-transfer-config=$(KV_TRANSFER_CONFIG)`, +9% at the 50-tps floor, quality-neutral). Details:
