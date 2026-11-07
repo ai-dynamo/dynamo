@@ -12238,3 +12238,137 @@ func TestDetectBackendFrameworkDoesNotMutateCommand(t *testing.T) {
 	assert.Equal(t, BackendFrameworkVLLM, backend)
 	assert.Equal(t, []string{"python3", "unchanged"}, backing)
 }
+
+// TestApplyModelExpressServerCache checks when a worker is switched to server-backed model fetching.
+func TestApplyModelExpressServerCache(t *testing.T) {
+	enabled := configv1alpha1.InfrastructureConfiguration{
+		ModelExpressURL:         "http://modelexpress:8001",
+		ModelExpressServerCache: true,
+	}
+	pvcVolume := corev1.Volume{
+		Name:         "model-cache",
+		VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "models"}},
+	}
+	compilationVolume := corev1.Volume{
+		Name:         "compilation-cache",
+		VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "compile"}},
+	}
+	serverCacheEnv := []corev1.EnvVar{
+		{Name: modelExpressNoSharedStorageEnvVar, Value: "true"},
+		{Name: hfHubOfflineEnvVar, Value: "1"},
+	}
+	shmVolume := corev1.Volume{
+		Name:         "shared-memory",
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}
+
+	tests := []struct {
+		name          string
+		infra         configv1alpha1.InfrastructureConfiguration
+		componentType v1beta1.ComponentType
+		compilation   *v1beta1.CompilationCacheConfig
+		volumes       []corev1.Volume
+		mounts        []corev1.VolumeMount
+		env           []corev1.EnvVar
+		wantEnv       []corev1.EnvVar
+	}{
+		{
+			name:          "worker without shared storage is switched on",
+			infra:         enabled,
+			componentType: v1beta1.ComponentTypeWorker,
+			volumes:       []corev1.Volume{shmVolume},
+			mounts:        []corev1.VolumeMount{{Name: "shared-memory", MountPath: "/dev/shm"}},
+			wantEnv:       serverCacheEnv,
+		},
+		{
+			name:          "prefill worker is switched on",
+			infra:         enabled,
+			componentType: v1beta1.ComponentTypePrefill,
+			wantEnv:       serverCacheEnv,
+		},
+		{
+			name:          "mounted PVC means shared storage",
+			infra:         enabled,
+			componentType: v1beta1.ComponentTypeWorker,
+			volumes:       []corev1.Volume{pvcVolume},
+			mounts:        []corev1.VolumeMount{{Name: "model-cache", MountPath: "/models"}},
+		},
+		{
+			name:          "hostPath mount means shared storage",
+			infra:         enabled,
+			componentType: v1beta1.ComponentTypeWorker,
+			volumes:       []corev1.Volume{{Name: "host", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/opt/model-cache"}}}},
+			mounts:        []corev1.VolumeMount{{Name: "host", MountPath: "/models"}},
+		},
+		{
+			name:          "PVC that is not mounted into the main container is ignored",
+			infra:         enabled,
+			componentType: v1beta1.ComponentTypeWorker,
+			volumes:       []corev1.Volume{pvcVolume},
+			wantEnv:       serverCacheEnv,
+		},
+		{
+			name:          "compilation cache PVC is not model storage",
+			infra:         enabled,
+			componentType: v1beta1.ComponentTypeWorker,
+			compilation:   &v1beta1.CompilationCacheConfig{PVCName: "compile"},
+			volumes:       []corev1.Volume{compilationVolume},
+			mounts:        []corev1.VolumeMount{{Name: "compilation-cache", MountPath: "/cache"}},
+			wantEnv:       serverCacheEnv,
+		},
+		{
+			name:          "a value set by the user is kept",
+			infra:         enabled,
+			componentType: v1beta1.ComponentTypeWorker,
+			env:           []corev1.EnvVar{{Name: modelExpressNoSharedStorageEnvVar, Value: "false"}},
+			wantEnv:       []corev1.EnvVar{{Name: modelExpressNoSharedStorageEnvVar, Value: "false"}},
+		},
+		{
+			name:          "an HF_HUB_OFFLINE set by the user is kept",
+			infra:         enabled,
+			componentType: v1beta1.ComponentTypeWorker,
+			env:           []corev1.EnvVar{{Name: hfHubOfflineEnvVar, Value: "0"}},
+			wantEnv: []corev1.EnvVar{
+				{Name: hfHubOfflineEnvVar, Value: "0"},
+				{Name: modelExpressNoSharedStorageEnvVar, Value: "true"},
+			},
+		},
+		{
+			name:          "frontend is left alone",
+			infra:         enabled,
+			componentType: v1beta1.ComponentTypeFrontend,
+		},
+		{
+			name:          "disabled by default",
+			infra:         configv1alpha1.InfrastructureConfiguration{ModelExpressURL: "http://modelexpress:8001"},
+			componentType: v1beta1.ComponentTypeWorker,
+		},
+		{
+			name:          "needs a Model Express URL",
+			infra:         configv1alpha1.InfrastructureConfiguration{ModelExpressServerCache: true},
+			componentType: v1beta1.ComponentTypeWorker,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Render a pod spec whose main container has the case's volumes and env")
+			podSpec := &corev1.PodSpec{
+				Volumes:    tt.volumes,
+				Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Env: tt.env, VolumeMounts: tt.mounts}},
+			}
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{ComponentType: tt.componentType, CompilationCache: tt.compilation}
+			operatorConfig := &configv1alpha1.OperatorConfiguration{Infrastructure: tt.infra}
+
+			t.Log("Apply the Model Express server cache setting")
+			applyModelExpressServerCache(podSpec, component, operatorConfig)
+
+			t.Log("Check the main container env")
+			if len(tt.wantEnv) == 0 {
+				assert.Empty(t, podSpec.Containers[0].Env)
+				return
+			}
+			assert.Equal(t, tt.wantEnv, podSpec.Containers[0].Env)
+		})
+	}
+}
