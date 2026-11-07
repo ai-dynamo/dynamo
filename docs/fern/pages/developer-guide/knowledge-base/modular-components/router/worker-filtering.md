@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Router Filtering
 subtitle: Candidate eligibility, DP-rank filtering, and queue backpressure boundaries
@@ -37,7 +37,7 @@ Busy filtering preserves error classification:
 
 ## Queue Backpressure
 
-`--router-queue-threshold` is not candidate eligibility. It is admission backpressure.
+`policy_classes[].prefill_busy_threshold_frac` controls queue backpressure independently of candidate eligibility.
 
 When queueing is enabled, the router checks active prefill tokens for the request's eligible workers. If all eligible workers are above the configured fraction of `max_num_batched_tokens`, the request waits in the router queue. The request is scored only after capacity frees up, so dispatch uses fresh load and cache state.
 
