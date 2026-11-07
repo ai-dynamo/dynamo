@@ -1044,13 +1044,27 @@ class LoadScalingMixin:
         self._diag_load_reason = "no_change"
         return None
 
-    def _decode_easy_decision(
-        self, fpm_stats: dict[tuple[str, int], ForwardPassMetrics], num_workers: int
+    def _kv_easy_decision(
+        self,
+        fpm_stats: dict[tuple[str, int], ForwardPassMetrics],
+        num_workers: int,
+        *,
+        mode_label: str,
+        include_queued_prefill: bool,
     ) -> Optional[int]:
+        """Easy-mode KV-utilization decision shared by decode-only and agg.
+
+        ``mode_label`` ("decode" or "agg") only changes log text. Agg sets
+        ``include_queued_prefill`` so queued prefill tokens count toward KV
+        utilization. Both modes report on the decode pool's metadata, min
+        endpoint, and pending-startup state.
+        """
         d_caps = self._capabilities.decode
         max_kv = d_caps.max_kv_tokens if d_caps else None
         if not max_kv or max_kv <= 0:
-            logger.warning("max_kv_tokens not available, skipping easy decode scaling")
+            logger.warning(
+                "max_kv_tokens not available, skipping easy %s scaling", mode_label
+            )
             self._diag_load_metadata_available["decode"] = False
             self._diag_load_reason = "missing_engine_metadata"
             return None
@@ -1068,7 +1082,8 @@ class LoadScalingMixin:
                 or self._config.decode_scale_down_kv_rate is None
             ):
                 logger.warning(
-                    "decode load thresholds not available, skipping decode scaling"
+                    "decode load thresholds not available, skipping %s scaling",
+                    mode_label,
                 )
                 self._diag_load_reason = "insufficient_data"
                 return None
@@ -1088,11 +1103,24 @@ class LoadScalingMixin:
         for (wid, dp), fpm in fpm_stats.items():
             sched_kv = fpm.scheduled_requests.sum_decode_kv_tokens
             queued_kv = fpm.queued_requests.sum_decode_kv_tokens
-            util = (sched_kv + queued_kv) / max_kv
+            if include_queued_prefill:
+                queued_prefill = fpm.queued_requests.sum_prefill_tokens
+                util = (sched_kv + queued_kv + queued_prefill) / max_kv
+                prefill_field = f"queued_prefill={queued_prefill}, "
+            else:
+                util = (sched_kv + queued_kv) / max_kv
+                prefill_field = ""
             utils.append(util)
             logger.info(
-                f"Easy decode {wid}:dp{dp}: sched_kv={sched_kv}, "
-                f"queued_kv={queued_kv}, max_kv={max_kv}, util={util:.3f}"
+                "Easy %s %s:dp%s: sched_kv=%s, queued_kv=%s, %smax_kv=%s, util=%.3f",
+                mode_label,
+                wid,
+                dp,
+                sched_kv,
+                queued_kv,
+                prefill_field,
+                max_kv,
+                util,
             )
 
         if not utils:
@@ -1101,8 +1129,10 @@ class LoadScalingMixin:
 
         if any(u >= up_thresh if is_load else u > up_thresh for u in utils):
             logger.info(
-                f"Easy decode: engine(s) above scale-up threshold "
-                f"({up_thresh}), scaling up to {num_workers + 1}"
+                "Easy %s: engine(s) above scale-up threshold (%s), scaling up to %s",
+                mode_label,
+                up_thresh,
+                num_workers + 1,
             )
             return num_workers + 1
 
@@ -1114,8 +1144,10 @@ class LoadScalingMixin:
         if (num_workers > 1 or self._pending_startup("decode")) and scale_down:
             desired = max(num_workers - 1, resolve_min_endpoint(self._config, "decode"))
             logger.info(
-                f"Easy decode: all engines below scale-down threshold "
-                f"({down_thresh}), -> {desired}"
+                "Easy %s: all engines below scale-down threshold (%s), -> %s",
+                mode_label,
+                down_thresh,
+                desired,
             )
             return self._consolidation_safe_easy_target(
                 desired, num_workers, utils, up_thresh
@@ -1123,88 +1155,23 @@ class LoadScalingMixin:
 
         self._diag_load_reason = "no_change"
         return None
+
+    # Tests replace these two entry points by name (MethodType), so keep them
+    # as methods rather than calling _kv_easy_decision from the callers.
+    def _decode_easy_decision(
+        self, fpm_stats: dict[tuple[str, int], ForwardPassMetrics], num_workers: int
+    ) -> Optional[int]:
+        return self._kv_easy_decision(
+            fpm_stats, num_workers, mode_label="decode", include_queued_prefill=False
+        )
 
     def _agg_easy_decision(
         self, fpm_stats: dict[tuple[str, int], ForwardPassMetrics], num_workers: int
     ) -> Optional[int]:
         """Easy-mode decision for agg: uses combined KV utilization including queued prefill."""
-        d_caps = self._capabilities.decode
-        max_kv = d_caps.max_kv_tokens if d_caps else None
-        if not max_kv or max_kv <= 0:
-            logger.warning("max_kv_tokens not available, skipping easy agg scaling")
-            self._diag_load_metadata_available["decode"] = False
-            self._diag_load_reason = "missing_engine_metadata"
-            return None
-        self._diag_load_metadata_available["decode"] = True
-        if num_workers == 0:
-            self._diag_load_reason = "insufficient_data"
-            return None
-
-        target = self._config.optimization_target
-        is_load = target == "load"
-        is_latency = target == "latency"
-        if is_load:
-            if (
-                self._config.decode_scale_up_kv_rate is None
-                or self._config.decode_scale_down_kv_rate is None
-            ):
-                logger.warning(
-                    "decode load thresholds not available, skipping agg scaling"
-                )
-                self._diag_load_reason = "insufficient_data"
-                return None
-            up_thresh = self._config.decode_scale_up_kv_rate / 100.0
-            down_thresh = self._config.decode_scale_down_kv_rate / 100.0
-        else:
-            up_thresh = (
-                _DECODE_LATENCY_SCALE_UP if is_latency else _DECODE_THROUGHPUT_SCALE_UP
-            )
-            down_thresh = (
-                _DECODE_LATENCY_SCALE_DOWN
-                if is_latency
-                else _DECODE_THROUGHPUT_SCALE_DOWN
-            )
-
-        utils: list[float] = []
-        for (wid, dp), fpm in fpm_stats.items():
-            sched_kv = fpm.scheduled_requests.sum_decode_kv_tokens
-            queued_kv = fpm.queued_requests.sum_decode_kv_tokens
-            queued_prefill = fpm.queued_requests.sum_prefill_tokens
-            util = (sched_kv + queued_kv + queued_prefill) / max_kv
-            utils.append(util)
-            logger.info(
-                f"Easy agg {wid}:dp{dp}: sched_kv={sched_kv}, queued_kv={queued_kv}, "
-                f"queued_prefill={queued_prefill}, max_kv={max_kv}, util={util:.3f}"
-            )
-
-        if not utils:
-            self._diag_load_reason = "insufficient_data"
-            return None
-
-        if any(u >= up_thresh if is_load else u > up_thresh for u in utils):
-            logger.info(
-                f"Easy agg: engine(s) above scale-up threshold "
-                f"({up_thresh}), scaling up to {num_workers + 1}"
-            )
-            return num_workers + 1
-
-        scale_down = (
-            all(u <= down_thresh for u in utils)
-            if is_load
-            else all(u < down_thresh for u in utils)
+        return self._kv_easy_decision(
+            fpm_stats, num_workers, mode_label="agg", include_queued_prefill=True
         )
-        if (num_workers > 1 or self._pending_startup("decode")) and scale_down:
-            desired = max(num_workers - 1, resolve_min_endpoint(self._config, "decode"))
-            logger.info(
-                f"Easy agg: all engines below scale-down threshold "
-                f"({down_thresh}), -> {desired}"
-            )
-            return self._consolidation_safe_easy_target(
-                desired, num_workers, utils, up_thresh
-            )
-
-        self._diag_load_reason = "no_change"
-        return None
 
     # ------------------------------------------------------------------
     # SLA-based per-engine latency estimation
