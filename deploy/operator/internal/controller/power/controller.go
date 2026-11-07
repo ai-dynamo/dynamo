@@ -19,8 +19,6 @@ import (
 	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,7 +31,7 @@ import (
 const (
 	// ConditionType is the DGD condition this controller owns.
 	ConditionType = "PowerCapPropagationReady"
-	// retryAfter re-observes expected convergence: cache lag on the owner chain and Pod conflicts.
+	// retryAfter re-observes a Pod whose patch conflicted with a concurrent update.
 	retryAfter = 2 * time.Second
 	// failureRetryAfter re-attempts failed Pod observation or repair.
 	failureRetryAfter = 10 * time.Second
@@ -56,10 +54,7 @@ type Reconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
-// +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
-// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments,verbs=get;list;watch
-// +kubebuilder:rbac:groups=grove.io,resources=podcliquesets;podcliques;podcliquescalinggroups,verbs=get;list;watch
+// +kubebuilder:rbac:groups=grove.io,resources=podcliquesets,verbs=get;list;watch
 
 // Reconcile observes the DGD's worker Pods, repairs their cap annotations and applies the condition.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -120,7 +115,8 @@ func (r *Reconciler) propagate(ctx context.Context, dgd *v1beta1.DynamoGraphDepl
 		}
 	}
 
-	// Observe only the indexed Pods of each capped component, in a stable order.
+	// The Dynamo graph and component labels associate a Pod with its DGD component; the lowering
+	// hierarchy that created the Pod is irrelevant. Observe each capped component in a stable order.
 	for _, component := range slices.Sorted(maps.Keys(caps)) {
 		cap := caps[component]
 		pods, err := podcontroller.ListComponentPods(ctx, r.client, dgd.Namespace, dgd.Name, component)
@@ -135,24 +131,9 @@ func (r *Reconciler) propagate(ctx context.Context, dgd *v1beta1.DynamoGraphDepl
 			if terminal(pod) || !dynamo.IsWorkerComponent(pod.Labels[consts.KubeLabelDynamoComponentType]) {
 				continue
 			}
-			owned, pending, err := podOwned(ctx, r.client, dgd, pod)
-			if err != nil {
-				logger.Error(err, "Failed to observe power-cap worker Pod ownership", "pod", pod.Name)
-				degrade(&condition, metav1.ConditionUnknown, "PodObservationFailed", err.Error())
-				requeue(failureRetryAfter)
-				continue
-			}
-			if pending {
-				degrade(&condition, metav1.ConditionUnknown, "PodObservationFailed", "Waiting to observe the worker ownership chain")
-				requeue(retryAfter)
-				continue
-			}
-			if !owned {
-				continue
-			}
 			if pod.Annotations[consts.KubeAnnotationGPUPowerLimit] == cap {
 				if condition.Status == metav1.ConditionTrue {
-					condition.Message = "All owned live worker Pod annotations match"
+					condition.Message = "All live worker Pod annotations match"
 				}
 				continue
 			}
@@ -207,51 +188,4 @@ func degrade(condition *metav1.Condition, status metav1.ConditionStatus, reason,
 	if conditionRank[reason] > conditionRank[condition.Reason] {
 		condition.Status, condition.Reason, condition.Message = status, reason, message
 	}
-}
-
-// podOwned follows only supported controller kinds and checks every owner UID.
-// A missing cached parent is pending; a mismatched UID or foreign chain is not authorized.
-// dgd and pod must be non-nil.
-func podOwned(ctx context.Context, reader client.Reader, dgd *v1beta1.DynamoGraphDeployment, pod *corev1.Pod) (owned, pending bool, err error) {
-	var object client.Object = pod
-	for range 6 {
-		owner := metav1.GetControllerOf(object)
-		if owner == nil {
-			return false, false, nil
-		}
-		if (owner.APIVersion == v1beta1.GroupVersion.String() || owner.APIVersion == "nvidia.com/v1alpha1") && owner.Kind == "DynamoGraphDeployment" {
-			return owner.Name == dgd.Name && owner.UID == dgd.UID, false, nil
-		}
-		var parent client.Object
-		switch owner.APIVersion + "/" + owner.Kind {
-		case "apps/v1/ReplicaSet":
-			parent = &metav1.PartialObjectMetadata{}
-			parent.GetObjectKind().SetGroupVersionKind(appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))
-		case "apps/v1/Deployment":
-			parent = &appsv1.Deployment{}
-		case v1beta1.GroupVersion.Group + "/v1beta1/DynamoComponentDeployment":
-			parent = &v1beta1.DynamoComponentDeployment{}
-		case "nvidia.com/v1alpha1/DynamoComponentDeployment":
-			parent = &v1beta1.DynamoComponentDeployment{}
-		case grovev1alpha1.SchemeGroupVersion.Group + "/v1alpha1/PodClique":
-			parent = &grovev1alpha1.PodClique{}
-		case grovev1alpha1.SchemeGroupVersion.Group + "/v1alpha1/PodCliqueScalingGroup":
-			parent = &grovev1alpha1.PodCliqueScalingGroup{}
-		case grovev1alpha1.SchemeGroupVersion.Group + "/v1alpha1/PodCliqueSet":
-			parent = &grovev1alpha1.PodCliqueSet{}
-		default:
-			return false, false, nil
-		}
-		if err := reader.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: owner.Name}, parent); err != nil {
-			if apierrors.IsNotFound(err) {
-				return false, true, nil
-			}
-			return false, false, fmt.Errorf("observe power-cap Pod owner: %w", err)
-		}
-		if parent.GetUID() != owner.UID {
-			return false, false, nil
-		}
-		object = parent
-	}
-	return false, false, nil
 }

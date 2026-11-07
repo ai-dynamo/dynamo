@@ -268,8 +268,8 @@ func retainedGrovePowerCaps(req groveReconcileRequest, pcs *grovev1alpha1.PodCli
 			}
 		}
 	}
-	if !changed || !found || retained.Hash == "" {
-		return retained, changed && found, nil
+	if !changed || !found {
+		return retained, false, nil
 	}
 
 	// A migrated generation keeps its v1 label while the recorded v2 hash describes the same spec.
@@ -278,6 +278,11 @@ func retainedGrovePowerCaps(req groveReconcileRequest, pcs *grovev1alpha1.PodCli
 		return retained, false, err
 	}
 	current := currentWorkerHashes(req.DGD)
+
+	// An unsuffixed PodCliqueSet labels no worker hash; the recorded v2 hash is its identity.
+	if retained.Hash == "" {
+		return retained, current.v2 != "" && identity == current.v2, nil
+	}
 	return retained, retained.Hash == identity || (current.contains(retained.Hash) && identity == current.v2), nil
 }
 

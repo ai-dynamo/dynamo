@@ -6,8 +6,12 @@ package power
 import (
 	"testing"
 
+	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 )
@@ -37,6 +41,66 @@ func TestPodCliqueSetPredicateAdmitsStatusOnlyBarrierChanges(t *testing.T) {
 
 			t.Log("Only barrier inputs wake the controller")
 			require.Equal(t, tc.want, podCliqueSetPredicate().Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after}))
+		})
+	}
+}
+
+func TestPodPredicateFollowsLabelsNotOwners(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*corev1.Pod)
+		want   bool
+	}{
+		{name: "moved to another component", change: func(pod *corev1.Pod) { pod.Labels[consts.KubeLabelDynamoComponent] = "decode" }, want: true},
+		{name: "moved to another graph", change: func(pod *corev1.Pod) { pod.Labels[consts.KubeLabelDynamoGraphDeploymentName] = "other" }, want: true},
+		{name: "component type changed", change: func(pod *corev1.Pod) { pod.Labels[consts.KubeLabelDynamoComponentType] = "frontend" }, want: true},
+		{name: "cap annotation changed", change: func(pod *corev1.Pod) { pod.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350" }, want: true},
+		{name: "terminated", change: func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodFailed }, want: true},
+		{name: "adopted by another owner", change: func(pod *corev1.Pod) {
+			pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: "grove.io/v1beta1", Kind: "PodClique", Name: "clique", UID: "clique-uid", Controller: new(true)}}
+		}},
+		{name: "unrelated label", change: func(pod *corev1.Pod) { pod.Labels["unrelated"] = "change" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Change one field of a labeled worker Pod")
+			before := &corev1.Pod{Name: "worker", Namespace: "default", Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "graph", consts.KubeLabelDynamoComponent: "worker", consts.KubeLabelDynamoComponentType: "worker",
+			}, Annotations: map[string]string{consts.KubeAnnotationGPUPowerLimit: "300"}}
+			after := before.DeepCopy()
+			tc.change(after)
+
+			t.Log("Label membership, the cap and terminality wake the controller; owner references do not")
+			require.Equal(t, tc.want, podPredicate().Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after}))
+		})
+	}
+}
+
+func TestConditionChangedPredicateAdmitsOnlyThePowerCondition(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*v1beta1.DynamoGraphDeployment)
+		want   bool
+	}{
+		{name: "power condition changed", change: func(dgd *v1beta1.DynamoGraphDeployment) {
+			meta.SetStatusCondition(&dgd.Status.Conditions, metav1.Condition{Type: ConditionType, Status: metav1.ConditionFalse, Reason: "PodAnnotationMismatch"})
+		}, want: true},
+		{name: "power condition removed", change: func(dgd *v1beta1.DynamoGraphDeployment) {
+			meta.RemoveStatusCondition(&dgd.Status.Conditions, ConditionType)
+		}, want: true},
+		{name: "other condition changed", change: func(dgd *v1beta1.DynamoGraphDeployment) {
+			meta.SetStatusCondition(&dgd.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: "Pending"})
+		}},
+		{name: "other status changed", change: func(dgd *v1beta1.DynamoGraphDeployment) { dgd.Status.State = v1beta1.DGDStateSuccessful }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Change the status of a DGD that carries the power condition")
+			before := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "default", Generation: 2}
+			meta.SetStatusCondition(&before.Status.Conditions, metav1.Condition{Type: ConditionType, Status: metav1.ConditionTrue, Reason: "PodAnnotationsMatch"})
+			after := before.DeepCopy()
+			tc.change(after)
+
+			t.Log("Only the controller's own condition wakes it, so a write skipped on a stale cache is re-observed")
+			require.Equal(t, tc.want, conditionChangedPredicate().Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after}))
 		})
 	}
 }

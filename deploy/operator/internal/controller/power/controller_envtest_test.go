@@ -19,13 +19,10 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -48,15 +45,11 @@ func startPowerController(t *testing.T, env *operatorenv.TestEnv, restricted str
 	})
 }
 
-// testPod is a worker Pod of the DGD's worker component created from a retained 300 W template.
-func testPod(dgd *v1beta1.DynamoGraphDeployment, name string, owner client.Object, gvk schema.GroupVersionKind) *corev1.Pod {
-	pod := &corev1.Pod{Name: name, Namespace: dgd.Namespace, Labels: map[string]string{
-		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name, consts.KubeLabelDynamoComponent: "worker", consts.KubeLabelDynamoComponentType: "worker", consts.KubeLabelDynamoSelector: "worker",
+// testPod is a labeled worker Pod of the DGD's worker component created from a retained 300 W template.
+func testPod(dgd *v1beta1.DynamoGraphDeployment, name string) *corev1.Pod {
+	return &corev1.Pod{Name: name, Namespace: dgd.Namespace, Labels: map[string]string{
+		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name, consts.KubeLabelDynamoComponent: "worker", consts.KubeLabelDynamoComponentType: "worker",
 	}, Annotations: map[string]string{consts.KubeAnnotationGPUPowerLimit: "300"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "example/engine:1.6.0"}}}}
-	if owner != nil {
-		pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(owner, gvk)}
-	}
-	return pod
 }
 
 // podCapIs reads a Pod's cap. Polling helpers report a failed read as false instead of failing
@@ -79,7 +72,7 @@ func conditionReason(c client.Client, dgd *v1beta1.DynamoGraphDeployment) (reaso
 	return condition.Reason, true, nil
 }
 
-func TestControllerRepairsReplacementAndAdoptedPods(t *testing.T) {
+func TestControllerRepairsLabeledWorkerPods(t *testing.T) {
 	t.Log("Start only the power controller and store a component graph edited to 350 W")
 	env := sharedEnv.ForTest(t)
 	c := env.Client()
@@ -88,14 +81,9 @@ func TestControllerRepairsReplacementAndAdoptedPods(t *testing.T) {
 	dgd.UID, dgd.Generation = "", 0
 	dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
 	require.NoError(t, c.Create(t.Context(), dgd))
-	rs := &appsv1.ReplicaSet{Name: "worker-rs", Namespace: env.Namespace(), OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}, Spec: appsv1.ReplicaSetSpec{
-		Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"worker": "power"}},
-		Template: corev1.PodTemplateSpec{Labels: map[string]string{"worker": "power"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "example/engine:1.6.0"}}}},
-	}}
-	require.NoError(t, c.Create(t.Context(), rs))
 
-	t.Log("A worker Pod created from the retained 300 W template is repaired by its create event")
-	retained := testPod(dgd, "retained", rs, appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))
+	t.Log("A labeled worker Pod created from the retained 300 W template is repaired by its create event")
+	retained := testPod(dgd, "retained")
 	require.NoError(t, c.Create(t.Context(), retained))
 	require.Eventually(t, func() bool { return podCapIs(c, retained, "350") }, waitTimeout, waitInterval)
 	require.Eventually(t, func() bool {
@@ -103,19 +91,21 @@ func TestControllerRepairsReplacementAndAdoptedPods(t *testing.T) {
 		return err == nil && reason == "PodAnnotationsMatch"
 	}, waitTimeout, waitInterval)
 
-	t.Log("A later replacement Pod is repaired without any DGD change")
-	replacement := testPod(dgd, "replacement", rs, appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))
+	t.Log("A replacement Pod owned through Grove's beta API, whose owner is not stored, is repaired without any DGD change")
+	replacement := testPod(dgd, "replacement")
+	replacement.OwnerReferences = []metav1.OwnerReference{{APIVersion: "grove.io/v1beta1", Kind: "PodClique", Name: "absent-clique", UID: "absent-clique-uid", Controller: new(true)}}
 	require.NoError(t, c.Create(t.Context(), replacement))
 	require.Eventually(t, func() bool { return podCapIs(c, replacement, "350") }, waitTimeout, waitInterval)
 
-	t.Log("An orphan worker Pod is skipped until adoption changes only its owner references")
-	orphan := testPod(dgd, "orphan", nil, schema.GroupVersionKind{})
-	require.NoError(t, c.Create(t.Context(), orphan))
-	require.Never(t, func() bool { return !podCapIs(c, orphan, "300") }, 2*time.Second, waitInterval)
-	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(orphan), orphan))
-	orphan.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(rs, appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))}
-	require.NoError(t, c.Update(t.Context(), orphan))
-	require.Eventually(t, func() bool { return podCapIs(c, orphan, "350") }, waitTimeout, waitInterval)
+	t.Log("A Pod labeled for another component keeps its annotation until its labels move it into the capped worker")
+	moved := testPod(dgd, "moved")
+	moved.Labels[consts.KubeLabelDynamoComponent] = "uncapped"
+	require.NoError(t, c.Create(t.Context(), moved))
+	require.Never(t, func() bool { return !podCapIs(c, moved, "300") }, 2*time.Second, waitInterval)
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(moved), moved))
+	moved.Labels[consts.KubeLabelDynamoComponent] = "worker"
+	require.NoError(t, c.Update(t.Context(), moved))
+	require.Eventually(t, func() bool { return podCapIs(c, moved, "350") }, waitTimeout, waitInterval)
 }
 
 func TestControllerWaitsForGroveUpdate(t *testing.T) {
@@ -131,9 +121,7 @@ func TestControllerWaitsForGroveUpdate(t *testing.T) {
 	t.Log("Grove has not acknowledged the DGD's PodCliqueSet; its worker Pod still carries 300 W")
 	pcs := &grovev1alpha1.PodCliqueSet{Name: dynamo.PCSNameForDGD(dgd, (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController), Namespace: env.Namespace(), OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}}
 	require.NoError(t, c.Create(t.Context(), pcs))
-	clique := &grovev1alpha1.PodClique{Name: "worker", Namespace: env.Namespace(), OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))}}
-	require.NoError(t, c.Create(t.Context(), clique))
-	pod := testPod(dgd, "worker", clique, grovev1alpha1.SchemeGroupVersion.WithKind("PodClique"))
+	pod := testPod(dgd, "worker")
 	require.NoError(t, c.Create(t.Context(), pod))
 	require.Eventually(t, func() bool {
 		reason, _, err := conditionReason(c, dgd)
@@ -172,12 +160,7 @@ func TestControllerIgnoresFilteredNamespace(t *testing.T) {
 	dgd.UID, dgd.Generation = "", 0
 	dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
 	require.NoError(t, c.Create(t.Context(), dgd))
-	rs := &appsv1.ReplicaSet{Name: "worker-rs", Namespace: env.Namespace(), OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}, Spec: appsv1.ReplicaSetSpec{
-		Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"worker": "power"}},
-		Template: corev1.PodTemplateSpec{Labels: map[string]string{"worker": "power"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "example/engine:1.6.0"}}}},
-	}}
-	require.NoError(t, c.Create(t.Context(), rs))
-	pod := testPod(dgd, "worker", rs, appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))
+	pod := testPod(dgd, "worker")
 	require.NoError(t, c.Create(t.Context(), pod))
 
 	t.Log("No Pod is patched and the DGD gets no condition")
@@ -212,47 +195,4 @@ func TestApplyConditionCoexistsWithDGDStatusUpdate(t *testing.T) {
 	require.Nil(t, meta.FindStatusCondition(dgd.Status.Conditions, ConditionType))
 	require.Equal(t, "Ready", meta.FindStatusCondition(dgd.Status.Conditions, "Ready").Reason)
 	require.Equal(t, v1beta1.DGDStateSuccessful, dgd.Status.State)
-}
-
-func TestReplicaSetOwnershipUsesMetadataCache(t *testing.T) {
-	t.Log("Seed an owner with an engine template that ownership observation does not need")
-	env := sharedEnv.ForTest(t)
-	dgd := testDGD(env.Namespace(), "component")
-	rs := &appsv1.ReplicaSet{Name: "power-owner", Namespace: env.Namespace(), OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}, Spec: appsv1.ReplicaSetSpec{
-		Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"worker": "power"}},
-		Template: corev1.PodTemplateSpec{Labels: map[string]string{"worker": "power"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "engine", Image: "example/engine:test"}}}},
-	}}
-	require.NoError(t, env.Client().Create(t.Context(), rs))
-	pod := &corev1.Pod{Namespace: env.Namespace(), OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(rs, appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))}}
-
-	t.Log("Register only a metadata informer and forbid lazy creation of typed informers")
-	cached, err := cache.New(env.RESTConfig(), cache.Options{Scheme: env.Client().Scheme(), ReaderFailOnMissingInformer: true, DefaultNamespaces: map[string]cache.Config{env.Namespace(): {}}})
-	require.NoError(t, err)
-	metadata := &metav1.PartialObjectMetadata{}
-	metadata.SetGroupVersionKind(appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))
-	_, err = cached.GetInformer(t.Context(), metadata)
-	require.NoError(t, err)
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	go func() { done <- cached.Start(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		require.NoError(t, <-done)
-	})
-	syncCtx, syncCancel := context.WithTimeout(ctx, waitTimeout)
-	defer syncCancel()
-	require.True(t, cached.WaitForCacheSync(syncCtx))
-
-	t.Log("Ownership resolves through metadata while a typed ReplicaSet read is explicitly uncached")
-	owned, pending, err := podOwned(ctx, cached, dgd, pod)
-	require.NoError(t, err)
-	require.True(t, owned)
-	require.False(t, pending)
-	err = cached.Get(ctx, client.ObjectKeyFromObject(rs), &appsv1.ReplicaSet{})
-	require.ErrorContains(t, err, "not cached")
-	pod.OwnerReferences[0].UID = "stale-owner-uid"
-	owned, pending, err = podOwned(ctx, cached, dgd, pod)
-	require.NoError(t, err)
-	require.False(t, owned)
-	require.False(t, pending)
 }

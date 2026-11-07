@@ -141,9 +141,14 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	}
 
 	// A retained generation written before its hash commit is what the workers run; record it once observed.
-	if renderedPodCliqueSet.powerCapPreserved && !pcsWasWritten && renderedPodCliqueSet.powerCapHash != "" &&
-		!currentWorkerHashes(req.DGD).contains(renderedPodCliqueSet.powerCapHash) {
-		transition := unsupportedWorkerHashTransition{next: workerGenerationHashes{v2: renderedPodCliqueSet.powerCapHash}, hashChanged: true}
+	// A graph with no recorded hash records its first generation, as a first deploy does, with no rollout warning.
+	if current := currentWorkerHashes(req.DGD); renderedPodCliqueSet.powerCapPreserved && !pcsWasWritten && renderedPodCliqueSet.powerCapHash != "" &&
+		!current.contains(renderedPodCliqueSet.powerCapHash) {
+		transition := unsupportedWorkerHashTransition{
+			next:                workerGenerationHashes{v2: renderedPodCliqueSet.powerCapHash},
+			noCurrentAnnotation: current.empty(),
+			hashChanged:         !current.empty(),
+		}
 		if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, req.DGD, transition, true); err != nil {
 			return groveWorkloadResult{}, failWorkloadProgram(
 				reasonRollingUpdateFailed,
@@ -177,6 +182,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	result := checkGroveResourcesReadiness(resources, readiness.Classification)
 	applyComponentGPUShapes(result.ComponentStatus, renderedPodCliqueSet.gpuShapes)
 	applyComponentRuntimeStatuses(result.ComponentStatus, renderedPodCliqueSet.runtimeStatuses)
+	applyDesiredPowerCaps(result.ComponentStatus, req.DGD)
 
 	return groveWorkloadResult{ReconcileResult: result, ScalingDeferred: scalingDeferred}, scaleErr
 }

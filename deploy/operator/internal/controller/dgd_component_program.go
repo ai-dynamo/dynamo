@@ -166,6 +166,7 @@ func (p *componentProgram) Reconcile(
 		checkpoints.Infos,
 		retained,
 	)
+	applyDesiredPowerCaps(result.ComponentStatus, req.DGD)
 	if err != nil {
 		// Preserve newly observed component status while leaving the generation unobserved.
 		if result.ComponentStatus != nil {

@@ -14,7 +14,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -50,7 +49,6 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	require.NoError(t, v1beta1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
-	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, grovev1alpha1.AddToScheme(scheme))
 	return scheme
 }
@@ -61,62 +59,48 @@ func testClient(t *testing.T) *fake.ClientBuilder {
 	return fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&corev1.Pod{}, podcontroller.ComponentIndex, podcontroller.ComponentIndexValues)
 }
 
-// testOwners constructs a fresh complete owner chain and one worker Pod at 300 W.
-func testOwners(dgd *v1beta1.DynamoGraphDeployment, provider string) ([]client.Object, *corev1.Pod) {
-	pod := &corev1.Pod{Name: "worker-pod", Namespace: dgd.Namespace, UID: "pod-uid", Labels: map[string]string{
-		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name, consts.KubeLabelDynamoComponent: "worker", consts.KubeLabelDynamoComponentType: "worker", consts.KubeLabelDynamoSelector: "worker",
-	}, Annotations: map[string]string{consts.KubeAnnotationGPUPowerLimit: "300", "other": "retained"}}
+// testWorkerPod constructs one labeled worker Pod at 300 W. Its controller reference names a
+// provider owner that does not exist, using Grove's beta API for Grove, because the Dynamo labels
+// alone associate the Pod with its DGD component.
+func testWorkerPod(dgd *v1beta1.DynamoGraphDeployment, provider string) *corev1.Pod {
+	owner := metav1.OwnerReference{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "absent-rs", UID: "absent-rs-uid", Controller: new(true)}
 	if provider == "grove" {
-		pcs := &grovev1alpha1.PodCliqueSet{Name: "pcs", Namespace: dgd.Namespace, UID: "pcs-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}}
-		group := &grovev1alpha1.PodCliqueScalingGroup{Name: "group", Namespace: dgd.Namespace, UID: "group-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))}}
-		clique := &grovev1alpha1.PodClique{Name: "clique", Namespace: dgd.Namespace, UID: "clique-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(group, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueScalingGroup"))}}
-		pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(clique, grovev1alpha1.SchemeGroupVersion.WithKind("PodClique"))}
-		return []client.Object{pcs, group, clique}, pod
+		owner = metav1.OwnerReference{APIVersion: "grove.io/v1beta1", Kind: "PodClique", Name: "absent-clique", UID: "absent-clique-uid", Controller: new(true)}
 	}
-	dcd := &v1beta1.DynamoComponentDeployment{Name: "dcd", Namespace: dgd.Namespace, UID: "dcd-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}}
-	deployment := &appsv1.Deployment{Name: "deployment", Namespace: dgd.Namespace, UID: "deployment-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dcd, v1beta1.DynamoComponentDeploymentGVK)}}
-	rs := &appsv1.ReplicaSet{Name: "rs", Namespace: dgd.Namespace, UID: "rs-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(deployment, appsv1.SchemeGroupVersion.WithKind("Deployment"))}}
-	pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(rs, appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))}
-	return []client.Object{dcd, deployment, rs}, pod
+	return &corev1.Pod{Name: "worker-pod", Namespace: dgd.Namespace, UID: "pod-uid", Labels: map[string]string{
+		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name, consts.KubeLabelDynamoComponent: "worker", consts.KubeLabelDynamoComponentType: "worker",
+	}, Annotations: map[string]string{consts.KubeAnnotationGPUPowerLimit: "300", "other": "retained"}, OwnerReferences: []metav1.OwnerReference{owner}}
 }
 
 func TestPropagate(t *testing.T) {
 	for _, provider := range []string{"component", "grove"} {
-		for _, scenario := range []string{"repair", "matching", "empty", "terminal", "foreign", "orphan", "missing-parent", "parent-arrives", "direct-grove", "list-error", "owner-error", "patch-error", "conflict", "deleted"} {
+		for _, scenario := range []string{"repair", "matching", "empty", "terminal", "non-worker", "unlabeled-component", "other-graph", "list-error", "patch-error", "conflict", "deleted"} {
 			t.Run(provider+"/"+scenario, func(t *testing.T) {
-				t.Log("Observe owned workers after a cap edit to 350 W")
+				t.Log("Observe labeled workers after a cap edit to 350 W")
 				dgd := testDGD("default", provider)
 				dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
-				owners, pod := testOwners(dgd, provider)
-				var lateParent client.Object
+				pod := testWorkerPod(dgd, provider)
 				switch scenario {
-				case "parent-arrives":
-					lateParent = owners[len(owners)-1].DeepCopyObject().(client.Object)
-					owners = owners[:len(owners)-1]
-				case "direct-grove":
-					if provider == "grove" {
-						owners[2].SetOwnerReferences([]metav1.OwnerReference{*metav1.NewControllerRef(owners[0], grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))})
-						owners = []client.Object{owners[0], owners[2]}
-					}
 				case "matching":
 					pod.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
 				case "terminal":
 					pod.Status.Phase = corev1.PodSucceeded
-				case "foreign":
-					pod.OwnerReferences[0].UID = "stale-owner"
-				case "orphan":
-					pod.OwnerReferences = nil
-				case "missing-parent":
-					owners = owners[:len(owners)-1]
+				case "non-worker":
+					pod.Labels[consts.KubeLabelDynamoComponentType] = "frontend"
+				case "unlabeled-component":
+					delete(pod.Labels, consts.KubeLabelDynamoComponent)
+				case "other-graph":
+					pod.Labels[consts.KubeLabelDynamoGraphDeploymentName] = "other"
 				}
-				objects := append(owners, dgd)
+				objects := []client.Object{dgd}
 				if scenario != "empty" {
 					objects = append(objects, pod)
 				}
+				ownerReads := 0
 				c := testClient(t).WithObjects(objects...).WithInterceptorFuncs(interceptor.Funcs{
 					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-						if _, ok := obj.(*grovev1alpha1.PodCliqueSet); !ok && scenario == "owner-error" {
-							return errors.New("owner read denied")
+						if _, ok := obj.(*grovev1alpha1.PodCliqueSet); !ok {
+							ownerReads++
 						}
 						return c.Get(ctx, key, obj, opts...)
 					},
@@ -141,10 +125,11 @@ func TestPropagate(t *testing.T) {
 				r := &Reconciler{client: c, groveEnabled: true}
 				condition, requeueAfter := r.propagate(t.Context(), dgd, dynamo.DesiredWorkerPowerCaps(dgd))
 
-				t.Log("Report the worst Pod outcome and retry only what no watch event will deliver")
+				t.Log("Report the worst Pod outcome and retry only what no watch event will deliver; no owner is ever read")
+				require.Zero(t, ownerReads)
 				require.Equal(t, dgd.Generation, condition.ObservedGeneration)
 				switch scenario {
-				case "list-error", "owner-error":
+				case "list-error":
 					require.Equal(t, metav1.ConditionUnknown, condition.Status)
 					require.Equal(t, "PodObservationFailed", condition.Reason)
 					require.Equal(t, failureRetryAfter, requeueAfter)
@@ -156,18 +141,15 @@ func TestPropagate(t *testing.T) {
 					require.Equal(t, metav1.ConditionFalse, condition.Status)
 					require.Equal(t, "PodPatchFailed", condition.Reason)
 					require.Equal(t, retryAfter, requeueAfter)
-				case "missing-parent", "parent-arrives":
-					require.Equal(t, metav1.ConditionUnknown, condition.Status)
-					require.Equal(t, retryAfter, requeueAfter)
-					if lateParent != nil {
-						t.Log("The cache later observes the parent and a retry repairs the Pod")
-						require.NoError(t, c.Create(t.Context(), lateParent))
-						condition, _ = r.propagate(t.Context(), dgd, dynamo.DesiredWorkerPowerCaps(dgd))
-						require.Equal(t, "PodAnnotationMismatch", condition.Reason)
-					}
-				case "deleted", "direct-grove":
+				case "deleted":
 					require.Equal(t, "PodAnnotationMismatch", condition.Reason)
 					require.Zero(t, requeueAfter)
+				case "non-worker", "unlabeled-component", "other-graph", "terminal":
+					t.Log("A Pod outside the label contract or no longer running keeps its annotation")
+					require.Equal(t, metav1.ConditionTrue, condition.Status)
+					require.Zero(t, requeueAfter)
+					require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
+					require.Equal(t, "300", pod.Annotations[consts.KubeAnnotationGPUPowerLimit])
 				case "repair":
 					require.Equal(t, "PodAnnotationMismatch", condition.Reason)
 					require.Zero(t, requeueAfter)
@@ -190,10 +172,10 @@ func TestPropagate(t *testing.T) {
 func TestPropagateMixedPodOutcomes(t *testing.T) {
 	for _, scenario := range []string{"conflict-and-denied", "denied-only"} {
 		t.Run(scenario, func(t *testing.T) {
-			t.Log("Observe several owned workers whose repairs end differently in one pass")
+			t.Log("Observe several labeled workers whose repairs end differently in one pass")
 			dgd := testDGD("default", "component")
 			dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
-			owners, conflicting := testOwners(dgd, "component")
+			conflicting := testWorkerPod(dgd, "component")
 			denied := conflicting.DeepCopy()
 			denied.Name, denied.UID = "denied-pod", "denied-uid"
 			matching := conflicting.DeepCopy()
@@ -203,7 +185,7 @@ func TestPropagateMixedPodOutcomes(t *testing.T) {
 			if scenario == "conflict-and-denied" {
 				pods = append(pods, conflicting)
 			}
-			c := testClient(t).WithObjects(append(append(owners, dgd), pods...)...).WithInterceptorFuncs(interceptor.Funcs{
+			c := testClient(t).WithObjects(append([]client.Object{dgd}, pods...)...).WithInterceptorFuncs(interceptor.Funcs{
 				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 					switch obj.GetName() {
 					case conflicting.Name:
@@ -237,11 +219,11 @@ func TestPropagateMultipleCaps(t *testing.T) {
 	other.PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "325"
 	dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
 	dgd.Spec.Components = append(dgd.Spec.Components, other)
-	owners, pod := testOwners(dgd, "component")
+	pod := testWorkerPod(dgd, "component")
 	second := pod.DeepCopy()
 	second.Name, second.UID = "second-pod", "second-uid"
 	second.Labels[consts.KubeLabelDynamoComponent] = "second"
-	c := testClient(t).WithObjects(append(owners, dgd, pod, second)...).Build()
+	c := testClient(t).WithObjects(dgd, pod, second).Build()
 	r := &Reconciler{client: c}
 	r.propagate(t.Context(), dgd, dynamo.DesiredWorkerPowerCaps(dgd))
 	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
@@ -256,9 +238,11 @@ func TestPropagateGroveBarrier(t *testing.T) {
 			t.Log("Observe the DGD's own PodCliqueSet in the given update state")
 			dgd := testDGD("default", "grove")
 			dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
-			owners, pod := testOwners(dgd, "grove")
-			pcs := owners[0].(*grovev1alpha1.PodCliqueSet)
-			pcs.Name, pcs.Generation = dynamo.PCSNameForDGD(dgd, (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController), 3
+			pod := testWorkerPod(dgd, "grove")
+			pcs := &grovev1alpha1.PodCliqueSet{
+				Name: dynamo.PCSNameForDGD(dgd, (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController), Namespace: dgd.Namespace, UID: "pcs-uid", Generation: 3,
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)},
+			}
 			switch state {
 			case "stale-observed-generation":
 				pcs.Status.ObservedGeneration = new(int64(2))
@@ -272,9 +256,9 @@ func TestPropagateGroveBarrier(t *testing.T) {
 				pcs.Status.ObservedGeneration = nil
 				pcs.OwnerReferences[0].UID = "other-graph"
 			}
-			objects := append(owners, dgd, pod)
-			if state == "absent" {
-				objects = objects[1:]
+			objects := []client.Object{dgd, pod}
+			if state != "absent" {
+				objects = append(objects, pcs)
 			}
 			podReads := 0
 			c := testClient(t).WithObjects(objects...).WithStatusSubresource(&grovev1alpha1.PodCliqueSet{}).WithInterceptorFuncs(interceptor.Funcs{
@@ -324,9 +308,9 @@ func TestReconcileSkipsUnobservableGraphs(t *testing.T) {
 			if scenario == "no-caps" {
 				delete(dgd.Spec.Components[0].PodTemplate.Annotations, consts.KubeAnnotationGPUPowerLimit)
 			}
-			owners, pod := testOwners(dgd, provider)
+			pod := testWorkerPod(dgd, provider)
 			podReads, podPatches, statusApplies := 0, 0, 0
-			c := testClient(t).WithObjects(append(owners, dgd, pod)...).WithStatusSubresource(dgd).WithInterceptorFuncs(interceptor.Funcs{
+			c := testClient(t).WithObjects(dgd, pod).WithStatusSubresource(dgd).WithInterceptorFuncs(interceptor.Funcs{
 				SubResourceApply: func(ctx context.Context, c client.Client, subResourceName string, obj runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption) error {
 					statusApplies++
 					return c.SubResource(subResourceName).Apply(ctx, obj, opts...)

@@ -271,21 +271,24 @@ The operator maintains observed state under `status`.
   `annotations`, and no worker with automatic checkpoints. Compare its
   `observedGeneration` with the DGD generation. Reasons:
 
-  - `PodAnnotationsMatch` (`True`): every owned nonterminal worker Pod matches,
-    including an empty live Pod set.
+  - `PodAnnotationsMatch` (`True`): every nonterminal worker Pod labeled for a
+    capped component matches, including an empty live Pod set. The
+    `nvidia.com/dynamo-graph-deployment-name`, `nvidia.com/dynamo-component` and
+    `nvidia.com/dynamo-component-type` labels associate a Pod with the graph's
+    worker component, whichever workload created it.
   - `PodAnnotationMismatch` (`False`): annotations are being repaired.
   - `WaitingForWorkerUpdate` (`False`): Grove has not acknowledged or finished an
     update of the graph's `PodCliqueSet`; no Pods are patched until it does.
-  - `PodObservationFailed` (`Unknown`): worker Pods or their owners could not be
-    observed.
+  - `PodObservationFailed` (`Unknown`): worker Pods or the graph's `PodCliqueSet`
+    could not be observed.
   - `PodPatchFailed` (`False`): a repair failed, including a conflicting
     concurrent Pod update.
 
   When Pods disagree, the condition reports the most severe reason. A separate
   power-cap controller writes this condition and no other status field. It reacts to
-  changes of the DGD, its worker Pods and its `PodCliqueSet`, retries conflicts and
-  pending owner observations after about 2 seconds, and retries other observation or
-  repair failures after about 10 seconds. These outcomes never change the DGD's
+  changes of the DGD, including this condition, its worker Pods and its
+  `PodCliqueSet`, retries conflicts after about 2 seconds, and retries other
+  observation or repair failures after about 10 seconds. These outcomes never change the DGD's
   `Ready` condition, state, or `observedGeneration`, and DGD workload failures do not
   stop propagation. The condition is removed when the graph leaves this scope. It
   does not prove GPU hardware enforcement.
@@ -526,7 +529,7 @@ Replica information for a single component, keyed by component name in `status.c
 </ParamField>
 
 <ParamField path="gpuPowerLimitWatts" type="integer">
-  Effective per-GPU power limit configured for the component. Omitted when no positive component-level power limit is configured. Minimum `1`.
+  Effective per-GPU power limit configured for the component. After a live cap edit it reports the desired cap while the retained worker templates keep the previous one; the `PowerCapPropagationReady` condition reports whether the running Pods have it. Omitted when no positive component-level power limit is configured. Minimum `1`.
 </ParamField>
 
 <ParamField path="gpusPerEngine" type="integer">

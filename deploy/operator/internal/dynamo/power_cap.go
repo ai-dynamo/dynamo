@@ -5,6 +5,7 @@ package dynamo
 
 import (
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -36,8 +37,10 @@ func LivePowerCapSupport(dgd *v1beta1.DynamoGraphDeployment) (reason string, sup
 	}
 
 	// Preserved v1alpha1 service annotations render into templates outside the component pod-template source.
+	// Sorted names make the admission message deterministic.
 	if alpha := getDGDAlpha(dgd); alpha != nil {
-		for name, service := range alpha.Spec.Services {
+		for _, name := range slices.Sorted(maps.Keys(alpha.Spec.Services)) {
+			service := alpha.Spec.Services[name]
 			if service == nil {
 				continue
 			}

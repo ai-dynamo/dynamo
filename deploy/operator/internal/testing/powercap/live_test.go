@@ -250,6 +250,11 @@ func waitForPowerCaps(t *testing.T, ctx context.Context, c client.Client, dgd *v
 		if current.Annotations[consts.AnnotationCurrentWorkerHashV2] == "" && current.Annotations[consts.AnnotationCurrentWorkerHash] == "" {
 			return false, nil
 		}
+
+		// Preservation checks are meaningful only after the workload controller has processed this generation.
+		if current.Status.ObservedGeneration != current.Generation {
+			return false, nil
+		}
 		condition := meta.FindStatusCondition(current.Status.Conditions, "PowerCapPropagationReady")
 		if condition == nil || condition.Status != metav1.ConditionTrue || condition.ObservedGeneration != current.Generation {
 			return false, nil
