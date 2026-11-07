@@ -199,6 +199,9 @@ async def test_deployment(
             deployment_spec=deployment_spec,
             namespace=namespace,
             skip_service_restart=skip_service_restart,
+            # Below @pytest.mark.timeout(1200), leaving room for the model wait
+            # and cleanup, so a stuck rollout fails with pod diagnostics.
+            readiness_timeout=900,
         ) as deployment:
             # Get frontend pod for port forwarding
             frontend_pods = deployment.get_pods([deployment.frontend_service_name])
@@ -341,7 +344,8 @@ async def test_deployment(
             and any(
                 endpoint.get("targetRef", {}).get("uid") in pod_uids
                 and endpoint.get("conditions", {}).get("ready")
-                for endpoint in item["endpoints"]
+                # The API returns `endpoints: null` for a slice with no endpoints.
+                for endpoint in item["endpoints"] or ()
             )
             for item in snapshots["endpointslices"]
         )
