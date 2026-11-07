@@ -574,6 +574,14 @@ async fn held_tool_call_usage_reaches_client_before_the_call_completes() {
             .map(|event| event.data["usage"]["output_tokens"].as_u64())
             .collect();
         assert_eq!(pings[..3], [Some(2), Some(4), Some(6)]);
+        let outputs: Vec<_> = events
+            .iter()
+            .filter_map(|event| event.data["usage"]["output_tokens"].as_u64())
+            .collect();
+        assert!(
+            outputs.is_sorted(),
+            "flushed fragments never lower the usage a ping published: {outputs:?}"
+        );
         assert_eq!(
             events
                 .iter()

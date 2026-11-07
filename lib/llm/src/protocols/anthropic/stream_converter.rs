@@ -47,6 +47,8 @@ pub struct AnthropicStreamConverter {
     saw_backend_usage: bool,
     // Output tokens of the usage last stamped on the wire; set while serializing.
     published_output_tokens: Cell<u32>,
+    // Usage of the last `ping`; fragment snapshots older than it are stamped with it.
+    pinged_usage: Option<AnthropicUsage>,
     // Tool call tracking
     tool_call_states: Vec<ToolCallState>,
     // The chat completion id, from the first chunk; `tool_use` ids derive from it.
@@ -118,6 +120,7 @@ impl AnthropicStreamConverter {
             },
             saw_backend_usage: false,
             published_output_tokens: Cell::new(0),
+            pinged_usage: None,
             tool_call_states: Vec::new(),
             chat_id: String::new(),
             pending_text: Vec::new(),
@@ -475,6 +478,11 @@ impl AnthropicStreamConverter {
         event: &AnthropicStreamEvent,
         usage: &AnthropicUsage,
     ) -> Result<Event, anyhow::Error> {
+        // Never lower the usage a ping already put on the wire.
+        let usage = match &self.pinged_usage {
+            Some(pinged) if usage.output_tokens < pinged.output_tokens => pinged,
+            _ => usage,
+        };
         if carries_usage(event) {
             self.published_output_tokens.set(usage.output_tokens);
         }
@@ -749,6 +757,7 @@ impl AnthropicStreamConverter {
     pub fn append_usage_ping(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
         if self.usage.output_tokens > self.published_output_tokens.get() + 1 {
             events.push(self.serialize_event("ping", &AnthropicStreamEvent::Ping {}));
+            self.pinged_usage = Some(self.usage.clone());
         }
     }
 
@@ -2813,10 +2822,11 @@ mod tests {
         assert_eq!(
             outputs,
             [
-                ("content_block_delta".to_owned(), 1),
+                ("content_block_delta".to_owned(), 2),
                 ("content_block_delta".to_owned(), 2),
                 ("ping".to_owned(), 5),
-            ]
+            ],
+            "fragments older than the ping never lower the usage on the wire"
         );
     }
 
