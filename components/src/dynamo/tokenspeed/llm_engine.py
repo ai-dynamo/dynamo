@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import logging
@@ -58,6 +59,7 @@ class TokenspeedLLMEngine(LLMEngine):
         self._model_max_len: int | None = None
         self._active_rids_by_context: dict[str, list[str]] = {}
         self._cancelled_contexts: set[str] = set()
+        self._native_steps: dict[str, asyncio.Future] = {}
 
     @classmethod
     async def from_args(
@@ -167,6 +169,14 @@ class TokenspeedLLMEngine(LLMEngine):
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
+        """Stream one request's token deltas from TokenSpeed.
+
+        Each native step is awaited as a task that ``abort()`` can cancel, so an
+        aborted request ends with a ``cancelled`` terminal chunk even though
+        TokenSpeed never ends its own stream after ``abort_request``. The native
+        stream is closed on every exit path, which sends ``AbortReq`` for a
+        request whose Dynamo stream is dropped without an abort.
+        """
         if self.engine is None:
             raise RuntimeError("Engine not initialized")
         normalize_request_token_ids(request)
@@ -202,22 +212,54 @@ class TokenspeedLLMEngine(LLMEngine):
                     "token_ids": [],
                     "disaggregated_params": request.get("bootstrap_info") or bootstrap,
                 }
-            # Native abort_request ignores unknown RIDs. An abort while the
-            # handoff was yielded must therefore prevent native submission.
-            if request_id is not None and request_id in self._cancelled_contexts:
-                yield {"token_ids": [], "finish_reason": "cancelled"}
-                return
-            async for out in self.engine.tokenizer_manager.generate_request(obj):
-                delta_out, emitted_completion_tokens = _completion_delta_output(
-                    out, emitted_completion_tokens
-                )
-                yield convert_output_to_chunk(delta_out)
+            native = self.engine.tokenizer_manager.generate_request(obj)
+            try:
+                while True:
+                    # Native abort_request ignores unknown RIDs. An abort while
+                    # the handoff was yielded must therefore prevent native
+                    # submission. For a submitted request, abort_request drops
+                    # the native state without waking its waiter, so the native
+                    # stream never ends: stop here instead.
+                    if (
+                        request_id is not None
+                        and request_id in self._cancelled_contexts
+                    ):
+                        yield {"token_ids": [], "finish_reason": "cancelled"}
+                        return
+                    # Await each native step as a task abort() can cancel.
+                    step = asyncio.ensure_future(anext(native))
+                    if request_id is not None:
+                        self._native_steps[request_id] = step
+                    try:
+                        out = await step
+                    except StopAsyncIteration:
+                        return
+                    except asyncio.CancelledError:
+                        # Only the step was cancelled (by abort()), not us.
+                        if asyncio.current_task().cancelling():
+                            raise
+                        yield {"token_ids": [], "finish_reason": "cancelled"}
+                        return
+                    delta_out, emitted_completion_tokens = _completion_delta_output(
+                        out, emitted_completion_tokens
+                    )
+                    yield convert_output_to_chunk(delta_out)
+            finally:
+                # Sends AbortReq if the native request is still running, e.g.
+                # when the Dynamo stream is dropped without an abort.
+                await native.aclose()
         finally:
             if request_id is not None:
                 self._active_rids_by_context.pop(request_id, None)
                 self._cancelled_contexts.discard(request_id)
+                self._native_steps.pop(request_id, None)
 
     async def abort(self, context: Context) -> None:
+        """Abort the request on TokenSpeed and end its ``generate()`` stream.
+
+        ``abort_request`` drops TokenSpeed's request state without waking the
+        coroutine waiting on it, so the pending native step is cancelled here.
+        """
         request_id = context.id()
         if self.engine is None or request_id is None:
             return
@@ -228,6 +270,11 @@ class TokenspeedLLMEngine(LLMEngine):
         for rid in rids:
             self.engine.tokenizer_manager.abort_request(rid)
             logger.debug("Aborted TokenSpeed request %s", rid)
+        # Nothing wakes the native waiter after abort_request; cancel the
+        # pending step so generate() can emit its cancelled terminal.
+        step = self._native_steps.get(request_id)
+        if step is not None:
+            step.cancel()
 
     async def cleanup(self) -> None:
         engine, self.engine = self.engine, None
