@@ -126,6 +126,14 @@ The SGLang wrapper selects a worker role from these flags and the native `--disa
   Environment variable: `DYN_SGL_FRONTEND_DECODING`
 </ParamField>
 
+## Decision Scoring
+
+<ParamField path="--systemone-serial" type="boolean" default="false">
+  Advertise the serialized decision-scoring profile so a frontend started with `--enable-systemone-api` can send `/v1/decisions` and `/v1/systemone` requests to this worker. The worker must also be aggregated, use `--max-running-requests 1` and `--disable-overlap-schedule`, run one DP rank and one pipeline stage, have no speculative decoding, dLLM decoding, or priority preemption, not use `--use-sglang-tokenizer`, and use a qualified SGLang version; otherwise it logs a warning and does not advertise the profile. Advertising the profile changes the worker's model checksum, so it only groups with other opted-in workers. See [Decision API Workers](../../cli/model-deployment/introduction.mdx#decision-api-workers).
+
+  Environment variable: `DYN_SGL_SYSTEMONE_SERIAL`
+</ParamField>
+
 ## Tracing
 
 <ParamField path="--sglang-trace-level" type="integer" default="2">

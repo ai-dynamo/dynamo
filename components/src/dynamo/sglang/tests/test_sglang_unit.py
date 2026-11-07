@@ -136,6 +136,22 @@ def test_freeze_gc_after_init_is_opt_in(monkeypatch):
     ).freeze_gc_after_init
 
 
+def test_systemone_serial_is_opt_in(monkeypatch):
+    monkeypatch.delenv("DYN_SGL_SYSTEMONE_SERIAL", raising=False)
+    parser = argparse.ArgumentParser()
+    DynamoSGLangArgGroup().add_arguments(parser)
+
+    assert not DynamoSGLangConfig.from_cli_args(parser.parse_args([])).systemone_serial
+    assert DynamoSGLangConfig.from_cli_args(
+        parser.parse_args(["--systemone-serial"])
+    ).systemone_serial
+
+    monkeypatch.setenv("DYN_SGL_SYSTEMONE_SERIAL", "1")
+    env_parser = argparse.ArgumentParser()
+    DynamoSGLangArgGroup().add_arguments(env_parser)
+    assert DynamoSGLangConfig.from_cli_args(env_parser.parse_args([])).systemone_serial
+
+
 @pytest.mark.parametrize(
     "mode, role_flags, supported",
     [
@@ -2161,16 +2177,19 @@ def test_systemone_serial_profile_covers_pinned_sglang_version(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("serial", "installed"),
+    ("serial", "opt_in", "installed", "sglang_tokenizer"),
     [
-        (False, "0.5.19"),
-        (True, "0.5.19"),
-        (True, "0.5.22+cu130"),
-        (True, "0.5.23"),
+        (False, False, "0.5.19", False),
+        (False, True, "0.5.19", False),
+        (True, False, "0.5.19", False),
+        (True, True, "0.5.19", False),
+        (True, True, "0.5.22+cu130", False),
+        (True, True, "0.5.23", False),
+        (True, True, "0.5.22+cu130", True),
     ],
 )
 async def test_systemone_serial_capability_published_only_when_isolated(
-    monkeypatch, caplog, serial, installed
+    monkeypatch, caplog, serial, opt_in, installed, sglang_tokenizer
 ):
     if sglang_register is None:
         pytest.skip("dynamo.sglang.register is unavailable")
@@ -2198,7 +2217,10 @@ async def test_systemone_serial_capability_published_only_when_isolated(
         speculative_algorithm=None,
     )
     dynamo_args = SimpleNamespace(
-        use_sglang_tokenizer=False, custom_jinja_template=None, model_source_uri=None
+        use_sglang_tokenizer=sglang_tokenizer,
+        custom_jinja_template=None,
+        model_source_uri=None,
+        systemone_serial=opt_in,
     )
     with caplog.at_level(logging.INFO):
         assert await sglang_register._register_model_with_runtime_config(
@@ -2208,10 +2230,18 @@ async def test_systemone_serial_capability_published_only_when_isolated(
             dynamo_args=dynamo_args,
             worker_type=sglang_register.WorkerType.Aggregated,
         )
-    assert published["sglang_generate"] == "true"
-    assert published.get("sglang_systemone_serial_v1") == ("true" if serial else None)
-    assert ("including chat and completions" in caplog.text) is serial
-    if serial:
+    # An eligible worker keeps its legacy checksum cohort unless it opts in.
+    # The SGLang tokenizer makes the worker text-input, so it is ineligible.
+    published_serial = serial and opt_in and not sglang_tokenizer
+    assert published.get("sglang_generate") == (None if sglang_tokenizer else "true")
+    assert published.get("sglang_systemone_serial_v1") == (
+        "true" if published_serial else None
+    )
+    assert ("including chat and completions" in caplog.text) is published_serial
+    assert ("--systemone-serial is ignored" in caplog.text) is (
+        opt_in and not published_serial
+    )
+    if published_serial:
         assert f"Published SGLang {installed} System One capability" in caplog.text
         assert "separate served-model name or namespace-scoped frontend" in caplog.text
 
@@ -2348,6 +2378,7 @@ async def test_register_model_preserves_source_with_sglang_modelexpress(
         use_sglang_tokenizer=False,
         frontend_decoding=False,
         custom_jinja_template=None,
+        systemone_serial=False,
     )
 
     result = await sglang_register._register_model_with_runtime_config(
@@ -2400,6 +2431,7 @@ async def test_register_model_uses_engine_managed_path_for_runai_object_storage(
         use_sglang_tokenizer=False,
         frontend_decoding=False,
         custom_jinja_template=None,
+        systemone_serial=False,
     )
     engine = SimpleNamespace(
         tokenizer_manager=SimpleNamespace(

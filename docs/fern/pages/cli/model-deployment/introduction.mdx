@@ -191,10 +191,13 @@ python -m dynamo.sglang \
   --tp 1 --dp-size 1 --pp-size 1 \
   --max-running-requests 1 --disable-overlap-schedule \
   --context-length 2048 --max-total-tokens 2048 \
-  --disable-piecewise-cuda-graph
+  --disable-piecewise-cuda-graph \
+  --systemone-serial
 ```
 
-Do not enable speculative decoding, attention data parallelism, pipeline parallelism, or priority preemption. Wait for the worker's `Published SGLang ... System One capability` message. An otherwise eligible worker running an unsupported version logs a warning and does not advertise decision scoring.
+The worker advertises decision scoring only when started with `--systemone-serial` (or `DYN_SGL_SYSTEMONE_SERIAL=1`). Existing decision deployments must add this flag when they upgrade; without it, the frontend finds no decision worker. The profile is part of the model checksum, so an eligible serial worker that does not set the flag stops advertising the profile and gets a different checksum than releases that advertised it automatically.
+
+Do not enable speculative decoding, dLLM decoding, attention data parallelism, pipeline parallelism, priority preemption, or `--use-sglang-tokenizer`. Wait for the worker's `Published SGLang ... System One capability` message. An opted-in worker with an ineligible configuration or an unsupported version logs a warning and does not advertise decision scoring.
 
 <Warning>
 The entire worker is serialized, including ordinary chat and completion requests. Keep decision workers separate from throughput-oriented chat deployments. This small-model configuration verifies integration; it does not qualify larger checkpoints or establish task accuracy.
