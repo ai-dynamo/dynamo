@@ -223,9 +223,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// preserves the implicit multinode role layout.
 	//
 	// LPX components each require an agent role. A DGD may contain independent
-	// LPX components, each with its own conductor role, or a shared draft and
-	// target pair with a conductor role only on the target. Every LPX role
-	// requires its own podTemplate.
+	// LPX components, each serving through its own conductor role or agent
+	// runtime init container, or a draft and target pair in which only the
+	// target serves. Every LPX role requires its own podTemplate.
 	// +optional
 	// +kubebuilder:validation:MaxItems=2
 	// +listType=map
