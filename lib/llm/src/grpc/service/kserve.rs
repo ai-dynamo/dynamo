@@ -71,7 +71,10 @@ use crate::grpc::service::tensor::{
     ExtendedNvCreateTensorResponse, kserve_metadata_shape, tensor_response_stream,
 };
 use std::convert::{TryFrom, TryInto};
-use tonic::{Request, Response, Status, transport::Server};
+use tonic::{
+    Request, Response, Status,
+    transport::{Server, server::TcpIncoming},
+};
 
 use crate::protocols::openai::completions::{
     NvCreateCompletionRequest, NvCreateCompletionResponse,
@@ -230,10 +233,55 @@ impl KserveService {
         tokio::spawn(async move { this.run(cancel_token).await })
     }
 
+    /// Like [`spawn`](Self::spawn), but serves on a caller-provided pre-bound listener
+    /// instead of binding `{host}:{port}` internally.
+    pub async fn spawn_with_listener(
+        &self,
+        cancel_token: CancellationToken,
+        listener: tokio::net::TcpListener,
+    ) -> JoinHandle<Result<()>> {
+        let this = self.clone();
+        tokio::spawn(async move { this.run_with_listener(cancel_token, listener).await })
+    }
+
     pub async fn run(&self, cancel_token: CancellationToken) -> Result<()> {
         let address = format!("{}:{}", self.host, self.port);
         tracing::info!(address, "Starting KServe gRPC service on: {address}");
 
+        let observer = cancel_token.child_token();
+        self.server_builder()
+            .add_service(GrpcInferenceServiceServer::new(self.clone()))
+            .serve_with_shutdown(address.parse()?, observer.cancelled_owned())
+            .await
+            .inspect_err(|_| cancel_token.cancel())?;
+
+        Ok(())
+    }
+
+    /// Like [`run`](Self::run), but serves on a caller-provided pre-bound listener.
+    pub async fn run_with_listener(
+        &self,
+        cancel_token: CancellationToken,
+        listener: tokio::net::TcpListener,
+    ) -> Result<()> {
+        let address = listener.local_addr()?;
+        tracing::info!(%address, "Starting KServe gRPC service on: {address}");
+
+        let observer = cancel_token.child_token();
+        self.server_builder()
+            .add_service(GrpcInferenceServiceServer::new(self.clone()))
+            // Match the TCP_NODELAY default that `serve_with_shutdown` applies.
+            .serve_with_incoming_shutdown(
+                TcpIncoming::from(listener).with_nodelay(Some(true)),
+                observer.cancelled_owned(),
+            )
+            .await
+            .inspect_err(|_| cancel_token.cancel())?;
+
+        Ok(())
+    }
+
+    fn server_builder(&self) -> Server {
         let tuning = &self.grpc_tuning;
 
         // Log tuning settings if configured via environment variables
@@ -247,25 +295,15 @@ impl KserveService {
             );
         }
 
-        let observer = cancel_token.child_token();
-
-        // Build server - only override window sizes if set via env vars
+        // Only override window sizes if set via env vars
         let mut builder = Server::builder();
-
         if let Some(size) = tuning.initial_connection_window_size {
             builder = builder.initial_connection_window_size(size);
         }
         if let Some(size) = tuning.initial_stream_window_size {
             builder = builder.initial_stream_window_size(size);
         }
-
         builder
-            .add_service(GrpcInferenceServiceServer::new(self.clone()))
-            .serve_with_shutdown(address.parse()?, observer.cancelled_owned())
-            .await
-            .inspect_err(|_| cancel_token.cancel())?;
-
-        Ok(())
     }
 }
 

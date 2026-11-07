@@ -60,7 +60,7 @@ pub mod kserve_test {
     use tokio::time::timeout;
     use tonic::{Request, Response, transport::Channel};
 
-    use crate::ports::{bind_random_port, get_random_port};
+    use crate::ports::bind_random_port;
     use dynamo_protocols::types::Prompt;
     use prost::Message;
 
@@ -1930,7 +1930,7 @@ pub mod kserve_test {
 
     #[tokio::test]
     async fn test_kserve_grpc_metrics_endpoint() {
-        let grpc_port = get_random_port().await;
+        let (grpc_listener, grpc_port) = bind_random_port().await;
         let (http_metrics_listener, http_metrics_port) = bind_random_port().await;
 
         let service = KserveService::builder()
@@ -1984,7 +1984,9 @@ pub mod kserve_test {
 
         // Start services
         let cancel_token = CancellationToken::new();
-        let grpc_task = service.spawn(cancel_token.clone()).await;
+        let grpc_task = service
+            .spawn_with_listener(cancel_token.clone(), grpc_listener)
+            .await;
         let http_task = service
             .http_service()
             .spawn_with_listener(cancel_token.clone(), http_metrics_listener)
