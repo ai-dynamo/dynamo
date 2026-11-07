@@ -1352,7 +1352,7 @@ data:
             {
               "editorMode": "code",
               "expr": "DCGM_FI_DEV_GPU_UTIL",
-              "legendFormat": "GPU {{gpu}} - {{Hostname}}",
+              "legendFormat": "GPU {{gpu}} - {{hostname}}{{Hostname}}",
               "range": true,
               "refId": "A"
             }
@@ -1455,7 +1455,7 @@ data:
             {
               "editorMode": "code",
               "expr": "DCGM_FI_DEV_MEM_COPY_UTIL",
-              "legendFormat": "GPU {{gpu}} - {{Hostname}}",
+              "legendFormat": "GPU {{gpu}} - {{hostname}}{{Hostname}}",
               "range": true,
               "refId": "A"
             }
@@ -1547,7 +1547,7 @@ data:
             {
               "editorMode": "code",
               "expr": "DCGM_FI_DEV_FB_USED / 1024",
-              "legendFormat": "GPU {{gpu}} - {{Hostname}}",
+              "legendFormat": "GPU {{gpu}} - {{hostname}}{{Hostname}}",
               "range": true,
               "refId": "A"
             }
@@ -2033,7 +2033,7 @@ data:
                 "uid": "${datasource}"
               },
               "expr": "(DCGM_FI_PROF_NVLINK_TX_BYTES + DCGM_FI_PROF_NVLINK_RX_BYTES) / 1e9",
-              "legendFormat": "GPU {{gpu}} - {{Hostname}}",
+              "legendFormat": "GPU {{gpu}} - {{hostname}}{{Hostname}}",
               "refId": "A"
             }
           ],
