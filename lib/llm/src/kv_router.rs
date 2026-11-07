@@ -1316,6 +1316,7 @@ impl KvRouter {
             allowed_worker_ids,
             routing_constraints,
             FindBestMatchAdmission::WithAdmission,
+            false,
         )
         .await
     }
@@ -1341,6 +1342,7 @@ impl KvRouter {
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
         admission: FindBestMatchAdmission,
+        needs_uncached_prefill: bool,
     ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         let start = Instant::now();
         if update_states && context_id.is_none() {
@@ -1371,35 +1373,38 @@ impl KvRouter {
             lookup,
         } = self
             .selection
-            .run_selection(SelectionOperation {
-                key: self.selection.partition_key().clone(),
-                prompt: PromptView {
-                    token_ids: Some(tokens),
-                    mm_routing_info: None,
-                    block_mm_infos,
-                    block_hashes: None,
-                    sequence_hashes: None,
-                    isl_tokens: None,
-                    lora_name: lora_name.as_deref(),
-                    cache_namespace: cache_namespace.as_deref(),
-                    is_eagle: Some(self.is_eagle),
+            .run_selection(
+                SelectionOperation {
+                    key: self.selection.partition_key().clone(),
+                    prompt: PromptView {
+                        token_ids: Some(tokens),
+                        mm_routing_info: None,
+                        block_mm_infos,
+                        block_hashes: None,
+                        sequence_hashes: None,
+                        isl_tokens: None,
+                        lora_name: lora_name.as_deref(),
+                        cache_namespace: cache_namespace.as_deref(),
+                        is_eagle: Some(self.is_eagle),
+                    },
+                    router_config_override: router_config_override.cloned(),
+                    expected_output_tokens,
+                    priority_jump,
+                    strict_priority,
+                    policy_class,
+                    session_context,
+                    session: SessionBinding::None,
+                    affinity_target,
+                    pinned_worker,
+                    allowed_worker_ids,
+                    routing_constraints,
+                    admission: core_admission,
+                    track_active_blocks: self.kv_router_config.router_track_active_blocks,
+                    return_routing_hashes: return_routing_hashes || session_index_context.is_some(),
+                    replay_id: None,
                 },
-                router_config_override: router_config_override.cloned(),
-                expected_output_tokens,
-                priority_jump,
-                strict_priority,
-                policy_class,
-                session_context,
-                session: SessionBinding::None,
-                affinity_target,
-                pinned_worker,
-                allowed_worker_ids,
-                routing_constraints,
-                admission: core_admission,
-                track_active_blocks: self.kv_router_config.router_track_active_blocks,
-                return_routing_hashes: return_routing_hashes || session_index_context.is_some(),
-                replay_id: None,
-            })
+                !needs_uncached_prefill,
+            )
             .await;
         if lookup.is_some_and(|lookup| lookup.shared_cache_error)
             && let Some(m) = metrics::RoutingOverheadMetrics::get()
@@ -2797,6 +2802,7 @@ mod tests {
                     None,
                     RoutingConstraints::default(),
                     admission,
+                    false,
                 )
                 .await
                 .unwrap();
@@ -2982,6 +2988,7 @@ mod tests {
                     None,
                     RoutingConstraints::default(),
                     FindBestMatchAdmission::WithAdmission,
+                    false,
                 )
                 .await
                 .unwrap();
@@ -3130,6 +3137,7 @@ mod tests {
                 None,
                 RoutingConstraints::default(),
                 FindBestMatchAdmission::WithAdmission,
+                false,
             )
             .await
             .unwrap();
