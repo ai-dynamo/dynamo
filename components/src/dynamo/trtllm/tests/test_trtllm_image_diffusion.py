@@ -748,12 +748,70 @@ class TestImageHandlerResponseFormats:
         assert len(results[0]["data"]) == 1
         assert mock_upload.call_count == 1
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "nvext, ran_steps",
+        [({"num_inference_steps": 30}, 30), (None, 12)],
+        ids=["request-steps", "config-default-steps"],
+    )
+    async def test_generate_reports_image_accounting_not_token_usage(
+        self, tmp_path, nvext, ran_steps
+    ):
+        """nvext.usage counts the images actually returned (the engine
+        short-changes n=2 with one image), no input images, and the step count
+        passed to the engine; the response carries no token usage."""
+        handler = self._make_handler(
+            tmp_path,
+            engine_output_batch=1,
+            default_num_inference_steps=12,
+        )
+
+        request = {
+            "prompt": "a test image",
+            "model": "test-model",
+            "n": 2,
+            "response_format": "b64_json",
+        }
+        if nvext is not None:
+            request["nvext"] = nvext
+
+        with patch(
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            return_value=b"fake_image_bytes",
+        ):
+            results = [r async for r in handler.generate(request, MagicMock())]
+
+        assert len(results) == 1
+        response = results[0]
+        assert len(response["data"]) == 1
+        assert "usage" not in response
+        assert response["nvext"] == {
+            "usage": {
+                "output_images": 1,
+                "input_images": 0,
+                "num_inference_steps": ran_steps,
+            }
+        }
+        assert (
+            handler.engine.generate.call_args.kwargs["num_inference_steps"] == ran_steps
+        )
+
     @pytest.mark.parametrize("default", [0, 11])
     def test_config_rejects_default_num_images_out_of_range(self, default):
         """The default used when a request omits `n` obeys the same [1, 10]
         rule as `n` itself."""
         with pytest.raises(ValueError, match="default_num_images_per_prompt"):
             DiffusionConfig(default_num_images_per_prompt=default)
+
+    @pytest.mark.parametrize("default", [0, 256])
+    def test_handler_rejects_default_num_inference_steps_out_of_range(
+        self, tmp_path, default
+    ):
+        """The step count the handler reports must fit the frontend's u8
+        field, so a default outside [1, 255] fails at startup, not after a
+        finished generation."""
+        with pytest.raises(ValueError, match="default_num_inference_steps"):
+            self._make_handler(tmp_path, default_num_inference_steps=default)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("n", [0, -1, 11, 100])
