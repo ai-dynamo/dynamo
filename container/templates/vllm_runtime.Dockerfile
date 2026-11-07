@@ -616,28 +616,45 @@ for package, expected in zip(("transformers", "tokenizers"), sys.argv[1:]):
 PY
 
 {% endif -%}
+# vLLM 0.32.0's vllm-rs omits VLLM_USE_RUST_FRONTEND for its engine, so VL models normalize
+# images twice and see black. Drop the export once pinned vLLM has vllm-project/vllm#61586.
 {% if device == "cuda" %}
 # Omni's soxr dependency is only needed for unsupported Breeze voice cloning.
 RUN python3 -m pip uninstall --yes soxr
 
-RUN vllm-rs --help >/dev/null
+# /usr/local/bin/vllm-rs is a symlink to the packaged binary; remove it first so
+# the redirect does not overwrite the binary.
+RUN set -eu; \
+    pkg="$(python3 -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
+    rm -f /usr/local/bin/vllm-rs; \
+    printf '%s\n' \
+        '#!/bin/sh' \
+        'VLLM_USE_RUST_FRONTEND="${VLLM_USE_RUST_FRONTEND-1}"' \
+        'export VLLM_USE_RUST_FRONTEND' \
+        "exec \"${pkg}/vllm-rs\" \"\$@\"" \
+        > /usr/local/bin/vllm-rs; \
+    chmod 755 /usr/local/bin/vllm-rs; \
+    vllm-rs --help >/dev/null
 {% else %}
 # Use the packaged binary to match the installed vLLM version.
 RUN set -eu; \
     pkg="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
     if [ -f "${pkg}/vllm-rs" ] && [ -x "${pkg}/vllm-rs" ]; then \
-        if [ "{{ vllm_rs_allowlist }}" = "1" ]; then \
+        rm -f {{ vllm_rs_link }}; \
+        { \
+            printf '%s\n' '#!/bin/sh'; \
+            if [ "{{ vllm_rs_allowlist }}" = "1" ]; then \
+                printf '%s\n' \
+                    '# Keep Omni from changing the EngineCore output schema.' \
+                    'VLLM_PLUGINS="${VLLM_PLUGINS-{{ vllm_rs_plugins }}}"' \
+                    'export VLLM_PLUGINS'; \
+            fi; \
             printf '%s\n' \
-                '#!/bin/sh' \
-                '# Keep Omni from changing the EngineCore output schema.' \
-                'VLLM_PLUGINS="${VLLM_PLUGINS-{{ vllm_rs_plugins }}}"' \
-                'export VLLM_PLUGINS' \
-                "exec \"${pkg}/vllm-rs\" \"\$@\"" \
-                > {{ vllm_rs_link }}; \
-            chmod 755 {{ vllm_rs_link }}; \
-        else \
-            ln -sf "${pkg}/vllm-rs" {{ vllm_rs_link }}; \
-        fi; \
+                'VLLM_USE_RUST_FRONTEND="${VLLM_USE_RUST_FRONTEND-1}"' \
+                'export VLLM_USE_RUST_FRONTEND' \
+                "exec \"${pkg}/vllm-rs\" \"\$@\""; \
+        } > {{ vllm_rs_link }}; \
+        chmod 755 {{ vllm_rs_link }}; \
         vllm-rs --help >/dev/null; \
     else \
         echo "WARNING: installed vllm package (${pkg}) ships no executable vllm-rs; not putting it onto PATH" >&2; \
