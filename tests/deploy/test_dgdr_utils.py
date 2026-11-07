@@ -3,6 +3,7 @@
 
 """Unit tests for DynamoGraphDeploymentRequest lifecycle helpers."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -340,6 +341,26 @@ async def test_wait_for_phase_survives_tunnel_outage_longer_than_15s(
     assert manager.get.await_count == 6
     assert sleep.await_count == 5
     assert all(call.args == (5,) for call in sleep.await_args_list)
+
+
+@pytest.mark.timeout(30)
+async def test_wait_for_phase_stops_connection_retries_at_phase_timeout(
+    monkeypatch,
+) -> None:
+    manager = initialized_manager()
+    manager.get = AsyncMock(side_effect=vcluster_connection_error())
+    real_sleep = asyncio.sleep
+
+    # Twelve 0.05 s retry sleeps take longer than the 0.25 s phase timeout.
+    async def short_sleep(_delay: float) -> None:
+        await real_sleep(0.05)
+
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", short_sleep)
+
+    with pytest.raises(TimeoutError, match="Timed out after 0.25s"):
+        await manager.wait_for_phase("request", "Ready", timeout=0.25)
+
+    assert manager.get.await_count < VCLUSTER_CONNECTION_RETRY_LIMIT + 1
 
 
 async def test_get_output_dgd_retries_vcluster_connection_refusal(
