@@ -12,8 +12,6 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
-import time
 from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
@@ -28,18 +26,21 @@ from kubernetes_asyncio.client.exceptions import ApiException
 from tests.deploy.api_checks import check_chat_api, check_embedding_api
 from tests.deploy.conftest import DeploymentTarget
 from tests.deploy.dgd_utils import (
+    _KR8S_VCLUSTER_CONNECTION_ERRORS,
     DEFAULT_MAX_TOKENS,
     DEFAULT_REQUEST_TIMEOUT,
     DEFAULT_TEMPERATURE,
-    MIN_RESPONSE_CONTENT_LENGTH,
     TEST_PROMPT,
     DeploymentSpec,
     ManagedDeployment,
     _get_workspace_dir,
+    kubectl,
     validate_chat_response,
 )
+from tests.deploy.vcluster_utils import retry_vcluster_api
 from tests.utils.client import send_request, wait_for_model_availability
 from tests.utils.output_paths import resolve_test_output_path
+from tests.utils.router_nvext import require_router_worker_id, router_nvext_extra_body
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ JSON_LOG_REQUIRED_FIELDS = frozenset({"time", "level", "target", "message"})
 # The install script deploys the Gateway into agentgateway-system; the
 # controller provisions the proxy Service in that same namespace.
 GAIE_AGW_NAMESPACE = "agentgateway-system"
+GAIE_GATEWAY_PORT = 80
 
 
 def normalize_log_lines(log_lines: Any) -> list[str]:
@@ -374,101 +376,123 @@ async def test_deployment(
 @pytest.mark.deploy
 @pytest.mark.post_merge
 @pytest.mark.e2e
-@pytest.mark.timeout(900)
+@pytest.mark.timeout(600)
+@pytest.mark.parametrize(
+    "backend,manifest,workers",
+    [
+        pytest.param("vllm", "agg.yaml", ("worker",), id="vllm-agg"),
+        pytest.param("vllm", "disagg.yaml", ("prefill", "decode"), id="vllm-disagg"),
+        pytest.param("sglang", "agg.yaml", ("worker",), id="sglang-agg"),
+        pytest.param("trtllm", "agg.yaml", ("worker",), id="trtllm-agg"),
+    ],
+)
 async def test_gaie_deployment(
-    image: str,
+    backend: str,
+    manifest: str,
+    workers: tuple[str, ...],
     namespace: str,
     skip_service_restart: bool,
     request,
 ) -> None:
-    """Test GAIE disaggregated deployment with vLLM workers.
+    """Test a backend's GAIE example through the Gateway, with mocker workers.
 
-    Applies the GAIE DynamoGraphDeployment (with CI-built images) and the
-    companion HTTPRoute, then verifies inference works end-to-end through
-    the full Gateway path.
+    Deploys the example's EPP and workers with frontend sidecars, each engine
+    replaced by a mocker of that engine from the frontend image, so the test
+    needs no GPU and no ``--image``. Applies an HTTPRoute to the generated
+    InferencePool, sends a chat completion through the Gateway, and checks
+    which workers served it.
     """
     frontend_image = request.config.getoption("--frontend-image")
-    worker_image = image
 
     assert frontend_image, "--frontend-image is required for GAIE deploy test"
-    assert worker_image, "--image is required for GAIE deploy test"
     assert namespace, "--namespace is required for GAIE deploy test"
 
     workspace = _get_workspace_dir()
-    gaie_dir = os.path.join(workspace, "examples", "backends", "vllm", "deploy", "gaie")
-    disagg_path = os.path.join(gaie_dir, "disagg.yaml")
-    httproute_path = os.path.join(gaie_dir, "http-route.yaml")
+    examples_dir = os.path.join(workspace, "examples", "backends")
+    manifest_path = os.path.join(examples_dir, backend, "deploy", "gaie", manifest)
+    # The route has nothing backend-specific, so every case uses the vLLM one.
+    httproute_path = os.path.join(
+        examples_dir, "vllm", "deploy", "gaie", "http-route.yaml"
+    )
 
-    assert os.path.exists(disagg_path), f"disagg.yaml not found: {disagg_path}"
+    assert os.path.exists(manifest_path), f"GAIE manifest not found: {manifest_path}"
     assert os.path.exists(
         httproute_path
     ), f"http-route.yaml not found: {httproute_path}"
 
-    deployment_spec = DeploymentSpec(disagg_path)
+    deployment_spec = DeploymentSpec(manifest_path)
     deployment_spec.namespace = namespace
+    # A name per case keeps one case's teardown from racing the next, and the
+    # prefix keeps it apart from the DGDs of the same name (vllm-agg,
+    # sglang-agg, trtllm-agg) that the backend deploy lanes run in the same
+    # namespace at the same time.
+    deployment_spec.name = f"gaie-{request.node.callspec.id}"
 
     logger.info(f"Frontend image: {frontend_image}")
-    logger.info(f"Worker image: {worker_image}")
 
     deployment_spec.set_image(frontend_image, service_name="Epp")
-    for worker in ("prefill", "decode"):
-        deployment_spec.set_image(worker_image, service_name=worker)
+    # The SGLang example's EPP names a larger model than the mockers serve.
+    deployment_spec.set_service_env_var("Epp", "DYN_MODEL_NAME", GAIE_MODEL_NAME)
+    for worker in workers:
+        deployment_spec[worker].use_mocker(frontend_image, GAIE_MODEL_NAME)
         deployment_spec.set_frontend_sidecar_image(frontend_image, service_name=worker)
 
-    route_hostname = f"{namespace}.example.com"
+    # Name the route and its host after the DGD, so no two cases' routes
+    # overlap on the shared Gateway.
+    route_hostname = f"{deployment_spec.name}.{namespace}.example.com"
     logger.info(f"HTTPRoute hostname: {route_hostname}")
 
     with open(httproute_path) as f:
         httproute_spec = yaml.safe_load(f)
+    httproute_spec["metadata"]["name"] = f"{deployment_spec.name}-route"
     httproute_spec["spec"]["hostnames"] = [route_hostname]
+    # The operator names the InferencePool <DGD name>-pool.
+    pool_ref = httproute_spec["spec"]["rules"][0]["backendRefs"][0]
+    pool_ref["name"] = f"{deployment_spec.name}-pool"
     httproute_yaml = yaml.safe_dump(httproute_spec)
 
+    def kubectl_httproute(verb: str, *flags: str) -> None:
+        """Run ``kubectl <verb>`` on the HTTPRoute, retrying if the tunnel drops."""
+
+        def run() -> None:
+            result = kubectl(
+                verb, *flags, "-n", namespace, "-f", "-", input_=httproute_yaml
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"kubectl {verb} failed: {result.stderr}")
+            logger.info(f"HTTPRoute {verb}: {result.stdout.strip()}")
+
+        retry_vcluster_api(
+            f"running kubectl {verb} on the HTTPRoute", run, (RuntimeError,), logger
+        )
+
+    def delete_httproute() -> None:
+        """Delete the HTTPRoute, which deleting the DGD leaves on the Gateway."""
+        try:
+            kubectl_httproute("delete", "--ignore-not-found")
+        except RuntimeError as error:
+            logger.warning(f"Failed to delete HTTPRoute: {error}")
+
     logger.info("Applying GAIE HTTPRoute...")
-    result = subprocess.run(
-        ["kubectl", "apply", "-n", namespace, "-f", "-"],
-        input=httproute_yaml,
-        capture_output=True,
-        text=True,
-    )
-    logger.info(f"HTTPRoute apply stdout: {result.stdout}")
-    if result.stderr:
-        logger.warning(f"HTTPRoute apply stderr: {result.stderr}")
-    assert result.returncode == 0, f"Failed to apply HTTPRoute: {result.stderr}"
+    request.addfinalizer(delete_httproute)
+    kubectl_httproute("apply")
 
     # Debug: verify namespace state before creating DGD
     logger.info(f"Namespace: {namespace}")
-    ns_check = subprocess.run(
-        ["kubectl", "get", "namespace", namespace],
-        capture_output=True,
-        text=True,
-    )
+    ns_check = kubectl("get", "namespace", namespace)
     logger.info(f"Namespace check: {ns_check.stdout.strip()}")
     if ns_check.returncode != 0:
         logger.error(f"Namespace not found: {ns_check.stderr}")
 
     # Debug: check if operator CRD is registered
-    crd_check = subprocess.run(
-        ["kubectl", "get", "crd", "dynamographdeployments.nvidia.com"],
-        capture_output=True,
-        text=True,
-    )
+    crd_check = kubectl("get", "crd", "dynamographdeployments.nvidia.com")
     logger.info(f"CRD check: {crd_check.stdout.strip()}")
     if crd_check.returncode != 0:
         logger.error(f"CRD not found: {crd_check.stderr}")
 
     # Debug: check operator pod status
-    operator_check = subprocess.run(
-        [
-            "kubectl",
-            "get",
-            "pods",
-            "-n",
-            namespace,
-            "-l",
-            "app.kubernetes.io/name=dynamo-operator",
-        ],
-        capture_output=True,
-        text=True,
+    operator_check = kubectl(
+        "get", "pods", "-n", namespace, "-l", "app.kubernetes.io/name=dynamo-operator"
     )
     logger.info(f"Operator pods: {operator_check.stdout.strip()}")
 
@@ -483,20 +507,16 @@ async def test_gaie_deployment(
         namespace=namespace,
         skip_service_restart=skip_service_restart,
         frontend_service_name="Epp",
+        # Half the test's timeout, so a stuck rollout fails with pod status.
+        readiness_timeout=300,
+        # A crash-looping EPP or mocker fails the case instead of waiting it out.
+        fail_fast_startup=True,
     ) as deployment:
         # Debug: check what DGDs exist after creation
-        dgd_check = subprocess.run(
-            ["kubectl", "get", "dynamographdeployments", "-n", namespace],
-            capture_output=True,
-            text=True,
-        )
+        dgd_check = kubectl("get", "dynamographdeployments", "-n", namespace)
         logger.info(f"DGDs after creation: {dgd_check.stdout.strip()}")
 
-        pod_check = subprocess.run(
-            ["kubectl", "get", "pods", "-n", namespace, "-o", "wide"],
-            capture_output=True,
-            text=True,
-        )
+        pod_check = kubectl("get", "pods", "-n", namespace, "-o", "wide")
         logger.info(f"Pods after creation: {pod_check.stdout.strip()}")
         epp_pods = deployment.get_pods(["Epp"])
         epp_pod_list = epp_pods.get("Epp", [])
@@ -508,12 +528,17 @@ async def test_gaie_deployment(
         # not in the workload namespace.
         gateway_svcs = []
         for attempt in range(30):
-            gateway_svcs = list(
-                kr8s.get(
-                    "services",
-                    "inference-gateway",
-                    namespace=GAIE_AGW_NAMESPACE,
-                )
+            gateway_svcs = retry_vcluster_api(
+                "looking up the inference-gateway Service",
+                lambda: list(
+                    kr8s.get(
+                        "services",
+                        "inference-gateway",
+                        namespace=GAIE_AGW_NAMESPACE,
+                    )
+                ),
+                _KR8S_VCLUSTER_CONNECTION_ERRORS,
+                logger,
             )
             if gateway_svcs:
                 break
@@ -526,60 +551,85 @@ async def test_gaie_deployment(
         assert (
             len(gateway_svcs) > 0
         ), f"inference-gateway service not found in namespace {GAIE_AGW_NAMESPACE}"
-        gateway_pf = gateway_svcs[0].portforward(remote_port=80, local_port=0)
-        gateway_pf.start()
-        time.sleep(2)
+        gateway_svc = gateway_svcs[0]
+        # ManagedDeployment stops its port-forwards at teardown.
+        gateway_pf = deployment.port_forward(gateway_svc, GAIE_GATEWAY_PORT)
+        assert gateway_pf is not None, "Failed to port-forward the inference-gateway"
+        gateway_url = f"http://localhost:{gateway_pf.local_port}"
+        logger.info(f"Gateway port-forward established: {gateway_url}")
 
-        try:
-            gateway_url = f"http://localhost:{gateway_pf.local_port}"
-            logger.info(f"Gateway port-forward established: {gateway_url}")
+        endpoint = deployment_spec.endpoint
+        headers = {"Host": route_hostname}
+        logger.info(f"Using Host header: {route_hostname}")
 
-            endpoint = deployment_spec.endpoint
-            headers = {"Host": route_hostname}
-            logger.info(f"Using Host header: {route_hostname}")
+        model_ready = wait_for_model_availability(
+            url=gateway_url,
+            endpoint=endpoint,
+            model=GAIE_MODEL_NAME,
+            logger=logger,
+            # At most about 200 s, so a Gateway that never routes fails
+            # here, inside the test's timeout.
+            max_attempts=12,
+            attempt_timeouts=[10] * 12,
+            headers=headers,
+        )
+        assert model_ready, (
+            f"Model '{GAIE_MODEL_NAME}' did not become available "
+            f"within the timeout period"
+        )
 
-            model_ready = wait_for_model_availability(
-                url=gateway_url,
-                endpoint=endpoint,
-                model=GAIE_MODEL_NAME,
-                logger=logger,
-                max_attempts=30,
-                headers=headers,
-            )
-            assert model_ready, (
-                f"Model '{GAIE_MODEL_NAME}' did not become available "
-                f"within the timeout period"
-            )
+        payload = {
+            "model": GAIE_MODEL_NAME,
+            "messages": [{"role": "user", "content": TEST_PROMPT}],
+            "max_tokens": DEFAULT_MAX_TOKENS,
+            "temperature": DEFAULT_TEMPERATURE,
+            "stream": False,
+            **router_nvext_extra_body(["worker_id"]),
+        }
+        logger.info(f"Sending inference request to {gateway_url}{endpoint}")
+        # A dropped vCluster tunnel closes the request's connection; the helper
+        # then sends it again through a new port-forward.
+        response, _ = deployment.send_request_with_port_forward_retry(
+            pod=gateway_svc,
+            remote_port=GAIE_GATEWAY_PORT,
+            endpoint=endpoint,
+            payload=payload,
+            timeout=DEFAULT_REQUEST_TIMEOUT,
+            port_forward=gateway_pf,
+            request_sender=lambda url, payload, *, timeout, method: requests.request(
+                method, url, json=payload, headers=headers, timeout=timeout
+            ),
+        )
 
-            url = f"{gateway_url}{endpoint}"
-            payload = {
-                "model": GAIE_MODEL_NAME,
-                "messages": [{"role": "user", "content": TEST_PROMPT}],
-                "max_tokens": DEFAULT_MAX_TOKENS,
-                "temperature": DEFAULT_TEMPERATURE,
-                "stream": False,
-            }
-            logger.info(f"Sending inference request to {url}")
-            response = requests.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=DEFAULT_REQUEST_TIMEOUT,
-            )
+        # A mocker's random tokens give text of unpredictable length, so
+        # require only non-empty text within max_tokens, and check where
+        # the request ran: one worker for both phases in the aggregated
+        # case, separate prefill and decode workers in the disaggregated one.
+        validate_chat_response(
+            response=response,
+            expected_model=GAIE_MODEL_NAME,
+            min_content_length=1,
+            max_tokens=DEFAULT_MAX_TOKENS,
+        )
 
-            validate_chat_response(
-                response=response,
-                expected_model=GAIE_MODEL_NAME,
-                min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
-            )
+        data = response.json()
+        worker_ids = require_router_worker_id(data, context=deployment_spec.name)
+        prefill_id = worker_ids.get("prefill_worker_id")
+        decode_id = worker_ids.get("decode_worker_id")
+        if "prefill" in workers:
+            assert (
+                None not in (prefill_id, decode_id) and prefill_id != decode_id
+            ), f"Expected separate prefill and decode workers, got {dict(worker_ids)}"
+        else:
+            assert prefill_id in (
+                None,
+                decode_id,
+            ), f"Expected one worker for both phases, got {dict(worker_ids)}"
 
-            data = response.json()
-            content = data["choices"][0]["message"]["content"]
-            logger.info(
-                f"GAIE deployment test PASSED | "
-                f"model={data['model']}, status={response.status_code}, "
-                f"response_length={len(content)} chars\n"
-                f"Model response: {content}"
-            )
-        finally:
-            gateway_pf.stop()
+        content = data["choices"][0]["message"]["content"]
+        logger.info(
+            f"GAIE deployment test PASSED | "
+            f"model={data['model']}, status={response.status_code}, "
+            f"response_length={len(content)} chars\n"
+            f"Model response: {content}"
+        )

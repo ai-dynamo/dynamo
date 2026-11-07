@@ -8,6 +8,7 @@
 #   power_agent -> power-agent image build
 #   deploy   -> deploy tests
 #   dgdr     -> DGDR deploy tests
+#   gaie     -> GAIE deploy test
 #   planner  -> dynamo build-test
 #   planner_gym -> Planner Gym CPU tests and packaging
 #   vllm     -> vllm build and test
@@ -360,6 +361,46 @@ dgdr:
   - 'tests/deploy/test_dgdr_utils.py'
   - 'tests/deploy/dgd_utils.py'
 
+# The GAIE deploy test runs only on these paths. Every worker in it is a
+# mocker, so engine changes do not run it.
+gaie:
+  - 'deploy/inference-gateway/ext-proc/**'
+  - 'deploy/inference-gateway/scripts/**'
+  # The crates the test exercises. The EPP also links lib/global-*,
+  # lib/kv-hashing, lib/rl and lib/truthy, which do not run it. Cargo.toml and
+  # Cargo.lock are left out because those crates change them. So is
+  # .cargo/config.toml: it sets flags for every crate, and the core and
+  # frontend filters already run the builds and tests that use them.
+  - 'lib/kv-router/**'
+  - 'lib/llm/**'
+  - 'lib/memory/**'
+  - 'lib/mocker/**'
+  - 'lib/router-plugins/builtin/**'
+  - 'lib/runtime/**'
+  - 'lib/tokens/**'
+  # The frontend sidecars and mocker workers behind the EPP, the image they run
+  # from, and the examples the test deploys.
+  - 'components/src/dynamo/frontend/**'
+  - 'components/src/dynamo/mocker/**'
+  - 'container/templates/frontend.Dockerfile'
+  - 'examples/backends/*/deploy/gaie/**'
+  # The operator, which renders the EPP and its InferencePool, and its chart.
+  - 'deploy/operator/**'
+  - 'deploy/helm/charts/platform/components/operator/**'
+  # The test, the helpers it calls, and the test dependencies they pin.
+  - 'tests/conftest.py'
+  - 'tests/deploy/conftest.py'
+  - 'tests/deploy/dgd_utils.py'
+  - 'tests/deploy/response_checks.py'
+  - 'tests/deploy/test_dgd.py'
+  - 'tests/deploy/vcluster_utils.py'
+  - 'tests/utils/client.py'
+  - 'tests/utils/router_nvext.py'
+  - 'container/deps/requirements.test.txt'
+  # Engine gRPC APIs served by the mocker, which the EPP does not link.
+  - '!lib/mocker/servers/**'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 planner_gym:
   - 'gyms/planner-gym/**'
