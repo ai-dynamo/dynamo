@@ -335,17 +335,23 @@ fn convert_tool_result_content(
         .iter()
         .any(|block| matches!(block, ToolResultContentBlock::Image { .. }))
     {
-        return Ok(ChatCompletionRequestToolMessageContent::Text(
-            blocks
-                .iter()
-                .filter_map(|block| match block {
-                    ToolResultContentBlock::Text { text } => Some(text.clone()),
-                    ToolResultContentBlock::Other(value) => Some(other_block_text(value)),
-                    ToolResultContentBlock::Image { .. } => None,
-                })
-                .collect::<Vec<_>>()
-                .join(""),
-        ));
+        // Plain text blocks keep their existing concatenation; a converted block is
+        // set apart by a blank line so adjacent results stay distinguishable.
+        let mut text = String::new();
+        let mut previous_was_converted = false;
+        for block in blocks {
+            let (piece, converted) = match block {
+                ToolResultContentBlock::Text { text } => (text.clone(), false),
+                ToolResultContentBlock::Other(value) => (other_block_text(value), true),
+                ToolResultContentBlock::Image { .. } => continue,
+            };
+            if !text.is_empty() && (converted || previous_was_converted) {
+                text.push_str("\n\n");
+            }
+            text.push_str(&piece);
+            previous_was_converted = converted;
+        }
+        return Ok(ChatCompletionRequestToolMessageContent::Text(text));
     }
 
     let mut parts = Vec::with_capacity(blocks.len());
@@ -378,28 +384,43 @@ fn convert_tool_result_content(
 }
 
 /// Text for a `tool_result` block that is neither text nor image: the block's own
-/// text (`text`, a text `document` source, or nested text blocks), else a placeholder.
+/// text (`text`, a `document` text or content source, a `search_result` with its title
+/// and source, or nested text blocks), else a placeholder.
 fn other_block_text(value: &serde_json::Value) -> String {
     if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
         return text.to_string();
     }
-    if let Some(source) = value.get("source")
-        && source.get("type").and_then(|v| v.as_str()) == Some("text")
-        && let Some(data) = source.get("data").and_then(|v| v.as_str())
-    {
-        return data.to_string();
+    if let Some(source) = value.get("source").filter(|v| v.is_object()) {
+        let source_text = match source.get("type").and_then(|v| v.as_str()) {
+            Some("text") => source
+                .get("data")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            Some("content") => content_text(source.get("content")),
+            _ => None,
+        };
+        if let Some(text) = source_text {
+            return text;
+        }
     }
-    let nested = value
-        .get("content")
-        .and_then(|v| v.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("text").and_then(|v| v.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default();
+    let nested = content_text(value.get("content")).unwrap_or_default();
+    if value.get("type").and_then(|v| v.as_str()) == Some("search_result") {
+        // `title` and `source` are required on a search result; keep them so the
+        // model can still name and link the result.
+        let mut lines = Vec::new();
+        if let Some(title) = value.get("title").and_then(|v| v.as_str()) {
+            lines.push(format!("Title: {title}"));
+        }
+        if let Some(source) = value.get("source").and_then(|v| v.as_str()) {
+            lines.push(format!("Source: {source}"));
+        }
+        if !nested.is_empty() {
+            lines.push(nested.clone());
+        }
+        if !lines.is_empty() {
+            return lines.join("\n");
+        }
+    }
     if !nested.is_empty() {
         return nested;
     }
@@ -408,6 +429,21 @@ fn other_block_text(value: &serde_json::Value) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
     format!("[tool_result block of type '{kind}' omitted: not supported by this endpoint]")
+}
+
+/// Text of a `content` value that is either a string or a list of text blocks.
+fn content_text(content: Option<&serde_json::Value>) -> Option<String> {
+    let content = content?;
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    let text = content
+        .as_array()?
+        .iter()
+        .filter_map(|item| item.get("text").and_then(|v| v.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
 }
 
 /// Flush accumulated user content parts into a user message.
@@ -2197,8 +2233,76 @@ mod tests {
         };
         assert_eq!(
             text,
-            "a [tool_result block of type 'document' omitted: not supported by this endpoint] doc hit"
+            "a \n\n[tool_result block of type 'document' omitted: not supported by this endpoint]\n\n doc\n\n hit"
         );
+    }
+
+    #[test]
+    fn test_tool_result_adjacent_converted_blocks_stay_separate() {
+        let content = ToolResultContent::Blocks(vec![
+            ToolResultContentBlock::Other(serde_json::json!({
+                "type": "search_result",
+                "content": [{"type": "text", "text": "10"}]
+            })),
+            ToolResultContentBlock::Other(serde_json::json!({
+                "type": "search_result",
+                "content": [{"type": "text", "text": "20"}]
+            })),
+            ToolResultContentBlock::Text { text: "a".into() },
+            ToolResultContentBlock::Text { text: "b".into() },
+        ]);
+
+        let ChatCompletionRequestToolMessageContent::Text(text) =
+            convert_tool_result_content(&content).unwrap()
+        else {
+            panic!("expected text content");
+        };
+        assert_eq!(text, "10\n\n20\n\nab");
+    }
+
+    #[test]
+    fn test_tool_result_search_result_keeps_title_and_source() {
+        let content =
+            ToolResultContent::Blocks(vec![ToolResultContentBlock::Other(serde_json::json!({
+                "type": "search_result",
+                "source": "https://example.com/rust",
+                "title": "Rust",
+                "content": [{"type": "text", "text": "A language."}]
+            }))]);
+
+        let ChatCompletionRequestToolMessageContent::Text(text) =
+            convert_tool_result_content(&content).unwrap()
+        else {
+            panic!("expected text content");
+        };
+        assert_eq!(
+            text,
+            "Title: Rust\nSource: https://example.com/rust\nA language."
+        );
+    }
+
+    #[test]
+    fn test_tool_result_document_content_source_is_extracted() {
+        let content = ToolResultContent::Blocks(vec![
+            ToolResultContentBlock::Other(serde_json::json!({
+                "type": "document",
+                "source": {"type": "content", "content": "plain"}
+            })),
+            ToolResultContentBlock::Other(serde_json::json!({
+                "type": "document",
+                "source": {"type": "content", "content": [
+                    {"type": "text", "text": "one"},
+                    {"type": "text", "text": "two"}
+                ]}
+            })),
+        ]);
+
+        let ChatCompletionRequestToolMessageContent::Text(text) =
+            convert_tool_result_content(&content).unwrap()
+        else {
+            panic!("expected text content");
+        };
+        assert_eq!(text, "plain\n\none\ntwo");
     }
 
     #[test]
