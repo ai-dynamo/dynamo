@@ -241,7 +241,8 @@ func truncateDNSLabelWithHash(value string, maxLength int) string {
 		return hashText[:maxLength]
 	}
 	suffix := "-" + hashText
-	prefix := strings.TrimRight(value[:maxLength-len(suffix)], "-")
+	// Trim "." too: a DGDR name may contain dots, and ".-" is not a valid DNS-1123 name.
+	prefix := strings.TrimRight(value[:maxLength-len(suffix)], "-.")
 	return prefix + suffix
 }
 
