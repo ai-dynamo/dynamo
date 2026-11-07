@@ -154,6 +154,28 @@ upgrades. Explicitly authored complete probes remain effective.
 `startupProbe` on its frontend container. This is an intentional Pod-template update;
 plan for frontend replacement, including a possible single-replica Grove Service outage.
 
+#### CRD and admission breaking changes
+
+##### DGD name limits
+
+**Change:** New DynamoGraphDeployments (DGDs) reject `metadata.name` longer than 63
+characters. Generated component names longer than 63 characters use a readable prefix
+and a hash of the full name. Shorter generated names stay unchanged.
+
+**Affected:** New DGDs with names longer than 63 characters, and existing DGDs whose
+component names exceed Kubernetes Service or selector label limits.
+
+**Action:** Keep new DGD names within 63 characters. Update manifests that create longer
+names before upgrading. No rename is required for existing DGDs.
+
+**Existing deployments:** Existing DGDs with longer names remain updateable and deletable.
+The operator creates components under the shortened names. For single-node workers, it
+waits for the replacement workers to be ready, drains the old DCDs, and deletes them.
+Old DCDs whose invalid Deployments were never created can be deleted after the operator
+confirms the old Deployment and running Pods are absent. Stale frontend DCDs remain until
+the DGD is deleted. The component path's multinode LeaderWorkerSet name still appends
+`-0` to the DCD name and can exceed 63 characters.
+
 #### Operator behavior breaking changes
 
 ##### Legacy LWS migration cleanup removed

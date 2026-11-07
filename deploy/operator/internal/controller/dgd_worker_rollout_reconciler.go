@@ -26,6 +26,7 @@ import (
 
 	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1000,9 +1001,10 @@ func oldWorkerPodsTerminated(dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
 	// Wait for serving pods; checkpoint captures can share the hash without being workers.
 	for i := range pods {
 		pod := &pods[i]
-		_, oldSelector := oldDCDNames[pod.Labels[consts.KubeLabelDynamoSelector]]
+		selector := pod.Labels[consts.KubeLabelDynamoSelector]
+		_, oldSelector := oldDCDNames[selector]
 		_, oldHash := oldWorkerHashes[pod.Labels[consts.KubeLabelDynamoWorkerHash]]
-		if !oldSelector && !(oldHash && isDGDManagedWorkerPod(pod)) {
+		if !oldSelector && !(selector == "" && oldHash && isDGDManagedWorkerPod(pod)) {
 			continue
 		}
 		if !isTerminalPhase(pod.Status.Phase) {
@@ -1020,9 +1022,29 @@ func (r *dgdWorkerRolloutReconciler) oldWorkerComponentDrained(
 	componentName string,
 	oldDCDs []*nvidiacomv1beta1.DynamoComponentDeployment,
 ) (bool, error) {
-	if !oldWorkerDCDsAtZero(oldDCDs) {
-		return false, nil
+	// Failed oversized Deployments never report replica status; prove their absence instead.
+	for _, dcd := range oldDCDs {
+		if oldWorkerDCDsAtZero([]*nvidiacomv1beta1.DynamoComponentDeployment{dcd}) {
+			continue
+		}
+		if dcd == nil || dcd.Spec.Replicas == nil || *dcd.Spec.Replicas != 0 ||
+			dcd.Status.Component != nil || dgd.HasAnyMultinodeComponent() || dcd.IsMultinode() || len(dcd.Name) <= 63 ||
+			!isNonCanonicalWorkerDCD(dgd, dcd, dcd.Labels[consts.KubeLabelDynamoWorkerHash]) {
+			return false, nil
+		}
+
+		// An existing Deployment still requires the normal observed-status drain barrier.
+		deployment := &appsv1.Deployment{}
+		err := r.Get(ctx, types.NamespacedName{Namespace: dcd.Namespace, Name: dcd.Name}, deployment)
+		if err == nil {
+			return false, nil
+		}
+		if !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("check stale DCD deployment absence: %w", err)
+		}
 	}
+
+	// Serving Pods must be terminal even when the old Deployment is absent.
 	pods, err := podcontroller.ListComponentPods(ctx, r, dgd.Namespace, dgd.Name, componentName)
 	if err != nil {
 		return false, err
