@@ -1690,6 +1690,20 @@ def test_vllm_validation_error_is_public_invalid_argument():
     assert str(public_error) == message
 
 
+def test_vllm_validation_error_public_message_is_truncated():
+    from vllm.exceptions import VLLMValidationError
+
+    from dynamo.llm.exceptions import _MAX_MESSAGE_LENGTH, InvalidArgument
+    from dynamo.vllm.errors import vllm_client_error_to_public_error
+
+    message = "bad_words entry rejected: " + "x" * (2 * _MAX_MESSAGE_LENGTH)
+    public_error = vllm_client_error_to_public_error(VLLMValidationError(message))
+
+    assert isinstance(public_error, InvalidArgument)
+    assert len(str(public_error)) == _MAX_MESSAGE_LENGTH
+    assert str(public_error).startswith("bad_words entry rejected: ")
+
+
 def test_build_sampling_params_accepts_productive_recursive_guided_json():
     from dynamo.vllm.handlers import build_sampling_params
 

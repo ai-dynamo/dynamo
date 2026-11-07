@@ -37,5 +37,5 @@ def vllm_client_error_to_public_error(
     """
     http_error = vllm_client_error_to_http_error(exc)
     if http_error.code == 400:
-        return InvalidArgument(str(exc))
+        return InvalidArgument(http_error.message)
     return http_error
