@@ -19,7 +19,7 @@ use llm_tokenizer::{Decoder, Encoder, Encoding, HuggingFaceTokenizer, SpecialTok
 use crate::protocols::TokenIdType;
 use crate::tokenizers::traits::Tokenizer as RuntimeTokenizer;
 
-use super::nemotron;
+use super::{glm5_next, nemotron};
 
 /// No-op `Tokenizer` impl used when a model directory has no `tokenizer.json`
 /// (e.g. Kimi-K2.5 ships `tiktoken.model` instead of an HF fast tokenizer).
@@ -123,6 +123,15 @@ pub(super) trait ImageRoutingBackend: Send + Sync {
             .collect()
     }
 
+    /// Check model-specific layout constraints before expanding placeholders.
+    fn validate_image_prompt(
+        &self,
+        _token_ids: &[TokenIdType],
+        _dimensions: &[(u32, u32)],
+    ) -> Result<()> {
+        Ok(())
+    }
+
     fn uses_request_context_budget(&self) -> bool {
         false
     }
@@ -167,7 +176,7 @@ impl ImageRoutingBackend for RegistryImageRoutingBackend {
 }
 
 impl ImageRoutingProcessor {
-    /// Returns `Err` when `preprocessor_config.json` is missing or unparseable
+    /// Returns `Err` when required processor configuration is missing or invalid,
     /// or no registered processor matches `model_id` / `model_type`. Callers
     /// should treat the error as "MM-aware routing disabled for this model"
     /// rather than failing the request.
@@ -179,6 +188,14 @@ impl ImageRoutingProcessor {
     /// Switching to async would cascade through `OpenAIPreprocessor::new`
     /// and every caller of it.
     pub fn try_new(model_id: &str, model_type: Option<&str>, model_dir: &Path) -> Result<Self> {
+        // GLM checkpoints may ship only the nested processor_config.json. Let
+        // the shared registry resolve it before the legacy flat-config path.
+        if model_type == Some("glm5_next") {
+            return Ok(Self {
+                processor: Box::new(glm5_next::Glm5NextImageRoutingBackend::try_new(model_dir)?),
+                model_id: model_id.to_string(),
+            });
+        }
         let cfg_path = model_dir.join("preprocessor_config.json");
         let json = std::fs::read_to_string(&cfg_path).with_context(|| {
             format!(
@@ -240,6 +257,14 @@ impl ImageRoutingProcessor {
     /// callers must not substitute a zero or approximate count on failure.
     pub fn count_tokens(&self, width: u32, height: u32) -> Result<usize> {
         self.processor.count_tokens(width, height)
+    }
+
+    pub(crate) fn validate_image_prompt(
+        &self,
+        token_ids: &[TokenIdType],
+        dimensions: &[(u32, u32)],
+    ) -> Result<()> {
+        self.processor.validate_image_prompt(token_ids, dimensions)
     }
 
     /// Return backend-exact image counts for one request. Nemotron shares the
