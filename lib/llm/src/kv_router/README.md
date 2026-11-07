@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Router Host Layer
 
 This module is the router's host layer. It embeds the selection core from `lib/kv-router`
@@ -218,3 +223,86 @@ exactly one prefill worker set and one decode worker set. The encoder target fol
 `encoder_result_handoff` rules there. In Direct mode the prefill hop requires
 `routing.prefill_worker_id`. See [`../discovery/AGENTS.md`](../discovery/AGENTS.md) for worker-set
 admission and succession.
+
+## Choose the operation by its effects
+
+| Operation | Admission | Booking | Dispatch | Result |
+|---|---|---|---|---|
+| `preview_kv_route` | Skipped | None | None | One `RoutePreview`: worker/rank and cache/load signals |
+| `plan_kv_route_from_preview` | Yes, for the previewed target | Owned by plan | None | `RoutePlan`, or failure |
+| `dispatch_kv_plan` | Uses the existing plan | Transferred into request cleanup | Yes | Backend response stream |
+| KV `RoutingHost::generate`, ordinary request | Yes | Owned by request cleanup | Yes | Backend response stream |
+| KV `RoutingHost::generate`, `query_instance_id` | Yes | None | None | One routing-data response |
+
+“Select” names an operation, not one ownership contract. Standalone `/select`
+does not book; the admitted selection used by ordinary generation does.
+Read the exact API and admission mode before assuming either behavior.
+
+Sources: [preview, plan, and dispatch](routing_host/kv.rs),
+[generate](routing_host.rs), and the
+[selection-service modes](../../../kv-router/src/services/selection/README.md).
+
+## RequestPhase identifies the routing hop
+
+The routing `RequestPhase` has `Prefill`, `Decode`, and `Aggregated` variants.
+It determines phase-specific routing and timing records and helps select the
+relevant worker pin and lifecycle handling. It does not reserve capacity or
+prove that backend computation has finished. A decode route can execute
+prefill locally when remote prefill is bypassed.
+
+Decode and aggregated selection own the logical request's classifier lifecycle.
+The prefill hop leaves that lifecycle to the decode owner. Another module's
+classifier state enum with the same name is a different type.
+
+Sources: [RequestPhase](../protocols/common/timing.rs) and
+[classifier lifecycle ownership](routing_host/kv.rs).
+
+## Preview is an observation
+
+A successful preview returns one chosen worker and data-parallel rank, not a
+candidate list. Signals include overlap blocks, cached tokens, potential decode
+blocks, and optional total KV capacity. The configured policy, worker constraints,
+and affinity handling determine the choice; it is not a maximum-raw-cache-hit
+contract.
+
+Preview bypasses queue admission. Worker eligibility still matters, but preview
+does not establish that the request is admittable or reserve capacity. A worker
+can leave, another request can consume capacity, or the request can be cancelled
+before the later admission completes.
+
+`plan_kv_route_from_preview` checks the request ID and supplies the previewed
+worker as the planned target to admitted selection. It carries forward the same
+cleanup budget. A successful plan is the commitment point.
+
+Making successful preview guarantee a booking would change its ownership and
+cancellation contract. Such an API would need to return an owned plan or booking.
+The current [conditional-prefill caller](prefill_router/README.md) deliberately
+makes its topology decision before that commitment.
+
+## Ordinary generation and conditional planning
+
+Ordinary KV generation calls `select_with_affinity`, installs tracking with
+`track_selection`, and calls `dispatch_selection`. Conditional disaggregation
+uses the explicit preview → plan-from-preview → dispatch-plan sequence. The
+prefill execution hop has its own `select_and_dispatch_kv_prefill` helper.
+
+The dispatched path installs `kv_hint`, handles affinity, tracks generated output
+blocks and approximate cache state, advances classifier state, and cleans up the
+stream. Selection alone does not perform these effects.
+
+The current branch does not expose a general `plan_kv_route`, `RouteRequest`,
+`RouteBooking`, `RoutePlan::into_booking`, or `RoutePlan::detach_booking` API.
+A generalized schedule-only design could share an owned plan between frontend
+execution and EPP, but it must define those ownership transfers rather than
+assuming the narrower conditional plan already serves every caller. See the
+[frontend integration discussion](../README.md).
+
+## PushRouter construction
+
+`PushRouter::from_client_with_dispatch` accepts an injected dispatch implementation.
+Its repository call sites are tests, including routing-host, prefill, and runtime
+response-stream tests. Production construction uses `from_client` or
+`from_client_with_monitor`. Public visibility alone does not establish production
+use, and repository search cannot rule out external consumers.
+
+Source: [PushRouter constructors](../../../runtime/src/pipeline/network/egress/push_router.rs).

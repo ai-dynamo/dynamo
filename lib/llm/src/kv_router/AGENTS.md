@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # lib/llm/src/kv_router
 
 This module is the router's host layer around the `lib/kv-router` selection core. Read
@@ -40,6 +45,19 @@ and the booking lifecycle these rules protect.
 
 ## Guardrails
 
+- Use the [selection-service guide](../../../kv-router/src/services/selection/README.md) for
+  admission modes and the [prefill guide](prefill_router/README.md) for topology decisions.
+- Treat `RequestPhase` as routing-hop context, not evidence that backend prefill completed.
+- Preserve request identity checks when consuming a preview and one cleanup budget across
+  preview, admission, and dispatch.
+- Check integrated frontend, conditional-disaggregation, prefill, and runtime-EPP callers
+  when changing selection and booking APIs; they do not share one general plan API.
+- Changes to schedule-only paths must account for dispatch-only features: affinity,
+  classifier progression, KV hints, output accounting, and cleanup.
+- `query_instance_id` currently enters admission on the KV path despite advisory wording
+  in a comment. Verify the implementation before calling it a nonblocking probe.
+- Use injected dispatch for tests where appropriate; public visibility alone does not make
+  `from_client_with_dispatch` a production call path.
 - `KvRouter` never dispatches. `RoutingHost` dispatches decode, aggregated, and prefill requests
   (the prefill hop through the prefill set's own `RoutingHost`); `EncoderRouter` dispatches
   encode requests through a round-robin `PushRouter`.
