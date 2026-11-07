@@ -1050,3 +1050,7 @@ overrides:
   - { ecosystem: python, name: instanttensor, license: "Apache-2.0", source: "https://github.com/scitix/InstantTensor/blob/v0.1.9/LICENSE" }
   - { ecosystem: python, name: sigstore-models, license: "MIT", source: "https://github.com/astral-sh/sigstore-models/blob/v0.0.6/LICENSE" }
   - { ecosystem: rust, name: tsp-asn1, license: "Apache-2.0", source: "https://github.com/trailofbits/rfc3161-client/blob/v1.0.8/LICENSE" }
+
+  # --- MiniMax MSA kernels (sglang-runtime): minimax-msa's pyproject.toml declares
+  #     no license, so the generator reports UNKNOWN; the repository is MIT. ---
+  - { ecosystem: python, name: minimax-msa, license: "MIT", source: "pyproject.toml declares no license; verified at https://github.com/MiniMax-AI/MSA/blob/1e7bf76f26a5f53cfc2d4d297e1ec2e40955e431/LICENSE (MIT)" }

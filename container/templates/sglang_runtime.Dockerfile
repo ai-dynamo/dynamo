@@ -242,6 +242,29 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     python3 -c "import importlib.metadata as m, re, sys; names={re.sub(r'[-_.]+', '-', n).lower() for d in m.distributions() if (n := (d.metadata or {}).get('Name'))}; sys.exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)"
 {% endif %}
 
+{% if device == "cuda" %}
+# MiniMax MSA kernels for msa_plan.py; editable so the JIT finds CUTLASS in the tree. Kept
+# last so nothing overwrites inference/datas/msa_v1. No sglang-msa-mono: needs sglang.srt.monokernels.
+ARG MSA_COMMIT
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    set -eu; \
+    export PIP_CACHE_DIR=/root/.cache/pip; \
+    printf '%s\n' "${MSA_COMMIT}" | grep -Eq '^[0-9a-f]{40}$' || { echo "ERROR: MSA_COMMIT must be a 40-character commit SHA; got '${MSA_COMMIT}'" >&2; exit 1; }; \
+    MSA_DIR=/sgl-workspace/minimax-msa; \
+    git init -q "${MSA_DIR}"; \
+    git -C "${MSA_DIR}" remote add origin https://github.com/MiniMax-AI/MSA.git; \
+    git -C "${MSA_DIR}" fetch -q --depth 1 origin "${MSA_COMMIT}"; \
+    git -C "${MSA_DIR}" checkout -q --detach FETCH_HEAD; \
+    git -C "${MSA_DIR}" submodule update -q --init --recursive --depth 1; \
+    test -f "${MSA_DIR}/third_party/cutlass/include/cutlass/cutlass.h"; \
+    rm -rf "${MSA_DIR}/.git" "${MSA_DIR}/third_party/cutlass/.git"; \
+    pip install --break-system-packages --no-deps -e "${MSA_DIR}"; \
+    python3 -c "import importlib.metadata as m; d = m.packages_distributions(); \
+bad = {k: d.get(k) for k in ('inference', 'datas', 'msa_v1') if d.get(k) != ['minimax-msa']}; \
+assert not bad, f'MSA top-level packages are shadowed or missing: {bad}'"; \
+    python3 -c "import inference.msa_v1.indexer.decode.q8kv4, inference.msa_v1.indexer.decode.q8kv8"
+{% endif %}
+
 # Remove the codec-bearing video-DECODE components from the upstream SGLang image
 # (PyAV, decord, OpenCV, torchcodec + any base ffmpeg/libav*), then copy the
 # VP9-only in-tree ffmpeg from wheel_builder below for the video-generation

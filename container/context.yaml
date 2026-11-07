@@ -153,6 +153,9 @@ sglang:
     # ffmpeg is copied in. The CUDA and XPU Dynamo Rust wheels link against that
     # same codec-limited build for frontend video decoding.
     baseline_sbom: cuda@0230b7f2
+    # MiniMax MSA kernels, missing from the cu130 base. SGLang's own pin (ARG MSA_COMMIT
+    # in docker/Dockerfile.cu134 at runtime_image_tag); re-read when that tag changes.
+    msa_commit: 1e7bf76f26a5f53cfc2d4d297e1ec2e40955e431
   xpu:
     # oneAPI 2026.0 is required by the SGLang XPU pins below: torch 2.13.0+xpu
     # links intel-sycl-rt 2026.0.0 (libsycl.so.9), and sgl-kernel-xpu's SYCL
