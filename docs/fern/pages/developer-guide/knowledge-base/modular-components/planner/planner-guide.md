@@ -104,7 +104,14 @@ New configurations default to `estimation_mode: auto` and `fallback_policy: deny
 Auto searches `op_level`, `fpm_interpolation`, then `fpm_regression`; `deny` prevents
 fallback only when you explicitly select a mode. Without `ais_perf_model`, the
 Planner creates a cold `fpm_regression` model and trains it from self-benchmark
-or live forward-pass metrics (FPM).
+or live forward-pass metrics (FPM). Its identity records what the worker
+reports: the model, backend, KV block size and MTP depth, plus the GPUs per
+worker, scheduler limits, KV capacity and context length as
+`deployment_limits`. Facts the Planner cannot observe are recorded as
+`"unknown"`: the hardware, backend version, quantization, attention backend,
+and the parallel split of a worker with more than one GPU. A state snapshot
+saved from this model can then time an AISimulate recommendation role, which
+pins the known facts and takes the rest from the recommendation's engine.
 
 Each role accepts the complete upstream schema, including ordered `systems_paths`,
 `database_mode`, `transfer_policy`, quantization and speculation settings, and
