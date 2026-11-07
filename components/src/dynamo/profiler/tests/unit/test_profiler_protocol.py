@@ -416,6 +416,23 @@ def test_build_dgd_config_trtllm_disagg_preserves_explicit_kv_events(
     assert decode_args.count("--publish-kv-events") == 1
 
 
+def _agg_worker_args(backend: str, agg_cli_args: list[str]) -> list[str]:
+    dgd_config = CONFIG_MODIFIERS[backend].build_dgd_config(
+        mode="agg",
+        model_name="test/model",
+        image=f"example/{backend}:test",
+        agg_cli_args=agg_cli_args,
+    )
+    (worker,) = _worker_components(dgd_config)
+    return _main_container(worker)["args"]
+
+
+def test_build_dgd_config_trtllm_agg_restores_publish_kv_events() -> None:
+    args = _agg_worker_args("trtllm", ["--tensor-parallel-size", "1"])
+
+    assert args.count("--publish-kv-events") == 1
+
+
 def test_build_dgd_config_sglang_disagg_restores_runtime_args() -> None:
     modifier = CONFIG_MODIFIERS["sglang"]
     dgd_config = modifier.build_dgd_config(

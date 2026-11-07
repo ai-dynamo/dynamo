@@ -663,6 +663,16 @@ class BaseConfigModifier:
         return args
 
     @classmethod
+    def _finalize_agg_cli_args(cls, args: list[str]) -> list[str]:
+        """Restore the Dynamo runtime arguments omitted by AIC engine tuning.
+
+        Agg counterpart of ``_finalize_disagg_cli_args``: generated args replace
+        the blueprint's wholesale, so backends override this to re-apply flags
+        the agg blueprint carries.
+        """
+        return args
+
+    @classmethod
     def _apply_disagg_workers(
         cls,
         cfg: Config,
@@ -729,7 +739,7 @@ class BaseConfigModifier:
             return
         cls._apply_worker_config(
             component,
-            agg_cli_args,
+            cls._finalize_agg_cli_args(agg_cli_args),
             agg_replicas,
             agg_gpus,
             num_gpus_per_node=num_gpus_per_node,
