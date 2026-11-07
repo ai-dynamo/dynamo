@@ -29,13 +29,11 @@ server. See the [sidecar overview](../README.md) for installation.
 | KV routing | Yes |
 | Kubernetes multinode tensor parallelism (TP) | Yes |
 | Attention DP (`--attn-dp-size N`) | Yes, one sidecar per node |
-| Replica DP (`--dp-size N`) | Aggregated and decode; SGLang's Rust server rejects it for prefill |
+| Replica DP (`--dp-size N`) | Aggregated and decode; SGLang rejects it for prefill |
 | Image, video, and audio input | No |
 
-SGLang's Rust server runs one listener per DP rank: listener `k` on a node
-binds `--port + k` and `--grpc-port + k`, so keep the two ports at least the
-node's listener count apart. One sidecar per node serves all of the node's
-listeners as one worker, with `--grpc-connections` connections
+SGLang's Rust server runs one listener per DP rank. One sidecar per node serves
+all of the node's listeners as one worker, with `--grpc-connections` connections
 to each. DP>1 needs SGLang main at or after
 [sgl-project/sglang#46637](https://github.com/sgl-project/sglang/pull/46637); v0.5.23 does not have it.
 
@@ -123,3 +121,9 @@ One engine spans two nodes. Only the leader node has a sidecar; the follower
 node holds the remaining TP ranks.
 
 ![When one SGLang engine spans two nodes with tensor parallelism, only the leader node runs a Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar on Node 0.](../../../docs/fern/assets/img/sidecar-sglang-multinode-tp.svg)
+
+### Multi-Node DP
+
+Attention DP across two nodes, with one sidecar per node.
+
+![With attention DP across two nodes, each node runs one Dynamo Sidecar that registers that node's DP ranks and calls its own SGLang listeners.](../../../docs/fern/assets/img/sidecar-sglang-multinode-dp.svg)
