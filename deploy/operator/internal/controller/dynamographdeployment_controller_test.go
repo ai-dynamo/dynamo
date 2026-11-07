@@ -1806,6 +1806,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-frontend",
 					Namespace:  "default",
 					Generation: 1,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 1,
 						Conditions: []metav1.Condition{
@@ -1857,6 +1862,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-frontend",
 					Namespace:  "default",
 					Generation: 1,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 1,
 						Conditions: []metav1.Condition{
@@ -1871,6 +1881,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-decode",
 					Namespace:  "default",
 					Generation: 2,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 1, // Not yet caught up
 						Conditions: []metav1.Condition{
@@ -1944,6 +1959,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-frontend",
 					Namespace:  "default",
 					Generation: 1,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 1,
 						Conditions: []metav1.Condition{
@@ -1988,6 +2008,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-frontend",
 					Namespace:  "default",
 					Generation: 1,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 1,
 						Conditions: []metav1.Condition{
@@ -2035,6 +2060,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-removed",
 					Namespace:  "default",
 					Generation: 1,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 1,
 						Conditions: []metav1.Condition{
@@ -2170,6 +2200,15 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd",
 					Namespace:  "default",
 					Generation: 1,
+					Spec: grovev1alpha1.PodCliqueSetSpec{
+						Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+							Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
+								Name:        "frontend",
+								Labels:      map[string]string{commonconsts.KubeLabelDynamoComponent: "frontend"},
+								Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+							}},
+						},
+					},
 					Status: grovev1alpha1.PodCliqueSetStatus{
 						ObservedGeneration: new(int64(1)),
 					},
@@ -2222,6 +2261,15 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd",
 					Namespace:  "default",
 					Generation: 2,
+					Spec: grovev1alpha1.PodCliqueSetSpec{
+						Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+							Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
+								Name:        "frontend",
+								Labels:      map[string]string{commonconsts.KubeLabelDynamoComponent: "frontend"},
+								Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+							}},
+						},
+					},
 					Status: grovev1alpha1.PodCliqueSetStatus{
 						ObservedGeneration: new(int64(1)),
 					},
@@ -2325,6 +2373,15 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd",
 					Namespace:  "default",
 					Generation: 1,
+					Spec: grovev1alpha1.PodCliqueSetSpec{
+						Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+							Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
+								Name:        "frontend",
+								Labels:      map[string]string{commonconsts.KubeLabelDynamoComponent: "frontend"},
+								Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+							}},
+						},
+					},
 					Status: grovev1alpha1.PodCliqueSetStatus{
 						ObservedGeneration: new(int64(1)),
 					},
@@ -2371,6 +2428,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-frontend",
 					Namespace:  "default",
 					Generation: 2,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 2,
 						Conditions: []metav1.Condition{
@@ -2382,6 +2444,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-decode",
 					Namespace:  "default",
 					Generation: 2,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 2,
 						Conditions: []metav1.Condition{
@@ -2393,6 +2460,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-completed",
 					Namespace:  "default",
 					Generation: 2,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 2,
 						Conditions: []metav1.Condition{
@@ -2441,6 +2513,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-frontend",
 					Namespace:  "default",
 					Generation: 2,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 2,
 						Conditions: []metav1.Condition{
@@ -2452,6 +2529,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-decode",
 					Namespace:  "default",
 					Generation: 2,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 2,
 						Conditions: []metav1.Condition{
@@ -2463,6 +2545,11 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 					Name:       "test-dgd-worker",
 					Namespace:  "default",
 					Generation: 2,
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							Annotations: map[string]string{commonconsts.RestartAnnotation: newID},
+						},
+					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
 						ObservedGeneration: 2,
 						Conditions: []metav1.Condition{
