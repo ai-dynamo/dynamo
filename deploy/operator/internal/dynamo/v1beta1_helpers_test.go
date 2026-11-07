@@ -7,8 +7,11 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestComponentsByNameNil(t *testing.T) {
@@ -371,4 +374,74 @@ func dcdFromAlpha(t *testing.T, spec v1alpha1.DynamoComponentDeploymentSpec) *v1
 		t.Fatalf("ConvertTo(v1beta1) error = %v", err)
 	}
 	return beta
+}
+
+func TestDCDName(t *testing.T) {
+	const longName = "nemotron-3-5-super-vl-120b-a12b-vllm-disagg-b200-swebenchpro-decode"
+	tests := []struct {
+		name   string
+		labels map[string]string
+		owner  string // name of a controlling ReplicaSet, if any
+		want   string
+		owned  bool
+	}{
+		{
+			name:   "DCD by selector label",
+			labels: map[string]string{commonconsts.KubeLabelDynamoSelector: "graph-frontend"},
+			want:   "graph-frontend",
+			owned:  true,
+		},
+		{
+			name: "DCD with a bounded selector label by ReplicaSet owner",
+			labels: map[string]string{
+				commonconsts.KubeLabelDynamoSelector:   DCDSelectorLabelValue(longName),
+				appsv1.DefaultDeploymentUniqueLabelKey: "7d9c6b5f4",
+			},
+			owner: longName + "-7d9c6b5f4",
+			want:  longName,
+			owned: true,
+		},
+		{
+			name: "ReplicaSet owner without the pod-template-hash suffix",
+			labels: map[string]string{
+				commonconsts.KubeLabelDynamoSelector:   "graph-frontend",
+				appsv1.DefaultDeploymentUniqueLabelKey: "7d9c6b5f4",
+			},
+			owner: "other-replicaset",
+			want:  "graph-frontend",
+			owned: true,
+		},
+		{
+			name: "no selector label",
+		},
+		{
+			name: "Grove Pod with the selector label",
+			labels: map[string]string{
+				commonconsts.KubeLabelDynamoSelector: "graph-frontend",
+				grovecommon.LabelPodClique:           "graph-0-frontend",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{}
+			pod.Labels = tt.labels
+			if tt.owner != "" {
+				pod.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: appsv1.SchemeGroupVersion.String(),
+					Kind:       "ReplicaSet",
+					Name:       tt.owner,
+					Controller: new(true),
+				}}
+			}
+			name, owned := DCDName(pod)
+			if owned != tt.owned {
+				t.Fatalf("DCDName() owned = %v, want %v", owned, tt.owned)
+			}
+			if owned && name != tt.want {
+				t.Fatalf("DCDName() = %q, want %q", name, tt.want)
+			}
+		})
+	}
 }

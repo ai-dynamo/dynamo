@@ -21,6 +21,7 @@ package controller
 
 import (
 	"context"
+	"maps"
 	"sort"
 	"strings"
 	"testing"
@@ -3326,9 +3327,7 @@ func TestStandaloneDCDLongNameSelectorLabelFits(t *testing.T) {
 			t.Log("Verify a Pod of the Deployment maps back to the DCD")
 			const podTemplateHash = "7d9c6b5f4"
 			podLabels := map[string]string{appsv1.DefaultDeploymentUniqueLabelKey: podTemplateHash}
-			for key, value := range templateLabels {
-				podLabels[key] = value
-			}
+			maps.Copy(podLabels, templateLabels)
 			pod := &corev1.Pod{
 				Name:      deployment.Name + "-" + podTemplateHash + "-x7k2p",
 				Namespace: "default",
@@ -3340,7 +3339,7 @@ func TestStandaloneDCDLongNameSelectorLabelFits(t *testing.T) {
 					Controller: new(true),
 				}},
 			}
-			owner, owned := podcontroller.DCDName(pod)
+			owner, owned := dynamo.DCDName(pod)
 			assert.True(t, owned)
 			assert.Equal(t, tt.dcdName, owner)
 

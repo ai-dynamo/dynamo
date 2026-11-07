@@ -16,10 +16,14 @@ import (
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // DCDSelectorLabelValue returns a DCD's nvidia.com/selector value; all users of that
@@ -32,6 +36,25 @@ func DCDSelectorLabelValue(dcdName string) string {
 	suffix := hex.EncodeToString(sum[:8])
 	prefix := strings.TrimRight(dcdName[:validation.LabelValueMaxLength-len(suffix)-1], "-")
 	return prefix + "-" + suffix
+}
+
+// DCDName returns the DCD whose Deployment selects obj. A DCD's Deployment
+// shares its name. DCDSelectorLabelValue hashes long names, so the name comes
+// from the controlling ReplicaSet when present. Grove Pods belong to no DCD.
+func DCDName(obj client.Object) (string, bool) {
+	labels := obj.GetLabels()
+	name := labels[commonconsts.KubeLabelDynamoSelector]
+	if name == "" || labels[grovecommon.LabelPodClique] != "" {
+		return name, false
+	}
+	if hash := labels[appsv1.DefaultDeploymentUniqueLabelKey]; hash != "" {
+		if owner := metav1.GetControllerOf(obj); owner != nil && owner.Kind == "ReplicaSet" {
+			if deployment, ok := strings.CutSuffix(owner.Name, "-"+hash); ok && deployment != "" {
+				return deployment, true
+			}
+		}
+	}
+	return name, true
 }
 
 // ComponentPodTemplates returns every authored complete PodTemplate source.
