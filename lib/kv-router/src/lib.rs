@@ -10,6 +10,7 @@ mod active_set;
 pub(crate) mod cleanup;
 pub mod conditional_disagg;
 
+pub mod global_view;
 pub mod identity;
 pub mod indexer;
 pub mod kv_hints;
