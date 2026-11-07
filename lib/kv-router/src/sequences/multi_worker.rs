@@ -1330,6 +1330,16 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         );
     }
 
+    /// Count full ranks from derived snapshots without materializing request load rows.
+    pub(crate) fn record_full_worker_ranks_at(
+        &self,
+        decay_now: Instant,
+        full_ranks: &mut FullRankCounts,
+    ) {
+        self.prompt_registry
+            .record_full_worker_ranks_at(decay_now, full_ranks);
+    }
+
     /// Read ranks' loads one at a time at `decay_now`, without projecting every rank.
     pub(crate) fn worker_load_reader(&self, decay_now: Instant) -> WorkerLoadReader<'_> {
         self.prompt_registry.worker_load_reader(decay_now)

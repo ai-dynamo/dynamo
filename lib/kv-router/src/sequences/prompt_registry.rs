@@ -457,6 +457,22 @@ impl PromptRegistry {
         }));
     }
 
+    pub(super) fn record_full_worker_ranks_at(
+        &self,
+        decay_now: Instant,
+        full_ranks: &mut FullRankCounts,
+    ) {
+        full_ranks.clear();
+        let loads = self.loads.read();
+        for (index, worker, load) in loads.iter_indexed() {
+            full_ranks.record(
+                worker,
+                loads.capacity_at(index),
+                &load.projection(decay_now, 0),
+            );
+        }
+    }
+
     pub(super) fn worker_load_reader(&self, decay_now: Instant) -> WorkerLoadReader<'_> {
         WorkerLoadReader {
             loads: self.loads.read(),
@@ -854,6 +870,17 @@ mod tests {
             "unreported capacity is never full"
         );
         assert_eq!(projections[&worker_a].active_decode_blocks, 7);
+        let mut count_only = FullRankCounts::default();
+        count_only.reset(limits);
+        registry.record_full_worker_ranks_at(decay_now, &mut count_only);
+        for worker_id in [1, 2, 3] {
+            for dp_size in [1, 2] {
+                assert_eq!(
+                    count_only.worker_is_full(worker_id, dp_size),
+                    full_ranks.worker_is_full(worker_id, dp_size),
+                );
+            }
+        }
 
         // Worker 1 leaves and worker 3 arrives with the same capacity and load. The in-place
         // pass counts a prefix before it notices the key sets diverged; the rebuild must count
@@ -878,6 +905,15 @@ mod tests {
         assert!(full_ranks.worker_is_full(3, 1));
         assert!(!full_ranks.worker_is_full(3, 2), "one rank is counted once");
         assert_eq!(projections.len(), 2);
+        registry.record_full_worker_ranks_at(decay_now, &mut count_only);
+        for worker_id in [1, 2, 3] {
+            for dp_size in [1, 2] {
+                assert_eq!(
+                    count_only.worker_is_full(worker_id, dp_size),
+                    full_ranks.worker_is_full(worker_id, dp_size),
+                );
+            }
+        }
     }
 
     #[test]

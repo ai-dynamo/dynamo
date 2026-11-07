@@ -43,11 +43,11 @@ sequenceDiagram
 - For a selector with a `candidate_preparer`, the handle also builds the candidate
   rows on the caller task: eligibility plus cache, preferred-taint, and fetch inputs.
   The actor fills only load inputs, which depend on its earlier bookings. It uses the
-  rows only when it would build the same ones: the worker configuration, availability,
-  and overload it reads at selection match preparation, no rank is past the host's
-  reject thresholds, and the request is admitted in the actor turn that received it.
-  Otherwise it rebuilds them, and rows for a request that stays queued are dropped
-  when that turn ends.
+  rows only when configuration generation, availability and overload still match
+  preparation and admission happens in the actor turn that received them. Full ranks
+  require fresh rows when exclusive affinity or fetch-source eligibility can change;
+  otherwise the actor filters full workers from the prepared rows. Rows for a request
+  that stays queued are dropped when that turn ends.
 - `SchedulerQueueActor` routes every request through the policy queue and drains the
   ready backlog in the same actor turn, so freed capacity can go to another class's
   queued head under DRR rather than to the arriving request. The direct path remains
@@ -89,27 +89,48 @@ sequenceDiagram
 
 ```text
 PolicyClassQueue("agents")
-├── pending: BinaryHeap<PolicyQueueEntry>                 # WorkerPlacement::Any
-├── ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry>>
-│   ├── Worker(7, dp_rank=0) → heap of requests pinned to that rank
-│   └── Worker(9, dp_rank=1) → heap of requests pinned to that rank
-├── blocked_workers: FxHashSet<WorkerWithDpRank>
+├── pending: BinaryHeap<PolicyQueueEntry>                 # shared requests
+├── ready_by_worker: FxHashMap<WorkerLane, BinaryHeap<PolicyQueueEntry>>
+│   ├── Exact(7, dp_rank=0) → requests hard-pinned to that rank
+│   ├── Affinity(7, dp_rank=0) → soft requests targeting that rank
+│   └── WorkerAffinity(9) → soft requests targeting any rank of that worker
+├── blocked_workers: FxHashSet<WorkerLane>
 ├── candidate_worker_heads: BTreeSet<WorkerLaneHead>       # one head per unblocked lane
+├── fallback_heads: BTreeSet<WorkerLaneHead>               # soft heads awaiting fallback capacity
 ├── due_entries: BTreeSet<(due key, seq)>                  # explicit deadlines; empty with head expiry
-└── expiring_roots: BTreeSet<LaneRoot>                     # head expiry: every lane root with a finite
-                                                           # due time, blocked lanes included
+└── expiring_roots: BTreeSet<LaneRoot>                     # every finite-due lane root with head expiry,
+                                                           # including blocked and fallback lanes
 ```
 
 - `pending` is the shared ready heap for requests where the existing selector may choose any eligible worker.
-- `ready_by_worker` contains requests pinned to a particular worker and data-parallel rank. Each worker/rank heap is removed when its last request leaves.
-- `candidate_worker_heads` tracks the highest-priority request for each worker. A worker is removed from this index while it is full, then checked again when capacity changes or when expiry or cancellation removes its lane's root.
-- A `PolicyClassQueue` does not own worker configuration, capacity, or scoring state. `WorkerWithDpRank` only identifies a queue pinned to one worker/rank; the actor and selector retain worker knowledge.
-- Every heap uses the class's configured priority ordering. `BinaryHeap::peek()` reads its highest-priority root in O(1); push and pop are O(log n).
-- `PolicyClassQueue::next_dispatchable` compares the shared root with the highest indexed worker head. It removes blocked worker heads until it finds a dispatchable one, so each blocked lane is checked once per capacity update rather than once per pop.
+- `ready_by_worker` separates hard pins from ranked and worker-only soft affinity, so a hard
+  pin cannot hide a soft request that can fall back. Each lane leaves the map when emptied.
+- `candidate_worker_heads` tracks one highest-priority head per unblocked lane. A full lane
+  leaves this index until rechecked, including when expiry or cancellation removes its root.
+- Affinity lanes wake on target capacity changes, an enqueue to the same target, or the
+  100 ms affinity recheck while affinity backlog exists.
+- `fallback_heads` contains soft heads whose target is ineligible and whose fallback workers
+  are full. These heads are rechecked on every dispatch pass, so another worker's freed
+  capacity can admit them before later shared work.
+- A `PolicyClassQueue` does not own worker configuration, capacity, or scoring state.
+  `WorkerLane` identifies the target and whether it is hard or soft; the actor and selector
+  retain worker knowledge. Expiry indexes retain that complete identity, including worker-only targets.
+- Every heap uses the class's configured priority ordering. `BinaryHeap::peek()` reads its
+  highest-priority root in O(1); push and pop are O(log n).
+- `PolicyClassQueue::next_dispatchable` compares the shared root with the highest indexed
+  lane head. Healthy blocked lanes stay parked until a wake; fallback heads remain eligible
+  for a recheck on every pass.
 - `round_cursor` marks which class receives the next weighted turn. `carry_class` lets a class spend its unused share before that turn, but only if `next_dispatchable` confirms that its next request can run.
-- `extract_next` returns the winning head with a `DispatchCharge`; `settle` spends that cost only for an admitted request. Expiry, cancellation, and failed selection, booking, or delivery spend no credit, and the class keeps it for its next head. `pop_next` charges at once, for callers without an admission step.
-- With head expiry, `take_expired` pops each lane's overdue prefix from `expiring_roots` in due order, O(log n) per entry. Every other class finds its expired explicit deadlines in `due_entries` and removes them with one scan of the class and a heap rebuild, as cancellation does. Any removal of a blocked lane's root, by expiry or cancellation, unblocks the lane, so its next head is checked at the next dispatch.
-- A full Worker 7 can block only Worker 7's first request. It cannot hide a ready request for Worker 9 or one that can run on any worker.
+- `extract_next` returns the winning head with a `DispatchCharge`; `settle` spends that cost
+  only for an admitted request. Expiry, cancellation, and failed selection, booking, or delivery
+  spend no credit, and the class keeps it for its next head. `pop_next` charges at once, for
+  callers without an admission step.
+- With head expiry, `take_expired` pops each lane's overdue prefix from `expiring_roots` in
+  due order, O(log n) per entry. Every other class finds its expired explicit deadlines in
+  `due_entries` and removes them with one scan of the class and a heap rebuild, as cancellation
+  does. Removing a blocked root unblocks its successor and updates affinity/fallback indexes.
+- A full Worker 7 can block only its own lane head. It cannot hide ready work for Worker 9
+  or work that can run on any worker.
 
 ## Guardrails
 
