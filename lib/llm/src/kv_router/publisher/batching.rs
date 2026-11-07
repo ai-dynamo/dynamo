@@ -48,6 +48,7 @@ impl<K: Eq> PlacementEventCoalescer<K> {
             pending_key == &key
                 && pending.event.dp_rank == event.event.dp_rank
                 && pending.session_id == event.session_id
+                && pending.shared_cache_eligible == event.shared_cache_eligible
                 && compatible_data(&pending.event.data, &event.event.data)
         });
         if can_merge {
@@ -191,6 +192,7 @@ impl BatchingState {
         let tier = placement_event.placement.tier;
         let domain = placement_event.placement.residency_domain;
         let session_id = placement_event.session_id;
+        let shared_cache_eligible = placement_event.shared_cache_eligible;
         let mut event = placement_event.event;
         event.data = match event.data {
             KvCacheEventData::Removed(data) => {
@@ -220,16 +222,10 @@ impl BatchingState {
             }
         };
         event.event_id = self.next_publish_id;
-        let _ = emit(
-            local_indexer,
-            worker_id,
-            tier,
-            domain,
-            event,
-            session_id,
-            output,
-        )
-        .await;
+        let mut router_event = RouterEvent::with_residency_domain(worker_id, event, tier, domain);
+        router_event.session_id = session_id;
+        router_event.shared_cache_eligible = shared_cache_eligible;
+        let _ = emit(local_indexer, router_event, output).await;
         self.next_publish_id = self
             .next_publish_id
             .checked_add(1)
@@ -239,6 +235,7 @@ impl BatchingState {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_kv_router::indexer::{KvIndexerInterface, WorkerKvQueryResponse};
     use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheRemoveData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash, Placement, ResidencyDomain, StorageTier,
@@ -326,6 +323,53 @@ mod tests {
             &output[0].event.data,
             KvCacheEventData::Stored(data) if data.blocks.len() == 1
         ));
+    }
+
+    #[tokio::test]
+    async fn shared_cache_eligibility_survives_coalescing_publication_and_buffering() {
+        for (first, second) in [(true, true), (true, false)] {
+            let token = tokio_util::sync::CancellationToken::new();
+            let indexer = Arc::new(LocalKvIndexer::new(
+                token.clone(),
+                1,
+                Arc::new(dynamo_kv_router::indexer::KvIndexerMetrics::new_unregistered()),
+                10,
+            ));
+            let mut state = BatchingState::new(128);
+            let mut dedup = EventDedupFilter::new();
+            let mut output = Vec::new();
+            for event in [
+                stored(None, 1).with_shared_cache_eligibility(first),
+                stored(Some(1), 2).with_shared_cache_eligibility(second),
+            ] {
+                state
+                    .push(event, &Some(indexer.clone()), 7, &mut dedup, &mut output)
+                    .await;
+            }
+            state
+                .flush(&Some(indexer.clone()), 7, &mut dedup, &mut output)
+                .await;
+            let expected = if first == second {
+                vec![first]
+            } else {
+                vec![first, second]
+            };
+            assert_eq!(
+                output
+                    .iter()
+                    .map(|event| event.shared_cache_eligible)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            indexer.flush().await;
+            let WorkerKvQueryResponse::Events { events, .. } =
+                indexer.get_events_in_id_range(Some(1), None).await
+            else {
+                panic!("expected buffered events");
+            };
+            assert_eq!(events, output);
+            token.cancel();
+        }
     }
 
     #[test]
