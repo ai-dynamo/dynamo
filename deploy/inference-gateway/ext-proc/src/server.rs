@@ -294,7 +294,7 @@ struct StreamTrace {
     /// Whether the response streams. A unary response's headers wait for
     /// the whole generation.
     streamed: bool,
-    /// The first non-empty response chunk's arrival.
+    /// The arrival of the first response chunk that carries engine output.
     first_chunk: Option<Duration>,
     rewrite: Option<Duration>,
     body_bytes_out: usize,
