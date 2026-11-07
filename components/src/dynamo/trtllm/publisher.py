@@ -874,6 +874,7 @@ class Publisher:
             return False
 
         def handle_stat(stat):
+            """Publish each rank's stats, using rank 0 for native TRT-LLM metrics."""
             kv_active_blocks = stat["kvCacheStats"]["usedNumBlocks"]
             kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
             dp_rank = int(stat.get("attentionDpRank", 0))
@@ -891,10 +892,12 @@ class Publisher:
             )
             self.component_gauges.set_gpu_cache_usage(dp_rank_label, gpu_cache_usage)
 
-            # Log iteration stats to TRT-LLM MetricsCollector (PR #11243)
-            # This populates trtllm_kv_cache_hit_rate and trtllm_kv_cache_utilization gauges
-            if self.metrics_collector and hasattr(
-                self.metrics_collector, "log_iteration_stats"
+            # Only rank 0 feeds the unlabelled trtllm_* collector: other DP rows copy
+            # rank 0's stats, report 0 queued and would double-count spec-decode.
+            if (
+                dp_rank == 0
+                and self.metrics_collector
+                and hasattr(self.metrics_collector, "log_iteration_stats")
             ):
                 try:
                     self.metrics_collector.log_iteration_stats(stat)
