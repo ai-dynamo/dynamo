@@ -90,7 +90,7 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
 
 /// `vllm_xargs` keys vLLM itself fills from dedicated request fields. Dynamo only
 /// forwards router-generated `kv_transfer_params`, so clients may not set them.
-const RESERVED_VLLM_XARGS_KEYS: &[&str] = &["kv_transfer_params", "ec_transfer_params"];
+pub(crate) const RESERVED_VLLM_XARGS_KEYS: &[&str] = &["kv_transfer_params", "ec_transfer_params"];
 
 /// Treat null passthrough fields as omitted while preserving unknown fields for validation.
 pub(super) fn deserialize_extra_fields<'de, D>(
@@ -106,6 +106,28 @@ where
     fields
         .retain(|key, value| !value.is_null() || !PASSTHROUGH_EXTRA_FIELDS.contains(&key.as_str()));
     Ok(fields)
+}
+
+/// Extra fields kept when a request is serialized for a text-input worker.
+/// Token-input workers read every passthrough field from `unsupported_fields` in
+/// the preprocessor; text-input workers only see the JSON request, and only the
+/// vLLM handler reads `vllm_xargs` from it. Other backends ignore the key.
+pub const TEXT_WORKER_PASSTHROUGH_FIELDS: &[&str] = &["vllm_xargs"];
+
+/// Serialize only `TEXT_WORKER_PASSTHROUGH_FIELDS`. Unknown fields allowed by
+/// `DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS` and other passthrough fields are not sent.
+pub(super) fn serialize_text_worker_fields<S>(
+    fields: &std::collections::HashMap<String, serde_json::Value>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.collect_map(
+        fields
+            .iter()
+            .filter(|(key, _)| TEXT_WORKER_PASSTHROUGH_FIELDS.contains(&key.as_str())),
+    )
 }
 
 static IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: LazyLock<bool> =
