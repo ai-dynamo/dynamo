@@ -10,9 +10,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, ComponentSnapshot, DisaggregationMode, DynamoError, EngineConfig,
-    GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
-    MetricsBindings, MetricsCtx, PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
+    GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput, MetricsBindings, MetricsCtx,
+    PreprocessedRequest, RuntimeConfig, WorkerConfig,
 };
+use dynamo_llm::protocols::common::preprocessor::REQUIRES_ENCODER_RESULT;
 use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
 };
@@ -24,11 +25,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, ModelInfo, TrtllmClient};
-use crate::convert::{
-    ResponseState, build_generate_request_with_routing, validate_remote_media_urls,
-};
 use crate::model::ConfiguredModel;
 use crate::proto as pb;
+
+mod generation;
 
 const ALREADY_STARTED: &str = "TensorRT-LLM sidecar has already started";
 const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -77,12 +77,6 @@ struct RoutingState {
     initial_snapshots: Vec<ComponentSnapshot>,
 }
 
-/// Terminal output emitted when a request is cancelled, carrying the usage
-/// accumulated so far.
-fn cancelled(state: &ResponseState) -> LLMEngineOutput {
-    LLMEngineOutput::cancelled().with_usage(usage(state.prompt_tokens(), state.completion_tokens()))
-}
-
 pub struct TrtllmSidecarEngine {
     endpoint: GrpcEndpoint,
     transport: GrpcTransportConfig,
@@ -92,6 +86,7 @@ pub struct TrtllmSidecarEngine {
     mode: DisaggregationMode,
     subagent_affinity_auth_key: Option<String>,
     allow_remote_media_urls: bool,
+    route_to_encoder: bool,
     /// Connection and model information may be discovered in the cancellable sidecar bootstrap.
     connection: OnceCell<(TrtllmClient, ModelInfo)>,
     started: OnceCell<()>,
@@ -119,6 +114,7 @@ impl TrtllmSidecarEngine {
             mode,
             subagent_affinity_auth_key: None,
             allow_remote_media_urls: true,
+            route_to_encoder: false,
             connection: OnceCell::new(),
             started: OnceCell::new(),
             routing: OnceCell::new(),
@@ -226,14 +222,14 @@ impl TrtllmSidecarEngine {
             })?;
         let allow_remote_media_urls = crate::args::allow_remote_media_urls(remote_urls.as_deref())?;
         let mode = args.sidecar.common.disaggregation_mode;
-        if mode.is_encode() {
+        if args.sidecar.common.route_to_encoder
+            && !matches!(
+                mode,
+                DisaggregationMode::Aggregated | DisaggregationMode::Prefill
+            )
+        {
             return Err(client::invalid_argument(
-                "encode mode is not supported by the TensorRT-LLM sidecar",
-            ));
-        }
-        if args.sidecar.common.route_to_encoder {
-            return Err(client::invalid_argument(
-                "route-to-encoder is not supported by the TensorRT-LLM sidecar",
+                "TensorRT-LLM encoder routing requires an aggregated or prefill worker",
             ));
         }
 
@@ -254,6 +250,7 @@ impl TrtllmSidecarEngine {
         let mut engine = Self::new(endpoint, transport, model.clone(), mode);
         engine.subagent_affinity_auth_key = args.subagent_affinity_auth_key;
         engine.allow_remote_media_urls = allow_remote_media_urls;
+        engine.route_to_encoder = args.sidecar.common.route_to_encoder;
         // Off by default: TensorRT-LLM's xgrammar rejects several tag formats (NVIDIA/TensorRT-LLM#19913).
         let structural_tag = args.sidecar.common.structural_tag(false);
         let config = WorkerConfig {
@@ -281,9 +278,9 @@ impl TrtllmSidecarEngine {
                 .exclude_tools_when_tool_choice_none,
             // Framework wiring is available; discovered source declarations
             // independently decide whether any event or metrics work starts.
-            enable_kv_routing: true,
+            enable_kv_routing: !mode.is_encode(),
             disaggregation_mode: mode,
-            route_to_encoder: false,
+            route_to_encoder: args.sidecar.common.route_to_encoder,
             enable_rl: args.sidecar.common.enable_rl,
             default_thinking_mode: args.default_thinking_mode,
             ..Default::default()
@@ -330,6 +327,22 @@ impl TrtllmSidecarEngine {
                 self.transport.retry_interval,
             )
             .await?;
+        if info.limits.encoder_only != self.mode.is_encode() {
+            return Err(client::invalid_argument(
+                "sidecar role must match the engine encoder-only role",
+            ));
+        }
+        // Decode consumes staged KV, not the single-use encoder cache.
+        if self.route_to_encoder && !info.limits.encoder_consumer {
+            return Err(client::invalid_argument(
+                "--route-to-encoder requires an engine that accepts encoder caches",
+            ));
+        }
+        if !self.mode.is_decode() && info.limits.requires_encoder_cache && !self.route_to_encoder {
+            return Err(client::invalid_argument(
+                "vision-disabled encoder consumers require --route-to-encoder",
+            ));
+        }
         Ok((client, info))
     }
 }
@@ -358,6 +371,28 @@ impl LLMEngine for TrtllmSidecarEngine {
                     return Err(client::protocol_error(
                         "Follower endpoint cannot serve inference; use the automatic sidecar launcher",
                     ));
+                }
+                if self.mode.is_encode() {
+                    let parallelism = server.parallelism.as_ref();
+                    let dp_size = parallelism
+                        .and_then(|parallelism| parallelism.data_parallel_size)
+                        .unwrap_or(1)
+                        .max(1);
+                    model.data_parallel_size = Some(dp_size);
+                    model.data_parallel_start_rank = Some(
+                        parallelism
+                            .and_then(|parallelism| parallelism.data_parallel_start_rank)
+                            .unwrap_or(0),
+                    );
+                    return Ok(RoutingState {
+                        instance_id: server.instance_id,
+                        dp_size,
+                        node,
+                        dp_targeting: false,
+                        heartbeat_timeout: None,
+                        sources: Vec::new(),
+                        initial_snapshots: Vec::new(),
+                    });
                 }
                 let metadata = server.extra.unwrap_or_default().fields;
                 let dp_targeting = matches!(
@@ -448,6 +483,12 @@ impl LLMEngine for TrtllmSidecarEngine {
         );
         let mut config = model.engine_config();
         config.served_model_name = Some(info.served_model_name.clone());
+        if self.route_to_encoder {
+            config.runtime_data.insert(
+                REQUIRES_ENCODER_RESULT.into(),
+                serde_json::Value::Bool(true),
+            );
+        }
         if let Some(node) = self.routing.get().and_then(|routing| routing.node.as_ref()) {
             config.runtime_data.insert(
                 crate::node::NODE_METADATA_KEY.to_string(),
@@ -478,154 +519,7 @@ impl LLMEngine for TrtllmSidecarEngine {
         request: PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        let (client, info) = self
-            .connection
-            .get()
-            .filter(|_| self.started.initialized())
-            .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
-        let request_id = ctx.id().to_string();
-        // A single-rank engine needs no hint, even when it advertises the
-        // capability. Suppress it and the associated anonymous conversation ID
-        // to avoid retaining one-shot per-conversation cache state.
-        let use_dp_targeting = self
-            .routing
-            .get()
-            .is_some_and(|routing| routing.dp_targeting && routing.dp_size > 1);
-        let target_dp_rank = request.routing.as_ref().and_then(|routing| {
-            if self.mode.is_prefill() {
-                routing.prefill_dp_rank.or(routing.dp_rank)
-            } else {
-                routing.dp_rank
-            }
-        });
-        if let Some(rank) = target_dp_rank {
-            let dp_size = self.routing.get().map_or(1, |routing| routing.dp_size);
-            if rank >= dp_size {
-                return Err(client::invalid_argument(format!(
-                    "data-parallel rank {rank} is outside the engine range 0..{dp_size}",
-                )));
-            }
-        }
-        let target_dp_rank = target_dp_rank.filter(|_| use_dp_targeting);
-        let parent_affinity = if self.mode.is_prefill() && self.subagent_affinity_auth_key.is_some()
-        {
-            request.agent_context.as_ref().and_then(|agent| {
-                agent
-                    .parent_session_id
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|parent| !parent.is_empty() && *parent != agent.session_id.trim())
-                    .map(str::to_owned)
-            })
-        } else {
-            None
-        };
-        if parent_affinity.is_some()
-            && request
-                .agent_context
-                .as_ref()
-                .is_none_or(|agent| agent.session_id.trim().is_empty())
-        {
-            return Err(client::invalid_argument(
-                "subagent affinity requires a stable child session ID",
-            ));
-        }
-        let mut state = ResponseState::new(&request, self.mode);
-        // A decode request that took a handoff has KV transferred into it, and
-        // the transceiver releases those blocks when the engine finishes the
-        // request -- not when the client goes away. Dropping the stream on
-        // cancellation would strand the prefill worker's blocks. Defer only
-        // until the first token proves the transfer landed; deferring past
-        // that would let a cancelled request generate its whole budget with no
-        // consumer. A decode-mode request without a handoff ran locally and
-        // has nothing to strand.
-        let needs_cancellation_deferral = self.mode.is_decode() && request.prefill_result.is_some();
-        let stopped_ctx = ctx.inner_arc();
-        // Hoisted: `stopped()` is an async-trait method, so re-creating it per
-        // streamed chunk costs a boxed future and a waker registration on every
-        // token.
-        let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
-        let shutdown = self.cancel.child_token();
-        let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
-
-        // The same deferral applies here, not just to the streaming loop below.
-        // `generate` sends the request and then awaits response headers, so
-        // losing this race can drop a request the engine has already accepted
-        // and begun pulling KV for; and an already-stopped context would skip
-        // the dispatch entirely, leaving the prefill worker's blocks with no
-        // decode leg to claim them. Both strand exactly what the deferral
-        // exists to protect. Shutdown still wins -- the process is going away.
-        let stream = tokio::select! {
-            biased;
-            _ = &mut request_cancellation, if !needs_cancellation_deferral => None,
-            _ = &mut shutdown_cancellation => None,
-            result = async {
-                validate_remote_media_urls(&request, self.allow_remote_media_urls)?;
-                let proto_request = build_generate_request_with_routing(
-                    request,
-                    &request_id,
-                    &self.model.source,
-                    Some(info.limits),
-                    self.mode,
-                    use_dp_targeting,
-                )?;
-                client.generate(
-                    proto_request,
-                    target_dp_rank,
-                    parent_affinity.as_deref().zip(self.subagent_affinity_auth_key.as_deref()),
-                ).await
-            } => Some(result?),
-        };
-        let Some(mut stream) = stream else {
-            let output = cancelled(&state);
-            return Ok(Box::pin(futures::stream::once(async move { Ok(output) })));
-        };
-
-        Ok(Box::pin(async_stream::stream! {
-            let mut is_transfer_settled = false;
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = &mut request_cancellation, if !needs_cancellation_deferral || is_transfer_settled => {
-                        yield Ok(cancelled(&state));
-                        break;
-                    }
-                    _ = &mut shutdown_cancellation => {
-                        yield Ok(cancelled(&state));
-                        break;
-                    }
-                    message = stream.message() => {
-                        match message {
-                            Ok(Some(response)) => match state.convert(response) {
-                                Ok(Some(output)) => {
-                                    is_transfer_settled |= !output.token_ids.is_empty();
-                                    let terminal = output.finish_reason.is_some();
-                                    yield Ok(output);
-                                    if terminal {
-                                        break;
-                                    }
-                                }
-                                Ok(None) => {}
-                                Err(error) => {
-                                    yield Err(error);
-                                    break;
-                                }
-                            },
-                            Ok(None) => {
-                                yield Err(client::stream_incomplete(
-                                    "TensorRT-LLM Generate ended before a terminal response",
-                                ));
-                                break;
-                            }
-                            Err(status) => {
-                                yield Err(client::stream_status_to_dynamo("Generate", status));
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }))
+        self.generate_request(request, ctx).await
     }
 
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
@@ -682,6 +576,9 @@ impl LLMEngine for TrtllmSidecarEngine {
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+        if self.mode.is_encode() && self.started.initialized() {
+            return Ok(Vec::new());
+        }
         let routing = self
             .routing
             .get()
@@ -694,6 +591,9 @@ impl LLMEngine for TrtllmSidecarEngine {
     }
 
     async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        if self.mode.is_encode() && self.started.initialized() {
+            return Ok(MetricsBindings::default());
+        }
         let routing = self
             .routing
             .get()

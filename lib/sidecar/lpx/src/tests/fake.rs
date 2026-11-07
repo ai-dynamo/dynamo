@@ -265,6 +265,22 @@ impl pb::inference_server::Inference for FakeEngine {
 
 #[tonic::async_trait]
 impl pb::control_server::Control for FakeEngine {
+    async fn shutdown(
+        &self,
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::unimplemented("engine shutdown is not implemented"))
+    }
+
+    async fn transfer_encoder_cache(
+        &self,
+        _request: Request<pb::TransferEncoderCacheRequest>,
+    ) -> Result<Response<pb::TransferEncoderCacheResponse>, Status> {
+        Err(Status::unimplemented(
+            "native NIXL transfer requires an engine",
+        ))
+    }
+
     async fn get_server_info(
         &self,
         _request: Request<pb::GetServerInfoRequest>,

@@ -80,6 +80,7 @@ pub(crate) fn build_generate_request(
         kv,
         guided: None,
         media: Vec::new(),
+        encoder: None,
         lora_name: request
             .routing
             .as_ref()
@@ -414,6 +415,9 @@ impl ResponseState {
             pb::generate_response::Event::Error(error) => {
                 Err(engine_error(error, engine_label(&self.engine_name)))
             }
+            pb::generate_response::Event::EncoderReady(_) => Err(self.protocol_error(
+                "received an encoder event; this sidecar does not support encoder handoffs",
+            )),
             pb::generate_response::Event::PrefillReady(_) => Err(self.protocol_error(
                 "received a prefill_ready event; this sidecar serves aggregated and decode \
                  requests only",

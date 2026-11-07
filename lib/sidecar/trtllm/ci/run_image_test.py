@@ -93,6 +93,11 @@ AUDIO_URL = (
 )
 AUDIO_SHA256 = "65b222837919ccbb924a4e1077413ea7cc6af3e68b663b012a9539d5c05850f0"
 
+EPD_TESTS = {
+    "image-epd": "tests::e2e::epd::e2e_real_openengine_image_epd",
+    "image-epd-disaggregated": "tests::e2e::epd::e2e_real_openengine_image_epd_disaggregated",
+}
+
 
 def prepare_audio(results):
     with urllib.request.urlopen(AUDIO_URL, timeout=30) as response:
@@ -107,6 +112,23 @@ def prepare_audio(results):
 def model_config(config, media):
     if media == "audio":
         return {**config, **config["audio"]}
+    return config
+
+
+def load_runtime_config(args, results):
+    config = model_config(json.loads(args.config.read_text()), args.media)
+    identity = {
+        **config,
+        "scenario": args.scenario,
+        "media": args.media,
+        "installed_version": importlib.metadata.version("tensorrt_llm"),
+        "installed_commit": os.environ.get("TRT_LLM_GIT_COMMIT"),
+    }
+    (results / "runtime.json").write_text(json.dumps(identity, indent=2) + "\n")
+    if identity["installed_commit"] != config["upstream_commit"]:
+        raise RuntimeError(
+            f"Unexpected upstream commit: {identity['installed_commit']}"
+        )
     return config
 
 
@@ -170,14 +192,14 @@ def stop_engine(process):
             process.wait(timeout=10)
 
 
-def run_rust_test(binary, env, test, results):
+def run_rust_test(binary, env, test, results, timeout=240):
     completed = subprocess.run(
         [str(binary), "--exact", test, "--ignored", "--nocapture", "--color", "never"],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        timeout=240,
+        timeout=timeout,
     )
     log = results / (
         "rust-events-test.log" if test.endswith("event_conversion") else "rust-test.log"
@@ -208,6 +230,11 @@ def routing_fixture():
 
 
 def run(args, results):
+    if args.scenario in EPD_TESTS:
+        from run_epd_test import run as run_epd
+
+        return run_epd(args, results)
+
     # CPU harness tests import this module without the inference dependencies.
     from huggingface_hub import snapshot_download
     from transformers import AutoTokenizer
@@ -215,19 +242,7 @@ def run(args, results):
     routing = args.scenario == "image-routing"
     fixture = FIXTURES[args.media]
     test = f"tests::e2e::e2e_real_openengine_{args.media}"
-    config = model_config(json.loads(args.config.read_text()), args.media)
-    identity = {
-        **config,
-        "scenario": args.scenario,
-        "media": args.media,
-        "installed_version": importlib.metadata.version("tensorrt_llm"),
-        "installed_commit": os.environ.get("TRT_LLM_GIT_COMMIT"),
-    }
-    (results / "runtime.json").write_text(json.dumps(identity, indent=2) + "\n")
-    if identity["installed_commit"] != config["upstream_commit"]:
-        raise RuntimeError(
-            f"Unexpected upstream commit: {identity['installed_commit']}"
-        )
+    config = load_runtime_config(args, results)
 
     video = video_data_uri() if args.media == "video" else None
     audio_path = prepare_audio(results) if args.media == "audio" else None
@@ -387,7 +402,7 @@ def run(args, results):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--scenario", choices=["image", "video", "audio", "image-routing"]
+        "--scenario", choices=["image", "video", "audio", "image-routing", *EPD_TESTS]
     )
     parser.add_argument("--media", choices=FIXTURES)
     parser.add_argument("--binary", type=Path, required=True)
@@ -400,7 +415,11 @@ def main():
     )
     args = parser.parse_args()
     args.scenario = args.scenario or args.media or "image"
-    media = "image" if args.scenario == "image-routing" else args.scenario
+    media = (
+        "image"
+        if args.scenario == "image-routing" or args.scenario in EPD_TESTS
+        else args.scenario
+    )
     if args.media is not None and args.media != media:
         parser.error("--media conflicts with --scenario")
     args.media = media
@@ -427,7 +446,8 @@ def main():
     case = ET.SubElement(
         suite,
         "testcase",
-        name=(
+        name=EPD_TESTS.get(args.scenario)
+        or (
             f"tests::e2e::e2e_real_openengine_{args.media}"
             + ("[image-routing]" if args.scenario == "image-routing" else "")
         ),

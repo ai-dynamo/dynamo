@@ -595,3 +595,41 @@ fn visible_stop_token_arrives_with_the_terminal_usage() {
         Some(2)
     );
 }
+
+#[test]
+fn encoder_ready_is_a_tokenless_terminal_with_an_opaque_handoff() {
+    let response = pb::GenerateResponse {
+        event: Some(pb::generate_response::Event::EncoderReady(
+            pb::EncoderReady {
+                cache: Some(pb::EncoderCacheRef {
+                    transfer_backend: ENCODER_BACKEND.into(),
+                    opaque_state: vec![1, 2, 3],
+                }),
+            },
+        )),
+        ..Default::default()
+    };
+    let mut encode = ResponseState::new(&request(), DisaggregationMode::Encode);
+    let result = encode.convert(response.clone()).unwrap().unwrap();
+    assert_eq!(result.finish_reason, Some(FinishReason::Stop));
+    assert!(result.token_ids.is_empty());
+    assert_eq!(
+        result.extra_args.unwrap(),
+        serde_json::json!({"encoder_result_release": true})
+    );
+    assert_eq!(
+        result.encoder_result.unwrap(),
+        serde_json::json!({"transfer_backend": ENCODER_BACKEND, "opaque_state": [1, 2, 3]})
+    );
+    let mut ordinary = ResponseState::new(&request(), AGG);
+    assert!(ordinary.convert(response).is_err());
+    let mut encode = ResponseState::new(&request(), DisaggregationMode::Encode);
+    assert!(
+        encode
+            .convert(pb::GenerateResponse {
+                event: Some(pb::generate_response::Event::Finished(Default::default())),
+                ..Default::default()
+            })
+            .is_err()
+    );
+}

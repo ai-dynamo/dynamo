@@ -5,25 +5,31 @@ SPDX-License-Identifier: Apache-2.0
 
 # Vendored OpenEngine protocol
 
-- Source: [`proto/openengine/v1`](https://github.com/ai-dynamo/openengine/tree/b5f2bd93721f7b888d3e2440679e0ae7012939d1/proto/openengine/v1)
-- Commit: `b5f2bd93721f7b888d3e2440679e0ae7012939d1` (tag `v0.1.0`)
+These files are an exact snapshot of the canonical OpenEngine encoder-handoff
+proposal below, including the `Abort.encoder_cache` release target. The proposal
+is still under review and is not in a published BSR release. Merge the canonical
+protocol before merging this consumer. Encoder handoffs require a matching engine
+implementation.
 
-This is the same revision TensorRT-LLM's OpenEngine server is generated from: it
-is the git commit behind Buf Schema Registry module commit `768a93c7b44e` of
-`buf.build/openengine/openengine`.
+- Source: [`proto/openengine/v1`](https://github.com/ai-dynamo/openengine/tree/7b4171659dad80d4820f1024345b18e397158641/proto/openengine/v1)
+- Commit: `7b4171659dad80d4820f1024345b18e397158641`
+
+TensorRT-LLM's matching transport branch vendors the same revision. The schema
+adds encoder roles, cache references and an engine-to-engine transfer RPC. Its
+existing shutdown RPC is kept in sync; this sidecar does not implement shutdown.
 
 SHA-256:
 
 | File | SHA-256 |
 |------|---------|
 | `openengine/v1/error.proto` | `b1c559a3b7847c55a247145f1493805b56b58491a320fb26e6ebcd7072b62fb3` |
-| `openengine/v1/generation.proto` | `3c4e9f11664d50dd26e393cb2b34dca9af680419097493d4f7ceb2654b0f1058` |
+| `openengine/v1/generation.proto` | `ffe30cacfb9e42e00c70ea9bc29a83b65865ee67a6ceb46ce3f5d3b9a8cb36cd` |
 | `openengine/v1/kv.proto` | `4f5c46a65a7998ecf34ea37117b325b0f0a5a70149702d6bca919726b40526cd` |
-| `openengine/v1/lifecycle.proto` | `0b39bbecc617db3de900333efe6c070dadca2f71f5e372c306d44973229d48c9` |
+| `openengine/v1/lifecycle.proto` | `9361c927d4a1746331e8d764c4537ea79861ade2a206ddbcca833b6d39959776` |
 | `openengine/v1/lora.proto` | `c1aa58fca3ab1b40f7c75dbbd17280b2b52ee295256479b6b0fc74f924047ef9` |
-| `openengine/v1/model.proto` | `5166cdcdaa260b1f5de2fa8d170dacbab1595af9413e73f09c6902b25f553284` |
-| `openengine/v1/openengine.proto` | `1d1baafee0aaf0dbf51962ae2d293431fbd3be96601b375288fab785fc2d8572` |
+| `openengine/v1/model.proto` | `ca767ecd917282d0a1e2e40716a2658c372c9abbfadd043ef8100db2ff39fee7` |
+| `openengine/v1/openengine.proto` | `464962a220ff8f5ae64d7468c7e7943aae9f3e29b24d95a5e7dddee99b91aef6` |
 | `openengine/v1/server.proto` | `deb379508d5e93c719cc0c5ebe222e66af7d8784384d3cc270e95d0b48274d96` |
 
-The files are copied without modification. Update the revision and checksums
-together, and add or remove entries in `build.rs`'s `PROTOS` list to match.
+Update the revision and checksums together. Add or remove entries in `build.rs`'s
+`PROTOS` list when the schema file set changes.

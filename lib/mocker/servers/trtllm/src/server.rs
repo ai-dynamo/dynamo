@@ -185,6 +185,7 @@ impl TrtllmMockerService {
             }),
             supports_lora: Some(false),
             supports_multimodal: Some(false),
+            encoder: None,
             reasoning_parser: String::new(),
             tool_call_parser: String::new(),
             extra: None,
@@ -746,6 +747,9 @@ impl pb::control_server::Control for TrtllmMockerService {
             Some(pb::abort_request::Target::KvSession(_)) => {
                 return unsupported("Abort by KV session");
             }
+            Some(pb::abort_request::Target::EncoderCache(_)) => {
+                return unsupported("Abort by encoder cache");
+            }
             Some(pb::abort_request::Target::AllRequests(_)) => {
                 // Collect first: holding shard guards across the awaits below
                 // would block every task touching the same shard.
@@ -806,6 +810,22 @@ impl pb::control_server::Control for TrtllmMockerService {
     // KV events stay UNIMPLEMENTED on purpose: the real TensorRT-LLM OpenEngine
     // server does not implement them, and a mocker that did would let a test
     // pass here and fail against a real engine.
+    async fn shutdown(
+        &self,
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::unimplemented("engine shutdown is not implemented"))
+    }
+
+    async fn transfer_encoder_cache(
+        &self,
+        _request: Request<pb::TransferEncoderCacheRequest>,
+    ) -> Result<Response<pb::TransferEncoderCacheResponse>, Status> {
+        Err(Status::unimplemented(
+            "native NIXL transfer requires an engine",
+        ))
+    }
+
     async fn get_kv_event_sources(
         &self,
         _request: Request<pb::GetKvEventSourcesRequest>,

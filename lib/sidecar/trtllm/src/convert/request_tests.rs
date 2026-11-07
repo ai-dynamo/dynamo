@@ -386,6 +386,62 @@ fn image_routing_hints_require_capability_and_exact_frontend_metadata() {
 }
 
 #[test]
+fn encoder_handoff_preserves_media_uuids_across_worker_roles() {
+    let mut limits = image_limits(4096).unwrap();
+    limits.encoder_only = true;
+    limits.encoder_consumer = true;
+    limits.encoder_shared_safetensors = true;
+    limits.supports_image_routing = true;
+    for uuid in [
+        None,
+        Some("caller-owned"),
+        Some("dynamo-image-v1:0123456789abcdef"),
+    ] {
+        let mut req = request();
+        add_images(&mut req, ["https://example.com/first.png"]);
+        req.multi_modal_uuids = Some(HashMap::from([(
+            "image_url".into(),
+            vec![uuid.map(str::to_string)],
+        )]));
+        req.extra_args = Some(json!({"mm_hashes": ["0123456789abcdef"]}));
+        req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
+            routing_token_ids: vec![11, 22, 33],
+            expanded_prompt_len: 3,
+            ..Default::default()
+        });
+        let encoded = build_generate_request(
+            req.clone(),
+            "e",
+            "model",
+            Some(limits),
+            DisaggregationMode::Encode,
+        );
+        req.encoder_result =
+            Some(json!({"transfer_backend": ENCODER_BACKEND, "opaque_state": [1]}));
+        for mode in [AGG, PREFILL] {
+            let consumed =
+                build_generate_request(req.clone(), "consumer", "model", Some(limits), mode);
+            if uuid.is_some_and(|value| value.starts_with("dynamo-image-v1:")) {
+                assert!(
+                    encoded
+                        .as_ref()
+                        .unwrap_err()
+                        .to_string()
+                        .contains("reserved")
+                );
+                assert!(consumed.unwrap_err().to_string().contains("reserved"));
+            } else {
+                assert_eq!(encoded.as_ref().unwrap().media, consumed.unwrap().media);
+                assert_eq!(
+                    encoded.as_ref().unwrap().media[0].uuid,
+                    uuid.unwrap_or_default()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn caller_uuids_cannot_spoof_internal_image_routing_hints() {
     let mut req = request();
     add_images(
@@ -1175,5 +1231,235 @@ fn prefill_result_on_a_non_decode_worker_is_rejected() {
                 .contains("must be routed to a decode worker"),
             "unexpected error for {mode}: {error}"
         );
+    }
+}
+
+#[test]
+fn image_encoder_handoff_requires_negotiated_roles() {
+    let mut source = request();
+    add_images(&mut source, ["https://example.com/image.png"]);
+    let mut limits = image_limits(4096).unwrap();
+    assert!(
+        build_generate_request(
+            source.clone(),
+            "e",
+            "model",
+            Some(limits),
+            DisaggregationMode::Encode
+        )
+        .is_err()
+    );
+    limits.encoder_only = true;
+    let encoded = build_generate_request(
+        source.clone(),
+        "e",
+        "model",
+        Some(limits),
+        DisaggregationMode::Encode,
+    )
+    .unwrap();
+    assert!(encoded.encoder.unwrap().encode_only);
+    source.encoder_result =
+        Some(json!({"transfer_backend": ENCODER_BACKEND, "opaque_state": [1, 2, 3]}));
+    assert!(build_generate_request(source.clone(), "pd", "model", Some(limits), AGG).is_err());
+    limits.encoder_consumer = true;
+    limits.encoder_shared_safetensors = true;
+    let consumed =
+        build_generate_request(source.clone(), "pd", "model", Some(limits), AGG).unwrap();
+    let options = consumed.encoder.unwrap();
+    assert!(!options.encode_only);
+    assert_eq!(options.cache.unwrap().opaque_state, [1, 2, 3]);
+    let prefill = build_generate_request(
+        source.clone(),
+        "p",
+        "model",
+        Some(limits),
+        DisaggregationMode::Prefill,
+    )
+    .expect("prefill can consume encoder output");
+    assert_eq!(
+        prefill.encoder.unwrap().cache.unwrap().opaque_state,
+        [1, 2, 3]
+    );
+    assert!(prefill.kv.is_none());
+    assert_eq!(
+        prefill.extra.unwrap().fields[disagg::REQUEST_TYPE_KEY].kind,
+        Some(prost_types::value::Kind::StringValue(
+            disagg::CONTEXT_ONLY.into()
+        ))
+    );
+    for mode in [DisaggregationMode::Decode, DisaggregationMode::Encode] {
+        assert!(build_generate_request(source.clone(), "p", "model", Some(limits), mode).is_err());
+    }
+    source.encoder_result = Some(json!({"transfer_backend": "future", "opaque_state": [1]}));
+    assert!(build_generate_request(source, "pd", "model", Some(limits), AGG).is_err());
+}
+
+#[test]
+fn encode_validates_consumer_guides_without_forwarding_them() {
+    let mut source = request();
+    add_images(&mut source, ["https://example.com/image.png"]);
+    let mut limits = image_limits(4096).unwrap();
+    limits.encoder_only = true;
+    let encoded = build_generate_request(
+        source.clone(),
+        "e",
+        "model",
+        Some(limits),
+        DisaggregationMode::Encode,
+    )
+    .unwrap();
+    assert!(encoded.guided.is_none());
+
+    source
+        .sampling_options
+        .guided_decoding
+        .as_mut()
+        .unwrap()
+        .choice = Some(vec!["yes".into(), "no".into()]);
+    for mode in [DisaggregationMode::Encode, AGG, PREFILL] {
+        let error =
+            build_generate_request(source.clone(), "req", "model", Some(limits), mode).unwrap_err();
+        assert!(error.to_string().contains("`choice` is not supported"));
+    }
+}
+
+#[test]
+fn encoder_consumers_require_handoffs_only_for_unstaged_media() {
+    let mut limits = image_limits(4096).unwrap();
+    limits.encoder_consumer = true;
+    limits.requires_encoder_cache = true;
+    for mode in [AGG, PREFILL, DisaggregationMode::Decode] {
+        let mut source = request();
+        assert!(
+            build_generate_request(source.clone(), "text", "model", Some(limits), mode).is_ok()
+        );
+        add_images(&mut source, ["https://example.com/image.png"]);
+        let optional_limits = ModelLimits {
+            requires_encoder_cache: false,
+            ..limits
+        };
+        let inline = build_generate_request(
+            source.clone(),
+            "inline",
+            "model",
+            Some(optional_limits),
+            mode,
+        )
+        .unwrap();
+        assert!(inline.encoder.is_none());
+        assert_eq!(inline.media.len(), 1);
+        let error = build_generate_request(source.clone(), "image", "model", Some(limits), mode)
+            .unwrap_err();
+        assert!(error.to_string().contains("media without encoder_result"));
+        assert!(matches!(
+            error.error_type(),
+            dynamo_backend_common::ErrorType::Backend(_)
+        ));
+
+        if mode.is_decode() {
+            source.prefill_result = Some(dynamo_backend_common::PrefillResult {
+                disaggregated_params: crate::disagg::session_to_json(fake_session()).unwrap(),
+                prompt_tokens_details: None,
+            });
+            let decoded = build_generate_request(source, "d", "model", Some(limits), mode).unwrap();
+            assert!(decoded.encoder.is_none());
+            assert_eq!(decoded.kv.unwrap().session, Some(fake_session()));
+        }
+    }
+}
+
+#[test]
+fn nixl_encoder_reference_is_forwarded_without_interpreting_engine_metadata() {
+    let mut source = request();
+    add_images(&mut source, ["https://example.com/image.png"]);
+    let mut limits = image_limits(4096).unwrap();
+    limits.encoder_consumer = true;
+    limits.encoder_nixl = true;
+    let state = vec![17_u8; 2048];
+    source.encoder_result = Some(json!({
+        "transfer_backend": "trtllm-nixl-encoder-v1", "opaque_state": state
+    }));
+    let consumed =
+        build_generate_request(source.clone(), "pd", "model", Some(limits), AGG).unwrap();
+    let cache = consumed.encoder.unwrap().cache.unwrap();
+    assert_eq!(cache.transfer_backend, "trtllm-nixl-encoder-v1");
+    assert_eq!(cache.opaque_state, state);
+    limits.encoder_nixl = false;
+    limits.encoder_shared_safetensors = true;
+    assert!(build_generate_request(source.clone(), "pd", "model", Some(limits), AGG).is_err());
+    limits.encoder_nixl = true;
+    source.encoder_result = Some(json!({
+        "transfer_backend": ENCODER_BACKEND, "opaque_state": [1, 2, 3]
+    }));
+    limits.encoder_shared_safetensors = false;
+    assert!(build_generate_request(source.clone(), "pd", "model", Some(limits), AGG).is_err());
+    source.encoder_result = Some(json!({
+        "transfer_backend": "trtllm-nixl-encoder-v1", "opaque_state": vec![0_u8; 65537]
+    }));
+    assert!(build_generate_request(source, "pd", "model", Some(limits), AGG).is_err());
+}
+
+#[test]
+fn decode_with_a_prefill_handoff_does_not_replay_the_encoder_reference() {
+    let mut source = request();
+    add_images(&mut source, ["https://example.com/image.png"]);
+    source.encoder_result = Some(json!({
+        "transfer_backend": ENCODER_BACKEND, "opaque_state": [1, 2, 3]
+    }));
+    source.prefill_result = Some(dynamo_backend_common::PrefillResult {
+        disaggregated_params: crate::disagg::session_to_json(fake_session()).unwrap(),
+        prompt_tokens_details: None,
+    });
+    let wire = build_generate_request(
+        source.clone(),
+        "d",
+        "model",
+        image_limits(4096),
+        DisaggregationMode::Decode,
+    )
+    .expect("decode consumes staged KV without consuming the encoder reference again");
+    assert!(wire.encoder.is_none());
+    assert_eq!(wire.kv.unwrap().session, Some(fake_session()));
+
+    source.prefill_result.as_mut().unwrap().disaggregated_params = json!({});
+    let error = build_generate_request(
+        source,
+        "d",
+        "model",
+        image_limits(4096),
+        DisaggregationMode::Decode,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("is not a TensorRT-LLM handoff"));
+}
+
+#[test]
+fn encoder_handoffs_reject_non_image_media_even_when_the_model_supports_it() {
+    for kind in ["video_url", "audio_url"] {
+        let mut source = request();
+        add_images(&mut source, ["https://example.com/image.png"]);
+        source.multi_modal_data.as_mut().unwrap().insert(
+            kind.into(),
+            vec![MultimodalData::RawUrl("https://example.com/media".into())],
+        );
+        let mut limits = all_media_limits(4096).unwrap();
+        limits.encoder_only = true;
+        limits.encoder_consumer = true;
+        limits.encoder_nixl = true;
+        let error = build_generate_request(
+            source.clone(),
+            "e",
+            "model",
+            Some(limits),
+            DisaggregationMode::Encode,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("image media only"));
+        source.encoder_result = Some(json!({
+            "transfer_backend": "trtllm-nixl-encoder-v1", "opaque_state": [1]
+        }));
+        let error = build_generate_request(source, "pd", "model", Some(limits), AGG).unwrap_err();
+        assert!(error.to_string().contains("image media only"));
     }
 }
