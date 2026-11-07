@@ -164,7 +164,7 @@ func TestUnitsSpecDecodePeerBuildPaths(t *testing.T) {
 		stage := []string{"draft", "target"}[index]
 		require.Equal(t, stages[stage].Spec.Containers[0].Args, main.Args)
 		require.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: "model-storage", MountPath: "/models"})
-		require.Contains(t, clique.Spec.PodSpec.Volumes, corev1.Volume{Name: "model-storage", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"}}})
+		require.Contains(t, clique.Spec.PodSpec.Volumes, corev1.Volume{Name: "model-storage", PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"}})
 		// Kubernetes expands these command arguments using the already-published
 		// container environment. The operator preserves the authored CLI itself.
 		own, peer := "/models/draft-build", "/models/target-build"
