@@ -1333,6 +1333,15 @@ class HandlerBase(BaseGenerativeHandler):
             }
             generate_async = self.engine.llm.generate_async
             try:
+                if self._request_has_images(processed_input):
+                    # generate_async preprocesses synchronously and blocks the
+                    # event loop on media; do it on a thread and pass the result.
+                    generate_kwargs["inputs"] = await asyncio.to_thread(
+                        self.engine.llm.preprocess,
+                        processed_input,
+                        sampling_params,
+                        disaggregated_params,
+                    )
                 generation_result = generate_async(**generate_kwargs)
             except RequestError as e:
                 # The engine owns request validation, including its token budget.
