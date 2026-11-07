@@ -1871,6 +1871,106 @@ async def test_prefill_exit_shuts_down_the_engine_after_withdrawing_state_agent(
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
 
 
+def _transcription_worker_case(
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[str],
+    **factory_overrides,
+) -> tuple[WorkerFactory, Mock, Mock, Mock]:
+    """A cold-start transcription worker whose engine, handler and metrics
+    directory record their cleanup in ``calls``.
+
+    Returns the factory, runtime, config and engine client.
+    """
+    monkeypatch.setenv(ENV_FPM_WORKER_ID, "")
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory.StatLoggerFactory", Mock())
+    handler = Mock()
+    handler.cleanup.side_effect = lambda: calls.append("handler")
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.TranscriptionWorkerHandler",
+        Mock(return_value=handler),
+    )
+    (engine_setup, _stat_logger), engine_client = _restore_snapshot_engine()
+    engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
+    prometheus_temp_dir = Mock()
+    prometheus_temp_dir.cleanup.side_effect = lambda: calls.append("temp-dir")
+    engine_setup = (*engine_setup[:3], prometheus_temp_dir, *engine_setup[4:])
+    factory_overrides.setdefault(
+        "setup_vllm_engine_fn", Mock(return_value=engine_setup)
+    )
+    factory = _make_factory(**factory_overrides)
+    runtime = Mock()
+    runtime.endpoint.return_value = _restored_endpoint()
+    config = _make_config(
+        transcription_worker=True,
+        namespace="dyn",
+        component="backend",
+        endpoint="generate",
+        model="m",
+        served_model_name="m",
+    )
+    return factory, runtime, config, engine_client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome", ["serve_returns", "cancelled", "register_raises", "setup_raises"]
+)
+async def test_transcription_exit_shuts_down_the_engine(
+    outcome: str, monkeypatch: pytest.MonkeyPatch
+):
+    """Every transcription worker exit shuts EngineCore down explicitly.
+
+    EngineCore is a non-daemon child: if the worker leaves it running, the
+    process blocks at interpreter exit joining it and keeps the GPU.
+    """
+    calls: list[str] = []
+    error = RuntimeError(f"transcription {outcome}")
+    factory_overrides: dict = {}
+    if outcome == "register_raises":
+        factory_overrides["register_vllm_model_fn"] = AsyncMock(side_effect=error)
+    if outcome == "setup_raises":
+        factory_overrides["setup_metrics_collection_fn"] = Mock(side_effect=error)
+    factory, runtime, config, engine_client = _transcription_worker_case(
+        monkeypatch, calls, **factory_overrides
+    )
+    endpoint = runtime.endpoint.return_value
+    serving = asyncio.Event()
+
+    async def _serve(*_args, **_kwargs) -> None:
+        serving.set()
+        if outcome == "cancelled":
+            await asyncio.Event().wait()
+
+    endpoint.serve_endpoint = AsyncMock(side_effect=_serve)
+    shutdown_event = asyncio.Event()
+    worker = asyncio.create_task(
+        factory._create_transcription_worker(runtime, config, shutdown_event, [])
+    )
+
+    if outcome == "serve_returns":
+        await worker
+    elif outcome == "cancelled":
+        await serving.wait()
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+    else:
+        with pytest.raises(RuntimeError) as exc_info:
+            await worker
+        assert exc_info.value is error
+
+    if outcome == "setup_raises":
+        endpoint.serve_endpoint.assert_not_called()
+    else:
+        endpoint.serve_endpoint.assert_awaited()
+    assert calls == ["handler", "engine", "temp-dir"]
+    assert shutdown_event.is_set()
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
 @pytest.mark.asyncio
 async def test_sync_or_shutdown_keeps_the_sync_error_when_shutdown_also_fails(
     caplog,
