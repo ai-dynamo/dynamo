@@ -1,5 +1,7 @@
 meta:
   catch_all: '@ai-dynamo/dynamo-runtime-codeowners'
+exemptions:
+  lib/bindings/kvbm/Cargo.lock: 'Exclude this specific file which is often changed in non-kvbm-specific PRs:'
 areas:
 - label: frontend
   github_team: '@ai-dynamo/dynamo-frontend-codeowners'

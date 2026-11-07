@@ -101,11 +101,7 @@ def main() -> int:
     for f in files:
         owners = resolve_owners(rules, f)
         union_owners.update(owners)
-        owners_str = (
-            " ".join(owners)
-            if owners
-            else "(no owner -- falls through; CI coverage gate should block this)"
-        )
+        owners_str = " ".join(owners) if owners else "(no owner)"
         print(f"{f}\n    review: {owners_str}")
 
     if args.changed:
