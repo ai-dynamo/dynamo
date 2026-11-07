@@ -18,13 +18,14 @@ def _build_aiperf_cmd(
     input_file: str,
     osl: int,
     artifact_dir: Path,
+    uuid_and_strip: bool = False,
 ) -> List[str]:
     if sweep_mode == "concurrency":
         sweep_flag = "--concurrency"
     else:
         sweep_flag = "--request-rate"
 
-    return [
+    cmd = [
         "aiperf",
         "profile",
         "-m",
@@ -56,6 +57,9 @@ def _build_aiperf_cmd(
         "none",
         "--no-server-metrics",
     ]
+    if uuid_and_strip:
+        cmd.extend(["--endpoint-type", "chat", "--uuid-and-strip"])
+    return cmd
 
 
 def run_aiperf_single(
@@ -68,6 +72,7 @@ def run_aiperf_single(
     input_file: str,
     osl: int,
     artifact_dir: Path,
+    uuid_and_strip: bool = False,
 ) -> None:
     """Run a single aiperf profile invocation."""
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -81,6 +86,7 @@ def run_aiperf_single(
         input_file=input_file,
         osl=osl,
         artifact_dir=artifact_dir,
+        uuid_and_strip=uuid_and_strip,
     )
 
     print(f"  aiperf {sweep_mode}={sweep_value} -> {artifact_dir}", flush=True)
@@ -109,6 +115,7 @@ def run_sweep(
     input_file: str,
     osl: int,
     output_dir: Path,
+    uuid_and_strip: bool = False,
 ) -> None:
     """Run aiperf across all sweep values, writing results under output_dir/{mode}{N}/."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -124,6 +131,7 @@ def run_sweep(
             input_file=input_file,
             osl=osl,
             artifact_dir=output_dir / f"{sweep_mode}{value}",
+            uuid_and_strip=uuid_and_strip,
         )
 
     print(f"Sweep complete. Results in {output_dir}", flush=True)
