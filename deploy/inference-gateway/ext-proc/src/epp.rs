@@ -59,7 +59,9 @@ const DYN_HTTP_SVC_RESPONSES_PATH: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
 /// [`OpenAIPreprocessor::gather_tokens`]'s own refusal to trust `token_data`
 /// for a `TextInput::Batch` of more than one prompt) — injecting them as
 /// `nvext.token_data` would apply prompt 1's tokens to every split of the
-/// batch. Chat and single/pre-tokenized completion requests are always safe.
+/// batch. It is also `false` for a request the EPP does not render the way
+/// the Frontend does (see [`parse_request_body`]). Chat and
+/// single/pre-tokenized completion requests on their routes are safe.
 struct TokenizeResult {
     tokens: Vec<u32>,
     cache_namespace: Option<String>,
@@ -2013,11 +2015,12 @@ impl EndpointPicker for Router {
             tracing::debug!(key = %k, value = %v, "Routing header set in PickResult");
         }
 
-        // Only inject token_data when it covers the whole request; a
-        // multi-prompt text batch's tokens cover prompt 1 alone and the
-        // backend applies nvext.token_data to every split (see
-        // `TokenizeResult`), so omit it and let the backend tokenize each
-        // prompt itself.
+        // Only inject token_data when it is the prompt the backend would build
+        // itself. A multi-prompt text batch's tokens cover prompt 1 alone and
+        // the backend applies nvext.token_data to every split, and a Responses
+        // body or a body guessed on an unknown route is rendered differently
+        // by the Frontend (see `TokenizeResult`), so omit it there and let the
+        // backend tokenize the request itself.
         let timings = PickTimings {
             prompt_tokens: tokens.len(),
             parse: tokenize_timings.parse,
