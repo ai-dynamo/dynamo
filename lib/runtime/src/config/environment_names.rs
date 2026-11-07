@@ -414,6 +414,10 @@ pub mod llm {
     /// LoRA cache directory path
     pub const DYN_LORA_PATH: &str = "DYN_LORA_PATH";
 
+    /// Skip TLS certificate verification for S3 LoRA downloads (set to "true" to enable).
+    /// Intended for trusted internal networks with private-CA or self-signed S3 endpoints.
+    pub const DYN_LORA_S3_TLS_INSECURE: &str = "DYN_LORA_S3_TLS_INSECURE";
+
     /// Enable the experimental Anthropic Messages API endpoint (/v1/messages)
     pub const DYN_ENABLE_ANTHROPIC_API: &str = "DYN_ENABLE_ANTHROPIC_API";
 
@@ -861,6 +865,11 @@ pub mod model {
 
 /// KV Router configuration environment variables
 pub mod router {
+    /// Most sessions each session-affinity table holds; defaults to 65,536.
+    /// The Python frontend exports `--router-session-affinity-max-entries` here.
+    pub const DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES: &str =
+        "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES";
+
     /// Scale applied to adjusted prompt-side prefill load after overlap/cache-hit credits.
     pub const DYN_ROUTER_PREFILL_LOAD_SCALE: &str = "DYN_ROUTER_PREFILL_LOAD_SCALE";
 
@@ -1231,6 +1240,7 @@ mod tests {
             llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
+            llm::DYN_LORA_S3_TLS_INSECURE,
             llm::DYN_ENABLE_ANTHROPIC_API,
             llm::DYN_SERVING_LOAD_PUBLISH,
             llm::DYN_ENABLE_SYSTEMONE_API,
