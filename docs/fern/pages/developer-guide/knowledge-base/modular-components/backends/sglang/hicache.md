@@ -112,7 +112,8 @@ adjusted_prefill_blocks = max(
 logit = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
 
 # With shared cache
-shared_beyond = shared_cache_hits.hits_beyond(device_overlap_blocks)
+local_blocks = device_overlap_blocks + host_overlap_blocks + disk_overlap_blocks
+shared_beyond = shared_cache_hits.loadable_beyond(local_blocks)
 adjusted_prefill_blocks = max(
     prefill_blocks
     - overlap_score_credit * device_overlap_blocks
@@ -124,14 +125,14 @@ adjusted_prefill_blocks = max(
 logit = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
 ```
 
-`hits_beyond(n)` counts shared-cache pages at positions `>= n` — "pages past my device prefix that I can still fetch from Mooncake instead of recomputing."
+`loadable_beyond(n)` counts the shared-cache pages SGLang prefetches after the `n` pages a worker already holds on GPU, host, or disk: the unbroken run of pages that starts at position `n`. SGLang stops prefetching at the first missing page, so pages after a gap do not count, and it skips a run shorter than its `prefetch_threshold` (set in `--hicache-storage-backend-extra-config`, default 256 tokens), so such a run counts as zero. Workers publish the threshold they use; for a worker from an earlier release that does not, the router assumes the 256-token default. Pages the worker holds on host earn host credit only. Requests that use a LoRA adapter get no shared-cache credit, because SGLang stores adapter pages under different keys.
 
-**Worked example.** Request is 4 blocks, `shared_cache_multiplier = 0.5`, `block_size = 1`, `overlap_score_credit = 1.0` (the maximum device-local overlap credit). Shared pool contains blocks 0–3.
+**Worked example.** Request is 4 blocks, `shared_cache_multiplier = 0.5`, `block_size = 1`, `overlap_score_credit = 1.0` (the maximum device-local overlap credit). Shared pool contains blocks 0–3, and neither worker holds blocks on host. The workers set `prefetch_threshold` to 1, so both runs clear it; the 256-token default would skip these 2- and 4-token runs.
 
-| Worker | Device overlap | `hits_beyond`  | Device credit | Shared credit | Adjusted prefill | Logit          |
-| ------ | -------------- | -------------- | ------------- | ------------- | ---------------- | -------------- |
-| W0     | 2 (A, B)       | 2 (C, D)       | 2.0           | 1.0           | 1.0              | **1.0 — wins** |
-| W1     | 0              | 4 (A, B, C, D) | 0.0           | 2.0           | 2.0              | 2.0            |
+| Worker | Device overlap | `loadable_beyond` | Device credit | Shared credit | Adjusted prefill | Logit          |
+| ------ | -------------- | ----------------- | ------------- | ------------- | ---------------- | -------------- |
+| W0     | 2 (A, B)       | 2 (C, D)          | 2.0           | 1.0           | 1.0              | **1.0 — wins** |
+| W1     | 0              | 4 (A, B, C, D)    | 0.0           | 2.0           | 2.0              | 2.0            |
 
 W0 wins because it combines device-local reuse with shared-pool hits beyond that device prefix. The multiplier encodes the cost ratio of a Mooncake fetch relative to a fresh GPU compute — `0.5` means "fetching from shared is half as expensive as recomputing."
 
@@ -146,7 +147,7 @@ You also need:
 
 - Dynamo router started with `--shared-cache-type hicache` (see [Configuration](#configuration)).
 - A Mooncake master with KV events enabled. This requires the event publisher introduced by [kvcache-ai/Mooncake#2214](https://github.com/kvcache-ai/Mooncake/pull/2214) until that change is available in a Mooncake release.
-- A Mooncake KV event endpoint reachable from the Dynamo frontend host. Worker-side Mooncake config (event endpoint, page size, TP/PP layout, and split-head layout) is published automatically through each worker's registration metadata.
+- A Mooncake KV event endpoint reachable from the Dynamo frontend host. Worker-side Mooncake config (event endpoint, page size, TP/PP layout, split-head layout, and prefetch threshold) is published automatically through each worker's registration metadata.
 
 ## Setup
 
