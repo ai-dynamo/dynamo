@@ -172,10 +172,10 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(updatedCarrier.Model).To(Equal("Qwen/Qwen3-30B-A3B"))
 		})
 
-		It("Should carry a native v1beta2 request through the v1alpha1 API", func() {
+		It("Should carry a native v1beta2 request through the v1beta1 API", func() {
 			ctx := context.Background()
 			dgdr := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
-				Name:      "v1alpha1-structural-carrier",
+				Name:      "v1beta1-structural-carrier",
 				Namespace: envtestNamespace,
 				Spec: nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec{
 					NativeSearchInput: nvidiacomv1beta2.NativeSearchInput{
@@ -189,24 +189,19 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 			nativeSpec := dgdr.Spec.DeepCopy()
 
-			By("Reading the request through the served v1alpha1 API")
-			alpha := &dgdv1alpha1.DynamoGraphDeploymentRequest{}
-			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), alpha)).Should(Succeed())
-			Expect(alpha.Spec.V1Beta2).NotTo(BeNil())
-			Expect(alpha.Spec.ProfilingConfig).To(BeNil())
+			By("Reading the request through the served v1beta1 API")
+			hub := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), hub)).Should(Succeed())
+			Expect(hub.Spec.V1Beta2).NotTo(BeNil())
 
-			By("Listing the request through the served v1alpha1 and v1beta1 APIs")
-			alphaList := &dgdv1alpha1.DynamoGraphDeploymentRequestList{}
-			Expect(k8sClient.List(ctx, alphaList, client.InNamespace(envtestNamespace))).Should(Succeed())
-			Expect(alphaList.Items).To(HaveLen(1))
-			Expect(alphaList.Items[0].Spec.V1Beta2).NotTo(BeNil())
+			By("Listing the request through the served v1beta1 API")
 			hubList := &nvidiacomv1beta1.DynamoGraphDeploymentRequestList{}
 			Expect(k8sClient.List(ctx, hubList, client.InNamespace(envtestNamespace))).Should(Succeed())
 			Expect(hubList.Items).To(HaveLen(1))
 			Expect(hubList.Items[0].Spec.V1Beta2).NotTo(BeNil())
 
-			By("Writing the v1alpha1 structural carrier back unchanged")
-			Expect(k8sClient.Update(ctx, alpha)).Should(Succeed())
+			By("Writing the v1beta1 structural carrier back unchanged")
+			Expect(k8sClient.Update(ctx, hub)).Should(Succeed())
 
 			By("Verifying the native v1beta2 payload did not change")
 			restored := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{}
@@ -218,10 +213,10 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(k8sClient.Update(ctx, restored)).Should(Succeed())
 
 			By("Reading the updated native payload through v1beta1")
-			hub := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
-			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), hub)).Should(Succeed())
+			updated := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), updated)).Should(Succeed())
 			var updatedCarrier nvidiacomv1beta2.DynamoGraphDeploymentRequestNativeSpec
-			Expect(json.Unmarshal(hub.Spec.V1Beta2.Raw, &updatedCarrier)).Should(Succeed())
+			Expect(json.Unmarshal(updated.Spec.V1Beta2.Raw, &updatedCarrier)).Should(Succeed())
 			Expect(updatedCarrier.Model.Name).To(Equal("Qwen/Qwen3-30B-A3B"))
 		})
 
@@ -257,13 +252,10 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(updated.Status.ObservedGeneration).To(Equal(updated.Generation))
 			Expect(updated.Status.V1Beta1).To(BeNil())
 
-			By("Reading the native status through the served v1beta1 and v1alpha1 APIs")
+			By("Reading the native status through the served v1beta1 API")
 			hub := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), hub)).Should(Succeed())
 			Expect(hub.Status.V1Beta2).NotTo(BeNil())
-			alpha := &dgdv1alpha1.DynamoGraphDeploymentRequest{}
-			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), alpha)).Should(Succeed())
-			Expect(alpha.Status.V1Beta2).NotTo(BeNil())
 		})
 
 		It("Should reject changing the API representation of an existing request", func() {

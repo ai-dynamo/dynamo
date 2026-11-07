@@ -343,9 +343,9 @@ type DynamoComponentDeploymentStatus struct {
 
 // DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.
 //
-// v1beta1 is the storage version. The API server transparently converts
-// to and from the served v1alpha1 version through
-// operator's conversion webhook; see api/v1alpha1/*_conversion.go.
+// v1beta1 is the storage and only served version. The v1alpha1 version is
+// unserved; its conversion webhook remains solely to serve objects stored
+// by pre-migration operator versions, until the version is removed.
 type DynamoComponentDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

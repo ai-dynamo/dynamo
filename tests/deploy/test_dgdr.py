@@ -180,45 +180,6 @@ async def test_dgdr_validation_crd_registers_expected_columns(
 
 
 @pytest.mark.gpu_0
-@pytest.mark.timeout(120)
-async def test_dgdr_validation_v1alpha1_server_dry_run_is_not_internal_error(
-    dgdr_manager: ManagedDGDR,
-) -> None:
-    name = unique_name(dgdr_manager.config, "v1a1")
-    old_manifest = f"""apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeploymentRequest
-metadata:
-  name: {name}
-spec:
-  model: {dgdr_manager.config.model}
-  backend: vllm
-  profilingConfig:
-    profilerImage: {dgdr_manager.config.image}
-"""
-    result = kubectl(
-        "apply",
-        "-n",
-        dgdr_manager.config.namespace,
-        "-f",
-        "-",
-        "--dry-run=server",
-        input_=old_manifest,
-    )
-    assert "Internal error" not in result.stderr + result.stdout
-
-
-@pytest.mark.gpu_0
-@pytest.mark.timeout(120)
-async def test_dgdr_validation_v1beta1_object_has_v1alpha1_view(
-    dgdr_manager: ManagedDGDR,
-) -> None:
-    dgdr = manifest(dgdr_manager, "conversion-get", {"autoApply": False})
-    await dgdr_manager.create(dgdr)
-    converted = await dgdr_manager.get_versioned(dgdr["metadata"]["name"], "v1alpha1")
-    assert converted["apiVersion"] == "nvidia.com/v1alpha1"
-
-
-@pytest.mark.gpu_0
 @pytest.mark.timeout(3660)
 async def test_dgdr_profiling_reaches_ready_and_job_succeeds(
     dgdr_manager: ManagedDGDR,

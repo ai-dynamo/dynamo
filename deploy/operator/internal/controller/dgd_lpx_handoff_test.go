@@ -814,11 +814,11 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 	program := parent.newGroveProgram()
 
 	t.Log("Leave a graph-owned adapter behind after ordinary component scaling was disabled")
-	disabledAdapter := &v1alpha1.DynamoGraphDeploymentScalingAdapter{
+	disabledAdapter := &v1beta1.DynamoGraphDeploymentScalingAdapter{
 		Name: generateAdapterName(source.Name, "prefill"), Namespace: source.Namespace,
 		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(source, v1beta1.DynamoGraphDeploymentGVK)},
-		Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
-			DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{Name: source.Name, ServiceName: "prefill"},
+		Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
+			DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{Name: source.Name, ComponentName: "prefill"},
 		},
 	}
 	require.NoError(t, kube.Create(t.Context(), disabledAdapter))
@@ -923,7 +923,7 @@ func TestGroveProgramPreservesAnotherGraphsScalingAdapter(t *testing.T) {
 	require.NoError(t, newDGDScalingAdaptersReconciler(kube, nil).Reconcile(t.Context(), ordinary))
 	key := client.ObjectKey{Namespace: source.Namespace, Name: generateAdapterName(ordinary.Name, "bar")}
 	require.Equal(t, key.Name, generateAdapterName(source.Name, source.Spec.Components[0].ComponentName))
-	adapter := &v1alpha1.DynamoGraphDeploymentScalingAdapter{}
+	adapter := &v1beta1.DynamoGraphDeploymentScalingAdapter{}
 	require.NoError(t, kube.Get(t.Context(), key, adapter))
 	before := adapter.DeepCopy()
 
