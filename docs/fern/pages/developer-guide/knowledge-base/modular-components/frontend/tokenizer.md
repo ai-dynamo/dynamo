@@ -77,6 +77,7 @@ flowchart TD
   counter; routing falls back to text-prefix overlap. See
   [Multimodal KV Routing](../../../../use-cases/image-understanding/vlm-performance-optimization/multimodal-kv-routing.md).
 - Has no effect on TikToken-format tokenizers (`.model` / `.tiktoken` files), which always use the TikToken backend.
+- With `--dyn-chat-processor sglang`, the SGLang chat processor tokenizes prompts in Python. There, `fastokens` selects SGLang's fastokens backend in the main process and in every preprocess worker, and needs the `fastokens` Python package (`pip install fastokens`); `--tokenizer-fallback` applies the same way. `basetenkenizer` has no SGLang equivalent, so that processor logs this and uses HuggingFace.
 - Dedicated vLLM embedding workers let vLLM tokenize raw text by default. When [`--embedding-frontend-tokenization`](../../../../reference/backends/vllm-configuration.mdx) is enabled, raw-text requests use a request-specific Dynamo tokenizer. The request's `add_special_tokens` value overrides `DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS`; the default is `true`. For `tokenizer.json` models, `true` selects HuggingFace while `false` follows the configured backend selection shown above. TikToken artifacts always use TikToken, and token-ID inputs bypass frontend tokenization.
 
 ## Configuration
