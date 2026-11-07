@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import hashlib
+import inspect
 import json
 import logging
 import subprocess
@@ -24,6 +25,8 @@ import threading
 import time
 import uuid
 from collections import deque
+from concurrent.futures import Future
+from contextlib import nullcontext
 from dataclasses import asdict, replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
@@ -396,6 +399,7 @@ def test_inline_launch_timing_requires_supported_execution(
 
 @pytest.fixture
 def fpm_timing_run(monkeypatch):
+    """Drive scheduler timing with a deterministic clock and published FPMs."""
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._adjust_fpm_host_launch = True
     stub._pending_fpm_launch = None
@@ -431,6 +435,7 @@ def fpm_timing_run(monkeypatch):
     )
 
     def schedule(now, *, prefill=0, deferred=False, empty=False):
+        """Schedule one batch at the requested synthetic timestamp."""
         tokens = {} if empty else {"decode": 1}
         if prefill:
             tokens["prefill"] = prefill
@@ -471,6 +476,7 @@ def fpm_timing_run(monkeypatch):
     "adjust,expected", [(True, [0.002, 0.020, 0.003]), (False, [0.010, 0.013, 0.002])]
 )
 def test_async_fpm_assigns_long_launch_to_its_prefill(fpm_timing_run, adjust, expected):
+    """Attribute changing host work without losing time at the tail or idle."""
     run = fpm_timing_run
     run.scheduler._adjust_fpm_host_launch = adjust
     decode = run.schedule(1.0)
@@ -530,6 +536,99 @@ def test_missing_launch_callback_retains_the_output_and_releases_its_snapshot(
     assert run.published[0].wall_time == pytest.approx(0.022)
     assert run.scheduler._pending_fpm_launch is None
     assert not run.scheduler._fpm_launch_durations
+
+
+@pytest.mark.parametrize("structured_output", [False, True])
+def test_fpm_grammar_callback_matches_vllm_engine_contract(
+    monkeypatch, structured_output
+):
+    """Exercise upstream ordering and the inherited grammar callback unchanged."""
+    assert inspect.signature(
+        InstrumentedScheduler.get_grammar_bitmask, eval_str=True
+    ) == inspect.signature(
+        instrumented_scheduler_module.AsyncScheduler.get_grammar_bitmask, eval_str=True
+    )
+    scheduler = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    scheduler._adjust_fpm_host_launch = True
+    scheduler._bench_active = False
+    scheduler._pending_fpm_launch = None
+    scheduler._fpm_launch_durations = {}
+    scheduler._schedule_times = deque()
+    scheduler.requests = {
+        "request": SimpleNamespace(use_structured_output=True, is_prefill_chunk=False)
+    }
+    output = SimpleNamespace(
+        total_num_scheduled_tokens=1,
+        num_scheduled_tokens={"request": 1},
+        pending_structured_output_tokens=False,
+        has_structured_output_requests=structured_output,
+        scheduled_spec_decode_tokens={},
+    )
+    clock = SimpleNamespace(now=1.0)
+    monkeypatch.setattr(
+        instrumented_scheduler_module.time, "monotonic", lambda: clock.now
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "schedule",
+        lambda self, *args: output,
+    )
+    scheduler.schedule = scheduler._schedule_and_record_time
+    scheduler.has_requests = lambda: True
+    events = []
+    bitmask = object()
+    execution = Future()
+    sampling = Future()
+
+    def execute_model(scheduled, *, non_block):
+        assert scheduled is output and non_block
+        events.append("execute")
+        clock.now += 0.008
+        return execution
+
+    def grammar_bitmask(requests, request_ids, speculative_tokens):
+        assert requests is scheduler.requests
+        assert request_ids == ["request"] and speculative_tokens == {}
+        events.append("grammar")
+        clock.now += 0.004
+        return bitmask
+
+    def sample_tokens(grammar_output, *, non_block):
+        assert non_block
+        assert scheduler._fpm_launch_durations[id(output)] == pytest.approx(0.008)
+        assert scheduler._pending_fpm_launch is None
+        if structured_output:
+            assert grammar_output.structured_output_request_ids == ["request"]
+            assert grammar_output.grammar_bitmask is bitmask
+        else:
+            assert grammar_output is None
+        events.append("sample")
+        return sampling
+
+    scheduler.structured_output_manager = SimpleNamespace(
+        grammar_bitmask=grammar_bitmask
+    )
+    core = SimpleNamespace(
+        scheduler=scheduler,
+        model_executor=SimpleNamespace(
+            execute_model=execute_model, sample_tokens=sample_tokens
+        ),
+        batch_queue=deque(),
+        batch_queue_size=2,
+        is_pooling_model=False,
+        is_mm_encoder_only=False,
+        is_ec_consumer=True,  # Pre-0.33 name for the same generative execution path.
+        _should_throttle_prefills=lambda: False,
+        log_error_detail=lambda scheduled: nullcontext(),
+    )
+    assert instrumented_scheduler_module.EngineCore.step_with_batch_queue(core) == (
+        None,
+        True,
+    )
+    assert events == (
+        ["execute", "grammar", "sample"] if structured_output else ["execute", "sample"]
+    )
+    assert list(core.batch_queue) == [(sampling, output, execution)]
 
 
 @pytest.mark.parametrize(

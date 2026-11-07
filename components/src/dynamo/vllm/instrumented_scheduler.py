@@ -2221,6 +2221,7 @@ _BASE_SCHEDULE_TAKES_THROTTLE = (
 
 
 def _uses_inline_async_launch(vllm_config: "VllmConfig") -> bool:
+    """Select engines whose grammar hook follows inline model submission."""
     parallel = vllm_config.parallel_config
     return (
         vllm_config.scheduler_config.async_scheduling is True
@@ -2397,6 +2398,7 @@ class InstrumentedScheduler(AsyncScheduler):
     def _schedule_and_record_time(
         self, throttle_prefills: bool = False
     ) -> SchedulerOutput:
+        """Record the batch start after scheduling and benchmark synchronization."""
         # vLLM added `throttle_prefills` to Scheduler.schedule() after some of
         # the runtime images were built; pass it only when the base accepts it
         # so one overlay works across both.
@@ -2430,6 +2432,7 @@ class InstrumentedScheduler(AsyncScheduler):
     def get_grammar_bitmask(
         self, scheduler_output: SchedulerOutput
     ) -> GrammarOutput | None:
+        """Close eligible host-submission timing before building the grammar."""
         if self._adjust_fpm_host_launch and not self._bench_active:
             pending = self._pending_fpm_launch
             self._pending_fpm_launch = None
@@ -2476,6 +2479,7 @@ class InstrumentedScheduler(AsyncScheduler):
         scheduler_output: SchedulerOutput,
         model_runner_output: "ModelRunnerOutput",
     ):
+        """Attribute the host interval to this output and publish its FPM."""
         model_output_arrival = (
             time.monotonic() if scheduler_output.total_num_scheduled_tokens > 0 else 0.0
         )
