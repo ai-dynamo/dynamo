@@ -953,6 +953,9 @@ impl Decoder {
                 (stop_condition.stop.unwrap_or_default(), Vec::new())
             };
 
+        let mut visible_stop_sequences = visible_stop_sequences;
+        visible_stop_sequences.extend(stop_condition.stop_visible.unwrap_or_default());
+
         // Calculate jail_max_bytes considering both hidden and visible stop sequences
         let jail_max_bytes = hidden_stop_sequences
             .iter()
@@ -2231,6 +2234,30 @@ mod tests {
                     vec![101, 104]
                 }
             );
+        }
+    }
+
+    #[test]
+    fn parser_stops_are_visible_while_user_stops_stay_hidden() {
+        for (user_stop, expected) in [(None, "Okay<|return|>"), (Some("<|return|>"), "Okay")] {
+            let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+            let stops = StopConditions {
+                stop: user_stop.map(|stop| vec![stop.to_string()]),
+                stop_visible: Some(vec!["<|return|>".into()]),
+                ..Default::default()
+            };
+            let mut decoder = Decoder::new(
+                crate::tokenizers::DecodeStream::new(tokenizer, &[], false),
+                stops,
+                false,
+                false,
+                false,
+                None,
+                None,
+            );
+            let result = decoder.process_token_ids(&[101, 104, 999]).unwrap();
+            assert_eq!(result.text.as_deref(), Some(expected));
+            assert!(result.stop_trigger.is_some());
         }
     }
 

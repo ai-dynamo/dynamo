@@ -31,6 +31,9 @@ pub use dynamo_parsers::tool_calling::StructuralTagSchemaMode;
 // Reserve a topology namespace so generated taints can be rebuilt without touching caller taints.
 pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 
+/// Engine retains parser stop strings while frontend trims ordinary user stops.
+pub const VISIBLE_STOP_STRINGS_CAPABILITY: &str = "visible_stop_strings";
+
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
 

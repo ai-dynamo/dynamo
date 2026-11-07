@@ -351,6 +351,11 @@ pub struct StopConditions {
     /// The returned output will not contain the stop strings.
     pub stop: Option<Vec<String>>,
 
+    /// Parser boundaries retained in output. Emitted only to engines advertising
+    /// visible_stop_strings; absent on older worker/frontend messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_visible: Option<Vec<String>>,
+
     /// List of tokens that stop the generation when they are
     /// generated. The returned output will NOT contain the stop tokens.
     pub stop_token_ids: Option<Vec<TokenIdType>>,
@@ -381,6 +386,7 @@ impl StopConditions {
     pub fn apply_ignore_eos(&mut self) {
         if self.ignore_eos.unwrap_or(false) {
             self.stop = None;
+            self.stop_visible = None;
             self.stop_token_ids = None;
             self.stop_token_ids_visible = None;
             self.stop_token_ids_hidden = None;

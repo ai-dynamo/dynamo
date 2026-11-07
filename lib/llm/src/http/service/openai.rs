@@ -521,8 +521,55 @@ fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
     }
 }
 
-fn responses_error_code(status_code: StatusCode) -> ResponseErrorCode {
-    match status_code {
+fn is_context_length_error(response: &ErrorResponse) -> bool {
+    if response.0 != StatusCode::BAD_REQUEST {
+        return false;
+    }
+    if response
+        .1
+        .details
+        .as_deref()
+        .and_then(|details| details.get("type"))
+        .and_then(serde_json::Value::as_str)
+        == Some("context_length")
+    {
+        return true;
+    }
+    // OpenEngine v1 has no structured context-overflow field. Recognize the
+    // engine's bounded-input diagnostics without classifying arbitrary 400s.
+    let message = response.1.message.to_ascii_lowercase();
+    message.contains("maximum context length is ")
+        || (message.contains("input length")
+            && message.contains("max_seq_len")
+            && message.contains("exceed"))
+        || (message.contains("max sequence length (") && message.contains("exceeds max_seq_len ("))
+}
+
+fn responses_overflow_stream(
+    model: String,
+    params: ResponseParams,
+    context: Option<crate::protocols::unified::ResponsesContext>,
+    error: &ErrorResponse,
+) -> Response {
+    use crate::protocols::openai::responses::stream_converter::ResponseStreamConverter;
+    let mut converter = match context {
+        Some(context) => ResponseStreamConverter::with_context(model, params, context),
+        None => ResponseStreamConverter::new(model, params),
+    };
+    let mut events = converter.emit_start_events();
+    events.extend(converter.emit_error_events(ResponseError {
+        misalignment: None,
+        code: responses_error_code(error),
+        message: error.1.message.clone(),
+    }));
+    Sse::new(stream::iter(events)).into_response()
+}
+
+fn responses_error_code(response: &ErrorResponse) -> ResponseErrorCode {
+    if is_context_length_error(response) {
+        return ResponseErrorCode::Other("context_length_exceeded".into());
+    }
+    match response.0 {
         StatusCode::TOO_MANY_REQUESTS => ResponseErrorCode::RateLimitExceeded,
         code if code.is_client_error() => ResponseErrorCode::InvalidPrompt,
         _ => ResponseErrorCode::ServerError,
@@ -4339,6 +4386,37 @@ async fn handler_responses_input_tokens(
     Ok(Json(CountInputTokensResponse::new(request.estimate_tokens())).into_response())
 }
 
+fn apply_responses_body_affinity(
+    request: &mut Context<NvCreateResponse>,
+    headers: &HeaderMap,
+    affinity: Option<String>,
+    explicit: bool,
+) {
+    if !explicit && session_affinity_from_headers(headers).is_some() {
+        return;
+    }
+    let Some(affinity) = affinity else {
+        return;
+    };
+    let mut agent = agent_context_from_headers(headers).unwrap_or(AgentContext {
+        session_id: affinity.clone(),
+        parent_session_id: None,
+        session_final: None,
+        agent_headers: Default::default(),
+        input_trigger: None,
+    });
+    agent.session_id = affinity.clone();
+    agent.input_trigger = Some(classify_response_request(request.content()));
+    if agent.parent_session_id.as_deref() == Some(affinity.as_str()) {
+        agent.parent_session_id = None;
+    }
+    request.insert(
+        SESSION_AFFINITY_CONTEXT_KEY,
+        SessionAffinityId::new(affinity),
+    );
+    request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent);
+}
+
 /// OpenAI Responses Request Handler
 ///
 /// This method will handle the incoming request for the /v1/responses endpoint.
@@ -4348,7 +4426,18 @@ async fn handler_responses(
     body: Body,
 ) -> Result<Response, ErrorResponse> {
     let body = read_json_request_body(&headers, body).await?;
-    let mut request: NvCreateResponse = parse_json_request("responses", &body)?;
+    let mut body_value: serde_json::Value = parse_json_request("responses", &body)?;
+    crate::protocols::openai::responses::request_compat::hoist_additional_tools(&mut body_value)
+        .map_err(|error| responses_conversion_error_response(error.into()))?;
+    let body_affinity =
+        crate::protocols::openai::responses::request_compat::body_affinity(&body_value)
+            .map(str::to_owned);
+    let explicit_body_affinity = body_value
+        .pointer("/conversation_params/conversation_id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty());
+    let mut request: NvCreateResponse =
+        serde_json::from_value(body_value).map_err(json_deserialize_error)?;
 
     // return a 503 if the service or model is not ready.
     // Resolve the templated model first so empty/missing `model` fields
@@ -4394,6 +4483,12 @@ async fn handler_responses(
         context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
             Some(classify_response_request(request))
         })?;
+    apply_responses_body_affinity(
+        &mut request,
+        &headers,
+        body_affinity,
+        explicit_body_affinity,
+    );
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -4511,7 +4606,9 @@ async fn responses(
             .into_iter()
             .map(|tool| tool.inner)
             .collect();
-    let response_params = ResponseParams {
+    let mut response_params = ResponseParams {
+        preserve_tool_spelling: false,
+        emit_backend_reasoning: false,
         tool_names: Some(crate::protocols::openai::responses::ToolNameMap::new(
             &loaded_tools,
             Some(&request.inner.input),
@@ -4593,11 +4690,6 @@ async fn responses(
             continuous_usage_stats: false,
         });
 
-    let mut request = context.map(|mut _req| chat_request);
-    if response_params.max_output_tokens.is_none() {
-        request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
-    }
-
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
     let (engine, parsing_options) = state
@@ -4609,8 +4701,37 @@ async fn responses(
             err_response
         })?;
 
+    if matches!(
+        parsing_options.tool_call_parser.as_deref(),
+        Some("kimi_k3" | "kimi-k3")
+    ) {
+        chat_request.normalize_kimi_replay().map_err(|error| {
+            let response = responses_conversion_error_response(error);
+            inflight_guard.mark_error(extract_error_type_from_response(&response));
+            response
+        })?;
+    }
+
+    // Match the Kimi/GLM Responses contract without exposing other models' private channels.
+    response_params.emit_backend_reasoning = matches!(
+        parsing_options.tool_call_parser.as_deref(),
+        Some("kimi_k3" | "kimi-k3" | "glm47")
+    ) || matches!(
+        parsing_options.reasoning_parser.as_deref(),
+        Some("kimi_k3" | "kimi-k3" | "glm45")
+    );
+
+    let mut request = context.map(|mut _req| chat_request);
+    if response_params.max_output_tokens.is_none() {
+        request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
+    }
+
     // The Responses API is converted to the same chat request contract. Narrow
     // the model parser before unary aggregation just as the streaming path does.
+    response_params.preserve_tool_spelling = matches!(
+        parsing_options.tool_call_parser.as_deref(),
+        Some("kimi_k3" | "kimi-k3")
+    );
     let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
         .map_err(|e| {
             let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");
@@ -4666,7 +4787,19 @@ async fn responses(
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
-    })?;
+    });
+    let engine_stream = match engine_stream {
+        Ok(stream) => stream,
+        Err(error) if streaming && is_context_length_error(&error) => {
+            return Ok(responses_overflow_stream(
+                model,
+                response_params,
+                responses_ctx,
+                &error,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
 
     // Capture the context to cancel the stream if the client disconnects
     let ctx = engine_stream.context();
@@ -4684,7 +4817,19 @@ async fn responses(
         .inspect_err(|err_response| {
             log_pre_commit_error(&request_id, err_response);
             inflight_guard.mark_error(extract_error_type_from_response(err_response));
-        })?;
+        });
+        let engine_stream = match engine_stream {
+            Ok(stream) => stream,
+            Err(error) if is_context_length_error(&error) => {
+                return Ok(responses_overflow_stream(
+                    model,
+                    response_params,
+                    responses_ctx,
+                    &error,
+                ));
+            }
+            Err(error) => return Err(error),
+        };
 
         // Streaming path: convert chat completion stream chunks to Responses API SSE events.
         // The engine yields Annotated<NvCreateChatCompletionStreamResponse>. We extract the
@@ -4734,7 +4879,7 @@ async fn responses(
                         }
                         backend_error = Some(ResponseError {
                             misalignment: None,
-                            code: responses_error_code(error_response.0),
+                            code: responses_error_code(&error_response),
                             message: error_response.1.message.clone(),
                         });
                     }
@@ -6314,6 +6459,86 @@ pub fn audios_router(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn context_overflow_is_a_typed_failed_sse_response() {
+        let error = ErrorMessage::from_anyhow(
+            crate::protocols::common::invalid_argument_error(
+                "Max sequence length (100) exceeds max_seq_len (64). Truncate the input or increase max_seq_len.",
+            ),
+            "validation failed",
+        );
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(is_context_length_error(&error));
+        let response =
+            responses_overflow_stream("m".into(), ResponseParams::default(), None, &error);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+        let events: Vec<serde_json::Value> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "response.created",
+                "response.in_progress",
+                "response.failed"
+            ]
+        );
+        assert_eq!(
+            events[2]["response"]["error"]["code"],
+            "context_length_exceeded"
+        );
+        assert_eq!(events[0]["response"]["id"], events[2]["response"]["id"]);
+        for (index, event) in events.iter().enumerate() {
+            assert_eq!(event["sequence_number"], index);
+        }
+    }
+
+    #[test]
+    fn body_affinity_obeys_explicit_body_then_header_then_fallback_precedence() {
+        for (header, explicit, expected) in [
+            (None, false, "body"),
+            (Some("header"), false, "header"),
+            (Some("header"), true, "body"),
+        ] {
+            let mut headers = HeaderMap::new();
+            if let Some(value) = header {
+                headers.insert("x-session-id", value.parse().unwrap());
+            }
+            let mut context =
+                context_from_headers(NvCreateResponse::default(), "r".into(), &headers).unwrap();
+            apply_responses_body_affinity(&mut context, &headers, Some("body".into()), explicit);
+            let affinity = context
+                .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+                .unwrap();
+            assert_eq!(affinity.as_str(), expected);
+            let agent = context
+                .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+                .unwrap();
+            assert_eq!(agent.session_id, expected);
+        }
+    }
+
+    #[test]
+    fn ordinary_invalid_arguments_are_not_context_overflows() {
+        let error = ErrorMessage::from_anyhow(
+            crate::protocols::common::invalid_argument_error("temperature must be nonnegative"),
+            "validation failed",
+        );
+        assert!(!is_context_length_error(&error));
+        assert_eq!(
+            responses_error_code(&error),
+            ResponseErrorCode::InvalidPrompt
+        );
+    }
 
     use super::*;
     use crate::discovery::ModelManagerError;

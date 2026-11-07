@@ -366,23 +366,28 @@ fn allowed_tools_filter_native_namespace_members() {
 }
 
 #[test]
-fn custom_allowed_tools_are_supported_but_unenforced_grammars_are_rejected() {
-    let request = |format: Value| -> NvCreateResponse {
-        serde_json::from_value(json!({
-        "model":"m","input":"hi","tools":[{"type":"custom","name":"run","format":format}],
-        "tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"custom","name":"run"}]}
-    })).unwrap()
-    };
-    let req = request(json!({"type":"text"}));
-    let chat: NvCreateChatCompletionRequest = req.try_into().unwrap();
-    assert_eq!(chat.inner.tools.as_ref().unwrap()[0].function.name, "run");
-    let req = request(json!({"type":"grammar","syntax":"regex","definition":"[a-z]+"}));
-    let error = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("grammar formats are not supported")
-    );
+fn custom_allowed_tools_accept_text_and_grammar_formats() {
+    for format in [
+        json!({"type":"text"}),
+        json!({"type":"grammar","syntax":"regex","definition":"[a-z]+"}),
+        json!({"type":"grammar","syntax":"lark","definition":"start: \"patch\""}),
+    ] {
+        let req: NvCreateResponse = serde_json::from_value(json!({
+            "model":"m","input":"hi",
+            "tools":[{"type":"custom","name":"run","format":format}],
+            "tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"custom","name":"run"}]}
+        })).unwrap();
+        let chat: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let tool = &chat.inner.tools.as_ref().unwrap()[0];
+        assert_eq!(tool.function.name, "run");
+        assert_eq!(
+            tool.function.parameters.as_ref().unwrap()["properties"]["input"]["type"],
+            "string"
+        );
+        assert_ne!(tool.function.strict, Some(true));
+        let declared = &chat.responses_tools.as_ref().unwrap().declared_tools[0];
+        assert_eq!(serde_json::to_value(declared).unwrap()["format"], format);
+    }
 }
 
 #[test]
