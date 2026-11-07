@@ -57,6 +57,15 @@ def session(req=None, budget=None, **kwargs):
     )
 
 
+def completion_output(token_ids, *, index=0, logprobs=None, routed_experts=None):
+    return SimpleNamespace(
+        index=index,
+        token_ids=token_ids,
+        logprobs=logprobs,
+        routed_experts=routed_experts,
+    )
+
+
 @pytest.mark.asyncio
 async def test_inline_routes_use_exact_sequence_and_geometry():
     capture = session(request(("moe_routes",)))
@@ -64,7 +73,7 @@ async def test_inline_routes_use_exact_sequence_and_geometry():
         [[[1, 2], [1, 2]], [[2, 3], [2, 3]], [[3, 4], [3, 4]]], dtype=np.int64
     )
     capture.observe(
-        SimpleNamespace(index=0, token_ids=[12, 13], routed_experts=routes), [10, 11]
+        completion_output(token_ids=[12, 13], routed_experts=routes), [10, 11]
     )
     result = await capture.finalize()
     choice = decode_generation_artifact(
@@ -127,7 +136,7 @@ async def test_delivery_rejection_is_not_reported_as_invalid_capture():
     capture = session(
         request((), "object_store", {"kind": "managed_store"}), runtime=runtime
     )
-    capture.observe(SimpleNamespace(index=0, token_ids=[12]), [10, 11])
+    capture.observe(completion_output(token_ids=[12]), [10, 11])
     result = await capture.finalize()
     assert result["state"] == "failed"
     assert result["error_code"] == "delivery_rejected"
@@ -139,7 +148,7 @@ async def test_delivery_rejection_is_not_reported_as_invalid_capture():
 async def test_missing_requested_routes_fails_explicitly():
     capture = session(request(("moe_routes",)))
     capture.observe(
-        SimpleNamespace(index=0, token_ids=[12, 13], routed_experts=None), [10, 11]
+        completion_output(token_ids=[12, 13], routed_experts=None), [10, 11]
     )
     result = await capture.finalize()
     assert result["state"] == "failed"
@@ -226,7 +235,7 @@ async def test_destination_and_profile_are_owned_after_admission():
     capture = session(request((), "object_store", destination), runtime=runtime)
     destination["object_key"] = "changed"
     destination["nested"]["header"] = "changed"
-    capture.observe(SimpleNamespace(index=0, token_ids=[12]), [10, 11])
+    capture.observe(completion_output(token_ids=[12]), [10, 11])
     await capture.finalize()
     submitted = runtime.submit.call_args.args[2]
     assert submitted["object_key"] == "original"
@@ -257,14 +266,14 @@ def test_router_profile_limit_names_the_tensor_budget():
 def test_closed_capture_never_retains_new_observations():
     capture = session()
     capture.close()
-    capture.observe(SimpleNamespace(index=0, token_ids=[12]), [10, 11])
+    capture.observe(completion_output(token_ids=[12]), [10, 11])
     assert capture.prompt is None
     assert capture.tokens == []
 
 
 def test_observed_prompt_cannot_silently_shift_route_origin():
     capture = session(request(("moe_routes",)), token_start=2)
-    capture.observe(SimpleNamespace(index=0, token_ids=[12]), [10])
+    capture.observe(completion_output(token_ids=[12]), [10])
     assert capture.error
     assert capture.prompt is None
     capture.close()
@@ -278,9 +287,7 @@ async def test_selected_and_topk_capture_keep_pairing_and_bounds():
         99: SimpleNamespace(logprob=-0.1),
         88: SimpleNamespace(logprob=-2.0),
     }
-    capture.observe(
-        SimpleNamespace(index=0, token_ids=[12], logprobs=[values]), [10, 11]
-    )
+    capture.observe(completion_output(token_ids=[12], logprobs=[values]), [10, 11])
     result = await capture.finalize()
     choice = decode_generation_artifact(
         base64.b64decode(result["data_base64"])
@@ -289,6 +296,80 @@ async def test_selected_and_topk_capture_keep_pairing_and_bounds():
     assert selected.logprobs.as_array().tolist() == pytest.approx([-0.2])
     assert topk.candidate_token_ids.as_array().tolist() == [[99, 12]]
     assert topk.logprobs.as_array()[0].tolist() == pytest.approx([-0.1, -0.2])
+
+
+@pytest.mark.asyncio
+async def test_logprob_buffers_keep_rows_across_output_chunks():
+    capture = session(request(("selected_logprobs", "topk_logprobs")), logprob_width=2)
+    first = {12: SimpleNamespace(logprob=-0.3), 91: SimpleNamespace(logprob=-0.1)}
+    second = {13: SimpleNamespace(logprob=-0.4), 92: SimpleNamespace(logprob=-0.2)}
+    capture.observe(completion_output([12], logprobs=[first]), [10, 11])
+    capture.observe(completion_output([13], logprobs=[second]), [10, 11])
+    assert capture.logprob_rows == 2
+    result = await capture.finalize()
+    choice = decode_generation_artifact(
+        base64.b64decode(result["data_base64"])
+    ).choices[0]
+    selected, topk = choice.components
+    assert selected.logprobs.as_array().tolist() == pytest.approx([-0.3, -0.4])
+    assert topk.candidate_token_ids.as_array().tolist() == [[91, 12], [92, 13]]
+    np.testing.assert_allclose(topk.logprobs.as_array(), [[-0.1, -0.3], [-0.2, -0.4]])
+
+
+def test_logprob_buffers_are_reserved_before_allocation(monkeypatch):
+    budget = CaptureBudget(1 << 20)
+    original_empty = np.empty
+
+    def checked_empty(shape, *, dtype):
+        assert budget.used > 0
+        return original_empty(shape, dtype=dtype)
+
+    monkeypatch.setattr(generation_artifact.np, "empty", checked_empty)
+    capture = session(
+        request(("selected_logprobs", "topk_logprobs")),
+        budget=budget,
+        logprob_width=2,
+    )
+    assert isinstance(capture.selected, np.ndarray)
+    assert capture.selected.shape == (2,)
+    assert capture.candidates.shape == (2, 2)
+    assert capture.candidate_scores.shape == (2, 2)
+    assert capture.logprob_rows == 0
+    capture.close()
+    assert budget.used == 0
+
+
+def test_failed_logprob_buffer_allocation_releases_reservation(monkeypatch):
+    budget = CaptureBudget(1 << 20)
+    original_empty = np.empty
+    allocations = 0
+
+    def failing_empty(shape, *, dtype):
+        nonlocal allocations
+        allocations += 1
+        if allocations == 2:
+            raise MemoryError("allocation failed")
+        return original_empty(shape, dtype=dtype)
+
+    monkeypatch.setattr(generation_artifact.np, "empty", failing_empty)
+    with pytest.raises(MemoryError, match="allocation failed"):
+        session(
+            request(("selected_logprobs", "topk_logprobs")),
+            budget=budget,
+            logprob_width=2,
+        )
+    assert budget.used == 0
+
+
+@pytest.mark.parametrize("missing", ["index", "logprobs", "routed_experts"])
+def test_missing_completion_output_field_invalidates_capture(missing):
+    budget = CaptureBudget(1 << 20)
+    capture = session(budget=budget)
+    output = completion_output([12])
+    delattr(output, missing)
+    capture.observe(output, [10, 11])
+    assert capture.error
+    assert budget.used == 0
 
 
 @pytest.mark.parametrize(
@@ -312,7 +393,7 @@ async def test_selected_and_topk_capture_keep_pairing_and_bounds():
 def test_invalid_logprob_rows_are_discarded_and_cannot_resume(values):
     capture = session(request(("selected_logprobs",)))
     capture.observe(
-        SimpleNamespace(
+        completion_output(
             index=0, token_ids=[12], logprobs=None if values is None else [values]
         ),
         [10, 11],
@@ -320,7 +401,7 @@ def test_invalid_logprob_rows_are_discarded_and_cannot_resume(values):
     assert capture.error
     assert capture.tokens == []
     capture.observe(
-        SimpleNamespace(
+        completion_output(
             index=0, token_ids=[13], logprobs=[{13: SimpleNamespace(logprob=-1.0)}]
         ),
         [10, 11],
@@ -337,7 +418,7 @@ async def test_prefill_only_selected_and_topk_have_zero_rows():
         max_tokens=0,
         logprob_width=2,
     )
-    capture.observe(SimpleNamespace(index=0, token_ids=[], logprobs=None), [10, 11])
+    capture.observe(completion_output(token_ids=[], logprobs=None), [10, 11])
     result = await capture.finalize()
     components = (
         decode_generation_artifact(base64.b64decode(result["data_base64"]))
@@ -351,9 +432,7 @@ async def test_prefill_only_selected_and_topk_have_zero_rows():
 def test_route_extent_is_bounded_before_compaction_and_failure_releases_views():
     capture = session(request(("moe_routes",)), token_start=1)
     native = np.zeros((20, 2, 2), dtype=np.int32)
-    capture.observe(
-        SimpleNamespace(index=0, token_ids=[12], routed_experts=native), [10, 11]
-    )
+    capture.observe(completion_output(token_ids=[12], routed_experts=native), [10, 11])
     assert capture.error
     assert capture.routes is None
     assert capture.tokens == []
@@ -365,7 +444,7 @@ async def test_valid_nonzero_start_keeps_requested_origin():
     capture = session(request(("moe_routes",)), token_start=1)
     native = np.asarray([[[0, 1], [2, 3]], [[1, 2], [3, 4]]], dtype=np.int64)
     capture.observe(
-        SimpleNamespace(index=0, token_ids=[12, 13], routed_experts=native), [10, 11]
+        completion_output(token_ids=[12, 13], routed_experts=native), [10, 11]
     )
     result = await capture.finalize()
     routes = (
@@ -397,7 +476,7 @@ async def test_route_compaction_runs_off_loop_and_finishes_before_cancellation(
     budget = CaptureBudget(1 << 20)
     capture = session(request(("moe_routes",)), budget=budget)
     routes = np.asarray([[[1, 2], [3, 4]], [[2, 3], [4, 5]]], dtype=np.int64)
-    output = SimpleNamespace(index=0, token_ids=[12], routed_experts=routes)
+    output = completion_output(token_ids=[12], routed_experts=routes)
     loop_thread = threading.get_ident()
 
     task = asyncio.create_task(capture.observe_async(output, [10, 11]))
@@ -433,7 +512,7 @@ async def test_cancelled_encoder_holds_reservation_until_thread_finishes(monkeyp
     monkeypatch.setattr(generation_artifact, "encode_generation_artifact", delayed)
     budget = CaptureBudget(1 << 20)
     capture = session(budget=budget)
-    capture.observe(SimpleNamespace(index=0, token_ids=[12]), [10, 11])
+    capture.observe(completion_output(token_ids=[12]), [10, 11])
     task = asyncio.create_task(capture.finalize())
     try:
         assert await asyncio.to_thread(started.wait, 2)
