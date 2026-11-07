@@ -48,6 +48,7 @@ vllm-proto = { workspace = true }
 
 [dev-dependencies]
 dynamo-vllm-generate = { workspace = true }
+tracing-subscriber = { workspace = true }
 reqwest = { workspace = true }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }

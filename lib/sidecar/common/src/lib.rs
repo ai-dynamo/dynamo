@@ -8,6 +8,8 @@ mod endpoint;
 mod error;
 mod json;
 mod run;
+mod trace_context;
+mod trace_rpc;
 mod transport;
 
 #[cfg(feature = "tonic-v14")]
@@ -20,7 +22,9 @@ pub mod v14 {
         stream_status_to_dynamo_v14 as stream_status_to_dynamo,
     };
 
-    // Keep connection policy identical across Tonic versions.
+    // Keep trace propagation and connection policy identical across Tonic
+    // versions. `transport.rs` ends with its test module, so it goes last.
+    include!("trace_rpc.rs");
     include!("transport.rs");
 }
 
@@ -34,6 +38,8 @@ pub use error::{
 pub use json::{json_to_struct, struct_to_json};
 #[cfg(feature = "tonic-v14")]
 pub use json::{json_to_struct_v14, struct_to_json_v14};
+pub use trace_context::trace_context_metadata;
+pub use trace_rpc::inject_trace_context;
 pub use transport::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, format_error_chain, startup_deadline,
 };

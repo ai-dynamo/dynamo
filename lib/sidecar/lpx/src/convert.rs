@@ -121,19 +121,6 @@ pub(crate) fn build_handoff_cleanup_request(
     })
 }
 
-/// The current span's W3C Trace Context, as `Generate` metadata.
-pub(crate) fn trace_headers() -> Vec<(&'static str, String)> {
-    let Some(context) = dynamo_runtime::logging::get_distributed_tracing_context() else {
-        return Vec::new();
-    };
-    let mut headers = Vec::with_capacity(2);
-    headers.push(("traceparent", context.create_traceparent()));
-    if let Some(tracestate) = context.tracestate {
-        headers.push(("tracestate", tracestate));
-    }
-    headers
-}
-
 /// -1 and 0 mean "all tokens" in Dynamo, as an unset top_k does in
 /// OpenEngine. Any other value is forwarded; the engine rejects a negative
 /// one.

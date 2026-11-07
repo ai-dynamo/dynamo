@@ -3292,6 +3292,7 @@ dependencies = [
  "tonic-health 0.13.1",
  "tower 0.5.3",
  "tracing",
+ "tracing-subscriber",
  "url",
 ]
 
@@ -3431,6 +3432,7 @@ dependencies = [
  "tonic-build 0.13.1",
  "tonic-health 0.13.1",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3510,6 +3512,7 @@ dependencies = [
  "tonic 0.14.6",
  "tonic-health 0.14.6",
  "tracing",
+ "tracing-subscriber",
  "vllm-proto",
 ]
 
