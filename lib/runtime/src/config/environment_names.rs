@@ -923,7 +923,8 @@ pub mod response_plane {
     /// or "velo". Defaults to "tcp".
     ///
     /// Velo has no TLS, so a velo runtime refuses to start while any
-    /// `DYN_TCP_TLS_*` path is set or `DYN_TCP_TLS_INSECURE` is truthy.
+    /// `DYN_TCP_TLS_*` path is set or `DYN_TCP_TLS_INSECURE` is truthy. When
+    /// this variable is unset, those settings keep the process on tcp.
     ///
     /// On a graceful Stop, velo still delivers what the worker's engine
     /// yields, final chunk included; tcp and quic end the stream at the worker.

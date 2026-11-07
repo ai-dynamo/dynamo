@@ -216,7 +216,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
 
     discovery_backend: str
     request_plane: str
-    response_plane: str = "tcp"
+    response_plane: Optional[str] = None
     event_plane: Optional[str] = None
     chat_processor: str
     enable_anthropic_api: bool
@@ -759,8 +759,11 @@ class FrontendArgGroup(ArgGroup):
             g,
             flag_name="--response-plane",
             env_var="DYN_RESPONSE_PLANE",
-            default="tcp",
-            help="Select the response transport. Frontend and workers must match.",
+            default=None,
+            help=(
+                "Select the response transport. Frontend and workers must match. "
+                "When unset, the runtime uses tcp."
+            ),
             choices=["tcp", "quic", "velo"],
             env=self.env,
         )

@@ -474,7 +474,7 @@ def test_frontend_reasoning_field_name_rejects_invalid_choice() -> None:
         parser.parse_args(["--reasoning-field-name", "invalid"])
 
 
-def test_frontend_response_plane_defaults_to_tcp_and_accepts_quic(
+def test_frontend_response_plane_defaults_to_unset_and_accepts_quic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
@@ -490,7 +490,7 @@ def test_frontend_response_plane_defaults_to_tcp_and_accepts_quic(
     FrontendArgGroup().add_arguments(env_parser)
     env_config = FrontendConfig.from_cli_args(env_parser.parse_args([]))
 
-    assert default_config.response_plane == "tcp"
+    assert default_config.response_plane is None
     assert quic_config.response_plane == "quic"
     assert parser.parse_args(["--response-plane", "velo"]).response_plane == "velo"
     assert env_config.response_plane == "quic"
