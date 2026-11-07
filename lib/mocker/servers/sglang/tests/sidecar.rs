@@ -12,6 +12,7 @@ use dynamo_sglang_mocker::{MockerServerConfig, ServerMode, SglangMockerService};
 use dynamo_sglang_sidecar::{
     SglangSidecarEngine, proto::sglang_service_server::SglangServiceServer,
 };
+use dynamo_sidecar_common::TEST_STARTUP_TIMEOUT;
 use futures::StreamExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -89,7 +90,7 @@ async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> SglangSidecarEngin
         "--grpc-retry-interval-secs".to_string(),
         "1".to_string(),
         "--grpc-startup-deadline-secs".to_string(),
-        "5".to_string(),
+        TEST_STARTUP_TIMEOUT.as_secs().to_string(),
     ];
     if mode.is_prefill() {
         argv.extend(["--bootstrap-host".to_string(), "127.0.0.1".to_string()]);

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::transport::connect_pool_with;
-use crate::{GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig};
+use crate::{GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig, TEST_STARTUP_TIMEOUT};
 use dynamo_backend_common::{BackendError, ErrorType};
 use tokio::net::UnixListener;
 use tokio::sync::oneshot;
@@ -189,7 +189,7 @@ async fn a_unix_socket_endpoint_waits_for_its_socket_then_serves_rpcs() {
         connections: NonZeroUsize::new(2).unwrap(),
         connect_attempt_timeout: Duration::from_millis(500),
         retry_interval: Duration::from_millis(10),
-        startup_deadline: Duration::from_secs(5),
+        startup_deadline: TEST_STARTUP_TIMEOUT,
     };
     let server_path = path.clone();
     let server = tokio::spawn(async move {

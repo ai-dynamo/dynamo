@@ -4,6 +4,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
 use dynamo_llm::local_model::runtime_config::{
@@ -18,6 +19,7 @@ use dynamo_sglang_sidecar::proto::{
     self as pb,
     sglang_service_server::{SglangService, SglangServiceServer},
 };
+use dynamo_sidecar_common::TEST_STARTUP_TIMEOUT;
 use dynamo_sidecar_testkit::control::{Controller, Protocol, RequestHandle};
 use dynamo_sidecar_testkit::fixtures::Outputs;
 use dynamo_sidecar_testkit::server::TestServer;
@@ -39,6 +41,7 @@ pub struct Fixture {
     scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
     model_info: Arc<Mutex<Value>>,
     server_info: Arc<Mutex<VecDeque<Value>>>,
+    server_info_entered: Arc<Mutex<Option<Instant>>>,
     health: watch::Sender<Option<bool>>,
     health_calls: watch::Receiver<usize>,
     engine_state: watch::Sender<Option<pb::EngineStateSnapshot>>,
@@ -117,6 +120,7 @@ impl SidecarFixture for Fixture {
         let scripted = Arc::new(Mutex::new(HashMap::new()));
         let model_info = Arc::new(Mutex::new(Value::Null));
         let server_info = Arc::new(Mutex::new(VecDeque::new()));
+        let server_info_entered = Arc::new(Mutex::new(None));
         let (health, health_rx) = watch::channel(Some(true));
         let (health_tx, health_calls) = watch::channel(0);
         let (engine_state, engine_state_rx) = watch::channel(Some(pb::EngineStateSnapshot {
@@ -131,6 +135,7 @@ impl SidecarFixture for Fixture {
             scripted: scripted.clone(),
             model_info: model_info.clone(),
             server_info: server_info.clone(),
+            server_info_entered: server_info_entered.clone(),
             health: health_rx,
             health_calls: health_tx,
             engine_state: engine_state_rx,
@@ -153,6 +158,7 @@ impl SidecarFixture for Fixture {
             scripted,
             model_info,
             server_info,
+            server_info_entered,
             health,
             health_calls,
             engine_state,
@@ -174,11 +180,27 @@ impl SidecarFixture for Fixture {
             "--grpc-retry-interval-secs".into(),
             "1".into(),
             "--grpc-startup-deadline-secs".into(),
-            "5".into(),
+            TEST_STARTUP_TIMEOUT.as_secs().to_string(),
         ];
-        tokio::task::spawn_blocking(move || SglangSidecarEngine::from_args(Some(argv)).unwrap().0)
-            .await
-            .unwrap()
+        *self.server_info_entered.lock().unwrap() = None;
+        let server_info_entered = self.server_info_entered.clone();
+        let started = Instant::now();
+        tokio::task::spawn_blocking(move || {
+            SglangSidecarEngine::from_args(Some(argv))
+                .unwrap_or_else(|error| {
+                    let entered = server_info_entered
+                        .lock()
+                        .unwrap()
+                        .map(|at| at.duration_since(started));
+                    panic!(
+                        "SGLang fixture startup failed after {:?}; server first entered GetServerInfo after {entered:?}: {error:?}",
+                        started.elapsed()
+                    )
+                })
+                .0
+        })
+        .await
+        .unwrap()
     }
 
     fn eof_error() -> BackendError {
@@ -386,6 +408,7 @@ struct ControlledService {
     scripted: Arc<Mutex<HashMap<String, Vec<pb::GenerateResponse>>>>,
     model_info: Arc<Mutex<Value>>,
     server_info: Arc<Mutex<VecDeque<Value>>>,
+    server_info_entered: Arc<Mutex<Option<Instant>>>,
     health: watch::Receiver<Option<bool>>,
     health_calls: watch::Sender<usize>,
     engine_state: watch::Receiver<Option<pb::EngineStateSnapshot>>,
@@ -469,6 +492,10 @@ macro_rules! delegate_service {
                 &self,
                 request: Request<pb::GetServerInfoRequest>,
             ) -> Result<Response<pb::GetServerInfoResponse>, Status> {
+                self.server_info_entered
+                    .lock()
+                    .unwrap()
+                    .get_or_insert_with(Instant::now);
                 let mut response = self.inner.get_server_info(request).await?.into_inner();
                 let mut scripts = self.server_info.lock().unwrap();
                 if let Some(patch) = scripts.front() {
