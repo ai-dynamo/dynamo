@@ -3813,6 +3813,68 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert captured["messages"][0]["tools"][0]["function"]["name"] == "get_weather"
         assert captured["messages"][1]["role"] == "user"
 
+    @pytest.mark.multimodal
+    @pytest.mark.parametrize(
+        ("model", "tool_parser", "reasoning_parser"),
+        [
+            ("DeepSeek-V4.1-Flash", None, None),
+            ("DeepSeek-V41-Flash-1017", None, None),
+            ("model-alias", "deepseekv41", None),
+            ("model-alias", None, "deepseek-v41"),
+        ],
+    )
+    def test_deepseek_v41_renders_image_slots_in_media_order(
+        self, monkeypatch, model, tool_parser, reasoning_parser
+    ):
+        urls = ["data:image/png;base64,aGVsbG8=", "https://example.com/image.png"]
+        request = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "First"},
+                        {"type": "image_url", "image_url": {"url": urls[0]}},
+                        {"type": "text", "text": "then"},
+                        {"type": "image_url", "image_url": {"url": urls[1]}},
+                    ],
+                }
+            ],
+        }
+        original = copy.deepcopy(request)
+        encoder_name = "sglang.srt.entrypoints.openai.encoding_dsv4"
+        fake_encoder = types.ModuleType(encoder_name)
+        fake_encoder.encode_messages = lambda messages, **kwargs: messages[0]["content"]
+        monkeypatch.setitem(sys.modules, encoder_name, fake_encoder)
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "create_parsers",
+            lambda *args, **kwargs: (None, None),
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def encode(self, prompt):
+                assert prompt == "First <｜deepseek_image｜> then <｜deepseek_image｜>"
+                return [1, 129264, 2, 129264]
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=tool_parser,
+            reasoning_parser_name=reasoning_parser,
+        )
+        preproc = _build_dynamo_preproc(
+            result.request, result.prompt_token_ids, model, None
+        )
+
+        assert preproc["token_ids"] == [1, 129264, 2, 129264]
+        assert preproc["multi_modal_data"] == {
+            "image_url": [{"Url": url} for url in urls]
+        }
+        assert request == original
+
     def test_deepseek_v4_tool_call_arguments_reach_encoder_as_json_string(
         self, monkeypatch
     ):
