@@ -2615,3 +2615,68 @@ async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch)
     )
 
     assert order == ["freeze_gc_heap", "register_model"]
+
+
+# --- is_object_storage_path tests (pure logic, no I/O) ---
+
+
+class TestIsObjectStoragePath:
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "s3://my-bucket/model/",
+            "gs://my-bucket/model",
+            "az://myaccount/container/model",
+        ],
+    )
+    def test_returns_true_for_object_storage_uris(self, path):
+        vllm_main = _load_vllm_main()
+        assert vllm_main.is_object_storage_path(path) is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "Qwen/Qwen3-0.6B",
+            "/local/path/to/model",
+            "hf://Qwen/Qwen3-0.6B",
+            "",
+            "runai://model",
+        ],
+    )
+    def test_returns_false_for_non_object_storage(self, path):
+        vllm_main = _load_vllm_main()
+        assert vllm_main.is_object_storage_path(path) is False
+
+
+# --- should_prefetch_model tests ---
+
+
+class TestShouldPrefetchModel:
+    def _make_config(self, model: str, load_format: str = "auto") -> SimpleNamespace:
+        engine_args = SimpleNamespace(load_format=load_format)
+        return SimpleNamespace(model=model, engine_args=engine_args)
+
+    def test_local_path_skips_prefetch(self, tmp_path):
+        vllm_main = _load_vllm_main()
+        config = self._make_config(str(tmp_path))
+        assert vllm_main.should_prefetch_model(config) is False
+
+    @pytest.mark.parametrize(
+        "uri",
+        ["s3://bucket/model", "gs://bucket/model", "az://account/container/model"],
+    )
+    def test_object_storage_uri_skips_prefetch(self, uri):
+        vllm_main = _load_vllm_main()
+        config = self._make_config(uri)
+        assert vllm_main.should_prefetch_model(config) is False
+
+    def test_hf_model_name_triggers_prefetch(self):
+        vllm_main = _load_vllm_main()
+        config = self._make_config("Qwen/Qwen3-0.6B")
+        assert vllm_main.should_prefetch_model(config) is True
+
+    @pytest.mark.parametrize("load_format", sorted(MX_LOAD_FORMATS))
+    def test_modelexpress_load_format_skips_prefetch(self, load_format):
+        vllm_main = _load_vllm_main()
+        config = self._make_config("Qwen/Qwen3-0.6B", load_format=load_format)
+        assert vllm_main.should_prefetch_model(config) is False
