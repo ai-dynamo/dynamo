@@ -7,6 +7,8 @@
 //! `message_start` -> `content_block_start` -> N x `content_block_delta` ->
 //! `content_block_stop` -> `message_delta` -> `message_stop`
 
+use std::cell::Cell;
+
 use axum::response::sse::Event;
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk, CompletionUsage,
@@ -43,6 +45,10 @@ pub struct AnthropicStreamConverter {
     // falls back to counting output deltas so that every `content_block_delta`
     // still carries a non-zero output-token estimate.
     saw_backend_usage: bool,
+    // Output tokens of the usage last stamped on the wire; set while serializing.
+    published_output_tokens: Cell<u32>,
+    // Usage of the last `ping`; fragment snapshots older than it are stamped with it.
+    pinged_usage: Option<AnthropicUsage>,
     // Tool call tracking
     tool_call_states: Vec<ToolCallState>,
     // The chat completion id, from the first chunk; `tool_use` ids derive from it.
@@ -113,6 +119,8 @@ impl AnthropicStreamConverter {
                 ..Default::default()
             },
             saw_backend_usage: false,
+            published_output_tokens: Cell::new(0),
+            pinged_usage: None,
             tool_call_states: Vec::new(),
             chat_id: String::new(),
             pending_text: Vec::new(),
@@ -444,7 +452,7 @@ impl AnthropicStreamConverter {
     }
 
     /// Serialize an event to SSE, stamping the current cumulative `usage` onto
-    /// every `content_block_delta`.
+    /// every `content_block_delta` and `ping`.
     ///
     /// Anthropic's native protocol only reports usage on `message_start` and the
     /// terminal `message_delta`, so a proxy that reads the stream for live
@@ -470,6 +478,14 @@ impl AnthropicStreamConverter {
         event: &AnthropicStreamEvent,
         usage: &AnthropicUsage,
     ) -> Result<Event, anyhow::Error> {
+        // Never lower the usage a ping already put on the wire.
+        let usage = match &self.pinged_usage {
+            Some(pinged) if usage.output_tokens < pinged.output_tokens => pinged,
+            _ => usage,
+        };
+        if carries_usage(event) {
+            self.published_output_tokens.set(usage.output_tokens);
+        }
         let value = event_json_with_usage(event, usage)?;
         Ok(Event::default()
             .event(event_type)
@@ -734,6 +750,17 @@ impl AnthropicStreamConverter {
         }
     }
 
+    /// Publish usage on a `ping` when the wire lags the generated tokens by more
+    /// than one. A held tool call, and text after it, emits no delta until the
+    /// call completes; one token is the detokenizer's usual hold-back, which the
+    /// next delta publishes. Call after each `append_chunk_events`.
+    pub fn append_usage_ping(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+        if self.usage.output_tokens > self.published_output_tokens.get() + 1 {
+            events.push(self.serialize_event("ping", &AnthropicStreamEvent::Ping {}));
+            self.pinged_usage = Some(self.usage.clone());
+        }
+    }
+
     /// Emit the final events when the stream ends.
     pub fn emit_end_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
@@ -869,8 +896,17 @@ fn make_sse_event(event_type: &str, event: &AnthropicStreamEvent) -> Result<Even
     Ok(Event::default().event(event_type).data(data))
 }
 
+/// Whether `event_json_with_usage` stamps a `usage` triple onto `event`.
+fn carries_usage(event: &AnthropicStreamEvent) -> bool {
+    matches!(
+        event,
+        AnthropicStreamEvent::ContentBlockDelta { .. } | AnthropicStreamEvent::Ping {}
+    )
+}
+
 /// Serialize an Anthropic stream event to JSON, injecting a `usage` triple onto
-/// `content_block_delta` events (and leaving every other event untouched).
+/// `content_block_delta` and `ping` events (and leaving every other event
+/// untouched).
 ///
 /// `dynamo-protocols`'s `AnthropicStreamEvent::ContentBlockDelta` has no `usage`
 /// field — the type is an external crate we don't own — so the field is added at
@@ -890,8 +926,8 @@ fn event_json_with_usage(
     usage: &AnthropicUsage,
 ) -> Result<serde_json::Value, anyhow::Error> {
     let mut value = serde_json::to_value(event)?;
-    if let (AnthropicStreamEvent::ContentBlockDelta { .. }, serde_json::Value::Object(map)) =
-        (event, &mut value)
+    if carries_usage(event)
+        && let serde_json::Value::Object(map) = &mut value
     {
         let mut usage_value = serde_json::to_value(usage)?;
         if let serde_json::Value::Object(usage_map) = &mut usage_value {
@@ -2739,6 +2775,58 @@ mod tests {
             fragment_outputs,
             vec![1, 2],
             "each fragment stamps the cumulative output count as of its own chunk"
+        );
+    }
+
+    /// A held tool call emits no delta, so its usage goes out on a `ping` once
+    /// the wire lags by more than one token. After the block flushes with its
+    /// per-fragment snapshots, a `ping` restores the latest usage on the wire.
+    #[tokio::test]
+    async fn test_usage_ping_publishes_held_tool_call_usage() {
+        let with_usage = |mut chunk: NvCreateChatCompletionStreamResponse, output| {
+            chunk.inner.usage = usage_chunk(10, None, output).inner.usage;
+            chunk
+        };
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 5);
+        let mut events = Vec::new();
+
+        let first = tool_call_chunk(0, Some("call-1"), Some("Read"), Some("{\"path\":"));
+        conv.append_chunk_events(&with_usage(first, 1), &mut events);
+        conv.append_usage_ping(&mut events);
+        assert!(
+            events.is_empty(),
+            "the call is held and one token of lag is tolerated"
+        );
+        let second = tool_call_chunk(0, None, None, Some("\"/a\"}"));
+        conv.append_chunk_events(&with_usage(second, 2), &mut events);
+        conv.append_usage_ping(&mut events);
+        conv.append_usage_ping(&mut events);
+        assert_eq!(
+            sse_values(std::mem::take(&mut events)).await,
+            vec![
+                serde_json::json!({"type": "ping", "usage": {"input_tokens": 10,
+                "output_tokens": 2, "cache_creation_input_tokens": 0, "total_tokens": 12}})
+            ],
+            "one ping, not repeated while usage is unchanged"
+        );
+
+        let finish = with_usage(finish_chunk(FinishReason::ToolCalls), 5);
+        conv.append_chunk_events(&finish, &mut events);
+        conv.append_usage_ping(&mut events);
+        let outputs: Vec<_> = sse_values(events)
+            .await
+            .iter()
+            .filter_map(|value| Some((value["type"].as_str()?.to_owned(), value.get("usage")?)))
+            .map(|(kind, usage)| (kind, usage["output_tokens"].as_u64().unwrap()))
+            .collect();
+        assert_eq!(
+            outputs,
+            [
+                ("content_block_delta".to_owned(), 2),
+                ("content_block_delta".to_owned(), 2),
+                ("ping".to_owned(), 5),
+            ],
+            "fragments older than the ping never lower the usage on the wire"
         );
     }
 
