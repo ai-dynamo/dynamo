@@ -30,6 +30,12 @@ lpx:
   # -- Configure the LPU model registry used by the LPX integration.
   modelRegistryURL: ""
 
+dgdr:
+  # -- Complete image reference for the v1beta1 DGDR output-copier. Empty uses the
+  # operator's digest-pinned kubectl default. Per-DGDR container image overrides
+  # take precedence. The image must contain /bin/sh, kubectl and shell utilities.
+  outputCopierImage: ""
+
 dgdrV1Beta2:
   # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2
   # Request API with conversion and install the Run and Candidate APIs. Run and

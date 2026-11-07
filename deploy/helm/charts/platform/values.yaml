@@ -67,6 +67,9 @@ global:
 
 # Dynamo operator configuration
 dynamo-operator:
+  dgdr:
+    # -- Complete output-copier image reference for v1beta1 DGDR profiling Jobs. Empty uses the operator's digest-pinned default; per-DGDR image overrides take precedence.
+    outputCopierImage: ""
   grovePreflight:
     # -- Validate externally managed Grove before installing/upgrading the operator. Disable only with a separate compatibility gate.
     enabled: true
