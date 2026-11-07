@@ -270,6 +270,7 @@ def _real_yaml(
     ("filename", "backend_type"),
     [
         ("match.sim.example.yaml", "sim"),
+        ("match.sim.cloudai.example.yaml", "sim"),
         ("match.real.example.yaml", "real"),
     ],
 )
