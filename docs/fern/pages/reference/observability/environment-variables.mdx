@@ -239,8 +239,16 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 </ParamField>
 
 <ParamField path="DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS" type="string">
-  Deprecated compatibility variable. The current runtime logs a warning and does not use this value
-  to select endpoints for system health.
+  JSON array of endpoint names, for example `["generate"]`. When the list is nonempty, the worker
+  system-status `/health` and `/live` paths report ready only when every listed endpoint is ready.
+  Each listed endpoint starts at `DYN_SYSTEM_STARTING_HEALTH_STATUS` (or not ready when canaries are
+  enabled) until it registers. A nonempty list takes precedence over endpoints that register health
+  check payloads. The list can also come from `use_endpoint_health_status` in
+  `/opt/dynamo/defaults/runtime.toml` or `/opt/dynamo/etc/runtime.toml`. An unset or empty variable
+  keeps any list set in those files; set the variable to `[]` to clear it. With no list, readiness
+  comes from registered health check targets, then from the default fallbacks. An outstanding
+  readiness hold reports not ready whatever the list says. The runtime logs a warning whenever this
+  variable is set.
 
   **Operator preset:** `["generate"]` on worker, prefill, and decode pods.
 </ParamField>
