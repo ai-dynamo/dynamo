@@ -113,6 +113,7 @@ class PlannerEnginePerfModel:
         # model has not successfully consumed the complete history.
         self._pending_iterations: list[list[ForwardPassMetrics]] = []
         self._retained_iterations: list[list[ForwardPassMetrics]] = []
+        self._history_decode_width: Optional[int] = None
         self._avg_isl = _MovingAverage(config.max_num_fpm_samples)
         self._avg_decode_length = _MovingAverage(config.max_num_fpm_samples)
 
@@ -150,6 +151,15 @@ class PlannerEnginePerfModel:
                 max_observations=self._config.max_num_fpm_samples,
                 attention_dp_size=self._attention_dp_size() or 1,
             )
+            width = self._engine_model.decode_query_width
+            if (
+                self._history_decode_width is not None
+                and self._history_decode_width != width
+            ):
+                # A different verification width describes different measured work.
+                self._retained_iterations.clear()
+                self._pending_iterations.clear()
+            self._history_decode_width = width
             diagnostics = self._engine_diagnostics()
             logger.info(
                 "Initialized AIS engine perf model for %s with source=%s readiness=%s",

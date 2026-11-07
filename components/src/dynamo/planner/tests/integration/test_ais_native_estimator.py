@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import pytest
-from aisimulate_core.sdk.engine import compile_engine
+from aisimulate_core.sdk.engine import EngineHandle, compile_engine
 
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
@@ -192,3 +192,117 @@ def test_ngram_worker_depth_preserves_native_speculation_identity() -> None:
     capabilities.speculative_nextn = 3
     with pytest.raises(ValueError, match="speculation depth conflicts"):
         model.update_capabilities(capabilities)
+
+
+def _speculative_model(role="decode", *, ngram=True):
+    config = _config()
+    identity = {
+        **config.ais_perf_model.roles["decode"],
+        "backend_version": "0.24.0",
+        "worker_type": role,
+        "estimation_mode": "op_level",
+        "fallback_policy": "deny",
+    }
+    if ngram:
+        identity["speculation"] = {
+            "kind": "ngram",
+            "params": {"num_speculative_tokens": 3},
+        }
+    config.ais_perf_model = AISPerfModelSpec(roles={role: identity})
+    config.load_min_observations = 2
+    caps = EngineCapabilities(
+        max_num_batched_tokens=16,
+        max_num_seqs=16,
+        max_kv_tokens=32768,
+        kv_cache_block_size=16,
+        speculative_nextn=3,
+    )
+    return (
+        PlannerEnginePerfModel(worker_type=role, config=config, capabilities=caps),
+        config,
+        caps,
+    )
+
+
+def _decode_fpm(count=1):
+    return ForwardPassMetrics(
+        worker_id="decode-0",
+        counter_id=1,
+        wall_time=0.01,
+        scheduled_requests=ScheduledRequestMetrics(
+            num_decode_requests=count, sum_decode_kv_tokens=count * 128
+        ),
+    )
+
+
+@pytest.mark.parametrize("role", ["decode", "aggregated"])
+def test_speculative_op_prediction_survives_unqualified_decode_observations(
+    role,
+) -> None:
+    model, _, _ = _speculative_model(role)
+    fpm = _decode_fpm()
+    before = model.estimate_scheduled_decode_itl([fpm], add_next_request=False)
+    assert before is not None and before > 0
+    model.add_observations({("decode-0", 0): fpm})
+    assert model._engine_diagnostics()["retained_observations"] == 0
+    assert model.has_sufficient_data()
+    assert model.estimate_scheduled_decode_itl(
+        [fpm], add_next_request=False
+    ) == pytest.approx(before)
+    capacity = model.find_engine_capacity_rps(isl=64, osl=64, accept_length=4)
+    assert capacity is not None and capacity.rps > 0
+
+
+def test_speculative_op_divisible_batch_matches_complete_native_round() -> None:
+    model, _, _ = _speculative_model()
+    actual = model.estimate_scheduled_decode_itl(
+        [_decode_fpm(4)], add_next_request=False
+    )
+    oracle = EngineHandle.compile(
+        "Qwen/Qwen3-32B",
+        "h200_sxm",
+        "vllm",
+        backend_version="0.24.0",
+        kv_block_size=16,
+        worker_type="decode",
+        speculation={"kind": "ngram", "params": {"num_speculative_tokens": 3}},
+    )
+    expected_ms = oracle.decode_step_latency(4, 126, 2)
+    assert actual == pytest.approx(expected_ms / 1000, rel=1e-9)
+
+
+def test_speculative_op_pure_prefill_correction_remains_available() -> None:
+    model, _, _ = _speculative_model("prefill")
+    scheduled = ScheduledRequestMetrics(num_prefill_requests=1, sum_prefill_tokens=8)
+    sample = ForwardPassMetrics(scheduled_requests=scheduled)
+    before = model._engine_model._estimate_forward_pass_seconds([sample])
+    assert before is not None and before > 0
+    for counter in (1, 2):
+        model.add_observations(
+            {
+                ("prefill-0", 0): ForwardPassMetrics(
+                    worker_id="prefill-0",
+                    counter_id=counter,
+                    scheduled_requests=scheduled,
+                    wall_time=before * 1.25,
+                )
+            }
+        )
+    after = model._engine_model._estimate_forward_pass_seconds([sample])
+    assert after == pytest.approx(before * 1.25, rel=1e-6)
+
+
+def test_withheld_speculative_history_replays_raw_after_same_width_mode_change() -> (
+    None
+):
+    model, config, caps = _speculative_model(ngram=False)
+    fpm = _decode_fpm()
+    model.add_observations({("decode-0", 0): fpm})
+    assert model._engine_diagnostics()["retained_observations"] == 0
+    assert not model._pending_iterations
+    config.ais_perf_model.roles["decode"]["estimation_mode"] = "fpm_regression"
+    model.update_capabilities(caps)
+    assert model._engine_diagnostics()["source"] == "fallback_regression"
+    assert model._engine_diagnostics()["retained_observations"] == 1
+    assert model._retained_iterations == [[fpm]]
+    assert not model._pending_iterations

@@ -90,6 +90,7 @@ def fake_engine_factory(monkeypatch):
         def best_available(cls, **kwargs):
             assert cls.next_model is not None
             cls.last_kwargs = kwargs
+            cls.next_model.decode_query_width = kwargs["ais_config"].get("nextn", 0) + 1
             return cls.next_model
 
     monkeypatch.setattr(ais_adapter, "AISCoreEnginePerfModel", FakeEngineFactory)
@@ -307,8 +308,11 @@ def test_ais_config_requests_raw_spec_decode_iteration_time(
     assert ais_config["nextn"] == int(expected_nextn)
 
 
-def test_capability_nextn_update_rebuilds_ais_model_and_replays_fpms(
+@pytest.mark.parametrize("init_fails", [False, True])
+def test_capability_nextn_update_rebuilds_without_replaying_old_width_timings(
     fake_engine_factory,
+    monkeypatch,
+    init_fails,
 ):
     first = _FakeEngineModel(
         diagnostics={
@@ -340,12 +344,25 @@ def test_capability_nextn_update_rebuilds_ais_model_and_replays_fpms(
     )
     fake_engine_factory.next_model = second
 
+    if init_fails:
+
+        def unavailable(**_kwargs):
+            raise RuntimeError("temporarily unavailable estimator")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(fake_engine_factory, "best_available", unavailable)
+            model.update_capabilities(_caps(speculative_nextn=3))
+        assert model._engine_model is None
+        assert model._retained_iterations == [[fpm]]
+
     model.update_capabilities(_caps(speculative_nextn=3))
 
     assert fake_engine_factory.last_kwargs is not None
     ais_config = fake_engine_factory.last_kwargs["ais_config"]
     assert ais_config["nextn"] == 3
-    assert second.tuned_iterations == [[fpm]]
+    assert second.tuned_iterations == []
+    assert model._retained_iterations == []
+    assert model._pending_iterations == []
 
 
 def test_partial_replay_failure_waits_for_fresh_model_before_full_retry(
@@ -402,7 +419,9 @@ def test_partial_replay_failure_waits_for_fresh_model_before_full_retry(
     )
     fake_engine_factory.next_model = second
 
-    model.update_capabilities(_caps(speculative_nextn=3))
+    changed_limits = _caps()
+    changed_limits.max_num_batched_tokens = 512
+    model.update_capabilities(changed_limits)
 
     assert second.tuned_iterations == [[first_fpm], [invalid_fpm], [later_fpm]]
     assert model._pending_iterations == []

@@ -11,6 +11,7 @@ TTFT/ITL derivation, engine-limit checks, and bounded capacity searches.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections import deque
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from typing import Any, Callable, Literal, Optional
 
 import msgspec
 from aisimulate_core.sdk import RustForwardPassPerfModel as AISForwardPassPerfModel
+from aisimulate_core.sdk.speculation import SpeculationConfig, build_spec_scheme
 
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,
@@ -34,6 +36,7 @@ _U32_MAX = (1 << 32) - 1
 _DURATION_EXCLUSIVE_MAX_SECONDS = float(1 << 64)
 
 WorkerType = Literal["prefill", "decode", "aggregated"]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -194,6 +197,9 @@ class AISCoreEnginePerfModel:
         limits: EnginePerfLimits,
         attention_dp_size: int,
         max_observations: int,
+        decode_query_width: int = 1,
+        pack_decode_queries: bool = False,
+        budget_decode_width: int = 1,
     ) -> None:
         if worker_type not in ("prefill", "decode", "aggregated"):
             raise ValueError(f"invalid worker_type {worker_type!r}")
@@ -201,11 +207,28 @@ class AISCoreEnginePerfModel:
             raise ValueError(
                 f"attention_dp_size must be positive, got {attention_dp_size}"
             )
+        for name, value in (
+            ("decode_query_width", decode_query_width),
+            ("budget_decode_width", budget_decode_width),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 1 <= value <= _U32_MAX
+            ):
+                raise ValueError(f"{name} must be a positive u32, got {value}")
         self._model = model
         self._worker_type = worker_type
         self._limits = limits
         self._attention_dp_size = attention_dp_size
         self._load_averages = _AggLoadAverages(max_observations)
+        self._decode_query_width = decode_query_width
+        self._packing_width = decode_query_width if pack_decode_queries else 1
+        self._budget_decode_width = budget_decode_width
+
+    @property
+    def decode_query_width(self) -> int:
+        return self._decode_query_width
 
     @classmethod
     def best_available(
@@ -220,23 +243,59 @@ class AISCoreEnginePerfModel:
         if ais_config["worker_type"] != worker_type:
             raise ValueError("AIS worker_type must match the Planner deployment role")
         model = AISForwardPassPerfModel.best_available(ais_config)
+        diagnostics = model.diagnostics()
+        provenance = (
+            diagnostics.get("provenance") if isinstance(diagnostics, dict) else None
+        )
+        provenance = provenance if isinstance(provenance, dict) else {}
+        resolved = provenance.get("config")
+        config = resolved if isinstance(resolved, dict) else ais_config
+        width = _configured_decode_width(config)
+        mode = provenance.get("selected_estimation_mode")
+        if width > 1 and (mode is None or not isinstance(resolved, dict)):
+            raise ValueError(
+                "Speculative AIS estimates require resolved estimator provenance"
+            )
+        packed = mode == "op_level"
+        if packed and width > 1:
+            logger.info(
+                "Speculative OP queries use configured verification width %s; "
+                "decode observations cannot calibrate OP without actual query widths",
+                width,
+            )
         return cls(
             model=model,
             worker_type=worker_type,
             limits=limits,
             attention_dp_size=attention_dp_size,
             max_observations=max_observations,
+            decode_query_width=width,
+            pack_decode_queries=packed,
+            budget_decode_width=width
+            if packed and config.get("backend") == "vllm"
+            else 1,
         )
 
     def tune_with_fpms(self, iterations: list[list[ForwardPassMetrics]]) -> None:
         for metrics_by_rank in iterations:
             self._validate_metrics_by_rank(metrics_by_rank)
-        self._model.tune_with_fpms(
-            [
-                [_fpm_to_ais_dict(metrics) for metrics in metrics_by_rank]
-                for metrics_by_rank in iterations
+        native_iterations = iterations
+        if self._packing_width > 1:
+            # Aggregate telemetry does not identify draftless or partial rounds.
+            native_iterations = [
+                group
+                for group in iterations
+                if not any(
+                    metrics.scheduled_requests.num_decode_requests for metrics in group
+                )
             ]
-        )
+        if native_iterations:
+            self._model.tune_with_fpms(
+                [
+                    [_fpm_to_ais_dict(metrics) for metrics in group]
+                    for group in native_iterations
+                ]
+            )
         self._load_averages.observe_iterations(iterations)
 
     def diagnostics(self) -> dict[str, Any]:
@@ -256,16 +315,27 @@ class AISCoreEnginePerfModel:
             return None
         self._validate_metrics_by_rank(metrics_by_rank)
 
+        if not any(
+            metrics.queued_requests.sum_prefill_tokens for metrics in metrics_by_rank
+        ):
+            return 0.0
+        chunk_sizes = [self._limits.max_num_batched_tokens] * len(metrics_by_rank)
+        if self._budget_decode_width > 1 and self._worker_type == "aggregated":
+            for index, metrics in enumerate(metrics_by_rank):
+                headroom = self._limits.max_num_batched_tokens - (
+                    metrics.scheduled_requests.num_decode_requests
+                    * self._budget_decode_width
+                )
+                if metrics.queued_requests.sum_prefill_tokens and headroom <= 0:
+                    return None
+                chunk_sizes[index] = max(1, headroom)
         plans = [
             _PrefillChunkPlan.build(
                 metrics.queued_requests.sum_prefill_tokens,
-                self._limits.max_num_batched_tokens,
+                chunk,
             )
-            for metrics in metrics_by_rank
+            for metrics, chunk in zip(metrics_by_rank, chunk_sizes, strict=True)
         ]
-        if all(plan.full_chunks == 0 and plan.tail_tokens == 0 for plan in plans):
-            return 0.0
-
         breakpoints = {0}
         for plan in plans:
             if plan.full_chunks > 0:
@@ -277,8 +347,10 @@ class AISCoreEnginePerfModel:
         for start, end in pairwise(sorted(breakpoints)):
             repeat_count = end - start
             chunk_metrics: list[ForwardPassMetrics] = []
-            for snapshot, plan in zip(metrics_by_rank, plans, strict=True):
-                chunk = plan.chunk_at(start, self._limits.max_num_batched_tokens)
+            for snapshot, plan, chunk_size in zip(
+                metrics_by_rank, plans, chunk_sizes, strict=True
+            ):
+                chunk = plan.chunk_at(start, chunk_size)
                 scheduled = ScheduledRequestMetrics(
                     num_prefill_requests=_estimate_prefill_request_count(
                         snapshot.queued_requests.num_prefill_requests, chunk
@@ -336,6 +408,12 @@ class AISCoreEnginePerfModel:
                         prefill_requests,
                         prefill_tokens,
                     ) = self._load_averages.typical_prefill_for_mixed_itl()
+                    if self._budget_decode_width > 1:
+                        headroom = self._limits.max_num_batched_tokens - (
+                            source.num_decode_requests * self._budget_decode_width
+                        )
+                        prefill_tokens = min(prefill_tokens, max(0, headroom))
+                        prefill_requests = min(prefill_requests, prefill_tokens)
                 prefill_variance = source.var_prefill_length
                 prefill_kv_tokens = source.sum_prefill_kv_tokens
 
@@ -452,6 +530,8 @@ class AISCoreEnginePerfModel:
                 batch_size,
                 self._limits.max_num_batched_tokens,
                 accept_length,
+                decode_query_width=self._budget_decode_width,
+                attention_dp_size=self._attention_dp_size,
             ):
                 continue
 
@@ -538,22 +618,37 @@ class AISCoreEnginePerfModel:
         current_decode_requests: int,
         current_decode_kv: int,
     ) -> Optional[float]:
+        max_chunk = self._limits.max_num_batched_tokens
+        if self._budget_decode_width > 1:
+            headroom = self._limits.max_num_batched_tokens - (
+                _split_total(current_decode_requests, self._attention_dp_size, 0)
+                * self._budget_decode_width
+            )
+            if queued_prefill_tokens and headroom <= 0:
+                return None
+            max_chunk = min(max_chunk, max(1, headroom * self._attention_dp_size))
         return self._prefill_chunk_time(
             queued_prefill_tokens,
             lambda chunk: self._mixed_time(
                 chunk, current_decode_requests, current_decode_kv
             ),
+            max_chunk=max_chunk,
         )
 
     def _prefill_chunk_time(
         self,
         tokens: int,
         estimate_chunk: Callable[[int], Optional[float]],
+        *,
+        max_chunk: Optional[int] = None,
     ) -> Optional[float]:
-        plan = _PrefillChunkPlan.build(tokens, self._limits.max_num_batched_tokens)
+        max_chunk = (
+            self._limits.max_num_batched_tokens if max_chunk is None else max_chunk
+        )
+        plan = _PrefillChunkPlan.build(tokens, max_chunk)
         total_s = 0.0
         if plan.full_chunks > 0:
-            duration_s = estimate_chunk(self._limits.max_num_batched_tokens)
+            duration_s = estimate_chunk(max_chunk)
             if duration_s is None:
                 return None
             total_s = _checked_duration_add(
@@ -581,10 +676,17 @@ class AISCoreEnginePerfModel:
     def _decode_max_batch(self, context_length: int) -> int:
         if context_length == 0:
             return 0
-        return min(
+        maximum = min(
             self._limits.max_num_seqs,
             self._limits.max_kv_tokens // context_length,
         )
+        if self._budget_decode_width > 1:
+            maximum = min(
+                maximum,
+                (self._limits.max_num_batched_tokens // self._budget_decode_width)
+                * self._attention_dp_size,
+            )
+        return maximum
 
     def _validate_metrics_by_rank(
         self, metrics_by_rank: list[ForwardPassMetrics]
@@ -615,8 +717,18 @@ class AISCoreEnginePerfModel:
     def _estimate_forward_pass_seconds(
         self, metrics_by_rank: list[ForwardPassMetrics]
     ) -> Optional[float]:
+        if self._budget_decode_width > 1 and any(
+            metrics.scheduled_requests.sum_prefill_tokens
+            + metrics.scheduled_requests.num_decode_requests * self._budget_decode_width
+            > self._limits.max_num_batched_tokens
+            for metrics in metrics_by_rank
+        ):
+            return None
         estimate_ms = self._model.estimate_forward_pass_time_ms(
-            [_fpm_to_ais_dict(metrics) for metrics in metrics_by_rank]
+            [
+                _fpm_to_ais_dict(metrics, self._packing_width)
+                for metrics in metrics_by_rank
+            ]
         )
         if estimate_ms is None:
             return None
@@ -630,7 +742,9 @@ class AISCoreEnginePerfModel:
         )
 
 
-def _fpm_to_ais_dict(metrics: ForwardPassMetrics) -> dict[str, Any]:
+def _fpm_to_ais_dict(
+    metrics: ForwardPassMetrics, decode_width: int = 1
+) -> dict[str, Any]:
     payload = msgspec.to_builtins(metrics)
     if not isinstance(payload, dict):
         raise TypeError(
@@ -638,7 +752,26 @@ def _fpm_to_ais_dict(metrics: ForwardPassMetrics) -> dict[str, Any]:
         )
     if metrics.version == 0:
         payload["version"] = FPM_VERSION
+    if decode_width > 1:
+        scheduled = payload["scheduled_requests"]
+        for key in ("num_decode_requests", "sum_decode_kv_tokens"):
+            value = scheduled[key]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+                or value > _U32_MAX // decode_width
+            ):
+                raise ValueError(f"packed {key} overflow")
+            scheduled[key] = value * decode_width
     return payload
+
+
+def _configured_decode_width(config: dict[str, Any]) -> int:
+    speculation = config.get("speculation")
+    if speculation:
+        return build_spec_scheme(None, SpeculationConfig(**speculation)).verify_width()
+    return config.get("nextn", 0) + 1
 
 
 def _replace_scheduled(
@@ -778,7 +911,18 @@ def _prefill_decode_balanced(
     batch_size: int,
     max_num_batched_tokens: int,
     accept_length: float,
+    *,
+    decode_query_width: int = 1,
+    attention_dp_size: int = 1,
 ) -> bool:
+    if decode_query_width > 1:
+        prefill = _aggregate_prefill_per_iteration(isl, osl, batch_size, accept_length)
+        return (
+            prefill <= max_num_batched_tokens
+            and _split_total(prefill, attention_dp_size, 0)
+            + decode_query_width * _split_total(batch_size, attention_dp_size, 0)
+            <= max_num_batched_tokens
+        )
     prefill_budget = max(0, max_num_batched_tokens - batch_size)
     if prefill_budget == 0:
         return False
