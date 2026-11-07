@@ -1,10 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import sys
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import pytest
 
 pytest.importorskip("pynvml")
 
+from dev.observability import dynamo_local_resource_monitor as monitor  # noqa: E402
 from dev.observability.dynamo_local_resource_monitor import (  # noqa: E402
     MetricsCollector,
     ProcessTracker,
@@ -128,3 +133,74 @@ def test_top_selection_refreshes_on_interval_or_membership_change():
     collector.counter_main = 6
     collector._refresh_top_ids()
     assert collector._gpu_top_ids == [[2]]
+
+
+@pytest.fixture
+def nvml_gpu(monkeypatch):
+    monkeypatch.setattr(monitor, "HAS_NVML", True)
+    monkeypatch.setattr(monitor.pynvml, "nvmlDeviceGetCount", lambda: 1)
+    monkeypatch.setattr(monitor.pynvml, "nvmlDeviceGetHandleByIndex", lambda _: 123)
+    monkeypatch.setattr(monitor.pynvml, "nvmlDeviceGetName", lambda _: b"NVIDIA GB10")
+    monkeypatch.setattr(
+        monitor.pynvml, "nvmlDeviceGetPcieThroughput", Mock(return_value=0)
+    )
+    memory_info = Mock()
+    monkeypatch.setattr(monitor.pynvml, "nvmlDeviceGetMemoryInfo", memory_info)
+    return memory_info
+
+
+@pytest.mark.parametrize("supported", [False, True])
+def test_collector_starts_without_supported_total_memory(nvml_gpu, supported):
+    nvml_gpu.return_value = SimpleNamespace(total=8 * 1024**3)
+    if not supported:
+        nvml_gpu.side_effect = monitor.pynvml.NVMLError_NotSupported()
+
+    collector = MetricsCollector(window_sec=60)
+
+    assert collector.gpu_names == ["NVIDIA GB10"]
+    assert collector.gpu_mem_total_gib == [8.0 if supported else 0.0]
+    assert len(collector.proc_gpu_mem) == 1
+    assert len(collector.gpu_util) == 1
+    assert len(collector.gpu_temp) == 1
+
+
+@pytest.mark.parametrize("supported", [False, True])
+def test_main_passes_gpu_banner_without_supported_total_memory(
+    monkeypatch, capsys, nvml_gpu, supported
+):
+    nvml_gpu.return_value = SimpleNamespace(total=8 * 1024**3)
+    if not supported:
+        nvml_gpu.side_effect = monitor.pynvml.NVMLError_NotSupported()
+    monkeypatch.setattr(sys, "argv", ["monitor"])
+    monkeypatch.setattr(monitor, "_missing_dashboard_packages", lambda: ["flask"])
+    gauge = Mock()
+    monkeypatch.setattr(monitor, "GPU_MEM_TOTAL_GIB", gauge)
+
+    class StartupReached(Exception):
+        pass
+
+    monkeypatch.setattr(monitor, "PrometheusUpdater", Mock(side_effect=StartupReached))
+    with pytest.raises(StartupReached):
+        monitor.main()
+
+    output = capsys.readouterr().out
+    if supported:
+        assert "GPU 0: NVIDIA GB10 (8.0 GiB)" in output
+        gauge.labels.assert_called_once_with(gpu="0")
+        gauge.labels.return_value.set.assert_called_once_with(8.0)
+    else:
+        assert "GPU 0: NVIDIA GB10 (memory unavailable)" in output
+        gauge.labels.assert_not_called()
+
+
+@pytest.mark.parametrize("entrypoint", ["collector", "main"])
+def test_startup_propagates_other_nvml_errors(monkeypatch, nvml_gpu, entrypoint):
+    nvml_gpu.side_effect = monitor.pynvml.NVMLError_Unknown()
+    monkeypatch.setattr(sys, "argv", ["monitor"])
+    monkeypatch.setattr(monitor, "_missing_dashboard_packages", lambda: ["flask"])
+
+    with pytest.raises(monitor.pynvml.NVMLError_Unknown):
+        if entrypoint == "collector":
+            MetricsCollector(window_sec=60)
+        else:
+            monitor.main()
