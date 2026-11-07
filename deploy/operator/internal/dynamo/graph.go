@@ -45,6 +45,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/serviceidentity"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -945,6 +946,7 @@ func getCliqueStartupDependencies(
 type ComponentServiceParams struct {
 	ServiceName     string
 	Namespace       string
+	DGDName         string // empty for standalone DCDs
 	ComponentType   string
 	DynamoNamespace string
 	ComponentName   string // original user-provided name, used in selector
@@ -980,8 +982,7 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 		}
 	}
 
-	labels := make(map[string]string)
-	maps.Copy(labels, params.Labels)
+	labels := serviceidentity.Labels(params.Labels, params.DGDName, params.ComponentName, params.ComponentType, params.DynamoNamespace)
 	if params.IsK8sDiscovery {
 		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = commonconsts.DiscoveryBackendKubernetes
 		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
@@ -1051,8 +1052,7 @@ func ElasticEPLeaderServiceName(componentServiceName string) string {
 func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Service {
 	// Copy the caller's metadata so the Service carries the component's labels and
 	// annotations without aliasing the caller's maps.
-	labels := make(map[string]string)
-	maps.Copy(labels, params.Labels)
+	labels := serviceidentity.Labels(params.Labels, params.DGDName, params.ComponentName, params.ComponentType, params.DynamoNamespace)
 
 	annotations := make(map[string]string)
 	maps.Copy(annotations, params.Annotations)

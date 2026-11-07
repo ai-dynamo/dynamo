@@ -1145,6 +1145,18 @@ func TestLPXServiceReconciliation(t *testing.T) {
 	require.Equal(t, consts.KubeLabelValueTrue, service.Spec.Selector[dynamo.LPXServingLabel])
 	require.Equal(t, dynamo.PCSNameForLPX(child), service.Spec.Selector[grovecommon.LabelPartOfKey])
 
+	t.Log("Backfill missing Service identity without changing its selector or external metadata")
+	service.Labels = map[string]string{"example.com/team": "external"}
+	require.NoError(t, r.Update(t.Context(), service))
+	beforeBackfill := service.DeepCopy()
+	require.NoError(t, r.reconcileRuntimeResources(t.Context(), child, resources))
+	require.NoError(t, r.Get(t.Context(), key, service))
+	require.Equal(t, dgd.Name, service.Labels[consts.KubeLabelDynamoGraphDeploymentName])
+	require.Equal(t, uppercaseComponentName, service.Labels[consts.KubeLabelDynamoComponent])
+	require.Equal(t, "external", service.Labels["example.com/team"])
+	require.Equal(t, beforeBackfill.Spec, service.Spec)
+	require.Equal(t, beforeBackfill.OwnerReferences, service.OwnerReferences)
+
 	t.Log("Update the endpoint selector when the component's Dynamo namespace changes")
 	require.NoError(t, r.Get(t.Context(), key, service))
 	expected := service.DeepCopy()

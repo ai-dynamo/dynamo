@@ -376,6 +376,10 @@ func TestSingleNodeStableServiceSelectsDeploymentPod(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Log("Verify every stable Service selector matches the single-node Pod labels")
+	require.Equal(t, dgd.Name, service.Labels[consts.KubeLabelDynamoGraphDeploymentName])
+	for _, key := range []string{consts.KubeLabelDynamoComponent, consts.KubeLabelDynamoComponentType, consts.KubeLabelDynamoNamespace} {
+		require.Equal(t, podTemplate.Labels[key], service.Labels[key], "Service identity %s must match its Pods", key)
+	}
 	require.NotContains(t, service.Spec.Selector, dcdWorkloadRoleLabel)
 	for key, value := range service.Spec.Selector {
 		require.Equal(t, value, podTemplate.Labels[key], "Service selector %q must match its Pod", key)

@@ -599,9 +599,16 @@ func (r *dcdWorkloadRenderer) generateService(
 		return nil, false, err
 	}
 
+	// The producer knows its DGD parent without another API lookup.
+	graphDeploymentName := ""
+	if _, managed := managedDGDUIDForDCD(dcd); managed {
+		graphDeploymentName = metav1.GetControllerOf(dcd).Name
+	}
+
 	svc, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
 		ServiceName:     dcd.Name,
 		Namespace:       dcd.Namespace,
+		DGDName:         graphDeploymentName,
 		ComponentType:   componentType,
 		DynamoNamespace: dynamoNamespace,
 		ComponentName:   dynamo.GetDCDComponentName(dcd),
@@ -648,6 +655,7 @@ func (r *dcdWorkloadRenderer) generateServiceForDGDComponent(
 	service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
 		ServiceName:     serviceName,
 		Namespace:       dgd.Namespace,
+		DGDName:         dgd.Name,
 		ComponentType:   workloadComponentType,
 		DynamoNamespace: dynamoNamespace,
 		ComponentName:   componentName,
