@@ -234,6 +234,14 @@ class Endpoint:
         """
         ...
 
+    async def model_cards(self) -> Dict[int, ModelDeploymentCard]:
+        """
+        The model card that each instance of this endpoint registered, keyed by
+        instance ID, as discovery lists them now. LoRA adapter cards are left
+        out.
+        """
+        ...
+
     @property
     def metrics(self) -> PyRuntimeMetrics:
         """
