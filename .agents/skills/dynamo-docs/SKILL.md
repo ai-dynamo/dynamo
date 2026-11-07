@@ -39,7 +39,8 @@ Every page under `docs/` (and the READMEs under `examples/` and `recipes/`) foll
 writing content. The `Docs Lint` job (`docs/fern/scripts/docs_lint.py`) enforces a **must-fix** subset on every
 PR — get these right or the checks fail:
 
-- **SPDX header** on every file, copyright range `2025-2026`. Fern pages put the two `#` lines
+- **SPDX header** on every file, copyright years ending in the current year (`2025-2026`, or
+  `2026` for a file added this year). Fern pages put the two `#` lines
   *inside* the `---` frontmatter; plain READMEs use an HTML-comment block.
 - **Frontmatter with at least one metadata key** (`title`/`subtitle`/`sidebar-title`) and **no body
   `# H1`**. Fern renders the page H1 from the nav `page:` value, so a body `# H1` produces a
@@ -312,10 +313,14 @@ These live **outside `docs/`**, so their READMEs use the HTML-comment SPDX form 
 docs link to them with absolute GitHub URLs.
 
 - **Example** (`examples/<topic>/`): code-first directory with a `README.md`. Surface it from the
-  relevant `*-examples.md` page (component-scoped ones live under `pages/developer-guide/`) or from
-  the topic page that needs it. There is no general Examples landing page — the empty
-  `pages/reference/general/examples.md` stub was removed, and `/dynamo/dev/reference/examples` now
-  redirects to the recipes catalog. Don't recreate it.
+  **Recipes → Examples → Overview** catalog and a topic-first page under
+  `pages/recipes/examples/`. Follow `docs/fern/pages/recipes/examples/_catalog/README.md`: keep
+  prose minimal and expose only DGD/DGDR manifests and launch scripts through the unified
+  `ExampleSelector`. Defer supporting assets (values, clients, setup helpers, standalone engine
+  configs) rather than treating them as deployment variants. Keep the selected source open,
+  without nested tabs or accordions.
+  Developer-oriented examples can also be linked from their component guide. Do not recreate the
+  removed `pages/reference/general/examples.md` stub.
 - **Recipe** (`recipes/<model>/`): `README.md` + `model-cache/` + `<framework>/<mode>/deploy.yaml`
   (+ optional `perf.yaml`). Add a row to the right table in
   [`recipes/README.md`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/README.md) — **Feature

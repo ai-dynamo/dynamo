@@ -1,0 +1,56 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Audio Generation"
+subtitle: "A Qwen3-TTS deployment and a local vLLM-Omni launch script."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Generate speech with `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`. See
+[Text-to-Speech](../../use-cases/speech/text-to-speech.md) for requests, or
+[Audio and Realtime Serving](audio.mdx) for transcription and speech-to-speech.
+
+`agg_omni_audio.yaml` was functionally validated on October 12, 2026 with one H100 GPU and Dynamo
+1.5.1 serving images and operator; it is a correctness check, not a performance benchmark. For
+`response_format: "wav"` with `data_source: "b64_json"`, save the raw response bytes as a WAV; the
+response is not a JSON/base64 envelope.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-vllm-agg-omni-audio-yaml", "target": "kubernetes:vllm", "label": "agg_omni_audio.yaml", "description": "Qwen3-TTS · validated on Dynamo 1.5.1"},
+    {"id": "local-vllm-agg-omni-audio-sh", "target": "local:vllm", "label": "agg_omni_audio.sh", "description": "Local audio generation · Dynamo 1.5.1 or later"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-omni-audio-yaml">
+
+Keep `DYN_HEALTH_CHECK_ENABLED=false` on the worker. The operator's canary health check sends a text
+request, which the speech handler rejects, so the worker would never become ready. Review the model’s
+remote code before enabling `--trust-remote-code`.
+
+[Source: `agg_omni_audio.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_omni_audio.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/agg_omni_audio.yaml" title="agg_omni_audio.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-audio-sh">
+
+Run it in a Dynamo 1.5.1 or later runtime; Dynamo 1.4.2 returned only an initial silent chunk. It
+also serves Nemotron Audex with `--model nvidia/Nemotron-Labs-Audex-2B`; see
+[Text-to-Speech](../../use-cases/speech/text-to-speech.md) for the 30B-A3B stage configuration
+and the Audex request contract.
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_omni_audio.sh)
+```
+
+[Source: `agg_omni_audio.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_audio.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_audio.sh" title="agg_omni_audio.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

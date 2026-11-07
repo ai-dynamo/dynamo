@@ -1,0 +1,87 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Observability and Recovery Examples
+sidebar-title: Overview
+subtitle: Explore tracing, metrics, GPU memory, failover, and snapshot restore examples
+hide-toc: true
+---
+
+import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+import { ExampleTargets } from "@/components/ExampleTargets";
+
+Choose an observability or recovery example, then filter its available platforms and backends.
+
+<ExamplesCatalog topicFilter={false}>
+
+<div className="dynamo-example-card" data-example="tracing" data-topic="observability-and-recovery" data-topic-label="Observability and Recovery" data-targets="kubernetes:vllm local:vllm local:sglang local:trtllm" data-keywords="agg.sh agg_tracing.sh agg_tracing.yaml agg_tracing_xpu_dra.yaml disagg.sh disagg_tracing.sh disagg_tracing.yaml disagg_tracing_xpu_dra.yaml">
+
+<span className="dynamo-example-icon"><Icon icon="bars-staggered" /></span>
+
+### OpenTelemetry Tracing
+
+Trace requests through aggregated or disaggregated workers.
+
+<ExampleTargets targets="kubernetes:vllm local:vllm local:sglang local:trtllm" />
+
+<a className="dynamo-example-card-link" href="tracing.mdx">Open OpenTelemetry Tracing example</a>
+
+</div>
+
+<div className="dynamo-example-card" data-example="logging-metrics" data-topic="observability-and-recovery" data-topic-label="Observability and Recovery" data-targets="kubernetes:sglang local:trtllm" data-keywords="agg_logging.yaml agg_metrics.sh">
+
+<span className="dynamo-example-icon"><Icon icon="chart-column" /></span>
+
+### Logging and Metrics
+
+SGLang structured logging and TensorRT-LLM worker metrics.
+
+<ExampleTargets targets="kubernetes:sglang local:trtllm" />
+
+<a className="dynamo-example-card-link" href="logging-metrics.mdx">Open Logging and Metrics example</a>
+
+</div>
+
+<div className="dynamo-example-card" data-example="gpu-memory-service" data-topic="observability-and-recovery" data-topic-label="Observability and Recovery" data-targets="kubernetes:sglang kubernetes:vllm" data-keywords="agg_gms.yaml">
+
+<span className="dynamo-example-icon"><Icon icon="memory" /></span>
+
+### GPU Memory Service
+
+Aggregated workers with a GPU Memory Service sidecar.
+
+<ExampleTargets targets="kubernetes:sglang kubernetes:vllm" />
+
+<a className="dynamo-example-card-link" href="gpu-memory-service.mdx">Open GPU Memory Service example</a>
+
+</div>
+
+<div className="dynamo-example-card" data-example="failover" data-topic="observability-and-recovery" data-topic-label="Observability and Recovery" data-targets="kubernetes:vllm" data-keywords="agg_failover.yaml gms-failover.yaml">
+
+<span className="dynamo-example-icon"><Icon icon="shield-halved" /></span>
+
+### GPU Failover
+
+Active-passive and multinode GPU Memory Service failover.
+
+<ExampleTargets targets="kubernetes:vllm" />
+
+<a className="dynamo-example-card-link" href="failover.mdx">Open GPU Failover example</a>
+
+</div>
+
+<div className="dynamo-example-card" data-example="snapshot-restore" data-topic="observability-and-recovery" data-topic-label="Observability and Recovery" data-targets="kubernetes:trtllm" data-keywords="glm-5.3.yaml qwen3-0.6b.yaml snapshot-restore.yaml">
+
+<span className="dynamo-example-icon"><Icon icon="clock-rotate-left" /></span>
+
+### Snapshot Restore
+
+Restore a TensorRT-LLM worker from a checkpoint.
+
+<ExampleTargets targets="kubernetes:trtllm" />
+
+<a className="dynamo-example-card-link" href="snapshot-restore.mdx">Open Snapshot Restore example</a>
+
+</div>
+
+</ExamplesCatalog>
