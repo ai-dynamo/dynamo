@@ -61,6 +61,11 @@ function checkFilter(file, patterns) {
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
   {
+    file: 'container/templates/tokenspeed_runtime.Dockerfile',
+    expect: { tokenspeed: true, core: false, vllm: false, sglang: false, trtllm: false, triton: false },
+    desc: 'TokenSpeed runtime templates have their own filter'
+  },
+  {
     file: 'lib/llm/tests/data/media/triangle_240p_10.mp4',
     expect: { sidecar_trtllm_image: true },
     desc: 'the video fixture triggers the nightly harness checksum tests'

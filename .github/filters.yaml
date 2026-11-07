@@ -456,6 +456,10 @@ triton:
   - '!**/*.md'
   - '!**/*.rst'
 
+# Classify the runtime template; TokenSpeed build/test jobs are a follow-up.
+tokenspeed:
+  - 'container/templates/tokenspeed_*'
+
 # sample -> sample-unified-test (framework-agnostic CPU-only backend
 # reference implementation). Piggybacks on the vllm image, so a sample-only
 # change triggers vllm-build + sample-unified-test. The common/backend ABC
