@@ -795,6 +795,102 @@ class TestAggregatedAudioFollowsOutputKind:
         assert np.allclose(audio, 0.1, atol=1e-3)
 
 
+class TestAggregatedTextStreamsDeltas:
+    """Text chat must emit every delta the engine streams, whole.
+
+    Text chat sends no ``sampling_params_list``, so vLLM-Omni's
+    ``resolve_sampling_params_list`` coerces the stage defaults to ``DELTA``:
+    each ``OmniRequestOutput.outputs[0].text`` is only the new text.
+    """
+
+    @staticmethod
+    def _delta_steps():
+        """Real DELTA text steps, shaped as vLLM-Omni's output processor emits them."""
+        from vllm.outputs import CompletionOutput
+        from vllm_omni.outputs import OmniRequestOutput
+
+        steps = []
+        cumulative_token_ids: list[int] = []
+        for text, token_ids, finish_reason in (
+            ("Hel", [1], None),
+            ("lo", [2], None),
+            (" world", [3, 4], "stop"),
+        ):
+            cumulative_token_ids = cumulative_token_ids + token_ids
+            output = CompletionOutput(
+                index=0,
+                text=text,
+                token_ids=token_ids,
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason=finish_reason,
+            )
+            # vLLM-Omni sets this on every step; token_ids holds only the delta.
+            output.cumulative_token_ids = list(cumulative_token_ids)
+            steps.append(
+                OmniRequestOutput(
+                    request_id="req-1",
+                    final_output_type="text",
+                    prompt_token_ids=[10, 20, 30],
+                    outputs=[output],
+                    finished=finish_reason is not None,
+                )
+            )
+        return steps
+
+    @pytest.mark.asyncio
+    async def test_delta_text_is_emitted_whole(self):
+        pytest.importorskip("vllm_omni.outputs")
+        from vllm_omni.entrypoints.utils import coerce_param_message_types
+
+        from dynamo.vllm.omni.output_formatter import OutputFormatter
+
+        # The upstream behavior this handler relies on; if a pin stops
+        # coercing, this fails instead of the stream silently changing kind.
+        coerced = coerce_param_message_types([SamplingParams()], is_streaming=True)
+        assert coerced[0].output_kind == RequestOutputKind.DELTA
+
+        handler = _make_handler(stage_types=("llm",))
+        handler.output_formatter = OutputFormatter(model_name="test-model")
+        generate_calls = []
+        steps = self._delta_steps()
+
+        async def fake_generate(**kwargs):
+            """Replay the scripted DELTA steps as the engine's stream."""
+            generate_calls.append(kwargs)
+            for step in steps:
+                yield step
+
+        handler.engine_client.generate = fake_generate
+
+        @asynccontextmanager
+        async def no_abort_monitor(context, request_id):
+            """Abort monitor that never fires."""
+            yield None
+
+        handler._abort_monitor = no_abort_monitor
+        handler.config.output_modalities = ["text"]
+
+        chunks = [
+            c
+            async for c in handler._generate_openai_mode(
+                {"messages": [{"role": "user", "content": "hi"}]},
+                MagicMock(),
+                "req-1",
+            )
+        ]
+
+        assert len(generate_calls) == 1
+        assert "sampling_params_list" not in generate_calls[0]
+        assert len(chunks) == 3
+        assert "".join(c["choices"][0]["delta"]["content"] for c in chunks) == (
+            "Hello world"
+        )
+        assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+        assert chunks[-1]["usage"]["prompt_tokens"] == 3
+        assert chunks[-1]["usage"]["completion_tokens"] == 4
+
+
 class _AsyncReturn:
     """Awaitable stub that ignores its arguments and returns a fixed value."""
 
