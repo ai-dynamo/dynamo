@@ -72,10 +72,9 @@ compare aggregated vs. disaggregated layouts before committing.
 
 This guide uses a **single-node, multi-GPU** example — prefill and decode run on
 separate GPUs in the same node (for instance, a node with 8×H100 serving
-Qwen3-32B, one GPU per worker). On a single node the KV cache moves GPU-to-GPU
-over NVLink, so there is nothing extra to configure for the transport. Scaling
-prefill and decode across **multiple nodes** adds RDMA networking — see
-[Enable multi-node transfer](#enable-multi-node-transfer) at the end.
+Qwen3-32B, one GPU per worker). This will leverage the RDMA network, as in Kubernetes,
+two pods on the same node cannot communicate over NVLink. See
+[Enable RDMA transfer](#enable-rdma-transfer) at the end for more information.
 
 ## Write the deployment
 
@@ -95,8 +94,8 @@ separately — see [Model caching](../kv-cache-offloading/overview.mdx). This
 guide omits those fields for clarity; without them the model downloads to the
 container's default cache.
 
-Scaling across multiple nodes additionally requires an RDMA-capable network and
-device plugin — covered in [Enable multi-node transfer](#enable-multi-node-transfer).
+Doing prefill/decode in Kubernetes across pods requires an RDMA-capable network and
+device plugin — covered in [Enable RDMA transfer](#enable-rdma-transfer).
 
 </Step>
 
@@ -249,12 +248,12 @@ disaggregated throughput falling below your aggregated baseline.
 
 </Step>
 
-<Step title="Enable multi-node transfer">
+<Step title="Enable RDMA transfer">
 
-Everything above keeps prefill and decode on **one node**, where the KV cache
-moves over NVLink. When a worker's parallelism exceeds the GPUs on a node, or you
-want prefill and decode pools on separate machines, the KV cache travels over the
-**network** instead — and that path needs **RDMA** (InfiniBand or RoCE). Without
+Even when keeping prefill and decode on **one node**, in Kubernetes the KV cache
+moves over RDMA. Similarly, when a worker's parallelism exceeds the GPUs on a node,
+want prefill and decode pools on separate machines, the KV cache will also travel over the
+**network** instead — and that path needs **RDMA** (InfiniBand, RoCE, EFA, etc). Without
 it, transfers fall back to TCP and KV movement can dominate TTFT and throughput.
 
 Multi-node adds RDMA fields to each worker (`rdma/ib` resource requests, the
@@ -308,8 +307,8 @@ and [KV Cache Aware Routing](../../developer-guide/knowledge-base/modular-compon
 - Confirm pods have the required GPU and shared memory.
 - Confirm frontend/router flags match your routing strategy.
 - Run benchmarks inside the cluster, not through local port-forwarding.
-- If you scale across nodes, validate the RDMA transfer path — see
-  [Enable multi-node transfer](#enable-multi-node-transfer).
+- Validate the RDMA transfer path — see
+  [Enable RDMA transfer](#enable-rdma-transfer).
 
 Use [Dynamo Benchmarking](../../recipes/feature-benchmarks/benchmarking-guide.md) to compare
 aggregated and disaggregated configurations under the same workload.
