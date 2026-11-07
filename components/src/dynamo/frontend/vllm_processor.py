@@ -61,6 +61,7 @@ from .utils import (
     nvext_extra_field_requested,
     random_uuid,
     resolve_chat_template,
+    routing_hints_from_request,
 )
 
 logger = logging.getLogger(__name__)
@@ -1094,7 +1095,7 @@ class VllmProcessor:
             },
             "eos_token_ids": self._get_eos_token_ids(),
             "annotations": [],
-            "routing": request.get("routing"),
+            "routing": routing_hints_from_request(request),
         }
         if guided_decoding is not None:
             dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding

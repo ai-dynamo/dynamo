@@ -11,6 +11,7 @@ from dynamo.frontend.utils import (
     make_backend_error,
     make_internal_error,
     resolve_chat_template,
+    routing_hints_from_request,
     validate_legacy_guided_decoding_constraints,
 )
 from dynamo.llm.exceptions import InvalidArgument
@@ -194,3 +195,11 @@ class TestBackendInvalidArgumentToHttpError:  # FRONTEND.8 — backend 4xx must 
     )
     def test_unrelated_errors_are_left_alone(self, text):
         assert backend_invalid_argument_to_http_error(ValueError(text)) is None
+
+
+class TestRoutingHintsFromRequest:
+    @pytest.mark.parametrize("routing", ["worker-1", [1], 0])
+    def test_rejects_non_object_explicit_routing(self, routing):
+        request = {"nvext": {"backend_instance_id": 7}, "routing": routing}
+        with pytest.raises(InvalidArgument, match="routing must be an object"):
+            routing_hints_from_request(request)
