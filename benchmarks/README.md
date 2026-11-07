@@ -53,7 +53,7 @@ aiperf plot artifacts/my-benchmark
 
 ## Directory Contents
 
-- **`incluster/`** — Kubernetes Job manifest for running benchmarks inside the cluster
+- **`incluster/`** — Kubernetes Job manifest for running benchmarks inside the cluster, and [`gateway_epp_ab/`](incluster/gateway_epp_ab/README.md), an aiperf A/B of the Frontend against Gateway + EPP on 2048 mocker workers
 - **`multimodal/`** — Media and multimodal benchmarks, including frontend media decoding
 - **`router/`** — KV Router benchmarking scripts (prefix ratio, trace replay, agent, priority queue)
 - **`prefix_data_generator/`** — Tools for analyzing and synthesizing prefix-structured data
