@@ -24,7 +24,7 @@ from vllm.inputs import TextPrompt, TokensPrompt
 from dynamo._core import Context
 
 from .args import Config
-from .handlers import EmbeddingWorkerHandler
+from .handlers import EmbeddingWorkerHandler, render_tokens_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +159,7 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
                 tokenize_params,
                 tokenizer,
             )
+            encode_arg = render_tokens_prompt(self.engine_client, encode_arg)
             final_output = None
             async with self._abort_monitor(context, request_id):
                 encode_kwargs: dict[str, Any] = {
