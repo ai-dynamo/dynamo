@@ -189,7 +189,7 @@ func TestSharedUnitsContract(t *testing.T) {
 				require.Empty(t, build.lpuUnits)
 				return
 			}
-			if tc.Name == "mixed-widths-across-units" {
+			if tc.Consumers["operator"] == "restriction: one devicesPerNode for the whole build (one Agent template)" {
 				require.True(t, tc.Valid)
 				require.Equal(t, "restriction: one devicesPerNode for the whole build (one Agent template)", tc.Consumers["operator"])
 				require.ErrorContains(t, err, "all LPU partitions must use the same devicesPerNode")

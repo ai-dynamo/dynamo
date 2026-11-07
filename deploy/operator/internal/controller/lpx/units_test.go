@@ -513,3 +513,72 @@ func TestUnitsOperatorOnlyUpgrade(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, settledRequests, afterRequests)
 }
+
+// TestUnitsMigrationShapes compares the same artifact and DGD through the actual
+// base reader and the units reader. The captures keep both metadata forms.
+func TestUnitsMigrationShapes(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name                   string
+		agents                 int32
+		partitions, connectors int
+		metadataRemoved        bool
+	}{
+		{"hx-unpacked", 2, 2, 1, true},
+		{"hx-packed", 1, 1, 0, true},
+		{"xt-hybrid-local", 4, 2, 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			t.Log("Compare old and new placement for unchanged artifact bytes and authored workload")
+			data, err := os.ReadFile("testdata/units-old-" + tc.name + ".json")
+			require.NoError(t, err)
+			var old struct {
+				Base       string
+				Deployment []byte
+				DGD        v1beta1.DynamoGraphDeployment
+				PCS        grovev1alpha1.PodCliqueSet
+				Requests   []lpxv1alpha1.LPUPipelineRequest
+			}
+			require.NoError(t, json.Unmarshal(data, &old))
+			require.Equal(t, "20a9321cf16eb11e95fd12194c3033c210f7b2be", old.Base)
+			root := t.TempDir()
+			require.NoError(t, os.Mkdir(filepath.Join(root, "units"), 0700))
+			require.NoError(t, os.WriteFile(filepath.Join(root, "units", "deployment.v1.capnp.bin"), old.Deployment, 0600))
+			registry, err := lpx.NewModelRegistry((&url.URL{Scheme: lpx.BuildSchemeFile, Path: root}).String(), nil)
+			require.NoError(t, err)
+			dgd := old.DGD.DeepCopy()
+			child := newLPXTestDeployment(t, dgd)
+			r, selected := newPreparedLPXTestReconciler(t, registry, t.Context(), child, dgd)
+			after := renderLPXTestPodCliqueSet(t, t.Context(), r, child, dgd, selected)
+			require.Equal(t, old.DGD.Spec, dgd.Spec)
+			require.True(t, podCliqueSetLayoutMatches(&old.PCS, after), "this same-build migration rolls the existing PCS")
+			require.NotEqual(t, old.PCS.Spec, after.Spec, "runtime templates change even when the layout is compatible")
+			for _, pcs := range []*grovev1alpha1.PodCliqueSet{&old.PCS, after} {
+				found := false
+				for _, clique := range pcs.Spec.Template.Cliques {
+					if clique.Name == "agt" {
+						require.NotNil(t, clique.Spec.MinAvailable)
+						require.Equal(t, tc.agents, *clique.Spec.MinAvailable)
+						found = true
+					}
+				}
+				require.True(t, found)
+			}
+			require.Len(t, old.Requests, 1)
+			require.Len(t, selected.requests, 1)
+			before, now := old.Requests[0].Spec, selected.requests[0].Spec
+			require.Len(t, now.Partitions, tc.partitions)
+			require.Len(t, now.PropSyncConnectors, tc.connectors)
+			require.Equal(t, before.Partitions, now.Partitions)
+			require.Equal(t, before.PropSyncConnectors, now.PropSyncConnectors)
+			require.Equal(t, before.NodeLocal, now.NodeLocal)
+			require.Equal(t, tc.metadataRemoved, !slices.Equal(before.AllocationMetadata.Raw, now.AllocationMetadata.Raw))
+			// The only request-spec change in these fixtures is removal of legacy HX
+			// allocation metadata. All scheduling fields keep the same values.
+			before.AllocationMetadata = now.AllocationMetadata
+			require.Equal(t, before, now)
+			require.NotEqual(t, old.Requests[0].Annotations, selected.requests[0].Annotations)
+		})
+	}
+}

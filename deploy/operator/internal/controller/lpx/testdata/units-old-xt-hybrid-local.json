@@ -1,0 +1,694 @@
+{
+  "base": "20a9321cf16eb11e95fd12194c3033c210f7b2be",
+  "deployment": "AAAAAFcAAAAAAAAAAQAHAAEAAAAAAAAAAAAAAAAAAAAUAAAAAgAEAKUAAABnAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAADAAAAAEAAgAdAAAADwAAABAAAAACAAAAIQAAACcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAEAAAAAAAAABAAAAAAAAQABAAAAFAAAAAcAAAAIAAAACAAAAAAAAgANAAAANwAAAC0AAAAXAAAANQAAAB8AAABFAAAABwAAAAgAAAABAAIAAgAAAAAAAAARAAAADAAAAAAAAAAAAAAAAgAAAAAAAAAJAAAADAAAAAAAAAAAAAAABwAAAAAAAAAIAAAAAAAAAAQAAAABAAEAAAAAAAAAAAAAAAAAAAAAAAQAAAABAAIAAgAAAAAAAAAFAAAADAAAAAAAAAAAAAAACQAAAAAAAAAAAAAAAQABABAAAAABAAIAAAAAAAAAAAAoAAAAAQAAACgAAAACAAMAAAAAAAAAAABAAAAAAQAAAEAAAAACAAMAAAAAAAAAAABYAAAAAQAAAFgAAAACAAMAAQAAAAAAAABwAAAAAQAAAPz///8AAAAAAAAAAAcAAAAQAAAACAAAAAEAAAAAAAAACQAAADoAAAAJAAAAcgAAAAAAAAAAAAAAcGFydC03AAB0ZXN0LXRvcG9sb2d5AAAAAAAAAAgAAAAQAAAACAAAAAEAAAAAAAAACQAAADoAAAAJAAAAcgAAAAAAAAAAAAAAcGFydC04AAB0ZXN0LXRvcG9sb2d5AAAAAAAAAAkAAAAQAAAACAAAAAEAAAAAAAAACQAAADoAAAAJAAAAcgAAAAAAAAAAAAAAcGFydC05AAB0ZXN0LXRvcG9sb2d5AAAAAQAAAAoAAAA=",
+  "dgd": {
+    "apiVersion": "nvidia.com/v1beta1",
+    "kind": "DynamoGraphDeployment",
+    "metadata": {
+      "generation": 3,
+      "name": "selected-source",
+      "namespace": "test",
+      "uid": "source-uid"
+    },
+    "spec": {
+      "components": [
+        {
+          "lpx": {
+            "buildId": "units",
+            "experimental": {
+              "localPartitions": {
+                "ids": [
+                  9
+                ],
+                "mode": "IDs"
+              }
+            }
+          },
+          "name": "lpx",
+          "replicas": 1,
+          "roles": [
+            {
+              "name": "conductor",
+              "podTemplate": {
+                "spec": {
+                  "containers": [
+                    {
+                      "image": "cyborg-runtime",
+                      "name": "main",
+                      "resources": {
+                        "limits": {
+                          "nvidia.com/gpu": "1"
+                        }
+                      },
+                      "volumeMounts": [
+                        {
+                          "mountPath": "/models",
+                          "name": "model-storage"
+                        }
+                      ]
+                    }
+                  ],
+                  "initContainers": [
+                    {
+                      "image": "dynamo-sidecar",
+                      "name": "runtime",
+                      "restartPolicy": "Always"
+                    }
+                  ],
+                  "volumes": [
+                    {
+                      "emptyDir": {},
+                      "name": "model-storage"
+                    }
+                  ]
+                }
+              },
+              "replicas": 1
+            },
+            {
+              "name": "agent",
+              "podTemplate": {
+                "spec": {
+                  "containers": [
+                    {
+                      "command": [
+                        "/bin/quasar-entrypoint"
+                      ],
+                      "image": "lpu-runtime",
+                      "name": "main",
+                      "volumeMounts": [
+                        {
+                          "mountPath": "/models",
+                          "name": "model-storage"
+                        },
+                        {
+                          "mountPath": "/dev",
+                          "name": "host-dev"
+                        },
+                        {
+                          "mountPath": "/sys",
+                          "name": "host-sys"
+                        },
+                        {
+                          "mountPath": "/ssh-pk",
+                          "name": "ssh-secret",
+                          "readOnly": true
+                        },
+                        {
+                          "mountPath": "/dev/hugepages",
+                          "name": "hugepages"
+                        },
+                        {
+                          "mountPath": "/tmp/dynamo-lpu-ssh",
+                          "name": "single-v2-ssh-key"
+                        }
+                      ]
+                    }
+                  ],
+                  "volumes": [
+                    {
+                      "emptyDir": {},
+                      "name": "model-storage"
+                    },
+                    {
+                      "hostPath": {
+                        "path": "/dev",
+                        "type": "Directory"
+                      },
+                      "name": "host-dev"
+                    },
+                    {
+                      "hostPath": {
+                        "path": "/sys",
+                        "type": "Directory"
+                      },
+                      "name": "host-sys"
+                    },
+                    {
+                      "emptyDir": {
+                        "medium": "HugePages"
+                      },
+                      "name": "hugepages"
+                    },
+                    {
+                      "name": "ssh-secret",
+                      "secret": {
+                        "defaultMode": 420,
+                        "secretName": "ssh-secret"
+                      }
+                    },
+                    {
+                      "emptyDir": {},
+                      "name": "single-v2-ssh-key"
+                    }
+                  ]
+                }
+              }
+            }
+          ],
+          "type": "lpx"
+        }
+      ]
+    },
+    "status": {
+      "state": ""
+    }
+  },
+  "pcs": {
+    "metadata": {
+      "name": "selected-source-fc6f",
+      "namespace": "test",
+      "labels": {
+        "lpx.nvidia.com/deployment-uid": "lpx-source-uid",
+        "nvidia.com/dynamo-graph-deployment-name": "selected-source"
+      },
+      "annotations": {
+        "lpx.nvidia.com/deployment-name": "selected-source"
+      }
+    },
+    "spec": {
+      "replicas": 1,
+      "template": {
+        "cliques": [
+          {
+            "name": "cond",
+            "labels": {
+              "lpx.nvidia.com/serving": "true",
+              "nvidia.com/dynamo-component": "lpx",
+              "nvidia.com/dynamo-component-type": "lpx",
+              "nvidia.com/dynamo-graph-deployment-name": "selected-source",
+              "nvidia.com/dynamo-namespace": "test-selected-source",
+              "nvidia.com/dynamo-worker-hash": "bdefe394",
+              "nvidia.com/metrics-enabled": "true",
+              "nvidia.com/selector": "selected-source-lpx"
+            },
+            "annotations": {
+              "lpx.nvidia.com/deployment-name": "selected-source",
+              "nvidia.com/extra-resources-hash": "734ce683f6b7ea5f7b0c0172b07d5e1ed45773120ab8c7d834967d180c62cea2",
+              "scheduling.lpu.nvidia.com/dynamo-workload-digest": "sha256:52da05ecfe7db61338b3acf78c353bd41326a28661464a28eb3dcbb1e5228256",
+              "scheduling.lpu.nvidia.com/role": "cyborg-worker"
+            },
+            "spec": {
+              "roleName": "cond",
+              "podSpec": {
+                "volumes": [
+                  {
+                    "name": "model-storage",
+                    "emptyDir": {}
+                  },
+                  {
+                    "name": "shared-memory",
+                    "emptyDir": {
+                      "medium": "Memory",
+                      "sizeLimit": "8Gi"
+                    }
+                  },
+                  {
+                    "name": "config",
+                    "configMap": {
+                      "name": "selected-source-fc6f-decode-734ce683f6b7ea5f"
+                    }
+                  }
+                ],
+                "initContainers": [
+                  {
+                    "name": "runtime",
+                    "image": "dynamo-sidecar",
+                    "ports": [
+                      {
+                        "name": "system",
+                        "containerPort": 9090,
+                        "protocol": "TCP"
+                      }
+                    ],
+                    "env": [
+                      {
+                        "name": "LPX_MODEL_PATH",
+                        "value": "/models/units"
+                      },
+                      {
+                        "name": "DYN_COMPONENT",
+                        "value": "decode"
+                      },
+                      {
+                        "name": "DYN_DISCOVERY_BACKEND",
+                        "value": "kubernetes"
+                      },
+                      {
+                        "name": "DYN_NAMESPACE",
+                        "value": "test-selected-source"
+                      },
+                      {
+                        "name": "DYN_NAMESPACE_WORKER_SUFFIX",
+                        "value": "bdefe394"
+                      },
+                      {
+                        "name": "DYN_PARENT_DGD_K8S_NAME",
+                        "value": "selected-source"
+                      },
+                      {
+                        "name": "DYN_PARENT_DGD_K8S_NAMESPACE",
+                        "value": "test"
+                      },
+                      {
+                        "name": "DYN_SYSTEM_ENABLED",
+                        "value": "true"
+                      },
+                      {
+                        "name": "DYN_SYSTEM_PORT",
+                        "value": "9090"
+                      },
+                      {
+                        "name": "POD_NAME",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "metadata.name"
+                          }
+                        }
+                      },
+                      {
+                        "name": "POD_NAMESPACE",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "metadata.namespace"
+                          }
+                        }
+                      },
+                      {
+                        "name": "POD_UID",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "metadata.uid"
+                          }
+                        }
+                      }
+                    ],
+                    "resources": {},
+                    "restartPolicy": "Always",
+                    "livenessProbe": {
+                      "httpGet": {
+                        "path": "/live",
+                        "port": "system"
+                      },
+                      "timeoutSeconds": 4,
+                      "periodSeconds": 5,
+                      "failureThreshold": 3
+                    },
+                    "readinessProbe": {
+                      "httpGet": {
+                        "path": "/health",
+                        "port": "system"
+                      },
+                      "timeoutSeconds": 4,
+                      "periodSeconds": 5,
+                      "failureThreshold": 3
+                    },
+                    "startupProbe": {
+                      "httpGet": {
+                        "path": "/live",
+                        "port": "system"
+                      },
+                      "timeoutSeconds": 1,
+                      "periodSeconds": 2,
+                      "failureThreshold": 30
+                    }
+                  }
+                ],
+                "containers": [
+                  {
+                    "name": "main",
+                    "image": "cyborg-runtime",
+                    "env": [
+                      {
+                        "name": "LPX_LOCAL_PARTITION_IDS",
+                        "value": "9"
+                      },
+                      {
+                        "name": "GBUILD_MANIFEST_PATH",
+                        "value": "/models/units/deployment.v1.capnp.bin"
+                      },
+                      {
+                        "name": "LPX_MODEL_PATH",
+                        "value": "/models/units"
+                      }
+                    ],
+                    "resources": {
+                      "limits": {
+                        "nvidia.com/gpu": "1"
+                      }
+                    },
+                    "volumeMounts": [
+                      {
+                        "name": "model-storage",
+                        "mountPath": "/models"
+                      },
+                      {
+                        "name": "shared-memory",
+                        "mountPath": "/dev/shm"
+                      }
+                    ]
+                  }
+                ],
+                "restartPolicy": "Always",
+                "terminationGracePeriodSeconds": 60,
+                "schedulerName": "lpx-scheduler"
+              },
+              "replicas": 1,
+              "minAvailable": 1,
+              "startsAfter": [
+                "agt"
+              ]
+            }
+          },
+          {
+            "name": "agt",
+            "labels": {
+              "nvidia.com/dynamo-component": "lpx",
+              "nvidia.com/dynamo-component-type": "lpx",
+              "nvidia.com/dynamo-graph-deployment-name": "selected-source",
+              "nvidia.com/dynamo-namespace": "test-selected-source",
+              "nvidia.com/dynamo-worker-hash": "bdefe394",
+              "nvidia.com/metrics-enabled": "true",
+              "nvidia.com/selector": "selected-source-lpx"
+            },
+            "annotations": {
+              "lpx.nvidia.com/deployment-name": "selected-source",
+              "nvidia.com/extra-resources-hash": "322d245b512cd7f9582ac0b2001775e9d0d2773374ae47533733090bfc362030",
+              "scheduling.lpu.nvidia.com/compiler-snapshot-digest": "sha256:adc5224221da20494a4da5aea28f8bea829e5dd64139c080eb426d2556488ac4",
+              "scheduling.lpu.nvidia.com/dynamo-workload-digest": "sha256:52da05ecfe7db61338b3acf78c353bd41326a28661464a28eb3dcbb1e5228256",
+              "scheduling.lpu.nvidia.com/model": "default",
+              "scheduling.lpu.nvidia.com/role": "agent",
+              "scheduling.lpu.nvidia.com/workload-mode": "v2StrictHybrid"
+            },
+            "spec": {
+              "roleName": "agt",
+              "podSpec": {
+                "volumes": [
+                  {
+                    "name": "model-storage",
+                    "emptyDir": {}
+                  },
+                  {
+                    "name": "host-dev",
+                    "hostPath": {
+                      "path": "/dev",
+                      "type": "Directory"
+                    }
+                  },
+                  {
+                    "name": "host-sys",
+                    "hostPath": {
+                      "path": "/sys",
+                      "type": "Directory"
+                    }
+                  },
+                  {
+                    "name": "ssh-secret",
+                    "secret": {
+                      "secretName": "ssh-secret",
+                      "defaultMode": 420
+                    }
+                  },
+                  {
+                    "name": "hugepages",
+                    "emptyDir": {
+                      "medium": "HugePages"
+                    }
+                  },
+                  {
+                    "name": "single-v2-ssh-key",
+                    "emptyDir": {}
+                  },
+                  {
+                    "name": "shared-memory",
+                    "emptyDir": {
+                      "medium": "Memory",
+                      "sizeLimit": "8Gi"
+                    }
+                  },
+                  {
+                    "name": "config",
+                    "configMap": {
+                      "name": "selected-source-fc6f-lpu-322d245b512cd7f9"
+                    }
+                  }
+                ],
+                "containers": [
+                  {
+                    "name": "main",
+                    "image": "lpu-runtime",
+                    "command": [
+                      "/bin/quasar-entrypoint"
+                    ],
+                    "env": [
+                      {
+                        "name": "LPX_MODEL_PATH",
+                        "value": "/models/units"
+                      },
+                      {
+                        "name": "DYN_COMPONENT",
+                        "value": "lpx"
+                      },
+                      {
+                        "name": "DYN_DISCOVERY_BACKEND",
+                        "value": "kubernetes"
+                      },
+                      {
+                        "name": "DYN_NAMESPACE",
+                        "value": "test-selected-source-bdefe394"
+                      },
+                      {
+                        "name": "DYN_NAMESPACE_WORKER_SUFFIX"
+                      },
+                      {
+                        "name": "DYN_PARENT_DGD_K8S_NAME",
+                        "value": "selected-source"
+                      },
+                      {
+                        "name": "DYN_PARENT_DGD_K8S_NAMESPACE",
+                        "value": "test"
+                      },
+                      {
+                        "name": "POD_IP",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "status.podIP"
+                          }
+                        }
+                      },
+                      {
+                        "name": "POD_NAME",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "metadata.name"
+                          }
+                        }
+                      },
+                      {
+                        "name": "POD_NAMESPACE",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "metadata.namespace"
+                          }
+                        }
+                      },
+                      {
+                        "name": "POD_UID",
+                        "valueFrom": {
+                          "fieldRef": {
+                            "fieldPath": "metadata.uid"
+                          }
+                        }
+                      }
+                    ],
+                    "resources": {
+                      "limits": {
+                        "lpu.nvidia.com/lpu": "8"
+                      },
+                      "requests": {
+                        "lpu.nvidia.com/lpu": "8"
+                      }
+                    },
+                    "volumeMounts": [
+                      {
+                        "name": "model-storage",
+                        "mountPath": "/models"
+                      },
+                      {
+                        "name": "host-dev",
+                        "mountPath": "/dev"
+                      },
+                      {
+                        "name": "host-sys",
+                        "mountPath": "/sys"
+                      },
+                      {
+                        "name": "ssh-secret",
+                        "readOnly": true,
+                        "mountPath": "/ssh-pk"
+                      },
+                      {
+                        "name": "hugepages",
+                        "mountPath": "/dev/hugepages"
+                      },
+                      {
+                        "name": "single-v2-ssh-key",
+                        "mountPath": "/tmp/dynamo-lpu-ssh"
+                      },
+                      {
+                        "name": "shared-memory",
+                        "mountPath": "/dev/shm"
+                      }
+                    ]
+                  }
+                ],
+                "restartPolicy": "Always",
+                "terminationGracePeriodSeconds": 60,
+                "schedulerName": "lpx-scheduler"
+              },
+              "replicas": 4,
+              "minAvailable": 4
+            }
+          }
+        ],
+        "cliqueStartupType": "CliqueStartupTypeExplicit",
+        "headlessServiceConfig": {
+          "publishNotReadyAddresses": true
+        },
+        "podCliqueScalingGroups": [
+          {
+            "name": "lpx",
+            "cliqueNames": [
+              "agt",
+              "cond"
+            ],
+            "annotations": {
+              "lpx.nvidia.com/deployment-name": "selected-source",
+              "scheduling.lpu.nvidia.com/dynamo-workload-digest": "sha256:52da05ecfe7db61338b3acf78c353bd41326a28661464a28eb3dcbb1e5228256"
+            },
+            "replicas": 1,
+            "minAvailable": 1
+          }
+        ]
+      }
+    },
+    "status": {
+      "updatedReplicas": 0,
+      "availableReplicas": 0
+    }
+  },
+  "requests": [
+    {
+      "metadata": {
+        "name": "lpx-selected-source-003251906913cde73e803c7e97255bb6",
+        "namespace": "test",
+        "labels": {
+          "lpx.nvidia.com/deployment-uid": "lpx-source-uid",
+          "nvidia.com/dynamo-graph-deployment-name": "selected-source"
+        },
+        "annotations": {
+          "lpx.nvidia.com/deployment-name": "selected-source",
+          "scheduling.lpu.nvidia.com/compiler-snapshot-digest": "sha256:adc5224221da20494a4da5aea28f8bea829e5dd64139c080eb426d2556488ac4",
+          "scheduling.lpu.nvidia.com/dynamo-model": "default",
+          "scheduling.lpu.nvidia.com/dynamo-workload-digest": "sha256:52da05ecfe7db61338b3acf78c353bd41326a28661464a28eb3dcbb1e5228256"
+        }
+      },
+      "spec": {
+        "allocationMetadata": {},
+        "cyborgPodCliqueRef": {
+          "name": "selected-source-fc6f-0-lpx-0-cond"
+        },
+        "executionBackend": "nodeLocal",
+        "materializationTarget": {
+          "podCliqueScalingGroupRef": {
+            "name": "selected-source-fc6f-0-lpx",
+            "replicaIndex": 0
+          },
+          "podCliqueSetReplicaIndex": 0
+        },
+        "nodeLocal": {
+          "agentPodCliqueRef": {
+            "name": "selected-source-fc6f-0-lpx-0-agt"
+          },
+          "model": "default",
+          "partitionMappings": [
+            {
+              "modelPartitionId": 0,
+              "partitionId": "partition-000"
+            },
+            {
+              "modelPartitionId": 1,
+              "partitionId": "partition-001"
+            }
+          ]
+        },
+        "partitions": [
+          {
+            "compilerPartitionId": 7,
+            "id": "partition-000",
+            "ordinal": 0,
+            "xtShape": "c16"
+          },
+          {
+            "compilerPartitionId": 8,
+            "id": "partition-001",
+            "ordinal": 1,
+            "xtShape": "c16"
+          }
+        ],
+        "propSyncConnectors": [
+          {
+            "fromPartitionId": "partition-000",
+            "requirement": {
+              "kind": "xt8888Gap",
+              "maxInterPartitionOffset": 0
+            },
+            "toPartitionId": "partition-001"
+          }
+        ],
+        "repairPolicy": {
+          "mode": "samePlacement"
+        },
+        "targetFamily": "xt8888",
+        "workloadMode": "v2StrictHybrid"
+      }
+    }
+  ],
+  "resources": [
+    {
+      "metadata": {
+        "name": "selected-source-fc6f-decode-734ce683f6b7ea5f",
+        "namespace": "test",
+        "labels": {
+          "lpx.nvidia.com/deployment-uid": "lpx-source-uid"
+        },
+        "annotations": {
+          "lpx.nvidia.com/deployment-name": "selected-source"
+        }
+      },
+      "immutable": true,
+      "data": {
+        "lpu_servers": "lpx-${GROVE_PCSG_INDEX}-agt-0"
+      }
+    },
+    {
+      "metadata": {
+        "name": "selected-source-fc6f-lpu-322d245b512cd7f9",
+        "namespace": "test",
+        "labels": {
+          "lpx.nvidia.com/deployment-uid": "lpx-source-uid"
+        },
+        "annotations": {
+          "lpx.nvidia.com/deployment-name": "selected-source"
+        }
+      },
+      "immutable": true,
+      "data": {
+        "nodes_per_partition": "4",
+        "partition_ids": "7",
+        "partition_node_offsets": "0",
+        "partition_paths": "part-7"
+      }
+    }
+  ]
+}
