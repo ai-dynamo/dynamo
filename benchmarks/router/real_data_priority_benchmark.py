@@ -23,6 +23,9 @@ from common import (
     resolve_tokenizer,
     setup_logger,
     tag_requests_with_priority,
+    validate_worker_participation,
+    worker_participation_requested,
+    write_trace_dataset,
 )
 
 logger = setup_logger(__name__)
@@ -73,14 +76,6 @@ def offset_hash_ids(tier_requests):
     return shifted
 
 
-def write_trace_file(requests, path):
-    """Write a list of request dicts to a JSONL file."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        for request in requests:
-            f.write(json.dumps(request) + "\n")
-
-
 def run_concurrent_streams(
     args, tier_requests, priority_values, run_dir, tag_priority, logger, seed=None
 ):
@@ -99,7 +94,11 @@ def run_concurrent_streams(
         requests = tier_requests[tier]
         if tag_priority:
             requests = tag_requests_with_priority(requests, priority)
-        write_trace_file(requests, trace_path)
+        write_trace_dataset(
+            requests,
+            trace_path,
+            worker_participation_requested(args),
+        )
 
         artifact_dir = os.path.join(tier_dir, "aiperf_artifacts")
         os.makedirs(artifact_dir, exist_ok=True)
@@ -112,6 +111,7 @@ def run_concurrent_streams(
             seed if seed is not None else args.seed,
             args.block_size,
             args.url,
+            worker_participation_requested(args),
         )
         cmd.extend(["--log-level", "WARNING", "--ui-type", "none"])
 
@@ -143,6 +143,14 @@ def run_concurrent_streams(
         logger.error(f"Failed tiers in {label} run: {', '.join(failed)}")
         logger.error("Check the aiperf.log files in each tier directory for details")
         raise SystemExit(1)
+
+    if worker_participation_requested(args):
+        validate_worker_participation(
+            run_dir,
+            args.minimum_prefill_workers,
+            args.minimum_decode_workers,
+            logger,
+        )
 
 
 def load_ttft(run_dir, tier):
