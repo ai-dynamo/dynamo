@@ -433,6 +433,17 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.components[1].engineGroup: Forbidden: DGD-driven Engine Group creation is not implemented; use a standalone DynamoGraphDeploymentEngineGroup for the gated proof of concept"},
 		},
 		{
+			name: "engineGroup rejects root workload overrides through shared component validation",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).EngineGroup = &nvidiacomv1beta1.ComponentEngineGroupSpec{InitialSize: 2}
+				dgd.Spec.ProviderOverride = groveProviderOverride("", `{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`)
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[1].engineGroup: Forbidden: Engine Group workload overrides cannot bypass the resolved launch profile",
+				"spec.components[1].engineGroup: Forbidden: DGD-driven Engine Group creation is not implemented; use a standalone DynamoGraphDeploymentEngineGroup for the gated proof of concept",
+			},
+		},
+		{
 			name: "initialSize must satisfy the template policy independently of world count",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).EngineGroup = &nvidiacomv1beta1.ComponentEngineGroupSpec{
