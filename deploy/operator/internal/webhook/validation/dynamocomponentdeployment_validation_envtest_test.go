@@ -100,6 +100,16 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			dcd.Spec.BackendFramework = ""
 			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionTRTLLMBackend)
 		}), wantWebhookErrs: []string{"spec.experimental.failover: Forbidden: Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: trtllm)"}},
+		// Backend framework resolution: admission runs the same resolution as
+		// rendering, so a spec the renderer would reject fails here instead of
+		// surfacing later as a failed deployment status (issue #17543).
+		{name: "explicit backendFramework conflicting with the detected worker backend is rejected", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Spec.BackendFramework = admissionSGLangBackend
+			dcd.Spec.PodTemplate.Spec.Containers[0].Command = []string{"python", "-m", "dynamo.vllm"}
+		}), wantWebhookErrs: []string{`spec.backendFramework: Invalid value: "sglang": backend framework mismatch: detected "vllm" from command but explicitly configured as "sglang"`}},
+		{name: "explicit backendFramework matching the detected worker backend is admitted", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+			dcd.Spec.PodTemplate.Spec.Containers[0].Command = []string{"python", "-m", "dynamo.vllm"}
+		})},
 		{name: "TRT-LLM snapshot failover cannot be enabled on update", oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			dcd.Spec.BackendFramework = admissionTRTLLMBackend
 			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, admissionTRTLLMBackend)

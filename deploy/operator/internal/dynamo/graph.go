@@ -3349,7 +3349,9 @@ func DetectBackendFrameworkFromArgs(command []string, args []string) (BackendFra
 	}
 
 	if len(detected) > 1 {
-		return "", fmt.Errorf("multiple backend frameworks detected from command: %v in %q", detected, fullCommand)
+		// The error can surface in admission responses, so it names the
+		// detected frameworks but never echoes the container command.
+		return "", fmt.Errorf("multiple backend frameworks detected from command: %v", detected)
 	}
 
 	return detected[0], nil
@@ -3486,6 +3488,55 @@ func GetBackendFrameworkFromDynamoComponent(dynComponent *v1beta1.DynamoComponen
 		&dynComponent.Spec.DynamoComponentDeploymentSharedSpec,
 		dynComponent.Spec.BackendFramework,
 	)
+}
+
+// ValidateBackendFrameworkResolution resolves the component's backend
+// framework exactly as rendering does and reports a resolution failure as a
+// field error on the backendFramework field itself. Admission calls it so a
+// spec the renderer would reject is refused at create or update time instead
+// of failing later in the deployment status. backendFramework is declared on
+// the owning spec, never on the component, so the caller passes
+// backendFldPath separately from any component path. componentName names
+// the component in the error detail when several components share one
+// spec-level field, and is empty when the spec belongs to a single
+// component. component and backendFldPath must not be nil.
+func ValidateBackendFrameworkResolution(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	backendFldPath *field.Path,
+	componentName string,
+	explicitBackendFramework string,
+) field.ErrorList {
+	// Resolution is the renderer's own logic, so admission and rendering
+	// cannot disagree about which specs are valid.
+	if _, err := determineBackendFrameworkForComponent(component, explicitBackendFramework); err != nil {
+		detail := err.Error()
+		if componentName != "" {
+			detail = fmt.Sprintf("component %q: %s", componentName, detail)
+		}
+		return field.ErrorList{field.Invalid(backendFldPath, explicitBackendFramework, detail)}
+	}
+	return nil
+}
+
+// ValidateGraphBackendFrameworkConsistency resolves the single backend
+// framework DCD generation derives for the whole graph and reports a failure
+// as a field error on the graph's backendFramework. Admission calls it so a
+// graph whose worker components resolve to different frameworks is refused
+// at create or update time instead of failing later in reconciliation.
+// Callers invoke it only when no explicit framework is set: with one set,
+// generation performs no detection and there is nothing to check. spec and
+// fldPath must not be nil; fldPath is the path of the graph spec.
+func ValidateGraphBackendFrameworkConsistency(
+	spec *v1beta1.DynamoGraphDeploymentSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	// Generation resolves one framework per graph from the spec alone, so
+	// run its own resolution over a spec-only view of the deployment.
+	dgd := &v1beta1.DynamoGraphDeployment{Spec: *spec}
+	if _, err := backendFrameworkForGeneratedDCDs(dgd); err != nil {
+		return field.ErrorList{field.Invalid(fldPath.Child("backendFramework"), spec.BackendFramework, err.Error())}
+	}
+	return nil
 }
 
 type GenerateBasePodSpecForControllerOptions struct {
