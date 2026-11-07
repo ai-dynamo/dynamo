@@ -19,6 +19,11 @@ ignored = ["prost", "prost-types"]
 name = "dynamo-trtllm-sidecar"
 path = "src/main.rs"
 
+[features]
+default = ["jemalloc"]
+# jemalloc as the binary's global allocator. The Python bindings turn it off.
+jemalloc = ["dynamo-sidecar-common/jemalloc"]
+
 [dependencies]
 dynamo-backend-common = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
