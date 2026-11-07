@@ -2613,6 +2613,17 @@ impl ModelManager {
         self.lora_domain(endpoint_id).state_tracker.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn insert_runtime_configs(
+        &self,
+        endpoint_id: &EndpointId,
+        configs: HashMap<WorkerId, ModelRuntimeConfig>,
+    ) -> tokio::sync::watch::Sender<HashMap<WorkerId, ModelRuntimeConfig>> {
+        let (tx, rx) = tokio::sync::watch::channel(configs);
+        self.runtime_configs.insert(endpoint_id.clone(), rx);
+        tx
+    }
+
     pub fn lora_load_estimator_for(&self, endpoint_id: &EndpointId) -> Arc<LoadEstimator> {
         self.lora_domain(endpoint_id).load_estimator.clone()
     }
@@ -2888,6 +2899,35 @@ impl ModelManager {
         };
         let configs = rx.borrow();
         has_required_kv_transfer_policy(&configs)
+    }
+
+    /// Wait until `worker_id` has a runtime config on this endpoint's watch.
+    ///
+    /// Instance discovery and config discovery are joined asynchronously, so a
+    /// worker can be selectable before its config is visible. Returns at once
+    /// when the config is already there or the endpoint has no watch.
+    pub async fn wait_for_runtime_config(
+        &self,
+        endpoint_id: &EndpointId,
+        worker_id: WorkerId,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<()> {
+        let Some(mut rx) = self.runtime_configs.get(endpoint_id).map(|rx| rx.clone()) else {
+            return Ok(());
+        };
+        let arrived = tokio::time::timeout(
+            timeout,
+            rx.wait_for(|configs| configs.contains_key(&worker_id)),
+        )
+        .await
+        .is_ok_and(|seen| seen.is_ok());
+        if !arrived {
+            anyhow::bail!(
+                "runtime config for worker {worker_id} on endpoint {endpoint_id} not seen within {timeout:?}, \
+                 so its KV transfer topology constraints are unknown"
+            );
+        }
+        Ok(())
     }
 
     /// Build topology routing constraints from a selected prefill worker's metadata.
@@ -3223,8 +3263,7 @@ mod tests {
         endpoint_id: &EndpointId,
         configs: HashMap<WorkerId, ModelRuntimeConfig>,
     ) {
-        let (_tx, rx) = tokio::sync::watch::channel(configs);
-        mm.runtime_configs.insert(endpoint_id.clone(), rx);
+        mm.insert_runtime_configs(endpoint_id, configs);
     }
 
     #[tokio::test]

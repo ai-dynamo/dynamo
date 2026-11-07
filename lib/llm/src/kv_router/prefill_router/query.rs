@@ -1,15 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 
 use anyhow::Result;
 use dynamo_kv_router::{
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
     scheduling::queue::BookingHandle,
 };
+use dynamo_runtime::protocols::EndpointId;
 
 use super::{PrefillError, PrefillLifecycleState, PrefillRouter};
+
+/// How long a reservation waits for the selected worker's runtime config before
+/// failing, rather than reserving it without its KV-transfer constraints.
+const RUNTIME_CONFIG_WAIT: Duration = Duration::from_secs(1);
 
 /// A prefill booking that owns cleanup of the exact scheduler attempt it admitted.
 ///
@@ -22,6 +27,7 @@ pub struct PrefillReservation {
     worker: WorkerWithDpRank,
     dp_rank: Option<u32>,
     booking: Option<BookingHandle>,
+    kv_transfer_constraints: Option<RoutingConstraints>,
 }
 
 impl PrefillReservation {
@@ -31,6 +37,12 @@ impl PrefillReservation {
 
     pub fn dp_rank(&self) -> Option<u32> {
         self.dp_rank
+    }
+
+    /// Topology constraints the decode pick must add so the KV transfer stays
+    /// in the reserved prefill worker's domain, as the frontend's prefill hop does.
+    pub fn kv_transfer_constraints(&self) -> Option<&RoutingConstraints> {
+        self.kv_transfer_constraints.as_ref()
     }
 
     /// Release this booking and wait for the scheduler to acknowledge it.
@@ -84,6 +96,9 @@ impl PrefillRouter {
                 worker: WorkerWithDpRank::new(worker_id, 0),
                 dp_rank: None,
                 booking: None,
+                kv_transfer_constraints: self
+                    .reserved_worker_kv_transfer_constraints(&binding.endpoint_id, worker_id)
+                    .await?,
             });
         };
         let admitted = chooser
@@ -112,10 +127,15 @@ impl PrefillRouter {
                 let Some(booking) = booking else {
                     anyhow::bail!("prefill reservation admission did not return a booking");
                 };
+                // A failed lookup drops the booking, which enqueues its cleanup.
+                let kv_transfer_constraints = self
+                    .reserved_worker_kv_transfer_constraints(&binding.endpoint_id, worker.worker_id)
+                    .await?;
                 Ok(PrefillReservation {
                     worker,
                     dp_rank: Some(worker.dp_rank),
                     booking: Some(booking),
+                    kv_transfer_constraints,
                 })
             }
             crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
@@ -129,6 +149,20 @@ impl PrefillRouter {
             }
         }
     }
+
+    /// Read the reserved worker's KV-transfer constraints once its runtime
+    /// config is visible. A worker picked before its config joins the watch
+    /// would otherwise look unconstrained and let decode leave its domain.
+    async fn reserved_worker_kv_transfer_constraints(
+        &self,
+        endpoint_id: &EndpointId,
+        worker_id: WorkerId,
+    ) -> Result<Option<RoutingConstraints>> {
+        self.model_manager
+            .wait_for_runtime_config(endpoint_id, worker_id, RUNTIME_CONFIG_WAIT)
+            .await?;
+        self.preflight_kv_transfer_constraints(Some(endpoint_id), worker_id)
+    }
 }
 
 #[cfg(test)]
@@ -139,9 +173,9 @@ mod tests {
         time::Duration,
     };
 
-    use crate::local_model::runtime_config::ModelRuntimeConfig;
+    use crate::local_model::runtime_config::{ModelRuntimeConfig, topology_taint};
     use async_trait::async_trait;
-    use dynamo_kv_router::config::KvRouterConfig;
+    use dynamo_kv_router::{config::KvRouterConfig, protocols::KvTransferEnforcement};
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         component::Instance,
@@ -590,6 +624,103 @@ mod tests {
         })
         .await
         .expect("dropped reservation must release its admitted booking");
+    }
+
+    /// Workers 7 and 8 in zones a and b, each requiring KV transfer to stay in its zone.
+    fn zone_runtime_configs() -> HashMap<WorkerId, ModelRuntimeConfig> {
+        HashMap::from([(7, "zone-a"), (8, "zone-b")].map(|(worker_id, zone)| {
+            let mut config = ModelRuntimeConfig {
+                kv_transfer_domain: Some("zone".to_string()),
+                kv_transfer_enforcement: Some(KvTransferEnforcement::Required),
+                ..Default::default()
+            };
+            config
+                .topology_domains
+                .insert("zone".to_string(), zone.to_string());
+            (worker_id, config)
+        }))
+    }
+
+    fn assert_requires_reserved_worker_zone(
+        reservation: &PrefillReservation,
+        configs: &HashMap<WorkerId, ModelRuntimeConfig>,
+    ) {
+        let zone = &configs[&reservation.worker_id()].topology_domains["zone"];
+        let constraints = reservation
+            .kv_transfer_constraints()
+            .expect("topology routing is configured");
+        assert_eq!(
+            constraints.required_taints,
+            HashSet::from([topology_taint("zone", zone)])
+        );
+        assert!(constraints.preferred_taints.is_empty());
+    }
+
+    #[tokio::test]
+    async fn prefill_reservation_carries_reserved_worker_kv_transfer_constraints() {
+        let (router, _chooser) = tracked_prefill_router().await;
+        let endpoint_id = router.binding.load_full().unwrap().endpoint_id.clone();
+        let configs = zone_runtime_configs();
+        router
+            .model_manager
+            .insert_runtime_configs(&endpoint_id, configs.clone());
+
+        let reservation = router
+            .reserve_prefill_worker(
+                "epp-prefill/zone",
+                &[1u32; 64],
+                None,
+                None,
+                None,
+                0.0,
+                0,
+                None,
+                None,
+                RoutingConstraints::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_requires_reserved_worker_zone(&reservation, &configs);
+        reservation.release().await.unwrap();
+    }
+
+    /// A worker can be selectable before its runtime config joins the watch.
+    /// The reservation waits for that config instead of reserving the worker
+    /// without its required domain.
+    #[tokio::test]
+    async fn prefill_reservation_waits_for_reserved_worker_runtime_config() {
+        let (router, _chooser) = tracked_prefill_router().await;
+        let endpoint_id = router.binding.load_full().unwrap().endpoint_id.clone();
+        let configs_tx = router
+            .model_manager
+            .insert_runtime_configs(&endpoint_id, HashMap::new());
+        let configs = zone_runtime_configs();
+
+        let reservation = router.reserve_prefill_worker(
+            "epp-prefill/late-config",
+            &[1u32; 64],
+            None,
+            None,
+            None,
+            0.0,
+            0,
+            None,
+            None,
+            RoutingConstraints::default(),
+        );
+        tokio::pin!(reservation);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut reservation)
+                .await
+                .is_err(),
+            "reservation must wait for the selected worker's runtime config"
+        );
+
+        configs_tx.send(configs.clone()).unwrap();
+        let reservation = reservation.await.unwrap();
+        assert_requires_reserved_worker_zone(&reservation, &configs);
+        reservation.release().await.unwrap();
     }
 
     #[tokio::test]
