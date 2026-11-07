@@ -142,6 +142,18 @@ class DynamoSGLangArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--image-png-compression-level",
+            env_var="DYN_SGL_IMAGE_PNG_COMPRESSION_LEVEL",
+            default=6,
+            arg_type=int,
+            help=(
+                "Lossless PNG compression level (0-9) for images from "
+                "--image-diffusion-worker. 0 disables compression for faster "
+                "encoding and larger responses; 6 preserves Pillow's default."
+            ),
+        )
+        add_argument(
+            g,
             flag_name="--disagg-config",
             env_var="DYN_SGL_DISAGG_CONFIG",
             default=None,
@@ -225,6 +237,7 @@ class DynamoSGLangConfig(ConfigBase):
     embedding_worker: bool
     rerank_worker: bool = False
     image_diffusion_worker: bool
+    image_png_compression_level: int = 6
 
     disagg_config: Optional[str] = None
     disagg_config_key: Optional[str] = None
@@ -241,6 +254,7 @@ class DynamoSGLangConfig(ConfigBase):
     served_model_aliases: Optional[List[str]] = None
 
     def validate(self) -> None:
+        """Reject incompatible worker modes and invalid configuration values."""
         _reject_removed_multimodal_env_vars()
         if self.rerank_worker and (
             self.embedding_worker
@@ -266,6 +280,8 @@ class DynamoSGLangConfig(ConfigBase):
 
         if self.gateway_workers is not None and self.gateway_workers < 1:
             raise ValueError("--gateway-workers must be a positive integer")
+        if not 0 <= self.image_png_compression_level <= 9:
+            raise ValueError("--image-png-compression-level must be between 0 and 9")
         self.validate_multimodal_topology()
 
         self.validate_dedicated_mm_encoder()
