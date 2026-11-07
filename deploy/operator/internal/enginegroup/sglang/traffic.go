@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/enginegroup/kubejournal"
@@ -19,19 +20,20 @@ import (
 // TrafficProjection records the identity-level traffic projection around SGLang's
 // group endpoint. SGLang currently admits new ranks internally at commit, so
 // this adapter does not claim to provide a pre-admission pause for joiners.
-// It projects current engine membership, not independently observed routing or
-// drain evidence. Production integration needs actual serving/registration
-// observations and durable withdrawal/drain, not a positive controller grant.
+// It records withdrawal intent and native retirement evidence, not independently
+// observed discovery registration or a positive controller serving grant.
 type TrafficProjection struct {
-	Client   *Client
-	Capacity CapacityObserver
-	Journal  kubejournal.Store
+	Client     *Client
+	Capacity   CapacityObserver
+	Journal    kubejournal.Store
+	Membership *MembershipAdapter
 }
 
 type trafficJournal struct {
-	AppliedRevision int64                     `json:"appliedRevision"`
-	TargetDigest    string                    `json:"targetDigest"`
-	Target          enginegroup.TrafficTarget `json:"target"`
+	AppliedRevision int64                           `json:"appliedRevision"`
+	TargetDigest    string                          `json:"targetDigest"`
+	Target          enginegroup.TrafficTarget       `json:"target"`
+	Drained         []enginegroup.ReplicaMembership `json:"drained,omitempty"`
 }
 
 // Observe projects the engine's current effective ranks independently of target acceptance.
@@ -44,10 +46,8 @@ func (a *TrafficProjection) Observe(
 	if err != nil {
 		return enginegroup.TrafficObservation{}, err
 	}
-	if snapshot.Exists() {
-		if len(state.Target.Drain) != 0 {
-			return enginegroup.TrafficObservation{}, fmt.Errorf("the traffic projection cannot prove drain completion")
-		}
+	if len(state.Target.Drain) != 0 && a.Membership == nil {
+		return enginegroup.TrafficObservation{}, fmt.Errorf("the traffic projection cannot prove drain completion without native membership correlation")
 	}
 	if a.Client == nil || a.Capacity == nil {
 		return enginegroup.TrafficObservation{}, fmt.Errorf("SGLang traffic client and capacity observer are required")
@@ -60,21 +60,59 @@ func (a *TrafficProjection) Observe(
 	if err != nil {
 		return enginegroup.TrafficObservation{}, err
 	}
+	for _, proof := range state.Drained {
+		for _, active := range topology.Replicas {
+			if active.ReplicaID != proof.ReplicaID {
+				continue
+			}
+			for _, member := range proof.Members {
+				if slices.Contains(active.Members, member) {
+					return enginegroup.TrafficObservation{}, fmt.Errorf("%w: SGLang readmitted a terminally retired process", enginegroup.ErrRecoveryRequired)
+				}
+			}
+		}
+	}
+	// Capture native proof before release; a later operation may replace the native retiree list.
+	if a.Membership != nil && len(state.Target.Drain) != 0 {
+		retired, err := a.Membership.retiredMembers(ctx, engineState)
+		if err != nil {
+			return enginegroup.TrafficObservation{}, err
+		}
+		changed := false
+		for _, replica := range retired {
+			if !slices.ContainsFunc(state.Drained, func(existing enginegroup.ReplicaMembership) bool {
+				return existing.ReplicaID == replica.ReplicaID && slices.Equal(existing.Members, replica.Members)
+			}) {
+				state.Drained = append(state.Drained, replica)
+				changed = true
+			}
+		}
+		if changed {
+			if _, err := a.Journal.Save(ctx, snapshot, state); err != nil {
+				return enginegroup.TrafficObservation{}, err
+			}
+		}
+	}
 	return enginegroup.TrafficObservation{
 		AppliedRevision: state.AppliedRevision,
 		Admitted:        topology.Replicas,
+		Drained:         state.Drained,
 	}, nil
 }
 
-// Apply records acceptance of an empty withdrawal target without granting admission.
-// Drain is unsupported because the merged SGLang slice is growth-only.
+// Apply durably accepts withdrawal intent; the native membership transaction performs drain.
 func (a *TrafficProjection) Apply(
 	ctx context.Context,
 	_ enginegroup.GroupID,
 	target enginegroup.TrafficTarget,
 ) (enginegroup.ApplyResult, error) {
-	if len(target.Drain) != 0 {
-		return rejectedApply("DrainUnsupported", "the current SGLang adapter supports growth only"), nil
+	if len(target.Drain) != 0 && a.Membership == nil {
+		return rejectedApply("DrainUnsupported", "SGLang withdrawal requires native membership and drain correlation"), nil
+	}
+	for _, drain := range target.Drain {
+		if drain.Mode != enginegroup.TrafficDrainModeGraceful {
+			return rejectedApply("UnsupportedDrainMode", "SGLang planned retirement requires graceful native drain"), nil
+		}
 	}
 	digest, err := trafficTargetDigest(target)
 	if err != nil {
@@ -93,7 +131,7 @@ func (a *TrafficProjection) Apply(
 			return rejectedApply("ConflictingTrafficRevision", "traffic target revision has a different payload"), nil
 		}
 	}
-	state = trafficJournal{AppliedRevision: target.ControlRevision, TargetDigest: digest, Target: target}
+	state.AppliedRevision, state.TargetDigest, state.Target = target.ControlRevision, digest, target
 	if _, err := a.Journal.Save(ctx, snapshot, state); err != nil {
 		return enginegroup.ApplyResult{}, err
 	}

@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Packed B200 functional test: two GPUs/native members per Pod.
+# Four GPUs exercise EP2 -> EP4 -> EP2 using native bootstrap and retirement.
+# Requires native #39834 + #33111 with correlated drain evidence; see README.md.
+# Manual MoE test, not shared L4/pre-merge CI; Elastic EP requires real expert redistribution.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-packed
+spec:
+  backendFramework: sglang
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    runtimeVersionOverride: "1.7.0"
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${IMAGE}
+  - name: Worker
+    type: worker
+    replicas: 1
+    runtimeVersionOverride: "1.7.0"
+    engineGroup:
+      initialSize: 1
+      policy: {minSize: 1, maxSize: 2}
+    podTemplate:
+      metadata:
+        labels:
+          dynamo.nvidia.com/poc-member: sglang-retest
+      spec:
+        restartPolicy: Never
+        readinessGates:
+        - conditionType: dynamo.nvidia.com/retained
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        tolerations:
+        - {key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}
+        containers:
+        - name: main
+          image: ${IMAGE}
+          command: [python3, -m, dynamo.sglang]
+          env:
+          - name: DYNAMO_ALLOCATION_UID
+            valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+          - {name: DYNAMO_POC_LOCAL_NIC_AUTO, value: "1"}
+          - {name: UCX_TLS, value: "rc,rc_gda,cuda_copy,sm,self"}
+          - {name: SGLANG_DEEPEP_BF16_DISPATCH, value: "1"}
+          - {name: SGLANG_NIXL_EP_BF16_DISPATCH, value: "1"}
+          args:
+          - --model-path=/models/hf-bootstrap-4a3/hub/models--deepseek-ai--DeepSeek-V2-Lite-Chat/snapshots/85864749cd611b4353ce1decdb286193298f64c7
+          - --served-model-name=deepseek-ai/DeepSeek-V2-Lite-Chat
+          - --trust-remote-code
+          - --skip-tokenizer-init
+          - --page-size=16
+          - --elastic-ep-join-mode=auto
+          - --elastic-ep-retiree-lifecycle=external
+          - --elastic-ep-allocation-index=$(DYNAMO_RANK)
+          - --elastic-ep-allocation-id=$(DYNAMO_ALLOCATION_UID)
+          - --dist-init-addr=$(DYNAMO_LEADER_ADDRESS):29500
+          - --moe-dense-tp-size=1
+          - --enable-dp-lm-head
+          - --moe-a2a-backend=nixl
+          - --moe-runner-backend=deep_gemm
+          - --deepep-mode=low_latency
+          - --elastic-ep-backend=mooncake
+          - --mooncake-ib-device=mlx5_0
+          - --load-balance-method=round_robin
+          - --enable-eplb
+          - --ep-num-redundant-experts=24
+          - --elastic-ep-initial-size=2
+          - --max-ep-size=4
+          - --disable-cuda-graph
+          - --context-length=2048
+          - --mem-fraction-static=0.65
+          - --max-running-requests=32
+          securityContext:
+            capabilities:
+              add: [IPC_LOCK]
+          resources:
+            requests: {cpu: "4", memory: 32Gi, nvidia.com/gpu: "2", rdma/shared_ib: "1"}
+            limits: {cpu: "16", memory: 96Gi, nvidia.com/gpu: "2", rdma/shared_ib: "1"}
+          volumeMounts:
+          - {name: model, mountPath: /models, readOnly: true}
+        volumes:
+        - name: model
+          persistentVolumeClaim: {claimName: moe-model}

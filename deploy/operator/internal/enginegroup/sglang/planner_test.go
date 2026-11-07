@@ -14,6 +14,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestSGLangScalePlannerRetiresOnlyTheHighestCompleteAllocation(t *testing.T) {
+	t.Log("start from two committed packed allocations and retain the complete initial allocation")
+	planner := ScalePlanner{ProfileFingerprint: "profile-v1", WorldID: "world", MembersPerReplica: 2, RetirementEnabled: true}
+	status := domain.GroupStatus{Membership: domain.MembershipStatus{Observed: domain.MembershipObservation{
+		CommittedTopology: domain.MembershipTopology{Generation: 2, Replicas: []domain.ReplicaMembership{
+			{ReplicaID: "replica-0", Members: []domain.NativeMemberIncarnation{{ID: "dp-0", RuntimeIncarnation: "pod-0/dp-0"}, {ID: "dp-1", RuntimeIncarnation: "pod-0/dp-1"}}},
+			{ReplicaID: "replica-1", Members: []domain.NativeMemberIncarnation{{ID: "dp-2", RuntimeIncarnation: "pod-1/dp-2"}, {ID: "dp-3", RuntimeIncarnation: "pod-1/dp-3"}}},
+		}},
+	}}}
+
+	t.Log("request native graceful retirement for the complete suffix, followed by survivor verification")
+	resolution, err := planner.ResolveScalePlan(t.Context(), "group", 1, status)
+	require.NoError(t, err)
+	require.NotNil(t, resolution.Plan)
+	assert.Equal(t, []domain.ReplicaID{"replica-1"}, resolution.Plan.Change.Retire.Replicas)
+	assert.Equal(t, domain.TrafficRequirementEngineManagedDrain, resolution.Plan.TrafficRequirement)
+	assert.Equal(t, domain.VerificationRequirementRequired, resolution.Plan.VerificationRequirement)
+
+	t.Log("refuse retirement when the engine has not enabled external retiree lifecycle")
+	planner.RetirementEnabled = false
+	resolution, err = planner.ResolveScalePlan(t.Context(), "group", 1, status)
+	require.NoError(t, err)
+	require.NotNil(t, resolution.Rejection)
+	assert.Equal(t, "SGLangShrinkUnsupported", resolution.Rejection.Reason)
+}
+
 func TestSGLangGrowthPlannerBuildsContiguousIdentityPlan(t *testing.T) {
 	t.Log("start from a committed two-allocation world")
 	planner := ScalePlanner{ProfileFingerprint: "profile-v1", WorldID: "clique-uid", MembersPerReplica: 1}

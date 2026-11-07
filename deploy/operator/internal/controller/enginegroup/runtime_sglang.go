@@ -141,9 +141,10 @@ func (p *sglangRuntimeResolver) Resolve(
 		Journal:            runtimeJournal(p.client, group, world.ID, "sglang-membership"),
 	}
 	traffic := &sglangruntime.TrafficProjection{
-		Client:   control,
-		Capacity: capacity,
-		Journal:  runtimeJournal(p.client, group, world.ID, "sglang-traffic"),
+		Client:     control,
+		Capacity:   capacity,
+		Journal:    runtimeJournal(p.client, group, world.ID, "sglang-traffic"),
+		Membership: membership,
 	}
 	return Runtime{
 		Workload:   world,
@@ -156,6 +157,7 @@ func (p *sglangRuntimeResolver) Resolve(
 			ProfileFingerprint: profile.Fingerprint,
 			WorldID:            string(world.ID),
 			MembersPerReplica:  resolved.NativeMembersPerReplica,
+			RetirementEnabled:  argumentValue(main.Args, "--elastic-ep-retiree-lifecycle") == "external",
 		},
 	}, nil
 }
