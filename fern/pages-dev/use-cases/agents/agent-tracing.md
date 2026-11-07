@@ -87,6 +87,9 @@ This interval includes tool execution and agent overhead. It cannot separate par
 
 ### Record Precise Tool Timing
 
+For Pi running in Substrate, follow [Trace Sandboxed Agents](trace-sandboxed-agents.mdx)
+to configure the frontend and the tool-event transport through sandbox egress.
+
 For per-tool attribution, have the harness send events to the frontend. Configure the frontend:
 
 ```bash title="Enable explicit tool-event ingress"

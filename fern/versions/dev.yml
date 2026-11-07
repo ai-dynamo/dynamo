@@ -134,6 +134,14 @@ navigation:
                 contents:
                   - page: GKE Setup
                     path: ../pages-dev/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx
+      - section: Agent Sandboxes
+        icon: cube
+        collapsed: true
+        contents:
+          - page: Install Substrate
+            path: ../pages-dev/kubernetes/agent-sandboxes/install-substrate.mdx
+          - page: Monitor Substrate
+            path: ../pages-dev/kubernetes/agent-sandboxes/monitor-substrate.mdx
       # ==================== Usage ====================
       - section: Model Deployment
         icon: microchip
@@ -731,6 +739,10 @@ navigation:
             path: ../pages-dev/use-cases/agents/session-affinity.md
           - page: Prioritize Requests
             path: ../pages-dev/use-cases/agents/priority-scheduling.mdx
+          - page: Sandboxed Coding Agents
+            path: ../pages-dev/use-cases/agents/harbor-substrate.mdx
+          - page: Trace Sandboxed Agents
+            path: ../pages-dev/use-cases/agents/trace-sandboxed-agents.mdx
           - page: Trace an Agent Run
             slug: agent-tracing
             path: ../pages-dev/use-cases/agents/agent-tracing.md
