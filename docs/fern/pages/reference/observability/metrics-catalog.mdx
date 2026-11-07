@@ -694,7 +694,7 @@ vLLM, SGLang, and TensorRT-LLM workers report F4 on the final response chunk of 
 
 ### Router Queue Metrics
 
-These metrics have series once a KV router starts, whether or not queueing is enabled; the queue metrics stay at zero unless queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`. With policy-family or cache-bucket configuration, `policy_class` is the resolved physical queue.
+These metrics have series once a KV router starts, whether or not queueing is enabled; the queue metrics stay at zero unless queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`, the resolved class: a request that names no class is reported as the default class, and a request whose class, after any request-classifier override, is unknown fails before it is queued, so these queue metrics do not count it.
 
 <ParamField path="dynamo_frontend_router_queue_pending_requests" type="gauge">
   Requests pending in the router scheduler queue.
