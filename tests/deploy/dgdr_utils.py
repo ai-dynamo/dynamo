@@ -495,11 +495,19 @@ class ManagedDGDR:
         while time.monotonic() < deadline:
             read_started = time.monotonic()
             try:
-                result = await self._retry_vcluster_api(
-                    f"reading DGDR {self.config.namespace}/{name} while waiting for {target}",
-                    self.get,
-                    name,
+                result = await asyncio.wait_for(
+                    self._retry_vcluster_api(
+                        f"reading DGDR {self.config.namespace}/{name} "
+                        f"while waiting for {target}",
+                        self.get,
+                        name,
+                    ),
+                    timeout=deadline - time.monotonic(),
                 )
+            except TimeoutError:
+                if time.monotonic() < deadline:
+                    raise
+                break
             except aiohttp.ClientConnectionError as error:
                 # The tunnel watchdog can outlast the per-call retries, so keep
                 # polling through a bounded outage instead of ending the wait.
