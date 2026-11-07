@@ -87,13 +87,21 @@ Gateway topology.
   scores.
 </ParamField>
 
-<ParamField path="DYN_DEFAULT_CHAT_TEMPLATE_KWARGS" type="JSON object">
-  Chat template kwargs the Frontend applies to every chat request, as set by the Frontend's
-  `--default-chat-template-kwargs` or `DYN_DEFAULT_CHAT_TEMPLATE_KWARGS`, including any vLLM
-  `--default-chat-template-kwargs` the Frontend folds in. Set the same merged value on the EPP. The
-  EPP renders `/v1/responses` requests with it before it injects their tokens, and the Frontend
-  generates from those tokens, so a mismatch changes the prompt, such as whether thinking is on. The
-  EPP does not apply this setting to `/v1/chat/completions` requests.
+<ParamField path="DYN_HTTP_SVC_CHAT_PATH" type="string" default="/v1/chat/completions">
+  Route the Frontend serves chat completions on. Set the same value on the EPP when the Frontend
+  serves it elsewhere. The EPP chooses how to tokenize a request by its route, and injects tokens only
+  for routes it recognizes.
+</ParamField>
+
+<ParamField path="DYN_HTTP_SVC_CMP_PATH" type="string" default="/v1/completions">
+  Route the Frontend serves completions on. Set the same value on the EPP when the Frontend serves it
+  elsewhere.
+</ParamField>
+
+<ParamField path="DYN_HTTP_SVC_RESPONSES_PATH" type="string" default="/v1/responses">
+  Route the Frontend serves the Responses API on. Set the same value on the EPP when the Frontend
+  serves it elsewhere; otherwise the EPP rejects Responses requests with 400. The EPP routes the
+  `input_tokens` subroute without tokenizing, since the Frontend answers it without a model.
 </ParamField>
 
 <ParamField path="DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION" type="boolean" default="false">

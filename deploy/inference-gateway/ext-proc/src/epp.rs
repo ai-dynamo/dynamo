@@ -18,7 +18,6 @@ use dashmap::DashMap;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
-use dynamo_llm::frontend_config::ChatTemplateDefaults;
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
 use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
@@ -45,7 +44,10 @@ use crate::picker::{
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
-const DYN_DEFAULT_CHAT_TEMPLATE_KWARGS: &str = "DYN_DEFAULT_CHAT_TEMPLATE_KWARGS";
+/// The Frontend's route variables, with its defaults (see [`RoutePaths`]).
+const DYN_HTTP_SVC_CHAT_PATH: &str = "DYN_HTTP_SVC_CHAT_PATH";
+const DYN_HTTP_SVC_CMP_PATH: &str = "DYN_HTTP_SVC_CMP_PATH";
+const DYN_HTTP_SVC_RESPONSES_PATH: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
 
 /// `tokens_safe_to_inject` is `false` when `token_ids` were computed from
 /// only one prompt of a multi-prompt text batch (routing-only, matching
@@ -60,6 +62,12 @@ struct TokenizeResult {
     strict_priority: u32,
     routing_constraints: RoutingConstraints,
     tokens_safe_to_inject: bool,
+}
+
+/// A request body parsed into its typed request.
+enum ParsedRequest {
+    Chat(Box<dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest>),
+    Completion(Box<NvCreateCompletionRequest>),
 }
 
 /// Validate `DYN_KUBE_DISCOVERY_MODE` and report whether *container* discovery
@@ -85,36 +93,6 @@ fn validate_kube_discovery_mode_value(mode: Option<&str>) -> Result<bool> {
             "Invalid {DYN_KUBE_DISCOVERY_MODE} value {mode:?}; valid values are 'pod' and 'container'"
         ),
     }
-}
-
-/// Read `DYN_DEFAULT_CHAT_TEMPLATE_KWARGS` once at startup. The Frontend reads
-/// the same variable; the EPP needs the same value so the tokens it injects
-/// for a Responses request match what the Frontend would render.
-fn chat_template_defaults_from_env() -> Result<ChatTemplateDefaults> {
-    match std::env::var(DYN_DEFAULT_CHAT_TEMPLATE_KWARGS) {
-        Ok(kwargs) => parse_chat_template_defaults(Some(&kwargs)),
-        Err(std::env::VarError::NotPresent) => parse_chat_template_defaults(None),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            anyhow::bail!("{DYN_DEFAULT_CHAT_TEMPLATE_KWARGS} must be valid Unicode")
-        }
-    }
-}
-
-/// Parse the value as the Frontend does: a JSON object of chat template kwargs,
-/// which may not set `chat_template`.
-fn parse_chat_template_defaults(kwargs: Option<&str>) -> Result<ChatTemplateDefaults> {
-    let mut defaults = ChatTemplateDefaults::default();
-    if let Some(kwargs) = kwargs.filter(|kwargs| !kwargs.trim().is_empty()) {
-        let kwargs: serde_json::Map<String, serde_json::Value> = serde_json::from_str(kwargs)
-            .map_err(|e| {
-                anyhow::anyhow!("{DYN_DEFAULT_CHAT_TEMPLATE_KWARGS} must be a JSON object: {e}")
-            })?;
-        if kwargs.contains_key("chat_template") {
-            anyhow::bail!("{DYN_DEFAULT_CHAT_TEMPLATE_KWARGS} cannot set chat_template");
-        }
-        defaults.set_default_chat_template_kwargs(Some(kwargs));
-    }
-    Ok(defaults)
 }
 
 fn decode_router_config_override(is_disaggregated: bool) -> Option<RouterConfigOverride> {
@@ -155,9 +133,8 @@ pub struct Router {
     worker_index: Arc<RwLock<WorkerEndpointIndex>>,
     pod_store_ready: Arc<AtomicBool>,
     served_model: String,
-    /// The Frontend's `--default-chat-template-kwargs`, applied to Responses
-    /// requests before their tokens are computed.
-    chat_template_defaults: ChatTemplateDefaults,
+    /// The routes the Frontend serves chat, completions and Responses on.
+    route_paths: RoutePaths,
 }
 
 /// Remove and release a booking once. Both response lifecycle callbacks use
@@ -188,7 +165,7 @@ impl Router {
         component: &str,
     ) -> Result<Self> {
         let container_discovery = validate_kube_discovery_mode()?;
-        let chat_template_defaults = chat_template_defaults_from_env()?;
+        let route_paths = RoutePaths::from_env();
 
         let runtime = Runtime::from_settings()?;
         let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
@@ -291,7 +268,7 @@ impl Router {
             worker_index,
             pod_store_ready,
             served_model: model_name,
-            chat_template_defaults,
+            route_paths,
         })
     }
 
@@ -308,72 +285,26 @@ impl Router {
     ///
     /// Returns the routing inputs, including the cache namespace resolved from
     /// the headers and body. Priorities default to zero and constraints default
-    /// to empty when absent. Supports `/v1/chat/completions`, `/v1/completions`
-    /// and `/v1/responses` bodies. The API is chosen by the `:path`
-    /// pseudo-header; when that names no known route, by the body's shape (see
-    /// [`request_api_from_body`]).
+    /// to empty when absent. Supports chat completions, completions and
+    /// Responses bodies; see [`parse_request_body`] for how the API is chosen
+    /// and which tokens may be injected.
     async fn tokenize(
         &self,
         request_json: &str,
         headers: &[(String, String)],
     ) -> Result<TokenizeResult> {
-        match request_api_from_path(headers) {
-            Some(RequestApi::ChatCompletions) => {
-                let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-                    serde_json::from_str(request_json)?;
-                return self.tokenize_chat(&request, headers);
+        let ParsedBody {
+            request,
+            injectable,
+        } = parse_request_body(request_json, headers, &self.route_paths)?;
+        let mut result = match request {
+            ParsedRequest::Completion(request) => {
+                self.tokenize_completion(*request, headers).await?
             }
-            Some(RequestApi::Completions) => {
-                let request: NvCreateCompletionRequest = serde_json::from_str(request_json)?;
-                return self.tokenize_completion(request, headers).await;
-            }
-            Some(RequestApi::Responses) => {
-                let request = responses_to_chat_request(
-                    serde_json::from_str(request_json)?,
-                    &self.chat_template_defaults,
-                )?;
-                return self.tokenize_chat(&request, headers);
-            }
-            None => {}
-        }
-
-        // Discriminating on a borrowed `Value` costs one scan plus the tree it
-        // allocates; `from_value` then consumes that tree rather than re-reading
-        // the body.
-        //
-        // A probe struct of `IgnoredAny` fields was tried here and reverted. It
-        // allocates nothing, but `IgnoredAny` does not skip -- serde_json still
-        // lexes every byte to find each value's end -- so the body ends up
-        // tokenized end to end twice, and on large bodies the scan dominates the
-        // allocation it saved. Measured, release build, 200 iterations, chat body
-        // with one large user message:
-        //
-        //     467 B    Value 1.9us   IgnoredAny 1.1us   (probe wins)
-        //      40 KB   Value 6.7us   IgnoredAny 8.5us
-        //     160 KB   Value 19.7us  IgnoredAny 28.4us  (probe ~44% worse)
-        //
-        // Inference bodies skew large, so the crossover lands on the wrong side.
-        // The `:path` dispatch above avoids this scan entirely; it remains only
-        // for requests whose path names no known route.
-        let value: serde_json::Value = serde_json::from_str(request_json)?;
-        match request_api_from_body(&value, request_path(headers).is_some()) {
-            RequestApi::ChatCompletions => {
-                let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-                    serde_json::from_value(value)?;
-                self.tokenize_chat(&request, headers)
-            }
-            RequestApi::Completions => {
-                let request: NvCreateCompletionRequest = serde_json::from_value(value)?;
-                self.tokenize_completion(request, headers).await
-            }
-            RequestApi::Responses => {
-                let request = responses_to_chat_request(
-                    serde_json::from_value(value)?,
-                    &self.chat_template_defaults,
-                )?;
-                self.tokenize_chat(&request, headers)
-            }
-        }
+            ParsedRequest::Chat(request) => self.tokenize_chat(&request, headers)?,
+        };
+        result.tokens_safe_to_inject &= injectable;
+        Ok(result)
     }
 
     /// Tokenize a `/v1/chat/completions` body via the chat template.
@@ -815,21 +746,75 @@ enum RequestApi {
     Responses,
 }
 
-/// The API named by the request's `:path` pseudo-header, ignoring any query
-/// string. `None` when the header is absent or names no known route.
-fn request_api_from_path(headers: &[(String, String)]) -> Option<RequestApi> {
-    let path = request_path(headers)?;
-    let path = path.split_once('?').map_or(path, |(path, _query)| path);
-    match path {
-        "/v1/chat/completions" => Some(RequestApi::ChatCompletions),
-        "/v1/completions" => Some(RequestApi::Completions),
-        "/v1/responses" => Some(RequestApi::Responses),
-        _ => None,
+/// The routes the Frontend serves chat completions, completions and Responses
+/// on, read from the same `DYN_HTTP_SVC_*_PATH` variables, with the same
+/// defaults, so a route the Frontend serves elsewhere is still recognized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RoutePaths {
+    chat: String,
+    completions: String,
+    responses: String,
+    /// The Responses input-token count, which the Frontend serves next to the
+    /// Responses route and answers without a model.
+    responses_input_tokens: String,
+}
+
+impl RoutePaths {
+    fn new(chat: Option<String>, completions: Option<String>, responses: Option<String>) -> Self {
+        let responses = responses.unwrap_or_else(|| "/v1/responses".to_string());
+        // The Frontend derives the subroute from the Responses route with any
+        // trailing slash trimmed.
+        let responses_input_tokens = format!("{}/input_tokens", responses.trim_end_matches('/'));
+        Self {
+            chat: chat.unwrap_or_else(|| "/v1/chat/completions".to_string()),
+            completions: completions.unwrap_or_else(|| "/v1/completions".to_string()),
+            responses,
+            responses_input_tokens,
+        }
+    }
+
+    fn from_env() -> Self {
+        let var = |key| std::env::var(key).ok();
+        Self::new(
+            var(DYN_HTTP_SVC_CHAT_PATH),
+            var(DYN_HTTP_SVC_CMP_PATH),
+            var(DYN_HTTP_SVC_RESPONSES_PATH),
+        )
+    }
+
+    /// The API a request path names, ignoring any query string.
+    fn api(&self, path: &str) -> Option<RequestApi> {
+        let path = without_query(path);
+        if path == self.chat {
+            Some(RequestApi::ChatCompletions)
+        } else if path == self.completions {
+            Some(RequestApi::Completions)
+        } else if path == self.responses {
+            Some(RequestApi::Responses)
+        } else {
+            None
+        }
+    }
+
+    /// Whether the request is a Responses input-token count, which needs no
+    /// tokens to route.
+    fn is_input_token_count(&self, headers: &[(String, String)]) -> bool {
+        request_path(headers).is_some_and(|path| without_query(path) == self.responses_input_tokens)
+    }
+}
+
+impl Default for RoutePaths {
+    fn default() -> Self {
+        Self::new(None, None, None)
     }
 }
 
 fn request_path(headers: &[(String, String)]) -> Option<&str> {
     crate::envoy_helpers::find_header(headers, ":path")
+}
+
+fn without_query(path: &str) -> &str {
+    path.split_once('?').map_or(path, |(path, _query)| path)
 }
 
 /// The API a body is shaped for, used when the path names no known route: a
@@ -855,23 +840,88 @@ fn request_api_from_body(value: &serde_json::Value, has_path: bool) -> RequestAp
     }
 }
 
-/// Convert a `/v1/responses` body to the chat request the Frontend renders
-/// for it, with the steps the Frontend's Responses handler runs before
-/// templating: the `NvCreateResponse` -> chat conversion, the chat template
-/// defaults, then the reasoning-control normalization. The template sees the
-/// Frontend's input only when `defaults` matches the Frontend's
-/// `--default-chat-template-kwargs`.
-fn responses_to_chat_request(
-    request: NvCreateResponse,
-    defaults: &ChatTemplateDefaults,
-) -> Result<dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest> {
-    let mut chat_request =
-        dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest::try_from(
-            request,
-        )?;
-    defaults.apply_to_request(&mut chat_request);
-    chat_request.normalize_reasoning_template_args()?;
-    Ok(chat_request)
+/// Deserialize the body, from its already parsed `Value` when there is one.
+fn from_body<T: serde::de::DeserializeOwned>(
+    request_json: &str,
+    value: Option<serde_json::Value>,
+) -> Result<T> {
+    Ok(match value {
+        Some(value) => serde_json::from_value(value)?,
+        None => serde_json::from_str(request_json)?,
+    })
+}
+
+/// A request body parsed into the request the EPP tokenizes, and whether the
+/// tokens may be injected as `nvext.token_data` or only route the request.
+struct ParsedBody {
+    request: ParsedRequest,
+    injectable: bool,
+}
+
+/// Parse a request body into the request the EPP tokenizes, choosing the API by
+/// the `:path` pseudo-header, or by the body's shape when the path names no
+/// known route (see [`request_api_from_body`]).
+///
+/// The Frontend generates from injected tokens as-is, so they are injected only
+/// where the EPP renders the request the way the Frontend does. A Responses
+/// request is converted to chat for routing only: before rendering, the
+/// Frontend applies more than this conversion (its chat template defaults, the
+/// Responses history and tool normalizations, worker thinking defaults). A body
+/// on a path the EPP does not know (`/v1/messages`) is shaped by guess, so its
+/// tokens only route it too.
+fn parse_request_body(
+    request_json: &str,
+    headers: &[(String, String)],
+    paths: &RoutePaths,
+) -> Result<ParsedBody> {
+    let path = request_path(headers);
+    let (api, value) = match path.and_then(|path| paths.api(path)) {
+        Some(api) => (api, None),
+        None => {
+            // Discriminating on a borrowed `Value` costs one scan plus the tree
+            // it allocates; `from_value` then consumes that tree rather than
+            // re-reading the body.
+            //
+            // A probe struct of `IgnoredAny` fields was tried here and
+            // reverted. It allocates nothing, but `IgnoredAny` does not skip --
+            // serde_json still lexes every byte to find each value's end -- so
+            // the body ends up tokenized end to end twice, and on large bodies
+            // the scan dominates the allocation it saved. Measured, release
+            // build, 200 iterations, chat body with one large user message:
+            //
+            //     467 B    Value 1.9us   IgnoredAny 1.1us   (probe wins)
+            //      40 KB   Value 6.7us   IgnoredAny 8.5us
+            //     160 KB   Value 19.7us  IgnoredAny 28.4us  (probe ~44% worse)
+            //
+            // Inference bodies skew large, so the crossover lands on the wrong
+            // side. A known `:path` avoids this scan entirely.
+            let value: serde_json::Value = serde_json::from_str(request_json)?;
+            (request_api_from_body(&value, path.is_some()), Some(value))
+        }
+    };
+    let guessed_on_a_path = path.is_some() && value.is_some();
+    let injectable = api != RequestApi::Responses && !guessed_on_a_path;
+    let mut chat: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+        match api {
+            RequestApi::Completions => {
+                return Ok(ParsedBody {
+                    request: ParsedRequest::Completion(Box::new(from_body(request_json, value)?)),
+                    injectable,
+                });
+            }
+            RequestApi::ChatCompletions => from_body(request_json, value)?,
+            RequestApi::Responses => {
+                let request: NvCreateResponse = from_body(request_json, value)?;
+                request.try_into()?
+            }
+        };
+    // The Frontend's chat and Responses handlers both resolve reasoning
+    // controls into the template arguments before rendering.
+    chat.normalize_reasoning_template_args()?;
+    Ok(ParsedBody {
+        request: ParsedRequest::Chat(Box::new(chat)),
+        injectable,
+    })
 }
 
 /// Whether a prefill or decode router's error is itself an `InvalidArgument` `DynamoError`, as
@@ -1567,7 +1617,7 @@ impl EndpointPicker for Router {
                 return Err(PickError::NoEndpoints);
             }
 
-            if req.body.is_empty() {
+            if req.body.is_empty() || self.route_paths.is_input_token_count(&req.headers) {
                 return Ok(PickResult {
                     endpoint: subset_filtered[0].address_port(),
                     ..Default::default()
@@ -1614,9 +1664,11 @@ impl EndpointPicker for Router {
             (Some(ids), wm)
         };
 
-        if req.body.is_empty() {
-            // No body (GET request) and no external endpoint list — resolve any
-            // worker via discovery. If a subset hint is present, stay within it.
+        if req.body.is_empty() || self.route_paths.is_input_token_count(&req.headers) {
+            // No body (GET request), or a Responses input-token count, which the
+            // Frontend answers without a model, and no external endpoint list —
+            // resolve any worker via discovery. If a subset hint is present, stay
+            // within it.
             let endpoint = match &allowed_worker_ids {
                 Some(ids) => self.resolve_any_worker_endpoint_in_subset(ids),
                 None => self.resolve_any_worker_endpoint(),
@@ -2160,19 +2212,43 @@ mod tests {
 
     #[test]
     fn request_api_chosen_by_path() {
-        let api = |p: &str| request_api_from_path(&[(":path".to_string(), p.to_string())]);
+        let paths = RoutePaths::default();
         assert_eq!(
-            api("/v1/chat/completions"),
+            paths.api("/v1/chat/completions"),
             Some(RequestApi::ChatCompletions)
         );
-        assert_eq!(api("/v1/completions"), Some(RequestApi::Completions));
-        assert_eq!(api("/v1/responses"), Some(RequestApi::Responses));
+        assert_eq!(paths.api("/v1/completions"), Some(RequestApi::Completions));
+        assert_eq!(paths.api("/v1/responses"), Some(RequestApi::Responses));
         assert_eq!(
-            api("/v1/responses?stream=true"),
+            paths.api("/v1/responses?stream=true"),
             Some(RequestApi::Responses)
         );
-        assert_eq!(api("/v1/models"), None);
-        assert_eq!(request_api_from_path(&[]), None);
+        assert_eq!(paths.api("/v1/models"), None);
+    }
+
+    /// The Frontend can serve each API on another route (`DYN_HTTP_SVC_*_PATH`);
+    /// the EPP reads the same variables, and serves the input-token count next
+    /// to whichever route Responses is on.
+    #[test]
+    fn route_paths_follow_frontend_route_variables() {
+        let paths = RoutePaths::new(
+            Some("/custom/chat".to_string()),
+            None,
+            Some("/custom/responses/".to_string()),
+        );
+        assert_eq!(paths.api("/custom/chat"), Some(RequestApi::ChatCompletions));
+        assert_eq!(paths.api("/v1/chat/completions"), None);
+        assert_eq!(paths.api("/v1/completions"), Some(RequestApi::Completions));
+        assert_eq!(paths.api("/custom/responses/"), Some(RequestApi::Responses));
+        assert_eq!(paths.api("/v1/responses"), None);
+
+        let path = |p: &str| [(":path".to_string(), p.to_string())];
+        assert!(paths.is_input_token_count(&path("/custom/responses/input_tokens")));
+        assert!(!paths.is_input_token_count(&path("/custom/responses/")));
+        let defaults = RoutePaths::default();
+        assert!(defaults.is_input_token_count(&path("/v1/responses/input_tokens?x=1")));
+        assert!(!defaults.is_input_token_count(&path("/v1/responses")));
+        assert!(!defaults.is_input_token_count(&[]));
     }
 
     /// Other routes carry `input` too (`/v1/embeddings`, `/v1/classify`), so a
@@ -2181,8 +2257,7 @@ mod tests {
     #[test]
     fn unknown_path_does_not_pick_responses_from_input() {
         for path in ["/v1/embeddings", "/v1/embeddings/", "/v1/classify"] {
-            let headers = [(":path".to_string(), path.to_string())];
-            assert_eq!(request_api_from_path(&headers), None, "{path}");
+            assert_eq!(RoutePaths::default().api(path), None, "{path}");
         }
         let body = serde_json::json!({"model": "m", "input": "hi"});
         assert_eq!(
@@ -2230,48 +2305,118 @@ mod tests {
         );
     }
 
-    /// The Frontend applies `--default-chat-template-kwargs` to a Responses
-    /// request before templating; the EPP must too, or the tokens it injects
-    /// render a different prompt from the one the Frontend would.
+    /// The Frontend generates from injected tokens as-is, so only a request the
+    /// EPP renders the way the Frontend does gets them: chat and completions on
+    /// their routes, or by body when there is no `:path`, as before. Responses,
+    /// and a body guessed on a route the EPP does not know (`/v1/messages`),
+    /// are routed on their tokens without injecting them.
     #[test]
-    fn responses_conversion_applies_chat_template_defaults() {
-        let defaults = parse_chat_template_defaults(Some(r#"{"enable_thinking": false}"#)).unwrap();
-        let enable_thinking = |body: serde_json::Value| {
-            responses_to_chat_request(serde_json::from_value(body).unwrap(), &defaults)
+    fn parse_request_body_injects_only_requests_rendered_like_the_frontend() {
+        let chat =
+            serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]});
+        let completion = serde_json::json!({"model": "m", "prompt": "hi"});
+        let responses = serde_json::json!({"model": "m", "input": "hi"});
+        let anthropic = serde_json::json!({
+            "model": "m",
+            "system": "Answer in French.",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let custom = RoutePaths::new(None, None, Some("/custom/responses".to_string()));
+        let cases = [
+            (
+                &RoutePaths::default(),
+                Some("/v1/chat/completions"),
+                &chat,
+                false,
+                true,
+            ),
+            (
+                &RoutePaths::default(),
+                Some("/v1/completions"),
+                &completion,
+                true,
+                true,
+            ),
+            (
+                &RoutePaths::default(),
+                Some("/v1/responses"),
+                &responses,
+                false,
+                false,
+            ),
+            (&custom, Some("/custom/responses"), &responses, false, false),
+            (&RoutePaths::default(), None, &chat, false, true),
+            (&RoutePaths::default(), None, &completion, true, true),
+            (&RoutePaths::default(), None, &responses, false, false),
+            (
+                &RoutePaths::default(),
+                Some("/v1/messages"),
+                &anthropic,
+                false,
+                false,
+            ),
+        ];
+        for (paths, path, body, is_completion, injectable) in cases {
+            let headers: Vec<(String, String)> = path
+                .map(|path| (":path".to_string(), path.to_string()))
+                .into_iter()
+                .collect();
+            let parsed = parse_request_body(&body.to_string(), &headers, paths)
+                .unwrap_or_else(|e| panic!("{path:?}: {e}"));
+            assert_eq!(
+                matches!(parsed.request, ParsedRequest::Completion(_)),
+                is_completion,
+                "{path:?}"
+            );
+            assert_eq!(parsed.injectable, injectable, "{path:?} {body}");
+        }
+    }
+
+    /// The Frontend's chat and Responses handlers both resolve reasoning
+    /// controls into the template arguments before rendering; so does the EPP,
+    /// once, where the two paths meet.
+    #[test]
+    fn parse_request_body_normalizes_reasoning_for_chat_and_responses() {
+        let chat_args = |path: &str, body: serde_json::Value| {
+            let headers = [(":path".to_string(), path.to_string())];
+            match parse_request_body(&body.to_string(), &headers, &RoutePaths::default())
                 .unwrap()
-                .chat_template_args
-                .and_then(|args| args.get("enable_thinking").cloned())
+                .request
+            {
+                ParsedRequest::Chat(request) => request.chat_template_args,
+                ParsedRequest::Completion(_) => panic!("{path} parsed as a completion"),
+            }
         };
+
+        let chat = serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "none",
+        });
+        let mut expected: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_value(chat.clone()).unwrap();
+        assert!(expected.chat_template_args.is_none());
+        expected.normalize_reasoning_template_args().unwrap();
+        assert!(expected.chat_template_args.is_some());
         assert_eq!(
-            enable_thinking(serde_json::json!({"model": "m", "input": "hi"})),
-            Some(serde_json::json!(false))
-        );
-        assert_eq!(
-            enable_thinking(serde_json::json!({
-                "model": "m",
-                "input": "hi",
-                "chat_template_kwargs": {"enable_thinking": true},
-            })),
-            Some(serde_json::json!(true))
+            chat_args("/v1/chat/completions", chat),
+            expected.chat_template_args
         );
 
-        assert_eq!(
-            parse_chat_template_defaults(None).unwrap(),
-            ChatTemplateDefaults::default()
-        );
-        assert_eq!(
-            parse_chat_template_defaults(Some(" ")).unwrap(),
-            ChatTemplateDefaults::default()
-        );
-        assert!(parse_chat_template_defaults(Some("[1]")).is_err());
-        assert!(parse_chat_template_defaults(Some("enable_thinking=false")).is_err());
-        assert!(parse_chat_template_defaults(Some(r#"{"chat_template": "x"}"#)).is_err());
+        let responses = serde_json::json!({
+            "model": "m",
+            "input": "hi",
+            "chat_template_kwargs": {"thinking": false},
+        });
+        let args = chat_args("/v1/responses", responses).unwrap();
+        assert_eq!(args.get("enable_thinking"), Some(&serde_json::json!(false)));
     }
 
     /// A `/v1/responses` body has `input`, not `messages` or `prompt`, so it
     /// does not parse as chat. Routed by path, it is converted the way the
-    /// Frontend converts it, and its chat-template tokens match those of the
-    /// equivalent chat request.
+    /// Frontend converts it, and its chat-template tokens, which route it,
+    /// match those of the equivalent chat request.
     #[test]
     fn responses_tokens_match_equivalent_chat_request() {
         let mdc = ModelDeploymentCard::load_from_disk(
@@ -2312,13 +2457,14 @@ mod tests {
                 "a Responses body must not parse as chat"
             );
 
-            let responses_tokens = template_tokens(
-                &responses_to_chat_request(
-                    serde_json::from_str(&responses_body).unwrap(),
-                    &ChatTemplateDefaults::default(),
-                )
-                .unwrap(),
-            );
+            let headers = [(":path".to_string(), "/v1/responses".to_string())];
+            let parsed =
+                parse_request_body(&responses_body, &headers, &RoutePaths::default()).unwrap();
+            assert!(!parsed.injectable);
+            let ParsedRequest::Chat(converted) = parsed.request else {
+                panic!("a Responses body converts to chat");
+            };
+            let responses_tokens = template_tokens(&converted);
 
             let chat_request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
                 serde_json::from_value(serde_json::json!({
