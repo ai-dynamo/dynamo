@@ -123,6 +123,7 @@ that any affected curated Kubernetes page remains aligned with the generated sch
 ```bash
 python3 docs/fern/scripts/docs_lint.py                          # the `Docs Lint` pull request job
 python3 docs/fern/scripts/docs_lint.py --scan docs,examples,recipes  # ungated trees; expect existing findings
+python3 docs/fern/scripts/check_examples_index.py     # examples with no website owner or stale example links
 fern check                                            # nav + frontmatter structure
 fern docs broken-links                                # link resolution
 python3 docs/fern/pages/recipes/_catalog/validate.py  # recipe or benchmark changes only
