@@ -99,7 +99,7 @@ SPLIT_ENCODE = int(os.getenv("DYN_SPLIT_ENCODE", 1))
 
 
 class _PendingRelease:
-    """Tracks NIXL tensor buffers that should be released after consumption.
+    """Tracks completed embedding transfers whose resources need releasing.
 
     For NIXL receivers, embeddings are views into pre-allocated reusable
     buffers.  Instead of cloning each embedding eagerly, we defer the
@@ -346,8 +346,7 @@ async def _fetch_from_encode_workers(
         ]
         loaded = await asyncio.gather(*tasks)
 
-    is_local = isinstance(receiver, LocalEmbeddingReceiver)
-    pending: _PendingRelease | None = None if is_local else _PendingRelease(receiver)
+    pending = _PendingRelease(receiver)
     try:
         _attach_received_embedding_transfers(
             multimodal_groups,
@@ -356,11 +355,16 @@ async def _fetch_from_encode_workers(
             pending,
         )
     except RuntimeError:
-        if pending is not None:
-            for tensor_id, _ in loaded:
-                pending.track(tensor_id)
-            pending.release_all()
+        for tensor_id, _ in loaded:
+            pending.track(tensor_id)
+        pending.release_all()
         raise
+
+    if isinstance(receiver, LocalEmbeddingReceiver):
+        # Loaded safetensors and their views keep their storage alive after
+        # unlinking the transfer file; no reusable DMA buffer needs protecting.
+        pending.release_all()
+        return multimodal_groups, None
 
     return multimodal_groups, pending
 
@@ -425,17 +429,23 @@ async def _fetch_embeddings(
 
         # ── 3. Update cache (no-op when cache is None) ──────────────
 
-        for (idx, _item, key), group in zip(to_fetch, groups, strict=True):
-            if cache is not None and key is not None:
-                assert group.loaded_embedding is not None
-                cache.set(
-                    key,
-                    CachedEmbedding(
-                        tensor=group.loaded_embedding.clone(),
-                        image_grid_thw=group.image_grid_thw,
-                    ),
-                )
-            results[idx] = group
+        try:
+            for (idx, _item, key), group in zip(to_fetch, groups, strict=True):
+                if cache is not None and key is not None:
+                    assert group.loaded_embedding is not None
+                    cache.set(
+                        key,
+                        CachedEmbedding(
+                            tensor=group.loaded_embedding.clone(),
+                            image_grid_thw=group.image_grid_thw,
+                        ),
+                    )
+                results[idx] = group
+        except Exception:
+            logger.exception("Failed to process received embeddings for %s", request_id)
+            if pending is not None:
+                pending.release_all()
+            raise
 
     return [r for r in results if r is not None], pending
 
@@ -496,25 +506,27 @@ class MultiModalEmbeddingLoader:
         )
 
         multi_modal_data: Dict[str, Any] = {}
-        with time_and_log_code_section(
-            f"[PREFILL] request: {request_id} accumulate embeddings"
-        ):
-            for group in groups:
-                assert group.loaded_embedding is not None
-                _accumulate_embeddings(
-                    multi_modal_data,
-                    model,
-                    group.loaded_embedding.dtype,
-                    group.loaded_embedding,
-                    group.image_grid_thw,
-                )
+        try:
+            with time_and_log_code_section(
+                f"[PREFILL] request: {request_id} accumulate embeddings"
+            ):
+                for group in groups:
+                    assert group.loaded_embedding is not None
+                    _accumulate_embeddings(
+                        multi_modal_data,
+                        model,
+                        group.loaded_embedding.dtype,
+                        group.loaded_embedding,
+                        group.image_grid_thw,
+                    )
 
-        if pending is not None:
             # Multi-image: torch.cat in _accumulate_embeddings already created
             # owned tensors.  Single-image: the data is still a view into the
             # NIXL buffer, so we must clone before releasing.
-            if len(groups) == 1:
+            if pending is not None and len(groups) == 1:
                 _ensure_owned_tensors(multi_modal_data)
-            pending.release_all()
+        finally:
+            if pending is not None:
+                pending.release_all()
 
         return multi_modal_data
