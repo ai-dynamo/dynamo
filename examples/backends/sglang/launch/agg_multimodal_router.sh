@@ -87,20 +87,6 @@ print_launch_banner --multimodal --no-curl \
 
 trap 'trap - EXIT INT TERM; echo; kill 0' EXIT INT TERM
 
-wait_ready() {
-    local url="$1" name="$2" timeout_s="${3:-900}"
-    local deadline=$((SECONDS + timeout_s))
-    echo "Waiting for ${name} ..."
-    while (( SECONDS < deadline )); do
-        if curl -fsS "${url}" 2>/dev/null | grep -q '"status"[[:space:]]*:[[:space:]]*"ready"'; then
-            echo "${name} is ready"
-            return 0
-        fi
-        sleep 1
-    done
-    return 1
-}
-
 COMMON_ENV=(
     "DYN_NAMESPACE=${NAMESPACE}"
     "DYN_REQUEST_PLANE=tcp"

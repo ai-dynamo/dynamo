@@ -126,25 +126,6 @@ echo
 # script itself) doesn't re-enter this trap and loop forever.
 trap 'trap - EXIT INT TERM; echo; echo "Cleaning up..."; kill 0' EXIT INT TERM
 
-wait_ready() {
-    local url="$1"
-    local name="$2"
-    local timeout_s="${3:-240}"
-    local deadline=$((SECONDS + timeout_s))
-
-    echo "Waiting for ${name} at ${url} ..."
-    while (( SECONDS < deadline )); do
-        if curl -fsS "${url}" 2>/dev/null | grep -q '"status"[[:space:]]*:[[:space:]]*"ready"'; then
-            echo "${name} is ready"
-            return 0
-        fi
-        sleep 1
-    done
-
-    echo "Timed out waiting for ${name} (${url})" >&2
-    return 1
-}
-
 wait_frontend_models() {
     local url="$1"
     local timeout_s="${2:-240}"
@@ -207,7 +188,7 @@ done
 # Phase 2: wait for all workers to be ready.
 for i in $(seq 1 "${NUM_WORKERS}"); do
     WORKER_PORT=$(dyn_port DYN_SYSTEM_PORT "$i" $((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2)))
-    wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i" 900
+    wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i" 900 report_url
 done
 
 echo
