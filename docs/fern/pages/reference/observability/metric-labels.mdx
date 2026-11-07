@@ -270,8 +270,8 @@ The `stage` label on `dynamo_epp_stage_duration_seconds`.
 | `pick` | The whole worker pick: `parse` through `book` and the waits between them |
 | `rewrite` | Rewriting the forwarded body: injecting `nvext.token_data`, stripping `nvext`, setting the cache salt |
 | `response_headers` | From the routing decision to the response headers: the gateway sending the body to the sidecar, and the sidecar reading it and answering. Streamed 2xx responses only |
-| `first_response` | From the routing decision to the first non-empty response chunk: the gateway, sidecar and worker producing the first token. Streamed 2xx responses only |
-| `epp_ttft` | From the request headers to the first non-empty response chunk: the time to first token as the EPP sees it. The client's time to first token minus this is the time spent outside the EPP's view, without comparing clocks across nodes. Streamed 2xx responses only |
+| `first_response` | From the routing decision to the first response chunk that carries engine output, not a Responses lifecycle event or an SSE comment: the gateway, sidecar and worker producing the first token. Streamed 2xx responses only |
+| `epp_ttft` | From the request headers to the first response chunk that carries engine output: the time to first token as the EPP sees it. The client's time to first token minus this is the time spent outside the EPP's view, without comparing clocks across nodes. Streamed 2xx responses only |
 
 `parse` through `book` are recorded when the EPP discovers Dynamo workers. In standalone mode, which tokenizes through a render service, only `receive_body`, `model_probe`, `pick`, `rewrite`, `response_headers`, `first_response` and `epp_ttft` are recorded.
 
