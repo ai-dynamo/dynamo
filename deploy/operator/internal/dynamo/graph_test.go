@@ -11587,15 +11587,58 @@ func TestPCSNameForDGD(t *testing.T) {
 			components: nil,
 			want:       "my-dgd",
 		},
+		{
+			name:    "dotted name cut right after a dot drops the dot before the hash",
+			dgdName: "qwen3-0-6b-vllm-production-east.cluster",
+			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				singleNodeComponent("Frontend"),
+				singleNodeComponent("decode"),
+			},
+			// Frontend budget=8, pcsBudget=45-8=37; prefix name[:32] ends in ".".
+			// Without trimming the result is "...east.-82e3", an invalid subdomain.
+			want: "qwen3-0-6b-vllm-production-east-82e3",
+		},
+		{
+			name:    "dotted name cut right after a dot at the minimum budget",
+			dgdName: "ab.my-deployment-dgd",
+			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				multinodeComponent("VllmPrefillWorker"),
+			},
+			// pcsBudget clamped to 8, so the prefix is name[:3] = "ab.".
+			want: "ab-a280",
+		},
+		{
+			// Stability guard, not a regression test for the dot bug: this passes
+			// before the fix too. A prefix ending in "-" already gives a valid name,
+			// so it must stay byte-identical to avoid renaming a running PodCliqueSet.
+			name:    "dotted name cut right after a hyphen keeps the hyphen",
+			dgdName: "qwen3.0-6b-vllm-production-west-cluster",
+			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				singleNodeComponent("Frontend"),
+				singleNodeComponent("decode"),
+			},
+			// pcsBudget=37; prefix name[:32] ends in "-".
+			want: "qwen3.0-6b-vllm-production-west--60cd",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Fixtures must be names the API server admits for a custom resource.
+			if errs := validation.IsDNS1123Subdomain(tt.dgdName); len(errs) > 0 {
+				t.Fatalf("fixture dgdName %q is not a DNS-1123 subdomain: %v", tt.dgdName, errs)
+			}
+
 			dgd := &v1beta1.DynamoGraphDeployment{
 				Name: tt.dgdName,
 				Spec: v1beta1.DynamoGraphDeploymentSpec{Components: tt.components},
 			}
 			got := PCSNameForDGD(dgd, nil)
+
+			// The PodCliqueSet name must itself be a valid object name.
+			if errs := validation.IsDNS1123Subdomain(got); len(errs) > 0 {
+				t.Errorf("PCSNameForDGD() = %q is not a DNS-1123 subdomain: %v", got, errs)
+			}
 
 			if tt.want != "" {
 				if got != tt.want {
