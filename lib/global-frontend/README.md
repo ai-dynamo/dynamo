@@ -27,10 +27,13 @@ given on the command line, the cluster also names the pool's region.
 Every `POST /v1/...` request (chat completions, completions, Responses,
 embeddings, Anthropic messages, and so on) goes to the same route on the
 selected pool's frontend, with the client's headers except hop-by-hop ones,
-including `x-dynamo-session-id`, `x-request-id`, and `authorization`. The pool's
-status, headers, and body come back unchanged, streamed or not, including its
-error responses and SSE keep-alives. A request whose model no pool serves gets
-404, and one whose pool cannot be reached gets 503. `/v1/models` lists the
+including `x-dynamo-session-id`, `x-request-id`, and `authorization`. The
+answering pool's status, headers, and body come back unchanged, streamed or not,
+including its error responses and SSE keep-alives. A request whose model no pool
+serves gets 404. One whose pool cannot take it, by failing to answer or by
+answering 503 or the overload status, goes to another pool (see
+[Failover](#failover)); the last pool tried answers it, or the Global Frontend
+answers 503 if that pool could not be reached. `/v1/models` lists the
 configured models, `/health` is healthy while some pool has a frontend, and
 `/live` always answers.
 
@@ -88,6 +91,30 @@ A producer-generation change clears the previous generation's load until a
 matching window arrives. The round trip to each region is the median TCP connect time to
 its pools, measured every 30 seconds; the request's own region counts as
 zero.
+
+### Failover
+
+A request goes to another pool serving its model, chosen by the same policy
+among the pools not yet tried, when its pool:
+
+- refuses the connection, does not accept it within `--connect-timeout-secs`,
+  or fails before sending response headers, even after receiving the request
+  (so the work may be done twice);
+- answers 503, or the overload status (`DYN_HTTP_OVERLOAD_STATUS_CODE`, 529 by
+  default; set it as on the pool frontends).
+
+Any other status, such as 429 when it is not the overload status, comes back as
+the pool sent it. A request tries at most `--max-failovers` (default 1) other
+pools, and never one twice; 0 turns failover off. Nothing has reached the client
+before a failover. Once a pool answers with any other status, or no other pool
+is left to try, its response is the client's, so a stream never moves between
+pools.
+
+Failover is per request: the pool is not marked unhealthy and `Retry-After` is
+ignored, so the next request may choose it again. The request stops counting
+in flight to a pool before the next pool is chosen. With `affinity`, the next
+pool is chosen as for a request without a session, so the session's pin stays
+on the pool that could not take the request.
 
 ### Session affinity storage
 
@@ -274,8 +301,10 @@ and GDS removes the router after its lease expires. Both flags require `--global
 named `dynamo_global_frontend_*`: requests per pool by response status,
 `no_response` when the pool sends no response, or `cancelled` when the client
 leaves before the pool's response headers arrive; requests answered without a
-pool; time to first byte and duration per pool; and requests in flight per
-pool. With `--router-policy affinity` it also serves:
+pool; failovers, by why the pool before could not take the request
+(`no_response`, `unavailable` or `overloaded`); time to first byte and duration
+per pool; and requests in flight per pool. With `--router-policy affinity` it
+also serves:
 
 - `overhead_affinity_store_ms`, the time each session request spent in affinity
   storage, named and bucketed like the local router's
@@ -291,7 +320,8 @@ pool. With `--router-policy affinity` it also serves:
 The `pool` label is the pool's
 `<cluster>/<namespace>/<DGD name>` and `region` its region. On requests, `local`
 says whether the pool is in `--region` (`unknown` without it), which gives the
-share of requests kept in the region. Nothing is labelled from the request
+share of requests kept in the region. A request that fails over counts once
+for each pool it was sent to. Nothing is labelled from the request
 body. Inter-token latency and token counts need the stream parsed, so they come
 from the pool frontends' own metrics. See the
 [Metrics Catalog](../../docs/fern/pages/reference/observability/metrics-catalog.mdx#global-frontend-metrics)
@@ -299,9 +329,15 @@ for each family.
 
 ## Deployment notes
 
-- The Global Frontend holds a request's body, as received, only until it is
-  written to the pool, not while the pool queues it. The body limit is
+- The Global Frontend holds a request's body, as received, until the pool it
+  was sent to answers, if another pool could take the request after it; the
+  last pool a request can try gets it without the body being held. A Dynamo
+  pool frontend answers a request that is not streamed only when generation
+  ends, so with failover on and more than one pool for the model, such a
+  request's body is held for as long as it runs. The body limit is
   `DYN_HTTP_BODY_LIMIT_MB` (default 45), as for Dynamo's HTTP service.
+- A request to a pool whose connections time out rather than being refused
+  waits up to `--connect-timeout-secs` (default 5) for each such pool it tries.
 - A client that disconnects closes its connection to the pool, which cancels
   the request there.
 - Requests to other regions go over long-lived connections that sit idle
@@ -311,8 +347,14 @@ for each family.
 
 ## Limitations
 
-Pool registration remains the Relay deployment's responsibility. There is no
-automatic forwarding retry: unreachable pools return 503. The listener has no TLS.
+Pool registration remains the Relay deployment's responsibility. The listener
+has no TLS.
+
+Failover tries other pools, not other frontends of the same pool: a pool with
+one failing frontend sends the request to another pool, and a model served by
+one pool does not fail over. With `round-robin`, choosing the next pool takes
+the model's next turn, so a pool that keeps failing gets more than its share of
+first attempts.
 
 ## Tests
 

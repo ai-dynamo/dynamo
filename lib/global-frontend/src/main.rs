@@ -71,6 +71,11 @@ struct Args {
     /// How long to wait for a pool frontend to accept a connection.
     #[arg(long, default_value_t = 5)]
     connect_timeout_secs: u64,
+    /// How many other pools a request may be sent to when its pool refuses
+    /// the connection, fails before answering, or answers 503 or the overload
+    /// status (`DYN_HTTP_OVERLOAD_STATUS_CODE`). 0 turns failover off.
+    #[arg(long, default_value_t = 1)]
+    max_failovers: usize,
     #[arg(long, value_enum, default_value_t = RouterPolicy::RoundRobin)]
     router_policy: RouterPolicy,
     /// The region this process runs in. Affinity prefers it, and metrics
@@ -303,7 +308,14 @@ async fn main() -> Result<()> {
     if let Some((counters, store_ms)) = affinity_metrics {
         metrics = metrics.with_affinity(counters.affinity, counters.cache, store_ms);
     }
-    let app = app(pools, selector, in_flight, http, metrics);
+    let app = app(
+        pools,
+        selector,
+        in_flight,
+        http,
+        metrics,
+        args.max_failovers,
+    );
     let address = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&address)
         .await
