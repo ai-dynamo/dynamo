@@ -44,6 +44,8 @@ from .utils import PreprocessError, legacy_guided_decoding, random_call_id
 
 logger = logging.getLogger(__name__)
 
+_DEEPSEEK_V41_IMAGE_PLACEHOLDER = "<｜deepseek_image｜>"
+
 # Union of parser types used for tool call detection.
 # - FunctionCallParser: model-specific format detection (tool_choice="auto")
 # - JsonArrayParser: direct JSON array parsing under constrained decoding
@@ -466,7 +468,9 @@ def _filter_template_tools(
     return [tool.model_dump() for tool in sglang_tools]
 
 
-def _flatten_message_content(content: Any) -> Any:
+def _flatten_message_content(
+    content: Any, *, image_placeholder: str | None = None
+) -> Any:
     """Flatten an OpenAI content-parts array to a plain string for the DSv4 encoder.
 
     SGLang's DeepSeek-V4 encoder (``encoding_dsv4.encode_messages``) consumes
@@ -477,20 +481,20 @@ def _flatten_message_content(content: Any) -> Any:
     ``[{"type": "text", "text": "..."}]`` crashes the encoder with
     ``TypeError: sequence item 0: expected str instance, list found``.
 
-    Replicate SGLang's ``"string"``-format behaviour for byte-parity with native
-    SGLang serving: join the text parts with a single space and drop non-text
-    parts (DSv4 is text-only). Non-list content (``str``/``None``) is returned
-    unchanged.
+    Join the text parts with a single space. When the model supports image
+    inputs, insert the placeholder at the position of each image part.
+    Non-list content (``str``/``None``) is returned unchanged.
     """
     if not isinstance(content, list):
         return content
-    text_parts = [
-        part["text"]
-        for part in content
-        if isinstance(part, dict)
-        and part.get("type") == "text"
-        and isinstance(part.get("text"), str)
-    ]
+    text_parts = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text" and isinstance(part.get("text"), str):
+            text_parts.append(part["text"])
+        elif image_placeholder is not None and part.get("type") == "image_url":
+            text_parts.append(image_placeholder)
     return " ".join(text_parts)
 
 
@@ -527,6 +531,7 @@ def _render_deepseek_v4_prompt_token_ids(
     messages: list[dict[str, Any]],
     tokenizer,
     template_tools: list[dict[str, Any]] | None,
+    image_placeholder: str | None = None,
 ) -> list[int]:
     """Render DeepSeek-V4 prompt token ids via SGLang's ``encoding_dsv4``.
 
@@ -551,7 +556,13 @@ def _render_deepseek_v4_prompt_token_ids(
         if content is None:
             msg["content"] = ""
         else:
-            msg["content"] = _flatten_message_content(content)
+            # The media side channel extracts images from user messages only.
+            msg["content"] = _flatten_message_content(
+                content,
+                image_placeholder=(
+                    image_placeholder if msg.get("role") == "user" else None
+                ),
+            )
 
         # encoding_dsv4.encode_arguments_to_dsml expects tool_call.arguments as
         # the OpenAI-wire JSON *string* (it json.loads() internally).
@@ -977,11 +988,20 @@ def preprocess_chat_request(
         tool_call_parser_name=tool_call_parser_name,
         reasoning_parser_name=reasoning_parser_name,
     ):
+        is_v41 = any(
+            "deepseekv41" in _normalize_deepseek_v4_hint(hint).replace(".", "")
+            for hint in (
+                request.get("model"),
+                tool_call_parser_name,
+                reasoning_parser_name,
+            )
+        )
         prompt_token_ids = _render_deepseek_v4_prompt_token_ids(
             request,
             messages=messages,
             tokenizer=tokenizer,
             template_tools=template_tools,
+            image_placeholder=_DEEPSEEK_V41_IMAGE_PLACEHOLDER if is_v41 else None,
         )
     else:
         # Build template kwargs -- single call for rendering + tokenization
