@@ -6078,7 +6078,9 @@ impl OpenAIPreprocessor {
                 start_token,
             ))
         } else {
-            Box::pin(stream)
+            // Already boxed: boxing it again would cost an allocation per request and a call
+            // per item.
+            stream
         };
         // A MiniMax M3 parser can also release held text in an end-of-stream
         // chunk (see `finalize_parser_at_finish`), so its usage is held too.
@@ -6120,7 +6122,7 @@ impl OpenAIPreprocessor {
                     stream,
                 ))
             }
-            ToolProcessingRoute::PassThrough => Box::pin(stream),
+            ToolProcessingRoute::PassThrough => stream,
             ToolProcessingRoute::Unified(_) => {
                 unreachable!("unified routes return before legacy response processing")
             }
