@@ -4731,8 +4731,8 @@ Worker components receive the following probe configurations:
 - **Path**: `/health`
 - **Port**: `system` (9090)
 - **Period**: 10 seconds
-- **Timeout**: 30 seconds
-- **Failure Threshold**: 60
+- **Timeout**: 4 seconds
+- **Failure Threshold**: 3
 
 **Startup Probe:**
 - **Type**: HTTP GET
@@ -4744,6 +4744,8 @@ Worker components receive the following probe configurations:
 
 > [!NOTE]
 > For larger models (typically >70B parameters) or slower storage systems, you may need to increase the `failureThreshold` to allow more time for model loading. Calculate the required threshold based on your expected startup time: `failureThreshold = (expected_startup_seconds / period)`. Override the startup probe in your component specification if the default 2-hour window is insufficient.
+
+User-specified probes replace these defaults. Multinode roles and some backends change or remove them, as described in Multinode Deployment Probe Modifications below.
 
 ### Multinode Deployment Probe Modifications
 
