@@ -469,7 +469,7 @@ def _opencode_cli(_tools_cache, _node_bin) -> Path:
 
 
 @pytest.mark.sglang
-@pytest.mark.core
+@pytest.mark.frontend
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.model(COMPLIANCE_MODEL)

@@ -198,6 +198,7 @@ vllm_configs = {
         env={"VLLM_USE_V2_MODEL_RUNNER": "0"},
         marks=[
             pytest.mark.core,
+            pytest.mark.smoke,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -412,6 +413,7 @@ vllm_configs = {
         script_name="agg_router.sh",
         marks=[
             pytest.mark.gpu_2,
+            pytest.mark.smoke,
             pytest.mark.router,
             pytest.mark.pre_merge,
             pytest.mark.timeout(600),
@@ -449,6 +451,7 @@ vllm_configs = {
         script_name="disagg.sh",
         marks=[
             pytest.mark.core,
+            pytest.mark.smoke,
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
             pytest.mark.timeout(720),  # 3x ~240s local runtime
