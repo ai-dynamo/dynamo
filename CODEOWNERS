@@ -74,6 +74,9 @@
 /components/src/dynamo/frontend/                                                                        @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/frontend/tests/                                                                  @ai-dynamo/dynamo-frontend-codeowners
 
+# === agents  (@ai-dynamo/dynamo-agents-codeowners) ===
+/examples/agents/                                                                                       @ai-dynamo/dynamo-agents-codeowners
+
 # === router  (@ai-dynamo/dynamo-router-codeowners) ===
 /lib/kv-router/                                                                                         @ai-dynamo/dynamo-router-codeowners
 /lib/router-plugins/                                                                                    @ai-dynamo/dynamo-router-codeowners
@@ -646,6 +649,7 @@ requirements.txt                                                                
 /lib/sidecar/testkit/                                                                                   @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /recipes/**/sglang/**                                                                                   @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
 /recipes/**/trtllm/**                                                                                   @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
+/.ai/metrics-review.md                                                                                  @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-observability-codeowners
 /.devcontainer/sglang/                                                                                  @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
 /.devcontainer/trtllm/                                                                                  @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners
 /lib/sidecar/README.md                                                                                  @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-sidecar-codeowners
