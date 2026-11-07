@@ -22,9 +22,13 @@ The HTTP API follows the [Mooncake KV Indexer RFC](https://github.com/kvcache-ai
 
 `DYN_ROUTER_MIN_INITIAL_WORKERS` is also honored here. When set to a positive integer, the
 standalone indexer registers the initial `--workers` entries, attempts `--peers` recovery, and
-then waits for that catalog count before binding its HTTP listener. Because `/register` is
-unavailable during this wait, the threshold must be met by initial workers, workers recovered
-from peers, or a combination of both.
+then waits until that many workers are registered before binding its HTTP listener. The count
+is the number of distinct worker instance IDs, so several dp_ranks of one instance count once.
+Because `/register` is unavailable during this wait, only the initial `--workers` entries can
+meet the threshold. `--peers` recovery restores cached index state but registers no workers,
+because a peer dump carries no worker endpoints. If the threshold is higher than the number of
+distinct instance IDs in `--workers`, the indexer waits until shutdown without a log message or
+timeout, and its HTTP listener never binds.
 
 ## Model and Routing Group Support
 
@@ -58,7 +62,7 @@ Multiple indexer replicas can subscribe to the same ZMQ worker endpoints for fau
 2. A 1-second delay biases peer recovery past the slow-joiner window, so the dump covers events that may have occurred before a fresh listener can safely start draining.
 3. The indexer fetches a `/dump` from the first reachable peer in `--peers`.
 4. Dump events are applied to populate the radix tree.
-5. After recovery completes, the ready gate opens. Any listener whose initial ZMQ connect has already succeeded transitions to `active` and begins draining buffered events; listeners for workers that are still down remain `pending` until they connect.
+5. After recovery completes (and, when `DYN_ROUTER_MIN_INITIAL_WORKERS` is set, after enough initial `--workers` are registered), the ready gate opens. Each listener whose local ZMQ socket setup succeeded then transitions to `active` and begins draining buffered events. ZMQ `connect()` does not wait for the worker, so a listener for a worker that is still down is also `active`; ZMQ keeps retrying that endpoint in the background, and events arrive once the worker is up.
 
 If no peers are reachable, the indexer starts with an empty state.
 
@@ -141,8 +145,9 @@ python -m dynamo.indexer --port 8090 [--threads 4] [--block-size 16 --model-name
 Set `DYN_ROUTER_MIN_INITIAL_WORKERS=<n>` to require at least `<n>` workers before the
 standalone indexer, frontend push-router path, and KV router config-ready gate all proceed.
 For the standalone indexer, the gate runs before the HTTP listener is bound, so its count can
-only be satisfied by initial `--workers` and workers recovered through `--peers`; `/register`
-cannot satisfy it. Leave the variable unset or set it to `0` to disable the startup wait.
+only be satisfied by distinct instance IDs in the initial `--workers`; `/register` cannot
+satisfy it, and `--peers` recovery restores index state without registering workers. Leave
+the variable unset or set it to `0` to disable the startup wait.
 
 ## HTTP API
 
