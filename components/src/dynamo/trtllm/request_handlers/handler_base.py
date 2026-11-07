@@ -22,6 +22,7 @@ import os
 import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
 
@@ -78,6 +79,15 @@ from dynamo.trtllm.utils.request_utils import (
     apply_stop_conditions_to_sampling_params,
     normalize_top_k_for_trtllm,
     request_cache_salt,
+)
+from dynamo.trtllm.utils.retained_prefix import (
+    apply_options as apply_retained_prefix_options,
+)
+from dynamo.trtllm.utils.retained_prefix import (
+    export_options as retained_prefix_export_options,
+)
+from dynamo.trtllm.utils.retained_prefix import (
+    request_options as retained_prefix_request_options,
 )
 
 if TYPE_CHECKING:
@@ -609,7 +619,7 @@ class HandlerBase(BaseGenerativeHandler):
             - disaggregated_params: Decoded LlmDisaggregatedParams object
             - epd_metadata: Dictionary containing EPD-specific metadata (_epd_processed_prompt, etc.)
         """
-        params_dict = prefill_result["disaggregated_params"]
+        params_dict = deepcopy(prefill_result["disaggregated_params"])
 
         # Remove worker_id if present (added by prefill worker, not needed for decode)
         params_dict.pop("worker_id", None)
@@ -632,6 +642,13 @@ class HandlerBase(BaseGenerativeHandler):
         )
         # Set to generation_only mode for decode phase
         disaggregated_params.request_type = "generation_only"
+        # A retained source was consumed by P. Older TRT dataclasses do not
+        # declare this opt-in field; ordinary handoffs keep their old schema.
+        if any(
+            field.name == "retained_prefix"
+            for field in dataclasses.fields(disaggregated_params)
+        ):
+            disaggregated_params.retained_prefix = None
 
         # In generation-only mode, multimodal embeddings are already processed and in KV cache
         # Remove multimodal_embedding_handles to avoid TRT-LLM validation error
@@ -708,6 +725,14 @@ class HandlerBase(BaseGenerativeHandler):
 
         logging.debug("PREFILL: Successfully encoded disaggregated params")
         params_dict = asdict(encoded_params)
+        # Keep default handoffs readable by older TRT workers. Only explicit
+        # native retention writes the new opt-in fields across the boundary.
+        if (
+            not params_dict.get("retain_prefix")
+            and params_dict.get("retained_prefix") is None
+        ):
+            params_dict.pop("retain_prefix", None)
+            params_dict.pop("retained_prefix", None)
 
         # Serialize first_gen_log_probs for the Rust transport layer.
         DisaggregatedParamsCodec.serialize_first_gen_log_probs(params_dict)
@@ -781,11 +806,16 @@ class HandlerBase(BaseGenerativeHandler):
         """
         disaggregated_params = None
         epd_metadata: dict[str, Any] = {}
+        retained_options = retained_prefix_request_options(request)
 
         use_request_disagg_params = request.get(HEALTH_CHECK_KEY) or (
             self.disaggregation_mode == DisaggregationMode.DECODE
             and BYPASS_REMOTE_PREFILL_ANNOTATION in (request.get("annotations") or [])
         )
+        if retained_options is not None and use_request_disagg_params:
+            raise InvalidArgument(
+                "retained-prefix options are unsupported for probes and bypasses"
+            )
 
         if (
             use_request_disagg_params
@@ -853,6 +883,16 @@ class HandlerBase(BaseGenerativeHandler):
             # For full EPD flow, make decoded params available to multimodal processor
             ep_disaggregated_params = disaggregated_params
 
+        if retained_options is not None:
+            disaggregated_params = apply_retained_prefix_options(
+                disaggregated_params,
+                retained_options,
+                enabled=self.engine.engine_args.get("native_retained_prefix")
+                is not None,
+                prefill=self.disaggregation_mode == DisaggregationMode.PREFILL,
+            )
+            if ep_disaggregated_params is not None:
+                ep_disaggregated_params = disaggregated_params
         return disaggregated_params, ep_disaggregated_params, epd_metadata
 
     async def _prepare_input_for_generation(
@@ -1468,6 +1508,21 @@ class HandlerBase(BaseGenerativeHandler):
                             )
                             if params_dict is not None:
                                 out["disaggregated_params"] = params_dict
+                        elif (
+                            self.disaggregation_mode == DisaggregationMode.DECODE
+                            and retained_prefix_request_options(request) is not None
+                        ):
+                            retained_export = retained_prefix_export_options(
+                                output.disaggregated_params,
+                                enabled=self.engine.engine_args.get(
+                                    "native_retained_prefix"
+                                )
+                                is not None,
+                            )
+                            if retained_export is not None:
+                                out.setdefault("engine_data", {})[
+                                    "trtllm_retained_prefix"
+                                ] = retained_export
 
                         if out.get("finish_reason") or res.finished:
                             if not out.get("finish_reason"):
