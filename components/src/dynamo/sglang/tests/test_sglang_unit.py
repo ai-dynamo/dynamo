@@ -854,11 +854,17 @@ async def test_parse_args_rejects_mla_dcp_on_backend_without_dcp_decode(
 async def test_parse_args_rejects_mla_dcp_on_dsa_backend(
     monkeypatch, mock_sglang_cli, tmp_path, overrides
 ):
-    """SGLang overrides the default to dsa for DSA models, whose decode returns no LSE."""
+    """Older SGLang builds must reject DSA decode without DCP support."""
     # The platform default alone would accept; the DSA override must win.
     monkeypatch.setattr(
         "dynamo.sglang._compat.sglang_get_default_attn_backend",
         lambda *_: "flashinfer",
+    )
+    # DSA is rejected only on SGLang builds without DSA DCP decode (< 0.5.22).
+    # Pin that condition so the test does not depend on the installed SGLang.
+    monkeypatch.setattr(
+        "dynamo.sglang.args.sglang_dsa_supports_decode_context_parallel",
+        lambda: False,
     )
     hf_config = SimpleNamespace(
         architectures=["DeepseekV32ForCausalLM"], index_topk=2048
@@ -888,15 +894,19 @@ async def test_parse_args_rejects_mla_dcp_on_dsa_backend(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("decode_backend", ["cutedsl_mla", "fa3"])
+@pytest.mark.parametrize(
+    "architecture",
+    ["KimiK3ForConditionalGeneration", "KimiK31ForConditionalGeneration"],
+)
 async def test_kimi_k3_dcp_defers_automatic_backend_until_engine_resolution(
-    monkeypatch, mock_sglang_cli, tmp_path, decode_backend
+    monkeypatch, mock_sglang_cli, tmp_path, decode_backend, architecture
 ):
-    """Do not reject Kimi-K3 using Hopper's generic default; check resolved decode."""
+    """Defer Kimi-K3/K3.1 backend prediction; still check the resolved decode."""
     platform_default = Mock(return_value="fa3")
     monkeypatch.setattr(
         "dynamo.sglang._compat.sglang_get_default_attn_backend", platform_default
     )
-    hf_config = SimpleNamespace(architectures=["KimiK3ForConditionalGeneration"])
+    hf_config = SimpleNamespace(architectures=[architecture])
     server_args = _dcp_server_args_stub(
         dcp_size=2,
         use_mla_backend=lambda: True,
@@ -924,6 +934,45 @@ async def test_kimi_k3_dcp_defers_automatic_backend_until_engine_resolution(
         resolved = config.use_resolved_server_args(engine_args)
         assert resolved.decode_attention_backend == "cutedsl_mla"
         assert config.server_args is resolved
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["dsa", "nsa"])
+async def test_parse_args_accepts_sparse_mla_dcp_when_engine_supports_it(
+    monkeypatch, mock_sglang_cli, tmp_path, backend
+):
+    monkeypatch.setattr(
+        sglang_args, "sglang_dsa_supports_decode_context_parallel", lambda: True
+    )
+    server_args = _dcp_server_args_stub(
+        dcp_size=8, use_mla_backend=lambda: True, attention_backend=backend
+    )
+    monkeypatch.setattr(sglang_args.ServerArgs, "from_cli_args", lambda _: server_args)
+    mock_sglang_cli(model=str(tmp_path), attention_backend=backend)
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args is server_args
+    assert config.use_resolved_server_args(server_args).attention_backend == backend
+
+
+@pytest.mark.parametrize("probe_result", [object(), None, ModuleNotFoundError()])
+def test_dsa_dcp_capability_depends_on_installed_engine(monkeypatch, probe_result):
+    def find_spec(module_name):
+        assert module_name == "sglang.srt.layers.attention.dsa.dsa_dcp"
+        if isinstance(probe_result, Exception):
+            raise probe_result
+        return probe_result
+
+    monkeypatch.setattr(sglang_compat.importlib.util, "find_spec", find_spec)
+    probe = sglang_compat.sglang_dsa_supports_decode_context_parallel
+    probe.cache_clear()
+    try:
+        assert probe() is (
+            probe_result is not None and not isinstance(probe_result, Exception)
+        )
+    finally:
+        probe.cache_clear()
 
 
 def _raise_runtime_error(*_):

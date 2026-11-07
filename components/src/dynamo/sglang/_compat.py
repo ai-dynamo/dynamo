@@ -22,6 +22,7 @@ Runtime data-contract notes (not code-level shims):
 
 import argparse
 import importlib
+import importlib.util
 import inspect
 import json
 import logging
@@ -144,10 +145,15 @@ def sglang_default_mla_attention_backend(server_args: Any) -> str | None:
     try:
         model_config = get_sglang_model_config(server_args)
         hf_config = getattr(model_config, "hf_config", None)
-        if "KimiK3ForConditionalGeneration" in (
-            getattr(hf_config, "architectures", None) or []
+        architectures = getattr(hf_config, "architectures", None) or []
+        if any(
+            architecture in architectures
+            for architecture in (
+                "KimiK3ForConditionalGeneration",
+                "KimiK31ForConditionalGeneration",
+            )
         ):
-            # Kimi-K3 resolves separate prefill/decode backends for DCP. The
+            # Kimi-K3/K3.1 resolve separate prefill/decode backends for DCP. The
             # platform default (fa3 on Hopper) is not its decode backend.
             # Defer to the engine's resolved configuration instead of guessing
             # or running SGLang's kernel capability checks during CLI parsing.
@@ -165,6 +171,20 @@ def sglang_default_mla_attention_backend(server_args: Any) -> str | None:
         )
         return None
     return backend if isinstance(backend, str) else None
+
+
+_SGLANG_DSA_DCP_MODULE = "sglang.srt.layers.attention.dsa.dsa_dcp"
+
+
+@lru_cache(maxsize=1)
+def sglang_dsa_supports_decode_context_parallel() -> bool:
+    """Detect the DSA DCP implementation without trusting development versions."""
+    # Fallback for SGLang 0.5.21. Remove when the oldest supported build
+    # includes DSA DCP (upstream 0.5.22+).
+    try:
+        return importlib.util.find_spec(_SGLANG_DSA_DCP_MODULE) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def publish_server_args(server_args: Any, *, role: str) -> None:
