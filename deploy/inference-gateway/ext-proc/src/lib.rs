@@ -16,6 +16,7 @@ pub mod epp;
 pub mod epp_router;
 pub mod epp_standalone_config;
 pub mod inference_pool;
+mod log_budget;
 pub mod metrics;
 pub mod peer_discovery;
 pub mod picker;
@@ -26,6 +27,7 @@ pub mod render_http;
 mod runner;
 pub mod selector;
 pub mod server;
+mod tokio_runtime;
 pub mod topology_adapter;
 
 pub use epp::Router;
@@ -34,11 +36,12 @@ pub use epp_standalone_config::{
     EppMode, EppStandaloneConfig, PeerReplicationConfig, RendererProtocol,
 };
 pub use inference_pool::PoolState;
-pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo, ResponseUsage};
+pub use picker::{Endpoint, EndpointPicker, PickResult, PickTimings, RequestInfo, ResponseUsage};
 pub use pod_discovery::{PodDiscovery, RawWorker};
 pub use render_client::RenderClient;
 pub use render_http::RenderError;
 pub use runner::run;
 pub use selector::{OverlapSummary, SelectRequest, SelectResponse, Selector};
 pub use server::ExtProcServer;
+pub use tokio_runtime::build_runtime;
 pub use topology_adapter::{RegistrationDefaults, TopologyAdapter};
