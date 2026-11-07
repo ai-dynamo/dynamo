@@ -1130,6 +1130,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_ids: set[str] = set()
         first_output_seen = False
         usage_metadata_by_index: dict[int, tuple[int, int | None]] = {}
+        # Prompt logprobs are the same for every choice; send them once per
+        # choice index (see below).
+        prompt_payload: list | None = None
+        prompt_payload_sent: set[int] = set()
         async with self._cancellation_monitor(
             request_id_future,
             context,
@@ -1180,6 +1184,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if stop_reason is not None:
                         out["stop_reason"] = stop_reason
 
+                # Read prompt logprobs from any chunk, including an empty one,
+                # until found. Uploaded metadata carries them instead.
+                if metadata_uploader is None and prompt_payload is None:
+                    prompt_payload = (
+                        _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(
+                            meta_info, prompt_logprobs_count=prompt_logprobs_count
+                        )
+                    )
+
                 # With stream_output=True, output_ids contains only new tokens (disjoint)
                 output_ids = res.get("output_ids", [])
                 # Keep draining empty, non-final chunks after cancellation so the
@@ -1225,14 +1238,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     out["completion_usage"] = usage
                     usage_metadata_by_index[output_idx] = usage_metadata
 
+                # Send on the first token output: a stop-string match can cancel the stream
+                # before the terminal output. Once per choice: echo reads it per choice index.
+                if prompt_payload is not None and output_idx not in prompt_payload_sent:
+                    engine_data["prompt_logprobs"] = prompt_payload
+                    prompt_payload_sent.add(output_idx)
+
                 if finish_reason:
-                    prompt_payload = (
-                        _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(
-                            meta_info, prompt_logprobs_count=prompt_logprobs_count
-                        )
-                    )
-                    if prompt_payload is not None and metadata_uploader is None:
-                        engine_data["prompt_logprobs"] = prompt_payload
                     # Router-facing, so kept even when metadata is uploaded instead.
                     kv_cache_hit = (
                         _kv_cache_hit_engine_data(meta_info)

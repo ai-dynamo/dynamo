@@ -58,12 +58,15 @@ def _output(
     )
 
 
-def _request_output(outputs, *, prompt_token_ids=None, num_cached_tokens=0):
+def _request_output(
+    outputs, *, prompt_token_ids=None, num_cached_tokens=0, prompt_logprobs=None
+):
     return SimpleNamespace(
         outputs=outputs,
         prompt_token_ids=prompt_token_ids if prompt_token_ids is not None else [101],
         num_cached_tokens=num_cached_tokens,
         kv_transfer_params=None,
+        prompt_logprobs=prompt_logprobs,
     )
 
 
@@ -84,16 +87,27 @@ def _handler_with_responses(responses):
     return handler
 
 
-async def _collect_handler_chunks(responses):
+async def _collect_handler_chunks(
+    responses, *, sampling_params=None, max_chunks=None, **kwargs
+):
+    """Collect worker chunks. ``max_chunks`` stops reading early, as the
+    frontend does when it matches a stop string and cancels the worker."""
     handler = _handler_with_responses(responses)
-    chunks = []
-    async for chunk in BaseWorkerHandler.generate_tokens(
+    stream = BaseWorkerHandler.generate_tokens(
         handler,
         prompt=None,
-        sampling_params=SamplingParams(),
+        sampling_params=sampling_params or SamplingParams(),
         request_id="req-1",
-    ):
-        chunks.append(chunk)
+        **kwargs,
+    )
+    chunks = []
+    try:
+        async for chunk in stream:
+            chunks.append(chunk)
+            if max_chunks is not None and len(chunks) >= max_chunks:
+                break
+    finally:
+        await stream.aclose()
     return chunks, handler
 
 
@@ -336,3 +350,95 @@ async def test_generate_tokens_keeps_multichunk_delta_logprobs_aligned():
     assert [
         [entry[0]["token_id"] for entry in chunk["top_logprobs"]] for chunk in chunks
     ] == [[7], [8, 9]]
+
+
+# vLLM's raw prompt_logprobs for a two-token prompt, and its serialized form.
+_RAW_PROMPT_LOGPROBS = [
+    None,
+    {11: SimpleNamespace(logprob=-0.5, rank=1, decoded_token="b")},
+]
+_PROMPT_LOGPROBS_PAYLOAD = [
+    None,
+    {"11": {"logprob": -0.5, "rank": 1, "decoded_token": "b"}},
+]
+
+
+def _chunks_with_prompt_logprobs(chunks):
+    return [
+        i
+        for i, chunk in enumerate(chunks)
+        if "prompt_logprobs" in (chunk.get("engine_data") or {})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_tokens_sends_prompt_logprobs_before_terminal():
+    # The frontend matches a stop string after the second chunk and cancels
+    # the worker, so the terminal output is never read.
+    responses = [
+        _request_output(
+            [_output([1])],
+            prompt_token_ids=[10, 11],
+            prompt_logprobs=_RAW_PROMPT_LOGPROBS,
+        ),
+        _request_output([_output([2])], prompt_token_ids=[10, 11]),
+        _request_output(
+            [_output([3], finish_reason="length")], prompt_token_ids=[10, 11]
+        ),
+    ]
+
+    chunks, _ = await _collect_handler_chunks(responses, max_chunks=2)
+
+    assert [chunk["token_ids"] for chunk in chunks] == [[1], [2]]
+    assert all("finish_reason" not in chunk for chunk in chunks)
+    assert chunks[0]["engine_data"]["prompt_logprobs"] == _PROMPT_LOGPROBS_PAYLOAD
+    assert "engine_data" not in chunks[1]
+
+
+@pytest.mark.asyncio
+async def test_generate_tokens_sends_late_prompt_logprobs_once():
+    responses = [
+        _request_output([_output([1])], prompt_token_ids=[10, 11]),
+        _request_output(
+            [_output([2])],
+            prompt_token_ids=[10, 11],
+            prompt_logprobs=_RAW_PROMPT_LOGPROBS,
+        ),
+        _request_output(
+            [_output([3], finish_reason="length")], prompt_token_ids=[10, 11]
+        ),
+    ]
+
+    chunks, _ = await _collect_handler_chunks(responses)
+
+    assert _chunks_with_prompt_logprobs(chunks) == [1]
+    assert chunks[1]["engine_data"]["prompt_logprobs"] == _PROMPT_LOGPROBS_PAYLOAD
+
+
+@pytest.mark.asyncio
+async def test_generate_tokens_sends_prompt_logprobs_once_per_choice():
+    # The completions echo path reads the payload per choice index, so each
+    # choice's first token output carries it.
+    responses = [
+        _request_output(
+            [_output([1], index=0), _output([10], index=1)],
+            prompt_token_ids=[10, 11],
+            prompt_logprobs=_RAW_PROMPT_LOGPROBS,
+        ),
+        _request_output(
+            [
+                _output([2], index=0, finish_reason="length"),
+                _output([12], index=1, finish_reason="length"),
+            ],
+            prompt_token_ids=[10, 11],
+        ),
+    ]
+
+    chunks, _ = await _collect_handler_chunks(
+        responses, sampling_params=SamplingParams(n=2)
+    )
+
+    assert [chunk["index"] for chunk in chunks] == [0, 1, 0, 1]
+    assert _chunks_with_prompt_logprobs(chunks) == [0, 1]
+    for chunk in chunks[:2]:
+        assert chunk["engine_data"]["prompt_logprobs"] == _PROMPT_LOGPROBS_PAYLOAD
