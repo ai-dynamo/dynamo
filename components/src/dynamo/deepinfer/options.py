@@ -64,8 +64,10 @@ class DeepInferOptions:
     kv_lease_s: float = 120.0
     prefix_snapshot_interval: int = 32768
     prefix_snapshot_slots: int = 256
-    prefix_snapshot_device: str = "gpu"
+    # None: on host with the host tier, else on GPU.
+    prefix_snapshot_device: Optional[str] = None
     prefix_free_watermark: float = 0.05
+    prefix_host_bytes: int = 0
     rank0_in_process: bool = True
     startup_timeout_s: float = 3600.0
     engine_overrides: dict[str, Any]
@@ -148,6 +150,7 @@ class DeepInferOptions:
                 "snapshot_slots": self.prefix_snapshot_slots,
                 "snapshot_device": self.prefix_snapshot_device,
                 "free_watermark": self.prefix_free_watermark,
+                "host_bytes": self.prefix_host_bytes,
             }
         events = self.kv_cache_manager != "none"
         per_node = self.ranks_per_node
@@ -221,8 +224,21 @@ def add_deepinfer_arguments(parser: argparse.ArgumentParser) -> None:
     g.add_argument("--kv-lease-s", type=float, default=120.0)
     g.add_argument("--prefix-snapshot-interval", type=int, default=32768)
     g.add_argument("--prefix-snapshot-slots", type=int, default=256)
-    g.add_argument("--prefix-snapshot-device", choices=["gpu", "host"], default="gpu")
+    g.add_argument(
+        "--prefix-snapshot-device",
+        choices=["gpu", "host"],
+        default=None,
+        help="Where prefix snapshots live (default: host with --prefix-host-bytes, else gpu).",
+    )
     g.add_argument("--prefix-free-watermark", type=float, default=0.05)
+    g.add_argument(
+        "--prefix-host-bytes",
+        type=parse_size,
+        default=0,
+        help="Per rank: pinned host memory for prefix blocks evicted from the GPU "
+        "(and the snapshots on host), e.g. 80GiB; 0 turns the host tier off. "
+        "Clamped at startup to keep 10%% of the host's memory available.",
+    )
     g.add_argument(
         "--rank0-in-process",
         action=argparse.BooleanOptionalAction,
@@ -317,6 +333,8 @@ def finalize_options(opts: Any, ns: argparse.Namespace) -> None:
 def validate_options(opts: Any) -> None:
     if opts.dp_size < 1:
         raise ValueError("--dp-size must be >= 1")
+    if opts.prefix_host_bytes and opts.kv_cache_manager != "prefix":
+        raise ValueError("--prefix-host-bytes needs --kv-cache-manager prefix")
     if opts.nnodes < 1 or not 0 <= opts.node_rank < opts.nnodes:
         raise ValueError(
             f"--node-rank {opts.node_rank} is outside 0..{opts.nnodes - 1} (--nnodes)"
@@ -465,6 +483,19 @@ def route_address(peer: str, port: int) -> str:
             return s.getsockname()[0]
     except OSError:
         return socket.gethostname()
+
+
+_SIZE_UNITS = {"": 1, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40}
+
+
+def parse_size(text: str) -> int:
+    """Bytes: an integer, or a number with K/M/G/T (binary, optional "iB"/"B")."""
+    value = text.strip().lower().removesuffix("b").removesuffix("i")
+    unit = value[-1:] if value[-1:].isalpha() else ""
+    try:
+        return int(float(value[: len(value) - len(unit)]) * _SIZE_UNITS[unit])
+    except (KeyError, ValueError):
+        raise argparse.ArgumentTypeError(f"not a size: {text!r}") from None
 
 
 def parse_engine_overrides(items: Sequence[str]) -> dict[str, Any]:
