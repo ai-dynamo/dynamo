@@ -23,3 +23,8 @@ optimization:
   target: throughput
   constraints: {max_candidate_gpus: 1}
 optimizer: {algorithm: random, max_trials: 1, parallelism: 1, candidate_timeout_seconds: 30.0, seed: 21}
+# Slow CI runners can exceed AISimulate's 60 s default initialization and 5 s
+# default shutdown windows (exit 124). Keep both below the test's 180 s
+# subprocess timeout.
+execution:
+  resources: {initialization_timeout_seconds: 150.0, shutdown_timeout_seconds: 20.0}
