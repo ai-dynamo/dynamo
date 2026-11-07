@@ -27,6 +27,7 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 use futures::stream::{self, StreamExt};
+use tokio::time::Instant;
 use tracing::Instrument;
 
 use crate::{
@@ -325,6 +326,7 @@ pub struct RoutingHost {
 /// and the affinity hold, until [`RoutingHost::dispatch_kv_plan`] sends it or
 /// [`RoutePlan::abort`] gives it up.
 pub(crate) struct RoutePlan {
+    started_at: Instant,
     /// The phase the worker was selected for; dispatch tracks under it rather
     /// than re-reading the request.
     phase: RequestPhase,
@@ -338,6 +340,7 @@ pub(crate) struct RoutePlan {
 
 /// A KV route selected without scheduler admission.
 pub(crate) struct RoutePreview {
+    started_at: Instant,
     request_id: String,
     phase: RequestPhase,
     pub(crate) signals: RoutePlanSignals,
@@ -751,6 +754,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let started_at = Instant::now();
         // One cleanup budget for this request's whole route through the host.
         let budget = CleanupBudget::default();
         if !matches!(&self.policy, RoutingPolicy::Kv(_)) {
@@ -810,7 +814,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
 
-        let plan = self.plan_kv_route(&request, phase, None, budget).await?;
+        let mut plan = self.plan_kv_route(&request, phase, None, budget).await?;
+        plan.started_at = started_at;
         self.dispatch_kv_plan(request, plan).await
     }
 }

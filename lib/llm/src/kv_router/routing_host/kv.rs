@@ -201,6 +201,7 @@ impl RoutingHost {
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
     ) -> Result<RoutePreview, Error> {
+        let started_at = Instant::now();
         // The conditional route's first stage. The budget travels with the
         // preview into the plan and on into dispatch, so the whole route shares
         // one deadline.
@@ -229,6 +230,7 @@ impl RoutingHost {
         let signals = self.route_signals(&selection);
         drop(route_guard);
         Ok(RoutePreview {
+            started_at,
             request_id: request.context().id().to_string(),
             phase,
             signals,
@@ -251,6 +253,7 @@ impl RoutingHost {
         planned_worker: Option<WorkerWithDpRank>,
         budget: CleanupBudget,
     ) -> Result<RoutePlan, Error> {
+        let started_at = Instant::now();
         if self.kv_router_if_enabled().is_none() {
             return Err(anyhow::anyhow!("KV route plans require KV routing"));
         }
@@ -283,6 +286,7 @@ impl RoutingHost {
             .await?;
         drop(route_guard);
         Ok(RoutePlan {
+            started_at,
             phase,
             cleanup: KvRequestCleanup::new(
                 Arc::clone(self.kv_router()),
@@ -310,13 +314,16 @@ impl RoutingHost {
         }
         // Inherited, not restarted: this stage continues the route the preview
         // opened, on the preview's budget.
-        self.plan_kv_route(
-            request,
-            preview.phase,
-            Some(preview.signals.worker),
-            preview.budget,
-        )
-        .await
+        let mut plan = self
+            .plan_kv_route(
+                request,
+                preview.phase,
+                Some(preview.signals.worker),
+                preview.budget,
+            )
+            .await?;
+        plan.started_at = preview.started_at;
+        Ok(plan)
     }
 
     pub(crate) async fn dispatch_kv_plan(
@@ -325,6 +332,7 @@ impl RoutingHost {
         plan: RoutePlan,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let RoutePlan {
+            started_at,
             phase,
             mut selection,
             cleanup,
@@ -334,7 +342,8 @@ impl RoutingHost {
         } = plan;
         let guard = self
             .track_planned_selection(&request, &mut selection, phase, cleanup, &budget)
-            .await?;
+            .await?
+            .with_started_at(started_at);
         self.dispatch_selection(request, selection, phase, guard, &budget, affinity)
             .await
     }
@@ -481,14 +490,16 @@ impl RoutingHost {
                     chooser.worker_type(),
                 );
                 tracker.record_router_queue_depth(chooser.pending_count());
-                if let Some(hit_rate) = tracker.kv_hit_rate() {
-                    guard.request_metrics().kv_hit_rate.observe(hit_rate);
+                if isl_blocks > 0 {
+                    guard
+                        .attempt_metrics()
+                        .kv_hit_rate
+                        .observe(selection.effective_overlap_blocks / isl_blocks as f64);
                 }
             }
             guard
-                .request_metrics()
+                .attempt_metrics()
                 .input_sequence_tokens
-                .with_label_values(&[phase.as_str(), &request.model])
                 .observe(request.token_ids.len() as f64);
             Ok(())
         }
