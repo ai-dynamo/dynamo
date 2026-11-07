@@ -572,9 +572,16 @@ pub enum PublicDetails {
         limit: u64,
         actual: Option<u64>,
     },
+    /// Structured token bounds for a context-length rejection.
     ContextLength {
         limit: u64,
+        /// The token count that exceeded `limit`; for a combined input/output
+        /// budget this includes the requested output.
         actual: Option<u64>,
+        /// Prompt tokens alone, when the producer knows them. Renderers use this
+        /// to distinguish a prompt-only overflow from a combined budget.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_tokens: Option<u64>,
     },
     RateLimit {
         limit: Option<u64>,
@@ -1065,6 +1072,11 @@ impl DynamoErrorBuilder {
     }
 
     /// Set a bounded client-safe rejection message.
+    ///
+    /// This and [`Self::public_details`] assign the same `public` field, so the
+    /// last call wins. Do not call this after `public_details` with a structured
+    /// variant such as [`PublicDetails::ContextLength`]: only this message would
+    /// survive and the structured fields would disappear.
     pub fn public_message(mut self, message: impl Into<String>) -> Self {
         let message = bounded_message(message.into());
         self.public = Some(PublicDetails::Message { message });
@@ -1072,6 +1084,11 @@ impl DynamoErrorBuilder {
     }
 
     /// Set structured client-safe details.
+    ///
+    /// This and [`Self::public_message`] assign the same `public` field, so the
+    /// last call wins. Protocol renderers derive a readable message from
+    /// [`PublicDetails::ContextLength`]; call this last and do not add a public
+    /// message afterwards.
     pub fn public_details(mut self, public: PublicDetails) -> Self {
         self.public = Some(public);
         self
@@ -1312,6 +1329,33 @@ mod tests {
             Some(&PublicDetails::RateLimit {
                 limit: Some(100),
                 remaining: Some(0),
+            })
+        );
+    }
+
+    #[test]
+    fn context_length_details_accept_payloads_without_prompt_tokens() {
+        let details: PublicDetails = serde_json::from_value(serde_json::json!({
+            "type": "context_length",
+            "limit": 8192,
+            "actual": 9000
+        }))
+        .expect("older context-length details remain readable");
+
+        assert_eq!(
+            details,
+            PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(details).unwrap(),
+            serde_json::json!({
+                "type": "context_length",
+                "limit": 8192,
+                "actual": 9000
             })
         );
     }
