@@ -23,7 +23,6 @@ use super::extensions::{AgentContext, RouterParams};
 use super::llm_backend::DecoderCheckpoint;
 use super::timing::{RequestPhase, RequestTracker};
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::kv_router::RequestAttemptRelease;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -138,7 +137,6 @@ struct MigrationStateInner {
     excluded_worker_ids: Vec<WorkerId>,
     last_error: Option<DynamoError>,
     request_lifecycle: Option<Box<RequestLifecycle>>,
-    prefill_release: Option<RequestAttemptRelease>,
 }
 
 impl MigrationState {
@@ -227,26 +225,6 @@ impl MigrationState {
             return;
         };
         lifecycle.abort(error.map(owned_abort_error));
-    }
-
-    /// Park the latest attempt's remote prefill booking. Its prefill can
-    /// outlive a failed decode to serve an in-flight KV transfer, so only a
-    /// committed retry, which re-books the same request ID, releases it early.
-    pub(crate) fn store_prefill_release(&self, release: RequestAttemptRelease) {
-        self.inner
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .prefill_release = Some(release);
-    }
-
-    pub(crate) fn take_prefill_release(&self) -> Option<RequestAttemptRelease> {
-        self.inner
-            .get()?
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .prefill_release
-            .take()
     }
 }
 

@@ -7,11 +7,8 @@ use prometheus::IntCounter;
 
 use crate::{
     kv_router::{
-        KvRouter,
-        indexer::ApproximateRequestLease,
-        metrics::RouterRequestMetrics,
-        prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
-        request_lease::{RequestAttemptLease, RequestAttemptRelease},
+        KvRouter, indexer::ApproximateRequestLease, metrics::RouterRequestMetrics,
+        prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION, request_lease::RequestAttemptLease,
     },
     lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
@@ -470,12 +467,6 @@ impl KvRequestCleanup {
 
     fn lifecycle(&self) -> Option<&RequestAttemptLease> {
         self.lifecycle.as_ref()
-    }
-
-    /// A handle that releases this attempt's scheduler booking ahead of the
-    /// lease, for a migration retry that re-books the same request ID.
-    pub(super) fn attempt_release(&self) -> Option<RequestAttemptRelease> {
-        self.lifecycle().map(RequestAttemptLease::release_handle)
     }
 
     pub(super) async fn finish(&self) {

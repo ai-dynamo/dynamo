@@ -19,7 +19,8 @@ use dynamo_runtime::{
     error::{DynamoError, ErrorClass, ErrorType, match_error_chain},
     pipeline::{
         AsyncEngineContextProvider, Context, ManyOut, Operator, ResponseStream, RouterMode,
-        ServerStreamingEngine, SingleIn, async_trait, propagate_first_response_guard,
+        ServerStreamingEngine, SingleIn, async_trait,
+        network::egress::route_span::get_route_trace_context, propagate_first_response_guard,
     },
     protocols::{EndpointId, annotated::Annotated},
 };
@@ -27,7 +28,7 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
-    kv_router::{RoutingHost, SelectionPolicySource, routing_host::PrefillDispatch},
+    kv_router::{RoutingHost, SelectionPolicySource, routing_host::set_prefill_attempt_booking_id},
     local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
@@ -613,11 +614,7 @@ impl
         let endpoint_id = &binding.endpoint_id;
         let mut prefill_completion = None;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
-            let PrefillDispatch {
-                metadata: prepared,
-                stream: prefill_stream,
-                booking,
-            } = router
+            let (prepared, prefill_stream) = router
                 .select_and_dispatch_prefill(prefill_context, |request, target| {
                     let prepared = self.prepare_prefill_dispatch(request, target, endpoint_id)?;
                     let prefill_supports_cancellation =
@@ -637,9 +634,6 @@ impl
                     Ok(prepared)
                 })
                 .await?;
-            if let (Some(state), Some(booking)) = (req.migration_state.as_ref(), booking) {
-                state.store_prefill_release(booking);
-            }
             let topology_constraints = prepared.topology_constraints;
             let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {
                 prefill_completion =
@@ -779,6 +773,7 @@ impl
 
 /// Prefill must survive client cancellation once decode needs its KV transfer.
 /// Copy request identity and metadata, but keep a separate cancellation controller.
+/// A migration retry's prefill also gets its own scheduler booking id.
 fn independent_prefill_context(
     request: PreprocessedRequest,
     source: &Context<()>,
@@ -786,6 +781,9 @@ fn independent_prefill_context(
     let mut prefill =
         Context::with_id_and_metadata(request, source.id().to_string(), source.metadata().clone());
     propagate_first_response_guard(source, &mut prefill)?;
+    if let Some(trace) = get_route_trace_context(source) {
+        set_prefill_attempt_booking_id(&mut prefill, trace.attempt());
+    }
     Ok(prefill)
 }
 
