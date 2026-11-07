@@ -203,6 +203,9 @@ newer booking that reused the same request id and worker.
   that the staged blocks will sit until they expire.
 - A request that took the conditional bypass reached decode without staged KV, so it cancels
   normally.
+- A request killed while its worker's stream ends is aborted, not completed: a killed stream
+  ends cleanly too, so the routing host checks the kill once at the stream's end. The router's
+  plugins see the request as aborted either way.
 
 ## Prefill activation
 

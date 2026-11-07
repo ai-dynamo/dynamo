@@ -3919,7 +3919,7 @@ async fn chat_completions(
         // once the response is built, so it does not bound this wait:
         // `UntilFirstEvent` ends on the first event or on the client
         // disconnecting, and on nothing else.
-        let stream = custom_tools.stream(stream);
+        let stream = custom_tools.stream(stream, ctx.clone());
         let stream = until_client_disconnects(
             check_for_backend_error_info(stream, state.streaming_backend_error_check()),
             &ctx,
