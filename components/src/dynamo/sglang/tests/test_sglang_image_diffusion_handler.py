@@ -16,6 +16,9 @@ from dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler impo
     ImageDiffusionWorkerHandler,
 )
 
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+JPEG_SIGNATURE = b"\xff\xd8\xff"
+
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
@@ -399,19 +402,21 @@ class TestImageDiffusionWorkerHandler:
         handler.generator.generate.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_upload_to_fs(self, handler):
+    @pytest.mark.parametrize("file_extension", ["png", "jpg", "webp"])
+    async def test_upload_to_fs(self, handler, file_extension):
         """Test _upload_to_fs method."""
         image_bytes = b"test image data"
         user_id = "user123"
         request_id = "req456"
 
         url, storage_path = await handler._upload_to_fs(
-            image_bytes, user_id, request_id
+            image_bytes, user_id, request_id, file_extension
         )
 
         # Verify storage path format
         assert f"users/{user_id}/generations/{request_id}/" in url
-        assert url.endswith(".png")
+        assert url.endswith(f".{file_extension}")
+        assert storage_path.endswith(f".{file_extension}")
         assert storage_path.startswith(f"users/{user_id}/generations/{request_id}/")
 
     @pytest.mark.asyncio
@@ -436,7 +441,9 @@ class TestImageDiffusionWorkerHandler:
         )
 
         assert len(images) == 1
-        assert isinstance(images[0], bytes)
+        image_bytes, image_size = images[0]
+        assert image_bytes.startswith(PNG_SIGNATURE)
+        assert image_size == (256, 256)
 
     @pytest.mark.asyncio
     async def test_generate_images_with_pil_image(self, handler):
@@ -457,12 +464,16 @@ class TestImageDiffusionWorkerHandler:
         )
 
         assert len(images) == 1
-        assert isinstance(images[0], bytes)
+        image_bytes, image_size = images[0]
+        assert image_bytes.startswith(PNG_SIGNATURE)
+        assert image_size == (256, 256)
 
     @pytest.mark.asyncio
     async def test_generate_images_with_bytes(self, handler):
-        """Test _generate_images handles bytes directly."""
-        img_bytes = b"raw image bytes"
+        """A frame the engine already encoded is re-encoded as requested."""
+        buf = io.BytesIO()
+        Image.new("RGB", (32, 16), color="red").save(buf, format="PNG")
+        img_bytes = buf.getvalue()
 
         handler.generator.generate = Mock(
             return_value=SimpleNamespace(frames=[img_bytes])
@@ -475,17 +486,22 @@ class TestImageDiffusionWorkerHandler:
             num_inference_steps=10,
             guidance_scale=7.5,
             seed=42,
+            output_format="jpeg",
         )
 
         assert len(images) == 1
-        assert images[0] == img_bytes
+        image_bytes, image_size = images[0]
+        assert image_bytes.startswith(JPEG_SIGNATURE)
+        assert image_size == (32, 16)
 
     @pytest.mark.asyncio
     async def test_generate_with_nvext(self, handler, mock_context):
         """Test that nvext parameters are passed to the generator."""
         test_image = Image.new("RGB", (256, 256), color="yellow")
 
-        handler._generate_images = AsyncMock(return_value=[test_image.tobytes()])
+        handler._generate_images = AsyncMock(
+            return_value=[(test_image.tobytes(), test_image.size)]
+        )
 
         request = {
             "prompt": "A yellow square",
@@ -519,6 +535,7 @@ class TestImageDiffusionWorkerHandler:
             seed=42,
             negative_prompt="negative",
             input_reference=None,
+            output_format="png",
         )
 
     @pytest.mark.asyncio
@@ -791,7 +808,7 @@ class TestNParameter:
 
         uploads = []
 
-        async def fake_upload(img, user_id, request_id):
+        async def fake_upload(img, user_id, request_id, file_extension):
             if len(uploads) == 1:
                 raise RuntimeError("upload failed")
             uploads.append(
@@ -808,3 +825,102 @@ class TestNParameter:
             async for _ in handler.generate(req, mock_context):
                 pass
         handler._cleanup_uploads.assert_awaited_once_with(uploads)
+
+
+class TestOutputFormat:
+    """`output_format`, `quality`, and `background` on image requests."""
+
+    @staticmethod
+    def _request(**overrides):
+        req = {
+            "prompt": "A red square",
+            "model": "test-model",
+            "size": "64x32",
+            "response_format": "b64_json",
+            "nvext": {"num_inference_steps": 1, "seed": 1},
+        }
+        req.update(overrides)
+        return req
+
+    @staticmethod
+    def _mock_frame(handler, frame):
+        handler.generator.generate = Mock(return_value=SimpleNamespace(frames=[frame]))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "output_format, expected_format",
+        [(None, "png"), ("png", "png"), ("jpeg", "jpeg"), ("WEBP", "webp")],
+    )
+    async def test_b64_bytes_and_metadata_match_output_format(
+        self, handler, mock_context, output_format, expected_format
+    ):
+        self._mock_frame(handler, Image.new("RGB", (64, 32), color="red"))
+        overrides = {} if output_format is None else {"output_format": output_format}
+
+        results = [
+            r async for r in handler.generate(self._request(**overrides), mock_context)
+        ]
+
+        response = results[0]
+        decoded = base64.b64decode(response["data"][0]["b64_json"])
+        assert Image.open(io.BytesIO(decoded)).format == expected_format.upper()
+        if expected_format == "png":
+            assert decoded.startswith(PNG_SIGNATURE)
+        elif expected_format == "jpeg":
+            assert decoded.startswith(JPEG_SIGNATURE)
+        else:
+            assert decoded[:4] == b"RIFF" and decoded[8:12] == b"WEBP"
+        assert response["output_format"] == expected_format
+        assert response["size"] == "64x32"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "output_format, extension", [("png", "png"), ("jpeg", "jpg"), ("webp", "webp")]
+    )
+    async def test_url_upload_extension_matches_output_format(
+        self, handler, mock_context, output_format, extension
+    ):
+        self._mock_frame(handler, Image.new("RGB", (64, 32), color="red"))
+        request = self._request(response_format="url", output_format=output_format)
+
+        results = [r async for r in handler.generate(request, mock_context)]
+
+        assert results[0]["data"][0]["url"].endswith(f".{extension}")
+        storage_path, uploaded = handler.fs.pipe.call_args.args[:2]
+        assert storage_path.endswith(f".{extension}")
+        assert Image.open(io.BytesIO(uploaded)).format == output_format.upper()
+        assert results[0]["output_format"] == output_format
+
+    @pytest.mark.asyncio
+    async def test_mixed_frame_sizes_omit_size(self, handler, mock_context):
+        handler.generator.generate = Mock(
+            side_effect=[
+                SimpleNamespace(frames=[Image.new("RGB", (64, 32))]),
+                SimpleNamespace(frames=[Image.new("RGB", (32, 32))]),
+            ]
+        )
+
+        results = [r async for r in handler.generate(self._request(n=2), mock_context)]
+
+        assert results[0]["size"] is None
+        assert results[0]["output_format"] == "png"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "overrides, field",
+        [
+            ({"quality": "high"}, "quality"),
+            ({"background": "transparent"}, "background"),
+            ({"output_format": "gif"}, "output_format"),
+        ],
+    )
+    async def test_unsupported_options_rejected_before_generation(
+        self, handler, mock_context, overrides, field
+    ):
+        handler.generator.generate = Mock()
+
+        with pytest.raises(InvalidArgument, match=field):
+            async for _ in handler.generate(self._request(**overrides), mock_context):
+                pass
+
+        handler.generator.generate.assert_not_called()

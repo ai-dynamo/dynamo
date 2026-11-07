@@ -385,8 +385,8 @@ Backend support:
 | Backend | `nvext.usage` | `size`, `output_format` |
 |---------|---------------|-------------------------|
 | vLLM-Omni | Yes | Yes |
-| SGLang | Not yet | Not yet |
-| TensorRT-LLM | Not yet | Not yet |
+| SGLang | Not yet | Yes |
+| TensorRT-LLM | Not yet | Yes |
 
 vLLM-Omni reports the step count the request asked for in `nvext.num_inference_steps` and omits it
 when the model default applied: its engine output does not carry the count it ran.

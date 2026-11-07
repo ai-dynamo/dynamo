@@ -11,6 +11,7 @@ import uuid
 from contextlib import AsyncExitStack
 from typing import Any, AsyncGenerator, Optional
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -21,6 +22,13 @@ from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPo
 from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
 from dynamo.common.protocols.request_parsing import parse_media_request
 from dynamo.common.storage import upload_to_fs
+from dynamo.common.utils.image_utils import (
+    IMAGE_OUTPUT_FORMATS,
+    ImageOutputFormat,
+    encode_image_bytes,
+    normalize_image_output_options,
+    uniform_image_size,
+)
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.args import Config
 from dynamo.sglang.media_protocol import SGLangCreateImageRequest
@@ -111,6 +119,14 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         # leaves unset. An explicit value is kept as sent.
         req = parse_media_request(SGLangCreateImageRequest, request)
         nvext = req.nvext
+        # Checked before generation so a rejected request uses no GPU.
+        output_format = normalize_image_output_options(
+            req.output_format,
+            quality=req.quality,
+            background=req.background,
+            handler_name="Dynamo SGLang image handler",
+        )
+        file_extension = IMAGE_OUTPUT_FORMATS[output_format][1]
 
         # The model carries the references as a list; this engine edits one
         # image. The frontend forwards two or more only to a worker that
@@ -140,7 +156,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         # semantics as n sequential generations. With an explicit seed use
         # seed+i: deterministic overall, yet each sample is distinct.
         # Without a seed, each generation draws its own random seed.
-        images: list[bytes] = []
+        images: list[tuple[bytes, tuple[int, int]]] = []
         for i in range(num_images):
             # Stop between generations if the request has gone away: a
             # cancelled n=10 request must not keep occupying the GPU.
@@ -159,6 +175,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
                     guidance_scale=guidance_scale,
                     seed=nvext.seed + i if nvext.seed is not None else None,
                     input_reference=input_reference,
+                    output_format=output_format,
                 )
             )
 
@@ -169,11 +186,11 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         image_data = []
         uploaded_paths: list[str] = []
         try:
-            for img in images:
+            for img, _ in images:
                 # uploading or encoding the image
                 if response_format == "url":
                     url, storage_path = await self._upload_to_fs(
-                        img, user_id, context_id
+                        img, user_id, context_id, file_extension
                     )
                     uploaded_paths.append(storage_path)
                     image_data.append(ImageData(url=url))
@@ -186,7 +203,12 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             await self._cleanup_uploads(uploaded_paths)
             raise
 
-        response = NvImagesResponse(created=int(time.time()), data=image_data)
+        response = NvImagesResponse(
+            created=int(time.time()),
+            data=image_data,
+            output_format=output_format,
+            size=uniform_image_size(image_size for _, image_size in images),
+        )
 
         yield response.model_dump()
 
@@ -200,8 +222,12 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         seed: Optional[int],
         negative_prompt: Optional[str] = None,
         input_reference: Optional[str] = None,
-    ) -> list[bytes]:
-        """Generate images using SGLang DiffGenerator"""
+        output_format: ImageOutputFormat = "png",
+    ) -> list[tuple[bytes, tuple[int, int]]]:
+        """Generate images using SGLang DiffGenerator.
+
+        Returns each image encoded as `output_format`, with its (width, height).
+        """
         args = {
             "prompt": prompt,
             "negative_prompt": negative_prompt,
@@ -259,34 +285,19 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
         images = result.frames if result.frames else []
 
-        # Convert images to bytes (handle PIL Images, numpy arrays, or bytes)
-        image_bytes_list = []
+        # Encode every frame as the requested format. A frame the engine already
+        # encoded (bytes) is decoded and re-encoded, so the format still holds.
+        encoded: list[tuple[bytes, tuple[int, int]]] = []
         for img in images:
             if isinstance(img, bytes):
-                image_bytes_list.append(img)
-            elif isinstance(img, Image.Image):
-                # Convert PIL Image to bytes
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                image_bytes_list.append(buf.getvalue())
-            else:
-                try:
-                    import numpy as np
+                img = Image.open(io.BytesIO(img))
+            elif isinstance(img, np.ndarray):
+                img = Image.fromarray(img)
+            elif not isinstance(img, Image.Image):
+                raise ValueError(f"Unsupported image type: {type(img)}")
+            encoded.append((encode_image_bytes(img, output_format), img.size))
 
-                    if isinstance(img, np.ndarray):
-                        # Convert numpy array to PIL Image then to bytes
-                        pil_img = Image.fromarray(img)
-                        buf = io.BytesIO()
-                        pil_img.save(buf, format="PNG")
-                        image_bytes_list.append(buf.getvalue())
-                    else:
-                        raise ValueError(f"Unsupported image type: {type(img)}")
-                except ImportError:
-                    raise RuntimeError(
-                        "Cannot convert image format. Install Pillow: pip install Pillow"
-                    )
-
-        return image_bytes_list
+        return encoded
 
     def _parse_size(self, size_str: Optional[str]) -> tuple[int, int]:
         """Parse '1024x1024' -> (1024, 1024)"""
@@ -306,23 +317,24 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             ) from e
 
     async def _upload_to_fs(
-        self, image_bytes: bytes, user_id: str, request_id: str
+        self, image_bytes: bytes, user_id: str, request_id: str, file_extension: str
     ) -> tuple[str, str]:
         """Upload image to filesystem and return URL.
 
         Uses per-user storage path:
-            users/{user_id}/generations/{request_id}/{image_uuid}.png
+            users/{user_id}/generations/{request_id}/{image_uuid}.{file_extension}
 
         Args:
             image_bytes: Image data as bytes.
             user_id: User identifier from request or context.
             request_id: Request context ID.
+            file_extension: `png`, `jpg`, or `webp`, matching the encoding.
 
         Returns:
             (public URL, storage path) for the uploaded image.
         """
         image_uuid = str(uuid.uuid4())
-        image_filename = f"{image_uuid}.png"
+        image_filename = f"{image_uuid}.{file_extension}"
 
         # Per-user storage path
         storage_path = f"users/{user_id}/generations/{request_id}/{image_filename}"
