@@ -136,7 +136,7 @@ pip install -e .
 | [**Multimodal Support**](multimodal.md) | ✅ | Image via EPD, E/PD, E/P/D patterns |
 | [**Diffusion Models**](../../../../../use-cases/diffusion/workflows/text-to-image.md) | ✅ | LLM diffusion, image, and video generation |
 | [**Request Cancellation**](../../../concepts/fault-tolerance/request-cancellation-architecture.md) | ✅ | Aggregated full; disaggregated decode-only |
-| [**LoRA**](../../../../../cli/operations/lora-adapters.md) | 🚧 | **Experimental.** Dynamic loading and aggregated serving are validated; unloading is implemented but not end-to-end tested; disaggregated serving is not end-to-end validated |
+| [**LoRA**](../../../../../cli/operations/lora-adapters.md) | ✅ | Aggregated load/unload and adapter-aware KV routing; disaggregated serving is experimental |
 | [**Graceful Shutdown**](../../../../../kubernetes/fault-tolerance/graceful-shutdown.md) | ✅ | Discovery unregister + grace period |
 | [**Observability**](observability.md) | ✅ | Metrics, tracing, and Grafana dashboards |
 
@@ -155,7 +155,7 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 | **Multimodal** | ✅<sup>2</sup> | ✅<sup>1</sup> | — | 🚧 | — | | | | | |
 | **Request Migration** | ✅ | ✅ | ✅ | 🚧 | ✅ | — | | | | |
 | **Request Cancellation** | 🚧<sup>3</sup> | ✅ | ✅ | 🚧 | 🚧 | ✅ | — | | | |
-| **LoRA** | 🚧<sup>4</sup> | 🚧<sup>4</sup> | — | 🚧 | 🚧 | 🚧 | 🚧 | — | | |
+| **LoRA** | 🚧<sup>4</sup> | ✅<sup>4</sup> | — | 🚧 | 🚧 | 🚧 | 🚧 | — | | |
 | **Tool Calling** | ✅ | ✅ | ✅ | 🚧 | ✅ | ✅ | ✅ | 🚧 | — | |
 | **Speculative Decoding** | ✅ | ✅ | — | 🚧 | — | ✅ | — | 🚧 | ✅ | — |
 
@@ -163,7 +163,7 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 > 1. **Multimodal + KV-Aware Routing**: Media-aware routing requires compatible SGLang cache identities. Builds without hash-forwarding support and [wide-token SGLang builds](multimodal.md#wide-token-sglang-builds) use text-prefix routing. Requests still run with this routing fallback. See [SGLang Multimodal KV Routing](multimodal.md#multimodal-kv-routing) for build requirements and supported models.
 > 2. **Multimodal Patterns**: Supports simple Aggregated **EPD**, **E/PD**, and **E/P/D** patterns. Traditional Disagg **EP/D** is not supported. ([Source](multimodal.md))
 > 3. **Request Cancellation**: Cancellation during the remote prefill phase is not supported in disaggregated mode. ([Source](../../../concepts/fault-tolerance/request-cancellation-architecture.md))
-> 4. **LoRA**: Dynamic adapter loading, discovery, and aggregated inference have pre-merge end-to-end coverage. Unloading is implemented but not exercised by an end-to-end test. Prefill/decode registration has unit coverage, but disaggregated LoRA and feature pairings such as KV-aware routing have not been validated end to end. ([Source](../../../../../cli/operations/lora-adapters.md))
+> 4. **LoRA**: Aggregated load, unload, reload, and KV-aware routing have end-to-end coverage. KV-aware routing requires SGLang 0.5.22 or later and KV events in the `dynamo` format, which `dynamo.sglang` sets by default. Prefill/decode registration has unit coverage, but disaggregated LoRA has not been validated end to end. ([Source](../../../../../cli/operations/lora-adapters.md))
 > 5. **Speculative Decoding**: EAGLE3 support documented. ([Source](../../../../additional-resources/speculative-decoding/speculative-decoding-with-sglang.md))
 
 ## Quick Start
