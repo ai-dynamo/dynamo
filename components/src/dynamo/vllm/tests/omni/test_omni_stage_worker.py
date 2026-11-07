@@ -32,6 +32,7 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
@@ -666,6 +667,75 @@ def test_build_sampling_params_user_overrides_yaml_defaults():
     sp = result[0]
     assert sp.num_inference_steps == 50  # user override wins
     assert sp.guidance_scale == 5.0  # YAML default preserved
+
+
+def _llm_stage_with_sampling_defaults():
+    return SimpleNamespace(
+        stage_type="llm",
+        default_sampling_params={
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "top_k": 20,
+            "min_p": 0.05,
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("temperature", "expected"),
+    [
+        (0.0, (0.0, 1.0, 0, 0.0)),
+        # vLLM raises 0 < temperature < 0.01 to 0.01, so this is not greedy.
+        (1e-6, (0.01, 0.8, 20, 0.05)),
+    ],
+    ids=["greedy", "tiny-temperature"],
+)
+def test_build_sampling_params_llm_applies_vllm_post_init_after_overrides(
+    temperature, expected
+):
+    result = _build_sampling_params(
+        _llm_stage_with_sampling_defaults(), {"temperature": temperature}
+    )
+    assert result is not None
+    sp = result[0]
+    assert (sp.temperature, sp.top_p, sp.top_k, sp.min_p) == expected
+
+
+def test_build_sampling_params_llm_rejects_out_of_range_greedy_values():
+    from vllm.exceptions import VLLMValidationError
+
+    with pytest.raises(VLLMValidationError, match="top_p"):
+        _build_sampling_params(
+            _llm_stage_with_sampling_defaults(), {"temperature": 0.0, "top_p": 0.0}
+        )
+
+
+@pytest.mark.asyncio
+async def test_invalid_sampling_override_yields_error_chunk():
+    engine = _MockEngine()
+    in_connector = MagicMock()
+    in_connector.get.return_value = {"engine_inputs": {"prompt": "hi"}}
+    stage_config = _llm_stage_with_sampling_defaults()
+    stage_config.engine_input_source = [0]
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=stage_config,
+        connectors={("0", "1"): in_connector},
+        stage_id=1,
+    )
+    request = {
+        "request_id": "req-invalid-top-p",
+        "original_prompt": {"prompt": "hi"},
+        "stage_connector_refs": {"0": {"name": "ref0"}},
+        "sampling_params_list": {"temperature": 0.0, "top_p": 0.0},
+    }
+
+    chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert len(chunks) == 1
+    assert chunks[0]["finished"] is True
+    assert "top_p" in chunks[0]["error"]
+    assert engine.received_prompt is None
 
 
 def test_build_sampling_params_no_defaults_returns_none():

@@ -19,6 +19,7 @@ from typing import Any, AsyncGenerator, Iterator
 
 import torch
 import yaml
+from vllm.exceptions import VLLMValidationError
 from vllm_omni.config import register_pipeline
 from vllm_omni.config.config_factory import StageConfigFactory
 from vllm_omni.config.pipeline_registry import OMNI_PIPELINES
@@ -141,7 +142,7 @@ class OmniStageWorker:
                         prompt = self._build_engine_core_request_from_upstream(
                             stage_list, request_id, sampling_params_list_override
                         )
-                    except RuntimeError as e:
+                    except (RuntimeError, VLLMValidationError) as e:
                         yield {"error": str(e), "finished": True}
                         return
                 else:
@@ -168,7 +169,13 @@ class OmniStageWorker:
             type(prompt).__name__,
         )
 
-        sp = _build_sampling_params(self.stage_config, sampling_params_list_override)
+        try:
+            sp = _build_sampling_params(
+                self.stage_config, sampling_params_list_override
+            )
+        except VLLMValidationError as e:
+            yield {"error": str(e), "finished": True}
+            return
         last_result = None
 
         try:
