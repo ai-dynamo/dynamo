@@ -13,6 +13,7 @@ use dynamo_llm::http::service::{Metrics, service_v2::HttpService};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_llm::protocols::{Annotated, codec::create_message_stream};
+use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_runtime::CancellationToken;
 use dynamo_runtime::error::DynamoError;
 use futures::StreamExt;
@@ -68,7 +69,19 @@ impl HarnessService {
     }
 
     pub async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
-        Self::start_with_engine_and_card(engine, ModelDeploymentCard::with_name_only(MODEL)).await
+        Self::start_with_chat_engine(engine.clone(), engine).await
+    }
+
+    pub async fn start_with_chat_engine(
+        engine: Arc<ScriptedChatEngine>,
+        chat_engine: OpenAIChatCompletionsStreamingEngine,
+    ) -> Self {
+        Self::start_with_chat_engine_and_card(
+            engine,
+            chat_engine,
+            ModelDeploymentCard::with_name_only(MODEL),
+        )
+        .await
     }
 
     /// Start with a model card of the caller's choosing, so handler behavior that depends
@@ -76,6 +89,14 @@ impl HarnessService {
     #[allow(dead_code)]
     pub async fn start_with_engine_and_card(
         engine: Arc<ScriptedChatEngine>,
+        card: ModelDeploymentCard,
+    ) -> Self {
+        Self::start_with_chat_engine_and_card(engine.clone(), engine, card).await
+    }
+
+    async fn start_with_chat_engine_and_card(
+        engine: Arc<ScriptedChatEngine>,
+        chat_engine: OpenAIChatCompletionsStreamingEngine,
         card: ModelDeploymentCard,
     ) -> Self {
         let client = reqwest::Client::builder()
@@ -98,7 +119,7 @@ impl HarnessService {
         let checksum = card.mdcsum().to_string();
         service
             .model_manager()
-            .add_chat_completions_model_with_card(MODEL, &checksum, card, engine.clone())
+            .add_chat_completions_model_with_card(MODEL, &checksum, card, chat_engine)
             .expect("failed to register scripted harness model");
 
         let cancel = CancellationToken::new();
