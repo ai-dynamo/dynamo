@@ -934,6 +934,45 @@ async fn trtllm_engine_lost_on_liveness_not_serving() {
     finish(&mut fixture, &engine).await;
 }
 
+#[tokio::test]
+async fn trtllm_clean_liveness_end_preserves_in_flight_generation() {
+    let control = Controller::default();
+    let mut fixture =
+        support::trtllm::Fixture::start(control.clone(), FixtureConfig::default()).await;
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+
+    let ctx = mock_context();
+    let handle = control.request(ctx.id(), after_token_responses(1, StreamAction::Continue));
+    let mut stream = engine
+        .generate(
+            request("mocker-model", vec![11, 22, 33], 3),
+            GenerateContext::new(ctx, None),
+        )
+        .await
+        .unwrap();
+    let mut outputs = checkpoint_outputs(&mut stream, &handle).await;
+    fixture.end_liveness_watch().await;
+    let error = bounded("engine lost on clean liveness EOF", engine.engine_lost()).await;
+    assert_eq!(
+        error.error_type(),
+        ErrorType::Backend(BackendError::EngineShutdown)
+    );
+    assert!(
+        error.to_string().contains("liveness stream ended"),
+        "{error}"
+    );
+
+    // Native graceful stop ends Watch before draining its active Generate RPCs.
+    assert!(poll!(stream.next()).is_pending());
+    handle.release();
+    outputs.extend(bounded("in-flight generation drains", stream.collect::<Outputs>()).await);
+    terminal(outputs, &handle.tokens(), 3, FinishReason::Length);
+    bounded("drained RPC released", handle.wait(Event::Dropped)).await;
+    fixture.scheduler_idle().await;
+    finish(&mut fixture, &engine).await;
+}
+
 fn http_request() -> PreprocessedRequest {
     let mut req = request("mocker-model", vec![11, 22, 33], 2);
     req.extra_args = Some(json!({"sglang_tito": {"sampling_params": {"max_new_tokens": 2}}}));
