@@ -1616,6 +1616,218 @@ jobs:
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
             --image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.vllm-copy-to-acr.outputs.image_tag }}
 
+  # ============================================================================
+  # MULTI-CLUSTER GLOBAL DISCOVERY DEPLOY TEST
+  # ============================================================================
+  # Two vClusters, each in a host namespace of its own: the hub runs the Global
+  # Discovery Service, the member a mocker pool whose PoolRelay registers with
+  # it. See tests/deploy/global_discovery/README.md. Non-blocking while the
+  # multi-cluster pieces land: continue-on-error, and not in
+  # deploy-status-check.
+  global-discovery-service-build:
+    name: Global Discovery Service
+    needs: [config]
+    # The test needs the frontend image, so build when frontend-build runs.
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
+    runs-on: dynamo-cpu-4gi-amd64
+    continue-on-error: true
+    permissions:
+      contents: read
+    outputs:
+      image_tag: ${{ steps.build.outputs.image_tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Initialize Dynamo Builder
+        uses: $/.github/actions/init-dynamo-builder
+        with:
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          flavor: general
+          arch: linux/amd64
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+      - name: Docker Login
+        uses: $/.github/actions/docker-login
+        with:
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build and push the Global Discovery Service image
+        id: build
+        shell: bash
+        env:
+          IMAGE: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}-global-discovery-service
+          DOCKER_PROXY: ${{ vars.ECR_REGISTRY }}/dockerhub/
+        run: |
+          set -euo pipefail
+          docker buildx build --push \
+            --platform linux/amd64 \
+            --build-arg "DOCKER_PROXY=${DOCKER_PROXY}" \
+            -t "${IMAGE}:${IMAGE_TAG}" \
+            -f container/Dockerfile.global-discovery-service .
+          # Only the tag crosses jobs: an output holding a secret is dropped.
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+  deploy-test-global-discovery:
+    name: Global Discovery Deploy Test
+    runs-on: prod-deploy-tester-v1
+    needs: [operator, frontend-copy-to-acr, global-discovery-service-build]
+    # The build may fail without failing the run; then there is no image.
+    if: needs.global-discovery-service-build.outputs.image_tag != ''
+    continue-on-error: true
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    env:
+      # vCluster runs one virtual cluster per host namespace.
+      HUB_NAMESPACE: gh-id-${{ github.run_id }}-gd-hub-dt
+      HUB_VCLUSTER: ci-${{ github.run_id }}-gd-hub
+      MEMBER_NAMESPACE: gh-id-${{ github.run_id }}-gd-member-dt
+      MEMBER_VCLUSTER: ci-${{ github.run_id }}-gd-member
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Create the hub vCluster
+        uses: $/.github/actions/setup-dynamo-operator
+        with:
+          # Sole writer of this vCluster name; a rerun replaces it.
+          reset_existing: 'true'
+          vcluster_name: ${{ env.HUB_VCLUSTER }}
+          vcluster_namespace: ${{ env.HUB_NAMESPACE }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
+          operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      # setup-dynamo-operator and connect-vcluster tunnel to 127.0.0.1:8443 and
+      # reuse a tunnel they find there, so the hub's tunnel must close before
+      # the member is created. The hub gets its own tunnel on 8444 below.
+      - name: Close the hub tunnel on 8443
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pid_file in .vcluster-port-forward-watchdog.pid .vcluster-port-forward.pid; do
+            if [ -f "${pid_file}" ]; then
+              kill "$(cat "${pid_file}")" 2>/dev/null || true
+              rm -f "${pid_file}"
+            fi
+          done
+          # The watchdog may have restarted the forward before it stopped.
+          pkill -f "port-forward -n ${HUB_NAMESPACE} svc/${HUB_VCLUSTER} 8443:443" || true
+          for _ in $(seq 1 15); do
+            if ! curl -fsk --connect-timeout 1 --max-time 2 https://127.0.0.1:8443/healthz >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::127.0.0.1:8443 still answers after the hub tunnel closed"
+          exit 1
+      - name: Create the member vCluster
+        uses: $/.github/actions/setup-dynamo-operator
+        with:
+          reset_existing: 'true'
+          vcluster_name: ${{ env.MEMBER_VCLUSTER }}
+          vcluster_namespace: ${{ env.MEMBER_NAMESPACE }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
+          operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      - name: Connect to the member vCluster
+        id: connect-member
+        uses: $/.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ env.MEMBER_VCLUSTER }}
+          vcluster_namespace: ${{ env.MEMBER_NAMESPACE }}
+      - name: Connect to the hub vCluster on 8444
+        id: connect-hub
+        shell: bash
+        env:
+          MEMBER_KUBECONFIG_B64: ${{ steps.connect-member.outputs.kubeconfig_base64 }}
+        run: |
+          set -euo pipefail
+          echo "${MEMBER_KUBECONFIG_B64}" | base64 -d > .kubeconfig-gd-member
+          chmod 600 .kubeconfig-gd-member
+          # A watchdog like connect-vcluster's keeps the forward up. Its log
+          # goes in test-output/, which the test step uploads.
+          mkdir -p test-output
+          nohup bash -c '
+            while true; do
+              if ! curl -sk --connect-timeout 1 --max-time 2 https://127.0.0.1:8444/healthz >/dev/null; then
+                if [ -f "$4" ]; then
+                  kill "$(cat "$4")" 2>/dev/null || true
+                fi
+                kubectl port-forward -n "$1" "svc/$2" 8444:443 >> "$3" 2>&1 &
+                echo "$!" > "$4"
+              fi
+              sleep 5
+            done
+          ' _ "${HUB_NAMESPACE}" "${HUB_VCLUSTER}" \
+            "${PWD}/test-output/gd-hub-port-forward.log" "${PWD}/.gd-hub-port-forward.pid" \
+            >/dev/null 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsk --connect-timeout 1 --max-time 2 https://127.0.0.1:8444/healthz >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          vcluster connect "${HUB_VCLUSTER}" --namespace "${HUB_NAMESPACE}" \
+            --server=https://127.0.0.1:8444 --print > .kubeconfig-gd-hub
+          kubectl --kubeconfig=.kubeconfig-gd-hub --request-timeout=15s get namespaces >/dev/null
+          KUBECONFIG_B64=$(base64 < .kubeconfig-gd-hub | tr -d '\n')
+          echo "::add-mask::${KUBECONFIG_B64}"
+          echo "kubeconfig_base64=${KUBECONFIG_B64}" >> "$GITHUB_OUTPUT"
+      - name: Run Global Discovery Deploy Test
+        uses: $/.github/actions/dynamo-deploy-test
+        with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: post-merge
+          kubeconfig_base64: ${{ steps.connect-hub.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          test_name: global_discovery
+          test_file: tests/deploy/global_discovery/test_global_discovery.py
+          # The test deletes what it creates in both clusters.
+          cleanup_deployment: 'false'
+          extra_pytest_args: >-
+            --member-kubeconfig=${{ github.workspace }}/.kubeconfig-gd-member
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
+            --global-discovery-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.global-discovery-service-build.outputs.image_tag }}
+
+  # Its own job: dynamo-deploy-test points KUBECONFIG at the hub vCluster for
+  # the rest of the test job. Keep the names in step with
+  # deploy-test-global-discovery's env.
+  deploy-cleanup-global-discovery:
+    name: Global Discovery Cleanup
+    if: always()
+    needs: [deploy-test-global-discovery]
+    runs-on: prod-deploy-tester-v1
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        persist-credentials: false
+    - name: Delete the member vCluster and its namespace
+      uses: $/.github/actions/teardown-dynamo-operator
+      with:
+        vcluster_name: ci-${{ github.run_id }}-gd-member
+        vcluster_namespace: gh-id-${{ github.run_id }}-gd-member-dt
+    - name: Delete the hub vCluster and its namespace
+      if: always()
+      uses: $/.github/actions/teardown-dynamo-operator
+      with:
+        vcluster_name: ci-${{ github.run_id }}-gd-hub
+        vcluster_namespace: gh-id-${{ github.run_id }}-gd-hub-dt
+
   deploy-status-check:
     runs-on: ubuntu-24.04
     needs:
@@ -1654,7 +1866,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, power-agent, sidecar-build, frontend-build, planner-build]
+    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, power-agent, sidecar-build, frontend-build, planner-build, global-discovery-service-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1683,4 +1895,10 @@ jobs:
     with:
       pipeline_name: Post-Merge
       runs_on: ubuntu-slim
+      # The defaults, plus the non-blocking Global Discovery jobs: a job that
+      # fails under continue-on-error still concludes "failure".
+      ignored_jobs: |
+        build-xpu
+        test-xpu
+        Global Discovery
     secrets: inherit
