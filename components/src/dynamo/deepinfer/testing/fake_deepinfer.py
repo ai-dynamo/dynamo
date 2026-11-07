@@ -5,9 +5,8 @@
 
 It mirrors the names (``LLMEngine``, ``EngineArgs``, ``EngineType``,
 ``SamplingParams``, ``RequestOutput``, ``SequenceStatus``) and the behaviour
-the Dynamo integration depends on, as read from DeepInfer 774ce24. Engine
-internals its own scheduler needs (block tables, token appends) are Python
-attributes here:
+the Dynamo integration depends on, as read from DeepInfer 774ce24 plus the
+``0001-dynamo-kv-bindings`` patch:
 
 - ``add_request(enqueue=...)``, ``abort_request``; ``step()`` /
   ``flush_inflight_reqs()`` return uint64 output handles that die at the next

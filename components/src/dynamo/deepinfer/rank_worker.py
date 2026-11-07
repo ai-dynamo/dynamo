@@ -5,15 +5,15 @@
 
     python -m dynamo.deepinfer.rank_worker --endpoint ipc://... --parent-pid P --spec JSON
     python -m dynamo.deepinfer.rank_worker --endpoint tcp://HEAD:PORT --parent-pid P \\
-        --spec JSON [--node-timeout-s S] [--startup-timeout-s S]
+        --spec JSON [--advertise-addr ADDR] [--node-timeout-s S] [--startup-timeout-s S]
 
 Builds the rank's engine, reports ``Ready``, then answers one ``Reply`` per
 ``Cmd`` until the CLOSE iteration. On ``ipc://`` it is a child of the head's
 Dynamo worker. On ``tcp://`` it is a rank on another node (spawned by
 ``dynamo.deepinfer.node``): it connects to the head's ``ControlServer`` and
 exits when that connection is lost. Must not import ``dynamo._core`` or
-``dynamo.common.backend``: only ``dynamo.deepinfer.{rank,protocol,kv_cache}``
-and what they need.
+``dynamo.common.backend``: only ``dynamo.deepinfer.{rank,protocol,kv_cache,
+kv_transfer}`` and what they need.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ from dynamo.deepinfer.protocol import (
     encode,
     routing_id,
     set_heartbeat,
+    tcp_endpoint,
 )
 from dynamo.deepinfer.rank import RankRunner, RankSpec
 
@@ -129,12 +130,20 @@ def _fail(
     os._exit(1)
 
 
+def _advertised(bind: Optional[str], host: Optional[str]) -> Optional[str]:
+    """The KV event endpoint ``tcp://*:PORT`` as the head reaches it."""
+    if bind is None:
+        return None
+    return tcp_endpoint(host or socket.gethostname(), int(bind.rsplit(":", 1)[1]))
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="DeepInfer DP rank worker")
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--parent-pid", type=int, required=True)
     parser.add_argument("--spec", required=True)
     # tcp:// only.
+    parser.add_argument("--advertise-addr", default=None)
     parser.add_argument("--node-timeout-s", type=float, default=30.0)
     parser.add_argument("--startup-timeout-s", type=float, default=3600.0)
     args = parser.parse_args(argv)
@@ -179,6 +188,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         ready.host = socket.gethostname()
         ready.spec_digest = spec.digest()
         ready.env = deepinfer_environ()
+        ready.kv_events_endpoint = _advertised(
+            spec.kv_events_endpoint, args.advertise_addr
+        )
     sock.send(encode(ready))
     while True:
         cmd = decode_cmd(sock.recv())

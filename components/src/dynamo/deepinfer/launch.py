@@ -17,7 +17,7 @@ import shutil
 import tempfile
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from dynamo.deepinfer.controller import exit_process
@@ -27,6 +27,7 @@ from dynamo.deepinfer.protocol import (
     EngineMeta,
     LocalRankHandle,
     RankHandle,
+    RemoteRankHandle,
     ZmqRankHandle,
     wait_all_ready,
 )
@@ -117,6 +118,8 @@ class Launch:
     handles: list[RankHandle]
     meta: EngineMeta
     ipc_dir: str
+    # dp rank -> KV event endpoint of a rank on another node, as it reported it.
+    kv_endpoints: dict[int, str] = field(default_factory=dict)
     server: Optional[ControlServer] = None
     watch: Optional[ChildWatch] = None
 
@@ -206,4 +209,11 @@ def launch_ranks(
         args.nnodes,
         meta,
     )
-    return Launch(handles, meta, ipc_dir, server, watch)
+    kv_endpoints = {
+        h.rank: h.ready.kv_events_endpoint
+        for h in handles
+        if isinstance(h, RemoteRankHandle)
+        and h.ready is not None
+        and h.ready.kv_events_endpoint
+    }
+    return Launch(handles, meta, ipc_dir, kv_endpoints, server, watch)

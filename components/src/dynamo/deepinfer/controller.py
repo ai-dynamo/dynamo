@@ -3,7 +3,7 @@
 
 """The controller: drives every DP rank one lockstep iteration at a time.
 
-Per iteration it drains its inbox (adds, aborts, close), picks a
+Per iteration it drains its inbox (adds, aborts, releases, close), picks a
 rank for each new request, sends one ``Cmd`` to every rank, collects one
 ``Reply`` from each, checks that the ranks agree (same ``seq``, same ``u``,
 all closed in the CLOSE iteration and none before), and hands all outputs to
@@ -18,9 +18,9 @@ and CLOSE:
 - ``unfinished``: some rank reported unfinished requests after its last step,
   or this iteration adds requests. It errs only towards stepping: a rank with
   nothing to schedule runs a placeholder step, as DeepInfer's DP ranks do.
-  Work a rank admits from outside its scheduler (a prompt that waited for KV
-  space) flushes in that iteration and steps in the next, which the
-  controller runs at once (``Reply.unfinished``).
+  Work a rank admits from outside its scheduler (a finished decode read, a
+  prompt that waited for KV space) flushes in that iteration and steps in the
+  next, which the controller runs at once (``Reply.unfinished``).
 - ``close``: the CLOSE iteration; every rank runs DeepInfer's collective
   ``close()`` in it.
 - ``new_prompts``: this iteration adds requests; NORMAL ranks make the next
@@ -80,13 +80,18 @@ class Abort(msgspec.Struct, tag="abort", array_like=True):
     request_id: str
 
 
+class Release(msgspec.Struct, tag="release", array_like=True):
+    handoff: dict[str, Any]
+    rank: Optional[int] = None
+
+
 class Close(msgspec.Struct, tag="close", array_like=True):
     timeout: float = 60.0
 
 
 # What the controller's inbox holds; a controller process gets them from the
 # head as msgpack.
-InboxItem = Union[Submit, Abort, Close]
+InboxItem = Union[Submit, Abort, Release, Close]
 
 
 def exit_process(reason: str) -> None:
@@ -106,6 +111,7 @@ class Controller:
         handles: Sequence[RankHandle],
         meta: EngineMeta,
         *,
+        engine_type: str = "NORMAL",
         idle_heartbeat_s: float = 1.0,
         pending_poll_s: float = 0.002,
         snapshot_interval_s: float = 1.0,
@@ -125,6 +131,7 @@ class Controller:
         self._recv_order = sorted(self._handles, key=lambda h: not h.inline)
         self.dp_size = len(self._handles)
         self.meta = meta
+        self.engine_type = engine_type
         self.idle_heartbeat_s = idle_heartbeat_s
         self.pending_poll_s = pending_poll_s
         self.snapshot_interval_s = snapshot_interval_s
@@ -174,6 +181,12 @@ class Controller:
 
     def abort(self, request_id: str) -> None:
         self._inbox.put(Abort(request_id))
+
+    def release(self, handoff: dict[str, Any], rank: Optional[int] = None) -> None:
+        """Free a KV handoff no decode peer will read, through ``rank``: the
+        prefill rank holding it, or any decode rank (None: rank 0), which
+        notifies the peer."""
+        self._inbox.put(Release(handoff, rank))
 
     def stats(self) -> list[RankStats]:
         return list(self._stats)
@@ -257,10 +270,11 @@ class Controller:
 
     def _plan(
         self, items: list[Any]
-    ) -> tuple[bool, list[list[AddReq]], list[list[str]]]:
+    ) -> tuple[bool, list[list[AddReq]], list[list[str]], list[list[dict[str, Any]]]]:
         n = self.dp_size
         adds: list[list[AddReq]] = [[] for _ in range(n)]
         aborts: list[list[str]] = [[] for _ in range(n)]
+        releases: list[list[dict[str, Any]]] = [[] for _ in range(n)]
         load = [s.num_running + s.num_waiting + s.num_pending for s in self._stats]
         closing = False
         for item in items:
@@ -279,22 +293,33 @@ class Controller:
                 rank = self._owner.pop(rid, None)
                 if rank is None:
                     continue
-                # Ranks apply aborts before adds: drop an add from this same batch.
-                if not any(a.request_id == rid for a in adds[rank]):
+                # Ranks apply aborts before adds: drop an add from this same
+                # batch, and free the prefill KV its handoff names.
+                dropped = [a for a in adds[rank] if a.request_id == rid]
+                if not dropped:
                     aborts[rank].append(rid)
                 adds[rank] = [a for a in adds[rank] if a.request_id != rid]
+                releases[rank] += [a.handoff for a in dropped if a.handoff]
+            elif isinstance(item, Release):
+                rank = 0 if item.rank is None else item.rank
+                if 0 <= rank < n:
+                    releases[rank].append(item.handoff)
+                else:
+                    logger.warning("Not releasing a KV handoff of rank %d", rank)
             elif isinstance(item, Close):
                 closing = True
                 self.close_timeout = item.timeout
             else:
                 logger.error("Ignoring unknown DeepInfer controller item %r", item)
         if closing:
+            for rank in range(n):
+                releases[rank] += [a.handoff for a in adds[rank] if a.handoff]
             adds = [[] for _ in range(n)]
-        return closing, adds, aborts
+        return closing, adds, aborts, releases
 
     def _iterate(self, timeout: float) -> bool:
         """One lockstep iteration; returns True after the CLOSE iteration."""
-        closing, adds, aborts = self._plan(self._drain(timeout))
+        closing, adds, aborts, releases = self._plan(self._drain(timeout))
         added = any(adds)
         sync = Sync(
             unfinished=self._unfinished or added,
@@ -311,6 +336,7 @@ class Controller:
                     op=op,
                     adds=adds[handle.rank],
                     aborts=aborts[handle.rank],
+                    releases=releases[handle.rank],
                     sync=sync,
                 )
             )

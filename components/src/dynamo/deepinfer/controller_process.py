@@ -15,7 +15,7 @@ starts the ranks (``launch_ranks``), owns their sockets and runs the
 ``Controller``.
 
 One ZMQ ``PAIR`` over ``ipc://`` links it to the head. The head sends the
-controller's inbox items (``Submit``, ``Abort``, ``Close``). The
+controller's inbox items (``Submit``, ``Abort``, ``Release``, ``Close``). The
 controller sends ``Started`` (or ``Failed``) once the ranks are ready, then
 per iteration one ``Outputs`` message carrying every rank's outputs as the
 rank encoded them (it decodes only the reply headers), and ``Stats`` once per
@@ -54,6 +54,7 @@ from dynamo.deepinfer.controller import (
     Controller,
     InboxItem,
     OutputSink,
+    Release,
     StatsSink,
     Submit,
     _percentiles,
@@ -79,6 +80,8 @@ logger = logging.getLogger(__name__)
 class Started(msgspec.Struct, tag="started", array_like=True):
     meta: EngineMeta
     dp_size: int
+    # dp rank -> KV event endpoint of a rank on another node.
+    kv_endpoints: dict[int, str] = {}
 
 
 class Failed(msgspec.Struct, tag="failed", array_like=True):
@@ -137,6 +140,7 @@ class ControllerProcess:
         self.ipc_dir = ipc_dir
         self.meta = started.meta
         self.dp_size = started.dp_size
+        self.kv_endpoints = started.kv_endpoints
         # Called ~once per snapshot interval per rank from the link thread.
         self.on_stats: Optional[StatsSink] = None
         self._sock = sock
@@ -229,6 +233,9 @@ class ControllerProcess:
 
     def abort(self, request_id: str) -> None:
         self._send(Abort(request_id))
+
+    def release(self, handoff: dict[str, Any], rank: Optional[int] = None) -> None:
+        self._send(Release(handoff, rank))
 
     def stats(self) -> list[RankStats]:
         return list(self._stats)
@@ -431,7 +438,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sock.close(linger=5000)
         ctx.term()
         return 1
-    sock.send(encode(Started(launch.meta, len(launch.handles))))
+    sock.send(encode(Started(launch.meta, len(launch.handles), launch.kv_endpoints)))
 
     def forward(frames: list[Any]) -> None:
         sock.send(encode(Outputs(time.time(), frames)))
@@ -444,6 +451,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     controller = Controller(
         launch.handles,
         launch.meta,
+        engine_type=opts.engine_type,
         on_stats=send_stats,
         inbox=_HeadInbox(sock),
         raw_outputs=True,

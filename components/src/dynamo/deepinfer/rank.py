@@ -4,10 +4,11 @@
 """One DP rank: builds and owns a DeepInfer engine and applies ``Cmd``s to it.
 
 Used in-thread for an in-process rank 0 and inside ``rank_worker`` for the
-others. Each ``apply`` is one lockstep iteration: aborts, adds, then the
-iteration's global flags (``Sync``: from the controller's ``Cmd``, else one
-MAX all-reduce of this rank's own values), then ``close()``, or ``step()`` if
-any rank has unfinished requests, or ``flush_inflight_reqs()``. The first iteration also checks that every rank
+others. Each ``apply`` is one lockstep iteration: aborts, handoff releases,
+adds, transfer polls, then the iteration's global flags (``Sync``: from the
+controller's ``Cmd``, else one MAX all-reduce of this rank's own values),
+then ``close()``, or ``step()`` if any rank has unfinished requests, or
+``flush_inflight_reqs()``. The first iteration also checks that every rank
 runs the same options and lockstep settings.
 """
 
@@ -27,6 +28,8 @@ from typing import Any, Optional
 import numpy as np
 
 from dynamo.deepinfer import di_engine
+from dynamo.deepinfer.disagg import HANDOFF_KEY
+from dynamo.deepinfer.kv_cache.base import make_event_sink
 from dynamo.deepinfer.protocol import (
     AddReq,
     Cmd,
@@ -50,12 +53,16 @@ class RankSpec:
     dp_size: int
     # deepinfer EngineArgs kwargs, without engine_type.
     engine_args: dict[str, Any]
-    engine_type: str = "NORMAL"
+    engine_type: str = "NORMAL"  # NORMAL | PROMPT | COMPLETION
     backend: str = "deepinfer"  # or "fake" (testing/fake_deepinfer.py)
     engine_id: str = ""
-    # kv_cache.base: the per-rank KV cache manager and its options.
     cache_manager: str = "none"
     cache_options: dict[str, Any] = field(default_factory=dict)
+    kv_transfer: str = "none"
+    transfer_options: dict[str, Any] = field(default_factory=dict)
+    # ZMQ PUB bind address for this rank's KV events (None: no events).
+    kv_events_endpoint: Optional[str] = None
+    kv_lease_s: float = 120.0
 
     def to_json(self) -> str:
         return json.dumps(dataclasses.asdict(self))
@@ -66,7 +73,8 @@ class RankSpec:
 
     def digest(self) -> str:
         """What every node of an engine must agree on for this rank: the spec
-        without the (informational) engine id."""
+        without its node-local KV event endpoint and the (informational)
+        engine id."""
         return _sha256(self._shared())
 
     def engine_digest(self) -> str:
@@ -79,7 +87,7 @@ class RankSpec:
 
     def _shared(self) -> dict[str, Any]:
         data = dataclasses.asdict(self)
-        del data["engine_id"]
+        del data["kv_events_endpoint"], data["engine_id"]
         return data
 
 
@@ -94,13 +102,20 @@ class RankRunner:
         self.api = di_engine.load_api(spec.backend)
         self.engine = di_engine.build_engine(self.api, spec)
         self.cache = self.engine.dynamo_cache
+        self.prefill = self.engine.dynamo_prefill
+        self.decode = self.engine.dynamo_decode
         self.meta = di_engine.engine_meta(self.engine)
+        self.sink = make_event_sink(
+            spec.kv_events_endpoint, spec.rank, self.meta.block_size
+        )
         self._dp_max = di_engine.dp_max(self.api, self.engine)
         self._startup_max = di_engine.dp_max(self.api, self.engine, cpu=True)
         # In-flight request id -> top_logprobs; outputs of other ids are dropped.
         self._live: dict[str, int] = {}
-        # Added but not admitted yet (the cache manager has no room): (seq, prompt).
+        # Added but not admitted yet (a prefix hit without KV headroom): (seq, prompt).
         self._later: deque[tuple[Any, np.ndarray]] = deque()
+        # Admitted request id -> prompt tokens served from the prefix cache.
+        self._hits: dict[str, int] = {}
         self._thread: Optional[int] = None
         self._busy = False
         self._checked = False
@@ -122,10 +137,19 @@ class RankRunner:
         outputs: dict[str, Output] = {}
         for rid in cmd.aborts:
             self._abort(rid)
+        for handoff in cmd.releases:
+            self._release(handoff)
         for add in cmd.adds:
             self._add(add, outputs)
         admitted = self._admit_later()
         closing = cmd.op == Op.CLOSE
+        if not closing:
+            if self.prefill is not None:
+                self.prefill.poll()
+            if self.decode is not None:
+                for out in self.decode.poll():
+                    outputs[out.request_id] = out
+            self.cache.before_step()
         unfinished = di_engine.has_local_work(engine)
         pending = self._num_pending() > 0
         flags = cmd.sync
@@ -164,16 +188,22 @@ class RankRunner:
             # 90%). 0 (an ALL point) would let such a rank veto prefill
             # everywhere for as long as prompts keep coming.
             engine.scheduler.decode_step = self.meta.prefill_any_attempt_interval
-        # Work that showed up here after the controller computed the flags (a
-        # prompt admitted from _later) is flushed now and steps next iteration
-        # (Reply.unfinished).
+        # Work that showed up here after the controller computed the flags
+        # (a finished decode read, a prompt admitted from _later) is flushed
+        # now and steps next iteration (Reply.unfinished).
         u = flags.unfinished
         ptrs = engine.step() if u else engine.flush_inflight_reqs()
         collect_outputs(ptrs, self.api.RequestOutput, self._live, outputs)
+        if self.prefill is not None:
+            for rid, handoff in self.prefill.take_handoffs().items():
+                out = outputs.setdefault(rid, Output(request_id=rid))
+                out.disaggregated_params = {HANDOFF_KEY: handoff}
+                out.finish_reason = out.finish_reason or "length"
         finished: list[str] = []
         for rid, out in outputs.items():
             if out.finish_reason is not None:
                 self._live.pop(rid, None)
+                out.cached_tokens = self._hits.pop(rid, None)
                 finished.append(rid)
         if self._busy and not u:
             # DeepInfer disables the cyclic GC and collects only every N steps.
@@ -186,6 +216,7 @@ class RankRunner:
             u=u,
             outputs=list(outputs.values()),
             stats=stats,
+            kv_events_published=self._publish_events(),
             unfinished=di_engine.has_local_work(engine),
             pending=stats.num_pending > 0,
             finished=finished,
@@ -246,7 +277,11 @@ class RankRunner:
 
     def _add(self, add: AddReq, outputs: dict[str, Output]) -> None:
         rid = add.request_id
+        # DecodeFlow.admit releases the prefill copy itself when it rejects.
+        handed_off = False
         try:
+            if add.handoff is not None and self.decode is None:
+                raise ValueError("received a prefill handoff on a non-decode rank")
             prompt = prompt_array(add.token_ids)
             seq = self.engine.add_request(
                 user_id="dynamo",
@@ -258,8 +293,18 @@ class RankRunner:
             )
             if seq is None:
                 raise ValueError("prompt has a token id outside the vocabulary")
-            self._later.append((seq, prompt))
+            if add.handoff is not None:
+                handed_off = True
+                self.decode.admit(seq, add.handoff)
+            else:
+                if add.hold_kv:
+                    if self.prefill is None:
+                        raise ValueError("hold_kv on a non-prefill rank")
+                    self.prefill.expect(rid)
+                self._later.append((seq, prompt))
         except (ValueError, TypeError) as e:
+            if add.handoff is not None and self.decode is not None and not handed_off:
+                self.decode.release(add.handoff)
             logger.warning("Rejected request %s on rank %d: %s", rid, self.spec.rank, e)
             outputs[rid] = Output(request_id=rid, finish_reason="error")
             return
@@ -267,26 +312,41 @@ class RankRunner:
 
     def _admit_later(self) -> int:
         """Hand added prompts to the scheduler; returns how many it took."""
-        # FIFO: a request the cache turns away holds back the ones behind it.
+        # FIFO: a request the cache turns away (a prefix hit without headroom)
+        # holds back the ones behind it.
         admitted = 0
         while self._later:
             seq, prompt = self._later[0]
-            if not self.cache.admit(seq, prompt).admitted:
+            admission = self.cache.admit(seq, prompt)
+            if not admission.admitted:
                 break
             self._later.popleft()
+            self._hits[seq.request_id] = admission.hit_tokens
             admitted += 1
         return admitted
 
+    def _release(self, handoff: dict[str, Any]) -> None:
+        """Free a KV handoff that no decode peer will read."""
+        if self.prefill is not None:
+            self.prefill.release(handoff)
+        elif self.decode is not None:
+            self.decode.release(handoff)
+
     def _abort(self, rid: str) -> None:
         self._live.pop(rid, None)
+        self._hits.pop(rid, None)
+        if self.prefill is not None:
+            self.prefill.forget(rid)
         for item in self._later:
             if item[0].request_id == rid:
                 self._later.remove(item)
                 return
+        if self.decode is not None and self.decode.abort(rid):
+            return
         scheduler = self.engine.scheduler
         # An aborted waiting seq is reported through the scheduler's ignored
-        # path, which never frees it. Partly prefilled prompts hold blocks
-        # while waiting, so release it here.
+        # path, which never frees it. Prefix hits and partly prefilled prompts
+        # hold blocks while waiting, so release it here.
         waiting = [
             s
             for s in scheduler.waiting
@@ -297,8 +357,10 @@ class RankRunner:
             self.cache.on_finished(seq)
 
     def _num_pending(self) -> int:
-        """Requests outside the scheduler: awaiting KV space."""
-        return len(self._later)
+        """Requests outside the scheduler: awaiting KV space or a transfer."""
+        return len(self._later) + (
+            self.decode.num_pending if self.decode is not None else 0
+        )
 
     def _stats(self) -> RankStats:
         cs = self.cache.stats()
@@ -307,13 +369,28 @@ class RankRunner:
             num_running=len(scheduler.running),
             num_waiting=len(scheduler.waiting),
             num_pending=self._num_pending(),
+            num_held=self.prefill.num_held if self.prefill is not None else 0,
             kv_used_blocks=cs.used_blocks,
             kv_total_blocks=cs.total_blocks,
+            kv_hit_rate=cs.hit_rate,
         )
+
+    def _publish_events(self) -> int:
+        events = self.cache.take_events()
+        if events:
+            self.sink.publish(events)
+        return len(events)
 
     def close(self) -> None:
         """DeepInfer's ``close()`` is collective: call it in the CLOSE iteration only."""
         if self._closed:
             return
         self._closed = True
-        self.engine.close()
+        try:
+            self.engine.close()
+        finally:
+            if self.prefill is not None:
+                self.prefill.close()
+            if self.engine.dynamo_transfer is not None:
+                self.engine.dynamo_transfer.shutdown()
+            self.sink.close()

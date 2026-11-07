@@ -21,8 +21,8 @@ engine usually fills one node; it can also [span several nodes](#run-one-engine-
 | Data and expert parallelism (DEP) over the GPUs of one or more nodes | Supported |
 | Reasoning and tool-call parsing | Through Dynamo (`deepseek_v41` parsers) |
 | Logprobs | Supported |
-| Prefix cache and KV events | Not yet |
-| Disaggregated prefill/decode | Not yet |
+| Prefix cache and KV events (`--kv-cache-manager prefix`) | Supported, 128-token blocks |
+| Disaggregated prefill/decode (`--disaggregation-mode`) | Supported, KV and state read over NIXL (UCX) |
 | Multimodal input | Not supported |
 
 ## Image
