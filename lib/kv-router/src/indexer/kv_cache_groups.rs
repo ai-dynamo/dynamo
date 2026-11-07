@@ -1498,6 +1498,23 @@ mod tests {
     use super::*;
     use crate::protocols::KvCacheRemoveData;
 
+    fn run_concurrency_test_with_timeout(body: impl FnOnce() + Send + 'static) {
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+            let _ = send.send(result);
+        });
+        // Dropping this owned thread on timeout avoids a scoped join waiting
+        // forever on a deadlock. Its test state stays owned by that thread.
+        let result = receive
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("concurrency test did not finish within 10 seconds");
+        worker.join().unwrap();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
     fn checkpoint(
         worker: WorkerWithDpRank,
         tier: StorageTier,
@@ -1709,47 +1726,53 @@ mod tests {
 
     #[test]
     fn endpoint_read_is_send_and_protects_invalidation_without_cloning_certificate() {
-        fn assert_send<T: Send>() {}
-        assert_send::<EndpointCertificateRead>();
-        let table = KvCacheGroupResidency::new();
-        let worker = WorkerWithDpRank::new(7, 0);
-        let hash = ExternalSequenceBlockHash(11);
-        let event = checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1));
-        table.apply(&event);
-        let certificate = endpoint_proof(&table, hash);
-        let references = Arc::strong_count(&certificate);
-        let cutoff = table.capture_cutoff();
-        let read = table.endpoint_certificate_read(hash, cutoff).unwrap();
-        assert_eq!(Arc::strong_count(&certificate), references);
-        assert_eq!(read.publication_id(), certificate.publication_id());
-        assert_eq!(read.workers(), &FxHashSet::from_iter([worker]));
-        assert!(table.is_certificate_read_valid(&read));
-        assert!(!KvCacheGroupResidency::new().is_certificate_read_valid(&read));
-        assert!(read.is_valid());
-        let (ready_send, ready_receive) = std::sync::mpsc::channel();
-        let (resume_send, resume_receive) = std::sync::mpsc::channel();
-        let reader = std::thread::spawn(move || {
-            ready_send.send(()).unwrap();
-            resume_receive.recv().unwrap();
-            assert!(!read.is_valid());
+        run_concurrency_test_with_timeout(|| {
+            fn assert_send<T: Send>() {}
+            assert_send::<EndpointCertificateRead>();
+            let table = KvCacheGroupResidency::new();
+            let worker = WorkerWithDpRank::new(7, 0);
+            let hash = ExternalSequenceBlockHash(11);
+            let event = checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1));
+            table.apply(&event);
+            let certificate = endpoint_proof(&table, hash);
+            let references = Arc::strong_count(&certificate);
+            let cutoff = table.capture_cutoff();
+            let read = table.endpoint_certificate_read(hash, cutoff).unwrap();
+            assert_eq!(Arc::strong_count(&certificate), references);
+            assert_eq!(read.publication_id(), certificate.publication_id());
             assert_eq!(read.workers(), &FxHashSet::from_iter([worker]));
+            assert!(table.is_certificate_read_valid(&read));
+            assert!(!KvCacheGroupResidency::new().is_certificate_read_valid(&read));
+            assert!(read.is_valid());
+            let (ready_send, ready_receive) = std::sync::mpsc::channel();
+            let (resume_send, resume_receive) = std::sync::mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                ready_send.send(()).unwrap();
+                resume_receive
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("reader did not receive the resume signal within 5 seconds");
+                assert!(!read.is_valid());
+                assert_eq!(read.workers(), &FxHashSet::from_iter([worker]));
+            });
+            ready_receive
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("reader did not become ready within 5 seconds");
+            let mut remove = event.clone();
+            remove.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![hash],
+            });
+            table.apply(&remove);
+            assert!(!certificate.is_valid());
+            table.apply(&event);
+            assert!(table.endpoint_certificate_read(hash, cutoff).is_none());
+            assert!(
+                table
+                    .endpoint_certificate_read(hash, table.capture_cutoff())
+                    .is_some()
+            );
+            resume_send.send(()).unwrap();
+            reader.join().unwrap();
         });
-        ready_receive.recv().unwrap();
-        let mut remove = event.clone();
-        remove.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
-            block_hashes: vec![hash],
-        });
-        table.apply(&remove);
-        assert!(!certificate.is_valid());
-        table.apply(&event);
-        assert!(table.endpoint_certificate_read(hash, cutoff).is_none());
-        assert!(
-            table
-                .endpoint_certificate_read(hash, table.capture_cutoff())
-                .is_some()
-        );
-        resume_send.send(()).unwrap();
-        reader.join().unwrap();
     }
 
     #[test]
@@ -1912,94 +1935,109 @@ mod tests {
 
     #[test]
     fn concurrent_checkpoint_writer_cannot_recertify_an_owner_being_cleared() {
-        use std::time::{Duration, Instant};
-        let table = KvCacheGroupResidency::new();
-        let first = WorkerWithDpRank::new(7, 0);
-        let second = WorkerWithDpRank::new(8, 0);
-        let hash = ExternalSequenceBlockHash(11);
-        for worker in [first, second] {
-            table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
-        }
-        for worker in [first, second] {
-            table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
-        }
-        let old = endpoint_proof(&table, hash);
-        let handle = table.registry.load().layouts[&ResidencyOwner::worker(first)].clone();
-        let generation = handle.snapshot.load().generation;
-        let done = AtomicU64::new(0);
-        std::thread::scope(|scope| {
-            let shard = &table.memberships.shards[CheckpointMembershipIndex::shard(hash.0)];
-            let hold_publication = shard.writer.lock();
-            scope.spawn(|| {
-                table.clear_worker(first);
-                done.fetch_add(1, Ordering::Release);
-            });
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let transitioned = loop {
-                if handle.eligible_generation.load(Ordering::Acquire) == 0 {
-                    break true;
-                }
-                if Instant::now() >= deadline {
-                    break false;
-                }
-                std::thread::yield_now();
-            };
-            assert_eq!(handle.snapshot.load().generation, generation);
-            scope.spawn(|| {
-                let mut removed = checkpoint(second, StorageTier::Device, 0, hash.0, Some(1));
-                removed.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: vec![hash],
-                });
-                table.apply(&removed);
-                table.apply(&checkpoint(second, StorageTier::Device, 0, hash.0, Some(1)));
-                done.fetch_add(1, Ordering::Release);
-            });
-            drop(hold_publication);
-            assert!(
-                transitioned,
-                "clear must close eligibility before waiting for the shard"
-            );
-            while done.load(Ordering::Acquire) != 2 {
-                if let Some(proof) = table.endpoint_certificate(hash, table.capture_cutoff()) {
-                    // Before all affected Hs are invalidated the old layout is
-                    // still published. After publication no old proof may win.
-                    if handle.snapshot.load().generation != generation && proof.is_valid() {
-                        assert!(!proof.workers().contains(&first));
-                    }
-                }
-                std::thread::yield_now();
+        run_concurrency_test_with_timeout(|| {
+            use std::time::{Duration, Instant};
+            let table = KvCacheGroupResidency::new();
+            let first = WorkerWithDpRank::new(7, 0);
+            let second = WorkerWithDpRank::new(8, 0);
+            let hash = ExternalSequenceBlockHash(11);
+            for worker in [first, second] {
+                table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
             }
+            for worker in [first, second] {
+                table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
+            }
+            let old = endpoint_proof(&table, hash);
+            let handle = table.registry.load().layouts[&ResidencyOwner::worker(first)].clone();
+            let generation = handle.snapshot.load().generation;
+            let done = AtomicU64::new(0);
+            std::thread::scope(|scope| {
+                let shard = &table.memberships.shards[CheckpointMembershipIndex::shard(hash.0)];
+                let hold_publication = shard.writer.lock();
+                scope.spawn(|| {
+                    table.clear_worker(first);
+                    done.fetch_add(1, Ordering::Release);
+                });
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let transitioned = loop {
+                    if handle.eligible_generation.load(Ordering::Acquire) == 0 {
+                        break true;
+                    }
+                    if Instant::now() >= deadline {
+                        break false;
+                    }
+                    std::thread::yield_now();
+                };
+                assert_eq!(handle.snapshot.load().generation, generation);
+                scope.spawn(|| {
+                    let mut removed = checkpoint(second, StorageTier::Device, 0, hash.0, Some(1));
+                    removed.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
+                        block_hashes: vec![hash],
+                    });
+                    table.apply(&removed);
+                    table.apply(&checkpoint(second, StorageTier::Device, 0, hash.0, Some(1)));
+                    done.fetch_add(1, Ordering::Release);
+                });
+                drop(hold_publication);
+                assert!(
+                    transitioned,
+                    "clear must close eligibility before waiting for the shard"
+                );
+                let completion_deadline = Instant::now() + Duration::from_secs(5);
+                while done.load(Ordering::Acquire) != 2 {
+                    assert!(
+                        Instant::now() < completion_deadline,
+                        "concurrent checkpoint and clear writers did not finish within 5 seconds"
+                    );
+                    if let Some(proof) = table.endpoint_certificate(hash, table.capture_cutoff()) {
+                        // Before all affected Hs are invalidated the old layout is
+                        // still published. After publication no old proof may win.
+                        if handle.snapshot.load().generation != generation && proof.is_valid() {
+                            assert!(!proof.workers().contains(&first));
+                        }
+                    }
+                    std::thread::yield_now();
+                }
+            });
+            assert!(!old.is_valid());
+            assert_eq!(
+                endpoint_proof(&table, hash).workers(),
+                &FxHashSet::from_iter([second])
+            );
         });
-        assert!(!old.is_valid());
-        assert_eq!(
-            endpoint_proof(&table, hash).workers(),
-            &FxHashSet::from_iter([second])
-        );
     }
 
     #[test]
     fn concurrent_layout_publishers_leave_only_current_generation_endpoint_facts() {
-        let table = KvCacheGroupResidency::new();
-        let hash = ExternalSequenceBlockHash(11);
-        let workers: Vec<_> = (1..=8).map(|id| WorkerWithDpRank::new(id, 0)).collect();
-        for &worker in &workers {
-            table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
-        }
-        std::thread::scope(|scope| {
+        run_concurrency_test_with_timeout(|| {
+            let table = KvCacheGroupResidency::new();
+            let hash = ExternalSequenceBlockHash(11);
+            let workers: Vec<_> = (1..=8).map(|id| WorkerWithDpRank::new(id, 0)).collect();
             for &worker in &workers {
-                let table = &table;
-                scope.spawn(move || {
-                    for _ in 0..12 {
-                        table.clear_worker(worker);
-                        table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
-                    }
-                });
+                table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
             }
+            std::thread::scope(|scope| {
+                for &worker in &workers {
+                    let table = &table;
+                    scope.spawn(move || {
+                        for _ in 0..12 {
+                            table.clear_worker(worker);
+                            table.apply(&checkpoint(
+                                worker,
+                                StorageTier::Device,
+                                0,
+                                hash.0,
+                                Some(1),
+                            ));
+                        }
+                    });
+                }
+            });
+            assert_eq!(
+                endpoint_proof(&table, hash).workers(),
+                &workers.into_iter().collect()
+            );
         });
-        assert_eq!(
-            endpoint_proof(&table, hash).workers(),
-            &workers.into_iter().collect()
-        );
     }
 
     #[test]
@@ -2075,86 +2113,89 @@ mod tests {
 
     #[test]
     fn closing_owner_invalidates_a_replacement_published_by_the_old_shard_writer() {
-        use std::time::{Duration, Instant};
-        let table = KvCacheGroupResidency::new();
-        let hash = ExternalSequenceBlockHash(11);
-        let first = WorkerWithDpRank::new(7, 0);
-        let second = WorkerWithDpRank::new(8, 0);
-        for worker in [first, second] {
-            table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
-        }
-        for worker in [first, second] {
-            table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
-        }
-        let previous = endpoint_proof(&table, hash);
-        let first_handle = table.registry.load().layouts[&ResidencyOwner::worker(first)].clone();
-        let old_generation = first_handle.snapshot.load().generation;
-        let second_state = table.owner(ResidencyOwner::worker(second)).unwrap();
-        let mut second_writer = second_state.write();
-        std::thread::scope(|scope| {
-            let shard = &table.memberships.shards[CheckpointMembershipIndex::shard(hash.0)];
-            let mut shard_writer = shard.writer.lock();
-            let clearing = scope.spawn(|| table.clear_worker(first));
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let closed = loop {
-                if first_handle.eligible_generation.load(Ordering::Acquire) == 0 {
-                    break true;
-                }
-                if Instant::now() >= deadline {
-                    break false;
-                }
-                std::thread::yield_now();
-            };
-            // Force the already-running other-owner publisher to finish after
-            // first closed, but before its invalidation can obtain this shard.
-            let replacement = if closed {
-                assert!(previous.is_valid());
-                assert_eq!(first_handle.snapshot.load().generation, old_generation);
-                let registry = table.registry.load_full();
-                let mut next = (**shard.entries.load()).clone();
-                let mut membership = (**next.get(&hash.0).unwrap()).clone();
-                second_writer.store(0, hash.0, StorageTier::HostPinned);
-                membership.update(
-                    ResidencyOwner::worker(second),
-                    second_writer.generation,
-                    second_writer.complete_checkpoints[&hash.0],
-                );
-                let replacement = table
-                    .memberships
-                    .build_certificate(
-                        &membership,
-                        &registry,
+        run_concurrency_test_with_timeout(|| {
+            use std::time::{Duration, Instant};
+            let table = KvCacheGroupResidency::new();
+            let hash = ExternalSequenceBlockHash(11);
+            let first = WorkerWithDpRank::new(7, 0);
+            let second = WorkerWithDpRank::new(8, 0);
+            for worker in [first, second] {
+                table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+            }
+            for worker in [first, second] {
+                table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
+            }
+            let previous = endpoint_proof(&table, hash);
+            let first_handle =
+                table.registry.load().layouts[&ResidencyOwner::worker(first)].clone();
+            let old_generation = first_handle.snapshot.load().generation;
+            let second_state = table.owner(ResidencyOwner::worker(second)).unwrap();
+            let mut second_writer = second_state.write();
+            std::thread::scope(|scope| {
+                let shard = &table.memberships.shards[CheckpointMembershipIndex::shard(hash.0)];
+                let mut shard_writer = shard.writer.lock();
+                let clearing = scope.spawn(|| table.clear_worker(first));
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let closed = loop {
+                    if first_handle.eligible_generation.load(Ordering::Acquire) == 0 {
+                        break true;
+                    }
+                    if Instant::now() >= deadline {
+                        break false;
+                    }
+                    std::thread::yield_now();
+                };
+                // Force the already-running other-owner publisher to finish after
+                // first closed, but before its invalidation can obtain this shard.
+                let replacement = if closed {
+                    assert!(previous.is_valid());
+                    assert_eq!(first_handle.snapshot.load().generation, old_generation);
+                    let registry = table.registry.load_full();
+                    let mut next = (**shard.entries.load()).clone();
+                    let mut membership = (**next.get(&hash.0).unwrap()).clone();
+                    second_writer.store(0, hash.0, StorageTier::HostPinned);
+                    membership.update(
                         ResidencyOwner::worker(second),
-                        Some(&previous),
-                    )
-                    .unwrap();
-                assert!(replacement.workers().contains(&first));
-                previous.invalidate();
-                *shard_writer += 1;
-                membership.revision = *shard_writer;
-                membership.endpoint_certificate = Some(replacement.clone());
-                next.insert(hash.0, Arc::new(membership));
-                shard.entries.store(Arc::new(next));
-                let born = table.memberships.publication.fetch_add(1, Ordering::AcqRel) + 1;
-                replacement.publication.store(born, Ordering::Release);
-                assert!(replacement.is_valid());
-                Some(replacement)
-            } else {
-                None
-            };
-            drop(shard_writer);
-            clearing.join().unwrap();
-            assert!(
-                closed,
-                "clear must close before waiting for shard invalidation"
+                        second_writer.generation,
+                        second_writer.complete_checkpoints[&hash.0],
+                    );
+                    let replacement = table
+                        .memberships
+                        .build_certificate(
+                            &membership,
+                            &registry,
+                            ResidencyOwner::worker(second),
+                            Some(&previous),
+                        )
+                        .unwrap();
+                    assert!(replacement.workers().contains(&first));
+                    previous.invalidate();
+                    *shard_writer += 1;
+                    membership.revision = *shard_writer;
+                    membership.endpoint_certificate = Some(replacement.clone());
+                    next.insert(hash.0, Arc::new(membership));
+                    shard.entries.store(Arc::new(next));
+                    let born = table.memberships.publication.fetch_add(1, Ordering::AcqRel) + 1;
+                    replacement.publication.store(born, Ordering::Release);
+                    assert!(replacement.is_valid());
+                    Some(replacement)
+                } else {
+                    None
+                };
+                drop(shard_writer);
+                clearing.join().unwrap();
+                assert!(
+                    closed,
+                    "clear must close before waiting for shard invalidation"
+                );
+                assert!(!replacement.unwrap().is_valid());
+                assert_ne!(first_handle.snapshot.load().generation, old_generation);
+            });
+            assert_eq!(
+                endpoint_proof(&table, hash).workers(),
+                &FxHashSet::from_iter([second])
             );
-            assert!(!replacement.unwrap().is_valid());
-            assert_ne!(first_handle.snapshot.load().generation, old_generation);
         });
-        assert_eq!(
-            endpoint_proof(&table, hash).workers(),
-            &FxHashSet::from_iter([second])
-        );
     }
 
     #[test]
