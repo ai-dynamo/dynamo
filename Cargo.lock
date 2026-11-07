@@ -2782,6 +2782,7 @@ dependencies = [
  "galil-seiferas",
  "half",
  "hf-hub 0.4.3",
+ "http-body 1.0.1",
  "http-body-util",
  "hyper-util",
  "image",
