@@ -13,7 +13,7 @@ you to.
 > **Experimental.** The sidecars and their deployment examples are
 > experimental. Manifests, flags, and behavior may change without notice.
 
-`dynamo-sglang-sidecar` connects a Dynamo worker to SGLang's native gRPC
+`dynamo-sglang-sidecar` connects a Dynamo worker to SGLang's Rust native gRPC
 server. See the [sidecar overview](../README.md) for installation.
 
 > [!TIP]
@@ -27,17 +27,9 @@ server. See the [sidecar overview](../README.md) for installation.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
-| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Yes |
-| Image, video, and audio input | Yes; disaggregated serving is untested |
-
-The sidecar sends a media kind only when the SGLang gRPC server lists it in
-`grpc_features` (`image_inputs`, `video_inputs`, or `audio_inputs`), and returns
-400 for other media requests.
-
-> [!WARNING]
-> SGLang downloads `http://` and `https://` media URLs itself, from any host by
-> default, including `127.0.0.1` and its own HTTP API. Start SGLang with
-> `--allowed-media-domains` to limit the hosts it fetches.
+| Kubernetes multinode tensor parallelism (TP) | Yes |
+| Data parallelism (DP>1) | Not yet |
+| Image, video, and audio input | No |
 
 See [support notes](../SUPPORT_NOTES.md#sglang) for feature restrictions and operational limits.
 
@@ -50,6 +42,8 @@ one GPU:
 export DYN_DISCOVERY_BACKEND=file   # single host: no etcd or NATS needed
 lib/sidecar/sglang/launch/agg.sh
 ```
+
+The scripts start SGLang with `SGLANG_RUST_SERVER=1`.
 
 In a second terminal:
 
@@ -84,15 +78,19 @@ and the [SGLang sidecar guide](https://github.com/ai-dynamo/dynamo/blob/main/doc
 The examples use an engine-primary layout: SGLang runs as the `main` container
 and `dynamo-sglang-sidecar` runs as a restartable `runtime` init container.
 Those reserved names activate operator sidecar behavior. SGLang native gRPC
-requires v0.5.16 or newer. SGLang can alternatively load the sidecar in-process
-with `--sidecar dynamo.sglang.sidecar`.
+requires SGLang's Rust server (`SGLANG_RUST_SERVER=1`) from SGLang v0.5.23 or
+later. [sgl-project/sglang#45859](https://github.com/sgl-project/sglang/pull/45859)
+is optional; without it, an EAGLE engine gets no token budget and the sidecar
+treats `--allow-auto-truncate` and `--skip-tokenizer-init` as off.
+SGLang can alternatively load the sidecar in-process with
+`--sidecar dynamo.sglang.sidecar`.
 
 Aggregated serving uses loopback between the engine and sidecar. Disaggregated
 serving binds SGLang to the pod network so decode workers can reach prefill's
-bootstrap server; the prefill sidecar auto-detects and advertises its pod IP.
-For KV routing, the sidecar normalizes the engine's wildcard ZMQ event address
-against its local gRPC endpoint. Restrict pod-network gRPC and ZMQ ports with
-NetworkPolicy.
+bootstrap server, which the Rust server serves on its HTTP port; the prefill
+sidecar auto-detects and advertises its pod IP. For KV routing, the sidecar
+subscribes to the ZMQ endpoints SGLang reports in its discovery metadata.
+Restrict pod-network gRPC, HTTP, and ZMQ ports with NetworkPolicy.
 
 Disaggregated serving requires an SGLang image with NIXL/UCX support, RDMA
 devices, `IPC_LOCK`, and shared memory. Tune UCX for the deployment fabric.
@@ -118,10 +116,6 @@ node holds the remaining TP ranks.
 
 ![When one SGLang engine spans two nodes with tensor parallelism, only the leader node runs a Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar on Node 0.](../../../docs/fern/assets/img/sidecar-sglang-multinode-tp.svg)
 
-### Multi-Node DP
+### Data parallelism
 
-The leader sidecar registers every DP rank and serves all requests; SGLang
-dispatches each one to the right scheduler. The follower sidecar
-accepts no requests and relays its node's KV events directly to the frontend.
-
-![SGLang data parallelism across two nodes. Only the leader sidecar serves requests: the Dynamo Frontend router picks a DP rank and sends requests over the request plane to the node 0 Dynamo Sidecar, which registers DP ranks 0-3 and calls its local SGLang over native gRPC.](../../../docs/fern/assets/img/sidecar-sglang-multinode-dp.svg)
+Not supported yet; see the [support matrix](#support-matrix).

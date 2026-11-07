@@ -30,7 +30,7 @@ spec:
       spec:
         initContainers:
         - name: runtime
-          image: <your-registry>/dynamo-sidecar:1.6.0
+          image: <your-registry>/dynamo-sidecar:<your-version>
           command:
           - dynamo-sglang-sidecar
           args:
@@ -54,7 +54,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.api.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 180
@@ -63,7 +63,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.api.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 3
@@ -72,10 +72,13 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.api.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 6
+          env:
+          - name: SGLANG_RUST_SERVER
+            value: "1"
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -104,8 +107,6 @@ spec:
           - --incremental-streaming-output
           - --disaggregation-mode
           - prefill
-          - --disaggregation-bootstrap-port
-          - "8998"
           - --disaggregation-transfer-backend
           - nixl
           - --page-size
@@ -121,7 +122,7 @@ spec:
       spec:
         initContainers:
         - name: runtime
-          image: <your-registry>/dynamo-sidecar:1.6.0
+          image: <your-registry>/dynamo-sidecar:<your-version>
           command:
           - dynamo-sglang-sidecar
           args:
@@ -143,7 +144,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.api.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 180
@@ -152,7 +153,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.api.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 3
@@ -161,10 +162,13 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.runtime.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
+              - import grpc; r=grpc.insecure_channel('127.0.0.1:30001').unary_unary('/sglang.api.v1.SglangService/HealthCheck')(b'', timeout=3); raise SystemExit(0 if r == b'\x08\x01' else 1)
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 6
+          env:
+          - name: SGLANG_RUST_SERVER
+            value: "1"
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -193,8 +197,6 @@ spec:
           - --incremental-streaming-output
           - --disaggregation-mode
           - decode
-          - --disaggregation-bootstrap-port
-          - "8998"
           - --disaggregation-transfer-backend
           - nixl
           - --page-size

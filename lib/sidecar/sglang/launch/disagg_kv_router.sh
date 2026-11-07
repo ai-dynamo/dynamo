@@ -14,6 +14,9 @@ source "$DYNAMO_HOME/examples/common/gpu_utils.sh"
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
 source "$DYNAMO_HOME/examples/common/launch_utils.sh"
 
+# The sidecar needs SGLang's Rust server (sglang.api.v1).
+export SGLANG_RUST_SERVER=1
+
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
 EXTRA_ARGS=()
@@ -49,12 +52,9 @@ while [[ $# -gt 0 ]]; do
             echo "  SGLANG_PREFILL1_HTTP_PORT          First prefill HTTP port (default: 30000)"
             echo "  SGLANG_PREFILL1_GRPC_PORT          First prefill gRPC port (default: 30001)"
             echo "  SGLANG_PREFILL1_KV_EVENT_PORT      First prefill KV-event port (default: 5557)"
-            echo "  SGLANG_DISAGGREGATION_BOOTSTRAP_PORT  First prefill bootstrap fallback (default: 8998)"
-            echo "  SGLANG_DISAGGREGATION_BOOTSTRAP_PORT1 First prefill bootstrap override"
             echo "  SGLANG_PREFILL2_HTTP_PORT          Second prefill HTTP port (default: 30010)"
             echo "  SGLANG_PREFILL2_GRPC_PORT          Second prefill gRPC port (default: 30011)"
             echo "  SGLANG_PREFILL2_KV_EVENT_PORT      Second prefill KV-event port (default: 5558)"
-            echo "  SGLANG_DISAGGREGATION_BOOTSTRAP_PORT2 Second prefill bootstrap port (default: 8999)"
             echo "  SGLANG_DECODE1_HTTP_PORT           First decode HTTP port (default: 30020)"
             echo "  SGLANG_DECODE1_GRPC_PORT           First decode gRPC port (default: 30021)"
             echo "  SGLANG_DECODE1_KV_EVENT_PORT       First decode KV-event port (default: 5559)"
@@ -90,8 +90,6 @@ dyn_worker_ports SGLANG_PREFILL1 1 HTTP=30000 GRPC=30001 KV_EVENT=5557
 dyn_worker_ports SGLANG_PREFILL2 2 HTTP=30010 GRPC=30011 KV_EVENT=5558
 dyn_worker_ports SGLANG_DECODE1 3 HTTP=30020 GRPC=30021 KV_EVENT=5559
 dyn_worker_ports SGLANG_DECODE2 4 HTTP=30030 GRPC=30031 KV_EVENT=5560
-SGLANG_DISAGGREGATION_BOOTSTRAP_PORT1=$(dyn_port DYN_DISAGG_BOOTSTRAP_PORT 1 "${SGLANG_DISAGGREGATION_BOOTSTRAP_PORT1:-${SGLANG_DISAGGREGATION_BOOTSTRAP_PORT:-8998}}")
-SGLANG_DISAGGREGATION_BOOTSTRAP_PORT2=$(dyn_port DYN_DISAGG_BOOTSTRAP_PORT 2 "${SGLANG_DISAGGREGATION_BOOTSTRAP_PORT2:-8999}")
 SGLANG_PAGE_SIZE="${SGLANG_PAGE_SIZE:-64}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
@@ -105,14 +103,14 @@ KV_EVENTS_CONFIG_DECODE1="{\"publisher\":\"zmq\",\"endpoint\":\"tcp://*:${SGLANG
 KV_EVENTS_CONFIG_DECODE2="{\"publisher\":\"zmq\",\"endpoint\":\"tcp://*:${SGLANG_DECODE2_KV_EVENT_PORT}\",\"topic\":\"\"}"
 
 print_launch_banner "Launching SGLang Native-gRPC Sidecars with Disaggregated KV Routing (4 GPUs)" "$MODEL" "$HTTP_PORT" \
-    "Prefill 1: GPU ${SGLANG_PREFILL1_GPU}, gRPC ${SGLANG_HOST}:${SGLANG_PREFILL1_GRPC_PORT}, KV events tcp://*:${SGLANG_PREFILL1_KV_EVENT_PORT}, bootstrap ${SGLANG_BOOTSTRAP_HOST}:${SGLANG_DISAGGREGATION_BOOTSTRAP_PORT1}" \
-    "Prefill 2: GPU ${SGLANG_PREFILL2_GPU}, gRPC ${SGLANG_HOST}:${SGLANG_PREFILL2_GRPC_PORT}, KV events tcp://*:${SGLANG_PREFILL2_KV_EVENT_PORT}, bootstrap ${SGLANG_BOOTSTRAP_HOST}:${SGLANG_DISAGGREGATION_BOOTSTRAP_PORT2}" \
+    "Prefill 1: GPU ${SGLANG_PREFILL1_GPU}, gRPC ${SGLANG_HOST}:${SGLANG_PREFILL1_GRPC_PORT}, KV events tcp://*:${SGLANG_PREFILL1_KV_EVENT_PORT}, bootstrap ${SGLANG_BOOTSTRAP_HOST}:${SGLANG_PREFILL1_HTTP_PORT}" \
+    "Prefill 2: GPU ${SGLANG_PREFILL2_GPU}, gRPC ${SGLANG_HOST}:${SGLANG_PREFILL2_GRPC_PORT}, KV events tcp://*:${SGLANG_PREFILL2_KV_EVENT_PORT}, bootstrap ${SGLANG_BOOTSTRAP_HOST}:${SGLANG_PREFILL2_HTTP_PORT}" \
     "Decode 1:  GPU ${SGLANG_DECODE1_GPU}, gRPC ${SGLANG_HOST}:${SGLANG_DECODE1_GRPC_PORT}, KV events tcp://*:${SGLANG_DECODE1_KV_EVENT_PORT}" \
     "Decode 2:  GPU ${SGLANG_DECODE2_GPU}, gRPC ${SGLANG_HOST}:${SGLANG_DECODE2_GRPC_PORT}, KV events tcp://*:${SGLANG_DECODE2_KV_EVENT_PORT}"
 
 python3 -m dynamo.frontend --router-mode kv &
 
-# Each prefill engine hosts its own KV-transfer bootstrap server, so these ports must be unique.
+# Each prefill engine serves its own bootstrap on its HTTP port.
 # shellcheck disable=SC2086 # GPU_MEM_ARGS intentionally expands into multiple flags.
 CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL1_GPU" \
 "$SGLANG_PYTHON" -m sglang.launch_server \
@@ -122,7 +120,6 @@ CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL1_GPU" \
     --grpc-port "$SGLANG_PREFILL1_GRPC_PORT" \
     --incremental-streaming-output \
     --disaggregation-mode prefill \
-    --disaggregation-bootstrap-port "$SGLANG_DISAGGREGATION_BOOTSTRAP_PORT1" \
     --disaggregation-transfer-backend nixl \
     --kv-events-config "$KV_EVENTS_CONFIG_PREFILL1" \
     --page-size "$SGLANG_PAGE_SIZE" \
@@ -140,7 +137,6 @@ CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL2_GPU" \
     --grpc-port "$SGLANG_PREFILL2_GRPC_PORT" \
     --incremental-streaming-output \
     --disaggregation-mode prefill \
-    --disaggregation-bootstrap-port "$SGLANG_DISAGGREGATION_BOOTSTRAP_PORT2" \
     --disaggregation-transfer-backend nixl \
     --kv-events-config "$KV_EVENTS_CONFIG_PREFILL2" \
     --page-size "$SGLANG_PAGE_SIZE" \

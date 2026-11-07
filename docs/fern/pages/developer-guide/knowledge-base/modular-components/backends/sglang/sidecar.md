@@ -4,15 +4,17 @@
 # Note to AI agents: keep this page minimal (intro, support matrix, launch example,
 # Kubernetes example, topologies). Do not edit it unless the user explicitly asks.
 title: SGLang Sidecar
-subtitle: Run Dynamo beside a stock SGLang engine through native gRPC.
+subtitle: Run Dynamo beside SGLang's Rust server through native gRPC.
 ---
 
 > [!WARNING]
 > **Experimental.** The sidecars and their deployment examples are
 > experimental. Manifests, flags, and behavior may change without notice.
 
-`dynamo-sglang-sidecar` connects a Dynamo worker to SGLang's native gRPC
-server. See [Sidecar Backends](../../../concepts/system-architecture/sidecar-backends.md)
+`dynamo-sglang-sidecar` connects a Dynamo worker to SGLang's Rust server
+(`SGLANG_RUST_SERVER=1`, SGLang v0.5.23 or later) through its native gRPC
+service, `sglang.api.v1`. See
+[Sidecar Backends](../../../concepts/system-architecture/sidecar-backends.md)
 for the architecture.
 
 > [!TIP]
@@ -26,17 +28,9 @@ for the architecture.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
-| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Yes |
-| Image, video, and audio input | Yes; disaggregated serving is untested |
-
-The sidecar sends a media kind only when the SGLang gRPC server lists it in
-`grpc_features` (`image_inputs`, `video_inputs`, or `audio_inputs`), and returns
-400 for other media requests.
-
-> [!WARNING]
-> SGLang downloads `http://` and `https://` media URLs itself, from any host by
-> default, including `127.0.0.1` and its own HTTP API. Start SGLang with
-> `--allowed-media-domains` to limit the hosts it fetches.
+| Kubernetes multinode tensor parallelism (TP) | Yes |
+| Data parallelism (DP>1) | Not yet |
+| Image, video, and audio input | No |
 
 Media-aware KV routing on wide-token SGLang builds is not supported by the sidecar; see the [multimodal compatibility limits](multimodal.md#wide-token-sglang-builds).
 
@@ -49,6 +43,8 @@ for all topologies. For example, aggregated serving on one GPU:
 export DYN_DISCOVERY_BACKEND=file   # single host: no etcd or NATS needed
 ./lib/sidecar/sglang/launch/agg.sh
 ```
+
+The scripts start SGLang with `SGLANG_RUST_SERVER=1`.
 
 In a second terminal:
 
@@ -77,9 +73,7 @@ kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 Multinode deployments require complete `leader` and `worker` role PodTemplates. Set
 `backendFramework: sglang` as the examples do; the operator does not infer a backend from
 a native engine launch. The templates own the native engine commands and
-sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and
-[attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). Attention-DP requires SGLang 0.5.22 or later and a Dynamo sidecar
-with matching attention-DP metadata support. Engine-failure KV recovery remains
+sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml). Engine-failure KV recovery remains
 incomplete and is tracked in [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
 
 The examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which exist only in
@@ -105,10 +99,6 @@ node holds the remaining TP ranks.
 
 ![When one SGLang engine spans two nodes with tensor parallelism, only the leader node runs a Dynamo Sidecar. The Dynamo Frontend sends requests over the request plane to the sidecar on Node 0.](../../../../../../assets/img/sidecar-sglang-multinode-tp.svg)
 
-### Multi-Node DP
+### Data Parallelism
 
-The leader sidecar registers every DP rank and serves all requests; SGLang
-dispatches each one to the right scheduler. The follower sidecar
-accepts no requests and relays its node's KV events directly to the frontend.
-
-![SGLang data parallelism across two nodes. Only the leader sidecar serves requests: the Dynamo Frontend router picks a DP rank and sends requests over the request plane to the node 0 Dynamo Sidecar, which registers DP ranks 0-3 and calls its local SGLang over native gRPC.](../../../../../../assets/img/sidecar-sglang-multinode-dp.svg)
+Not supported yet; see the [support matrix](#support-matrix).

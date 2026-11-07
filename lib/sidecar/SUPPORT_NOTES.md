@@ -20,17 +20,15 @@ If an output stream closes early without an error, the sidecar treats the closur
 
 ## SGLang
 
-The standard gRPC generation path requires one completion per request (`n=1`). It accepts image, video, and audio input when the engine reports support for the media type. The engine reports this support in `grpc_features`. The flags are `image_inputs`, `video_inputs`, and `audio_inputs`. Other media requests return HTTP 400. The sidecar does not accept per-request `mm_processor_kwargs` or separate encoder handoffs. The sidecar provides basic structured output. It supports fewer constraint controls than the in-process backend.
+The standard gRPC generation path requires one completion per request (`n=1`). It refuses image, video, and audio input with HTTP 400. The sidecar does not accept per-request `mm_processor_kwargs` or separate encoder handoffs. The sidecar provides basic structured output. It supports fewer constraint controls than the in-process backend.
 
-Multimodal disaggregated serving is untested. Media-aware KV routing on wide-token SGLang builds is not supported. See the [multimodal compatibility limits](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#wide-token-sglang-builds).
-
-SGLang downloads HTTP and HTTPS media URLs from any host by default. This includes `127.0.0.1` and SGLang's own HTTP API. Start SGLang with `--allowed-media-domains` to limit which hosts it can access.
+Media-aware KV routing on wide-token SGLang builds is not supported. See the [multimodal compatibility limits](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#wide-token-sglang-builds).
 
 The sidecar does not register the engine's LoRA adapter list. Dynamo cannot load or unload adapters through this sidecar. An adapter name in an internal request does not add the adapter to OpenAI model lookup.
 
 The optional native `/generate` passthrough can select a preloaded adapter with `lora_path`. You must enable this passthrough separately. This passthrough is separate from the standard generation path. Manually published adapter records are another integration option.
 
-Configure HiCache and speculative decoding in the native engine. The sidecar reports HiCache capacity for configurations that it recognizes. It also handles EAGLE-family routing metadata and draft-token reserves. Test each model, algorithm, routing, disaggregation, and telemetry combination separately.
+Configure HiCache and speculative decoding in the native engine. The sidecar reports HiCache capacity for configurations that it recognizes. It also handles EAGLE-family routing metadata and draft-token reserves; the reserves need [sgl-project/sglang#45859](https://github.com/sgl-project/sglang/pull/45859), and without it an EAGLE engine gets no token budget. Test each model, algorithm, routing, disaggregation, and telemetry combination separately.
 
 Request migration can retry a stream that closes early without an error. See the [shared operational limits](#operational-limits) for migration rules, observability, planning, cache offloading, and shutdown behavior.
 
