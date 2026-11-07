@@ -1251,6 +1251,9 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         }
 
         let top_logprobs = convert_top_logprobs(resp.inner.top_logprobs);
+        // Responses has no `logprobs` flag, but chat validation needs it for a positive
+        // `top_logprobs`. `include` still decides whether alternatives are returned.
+        let logprobs = top_logprobs.is_some_and(|n| n > 0).then_some(true);
 
         let (tools, tool_choice) = convert_tools_and_choice(
             (!inner_tools.is_empty()).then_some(inner_tools.as_slice()),
@@ -1342,6 +1345,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 max_completion_tokens: resp.inner.max_output_tokens,
                 store: resp.inner.store,
                 parallel_tool_calls: resp.inner.parallel_tool_calls,
+                logprobs,
                 top_logprobs,
                 metadata: resp
                     .inner
@@ -2025,6 +2029,23 @@ mod tests {
                 _ => panic!("unexpected user content type"),
             },
             _ => panic!("expected user message"),
+        }
+    }
+
+    #[test]
+    fn top_logprobs_sets_chat_logprobs_flag() {
+        // A positive count turns on chat `logprobs` so the converted request
+        // passes chat validation; zero or unset leaves the flag unset.
+        for (top_logprobs, expected) in [(Some(15), Some(true)), (Some(0), None), (None, None)] {
+            let mut resp = make_response_with_input("hi there");
+            resp.inner.top_logprobs = top_logprobs;
+            let nv_req: NvCreateChatCompletionRequest = resp.try_into().unwrap();
+            assert_eq!(
+                nv_req.inner.logprobs, expected,
+                "top_logprobs={top_logprobs:?}"
+            );
+            crate::engines::ValidateRequest::validate(&nv_req)
+                .unwrap_or_else(|e| panic!("top_logprobs={top_logprobs:?}: {e}"));
         }
     }
 

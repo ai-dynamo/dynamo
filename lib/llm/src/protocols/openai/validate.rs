@@ -852,6 +852,20 @@ pub fn validate_best_of(best_of: Option<u8>, n: Option<u8>) -> Result<(), anyhow
     Ok(())
 }
 
+/// Checks the chat rule that a positive `top_logprobs` needs `logprobs: true`,
+/// matching the SGLang and vLLM frontend processors. Zero or None succeeds with
+/// any `logprobs`. Run it after the `top_logprobs` range check so an
+/// out-of-range count reports the range error first.
+pub fn validate_top_logprobs_requires_logprobs(
+    logprobs: Option<bool>,
+    top_logprobs: Option<u8>,
+) -> Result<(), anyhow::Error> {
+    if top_logprobs.unwrap_or(0) > 0 && logprobs != Some(true) {
+        anyhow::bail!("When using `top_logprobs`, `logprobs` must be set to true.");
+    }
+    Ok(())
+}
+
 /// Validates suffix parameter
 pub fn validate_suffix(suffix: Option<&str>) -> Result<(), anyhow::Error> {
     if let Some(suffix_str) = suffix {

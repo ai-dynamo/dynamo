@@ -9353,6 +9353,21 @@ mod tests {
                 format!("{VALIDATION_PREFIX}Top_logprobs must be between 0 and 20, got 25")
             );
         }
+
+        // Top Logprobs: a positive count needs `logprobs: true`; zero does not
+        let mut request = request;
+        request.inner.top_logprobs = Some(5);
+        let error_response = validate_chat_completion_fields_generic(&request)
+            .expect_err("top_logprobs without logprobs must be rejected");
+        assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error_response.1.message,
+            format!(
+                "{VALIDATION_PREFIX}When using `top_logprobs`, `logprobs` must be set to true."
+            )
+        );
+        request.inner.top_logprobs = Some(0);
+        assert!(validate_chat_completion_fields_generic(&request).is_ok());
     }
 
     #[test]

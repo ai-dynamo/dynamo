@@ -214,7 +214,7 @@ trtllm_configs = {
         delayed_start=5,
         request_payloads=[
             chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=5),
-            chat_payload(content=TEXT_PROMPT, logprobs=False, top_logprobs=5),
+            chat_payload(content=TEXT_PROMPT, logprobs=False, top_logprobs=0),
             chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=None),
             chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=0),
         ],
@@ -233,7 +233,7 @@ trtllm_configs = {
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=5),
-            chat_payload(content=TEXT_PROMPT, logprobs=False, top_logprobs=5),
+            chat_payload(content=TEXT_PROMPT, logprobs=False, top_logprobs=0),
             chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=None),
             chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=0),
         ],

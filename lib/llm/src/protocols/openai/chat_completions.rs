@@ -780,8 +780,11 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // none for metadata
         validate::validate_frequency_penalty(self.inner.frequency_penalty)?;
         validate::validate_logit_bias(&self.inner.logit_bias)?;
-        // none for logprobs
         validate::validate_top_logprobs(self.inner.top_logprobs)?;
+        validate::validate_top_logprobs_requires_logprobs(
+            self.inner.logprobs,
+            self.inner.top_logprobs,
+        )?;
         // `max_tokens` is deprecated but still accepted as a fallback for
         // `max_completion_tokens`, so it must be validated too.
         #[allow(deprecated)]
@@ -884,6 +887,37 @@ mod tests {
             body[key] = value.clone();
         }
         serde_json::from_value(body).expect("Failed to deserialize request")
+    }
+
+    #[test]
+    fn positive_top_logprobs_requires_logprobs_true() {
+        // Same rule and message as the SGLang and vLLM frontend processors.
+        for extra in [
+            json!({"top_logprobs": 5}),
+            json!({"top_logprobs": 5, "logprobs": false}),
+        ] {
+            let error = ValidateRequest::validate(&chat_request_with(&extra))
+                .expect_err("positive top_logprobs without logprobs: true must be rejected");
+            assert_eq!(
+                error.to_string(),
+                "When using `top_logprobs`, `logprobs` must be set to true.",
+                "{extra}"
+            );
+        }
+
+        let request = chat_request_with(&json!({"top_logprobs": 5, "logprobs": true}));
+        ValidateRequest::validate(&request).expect("logprobs: true admits top_logprobs");
+        assert_eq!(request.get_logprobs(), Some(5));
+
+        // Zero stays legal without the flag and requests no logprobs.
+        for extra in [
+            json!({"top_logprobs": 0}),
+            json!({"top_logprobs": 0, "logprobs": false}),
+        ] {
+            let request = chat_request_with(&extra);
+            ValidateRequest::validate(&request).unwrap_or_else(|e| panic!("{extra}: {e}"));
+            assert_eq!(request.get_logprobs(), None, "{extra}");
+        }
     }
 
     /// Extracts sampling options for `extra` and returns the guided-decoding options it
