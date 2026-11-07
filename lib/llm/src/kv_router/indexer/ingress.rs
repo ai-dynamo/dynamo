@@ -11,6 +11,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
+use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
 use dynamo_kv_router::services::indexer::registry::WorkerRegistry;
 use dynamo_kv_router::services::selection::KvEventIngress;
 use dynamo_kv_router::{SessionPrefixIndexer, WorkerType};
@@ -31,8 +32,8 @@ pub(crate) struct RuntimeIngressArgs<'a> {
     pub model_name: Option<&'a str>,
     pub worker_role: Option<WorkerType>,
     pub metric_worker_type: &'static str,
-    /// Whether any consumer needs KV knowledge; without it the index is `None`.
-    pub cache_required: bool,
+    /// Combined policy inputs. Without CACHE, no routing indexer is created.
+    pub worker_inputs: WorkerInputs,
     pub kv_event_source_requirement: KvEventSourceRequirement,
     pub kv_source_membership: Option<KvSourceMembershipWatch>,
     pub cancellation_token: CancellationToken,
@@ -54,14 +55,15 @@ impl RuntimeIngress {
             model_name,
             worker_role,
             metric_worker_type,
-            cache_required,
+            worker_inputs,
             kv_event_source_requirement,
             kv_source_membership,
             cancellation_token,
             session_prefix_index,
         } = args;
         let component = endpoint.component();
-        let indexer = if cache_required {
+        let index_required = worker_inputs.reads_kv_index();
+        let indexer = if index_required {
             super::build(
                 component,
                 kv_router_config,
@@ -75,9 +77,7 @@ impl RuntimeIngress {
             Indexer::None
         };
 
-        let subscription = if cache_required
-            && kv_event_source_requirement.should_subscribe(kv_router_config)
-        {
+        let subscription = if index_required && kv_event_source_requirement.should_subscribe() {
             let membership_watch = kv_source_membership.ok_or_else(|| {
                 anyhow::anyhow!(
                     "KV source membership watch is required when local KV event subscription is enabled"
@@ -100,9 +100,8 @@ impl RuntimeIngress {
         } else {
             tracing::info!(
                 requirement = %kv_event_source_requirement,
-                cache_required = cache_required,
+                index_required = index_required,
                 use_kv_events = kv_router_config.use_kv_events,
-                overlap_score_credit = kv_router_config.overlap_score_credit,
                 use_remote_indexer = kv_router_config.use_remote_indexer,
                 "Skipping KV event subscription"
             );

@@ -14,22 +14,22 @@ use crate::{
     entrypoint::EngineConfig,
     http::service::metrics::Metrics,
     kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
-    kv_router::{
-        EncoderRouter, KvRouter, PrefillRouter, RoutingHost, RoutingLoadContext,
-        metrics::RouterRequestMetrics,
-    },
+    kv_router::{EncoderRouter, KvRouter, PrefillRouter, RoutingHost, RoutingLoadContext},
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
-    session_affinity::{AffinityCoordinator, SessionAffinityMode, create_affinity_coordinator},
+    session_affinity::{SessionAffinityMode, create_affinity_coordinator},
     types::{
         Annotated,
-        openai::chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-            OpenAIChatCompletionsStreamingEngine,
+        openai::{
+            chat_completions::{
+                NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+                OpenAIChatCompletionsStreamingEngine,
+            },
+            completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         },
     },
 };
@@ -40,13 +40,11 @@ use dynamo_runtime::{
     component::Client,
     engine::{AsyncEngineStream, Data},
     pipeline::{
-        Context, ManyOut, MultimodalCacheKeyExtractor, Operator, PushRouter, RouterMode,
-        SegmentSource, ServiceBackend, ServiceEngine, ServiceFrontend, SingleIn, Source,
+        Context, ManyOut, MultimodalCacheKeyExtractor, Operator, RouterMode, SegmentSource,
+        ServiceBackend, ServiceEngine, ServiceFrontend, SingleIn, Source,
     },
 };
 use std::sync::Arc;
-
-type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
 #[derive(Clone)]
 pub struct PreprocessedRouting {
@@ -119,8 +117,7 @@ fn router_client(
 
 /// LoRA-aware routing is only implemented for the KV, Random, and RoundRobin modes. `Direct`
 /// dispatches to a caller-chosen worker and bypasses both the LoRA filter and non-KV load
-/// tracking; the advanced load-based modes (`PowerOfTwoChoices`, `LeastLoaded`,
-/// `DeviceAwareWeighted`) have no 2-stage LoRA filtering. Reject those combinations so a
+/// tracking; the advanced load-based modes (`LeastLoaded`, `DeviceAwareWeighted`) have no 2-stage LoRA filtering. Reject those combinations so a
 /// misconfiguration fails fast — at startup, before the initial-worker wait — instead of
 /// silently mis-routing adapter traffic to a worker without the adapter.
 fn validate_router_mode_for_lora(
@@ -148,52 +145,6 @@ fn validate_router_mode_for_lora(
              use KV, Random, or RoundRobin for LoRA-aware routing, or disable LoRA serving."
         ),
     }
-}
-
-fn preprocessed_backend_engine(
-    router: LlmPushRouter,
-    router_mode: RouterMode,
-    chooser: Option<Arc<KvRouter>>,
-    model_manager: &Arc<crate::discovery::ModelManager>,
-    endpoint_id: &dynamo_runtime::protocols::EndpointId,
-    affinity: Option<AffinityCoordinator>,
-    load_context: Arc<RoutingLoadContext>,
-) -> anyhow::Result<Arc<RoutingHost>> {
-    // Reject LoRA + unsupported-mode combinations up front (single source of truth, shared with
-    // the fail-fast check in `build_preprocessed_routing`). After this, the Direct and advanced
-    // arms below are only reached with LoRA serving disabled.
-    validate_router_mode_for_lora(
-        router_mode,
-        model_manager.lora_enabled(),
-        affinity.is_some(),
-    )?;
-
-    let routing_host = match router_mode {
-        RouterMode::KV => {
-            let Some(chooser) = chooser else {
-                anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
-            };
-            Arc::new(RoutingHost::new_with_load_context_and_coordinator(
-                router,
-                chooser,
-                load_context,
-                affinity,
-            ))
-        }
-        _ => {
-            let lora = model_manager
-                .lora_filter_for(endpoint_id)
-                .map(|filter| (filter, model_manager.lora_load_estimator_for(endpoint_id)));
-            Arc::new(RoutingHost::new_builtin_with_capabilities(
-                router,
-                load_context,
-                affinity,
-                lora,
-            )?)
-        }
-    };
-
-    Ok(routing_host)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -272,20 +223,6 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
             as MultimodalCacheKeyExtractor<PreprocessedRequest>
     });
 
-    let router = LlmPushRouter::from_client_with_state(
-        router_client,
-        router_mode,
-        None,
-        embedding_cache_indexer,
-        cache_key_extractor,
-    )
-    .await?;
-
-    // Eagerly register router request metrics so they appear as zeros before
-    // RoutingHost is constructed. The host repeats this idempotently so the
-    // standalone router path is covered as well.
-    RouterRequestMetrics::from_component(client.endpoint.component());
-
     let prefill_router = prefill_chooser.unwrap_or_else(|| {
         PrefillRouter::disabled_with_session_affinity_mode(
             model_manager.clone(),
@@ -295,15 +232,26 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         )
     });
     let encoder_router = encoder_chooser.unwrap_or_else(EncoderRouter::disabled);
-    let routing_host = preprocessed_backend_engine(
-        router,
-        router_mode,
-        chooser,
-        &model_manager,
-        &endpoint_id,
-        affinity,
-        load_context,
-    )?;
+
+    // LoRA-aware selection lives in the host only for the built-in modes; under
+    // KV routing the KV router applies the adapter filter itself.
+    let lora = (router_mode != RouterMode::KV)
+        .then(|| {
+            model_manager
+                .lora_filter_for(&endpoint_id)
+                .map(|filter| (filter, model_manager.lora_load_estimator_for(&endpoint_id)))
+        })
+        .flatten();
+    let routing_host = Arc::new(
+        RoutingHost::builder(router_client, router_mode)
+            .kv_router(chooser)
+            .load_context(load_context)
+            .affinity_coordinator(affinity)
+            .lora(lora)
+            .multimodal_cache(embedding_cache_indexer.zip(cache_key_extractor))
+            .build()
+            .await?,
+    );
     if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {
         prefill_router
             .set_decode_routing_host(routing_host.clone())
@@ -450,11 +398,40 @@ where
             Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
         >,
 {
-    let frontend = ServiceFrontend::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let PromptFormatter::OAI(formatter) = prompt_formatter_from_mdc(card)?;
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())?
-            .into_operator();
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())?;
+    link_pipeline(engine, tokenizer, preprocessor)
+}
+
+type InputFrontend<Req, Resp> = Arc<ServiceFrontend<SingleIn<Req>, ManyOut<Annotated<Resp>>>>;
+
+pub(crate) fn build_completions_pipeline(
+    card: &ModelDeploymentCard,
+    engine: ExecutionContext,
+    tokenizer: crate::tokenizers::Tokenizer,
+) -> anyhow::Result<InputFrontend<NvCreateCompletionRequest, NvCreateCompletionResponse>> {
+    let preprocessor = OpenAIPreprocessor::new_for_completions(card.clone(), tokenizer.clone())?;
+    link_pipeline(engine, tokenizer, preprocessor)
+}
+
+fn link_pipeline<Req, Resp>(
+    engine: ExecutionContext,
+    tokenizer: crate::tokenizers::Tokenizer,
+    preprocessor: Arc<OpenAIPreprocessor>,
+) -> anyhow::Result<InputFrontend<Req, Resp>>
+where
+    Req: Data,
+    Resp: Data,
+    OpenAIPreprocessor: Operator<
+            Context<Req>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
+            Context<PreprocessedRequest>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
+        >,
+{
+    let frontend = ServiceFrontend::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
+    let preprocessor = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(tokenizer).into_operator();
     let engine = ServiceBackend::from_engine(engine);
 
@@ -561,7 +538,6 @@ mod tests {
             KV,
             Random,
             RoundRobin,
-            PowerOfTwoChoices,
             LeastLoaded,
             DeviceAwareWeighted,
         ];
@@ -583,7 +559,7 @@ mod tests {
         }
 
         // LoRA enabled: Direct + the advanced load-based modes are rejected with a clear error.
-        for m in [Direct, PowerOfTwoChoices, LeastLoaded, DeviceAwareWeighted] {
+        for m in [Direct, LeastLoaded, DeviceAwareWeighted] {
             let err = validate_router_mode_for_lora(m, true, false)
                 .expect_err("must reject unsupported LoRA router mode")
                 .to_string();

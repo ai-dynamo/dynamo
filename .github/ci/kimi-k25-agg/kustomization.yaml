@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: dynamo-nightly-dsv4
+commonLabels:
+  ci-run: local
+resources:
+- ../../../recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/deploy.yaml
+- ../../../recipes/kimi-k2.5/model-cache/compute-domain.yaml
+- ../../../recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/perf.yaml
+patches:
+- path: patch-deploy.yaml
+- path: patch-perf.yaml
+- target:
+    kind: ComputeDomain
+    name: your-compute-domain
+  patch: |-
+    - op: replace
+      path: /metadata/name
+      value: kimi-k25-compute-domain
+    - op: replace
+      path: /spec/channel/resourceClaimTemplate/name
+      value: kimi-k25-compute-domain-channel
+- target:
+    kind: DynamoGraphDeployment
+    name: kimi-k25-agg-kv-eagle
+  patch: |-
+    - op: add
+      path: /spec/services/Frontend/extraPodSpec/mainContainer/env/-
+      value: {name: HF_HOME, value: /opt/models}
+    # Spread MPI ranks across both GPU pods and keep each pod's ranks contiguous.
+    - op: add
+      path: /spec/services/agg/extraPodSpec/mainContainer/env/-
+      value: {name: PRTE_MCA_rmaps_default_mapping_policy, value: "node:oversubscribe"}
+    - op: add
+      path: /spec/services/agg/extraPodSpec/mainContainer/env/-
+      value: {name: PRTE_MCA_rmaps_default_ranking_policy, value: slot}
+    # These pods expose no gIB devices; Socket preserves intra-clique MNNVL.
+    - op: add
+      path: /spec/services/agg/extraPodSpec/mainContainer/env/-
+      value: {name: NCCL_NET, value: Socket}
+    - op: replace
+      path: /spec/services/agg/extraPodSpec/resourceClaims/0/resourceClaimTemplateName
+      value: kimi-k25-compute-domain-channel
+    - op: replace
+      path: /spec/services/agg/extraPodSpec/volumes/0/persistentVolumeClaim/claimName
+      value: shared-model-cache
+    - op: add
+      path: /spec/services/agg/extraPodSpec/mainContainer/volumeMounts/-
+      value: {name: sshd-run, mountPath: /run/sshd}
+    - op: add
+      path: /spec/services/agg/extraPodSpec/volumes/-
+      value: {name: sshd-run, emptyDir: {}}

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import sys
+import tomllib
 from importlib import metadata
 from pathlib import Path
 
@@ -16,10 +17,7 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import Version
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
+from tests.wheels.smoke_install import AISIMULATE_FIND_LINKS
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -116,6 +114,12 @@ def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
     assert not python_requirement.marker.evaluate(environment)
     assert container_requirement.marker is None
     assert _exact_version(container_requirement) == python_version
+    with (ROOT / "benchmarks/pyproject.toml").open("rb") as handle:
+        benchmarks = tomllib.load(handle)
+    assert _exact_version(_python_requirement(benchmarks)) == python_version
+    assert "aisimulate" not in pyproject.get("tool", {}).get("uv", {}).get(
+        "sources", {}
+    )
 
     cargo_dependency = cargo["workspace"]["dependencies"]["aisimulate-core"]
     assert not {"path", "git", "rev", "branch", "tag"} & cargo_dependency.keys()
@@ -124,6 +128,12 @@ def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
         "="
     ), "aisimulate-core must use one exact crates.io version"
     cargo_version = Version(cargo_requirement.removeprefix("="))
+
+    with (ROOT / "lib/bindings/python/Cargo.toml").open("rb") as handle:
+        bindings = tomllib.load(handle)
+    bindings_dependency = bindings["dependencies"]["aisimulate-core"]
+    assert not {"path", "git", "rev", "branch", "tag"} & bindings_dependency.keys()
+    assert bindings_dependency["version"] == cargo_requirement
 
     assert cargo_version == python_version
     assert all(_locked_cargo_version(path) == cargo_version for path in LOCKFILES)
@@ -148,7 +158,8 @@ def test_container_stages_the_published_aisimulate_wheel() -> None:
     assert "--only-binary=:all:" in wheel_builder
     assert "--no-deps" in wheel_builder
     assert "--no-index" in wheel_builder
-    assert "--find-links https://pypi.nvidia.com/aisimulate/" in wheel_builder
+    assert AISIMULATE_FIND_LINKS == "https://pypi.nvidia.com/aisimulate/"
+    assert f"--find-links {AISIMULATE_FIND_LINKS}" in wheel_builder
     assert "COPY aisimulate" not in wheel_builder
     assert "/opt/dynamo/aisimulate" not in wheel_builder
     assert not (ROOT / "aisimulate").exists()

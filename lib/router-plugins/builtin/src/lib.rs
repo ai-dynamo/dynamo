@@ -1,43 +1,57 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Worker-selection policies Dynamo ships.
+//! Router plugins Dynamo ships.
 //!
-//! Any build that enables the Python bindings' `custom-policy` feature links these, and that
-//! feature is on by default, so a frontend deployment selects one through router-policy YAML
-//! without rebuilding. A build with default features off, and the standalone EPP, link no catalog
-//! at all and reject a configured policy type at startup.
-//!
-//! These do not go through the replaceable `dynamo-worker-selection-policy-catalog` alias, and they
-//! register before it, so a custom image's catalog adds its policies alongside these rather than
-//! displacing them.
-//!
-//! Each policy is one module here. To ship another, add a module and a line in [`register`], then
-//! add a row to the policy table in the router configuration guide. Keep a policy in a single file
-//! until it needs submodules, then promote it to a directory. If a policy ever needs a dependency
-//! beyond `dynamo-kv-router`, put it behind its own default-on Cargo feature so a build can drop
-//! it; every policy registered here is compiled into every artifact that links this crate.
+//! Routing hosts always link the default through `default_registry`. The optional custom
+//! catalog adds the named default, two-tier, and ThunderAgent providers through `register`. The default
+//! itself uses the same public candidate inputs and scorer/picker dispatch as external policies.
+//! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
 
+mod default;
+pub mod router_modes;
+mod sticky_min_load;
+mod thunderagent;
 mod two_tier_cost_fn;
-
-use dynamo_kv_router::services::selection::{
-    WorkerSelectionPolicyRegistry, WorkerSelectionPolicyRegistryError,
+pub use default::{
+    DefaultWorkerSelector, DefaultWorkerSelectorControl, default_factory, default_policy,
+    startup_policy_parameters,
 };
 
-/// Register every policy Dynamo ships.
+/// Registry every host links: the required default plus the routing modes
+/// ([`router_modes`]), without an optional policy catalog.
+pub fn default_registry() -> RouterPluginRegistry {
+    with_defaults(RouterPluginRegistry::default())
+}
+
+/// `registry` plus what [`default_registry`] holds: the required default and each routing mode
+/// it doesn't already provide. A host applies this to the catalog it installs, so
+/// `--router-mode` resolves however that catalog was built.
+pub fn with_defaults(registry: RouterPluginRegistry) -> RouterPluginRegistry {
+    let mut registry = registry.with_default_factory(default_factory());
+    router_modes::register_missing(&mut registry);
+    registry
+}
+
+use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError};
+
+/// Register the named providers Dynamo ships, without changing the host's default factory.
 ///
 /// `default` is reserved by the registry for Dynamo's built-in worker selector, so no policy here
 /// can shadow it. A later catalog that reuses one of these type names fails registration rather
 /// than overriding it.
-pub fn register(
-    registry: &mut WorkerSelectionPolicyRegistry,
-) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    two_tier_cost_fn::register(registry)
+pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginRegistryError> {
+    default::register(registry)?;
+    sticky_min_load::register(registry)?;
+    two_tier_cost_fn::register(registry)?;
+    thunderagent::register(registry)?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::services::selection::WorkerSelectionPolicyFactory;
+    use dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError;
+    use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
     use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerType};
 
     use super::*;
@@ -57,7 +71,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut registry = WorkerSelectionPolicyRegistry::default();
+        let mut registry = default_registry();
         register(&mut registry).unwrap();
         let resolved = registry.resolve(&config);
         (config, resolved)
@@ -82,6 +96,34 @@ worker_selection:
             .unwrap()
             .expect("a configured instance resolves to a factory");
 
+        let partition = RoutingPartitionRef::new("model", "default");
+        for worker_type in [
+            WorkerType::Aggregated,
+            WorkerType::Prefill,
+            WorkerType::Decode,
+        ] {
+            factory(&config, worker_type, partition);
+        }
+    }
+
+    #[test]
+    fn resolves_sticky_min_load_yaml() {
+        let (config, resolved) = resolve(
+            r#"
+worker_selection:
+  aggregated: sticky
+  prefill: sticky
+  decode: sticky
+  instances:
+    - name: sticky
+      type: dynamo-sticky-min-load
+      parameters:
+        max_idle_secs: 600
+"#,
+        );
+        let factory = resolved
+            .unwrap()
+            .expect("a configured instance resolves to a factory");
         let partition = RoutingPartitionRef::new("model", "default");
         for worker_type in [
             WorkerType::Aggregated,
@@ -120,5 +162,35 @@ worker_selection:
             error.to_string().contains("cache_affinity_threshold"),
             "the error should name the offending key: {error}"
         );
+    }
+
+    /// The routing modes take no parameters, so a `parameters` block under one is a mistake.
+    #[test]
+    fn routing_modes_reject_parameters() {
+        for policy_type in [
+            router_modes::RANDOM,
+            router_modes::ROUND_ROBIN,
+            router_modes::LEAST_LOADED,
+        ] {
+            let (_config, resolved) = resolve(&format!(
+                r#"
+worker_selection:
+  aggregated: mode
+  instances:
+    - name: mode
+      type: {policy_type}
+      parameters:
+        temperature: 0.5
+"#
+            ));
+            let Err(error) = resolved else {
+                panic!("{policy_type} must reject parameters");
+            };
+            assert!(
+                matches!(&error, WorkerSelectionPolicyRegistryError::Provider { policy_type: rejected, .. }
+                    if rejected == policy_type),
+                "unexpected error: {error}"
+            );
+        }
     }
 }

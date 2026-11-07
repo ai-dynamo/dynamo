@@ -6,11 +6,14 @@
 import asyncio
 import logging
 import time
-from random import randint
+import zlib
+from random import Random, randint
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import torch
 
+from dynamo import nixl_connect
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
     LocalEmbeddingSender,
@@ -19,6 +22,7 @@ from dynamo.common.multimodal.embedding_transfer import (
     NixlWriteEmbeddingReceiver,
     NixlWriteEmbeddingSender,
     RingBuffer,
+    TransferRequest,
 )
 
 # GPU tier is set per-class/per-test below (gpu_0 for local/ring buffer, gpu_1
@@ -153,8 +157,197 @@ class TestNixlReadEmbeddingTransfer:
         await benchmark(sender, receiver, from_cuda=True)
 
 
+@pytest.mark.gpu_0  # Native NIXL agent is mocked; buffers are CPU tensors
+class TestNixlReadEmbeddingReceiverPreparation:
+    @pytest.fixture
+    def receiver(self, monkeypatch):
+        # Real receiver with a one-descriptor pool of registered CPU buffers.
+        # Only native NIXL agent calls are mocked.
+        native = MagicMock()
+        native.register_memory.side_effect = lambda *_: object()
+        # A read that slips past validation fails instead of polling forever.
+        native.check_xfer_state.return_value = "ERR"
+        api = MagicMock()
+        api.nixl_agent.return_value = native
+        monkeypatch.setattr(nixl_connect, "nixl_api", api)
+        receiver = NixlReadEmbeddingReceiver(
+            embedding_hidden_size=16, max_item_mm_token=1, max_items=1
+        )
+        descriptor = receiver.warmedup_descriptors.get_nowait()
+        receiver.warmedup_descriptors.put(descriptor)
+        receiver.connector.begin_read = AsyncMock(wraps=receiver.connector.begin_read)
+        try:
+            yield receiver, descriptor, native
+        finally:
+            if descriptor._connection is not None:
+                descriptor.deregister_with_connector(descriptor._connection)
+
+    @staticmethod
+    def request(shape=(2, 2), size=16):
+        return TransferRequest(
+            embeddings_shape=list(shape),
+            embedding_dtype_str="torch.float32",
+            serialized_request={
+                "descriptors": [{"ptr": 1, "size": size, "device": "cpu"}],
+                "operation_kind": nixl_connect.OperationKind.READ.value,
+                "notification_key": "embedding-0",
+                "nixl_metadata": zlib.compress(b"mock-agent").hex(),
+            },
+        )
+
+    @staticmethod
+    def assert_pool_preserved(receiver, descriptor, native, original_size):
+        assert receiver.warmedup_descriptors.qsize() == 1
+        pooled = receiver.warmedup_descriptors.get_nowait()
+        receiver.warmedup_descriptors.put(pooled)
+        assert pooled is descriptor
+        assert descriptor._data_size == original_size
+        assert receiver.inuse_descriptors == {}
+        receiver.connector.begin_read.assert_not_called()
+        native.initialize_xfer.assert_not_called()
+        native.add_remote_agent.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "invalid_field, invalid_value, error",
+        [
+            ("operation_kind", nixl_connect.OperationKind.WRITE.value, "kind READ"),
+            ("operation_kind", None, "kind READ"),
+            ("descriptors", [], "at least one"),
+            (
+                "descriptors",
+                [{"ptr": 1, "size": 8}, {"ptr": 2, "size": 8}],
+                "exactly one",
+            ),
+            ("descriptors", [{"ptr": 1, "size": 32}], "same size"),
+            ("descriptors", [{"size": 16}], "cannot be zero"),
+            ("notification_key", "", "notification_key"),
+            ("nixl_metadata", "", "cannot be empty"),
+            ("nixl_metadata", "not-hex", "fromhex"),
+            ("nixl_metadata", "00", "decompress"),
+            ("nixl_metadata", zlib.compress(b"").hex(), "Decoded NIXL agent"),
+        ],
+        ids=[
+            "write",
+            "missing-kind",
+            "empty-descriptors",
+            "multiple-descriptors",
+            "size-mismatch",
+            "missing-pointer",
+            "empty-notification",
+            "empty-agent",
+            "invalid-hex",
+            "invalid-compression",
+            "empty-decoded-agent",
+        ],
+    )
+    async def test_invalid_read_metadata_does_not_borrow_buffer(
+        self, receiver, invalid_field, invalid_value, error
+    ):
+        receiver, descriptor, native = receiver
+        original_size = descriptor._data_size
+        request = self.request()
+        if invalid_value is None:
+            request.serialized_request.pop(invalid_field)
+        else:
+            request.serialized_request[invalid_field] = invalid_value
+        # These all pass schema validation but cannot start a matching READ.
+        nixl_connect.RdmaMetadata.model_validate(request.serialized_request)
+        with pytest.raises((ValueError, zlib.error), match=error):
+            await receiver.receive_embeddings(request)
+        self.assert_pool_preserved(receiver, descriptor, native, original_size)
+
+    @pytest.mark.asyncio
+    async def test_oversized_request_returns_borrowed_buffer(self, receiver):
+        receiver, descriptor, native = receiver
+        original_size = descriptor._data_size
+        # Valid READ metadata, but larger than the 16-byte pooled buffer, so
+        # building the view fails after the descriptor has been borrowed.
+        with pytest.raises(RuntimeError):
+            await receiver.receive_embeddings(self.request(shape=(4, 2), size=32))
+        self.assert_pool_preserved(receiver, descriptor, native, original_size)
+
+    @pytest.mark.asyncio
+    async def test_failed_read_keeps_buffer_out_of_pool(self, receiver):
+        receiver, descriptor, _ = receiver
+        # Once a read has been created, NIXL may still write into the buffer,
+        # so it must not be recycled even if the read fails.
+        read_op = MagicMock()
+        read_op.wait_for_completion = AsyncMock(side_effect=RuntimeError("failed"))
+        receiver.connector.begin_read = AsyncMock(return_value=read_op)
+        with pytest.raises(RuntimeError, match="failed"):
+            await receiver.receive_embeddings(self.request())
+        receiver.connector.begin_read.assert_awaited_once()
+        assert receiver.connector.begin_read.await_args.args[1] is descriptor
+        assert receiver.warmedup_descriptors.qsize() == 0
+        assert receiver.inuse_descriptors == {}
+
+
 @pytest.mark.gpu_0  # Echo tensor worker is CPU-only (no GPU required)
 class TestRingBuffer:
+    def test_does_not_wrap_twice_over_live_buffers(self):
+        ring_buffer = RingBuffer(16)
+        first, _ = ring_buffer.get_buffer(12)
+        tail, tail_tensor = ring_buffer.get_buffer(2)
+        tail_tensor.fill_(2)
+        ring_buffer.release_buffer(first)
+        head, head_tensor = ring_buffer.get_buffer(10)
+        head_tensor.fill_(3)
+
+        # Only [10, 12) is available before the oldest live tail allocation.
+        # Wrapping again would reuse [0, 8), which belongs to head_tensor.
+        rejected, tensor = ring_buffer.get_buffer(8)
+        assert rejected is None
+        assert tensor is None
+        assert tail_tensor.tolist() == [2] * 2
+        assert head_tensor.tolist() == [3] * 10
+
+        gap, gap_tensor = ring_buffer.get_buffer(2)
+        assert gap is not None
+        assert gap_tensor.storage_offset() == 10
+        gap_tensor.fill_(4)
+        assert head_tensor.tolist() == [3] * 10
+        assert tail_tensor.tolist() == [2] * 2
+
+        for buffer_id in (tail, gap, head):
+            ring_buffer.release_buffer(buffer_id)
+        full, tensor = ring_buffer.get_buffer(16)
+        assert full is not None
+        assert tensor.numel() == 16
+        ring_buffer.release_buffer(full)
+
+    def test_variable_size_allocations_do_not_overlap_live_views(self):
+        rng = Random(0)
+        ring_buffer = RingBuffer(32)
+        live = {}
+        for _ in range(500):
+            if live and rng.random() < 0.4:
+                buffer_id = rng.choice(list(live))
+                ring_buffer.release_buffer(buffer_id)
+                del live[buffer_id]
+            else:
+                buffer_id, tensor = ring_buffer.get_buffer(rng.randint(1, 32))
+                if buffer_id is None:
+                    assert tensor is None
+                    continue
+                tensor.fill_(buffer_id % 127)
+                live[buffer_id] = tensor
+                intervals = sorted(
+                    (view.storage_offset(), view.storage_offset() + view.numel())
+                    for view in live.values()
+                )
+                assert all(
+                    left[1] <= right[0] for left, right in zip(intervals, intervals[1:])
+                )
+                for live_id, view in live.items():
+                    assert view.tolist() == [live_id % 127] * view.numel()
+        for buffer_id in live:
+            ring_buffer.release_buffer(buffer_id)
+        buffer_id, tensor = ring_buffer.get_buffer(32)
+        assert buffer_id is not None
+        assert tensor.numel() == 32
+        ring_buffer.release_buffer(buffer_id)
+
     def test_simple(self):
         buffer_size = 128
         ring_buffer = RingBuffer(buffer_size)

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(feature = "select-service")]
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 use pythonize::{depythonize, pythonize};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -20,30 +22,29 @@ use crate::Endpoint;
     feature = "select-service"
 ))]
 use clap::Parser;
-use dynamo_kv_router::WorkerSelectionPolicyFactory;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
+use dynamo_kv_router::plugins::RouterPlugins;
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::services::selection::{
-    self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
-    SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig, SelectionError,
-    SelectionService as RustSelectionService, SelectionServiceBuilder, SelectionServiceConfig,
-    WorkerPatchRequest, WorkerRequest, WorkerSelectionPolicyRegistry,
+    self, OverlapScoresRequest, PotentialLoadsRequest, PromptRequest, ReservationRequest,
+    SelectAndReserveRequest, SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig,
+    SelectionError, SelectionService as RustSelectionService, SelectionServiceBuilder,
+    SelectionServiceConfig, WorkerPatchRequest, WorkerRequest,
     warn_for_unserved_worker_selection_policies,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::{TrackingHashAlgorithm, WorkerType};
-use llm_rs::kv_router::SelectionPolicySource;
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
-use tracing;
+use tracing::Instrument;
 
 use llm_rs::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use llm_rs::kv_router::RoutingHost;
@@ -56,8 +57,8 @@ use llm_rs::session_affinity::{
     MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinityMode as RsSessionAffinityMode,
 };
 
-use super::aic_callback::create_aic_prefill_load_estimator;
-use super::entrypoint::AicPerfConfig;
+use super::ais_callback::create_ais_prefill_load_estimator;
+use super::entrypoint::AisPerfConfig;
 
 mod demand_driven;
 
@@ -203,6 +204,11 @@ struct KvIndexerCli {
     #[arg(long, default_value = "default")]
     routing_group: String,
 
+    /// Initial workers registered via --workers derive multimodal pad values from
+    /// engine identities (SGLang after sgl-project/sglang#43043)
+    #[arg(long)]
+    engine_owned_mm_identity: bool,
+
     /// Legacy compatibility input; accepted but ignored
     #[arg(long = "tenant-id", default_value = "default", hide = true)]
     _tenant_id: String,
@@ -252,6 +258,7 @@ where
             workers: cli.workers,
             model_name: cli.model_name,
             routing_group: cli.routing_group,
+            engine_owned_mm_identity: cli.engine_owned_mm_identity,
             peers: cli.peers,
             access_log: cli.access_log,
             trace_id_header,
@@ -519,7 +526,7 @@ where
 #[cfg(feature = "select-service")]
 pub(crate) fn run_select_service_cli<I, T>(
     args: I,
-    policy_registry: WorkerSelectionPolicyRegistry,
+    policy_registry: RouterPluginRegistry,
 ) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = T>,
@@ -569,6 +576,70 @@ where
     let rt = tokio::runtime::Runtime::new()?;
     let service = rt.block_on(builder.build())?;
     rt.block_on(selection::run_server(config.port, service))
+}
+
+/// Depythonize a prompt-carrying request dict. `token_ids` is read by [`extract_token_ids`]
+/// rather than pythonize, whose per-element serde path costs several times more per token,
+/// all of it on the calling thread under the GIL.
+#[cfg(feature = "select-service")]
+fn depythonize_prompt_request<T: serde::de::DeserializeOwned>(
+    request: &Bound<'_, PyAny>,
+    prompt: impl FnOnce(&mut T) -> &mut PromptRequest,
+) -> PyResult<T> {
+    let invalid = |e: pythonize::PythonizeError| PyValueError::new_err(e.to_string());
+    let Ok(dict) = request.downcast::<pyo3::types::PyDict>() else {
+        return depythonize(request).map_err(invalid);
+    };
+    let Some(tokens) = dict
+        .get_item("token_ids")?
+        .filter(|tokens| !tokens.is_none())
+    else {
+        return depythonize(request).map_err(invalid);
+    };
+    let token_ids = extract_token_ids(&tokens)?;
+    let rest = dict.copy()?;
+    rest.del_item("token_ids")?;
+    let mut req: T = depythonize(rest.as_any()).map_err(invalid)?;
+    prompt(&mut req).token_ids = Some(token_ids);
+    Ok(req)
+}
+
+/// `token_ids` as `Vec<u32>`. An exact `list` of `int`s is read by index with borrowed
+/// items, skipping the per-element iterator and refcount work of pyo3's generic
+/// conversion, which costs more than converting the ints at prompt sizes. Everything
+/// else (list subclasses, whose `__iter__` the generic conversion honors; other
+/// sequences; any element the fast read declines) takes the generic conversion, so
+/// accepted inputs and errors are unchanged.
+#[cfg(feature = "select-service")]
+fn extract_token_ids(tokens: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
+    let generic = || {
+        tokens
+            .extract::<Vec<u32>>()
+            .map_err(|e| PyValueError::new_err(format!("token_ids: {e}")))
+    };
+    let Ok(list) = tokens.downcast_exact::<pyo3::types::PyList>() else {
+        return generic();
+    };
+    let mut token_ids = Vec::with_capacity(list.len());
+    // SAFETY: the GIL is held and the loop runs no Python code (only exact `int`s are
+    // converted, and `PyLong_AsUnsignedLong` does not call `__index__`), so the exact
+    // list cannot change, every index is in range, and the borrowed items stay valid.
+    unsafe {
+        for index in 0..list.len() {
+            let item = pyo3::ffi::PyList_GetItem(list.as_ptr(), index as pyo3::ffi::Py_ssize_t);
+            if pyo3::ffi::PyLong_CheckExact(item) == 0 {
+                return generic();
+            }
+            // A negative int sets OverflowError and returns `c_ulong::MAX`; both it and
+            // values past `u32::MAX` fail `try_from`, and the generic path raises.
+            let Ok(id) = u32::try_from(pyo3::ffi::PyLong_AsUnsignedLong(item)) else {
+                pyo3::ffi::PyErr_Clear();
+                return generic();
+            };
+            token_ids.push(id);
+        }
+    }
+    Ok(token_ids)
 }
 
 /// Map a [`SelectionError`] to a Python exception: invalid input becomes a
@@ -658,11 +729,35 @@ pub(crate) struct SelectionService {
 }
 
 #[cfg(feature = "select-service")]
+#[pyclass]
+pub(crate) struct SessionBindingStream {
+    updates: Arc<selection::SessionBindingUpdates>,
+}
+
+#[cfg(feature = "select-service")]
+#[pymethods]
+impl SessionBindingStream {
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __anext__<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let updates = self.updates.clone();
+        crate::future_into_py(py, async move {
+            let events = updates.recv_many().await.ok_or_else(|| {
+                pyo3::exceptions::PyStopAsyncIteration::new_err("selection service shut down")
+            })?;
+            Python::with_gil(|py| pythonize(py, &events).map(|o| o.unbind()).map_err(to_pyerr))
+        })
+    }
+}
+
+#[cfg(feature = "select-service")]
 #[pymethods]
 impl SelectionService {
     /// Create a selection service. `indexer_threads` sizes the KV indexer pool.
     #[new]
-    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None, selection_cache = None, session_affinity_ttl_secs = None))]
+    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None, selection_cache = None, session_affinity_ttl_secs = None, session_affinity_mode = "hard", session_replication_writer_id = None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -672,7 +767,12 @@ impl SelectionService {
         replica_sync_peers: Option<Vec<String>>,
         selection_cache: Option<SelectionCacheConfig>,
         session_affinity_ttl_secs: Option<f64>,
+        session_affinity_mode: &str,
+        session_replication_writer_id: Option<u64>,
     ) -> PyResult<Self> {
+        let session_affinity_mode = session_affinity_mode
+            .parse::<RsSessionAffinityMode>()
+            .map_err(PyValueError::new_err)?;
         let replica_sync_peers = replica_sync_peers.unwrap_or_default();
         if replica_sync_port.is_none() && !replica_sync_peers.is_empty() {
             return Err(PyValueError::new_err(
@@ -690,7 +790,8 @@ impl SelectionService {
         )
         .indexer_threads(indexer_threads)
         .indexer_peers(indexer_peers.unwrap_or_default())
-        .selection_cache(selection_cache.unwrap_or_default().inner);
+        .selection_cache(selection_cache.unwrap_or_default().inner)
+        .session_affinity_mode(session_affinity_mode);
         if let Some(port) = replica_sync_port {
             builder = builder.replica_sync(port, replica_sync_peers);
         }
@@ -698,6 +799,9 @@ impl SelectionService {
             builder = builder.session_affinity(
                 session_affinity_ttl_from_secs(ttl).map_err(PyValueError::new_err)?,
             );
+        }
+        if let Some(writer_id) = session_replication_writer_id {
+            builder = builder.session_binding_replication(writer_id);
         }
         let inner = py
             .allow_threads(|| crate::bridge_runtime().block_on(builder.build()))
@@ -715,6 +819,26 @@ impl SelectionService {
     fn shutdown(&self, py: Python<'_>) {
         let service = Arc::clone(&self.inner);
         py.allow_threads(|| crate::bridge_runtime().block_on(service.shutdown()));
+    }
+
+    /// Session bindings this replica commits or refreshes, for the host to
+    /// broadcast to its peers. Ends when the service shuts down.
+    fn session_binding_updates(&self) -> PyResult<SessionBindingStream> {
+        Ok(SessionBindingStream {
+            updates: Arc::new(
+                self.inner
+                    .session_binding_updates()
+                    .map_err(selection_to_pyerr)?,
+            ),
+        })
+    }
+
+    fn apply_session_binding(&self, py: Python<'_>, update: PyObject) -> PyResult<()> {
+        let event =
+            depythonize(update.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        self.inner
+            .apply_session_binding(event)
+            .map_err(selection_to_pyerr)
     }
 
     /// Await service shutdown without blocking the Python event loop.
@@ -793,8 +917,9 @@ impl SelectionService {
 
     /// Per-worker KV-overlap scores for a prompt (dict, see `OverlapScoresRequest`).
     fn overlap_scores<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let req: OverlapScoresRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req = depythonize_prompt_request::<OverlapScoresRequest>(request.bind(py), |req| {
+            &mut req.prompt
+        })?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core.overlap_scores(req).await.map_err(selection_to_pyerr)?;
@@ -804,8 +929,8 @@ impl SelectionService {
 
     /// Select the best worker by KV-overlap + load, no booking (dict, see `SelectRequest`).
     fn select<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let req: SelectRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req =
+            depythonize_prompt_request::<SelectRequest>(request.bind(py), |req| &mut req.prompt)?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core.select(req).await.map_err(selection_to_pyerr)?;
@@ -819,8 +944,9 @@ impl SelectionService {
         py: Python<'p>,
         request: PyObject,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let req: SelectAndReserveRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req = depythonize_prompt_request::<SelectAndReserveRequest>(request.bind(py), |req| {
+            &mut req.prompt
+        })?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core
@@ -838,8 +964,9 @@ impl SelectionService {
         py: Python<'p>,
         request: PyObject,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let req: ReservationRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req = depythonize_prompt_request::<ReservationRequest>(request.bind(py), |req| {
+            &mut req.prompt
+        })?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core
@@ -904,8 +1031,9 @@ impl SelectionService {
 
     /// Per-worker potential loads for a prompt, without booking (dict, see `PotentialLoadsRequest`).
     fn potential_loads<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let req: PotentialLoadsRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req = depythonize_prompt_request::<PotentialLoadsRequest>(request.bind(py), |req| {
+            &mut req.prompt
+        })?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core
@@ -987,9 +1115,10 @@ mod selection_service_lifecycle_tests {
     #[test]
     fn idempotent_shutdown() {
         pyo3::prepare_freethreaded_python();
-        let service =
-            Python::with_gil(|py| SelectionService::new(py, 1, None, None, None, None, None))
-                .unwrap();
+        let service = Python::with_gil(|py| {
+            SelectionService::new(py, 1, None, None, None, None, None, "hard", None)
+        })
+        .unwrap();
         Python::with_gil(|py| {
             service.shutdown(py);
             service.shutdown(py);
@@ -1277,8 +1406,12 @@ impl KvEventPublisher {
     ///         does not change the endpoint used for request routing.
     ///     video_token_id: Optional model video-placeholder token used to
     ///         normalize vLLM KV events for exact MM routing.
+    ///     engine_owned_mm_identity: The source uses SGLang's wide multimodal pad
+    ///         format (after sgl-project/sglang#43043), including for caller hashes,
+    ///         so every event token at or above 1,000,000 is excluded from the
+    ///         index. Otherwise only values that do not fit in 32 bits are.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None, video_token_id=None))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None, video_token_id=None, engine_owned_mm_identity=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
@@ -1292,12 +1425,17 @@ impl KvEventPublisher {
         image_token_id: Option<u32>,
         kv_state_endpoint: Option<String>,
         video_token_id: Option<u32>,
+        engine_owned_mm_identity: bool,
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
+            liveness: None,
+            expected_rank: None,
             endpoint: ep,
             topic: zmq_topic.unwrap_or_default(),
             image_token_id,
             video_token_id,
+            engine_owned_mm_identity,
+            recovery: None,
         });
 
         if kv_block_size == 0 {
@@ -1796,7 +1934,7 @@ mod metric_worker_type_tests {
             Some(config),
             load_threshold_config,
             None,
-            None,
+            RouterPlugins::default(),
         )
         .await
         .unwrap();
@@ -1910,7 +2048,7 @@ async fn create_kv_router_from_endpoint(
     kv_router_config: Option<KvRouterConfig>,
     load_threshold_config: RsLoadThresholdConfig,
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
-    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+    plugins: RouterPlugins,
 ) -> anyhow::Result<RsManagedKvRouter> {
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
@@ -1934,7 +2072,7 @@ async fn create_kv_router_from_endpoint(
         .as_ref()
         .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
-    let needs_policy_role = worker_selection_policy_factory.is_some();
+    let needs_policy_role = plugins.has_custom_worker_selection();
     let (model_name, policy_model_name, enable_eagle, worker_role, policy_worker_role, load_source) = {
         let maybe_card = if needs_model_name || needs_policy_role {
             let wait_secs: u64 = std::env::var("DYN_ROUTER_MODEL_CARD_WAIT_SECS")
@@ -2020,8 +2158,6 @@ async fn create_kv_router_from_endpoint(
             }
         }
     };
-    #[cfg(not(feature = "custom-policy"))]
-    let _ = (policy_model_name, policy_worker_role);
 
     let load_context = llm_rs::kv_router::RoutingLoadContext::start(
         client.clone(),
@@ -2032,34 +2168,35 @@ async fn create_kv_router_from_endpoint(
     )
     .await?;
 
-    #[cfg(not(feature = "custom-policy"))]
-    let selection_policy = SelectionPolicySource::Registry;
-    #[cfg(feature = "custom-policy")]
-    let selection_policy = match worker_selection_policy_factory {
-        None => SelectionPolicySource::Registry,
-        // The policy sees the card's typed role and display name, which can
-        // differ from the metric role and the routing model name.
-        Some(factory) => {
-            let policy_worker_role = policy_worker_role
-                .expect("a configured worker-selection policy waits for a typed model card above");
-            let policy_model_name = policy_model_name.unwrap_or_default();
-            SelectionPolicySource::Factory(Arc::new(move |config, _worker_type, _partition| {
-                factory(
-                    config,
-                    policy_worker_role,
-                    dynamo_kv_router::RoutingPartitionRef::new(
-                        &policy_model_name,
-                        dynamo_kv_router::DEFAULT_ROUTING_GROUP,
-                    ),
-                )
-            }))
-        }
+    // Preserve the model card's role and display name, which can differ
+    // from the metric role and the routing partition name.
+    let plugins = if let Some(factory) = plugins
+        .worker_selection()
+        .filter(|_| needs_policy_role)
+        .cloned()
+    {
+        let policy_worker_role = policy_worker_role
+            .expect("a configured worker-selection policy waits for a typed model card above");
+        let policy_model_name = policy_model_name.unwrap_or_default();
+        plugins.with_worker_selection(Arc::new(move |config, _worker_type, _partition| {
+            factory(
+                config,
+                policy_worker_role,
+                dynamo_kv_router::RoutingPartitionRef::new(
+                    &policy_model_name,
+                    dynamo_kv_router::DEFAULT_ROUTING_GROUP,
+                ),
+            )
+        }))
+    } else {
+        plugins
     };
+    let plugins = llm_rs::kv_router::plugins::RouterPluginBuilder::new(plugins);
     let kv_router = model_manager
-        .kv_chooser_for_with_policy_and_client(
+        .kv_chooser_for_with_plugins_and_client(
             client,
             block_size as u32,
-            selection_policy,
+            &plugins,
             kv_router_config,
             prefill_load_estimator,
             worker_role,
@@ -2114,13 +2251,17 @@ impl KvRouter {
     fn process_request_to_stream<'p>(
         py: Python<'p>,
         inner: Arc<RsRoutingHost>,
-        request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+        request: SingleIn<llm_rs::protocols::common::preprocessor::PreprocessedRequest>,
         tracker: Option<Arc<RequestTracker>>,
         response_buffer_size: usize,
+        dispatch_span: tracing::Span,
     ) -> PyResult<Bound<'p, PyAny>> {
         crate::future_into_py(py, async move {
-            let single_in = SingleIn::new(request);
-            let stream = inner.generate(single_in).await.map_err(to_pyerr)?;
+            let stream = inner
+                .generate(request)
+                .instrument(dispatch_span)
+                .await
+                .map_err(to_pyerr)?;
             let (tx, rx) =
                 tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(response_buffer_size);
 
@@ -2188,17 +2329,23 @@ impl KvRouter {
     fn dispatch_request_to_stream<'p>(
         py: Python<'p>,
         inner: Arc<RsRoutingHost>,
-        request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+        request: SingleIn<llm_rs::protocols::common::preprocessor::PreprocessedRequest>,
         tracker: Option<Arc<RequestTracker>>,
         response_buffer_mode: ResponseBufferMode,
+        dispatch_span: tracing::Span,
     ) -> PyResult<Bound<'p, PyAny>> {
         match response_buffer_mode {
             ResponseBufferMode::Rendezvous => {
-                demand_driven::process_request_to_stream(py, inner, request, tracker)
+                demand_driven::process_request_to_stream(py, inner, request, tracker, dispatch_span)
             }
-            ResponseBufferMode::Buffered(capacity) => {
-                Self::process_request_to_stream(py, inner, request, tracker, capacity)
-            }
+            ResponseBufferMode::Buffered(capacity) => Self::process_request_to_stream(
+                py,
+                inner,
+                request,
+                tracker,
+                capacity,
+                dispatch_span,
+            ),
         }
     }
 }
@@ -2215,13 +2362,13 @@ impl KvRouter {
     /// Worker role and Prometheus metric labels come from the endpoint's model card.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None, session_affinity_mode="hard"))]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, ais_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None, session_affinity_mode="hard"))]
     fn new(
         py: Python<'_>,
         endpoint: &Endpoint,
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
-        aic_perf_config: Option<&AicPerfConfig>,
+        ais_perf_config: Option<&AisPerfConfig>,
         session_affinity_ttl_secs: Option<u64>,
         load_threshold_config: Option<&LoadThresholdConfig>,
         session_affinity_mode: &str,
@@ -2234,30 +2381,10 @@ impl KvRouter {
         let load_threshold_config = load_threshold_config
             .map(LoadThresholdConfig::as_rust)
             .unwrap_or_default();
-        let worker_selection_policy_factory =
-            crate::worker_selection_policy_factory(&kv_router_config).map_err(to_pyerr)?;
-        let prefill_load_estimator = aic_perf_config
+        let plugins = crate::router_plugins(&kv_router_config).map_err(to_pyerr)?;
+        let prefill_load_estimator = ais_perf_config
             .map(|config| {
-                Python::with_gil(|py| {
-                    create_aic_prefill_load_estimator(
-                        py,
-                        config.backend_name(),
-                        config.system(),
-                        config.model_path(),
-                        config.tp_size(),
-                        config.backend_version(),
-                        config.moe_tp_size(),
-                        config.moe_ep_size(),
-                        config.attention_dp_size(),
-                        config.gemm_dtype(),
-                        config.moe_dtype(),
-                        config.fmha_dtype(),
-                        config.kv_cache_dtype(),
-                        config.comm_dtype(),
-                        config.nextn(),
-                        config.nextn_accept_rates(),
-                    )
-                })
+                Python::with_gil(|py| create_ais_prefill_load_estimator(py, config.config()))
             })
             .transpose()
             .map_err(to_pyerr)?;
@@ -2277,30 +2404,28 @@ impl KvRouter {
                     Some(kv_router_config),
                     load_threshold_config,
                     prefill_load_estimator,
-                    worker_selection_policy_factory,
+                    plugins,
                 )
                 .await
                 .map_err(to_pyerr)?;
 
-                let push_router = rs::pipeline::PushRouter::<
-                    llm_rs::protocols::common::preprocessor::PreprocessedRequest,
-                    rs::protocols::annotated::Annotated<
-                        llm_rs::protocols::common::llm_backend::LLMEngineOutput,
-                    >,
-                >::from_client(
+                let kv_router = managed_router.router().clone();
+                let affinity = session_affinity_ttl_secs
+                    .map(|ttl| {
+                        kv_router
+                            .affinity_coordinator(Duration::from_secs(ttl), session_affinity_mode)
+                    })
+                    .transpose()
+                    .map_err(to_pyerr)?;
+                let routing_host = RsRoutingHost::builder(
                     managed_router.load_context().client().clone(),
                     rs::pipeline::network::egress::push_router::RouterMode::KV,
                 )
+                .kv_router(kv_router)
+                .load_context(managed_router.load_context().clone())
+                .affinity_coordinator(affinity)
+                .build()
                 .await
-                .map_err(to_pyerr)?;
-
-                let routing_host = RsRoutingHost::new_with_load_context(
-                    push_router,
-                    managed_router.router().clone(),
-                    managed_router.load_context().clone(),
-                    session_affinity_ttl_secs.map(Duration::from_secs),
-                    session_affinity_mode,
-                )
                 .map_err(to_pyerr)?;
 
                 Ok(Self {
@@ -2422,18 +2547,22 @@ impl KvRouter {
         Self::dispatch_request_to_stream(
             py,
             self.inner.clone(),
-            request,
+            SingleIn::new(request),
             Some(tracker),
             response_buffer_size,
+            tracing::Span::none(),
         )
     }
 
-    #[pyo3(signature = (request, response_buffer_size=100))]
+    /// Generate from a preprocessed request while optionally preserving its
+    /// parent Python context across the PyO3 task boundary.
+    #[pyo3(signature = (request, response_buffer_size=100, context=None))]
     fn generate_from_request<'p>(
         &self,
         py: Python<'p>,
         request: PyObject,
         response_buffer_size: isize,
+        context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let response_buffer_size = validate_response_buffer_size(response_buffer_size)?;
         // Depythonize the request directly into PreprocessedRequest
@@ -2449,6 +2578,11 @@ impl KvRouter {
                 t
             }
         };
+        let request = crate::create_request_context(request, &context);
+        let dispatch_span = context
+            .as_ref()
+            .map(|context| crate::get_span_for_context(context, "kv_router.generate_from_request"))
+            .unwrap_or_else(tracing::Span::none);
 
         // Use the helper method to process the request
         Self::dispatch_request_to_stream(
@@ -2457,6 +2591,7 @@ impl KvRouter {
             request,
             Some(tracker),
             response_buffer_size,
+            dispatch_span,
         )
     }
 
@@ -2640,13 +2775,8 @@ impl KvRouter {
         include_shared: bool,
         cache_namespace: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let router_config_override = if let Some(obj) = router_config_override {
-            let override_config: RouterConfigOverride =
-                depythonize(obj.bind(py)).map_err(to_pyerr)?;
-            Some(override_config)
-        } else {
-            None
-        };
+        // Retain the Python argument for existing callers; raw overlaps have no score weights.
+        let _ = router_config_override;
         let block_mm_infos = block_mm_infos
             .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
             .transpose()?;
@@ -2656,7 +2786,6 @@ impl KvRouter {
             let scores = chooser
                 .get_overlap_scores(
                     &token_ids,
-                    router_config_override.as_ref(),
                     block_mm_infos.as_deref(),
                     lora_name.as_deref(),
                     cache_namespace.as_deref(),

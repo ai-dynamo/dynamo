@@ -153,6 +153,7 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
                 prompt_tokens_details: Some(PromptTokensDetails {
                     audio_tokens: None,
                     cached_tokens: Some(ct),
+                    ..Default::default()
                 }),
                 completion_tokens_details: None,
             }),
@@ -203,6 +204,8 @@ fn create_chat_request(
     };
 
     NvCreateChatCompletionRequest {
+        preserve_thinking: None,
+        responses_tools: None,
         inner,
         common: Default::default(),
         nvext: None,
@@ -210,6 +213,7 @@ fn create_chat_request(
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -773,6 +777,7 @@ fn create_cmpl_request(include_usage: Option<bool>, stream: bool) -> NvCreateCom
         nvext: None,
         metadata: None,
         return_tokens_as_token_ids: None,
+        no_stop_trim: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -795,6 +800,8 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
     };
 
     NvCreateChatCompletionRequest {
+        preserve_thinking: None,
+        responses_tools: None,
         inner,
         common: Default::default(),
         nvext: None,
@@ -802,6 +809,7 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
         unsupported_fields: Default::default(),
     }
 }

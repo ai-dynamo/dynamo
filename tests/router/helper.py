@@ -23,25 +23,6 @@ NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 
 
-def parse_sse_json_chunks(body: str) -> list[dict[str, Any]]:
-    """Decode JSON objects from single-line SSE data fields."""
-    chunks = []
-    for line in body.splitlines():
-        line = line.strip()
-        if not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if not data or data == "[DONE]":
-            continue
-        try:
-            chunk = json.loads(data)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(chunk, dict):
-            chunks.append(chunk)
-    return chunks
-
-
 def generate_random_suffix() -> str:
     """Generate a 10-character random alphabetic suffix for namespace isolation."""
     return "".join(random.choices(string.ascii_lowercase, k=10))  # noqa: S311
@@ -243,19 +224,19 @@ async def wait_for_frontend_ready(
                 f"expected={expected_num_workers}, configured={configured_workers}"
             )
 
-        runtime = get_runtime(
+        with managed_runtime(
             store_backend=store_backend,
             request_plane=request_plane,
-        )
-        for group in worker_groups:
-            endpoint = runtime.endpoint(
-                f"{group.namespace}.{group.component_name}.generate"
-            )
-            await poll_for_worker_instances(
-                endpoint,
-                group.num_workers,
-                max_wait_time=timeout,
-            )
+        ) as runtime:
+            for group in worker_groups:
+                endpoint = runtime.endpoint(
+                    f"{group.namespace}.{group.component_name}.generate"
+                )
+                await poll_for_worker_instances(
+                    endpoint,
+                    group.num_workers,
+                    max_wait_time=timeout,
+                )
 
     models_url = f"{frontend_url}/v1/models"
     chat_url = f"{frontend_url}/v1/chat/completions"

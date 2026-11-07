@@ -611,6 +611,8 @@ mod tests {
         });
 
         NvCreateChatCompletionRequest {
+            preserve_thinking: None,
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "mock-llama".to_string(),
                 messages,
@@ -621,6 +623,7 @@ mod tests {
             nvext,
             chat_template_args: None,
             thinking: None,
+            thinking_token_budget: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -644,6 +647,7 @@ mod tests {
         };
 
         Annotated::from_data(NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "chatcmpl-test".to_string(),
                 object: "chat.completion.chunk".to_string(),
@@ -655,7 +659,10 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
+            tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         })
     }
 

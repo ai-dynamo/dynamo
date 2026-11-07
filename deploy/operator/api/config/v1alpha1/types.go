@@ -17,9 +17,7 @@
 
 package v1alpha1
 
-import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-)
+import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 // +kubebuilder:object:root=true
 
@@ -72,6 +70,9 @@ type OperatorConfiguration struct {
 
 	// HTTP/2 and TLS settings
 	Security SecurityConfiguration `json:"security"`
+
+	// LPX scheduler integration and model-registry configuration.
+	LPX LPXConfiguration `json:"lpx"`
 }
 
 // ServerConfiguration holds server bind addresses and ports.

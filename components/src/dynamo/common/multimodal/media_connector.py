@@ -16,11 +16,16 @@ Usage:
 """
 
 import logging
+from typing import Any
 
 from PIL import Image
 
-from dynamo.common.http import HttpStatusError
-from dynamo.common.http.url_validator import UrlValidationError
+from dynamo.common.http import HttpConfigurationError, HttpStatusError
+from dynamo.common.http.url_validator import (
+    UrlValidationError,
+    UrlValidationPolicy,
+    check_remote_url_allowed,
+)
 from dynamo.common.multimodal.image_loader import ImageLoader
 
 logger = logging.getLogger(__name__)
@@ -70,7 +75,7 @@ try:
             """Async image fetch via dynamo's ImageLoader with LRU cache."""
             try:
                 img = await self._image_loader.load_image(image_url)
-            except (UrlValidationError, HttpStatusError):
+            except (UrlValidationError, HttpStatusError, HttpConfigurationError):
                 # These are deliberate client-error verdicts, not signals that
                 # another loader should retry the same rejected URL.
                 raise
@@ -86,6 +91,18 @@ try:
             if image_mode != "RGB" and img.mode != image_mode:
                 img = img.convert(image_mode)
             return img
+
+        # Audio, video and the image fallback download through vLLM's own
+        # client, so DYN_MM_ALLOW_REMOTE_URLS is enforced here, before it.
+        def load_from_url(self, url: str, media_io: Any, **kwargs: Any) -> Any:
+            check_remote_url_allowed(url, UrlValidationPolicy.from_env())
+            return super().load_from_url(url, media_io, **kwargs)
+
+        async def load_from_url_async(
+            self, url: str, media_io: Any, **kwargs: Any
+        ) -> Any:
+            check_remote_url_allowed(url, UrlValidationPolicy.from_env())
+            return await super().load_from_url_async(url, media_io, **kwargs)
 
     logger.debug("Registered 'dynamo' MediaConnector with vLLM")
 

@@ -236,12 +236,16 @@ impl DemandDrivenResponseStream {
 pub(super) fn process_request_to_stream<'p>(
     py: Python<'p>,
     inner: Arc<RsRoutingHost>,
-    request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+    request: SingleIn<llm_rs::protocols::common::preprocessor::PreprocessedRequest>,
     tracker: Option<Arc<RequestTracker>>,
+    dispatch_span: tracing::Span,
 ) -> PyResult<Bound<'p, PyAny>> {
     crate::future_into_py(py, async move {
-        let single_in = SingleIn::new(request);
-        let stream = inner.generate(single_in).await.map_err(to_pyerr)?;
+        let stream = inner
+            .generate(request)
+            .instrument(dispatch_span)
+            .await
+            .map_err(to_pyerr)?;
         // Zero capacity is genuinely demand-driven only for direct Python
         // consumption of this KvRouter iterator: each __anext__ polls the
         // upstream stream once. PythonServerStreamingEngine adds its own

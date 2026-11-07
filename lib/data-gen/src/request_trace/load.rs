@@ -21,6 +21,8 @@ use flate2::read::MultiGzDecoder;
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
+use crate::{AgenticDependencyRelation, AgenticDependencyTrigger};
+
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RequestTraceRecord {
     pub(crate) schema: TraceSchema,
@@ -125,6 +127,18 @@ pub(crate) struct RequestTraceReplayMetrics {
     pub(crate) trace_block_size: usize,
     pub(crate) input_length: usize,
     pub(crate) input_sequence_hashes: Vec<u64>,
+    /// Exporter-only edges to earlier requests. Live traces omit them, and agentic lowering then
+    /// infers cross-session edges from timestamps.
+    #[serde(default)]
+    pub(crate) dependencies: Vec<ReplayDependencyRecord>,
+}
+
+/// An edge from a request to an earlier request it could not start before.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ReplayDependencyRecord {
+    pub(crate) request_id: String,
+    pub(crate) relation: AgenticDependencyRelation,
+    pub(crate) trigger: AgenticDependencyTrigger,
 }
 
 #[derive(Debug, Clone, Deserialize)]

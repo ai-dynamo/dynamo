@@ -13,9 +13,8 @@ pub mod policy_queue;
 pub mod prefill_load;
 pub mod queue;
 mod queue_admission;
+pub mod request_classifier;
 pub mod selector;
-
-mod worker_selection_config;
 
 mod types;
 pub use filter::*;
@@ -31,15 +30,16 @@ pub use overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap, TieredOverlapRefresher,
 };
 pub use policy_config::{
-    PolicyClassConfig, PolicyProfile, RouterPolicyConfig, RouterPolicyConfigError,
-    WorkerSelectionConfig, WorkerSelectionInstance,
+    BusyThresholds, PolicyClassConfig, PolicyProfile, RejectThresholdsProvider, RouterPolicyConfig,
+    RouterPolicyConfigError,
 };
 pub use policy_queue::{
-    PolicyQueue, PolicyQueueEntry, QueueLimitKind, QueueRejection, QueueSnapshot,
+    PolicyQueue, PolicyQueueEntry, QueueLimitKind, QueueMetadata, QueueRejection, QueueSnapshot,
 };
 pub use prefill_load::{
     InvalidEffectivePrefillTokens, PrefillLoadEstimator, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,
 };
-pub use queue_admission::{RequestProgress, RequestProgressUpdater, WorkerPlacement};
+pub use queue_admission::WorkerPlacement;
+pub use request_classifier::RequestLifecycle;
 pub use types::*;

@@ -73,7 +73,7 @@ When the router queries a worker, the local indexer can return six response vari
 | `InvalidRange` | The requested end precedes the start | Rejects the malformed range |
 | `Error` | The worker query itself fails | Returns a serialized query error |
 
-The snapshot fallback makes an evicted replay range recoverable while the worker-local indexer is available. A successful tree dump transactionally replaces that worker rank in the router's index. It is not a transport delivery guarantee: both the live stream and the query can fail, and router state can remain temporarily degraded.
+The snapshot fallback makes an evicted replay range recoverable while the worker-local indexer is available. To apply a tree dump, the router clears that worker rank in its index and then admits the dumped events one at a time, so routing lookups that run during the replacement can see the rank empty or partially rebuilt. The fallback is not a transport delivery guarantee: both the live stream and the query can fail, and router state can remain temporarily degraded.
 
 ## Gap Detection
 
@@ -90,7 +90,7 @@ if last_seq >= 0 and seq > last_seq + 1:
 **Dynamo** (from `lib/llm/src/kv_router/indexer/recovery/worker_query_state.rs`):
 The router tracks an admission cursor per worker and data-parallel rank. Discovering and activating a source with a recovery target starts an initial full recovery immediately; live events arriving during recovery are admitted or buffered according to the rank state. A later gap buffers the live event and requests events from the next expected ID (`start_event_id=Some(expected)`, `end_event_id=None`), preserving the existing rank and cursor.
 
-The worker selects the recovery response when handling the query: retained history produces `Events`; expired or unavailable history requires `TreeDump`. Buffered events update the existing index, while a successful tree dump transactionally replaces the rank. The client does not preselect snapshot recovery for an ordinary gap.
+The worker selects the recovery response when handling the query: retained history produces `Events`; expired or unavailable history requires `TreeDump`. Buffered events update the existing index, while a successful tree dump clears the rank and then admits the dumped events. The client does not preselect snapshot recovery for an ordinary gap.
 
 After applying the response, the router sorts and deduplicates its local pending events, discards those covered by the response watermark, and admits the remaining suffix in order. Missing IDs, including events evicted from the bounded pending buffer, produce a structured warning; the router continues through the gaps and finishes recovery without another catch-up RPC. This can leave stale or missing advisory cache hints. The cursor advances only after successful queue admission, and source fencing and clear ordering still apply.
 
@@ -114,7 +114,7 @@ For deployments using Dynamo's KV-aware routing, the local indexer is used autom
 
 ## See Also
 
-- **[KV Router Index Data Structures](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/indexer/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals
+- **[KV Router Index Data Structures](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/indexer/README.md)**: `RadixTree`, `ConcurrentRadixTreeCompressed`, and `PositionalIndexer` internals
 - **[Router Guide](router-guide.md)**: Deployment topologies and worker-set configuration
 - **[Configuration and Tuning](configuration-and-tuning.md)**: Router flags and tuning details
 - **[Router Design](router-design.md)**: Architecture details and event transport modes

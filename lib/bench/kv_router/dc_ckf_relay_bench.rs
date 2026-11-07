@@ -27,7 +27,7 @@ use dynamo_bench::kv_router_common::issuer::{
 };
 use dynamo_bench::kv_router_common::replay::generate_replay_artifacts;
 use dynamo_kv_router::identity::{
-    CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+    CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
 };
 use dynamo_kv_router::indexer::cuckoo::{
     CanonicalSequenceBlockHash, CkfConfig, ConsumerInstanceId, DcCkfDelta, DcCkfDeltaSink,
@@ -428,7 +428,7 @@ fn actor_loop(
         RoutingScopeId::new([1; 16], IdentitySource::Explicit),
     );
     let identity = ProducerIdentity::new(
-        PoolId::new(domain, DcId::new(dc_ordinal as u64)),
+        PoolId::new(domain, ClusterId::new(dc_ordinal as u64)),
         1,
         1,
         state.format(),
@@ -992,7 +992,7 @@ async fn drive_phase(
     tokio::task::spawn_blocking(move || {
         let ready = Arc::new(Barrier::new(issuer_count + 1));
         let start = Arc::new(Barrier::new(issuer_count + 1));
-        let started = Arc::new(OnceLock::new());
+        let started = Arc::new(OnceLock::<Instant>::new());
         let (elapsed, outputs) = std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(issuer_count);
             for (issuer, shard) in shards.into_iter().enumerate() {

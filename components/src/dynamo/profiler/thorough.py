@@ -21,9 +21,9 @@ from itertools import chain
 
 import pandas as pd
 import yaml
-from aiconfigurator.generator.enumerate import enumerate_profiling_configs
-from aiconfigurator.sdk.picking import pick_autoscale, pick_default, pick_load_match
-from aiconfigurator.sdk.task_v2 import Task
+from aisimulate.generator.enumerate import enumerate_profiling_configs
+from aisimulate.sdk.picking import pick_autoscale, pick_default, pick_load_match
+from aisimulate.sdk.task_v2 import Task
 
 from deploy.utils.dynamo_deployment import DeploymentFailedError, DynamoDeploymentClient
 from dynamo.profiler.rapid import _generate_dgd_from_pick

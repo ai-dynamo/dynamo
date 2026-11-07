@@ -16,10 +16,10 @@ Each target below is a Dynamo + vLLM or SGLang deployment of [Qwen3.8-2.4T-A95B]
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">GPU</span>
-<input type="radio" id="recipe-sku-gb300" name="recipe-sku" value="gb300" defaultChecked />
-<label htmlFor="recipe-sku-gb300">GB300</label>
 <input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" />
 <label htmlFor="recipe-sku-gb200">GB200</label>
+<input type="radio" id="recipe-sku-gb300" name="recipe-sku" value="gb300" defaultChecked />
+<label htmlFor="recipe-sku-gb300">GB300</label>
 </div>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Topology</span>
@@ -30,10 +30,10 @@ Each target below is a Dynamo + vLLM or SGLang deployment of [Qwen3.8-2.4T-A95B]
 </div>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Engine</span>
-<input type="radio" id="recipe-engine-vllm" name="recipe-engine" value="vllm" defaultChecked />
-<label htmlFor="recipe-engine-vllm">vLLM</label>
 <input type="radio" id="recipe-engine-sglang" name="recipe-engine" value="sglang" />
 <label htmlFor="recipe-engine-sglang">SGLang</label>
+<input type="radio" id="recipe-engine-vllm" name="recipe-engine" value="vllm" defaultChecked />
+<label htmlFor="recipe-engine-vllm">vLLM</label>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="gb300" data-variant="agg">
 <span><b>Checkpoint</b> Qwen/Qwen3.8-2.4T-A95B-FP8</span>

@@ -1,23 +1,23 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: DC KV Relay Concepts
+title: Pool Relay Concepts
 subtitle: Endpoint-local KV pools, serving topology, and the universal publication boundary
 ---
 
-**Experimental.** NVIDIA Dynamo's DC KV Relay exports compact facts about a data center's
+**Experimental.** NVIDIA Dynamo's Pool Relay (formerly KV DC Relay) exports compact facts about a discovery cluster's
 key-value (KV) cache and serving topology. It keeps exact block ownership local and publishes a
 Cuckoo-filter (CKF) projection for each pool, avoiding replication of every worker's full event
 stream across the WAN. Consumers decide how to query and use the published facts.
 
-For deployment, see [Deploy the DC KV Relay](../../../../kubernetes/kv-aware-routing/kv-dc-relay.md).
-For flags and defaults, see [Multi-Datacenter KV Relay Configuration](../../../../reference/components/kv-dc-relay-configuration.md).
+For deployment, see [Deploy the Pool Relay](../../../../kubernetes/kv-aware-routing/pool-relay.md).
+For flags and defaults, see [Pool Relay Configuration](../../../../reference/components/pool-relay-configuration.md).
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph DC["One data center"]
+    subgraph CLUSTER["One discovery cluster"]
         E["Workers"] -->|"KV events"| K["Endpoint-local pools"]
         E -->|"model cards + availability"| T["Serving topology"]
         E -->|"KV occupancy"| L["Pool load"]
@@ -40,16 +40,16 @@ serving dependencies without publishing KV state; pool presence alone never impl
 
 ## Pool and Producer Identity
 
-`PoolId = (identity_version, IndexerDomainId, DcId)` identifies a pool across restarts.
+`PoolId = (identity_version, IndexerDomainId, ClusterId)` identifies a pool across restarts.
 The domain combines cache semantics with routing scope. Routing scope defaults to the endpoint
 identity but accepts explicit overrides. Colliding live pools are fenced, not merged.
 
 `ProducerIdentity` adds the pool's generation and CKF layout; replacing it requires a fresh
-snapshot. `RelayIdentity` identifies the runtime and Relay incarnation. Descriptor metadata
+snapshot. `PoolRelayIdentity` identifies the runtime and Relay incarnation. Descriptor metadata
 does not extend the subscription key; `serving_endpoint` names the owner, not an inference ingress.
 
 Exact key fields and compatibility rules belong to the
-[gRPC contract](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/docs/grpc-contract.md#producer-identity-key).
+[gRPC contract](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/pool_relay/docs/grpc-contract.md#producer-identity-key).
 
 ## Canonical Models and LoRA
 
@@ -76,7 +76,7 @@ streams, plus a Relay identity query. It forwards universal publication state wi
 CKF mirror or publication pipeline.
 
 RPC schemas, message validation, versioning, errors, and reconnect rules are specified in the
-[gRPC contract](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/docs/grpc-contract.md).
+[gRPC contract](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/pool_relay/docs/grpc-contract.md).
 The adapter does not provide an overlap RPC or request-routing policy.
 
 ## CKF Publication
@@ -110,18 +110,18 @@ Worker recovery is rank-local; fencing withdraws one producer generation. Catalo
 readiness, and load have independent revisions and recovery, not one atomic transaction.
 
 For producer invariants, see the
-[implementation guide](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/docs/architecture.md).
+[implementation guide](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/pool_relay/docs/architecture.md).
 For consumer actions, see the
-[contract lifecycle rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/docs/grpc-contract.md#consumer-lifecycle-rules).
+[contract lifecycle rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/pool_relay/docs/grpc-contract.md#consumer-lifecycle-rules).
 
 ## Transport
 
 The optional listener serves plaintext HTTP/2 gRPC. Local pool maintenance runs without it.
 Listener configuration and limits are in the
-[configuration reference](../../../../reference/components/kv-dc-relay-configuration.md).
+[configuration reference](../../../../reference/components/pool-relay-configuration.md).
 
 ### Optional mTLS Sidecar
 
 Transport security belongs to an external proxy, not Relay. For certificate handling, protected
 exposure, and probe changes, see the
-[Kubernetes sidecar procedure](../../../../kubernetes/kv-aware-routing/kv-dc-relay.md#optional-mtls-sidecar).
+[Kubernetes sidecar procedure](../../../../kubernetes/kv-aware-routing/pool-relay.md#optional-mtls-sidecar).

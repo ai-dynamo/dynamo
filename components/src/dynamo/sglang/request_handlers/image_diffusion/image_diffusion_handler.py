@@ -18,19 +18,19 @@ from dynamo._core import Context
 from dynamo.common.http.base import HttpStatusError
 from dynamo.common.http.media_reference import local_media_reference
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
-from dynamo.common.protocols.image_protocol import ImageNvExt
+from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
+from dynamo.common.protocols.request_parsing import parse_media_request
 from dynamo.common.storage import upload_to_fs
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.args import Config
-from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse
+from dynamo.sglang.media_protocol import SGLangCreateImageRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 
 logger = logging.getLogger(__name__)
 
+# The engine's ceiling on denoising steps; a larger request is clamped.
 MAX_NUM_INFERENCE_STEPS = 50
-DEFAULT_NUM_INFERENCE_STEPS = 50
-DEFAULT_GUIDANCE_SCALE = 7.5
 
 
 class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
@@ -107,47 +107,86 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         # events on the response stream (Annotated::from_err); the frontend
         # folds those into a non-200 HTTP response. Expected validation
         # failures (InvalidArgument) become 400s without traceback noise.
-        req = CreateImageRequest(**request)
+        # The SGLang model fills in the defaults for the fields the request
+        # leaves unset. An explicit value is kept as sent.
+        req = parse_media_request(SGLangCreateImageRequest, request)
+        nvext = req.nvext
 
-        nvext = req.nvext or ImageNvExt()
+        # The model carries the references as a list; this engine edits one
+        # image. The frontend forwards two or more only to a worker that
+        # advertises edit capacity, which this one does not, so the check
+        # guards a body that skipped the frontend.
+        input_reference: Optional[str] = None
+        if req.input_reference is not None:
+            if len(req.input_reference) > 1:
+                raise InvalidArgument(
+                    "SGLang image diffusion takes one input_reference"
+                )
+            (input_reference,) = req.input_reference
 
-        # Apply SGLang-specific defaults for unset values
-        raw_steps = nvext.num_inference_steps or DEFAULT_NUM_INFERENCE_STEPS
-        if raw_steps > MAX_NUM_INFERENCE_STEPS:
+        if nvext.num_inference_steps > MAX_NUM_INFERENCE_STEPS:
             logger.warning(
-                f"num_inference_steps={raw_steps} exceeds max "
+                f"num_inference_steps={nvext.num_inference_steps} exceeds max "
                 f"{MAX_NUM_INFERENCE_STEPS}, clamping"
             )
-        num_inference_steps = min(raw_steps, MAX_NUM_INFERENCE_STEPS)
-        guidance_scale = nvext.guidance_scale or DEFAULT_GUIDANCE_SCALE
+        num_inference_steps = min(nvext.num_inference_steps, MAX_NUM_INFERENCE_STEPS)
+        guidance_scale = nvext.guidance_scale
 
         width, height = self._parse_size(req.size)
 
-        images = await self._generate_images(
-            prompt=req.prompt,
-            negative_prompt=nvext.negative_prompt,
-            width=width,
-            height=height,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            seed=nvext.seed,
-            input_reference=req.input_reference,
-        )
+        num_images = req.n
+
+        # The engine produces one image per call, so serve OpenAI `n`
+        # semantics as n sequential generations. With an explicit seed use
+        # seed+i: deterministic overall, yet each sample is distinct.
+        # Without a seed, each generation draws its own random seed.
+        images: list[bytes] = []
+        for i in range(num_images):
+            # Stop between generations if the request has gone away: a
+            # cancelled n=10 request must not keep occupying the GPU.
+            if context.is_stopped() or context.is_killed():
+                logger.info(
+                    "Request cancelled after %d of %d generations", i, num_images
+                )
+                return
+            images.extend(
+                await self._generate_images(
+                    prompt=req.prompt,
+                    negative_prompt=nvext.negative_prompt,
+                    width=width,
+                    height=height,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    seed=nvext.seed + i if nvext.seed is not None else None,
+                    input_reference=input_reference,
+                )
+            )
 
         context_id = context.id()
         assert context_id is not None
         user_id = req.user or context_id
+        response_format = req.response_format
         image_data = []
-        for img in images:
-            # uploading or encoding the image
-            if req.response_format == "url":
-                url = await self._upload_to_fs(img, user_id, context_id)
-                image_data.append(ImageData(url=url))
-            else:
-                b64 = self._encode_base64(img)
-                image_data.append(ImageData(b64_json=b64))
+        uploaded_paths: list[str] = []
+        try:
+            for img in images:
+                # uploading or encoding the image
+                if response_format == "url":
+                    url, storage_path = await self._upload_to_fs(
+                        img, user_id, context_id
+                    )
+                    uploaded_paths.append(storage_path)
+                    image_data.append(ImageData(url=url))
+                else:
+                    b64 = self._encode_base64(img)
+                    image_data.append(ImageData(b64_json=b64))
+        except Exception:
+            # The whole batch fails: remove files already uploaded so a
+            # failed request leaves no orphaned media behind.
+            await self._cleanup_uploads(uploaded_paths)
+            raise
 
-        response = ImagesResponse(created=int(time.time()), data=image_data)
+        response = NvImagesResponse(created=int(time.time()), data=image_data)
 
         yield response.model_dump()
 
@@ -268,7 +307,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
     async def _upload_to_fs(
         self, image_bytes: bytes, user_id: str, request_id: str
-    ) -> str:
+    ) -> tuple[str, str]:
         """Upload image to filesystem and return URL.
 
         Uses per-user storage path:
@@ -280,7 +319,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             request_id: Request context ID.
 
         Returns:
-            Public URL for the uploaded image.
+            (public URL, storage path) for the uploaded image.
         """
         image_uuid = str(uuid.uuid4())
         image_filename = f"{image_uuid}.png"
@@ -288,7 +327,16 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         # Per-user storage path
         storage_path = f"users/{user_id}/generations/{request_id}/{image_filename}"
 
-        return await upload_to_fs(self.fs, storage_path, image_bytes, self.base_url)
+        url = await upload_to_fs(self.fs, storage_path, image_bytes, self.base_url)
+        return url, storage_path
+
+    async def _cleanup_uploads(self, storage_paths: list[str]) -> None:
+        """Best-effort removal of uploaded files after a failed batch."""
+        for path in storage_paths:
+            try:
+                await asyncio.to_thread(self.fs.rm, path)
+            except Exception:
+                logger.warning("Failed to clean up uploaded file %s", path)
 
     def _encode_base64(self, image_bytes: bytes) -> str:
         """Encode image as base64 string"""

@@ -10,7 +10,9 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
+from vllm.outputs import RequestOutput
 
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm.handlers import BaseWorkerHandler
 
 pytestmark = [
@@ -32,6 +34,8 @@ def mock_handler():
     handler.model_config = Mock(enable_prompt_embeds=True)
     handler.model_config.dtype = torch.float32
     handler.model_config.get_hidden_size.return_value = 4096
+    # A non-OPT text config: vLLM checks word_embed_proj_dim before hidden_size.
+    handler.model_config.hf_text_config = Mock(spec=[])
     handler._decode_prompt_embeds = BaseWorkerHandler._decode_prompt_embeds.__get__(  # type: ignore
         handler
     )
@@ -95,8 +99,8 @@ class TestPromptEmbedsDecode:
     def test_decode_invalid_inputs(
         self, mock_handler, invalid_input, error_match, description
     ):
-        """Test that invalid inputs raise ValueError."""
-        with pytest.raises(ValueError, match=error_match):
+        """Test that undecodable inputs raise InvalidArgument (client 400)."""
+        with pytest.raises(InvalidArgument, match=error_match):
             mock_handler._decode_prompt_embeds(invalid_input)
 
     def test_missing_model_config_is_server_error(self, mock_handler):
@@ -129,7 +133,7 @@ class TestPromptEmbedsDecode:
         buffer.seek(0)
         embeddings_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-        with pytest.raises(ValueError, match="Failed to decode.*PyTorch"):
+        with pytest.raises(InvalidArgument, match="Failed to decode.*PyTorch"):
             mock_handler._decode_prompt_embeds(embeddings_base64)
 
     def test_decode_non_tensor_object_rejected(self, mock_handler):
@@ -137,7 +141,7 @@ class TestPromptEmbedsDecode:
         non_tensor = {"key": "value"}
         embeddings_base64 = encode_tensor_to_base64_obj(non_tensor)
 
-        with pytest.raises(ValueError, match="Failed to decode"):
+        with pytest.raises(InvalidArgument, match="Failed to decode"):
             mock_handler._decode_prompt_embeds(embeddings_base64)
 
 
@@ -252,3 +256,40 @@ class TestUsageStatistics:
         assert result["prompt_tokens"] == 5
         assert result["completion_tokens"] == 2
         assert result["prompt_tokens_details"] == expected_prompt_tokens_details
+
+    @pytest.mark.core
+    def test_kv_cache_hit_engine_data_uses_stock_aggregate_counter(self):
+        request_output = RequestOutput(
+            request_id="cache-reuse",
+            prompt=None,
+            prompt_token_ids=[1, 2, 3, 4],
+            prompt_logprobs=None,
+            outputs=[],
+            finished=True,
+            num_cached_tokens=3,
+        )
+
+        assert BaseWorkerHandler._kv_cache_hit_engine_data(request_output) == {
+            "prompt_tokens": 4,
+            "reused_tokens": 3,
+        }
+
+    @pytest.mark.core
+    @pytest.mark.parametrize(
+        ("prompt_token_ids", "num_cached_tokens"),
+        [([1, 2], None), (None, 0)],
+    )
+    def test_kv_cache_hit_engine_data_omits_missing_counters(
+        self, prompt_token_ids, num_cached_tokens
+    ):
+        request_output = RequestOutput(
+            request_id="cache-reuse",
+            prompt=None,
+            prompt_token_ids=prompt_token_ids,
+            prompt_logprobs=None,
+            outputs=[],
+            finished=True,
+            num_cached_tokens=num_cached_tokens,
+        )
+
+        assert BaseWorkerHandler._kv_cache_hit_engine_data(request_output) == {}

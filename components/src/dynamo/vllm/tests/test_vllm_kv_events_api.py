@@ -26,9 +26,14 @@ to preserve and republish a new upstream field.
 """
 
 import importlib
+import json
+from types import SimpleNamespace
 
 import pytest
 from packaging.version import Version
+
+from dynamo.vllm.args import update_engine_config_with_dynamo
+from dynamo.vllm.constants import DisaggregationMode
 
 # Import vllm first to ensure it's properly loaded before accessing submodules.
 # This works around potential issues with pytest's import machinery.
@@ -85,10 +90,12 @@ class TestVllmKvEventsApi:
         11. kv_cache_spec_sliding_window (semantic cache window; optional for older vLLM)
         12. locality (per-tier storage locality; optional for older vLLM)
         13. ownership (secondary offloading tier; added in vLLM 0.29)
+        14. session_id (request session; added in vLLM 0.30)
+        15. lookahead_token_ids (EAGLE/MTP lookahead hashes; added in vLLM 0.33)
 
         If vLLM adds/removes/reorders fields, this test will fail.
         """
-        expected_fields = [
+        expected_fields = (
             "block_hashes",
             "parent_block_hash",
             "token_ids",
@@ -97,18 +104,14 @@ class TestVllmKvEventsApi:
             "medium",
             "lora_name",
             "extra_keys",
-        ]
-        if _has_group_idx(BlockStored):
-            expected_fields.append("group_idx")
-        if _has_kv_cache_spec_kind(BlockStored):
-            expected_fields.append("kv_cache_spec_kind")
-        if _has_kv_cache_spec_sliding_window(BlockStored):
-            expected_fields.append("kv_cache_spec_sliding_window")
-        if _has_locality(BlockStored):
-            expected_fields.append("locality")
-        if Version(_vllm.__version__).release >= (0, 29):
-            expected_fields.append("ownership")
-        expected_fields = tuple(expected_fields)
+            "group_idx",
+            "kv_cache_spec_kind",
+            "kv_cache_spec_sliding_window",
+            "locality",
+            "ownership",
+            "session_id",
+            "lookahead_token_ids",
+        )
 
         actual_fields = BlockStored.__struct_fields__
         assert actual_fields == expected_fields, (
@@ -217,6 +220,8 @@ class TestVllmKvEventsApi:
             event_kwargs["kv_cache_spec_sliding_window"] = 128
         if _has_locality(BlockStored):
             event_kwargs["locality"] = "LOCAL"
+        if Version(_vllm.__version__).release >= (0, 30):
+            event_kwargs["session_id"] = "session-1"
         event = BlockStored(**event_kwargs)
 
         encoded = msgspec.msgpack.encode(event)
@@ -240,6 +245,8 @@ class TestVllmKvEventsApi:
             assert decoded["kv_cache_spec_sliding_window"] == 128
         if _has_locality(BlockStored):
             assert decoded["locality"] == "LOCAL"
+        if Version(_vllm.__version__).release >= (0, 30):
+            assert decoded["session_id"] == "session-1"
 
     def test_block_stored_tuple_extra_keys_serialization_format(self):
         """Verify multimodal tuple extra_keys keep the vLLM 0.19 wire shape."""
@@ -311,3 +318,64 @@ class TestVllmKvEventsApi:
             ), "kv_cache_spec_sliding_window has wrong value"
         if _has_locality(BlockRemoved):
             assert decoded["locality"] == "REMOTE"
+
+
+_SPECULATORS_CHECKPOINT_CONFIG = {
+    "speculators_model_type": "eagle3",
+    "speculators_config": {
+        "proposal_methods": [{"speculative_tokens": 1}],
+        "verifier": {"name_or_path": "Qwen/Qwen3-0.6B"},
+    },
+    "transformer_layer_config": {},
+}
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_config", "speculative_config"),
+    [
+        (None, {"method": "eagle3", "num_speculative_tokens": 1}),
+        (_SPECULATORS_CHECKPOINT_CONFIG, None),
+    ],
+    ids=["speculative-config", "speculators-checkpoint"],
+)
+def test_kv_event_publisher_keeps_legacy_block_hashes(
+    tmp_path, checkpoint_config, speculative_config
+):
+    """Dynamo's KV indexers hash each block's own tokens, so a worker publishing
+    KV events must not default to vLLM's EAGLE/MTP lookahead block hashes,
+    including those vLLM derives from a speculators checkpoint."""
+    if checkpoint_config is not None:
+        (tmp_path / "config.json").write_text(json.dumps(checkpoint_config))
+
+    dynamo_config = SimpleNamespace(
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+        use_kv_events=False,
+        embedding_worker=False,
+        classify_worker=False,
+        headless=False,
+        enable_multimodal=False,
+        fpm_trace=False,
+        benchmark_mode=None,
+    )
+    # AsyncEngineArgs would resolve the model from Hugging Face on construction.
+    engine_args = SimpleNamespace(
+        model=str(tmp_path),
+        tokenizer=None,
+        trust_remote_code=False,
+        revision=None,
+        hf_token=None,
+        enable_prefix_caching=True,
+        block_size=16,
+        kv_transfer_config=None,
+        spec_method=None,
+        speculative_config=speculative_config,
+        kv_events_config=_kv_events.KVEventsConfig(enable_kv_cache_events=True),
+    )
+
+    update_engine_config_with_dynamo(dynamo_config, engine_args)
+
+    assert dynamo_config.use_kv_events
+    assert engine_args.speculative_config == {
+        "disable_lookahead_block_hashes": True,
+        **(speculative_config or {}),
+    }

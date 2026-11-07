@@ -10,7 +10,10 @@ use dynamo_kv_router::{
     protocols::{
         BlockExtraInfo, RoutingConstraints, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
     },
-    scheduling::{AdvisoryWorkerLoad, QueueRejection, RoutingEligibility, queue::BookingHandle},
+    scheduling::{
+        AdvisoryWorkerLoad, QueueRejection, RequestLifecycle, RoutingEligibility,
+        queue::BookingHandle,
+    },
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
@@ -31,10 +34,14 @@ pub(super) struct WorkerSelection {
     pub(super) overlap_amount: u32,
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
+    pub(super) selected_raw_cached_tokens: Option<usize>,
+    /// Greatest raw router-visible overlap among eligible workers, in tokens.
+    pub(super) max_raw_cached_tokens: Option<usize>,
     pub(super) potential_decode_blocks: u64,
     pub(super) selected_worker_load: Option<AdvisoryWorkerLoad>,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
     pub(super) kv_hint: Option<KvHint>,
+    pub(super) request_lifecycle: Option<Box<RequestLifecycle>>,
 }
 
 // Transient return value; `Routed` is moved into `WorkerSelection` right away.
@@ -129,6 +136,8 @@ impl RoutingHost {
                 overlap_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                selected_raw_cached_tokens,
+                max_raw_cached_tokens,
                 potential_decode_blocks,
                 routing_hashes,
                 kv_hint,
@@ -138,10 +147,13 @@ impl RoutingHost {
                 overlap_amount: overlap_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                selected_raw_cached_tokens,
+                max_raw_cached_tokens,
                 potential_decode_blocks,
                 selected_worker_load: admitted.advisory_load,
                 routing_hashes,
                 kv_hint,
+                request_lifecycle: None,
             })),
             FindBestMatchOutcome::QueueRejected { rejection } => {
                 Ok(SelectionOutcome::QueueRejected(rejection))
@@ -235,6 +247,9 @@ impl RoutingHost {
                 .dp_rank
                 .map(|dp_rank| (target.worker_id, Some(dp_rank)))
         });
+        // A pin from the session binding alone is an affinity decision: forward it as the
+        // affinity target so the scheduler logs and measures it as one.
+        let pin_is_affinity_only = explicit_pin.is_none() && affinity_pin.is_some();
         let requested_pin = merge_affinity_pin(explicit_pin, affinity_pin);
         let pinned_worker = match planned_worker {
             Some(planned_worker) => {
@@ -345,7 +360,7 @@ impl RoutingHost {
             policy_class,
             session_context,
             expected_output_tokens,
-            affinity_target: None,
+            affinity_target: pin_is_affinity_only.then(|| pinned_worker.into()),
             pinned_worker: Some(pinned_worker),
             allowed_worker_ids,
             routing_constraints,

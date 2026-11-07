@@ -4,29 +4,31 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use parking_lot::Mutex;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::WorkerSelectionPolicyFactory;
 use crate::config::KvRouterConfig;
+use crate::plugins::worker_selection::WorkerSelectionPolicyFactory;
 use crate::protocols::WorkerId;
 use crate::scheduling::PotentialLoad;
 use crate::services::common::replica_sync::{
-    PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
+    AffinityBindingEvent, PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
 };
 use crate::services::indexer::backend::IndexerPolicy;
 use crate::tracking_hash::TrackingHashContext;
 
-use super::affinity::SessionAffinityConfig;
+use super::affinity::{SessionAffinityConfig, SessionAffinityMode};
 use super::core::{KvIndexSource, SelectionCore, SelectionHost, SelectionServiceConfig};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
-use super::policy_registry::WorkerSelectionPolicyRegistry;
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
     SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
 use crate::WorkerType;
+use crate::plugins::RouterPluginRegistry;
 
 pub struct SelectionServiceBuilder {
     kv_router_config: KvRouterConfig,
@@ -36,10 +38,13 @@ pub struct SelectionServiceBuilder {
     replica_sync_peers: Vec<String>,
     selection_cache: SelectionCacheConfig,
     worker_type: WorkerType,
-    worker_selection_policy_registry: WorkerSelectionPolicyRegistry,
+    plugin_registry: RouterPluginRegistry,
     host: SelectionHost,
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
     session_affinity_ttl: Option<Duration>,
+    session_affinity_mode: SessionAffinityMode,
+    session_replication_writer_id: Option<u64>,
+    host_manages_request_lifecycle: bool,
 }
 
 /// Warn when a host does not construct workers for explicitly configured policy roles.
@@ -66,7 +71,7 @@ impl SelectionServiceBuilder {
     pub fn new(
         kv_router_config: KvRouterConfig,
         worker_type: WorkerType,
-        worker_selection_policy_registry: WorkerSelectionPolicyRegistry,
+        plugin_registry: RouterPluginRegistry,
     ) -> Self {
         Self {
             kv_router_config,
@@ -76,10 +81,13 @@ impl SelectionServiceBuilder {
             replica_sync_peers: Vec::new(),
             selection_cache: SelectionCacheConfig::default(),
             worker_type,
-            worker_selection_policy_registry,
+            plugin_registry,
             host: SelectionHost::default(),
             worker_selection_policy_factory: None,
             session_affinity_ttl: None,
+            session_affinity_mode: SessionAffinityMode::default(),
+            session_replication_writer_id: None,
+            host_manages_request_lifecycle: false,
         }
     }
 
@@ -123,6 +131,20 @@ impl SelectionServiceBuilder {
         self
     }
 
+    /// Choose whether a live binding must be honored or may follow a new dispatch.
+    pub fn session_affinity_mode(mut self, mode: SessionAffinityMode) -> Self {
+        self.session_affinity_mode = mode;
+        self
+    }
+
+    /// Export bindings through a bounded channel instead of the built-in mesh.
+    /// The host supplies an id unique to this replica incarnation and carries
+    /// both commit updates and release-time TTL refreshes to its peers.
+    pub fn session_binding_replication(mut self, writer_id: u64) -> Self {
+        self.session_replication_writer_id = Some(writer_id);
+        self
+    }
+
     pub fn replica_sync(mut self, port: u16, peers: Vec<String>) -> Self {
         self.replica_sync_port = Some(port);
         self.replica_sync_peers = peers;
@@ -134,18 +156,46 @@ impl SelectionServiceBuilder {
         self
     }
 
-    pub async fn build(self) -> anyhow::Result<SelectionService> {
+    /// The embedding host installs classifiers and drives their request lifecycle.
+    ///
+    /// Only hosts that enroll requests and report dispatch, completion, and abort
+    /// may enable this. Standalone selection cannot provide those callbacks.
+    pub fn host_manages_request_lifecycle(mut self) -> Self {
+        self.host_manages_request_lifecycle = true;
+        self
+    }
+
+    pub async fn build(mut self) -> anyhow::Result<SelectionService> {
+        if self.session_replication_writer_id.is_some() {
+            anyhow::ensure!(
+                self.session_affinity_ttl.is_some(),
+                "session binding replication requires session affinity"
+            );
+            anyhow::ensure!(
+                self.replica_sync_port.is_none(),
+                "host session binding replication cannot be combined with replica_sync"
+            );
+        }
+        self.kv_router_config
+            .apply_policy_config()
+            .map_err(anyhow::Error::msg)?;
         if let Some(ttl) = self.session_affinity_ttl {
             super::affinity::SessionAffinity::validate_ttl(ttl)?;
         }
         self.kv_router_config
             .validate_config()
             .map_err(anyhow::Error::msg)?;
+        if !self.host_manages_request_lifecycle
+            && self.kv_router_config.request_classifier_config()?.is_some()
+        {
+            anyhow::bail!("standalone selection does not support request_classifier plugins");
+        }
         let worker_selection_policy_factory = match self.worker_selection_policy_factory {
-            Some(factory) => Some(factory),
+            Some(factory) => factory,
             None => self
-                .worker_selection_policy_registry
-                .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?,
+                .plugin_registry
+                .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?
+                .ok_or(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault)?,
         };
         let tracking_hash = Arc::new(TrackingHashContext::from_config(&self.kv_router_config)?);
         let indexer_policy = IndexerPolicy::from_router_config(&self.kv_router_config)?;
@@ -165,7 +215,7 @@ impl SelectionServiceBuilder {
             );
         }
         let replica_config = replica_runtime.as_ref().map(ReplicaSyncRuntime::config);
-        let core = Arc::new(SelectionCore::new_inner(
+        let core = SelectionCore::new_inner(
             self.kv_router_config,
             self.indexer_threads,
             cancel_token.clone(),
@@ -177,8 +227,17 @@ impl SelectionServiceBuilder {
             self.selection_cache,
             tracking_hash,
             indexer_policy,
-            self.session_affinity_ttl.map(SessionAffinityConfig::new),
-        ));
+            self.session_affinity_ttl
+                .map(|ttl| SessionAffinityConfig::new(ttl).with_mode(self.session_affinity_mode)),
+        );
+        let (core, session_binding_rx) = match self.session_replication_writer_id {
+            Some(writer_id) => {
+                let (core, rx) = core.with_session_binding_publisher(writer_id);
+                (core, Some(Mutex::new(Some(rx))))
+            }
+            None => (core, None),
+        };
+        let core = Arc::new(core);
 
         if recover_from_peers {
             match core.recover_indexer_from_peers(&self.indexer_peers).await {
@@ -198,7 +257,7 @@ impl SelectionServiceBuilder {
         let peer_manager = if replica_runtime.is_some() {
             let weak_core = Arc::downgrade(&core);
             let affinity_core = Arc::downgrade(&core);
-            Some(PeerManager::start_with_affinity(
+            Some(Arc::new(PeerManager::start_with_affinity(
                 self.replica_sync_peers,
                 cancel_token.child_token(),
                 move |event| {
@@ -213,7 +272,7 @@ impl SelectionServiceBuilder {
                         }
                     }
                 }),
-            )?)
+            )?))
         } else {
             None
         };
@@ -221,6 +280,7 @@ impl SelectionServiceBuilder {
         startup_guard.disarm();
         Ok(SelectionService {
             core,
+            session_binding_rx,
             peer_manager,
             replica_runtime,
             replica_sync_port: self.replica_sync_port,
@@ -233,12 +293,12 @@ impl SelectionServiceConfig {
     pub fn service_builder(
         &self,
         worker_type: WorkerType,
-        worker_selection_policy_registry: WorkerSelectionPolicyRegistry,
+        plugin_registry: RouterPluginRegistry,
     ) -> SelectionServiceBuilder {
         let mut builder = SelectionServiceBuilder::new(
             self.kv_router_config.clone(),
             worker_type,
-            worker_selection_policy_registry,
+            plugin_registry,
         )
         .indexer_threads(self.threads)
         .indexer_peers(self.indexer_peers.clone())
@@ -281,13 +341,66 @@ impl Drop for StartupGuard {
 
 pub struct SelectionService {
     core: Arc<SelectionCore>,
-    peer_manager: Option<PeerManager>,
+    /// `None` when replication is disabled; the inner `None` once taken.
+    session_binding_rx: Option<Mutex<Option<mpsc::Receiver<AffinityBindingEvent>>>>,
+    peer_manager: Option<Arc<PeerManager>>,
     replica_runtime: Option<ReplicaSyncRuntime>,
     replica_sync_port: Option<u16>,
     cancel_token: CancellationToken,
 }
 
+/// Session bindings that terminate when the service shuts down.
+pub struct SessionBindingUpdates {
+    rx: tokio::sync::Mutex<mpsc::Receiver<AffinityBindingEvent>>,
+    cancel_token: CancellationToken,
+}
+
+impl SessionBindingUpdates {
+    pub async fn recv_many(&self) -> Option<Vec<AffinityBindingEvent>> {
+        let mut rx = self.rx.lock().await;
+        let limit = rx.max_capacity();
+        let mut events = Vec::new();
+        tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => None,
+            received = rx.recv_many(&mut events, limit) => (received > 0).then_some(events),
+        }
+    }
+}
+
 impl SelectionService {
+    /// Session bindings this replica commits or refreshes, for the host to
+    /// broadcast to its peers. Ends when the service shuts down.
+    pub fn session_binding_updates(&self) -> Result<SessionBindingUpdates, SelectionError> {
+        let rx = self
+            .session_binding_rx
+            .as_ref()
+            .ok_or_else(|| {
+                SelectionError::Conflict("session binding stream is disabled".to_string())
+            })?
+            .lock()
+            .take()
+            .ok_or_else(|| {
+                SelectionError::Conflict("session binding stream already taken".to_string())
+            })?;
+        Ok(SessionBindingUpdates {
+            rx: tokio::sync::Mutex::new(rx),
+            cancel_token: self.cancel_token.clone(),
+        })
+    }
+
+    /// Reconcile a peer binding independently of request load. Importing does
+    /// not publish an update. A binding this replica cannot place yet is
+    /// dropped and converges on the owner's next refresh.
+    pub fn apply_session_binding(
+        &self,
+        binding: AffinityBindingEvent,
+    ) -> Result<(), SelectionError> {
+        self.core.ensure_running()?;
+        self.core.dispatch_affinity_event(binding);
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(super) fn new_local_for_test(
         kv_router_config: KvRouterConfig,
@@ -295,12 +408,19 @@ impl SelectionService {
     ) -> Self {
         let cancel_token = CancellationToken::new();
         Self {
+            session_binding_rx: None,
             core: Arc::new(
                 SelectionCore::try_new_local(
                     kv_router_config,
                     indexer_threads,
                     cancel_token.clone(),
                     SelectionCacheConfig::default(),
+                    std::sync::Arc::new(|config, role, _| {
+                        crate::plugins::worker_selection::WorkerSelectionPolicy::reference(
+                            config.clone(),
+                            role.default_selector_label(),
+                        )
+                    }),
                 )
                 .expect("valid test config"),
             ),
@@ -451,8 +571,12 @@ impl SelectionService {
     pub fn list_replica_peers(&self) -> Vec<String> {
         self.peer_manager
             .as_ref()
-            .map(PeerManager::list_peers)
+            .map(|peer_manager| peer_manager.list_peers())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn peer_manager(&self) -> Option<Arc<PeerManager>> {
+        self.peer_manager.clone()
     }
 
     pub async fn indexer_snapshot(&self) -> serde_json::Value {
@@ -506,12 +630,64 @@ mod tests {
         }
     }
 
+    fn test_registry() -> RouterPluginRegistry {
+        RouterPluginRegistry::default().with_default_factory(Arc::new(|config, role, _| {
+            crate::plugins::worker_selection::WorkerSelectionPolicy::reference(
+                config.clone(),
+                role.default_selector_label(),
+            )
+        }))
+    }
+
+    #[tokio::test]
+    async fn missing_default_is_rejected_at_construction() {
+        let result = SelectionServiceBuilder::new(
+            test_config(),
+            WorkerType::Aggregated,
+            RouterPluginRegistry::default(),
+        )
+        .build()
+        .await;
+        let Err(error) = result else {
+            panic!("missing default accepted")
+        };
+        assert!(matches!(
+            error.downcast_ref::<crate::plugins::WorkerSelectionPolicyRegistryError>(),
+            Some(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault)
+        ));
+    }
+
     fn reserve_tcp_port() -> u16 {
         StdTcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port()
+    }
+
+    #[tokio::test]
+    async fn standalone_selection_rejects_request_classifier() {
+        let policy = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(policy.path(), "request_classifier: {type: test}").unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy.path().display().to_string()),
+            ..test_config()
+        };
+        let result = SelectionServiceBuilder::new(
+            config,
+            WorkerType::Aggregated,
+            RouterPluginRegistry::default(),
+        )
+        .build()
+        .await;
+        let Err(error) = result else {
+            panic!("classifier ignored")
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("standalone selection does not support request_classifier")
+        );
     }
 
     #[tokio::test]
@@ -537,7 +713,7 @@ worker_selection:
         let error = match SelectionServiceBuilder::new(
             config,
             WorkerType::Prefill,
-            WorkerSelectionPolicyRegistry::default(),
+            RouterPluginRegistry::default(),
         )
         .build()
         .await
@@ -553,19 +729,18 @@ worker_selection:
         );
     }
 
+    async fn build(port: u16) -> anyhow::Result<SelectionService> {
+        SelectionServiceBuilder::new(test_config(), WorkerType::Aggregated, test_registry())
+            .indexer_threads(1)
+            .replica_sync(port, Vec::new())
+            .build()
+            .await
+    }
+
     async fn build_on_port(port: u16) -> SelectionService {
         tokio::time::timeout(Duration::from_secs(5), async move {
             loop {
-                match SelectionServiceBuilder::new(
-                    test_config(),
-                    WorkerType::Aggregated,
-                    WorkerSelectionPolicyRegistry::default(),
-                )
-                .indexer_threads(1)
-                .replica_sync(port, Vec::new())
-                .build()
-                .await
-                {
+                match build(port).await {
                     Ok(service) => return service,
                     Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
                 }
@@ -578,22 +753,21 @@ worker_selection:
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn startup_and_shutdown_release_replica_resources() {
         let port = reserve_tcp_port();
-        let failed = SelectionServiceBuilder::new(
-            test_config(),
-            WorkerType::Aggregated,
-            WorkerSelectionPolicyRegistry::default(),
-        )
-        .indexer_threads(1)
-        .replica_sync(port, vec!["invalid".to_string()])
-        .build()
-        .await;
+        let failed =
+            SelectionServiceBuilder::new(test_config(), WorkerType::Aggregated, test_registry())
+                .indexer_threads(1)
+                .replica_sync(port, vec!["invalid".to_string()])
+                .build()
+                .await;
         assert!(failed.is_err());
 
         let service = build_on_port(port).await;
         assert_eq!(service.replica_sync_port(), Some(port));
         let weak_core = Arc::downgrade(&service.core);
         service.shutdown().await;
-        let replacement = build_on_port(port).await;
+        let replacement = build(port)
+            .await
+            .expect("shutdown releases the replica port");
         drop(service);
         assert!(weak_core.upgrade().is_none());
         replacement.shutdown().await;
@@ -633,14 +807,10 @@ worker_selection:
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
 
         let build = tokio::spawn(
-            SelectionServiceBuilder::new(
-                test_config(),
-                WorkerType::Aggregated,
-                WorkerSelectionPolicyRegistry::default(),
-            )
-            .indexer_threads(1)
-            .indexer_peers(vec![peer_url])
-            .build(),
+            SelectionServiceBuilder::new(test_config(), WorkerType::Aggregated, test_registry())
+                .indexer_threads(1)
+                .indexer_peers(vec![peer_url])
+                .build(),
         );
         tokio::time::timeout(Duration::from_secs(3), gate.requested.notified())
             .await

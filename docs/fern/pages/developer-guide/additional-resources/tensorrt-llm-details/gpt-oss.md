@@ -52,7 +52,7 @@ huggingface-cli download openai/gpt-oss-120b --exclude "original/*" --exclude "m
 
 Set the container image:
 ```bash
-export DYNAMO_CONTAINER_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.4.0
+export DYNAMO_CONTAINER_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.6.0
 ```
 
 Launch the Dynamo TensorRT-LLM container with the necessary configurations:
@@ -97,14 +97,14 @@ The deployment uses configuration files and command-line arguments to control be
 - `enable_attention_dp: false` - Attention data parallelism disabled for prefill
 - `enable_chunked_prefill: true` - Enables efficient chunked prefill processing
 - `moe_config.backend: CUTLASS` - Uses optimized CUTLASS kernels for MoE layers
-- `cache_transceiver_config.backend: ucx` - Uses UCX for efficient KV cache transfer
+- `cache_transceiver_config.backend: NIXL` and `cache_transceiver_config.transceiver_runtime: PYTHON` - Use the Python NIXL transceiver for KV cache transfer
 - `cuda_graph_config.max_batch_size: 32` - Maximum batch size for CUDA graphs
 
 **Decode Configuration (`examples/backends/trtllm/engine_configs/gpt-oss-120b/decode.yaml`)**:
 - `enable_attention_dp: true` - Attention data parallelism enabled for decode
 - `disable_overlap_scheduler: false` - Enables overlapping for decode efficiency
 - `moe_config.backend: CUTLASS` - Uses optimized CUTLASS kernels for MoE layers
-- `cache_transceiver_config.backend: ucx` - Uses UCX for efficient KV cache transfer
+- `cache_transceiver_config.backend: NIXL` and `cache_transceiver_config.transceiver_runtime: PYTHON` - Use the Python NIXL transceiver for KV cache transfer
 - `cuda_graph_config.max_batch_size: 128` - Maximum batch size for CUDA graphs
 
 #### Command-Line Arguments
@@ -178,7 +178,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
 
 Poll the `/health` endpoint to verify that both the prefill and decode worker endpoints have started:
 ```
-curl http://localhost:8000/health
+curl 'http://localhost:8000/health?instances=true'
 ```
 
 Make sure that both of the endpoints are available before sending an inference request:
@@ -188,6 +188,7 @@ Make sure that both of the endpoints are available before sending an inference r
     "dyn://dynamo.backend.generate",
     "dyn://dynamo.prefill.generate"
   ],
+  "stage": "ready",
   "status": "healthy"
 }
 ```
@@ -474,7 +475,7 @@ flowchart TD
     Frontend --> Prefill["Prefill Worker<br/>(GPUs 0-3)"]
     Frontend --> Decode["Decode Worker<br/>(GPUs 4-7)"]
 
-    Prefill -.->|KV Cache Transfer<br/>via UCX| Decode
+    Prefill -.->|KV Cache Transfer<br/>via NIXL| Decode
 ```
 
 ## Key Features

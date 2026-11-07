@@ -12,19 +12,23 @@ homepage.workspace = true
 repository.workspace = true
 readme = "README.md"
 
+[package.metadata.cargo-machete]
+# flate2 only selects the deflate backend that zip uses; no code imports it.
+ignored = ["flate2"]
+
 [features]
 default = []
 profile = []
-# Test/benchmark-only deterministic replay plumbing. Production replay never
-# enables this feature and keeps the existing random selector behavior.
+# Benchmark builds for replay parity tooling. Canonical (seeded) replay needs no
+# feature: a caller opts in per replay with ReplayDeterminism::CanonicalV1.
 replay-bench = ["aisimulate-core/replay-bench", "dynamo-kv-router/bench"]
 test-support = []
 zmq-events = ["dep:tmq"]
 
 [dependencies]
+dynamo-router-policies = { workspace = true }
 # repo
 aisimulate-core = { workspace = true }
-dynamo-data-gen = { workspace = true }
 dynamo-kv-router = { workspace = true }
 dynamo-tokens = { workspace = true }
 
@@ -33,7 +37,6 @@ anyhow = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
-derive_builder = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
 rmp-serde = { workspace = true }
@@ -48,10 +51,15 @@ uuid = { workspace = true }
 validator = { workspace = true }
 
 # crate-specific
+# zip's deflate-flate2 picks no flate2 backend; flate2's default backend is miniz_oxide.
+flate2 = "1.1.9"
 ndarray = "0.16"
-ndarray-npy = "0.9"
+# Without its npz feature, which needs zip 2.x; perf_model.rs reads NPZ archives with zip.
+ndarray-npy = { version = "0.9", default-features = false }
 ndarray-interp = "0.5"
 rustc-hash = "2"
+# deflate-flate2 uses the miniz_oxide backend above; the zlib variants switch flate2 for all users.
+zip = { version = "9.1.3", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-timerfd = "0.2"

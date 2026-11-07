@@ -15,6 +15,7 @@ import requests
 
 from tests.conftest import NatsServer
 from tests.fault_tolerance.etcd_ha.utils import (
+    ETCD_LEASE_TTL_SECS,
     DynamoFrontendProcess,
     EtcdCluster,
     send_inference_request,
@@ -88,13 +89,17 @@ class DynamoWorkerProcess(ManagedProcess):
             health_check_urls = [
                 (f"http://localhost:{port}/health", check_health_ready),
                 (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
-                (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
+                (
+                    f"http://localhost:{FRONTEND_PORT}/health?instances=true",
+                    check_health_generate,
+                ),
             ]
 
         # Set debug logging and ETCD endpoints
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
         env["ETCD_ENDPOINTS"] = ",".join(etcd_endpoints)
+        env["ETCD_LEASE_TTL"] = str(ETCD_LEASE_TTL_SECS)
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
         if detect_target_device() == "xpu":
@@ -107,17 +112,23 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Both prefill and decode workers need kv-transfer-config for disaggregated mode
         if mode != WorkerMode.AGGREGATED:
+            nixl_role = "kv_producer" if mode == WorkerMode.PREFILL else "kv_consumer"
             command.extend(
                 [
                     "--kv-transfer-config",
-                    json.dumps(build_nixl_kv_transfer_config()),
+                    json.dumps(build_nixl_kv_transfer_config(nixl_role)),
                 ]
             )
 
-        # KV events config and NIXL side channel port only for prefill worker
+        # Every worker launched with --kv-transfer-config opens a NIXL listener,
+        # so each needs its own port; unset means vLLM's host-wide default 5600.
+        if mode != WorkerMode.AGGREGATED:
+            self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
+            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
+
+        # KV events config only for prefill worker
         if mode == WorkerMode.PREFILL:
             self.kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
-            self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
             command.extend(
                 [
                     "--kv-events-config",
@@ -131,7 +142,6 @@ class DynamoWorkerProcess(ManagedProcess):
                     ),
                 ]
             )
-            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
 
         # Set log directory based on worker type.
         worker_type = "prefill_worker" if mode == WorkerMode.PREFILL else "worker"
