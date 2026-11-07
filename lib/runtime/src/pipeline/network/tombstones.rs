@@ -17,29 +17,43 @@ pub(crate) const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 
 /// Instances removed from discovery in the last [`TOMBSTONE_TTL`]. They close
 /// the race between `cancel_instance_streams` and a later `associate_instance`
-/// for the same instance. Expired entries are pruned on every insert and lookup.
+/// for the same instance. Expired entries are pruned on insert and lookup, but
+/// only once the earliest tracked expiry has passed.
 #[derive(Default)]
-pub(crate) struct InstanceTombstones(HashMap<EndpointInstanceId, Instant>);
+pub(crate) struct InstanceTombstones {
+    removed: HashMap<EndpointInstanceId, Instant>,
+    /// Refresh and remove can leave an earlier deadline, but never a later one.
+    next_expiry: Option<Instant>,
+}
 
 impl InstanceTombstones {
     pub(crate) fn insert(&mut self, instance: &EndpointInstanceId) {
         let now = Instant::now();
         self.prune(now);
-        self.0.insert(instance.clone(), now);
+        self.removed.insert(instance.clone(), now);
+        self.next_expiry.get_or_insert(now + TOMBSTONE_TTL);
     }
 
     pub(crate) fn contains(&mut self, instance: &EndpointInstanceId) -> bool {
         self.prune(Instant::now());
-        self.0.contains_key(instance)
+        self.removed.contains_key(instance)
     }
 
     pub(crate) fn remove(&mut self, instance: &EndpointInstanceId) {
-        self.0.remove(instance);
+        self.removed.remove(instance);
     }
 
     fn prune(&mut self, now: Instant) {
-        self.0
-            .retain(|_, removed| now.saturating_duration_since(*removed) < TOMBSTONE_TTL);
+        if self.next_expiry.is_none_or(|expiry| now < expiry) {
+            return;
+        }
+        self.removed
+            .retain(|_, removed| now < *removed + TOMBSTONE_TTL);
+        self.next_expiry = self
+            .removed
+            .values()
+            .min()
+            .map(|removed| *removed + TOMBSTONE_TTL);
     }
 }
 
@@ -66,10 +80,35 @@ mod tests {
         tokio::time::advance(TOMBSTONE_TTL + Duration::from_secs(1)).await;
         tombstones.insert(&instance(2));
         // Inserting pruned the expired entry, so the map holds only the new one.
-        assert_eq!(tombstones.0.len(), 1);
+        assert_eq!(tombstones.removed.len(), 1);
         assert!(!tombstones.contains(&instance(1)));
 
         tombstones.remove(&instance(2));
         assert!(!tombstones.contains(&instance(2)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refresh_and_remove_preserve_expiry() {
+        let mut tombstones = InstanceTombstones::default();
+        let start = Instant::now();
+        tombstones.insert(&instance(1));
+        tombstones.insert(&instance(2));
+
+        tokio::time::advance(TOMBSTONE_TTL - Duration::from_secs(1)).await;
+        tombstones.insert(&instance(1));
+        tombstones.remove(&instance(2));
+        assert_eq!(tombstones.next_expiry, Some(start + TOMBSTONE_TTL));
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(tombstones.contains(&instance(1)));
+        assert_eq!(
+            tombstones.next_expiry,
+            Some(start + TOMBSTONE_TTL * 2 - Duration::from_secs(1)),
+        );
+
+        tokio::time::advance(TOMBSTONE_TTL - Duration::from_secs(1)).await;
+        assert!(!tombstones.contains(&instance(1)));
+        assert!(tombstones.removed.is_empty());
+        assert_eq!(tombstones.next_expiry, None);
     }
 }
