@@ -188,7 +188,8 @@ kubectl get crd | grep dynamo
 
 # Check operator and platform pods
 kubectl get pods -n $NAMESPACE
-# Expected: dynamo-operator-* and nats-* pods all Running
+# Expected: the dynamo-operator-* pod Running. NATS and etcd pods appear only if you
+# installed them with global.nats.install=true or global.etcd.install=true.
 ```
 
 </Step>
