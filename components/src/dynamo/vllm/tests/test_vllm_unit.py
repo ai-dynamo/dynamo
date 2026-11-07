@@ -979,14 +979,18 @@ class TestBenchmarkConfig:
     def test_disabled_benchmark_preserves_serving_worker(
         self, monkeypatch, mock_vllm_cli, trace, worker_cls
     ):
+        """Serving keeps the configured worker when benchmark mode is disabled."""
         for name in (
             "DYN_BENCHMARK_MODE",
             "DYN_BENCHMARK_RANDOMIZE_KDA_STATE",
             "DYN_FORWARDPASS_METRIC_PORT",
-            "DYN_FPM_TRACE",
             "DYN_GMS_USE_V1",
         ):
             monkeypatch.delenv(name, raising=False)
+        # parse_args writes DYN_FPM_TRACE; setenv records the original value so
+        # teardown restores it instead of leaking "1" into later tests.
+        monkeypatch.setenv("DYN_FPM_TRACE", "0")
+        monkeypatch.delenv("DYN_FPM_TRACE")
         monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
         flags = [
             "--model",

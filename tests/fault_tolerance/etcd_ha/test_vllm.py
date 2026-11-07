@@ -55,6 +55,7 @@ class DynamoWorkerProcess(ManagedProcess):
         etcd_endpoints: list,
         mode: WorkerMode = WorkerMode.AGGREGATED,
     ):
+        """Configure an etcd test worker without inherited FPM settings."""
         # Allocate system port for this worker.
         self.system_port = allocate_port(DynamoPortRange.SERVE.value)
         # Register port cleanup early so partially constructed workers still release ports.
@@ -102,6 +103,10 @@ class DynamoWorkerProcess(ManagedProcess):
         env["ETCD_LEASE_TTL"] = str(ETCD_LEASE_TTL_SECS)
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
+        # These tests do not use FPM; inherited FPM env would make every worker
+        # bind the default FPM port and the second disaggregated worker fail.
+        env.pop("DYN_FPM_TRACE", None)
+        env.pop("DYN_FORWARDPASS_METRIC_PORT", None)
         if detect_target_device() == "xpu":
             visible_devices = [
                 device.strip()
