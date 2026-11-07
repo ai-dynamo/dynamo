@@ -2261,7 +2261,7 @@ impl KvRouter {
                 .generate(request)
                 .instrument(dispatch_span)
                 .await
-                .map_err(to_pyerr)?;
+                .map_err(crate::errors::routed_error_to_pyerr)?;
             let (tx, rx) =
                 tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(response_buffer_size);
 
