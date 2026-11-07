@@ -16,6 +16,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+const bashExecutable = "bash"
+
 // ComponentRuntimeStatus is the provider-neutral runtime identity projected
 // from the Pod that exposes a logical Dynamo component.
 type ComponentRuntimeStatus struct {
@@ -131,7 +133,7 @@ func isShellExecutable(value string) bool {
 	if index := strings.LastIndexByte(name, '/'); index >= 0 {
 		name = name[index+1:]
 	}
-	return name == "sh" || name == "bash"
+	return name == "sh" || name == bashExecutable
 }
 
 func splitShellWords(value string) []string {
