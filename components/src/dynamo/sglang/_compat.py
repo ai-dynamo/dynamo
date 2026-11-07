@@ -22,6 +22,7 @@ Runtime data-contract notes (not code-level shims):
 
 import argparse
 import importlib
+import importlib.util
 import inspect
 import json
 import logging
@@ -75,6 +76,13 @@ except ImportError:
     # The separately pinned XPU SGLang 0.5.11 predates the DSA rename.
     # Remove when the XPU pin is upgraded to 0.5.19+.
     sglang_is_dsa_model = None
+
+try:
+    from sglang.srt.runtime_context import get_platform as sglang_get_platform
+except ImportError:
+    # Older XPU builds lack runtime-context platform facts and DSA DCP.
+    # Remove when the XPU pin includes the runtime-context API.
+    sglang_get_platform = None
 
 try:
     from sglang.srt.runtime_context import publish as _sglang_publish
@@ -144,10 +152,15 @@ def sglang_default_mla_attention_backend(server_args: Any) -> str | None:
     try:
         model_config = get_sglang_model_config(server_args)
         hf_config = getattr(model_config, "hf_config", None)
-        if "KimiK3ForConditionalGeneration" in (
-            getattr(hf_config, "architectures", None) or []
+        architectures = getattr(hf_config, "architectures", None) or []
+        if any(
+            architecture in architectures
+            for architecture in (
+                "KimiK3ForConditionalGeneration",
+                "KimiK31ForConditionalGeneration",
+            )
         ):
-            # Kimi-K3 resolves separate prefill/decode backends for DCP. The
+            # Kimi-K3/K3.1 resolve separate prefill/decode backends for DCP. The
             # platform default (fa3 on Hopper) is not its decode backend.
             # Defer to the engine's resolved configuration instead of guessing
             # or running SGLang's kernel capability checks during CLI parsing.
@@ -165,6 +178,55 @@ def sglang_default_mla_attention_backend(server_args: Any) -> str | None:
         )
         return None
     return backend if isinstance(backend, str) else None
+
+
+_SGLANG_DSA_DCP_MODULE = "sglang.srt.layers.attention.dsa.dsa_dcp"
+_SGLANG_DSA_SHARDED_DCP_MODULE = "sglang.srt.layers.attention.dsa.dsa_dcp_sharded"
+
+
+@lru_cache(maxsize=2)
+def _sglang_has_dsa_dcp_module(module_name: str) -> bool:
+    # Fallback for SGLang 0.5.21. Remove when the oldest supported build
+    # includes DSA DCP (upstream 0.5.22+).
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def sglang_dsa_supports_decode_context_parallel(server_args: Any) -> bool | None:
+    """Check resolved DSA kernels; None defers an unfinished engine selection."""
+    if not _sglang_has_dsa_dcp_module(_SGLANG_DSA_DCP_MODULE):
+        return False
+    resolved = resolved_server_args(server_args)
+    prefill = getattr(resolved, "dsa_prefill_backend", None)
+    decode = getattr(resolved, "dsa_decode_backend", None)
+    if any(
+        kernel is not None and kernel not in {"trtllm", "flashmla_kv"}
+        for kernel in (prefill, decode)
+    ):
+        return False
+    if prefill is not None and decode is not None and prefill != decode:
+        return False
+    # K3.1's sharded DCP path adds FlashMLA and Rubin TRT-LLM support.
+    model_config = get_sglang_model_config(server_args)
+    hf_config = getattr(model_config, "hf_config", None)
+    kimi_k31 = "KimiK31ForConditionalGeneration" in (
+        getattr(hf_config, "architectures", None) or []
+    )
+    sharded = kimi_k31 and _sglang_has_dsa_dcp_module(_SGLANG_DSA_SHARDED_DCP_MODULE)
+    if not sharded:
+        if "flashmla_kv" in (prefill, decode):
+            return False
+        if sglang_get_platform is None or sglang_get_platform().device_sm not in (
+            100,
+            103,
+        ):
+            return False
+    # K3.1's native validator owns its model-specific platform constraints.
+    if prefill is None or decode is None:
+        return None
+    return True
 
 
 def publish_server_args(server_args: Any, *, role: str) -> None:
