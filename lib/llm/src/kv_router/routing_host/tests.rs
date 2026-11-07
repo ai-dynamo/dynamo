@@ -1627,6 +1627,148 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn native_decode_progress_real_booking_stream_projection_and_picker() {
+    use dynamo_kv_router::WorkerSelectionPolicyError;
+    use dynamo_kv_router::plugins::worker_selection::{
+        WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
+    };
+    struct Probe(Arc<Mutex<Option<(usize, usize)>>>);
+    impl WorkerPicker for Probe {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::DECODE_PROGRESS
+        }
+        fn pick(
+            &self,
+            context: &WorkerSelectionContext<'_>,
+            _: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            *self.0.lock().unwrap() = context
+                .decode_progress()
+                .and_then(|view| view.entries().first())
+                .map(|entry| (entry.observed_requests(), entry.remaining_token_budget()));
+            Ok(0)
+        }
+    }
+    let seen = Arc::new(Mutex::new(None));
+    let capture = Arc::clone(&seen);
+    let config = KvRouterConfig {
+        skip_initial_worker_wait: true,
+        use_kv_events: false,
+        router_track_active_blocks: true,
+        router_track_output_blocks: true,
+        ..Default::default()
+    };
+    let (router, runtime) = router_with_config_classifier_and_policy(
+        None,
+        HashMap::from([(7, ModelRuntimeConfig::default())]),
+        config,
+        None::<RecordingClassifier>,
+        SelectionPolicySource::Factory(Arc::new(move |config, role, _| {
+            WorkerSelectionPolicy::new(
+                config.clone(),
+                role.as_str(),
+                Vec::new(),
+                Box::new(Probe(Arc::clone(&capture))),
+            )
+        })),
+    )
+    .await;
+    let mut input = request();
+    input.token_ids = vec![1; 15].into();
+    input.stop_conditions.max_tokens = Some(128);
+    input.stop_conditions.ignore_eos = Some(true);
+    let input = Context::new(input);
+    let (mut selection, _) = router
+        .select_with_affinity(
+            &input,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+    let mut guard = track_selection(
+        &router,
+        &input,
+        &mut selection,
+        RequestPhase::Aggregated,
+        &CleanupBudget::default(),
+    )
+    .await
+    .unwrap();
+    // Bypass only the process-wide env switch; retain real booking, producer and read paths.
+    guard.enable_decode_progress_for_test(&input);
+    guard
+        .on_item(&Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![10],
+            ..Default::default()
+        }))
+        .await;
+    router
+        .kv_router()
+        .find_best_match_details_with_policy_class(
+            None,
+            &[1],
+            None,
+            None,
+            false,
+            false,
+            None,
+            None,
+            0.0,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            RoutingConstraints::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(*seen.lock().unwrap(), Some((1, 127)));
+    guard
+        .on_item(&Annotated::from_data(LLMEngineOutput {
+            finish_reason: Some(FinishReason::Length),
+            ..Default::default()
+        }))
+        .await;
+    router
+        .kv_router()
+        .find_best_match_details_with_policy_class(
+            None,
+            &[1],
+            None,
+            None,
+            false,
+            false,
+            None,
+            None,
+            0.0,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            RoutingConstraints::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(*seen.lock().unwrap(), None);
+    guard.complete().await;
+    let loads = router
+        .kv_router()
+        .get_potential_loads(&[], None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(loads[0].active_requests, 0);
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn output_block_accounting_tracks_grouped_chunks() {
     for (track_output_blocks, expected_output_tokens, expected_output_blocks) in
         [(true, None, 3), (true, Some(66), 3), (false, None, 0)]
@@ -4933,145 +5075,202 @@ async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
     runtime.shutdown();
 }
 
-#[tokio::test]
-#[serial_test::serial]
-async fn native_decode_progress_real_booking_stream_projection_and_picker() {
-    use dynamo_kv_router::WorkerSelectionPolicyError;
-    use dynamo_kv_router::plugins::worker_selection::{
-        WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
-    };
-    struct Probe(Arc<Mutex<Option<(usize, usize)>>>);
-    impl WorkerPicker for Probe {
-        fn required_worker_inputs(&self) -> WorkerInputs {
-            WorkerInputs::DECODE_PROGRESS
-        }
-        fn pick(
-            &self,
-            context: &WorkerSelectionContext<'_>,
-            _: WorkerInputView<'_>,
-        ) -> Result<usize, WorkerSelectionPolicyError> {
-            *self.0.lock().unwrap() = context
-                .decode_progress()
-                .and_then(|view| view.entries().first())
-                .map(|entry| (entry.observed_requests(), entry.remaining_token_budget()));
-            Ok(0)
+#[derive(Debug, Default, Clone)]
+struct CapturedEvent {
+    message: String,
+    fields: HashMap<String, String>,
+}
+
+impl tracing::field::Visit for CapturedEvent {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.message = value.to_string();
+        } else {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
         }
     }
-    let seen = Arc::new(Mutex::new(None));
-    let capture = Arc::clone(&seen);
-    let config = KvRouterConfig {
-        skip_initial_worker_wait: true,
-        use_kv_events: false,
-        router_track_active_blocks: true,
-        router_track_output_blocks: true,
-        ..Default::default()
-    };
-    let (router, runtime) = router_with_config_classifier_and_policy(
-        None,
-        HashMap::from([(7, ModelRuntimeConfig::default())]),
-        config,
-        None::<RecordingClassifier>,
-        SelectionPolicySource::Factory(Arc::new(move |config, role, _| {
-            WorkerSelectionPolicy::new(
-                config.clone(),
-                role.as_str(),
-                Vec::new(),
-                Box::new(Probe(Arc::clone(&capture))),
-            )
-        })),
-    )
-    .await;
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = format!("{value:?}");
+        } else {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct SelectedWorkerCapture(Arc<Mutex<Vec<CapturedEvent>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SelectedWorkerCapture {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut captured = CapturedEvent::default();
+        event.record(&mut captured);
+        if captured.message.starts_with("Selected") {
+            self.0.lock().unwrap().push(captured);
+        }
+    }
+}
+
+impl SelectedWorkerCapture {
+    /// Capture on the current thread. Tests run on a current-thread runtime, so the
+    /// scheduler actor's events land here too.
+    fn install(&self) -> tracing::subscriber::DefaultGuard {
+        use tracing_subscriber::layer::SubscriberExt;
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(self.clone()))
+    }
+
+    fn events(&self) -> Vec<CapturedEvent> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_session_affinity_hit_logs_selected_worker_and_records_kv_metrics() {
+    let (mut router, runtime) = router_with_workers(Some(Duration::from_secs(10)), &[7]).await;
+    router.request_metrics = crate::kv_router::metrics::RouterRequestMetrics::for_test(
+        &dynamo_runtime::MetricsRegistry::new(),
+    );
+    let session_id = SessionAffinityId::new("kv-affinity-hit-observability");
+    bind_affinity_target(&router, &session_id, AffinityTarget::new(7, Some(0))).await;
+    let hit_rate_samples = router.request_metrics.kv_hit_rate.get_sample_count();
+
+    let tracker = Arc::new(RequestTracker::new());
     let mut input = request();
-    input.token_ids = vec![1; 15].into();
-    input.stop_conditions.max_tokens = Some(128);
-    input.stop_conditions.ignore_eos = Some(true);
-    let input = Context::new(input);
-    let (mut selection, _) = router
-        .select_with_affinity(
-            &input,
+    input.tracker = Some(Arc::clone(&tracker));
+    let mut request = Context::new(input);
+    request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+
+    let capture = SelectedWorkerCapture::default();
+    let (mut selection, guard) = {
+        let _capture = capture.install();
+        let (mut selection, _hold) = router
+            .select_with_affinity(
+                &request,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default(),
+            )
+            .await
+            .unwrap();
+        let guard = track_selection(
+            &router,
+            &request,
+            &mut selection,
             RequestPhase::Aggregated,
-            false,
             &CleanupBudget::default(),
         )
         .await
         .unwrap();
-    let mut guard = track_selection(
-        &router,
-        &input,
-        &mut selection,
-        RequestPhase::Aggregated,
-        &CleanupBudget::default(),
-    )
-    .await
-    .unwrap();
-    // Bypass only the process-wide env switch; retain real booking, producer and read paths.
-    guard.enable_decode_progress_for_test(&input);
-    guard
-        .on_item(&Annotated::from_data(LLMEngineOutput {
-            token_ids: vec![10],
-            ..Default::default()
-        }))
-        .await;
-    router
-        .kv_router()
-        .find_best_match_details_with_policy_class(
-            None,
-            &[1],
-            None,
-            None,
-            false,
-            false,
-            None,
-            None,
-            0.0,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            RoutingConstraints::default(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(*seen.lock().unwrap(), Some((1, 127)));
-    guard
-        .on_item(&Annotated::from_data(LLMEngineOutput {
-            finish_reason: Some(FinishReason::Length),
-            ..Default::default()
-        }))
-        .await;
-    router
-        .kv_router()
-        .find_best_match_details_with_policy_class(
-            None,
-            &[1],
-            None,
-            None,
-            false,
-            false,
-            None,
-            None,
-            0.0,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            RoutingConstraints::default(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(*seen.lock().unwrap(), None);
-    guard.complete().await;
-    let loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
-    assert_eq!(loads[0].active_requests, 0);
+        (selection, guard)
+    };
+    assert_eq!(selection.worker, WorkerWithDpRank::new(7, 0));
+
+    let events = capture.events();
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.message.starts_with("Selected pinned worker")),
+        "{events:?}"
+    );
+    let selected: Vec<_> = events
+        .iter()
+        .filter(|event| event.message == "Selected worker")
+        .collect();
+    assert_eq!(selected.len(), 1, "{events:?}");
+    let fields = &selected[0].fields;
+    assert_eq!(fields.get("router_mode").map(String::as_str), Some("kv"));
+    assert_eq!(fields.get("worker_id").map(String::as_str), Some("7"));
+    assert_eq!(fields.get("dp_rank").map(String::as_str), Some("0"));
+    assert_eq!(
+        fields.get("selection").map(String::as_str),
+        Some("session_affinity")
+    );
+
+    assert_eq!(
+        router.request_metrics.kv_hit_rate.get_sample_count(),
+        hit_rate_samples + 1
+    );
+
+    selection.booking.take();
+    drop(guard);
     drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_hard_affinity_hit_logs_selected_worker() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-affinity-hit-log".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("round-robin");
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let (host, _affinity) = builtin_host_with_affinity(
+        client,
+        RouterMode::RoundRobin,
+        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+        load_context,
+        crate::session_affinity::SessionAffinityMode::Hard,
+    )
+    .await;
+
+    let session_id = "builtin-affinity-hit-log";
+    let mut first = host
+        .generate(affinity_request(session_id, None))
+        .await
+        .unwrap();
+    while first.next().await.is_some() {}
+
+    // The second request hits the binding and dispatches through `dispatch_exact`.
+    let capture = SelectedWorkerCapture::default();
+    {
+        let _capture = capture.install();
+        let mut second = host
+            .generate(affinity_request(session_id, None))
+            .await
+            .unwrap();
+        while second.next().await.is_some() {}
+    }
+    assert_eq!(
+        dispatch.worker_ids.lock().unwrap().as_slice(),
+        &[worker_id; 2]
+    );
+
+    let events = capture.events();
+    let selected: Vec<_> = events
+        .iter()
+        .filter(|event| event.message == "Selected worker")
+        .collect();
+    assert_eq!(selected.len(), 1, "{events:?}");
+    let fields = &selected[0].fields;
+    assert_eq!(
+        fields.get("router_mode").map(String::as_str),
+        Some("round-robin")
+    );
+    assert_eq!(
+        fields.get("worker_id").map(String::as_str),
+        Some(worker_id.to_string().as_str())
+    );
+
+    drop(host);
     runtime.shutdown();
 }
 
