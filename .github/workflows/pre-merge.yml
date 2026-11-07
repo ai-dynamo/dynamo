@@ -533,9 +533,12 @@ jobs:
         compile_bench active-sequences --bench active_sequences_bench
         compile_bench dc-ckf-consumer --bin dc_ckf_consumer_bench
         compile_bench dc-ckf-relay --bench dc_ckf_relay_bench
+        compile_bench selection-replay --bench selection_replay_bench
 
         cargo test --locked --no-default-features -p dynamo-bench \
           --features request-trace-to-mooncake --test request_trace_to_mooncake
+        cargo test --locked --no-default-features -p dynamo-bench \
+          --features selection-replay --test selection_replay
 
         cargo test --locked -p dynamo-llm --no-default-features \
           --features kv-router-stress --bench kv_router_bench --no-run
@@ -606,6 +609,7 @@ jobs:
         lint_bench active-sequences --bench active_sequences_bench
         lint_bench dc-ckf-consumer --bin dc_ckf_consumer_bench
         lint_bench dc-ckf-relay --bench dc_ckf_relay_bench
+        lint_bench selection-replay --bench selection_replay_bench --test selection_replay
 
         cargo clippy --locked --no-deps -p dynamo-llm --no-default-features \
           --features kv-router-stress --bench kv_router_bench -- -D warnings

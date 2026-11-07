@@ -65,6 +65,21 @@ multiturn = [
 ]
 offline-replay = ["dep:blake3", "dep:dynamo-mocker", "dep:libc"]
 router-bench = ["dynamo-kv-router/bench"]
+# Must not enable `router-bench`: kv-router's `bench` feature changes the code under test.
+selection-replay = [
+  "router-metrics",
+  "dynamo-kv-router/standalone-selection",
+  "dep:blake3",
+  "dep:dynamo-mocker",
+  "dep:dynamo-router-policies",
+  "dep:futures-util",
+  "dep:indicatif",
+  "dep:libc",
+  "dep:prometheus",
+  "dep:rmp-serde",
+  "dep:rustc-hash",
+  "dep:tracing-subscriber",
+]
 router-metrics = ["dynamo-kv-router/metrics"]
 router-test-support = [
   "router-bench",
@@ -156,6 +171,17 @@ path = "tests/approximate_lru.rs"
 required-features = ["approximate-lru"]
 
 [[bench]]
+name = "selection_replay_bench"
+path = "kv_router/selection_replay_bench.rs"
+harness = false
+required-features = ["selection-replay"]
+
+[[test]]
+name = "selection_replay"
+path = "tests/selection_replay.rs"
+required-features = ["selection-replay"]
+
+[[bench]]
 name = "dc_ckf_relay_bench"
 path = "kv_router/dc_ckf_relay_bench.rs"
 harness = false
@@ -176,6 +202,8 @@ reqwest = { workspace = true, optional = true }
 rustc-hash = { version = "2", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+prometheus = { workspace = true, optional = true }
+rmp-serde = { workspace = true, optional = true }
 sha2 = { version = "0.10", optional = true }
 tempfile = { workspace = true, optional = true }
 tokio = { workspace = true }
@@ -190,6 +218,7 @@ dynamo-tokens = { workspace = true, optional = true }
 dynamo-data-gen = { workspace = true, optional = true }
 dynamo-mocker = { workspace = true, optional = true }
 dynamo-kv-router = { workspace = true }
+dynamo-router-policies = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true, optional = true }

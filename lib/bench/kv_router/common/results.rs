@@ -57,7 +57,7 @@ pub fn compute_benchmark_run(
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct PercentileStats<T> {
     pub min: T,
     pub p50: T,
