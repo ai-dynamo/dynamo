@@ -35,6 +35,12 @@ pass. Three properties of the upstream class make that safe (verified against
   inherited cleanup exactly right.
 * Only ``__len__``, ``avg_fps`` and ``get_frames_as_tensor`` are on the
   ``preprocess_video`` path.
+
+Frames are decoded into device memory and copied to the host by
+``_frame_to_rgb_hwc`` after a device synchronize. In host-memory mode,
+PyNvVideoCodec fills the returned host buffer from its own CUDA streams, and
+a CPU DLPack import carries no stream handshake, so nothing documented
+orders our read after the library's writes.
 """
 
 from __future__ import annotations
@@ -76,10 +82,12 @@ class NvdecVideoDecoder(VideoDecoderWrapper):  # type: ignore[misc,valid-type]
     """
 
     def __init__(self, data: bytes, gpu_id: int | None = None) -> None:
+        """Open video bytes on the selected GPU, keeping the backing file alive."""
         import PyNvVideoCodec as nvc
 
         if gpu_id is None:
             gpu_id = _gpu_id()
+        self._gpu_id = gpu_id
 
         # SimpleDecoder takes a PATH and reads frames lazily, so the file must
         # outlive __init__. Mirrors what the parent's decord-bytes branch does.
@@ -103,11 +111,13 @@ class NvdecVideoDecoder(VideoDecoderWrapper):  # type: ignore[misc,valid-type]
         self._tc_kwargs: dict[str, Any] = {}
 
         try:
+            # Device memory, not host: _frame_to_rgb_hwc syncs the device before
+            # copying to host, so reads cannot race the library's streams.
             self._decoder = nvc.SimpleDecoder(
                 tmp_path,
                 gpu_id=gpu_id,
                 output_color_type=nvc.OutputColorType.RGB,
-                use_device_memory=False,
+                use_device_memory=True,
             )
             if len(self._decoder) <= 0:
                 raise RuntimeError("NVDEC opened the video but reports no frames")
@@ -162,7 +172,10 @@ class NvdecVideoDecoder(VideoDecoderWrapper):  # type: ignore[misc,valid-type]
 
         if not indices:
             raise ValueError("get_frames_as_tensor requires at least one index")
-        frames = [_frame_to_rgb_hwc(self._decoder[int(i)]) for i in indices]
+        frames = [
+            _frame_to_rgb_hwc(self._decoder[int(i)], gpu_id=self._gpu_id)
+            for i in indices
+        ]
         arr = np.ascontiguousarray(np.stack(frames)).astype(np.uint8, copy=False)
         if arr.ndim != 4 or arr.shape[-1] != 3:
             raise RuntimeError(
@@ -195,4 +208,4 @@ class NvdecVideoDecoder(VideoDecoderWrapper):  # type: ignore[misc,valid-type]
 
     def __getitem__(self, idx):
         """Single frame as numpy NHWC uint8, matching the parent's contract."""
-        return _frame_to_rgb_hwc(self._decoder[int(idx)])
+        return _frame_to_rgb_hwc(self._decoder[int(idx)], gpu_id=self._gpu_id)
