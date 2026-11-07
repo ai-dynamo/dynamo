@@ -48,8 +48,16 @@ pub mod logging {
 
     /// OTLP (OpenTelemetry Protocol) tracing and logging configuration
     pub mod otlp {
-        /// Enable OTLP export for traces and logs (set to "1" to enable)
+        /// Enable OTLP export for traces and logs (set to "1" to enable).
         pub const OTEL_EXPORT_ENABLED: &str = "OTEL_EXPORT_ENABLED";
+
+        /// Set to "otlp" to export traces over OTLP. Any other non-blank value
+        /// (e.g. "none") disables it. Unset or blank defers to OTEL_EXPORT_ENABLED.
+        pub const OTEL_TRACES_EXPORTER: &str = "OTEL_TRACES_EXPORTER";
+
+        /// Set to "otlp" to export logs over OTLP. Any other non-blank value
+        /// (e.g. "none") disables it. Unset or blank defers to OTEL_EXPORT_ENABLED.
+        pub const OTEL_LOGS_EXPORTER: &str = "OTEL_LOGS_EXPORTER";
 
         /// OTLP exporter transport protocol. Supported values: "grpc", "http/protobuf".
         pub const OTEL_EXPORTER_OTLP_PROTOCOL: &str = "OTEL_EXPORTER_OTLP_PROTOCOL";
@@ -1166,6 +1174,8 @@ mod tests {
             logging::DYN_LOG_USE_LOCAL_TZ,
             logging::DYN_LOGGING_SPAN_EVENTS,
             logging::otlp::OTEL_EXPORT_ENABLED,
+            logging::otlp::OTEL_TRACES_EXPORTER,
+            logging::otlp::OTEL_LOGS_EXPORTER,
             logging::otlp::OTEL_EXPORTER_OTLP_PROTOCOL,
             logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
             logging::otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL,
@@ -1412,6 +1422,8 @@ mod tests {
 
         // OpenTelemetry vars should start with OTEL_
         assert!(logging::otlp::OTEL_EXPORT_ENABLED.starts_with("OTEL_"));
+        assert!(logging::otlp::OTEL_TRACES_EXPORTER.starts_with("OTEL_"));
+        assert!(logging::otlp::OTEL_LOGS_EXPORTER.starts_with("OTEL_"));
         assert!(logging::otlp::OTEL_EXPORTER_OTLP_ENDPOINT.starts_with("OTEL_"));
         assert!(logging::otlp::OTEL_SERVICE_NAME.starts_with("OTEL_"));
     }
