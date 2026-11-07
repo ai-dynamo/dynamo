@@ -3,6 +3,7 @@ package dynamo
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1379,6 +1380,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 	tests := []struct {
 		name                       string
 		activeNamespace            bool
+		previousNamespaces         []string
 		pcsAccepted                bool
 		childRevision              string
 		updateInProgress           bool
@@ -1391,25 +1393,29 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 		childReplicas              *int32
 		wantReady                  bool
 		wantNamespace              string
+		wantNamespaces             []string
 	}{
 		{name: "unaccepted suffixed PCS leaves a new worker namespace empty", childRevision: previousRevision},
 		{name: "unaccepted legacy PCS preserves the previous worker namespace", legacyPCS: true, childRevision: previousRevision},
 		{name: "unaccepted PCS preserves the active worker namespace", activeNamespace: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active"},
-		{name: "accepted PCS with a previous child revision preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: previousRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active"},
+		{name: "accepted PCS with a previous child revision preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: previousRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active", wantNamespaces: []string{"active", acceptedHash}},
 		{name: "accepted PCS initial realization publishes its rendered hash", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, wantReady: true, wantNamespace: acceptedHash},
-		{name: "accepted PCS with an unfinished child update preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateInProgress: true, childReady: true, wantReady: true, wantNamespace: "active"},
+		{name: "accepted PCS with an unfinished child update preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateInProgress: true, childReady: true, wantReady: true, wantNamespace: "active", wantNamespaces: []string{"active", acceptedHash}},
 		{name: "accepted PCS revision publishes its rendered hash instead of the desired DGD hash", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: acceptedHash},
 		{name: "PCS observation ahead of its generation preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, pcsObservedGenerationAhead: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active"},
-		{name: "accepted PCS with a stale child generation preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, childReady: true, childGenerationStale: true, wantNamespace: "active"},
-		{name: "cached pre-scale-up spec cannot publish readiness or the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: new(int32(2)), wantNamespace: "active"},
-		{name: "cached pre-scale-down spec cannot publish readiness or the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: new(int32(1)), childReplicas: new(int32(2)), wantNamespace: "active"},
-		{name: "cached zero replicas cannot complete scale-up", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: new(int32(1)), childReplicas: new(int32(0)), wantNamespace: "active"},
-		{name: "scale-to-zero waits for the cached spec", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: new(int32(0)), wantNamespace: "active"},
+		{name: "accepted PCS with a stale child generation preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, childReady: true, childGenerationStale: true, wantNamespace: "active", wantNamespaces: []string{"active", acceptedHash}},
+		{name: "cached pre-scale-up spec cannot publish readiness or the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: new(int32(2)), wantNamespace: "active", wantNamespaces: []string{"active", acceptedHash}},
+		{name: "cached pre-scale-down spec cannot publish readiness or the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: new(int32(1)), childReplicas: new(int32(2)), wantNamespace: "active", wantNamespaces: []string{"active", acceptedHash}},
+		{name: "cached zero replicas cannot complete scale-up", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: new(int32(1)), childReplicas: new(int32(0)), wantNamespace: "active", wantNamespaces: []string{"active", acceptedHash}},
+		{name: "scale-to-zero waits for the cached spec", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: new(int32(0)), wantNamespace: "active", wantNamespaces: []string{"active", acceptedHash}},
 		{name: "observed scale-up publishes readiness and the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: new(int32(2)), childReplicas: new(int32(2)), wantReady: true, wantNamespace: acceptedHash},
 		{name: "observed scale-to-zero publishes readiness and the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: new(int32(0)), childReplicas: new(int32(0)), wantReady: true, wantNamespace: acceptedHash},
 		{name: "omitted replicas preserve externally managed capacity", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, childReplicas: new(int32(2)), wantReady: true, wantNamespace: acceptedHash},
 		{name: "accepted completed PCS revision remains published after worker health loss", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, wantNamespace: acceptedHash},
-		{name: "accepted legacy PCS with an unfinished child preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, updateInProgress: true, childReady: true, wantReady: true, wantNamespace: "active"},
+		{name: "accepted legacy PCS with an unfinished child preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, updateInProgress: true, childReady: true, wantReady: true, wantNamespace: "active", wantNamespaces: []string{"active", "base"}},
+		{name: "an interrupted rollout keeps the superseded revision's namespace", activeNamespace: true, previousNamespaces: []string{"active", "middle"}, pcsAccepted: true, childRevision: targetRevision, updateInProgress: true, childReady: true, wantReady: true, wantNamespace: "active", wantNamespaces: []string{"active", "middle", acceptedHash}},
+		{name: "an unaccepted PCS keeps the listed namespaces", activeNamespace: true, previousNamespaces: []string{"active", "middle"}, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active", wantNamespaces: []string{"active", "middle"}},
+		{name: "cutover drops the listed namespaces", activeNamespace: true, previousNamespaces: []string{"active", "middle"}, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: acceptedHash},
 		{name: "accepted legacy PCS publishes the base namespace", pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "base"},
 	}
 
@@ -1436,10 +1442,18 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 				t.Fatal("test requires a desired DGD hash different from the accepted PCS hash")
 			}
 			baseNamespace := dgd.GetDynamoNamespaceForComponent(component)
+			namespaceOf := map[string]string{
+				"base":       baseNamespace,
+				"active":     ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), "active"),
+				"middle":     ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), "middle"),
+				acceptedHash: ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), acceptedHash),
+			}
 			if tt.activeNamespace {
-				dgd.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
-					componentName: {RuntimeNamespace: ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), "active")},
+				status := v1beta1.ComponentReplicaStatus{RuntimeNamespace: namespaceOf["active"]}
+				for _, token := range tt.previousNamespaces {
+					status.RuntimeNamespaces = append(status.RuntimeNamespaces, namespaceOf[token])
 				}
+				dgd.Status.Components = map[string]v1beta1.ComponentReplicaStatus{componentName: status}
 			}
 
 			labels := map[string]string{commonconsts.KubeLabelDynamoComponent: componentName}
@@ -1510,6 +1524,16 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 			}
 			if got := readiness.ComponentStatuses[componentName].RuntimeNamespace; got != wantNamespace {
 				t.Fatalf("runtime namespace = %q, want %q", got, wantNamespace)
+			}
+
+			t.Log("Verify that a rollout lists the accepted revision's namespace beside the active and listed ones")
+			var wantNamespaces []string
+			for _, token := range tt.wantNamespaces {
+				wantNamespaces = append(wantNamespaces, namespaceOf[token])
+			}
+			slices.Sort(wantNamespaces)
+			if got := readiness.ComponentStatuses[componentName].RuntimeNamespaces; !slices.Equal(got, wantNamespaces) {
+				t.Fatalf("runtime namespaces = %q, want %q", got, wantNamespaces)
 			}
 		})
 	}

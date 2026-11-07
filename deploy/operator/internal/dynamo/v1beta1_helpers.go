@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -423,6 +424,23 @@ func ComponentRuntimeNamespace(dynamoNamespace string, componentType string, wor
 		return dynamoNamespace + "-" + workerHashSuffix
 	}
 	return dynamoNamespace
+}
+
+// StatusRuntimeNamespaces returns a component status's RuntimeNamespaces:
+// the distinct, non-empty namespaces among active and namespaces, sorted, or nil
+// when active alone names them all.
+func StatusRuntimeNamespaces(active string, namespaces ...string) []string {
+	all := make([]string, 0, len(namespaces)+1)
+	for _, namespace := range append([]string{active}, namespaces...) {
+		if namespace != "" && !slices.Contains(all, namespace) {
+			all = append(all, namespace)
+		}
+	}
+	if len(all) == 0 || (len(all) == 1 && all[0] == active) {
+		return nil
+	}
+	slices.Sort(all)
+	return all
 }
 
 // GetDCDEffectiveWorkerHash returns the worker hash rendered into worker pod
