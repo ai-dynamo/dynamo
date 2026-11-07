@@ -106,6 +106,31 @@ def tokenizer():
 
 
 @pytest.fixture(scope="module")
+def qwen3_reasoning_tokenizer(tokenizer):
+    # One copy per module: cases only encode and decode, and the shared
+    # ``tokenizer`` must not gain these special tokens.
+    _, reasoning_parser = create_parsers(
+        {},
+        tool_call_parser_name=None,
+        reasoning_parser_name="qwen3",
+        force_reasoning=True,
+    )
+    assert reasoning_parser is not None
+    detector = reasoning_parser.detector
+    reasoning_tokenizer = copy.deepcopy(tokenizer)
+    # Model tokenizers keep their reasoning delimiters atomic.
+    reasoning_tokenizer.add_special_tokens(
+        {
+            "additional_special_tokens": [
+                detector.think_start_token,
+                detector.think_end_token,
+            ]
+        }
+    )
+    return reasoning_tokenizer
+
+
+@pytest.fixture(scope="module")
 def tool_grammar_compiler(tokenizer):
     return xgr.GrammarCompiler(
         xgr.TokenizerInfo.from_huggingface(tokenizer), max_threads=1
@@ -1693,8 +1718,8 @@ def test_structured_response_content_and_reasoning_gate(
 def test_gpt_oss_budget_uses_harmony_reasoning_without_think_template(
     tokenizer, monkeypatch, use_pool, separate_reasoning, budget
 ):
-    tokenizer = copy.deepcopy(tokenizer)
-    tokenizer.chat_template = "{{ messages[0]['content'] }}"
+    # Only the template changes; monkeypatch restores it on the shared tokenizer.
+    monkeypatch.setattr(tokenizer, "chat_template", "{{ messages[0]['content'] }}")
     request = {
         "model": MODEL,
         "messages": [{"role": "user", "content": "Return a short answer."}],
@@ -6210,7 +6235,7 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
     )
     def test_structured_response_preserves_reasoning_boundaries(
         self,
-        tokenizer,
+        qwen3_reasoning_tokenizer,
         chunk_size,
         finish_with_tokens,
         text,
@@ -6225,22 +6250,12 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
             force_reasoning=True,
         )
         assert reasoning_parser is not None
-        case_tokenizer = copy.deepcopy(tokenizer)
-        detector = reasoning_parser.detector
-        case_tokenizer.add_special_tokens(
-            {
-                "additional_special_tokens": [
-                    detector.think_start_token,
-                    detector.think_end_token,
-                ]
-            }
-        )
         post = SglangStreamingPostProcessor(
-            tokenizer=case_tokenizer,
+            tokenizer=qwen3_reasoning_tokenizer,
             tool_call_parser=None,
             reasoning_parser=reasoning_parser,
         )
-        token_ids = case_tokenizer.encode(text, add_special_tokens=False)
+        token_ids = qwen3_reasoning_tokenizer.encode(text, add_special_tokens=False)
         responses = []
         for offset in range(0, len(token_ids), chunk_size):
             is_last = offset + chunk_size >= len(token_ids)
