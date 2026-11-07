@@ -39,6 +39,15 @@ See [Compatibility](compatibility.mdx) for hardware, platform, and backend featu
 
 | Model | Tag | Release line | Runtimes | Shipped | GA path | Status | Coverage (images / wheels / helm / crates) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
+| DeepSeek-V4.1-Flash | `1.6.0-deepseek-v4.1-flash-dev.1` | v1.6.0 | sglang-runtime | Sep 12, 2026 | Dev-only | SGLang image for the v1.6.0 DeepSeek-V4.1-Flash recipe; not yet promoted to a stable release container. | yes / no / no / no |
+| Motif-3 | `1.5.0-motif-3-dev.1` | v1.5.0 | vllm-runtime | Oct 1, 2026 | Dev-only | vLLM image for the experimental Motif-3 NVFP4 recipe on B200; not yet promoted to a stable release container. | yes / no / no / no |
+| Kimi-K3 | `1.5.0-kimi-k3-dev.1` | v1.5.0 | vllm-runtime, sglang-runtime | Sep 9, 2026 | Dev-only | One tag on both runtimes: vLLM for H200, GB200, and GB300 and SGLang for GB200 and GB300; not yet promoted to a stable release container. | yes / no / no / no |
+| DeepSeek-V4-Pro-0813 | `1.5.0-deepseek-v4-pro-0813-dev.1` | v1.5.0 | vllm-runtime | Sep 4, 2026 | Dev-only | vLLM image for the DeepSeek-V4-Pro-0813 GB200 recipe; not yet promoted to a stable release container. | yes / no / no / no |
+| Gemma-4-31B | `1.5.0-gemma-4-31b-dev.1` | v1.5.0 | tensorrtllm-runtime | Sep 3, 2026 | Dev-only | TensorRT-LLM image for the Gemma-4-31B agentic recipes on B200, GB200, and H200; not yet promoted to a stable release container. | yes / no / no / no |
+| Inkling | `1.5.0-inkling-dev.1` | v1.5.0 | vllm-runtime | Sep 3, 2026 | Dev-only · v1.5.0 line | vLLM image for the Inkling GB300 agentic recipes; the SGLang recipes stay on the v1.4.0 build below. | yes / no / no / no |
+| K-EXAONE 2.0 | `1.4.1-k-exaone-2.0-750b-post.1` | v1.4.1 | vllm-runtime | Sep 17, 2026 | Dev-only | Post-release vLLM image on the v1.4.1 line for the K-EXAONE 2.0 B200 recipes; not yet promoted to a stable release container. | yes / no / no / no |
+| Solar Open2 250B | `1.4.1-solar-open2-250b-post.1` | v1.4.1 | vllm-runtime | Sep 16, 2026 | Dev-only | Post-release vLLM image on the v1.4.1 line for the Solar Open2 250B B200 recipes; not yet promoted to a stable release container. | yes / no / no / no |
+| A.X-K2 | `1.4.1-a.x-k2-post.1` | v1.4.1 | vllm-runtime | Sep 15, 2026 | Dev-only | Post-release vLLM image on the v1.4.1 line for the A.X-K2 B200 and H200 recipes; not yet promoted to a stable release container. | yes / no / no / no |
 | Inkling | `1.4.0-inkling-dev.1` | v1.4.0 | sglang-runtime | Jul 17, 2026 | Dev-only · v1.4.0 line | First build on the v1.4.0 line; targets the next stable release. | yes / no / no / no |
 | GLM-5.2 | `1.3.0-glm-5.2-dev.1` | v1.3.0 | sglang-runtime | Jul 20, 2026 | Dev-only | Container carries SGLang cherry-picks (stability, config parsing, model support) opened upstream but not yet in a released SGLang. | yes / no / no / no |
 | MiniMax-M3 | `1.3.0-minimax-m3-dev.1` | v1.3.0 | vllm-runtime, sglang-runtime, tensorrtllm-runtime | Jun 12, 2026 | Promoted → :1.3.0 | Dynamo changes and the M2 tool-calling fix are in release/1.3.0; the recipes run on the stock :1.3.0 containers. | yes / no / no / no |
