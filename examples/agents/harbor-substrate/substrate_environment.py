@@ -382,7 +382,9 @@ class SubstrateEnvironment(BaseEnvironment):
             if delete:
                 try:
                     async with asyncio.timeout(60):
-                        await self._ate("delete", "actor", self.actor_id, "-a", self._atespace)
+                        await self._ate(
+                            "delete", "actor", self.actor_id, "-a", self._atespace
+                        )
                 except RuntimeError as exc:
                     if "notfound" not in str(exc).replace(" ", "").lower():
                         raise
