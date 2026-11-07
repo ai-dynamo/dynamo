@@ -15,21 +15,9 @@ tests:
         documentSelector:
           path: kind
           value: Deployment
-      - contains:
+      - notContains:
           path: spec.template.spec.initContainers[0].args
           content: --dgdr-v1beta2-enabled=false
-        documentSelector:
-          path: kind
-          value: Deployment
-
-  - it: enables experimental DGDR v1beta2 CRD installation
-    template: charts/dynamo-operator/templates/deployment.yaml
-    set:
-      dynamo-operator.dgdrV1Beta2.enabled: true
-    asserts:
-      - contains:
-          path: spec.template.spec.initContainers[0].args
-          content: --dgdr-v1beta2-enabled=true
         documentSelector:
           path: kind
           value: Deployment
@@ -94,24 +82,12 @@ tests:
       - failedTemplate:
           errorPattern: "webhook.namespaceSelector must be empty"
 
-  - it: passes the DGDR v1beta2 switch to the manager
+  - it: starts the manager without a DGDR v1beta2 opt-in
     template: charts/dynamo-operator/templates/deployment.yaml
     asserts:
-      - contains:
+      - notContains:
           path: spec.template.spec.containers[0].args
           content: --dgdr-v1beta2-enabled=false
-        documentSelector:
-          path: kind
-          value: Deployment
-
-  - it: enables the DGDR v1beta2 controller in the manager
-    template: charts/dynamo-operator/templates/deployment.yaml
-    set:
-      dynamo-operator.dgdrV1Beta2.enabled: true
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].args
-          content: --dgdr-v1beta2-enabled=true
         documentSelector:
           path: kind
           value: Deployment

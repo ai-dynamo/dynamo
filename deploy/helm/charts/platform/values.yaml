@@ -124,14 +124,7 @@ dynamo-operator:
         unsupportedDowngradeOverride: ""
 
   dgdrV1Beta2:
-    # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2
-    # Request API with conversion and install the Run and Candidate APIs. Run and
-    # Candidate objects are persisted in etcd; incompatible schema changes may make
-    # them unreadable or block future CRD upgrades. When true, the operator
-    # reconciles v1beta2 Requests into Runs and executes each Run as an AISimulate
-    # planner Job with a publisher sidecar that persists deployment Candidates.
-    enabled: false
-    # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: With dgdrV1Beta2.enabled, grant every
+    # -- EXPERIMENTAL, NOT FEATURE COMPLETE: Opt in to Planner live retune by granting every
     # Planner ServiceAccount what Planner live retune (retune.executor: dgdr) needs:
     # create, read and delete DGDR v1beta2 Requests, read their Runs and Candidates,
     # and read, create, update and delete any Lease in the namespace.

@@ -11,6 +11,32 @@ For the task-oriented walkthrough — authoring a request step by step — see [
 
 This page documents the `nvidia.com/v1beta1` API — the storage version.
 
+## Experimental v1beta2 availability
+
+The `nvidia.com/v1beta2` Request, Run, and Candidate APIs are **Experimental** and not feature complete.
+They are available without a feature gate and may change incompatibly in future releases.
+The operator installs their CRDs and reconciles native v1beta2 Requests by default;
+`v1beta1` remains the Request storage version. Installations with `dynamo-operator.upgradeCRD=false`, including namespace-restricted
+installations, require an administrator to install the matching CRDs before upgrading the operator.
+
+On a cluster with discoverable GPUs, a native Request can use admission defaults:
+
+```yaml
+apiVersion: nvidia.com/v1beta2
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-search
+spec:
+  model:
+    name: Qwen/Qwen3-0.6B
+```
+
+Planner live retune remains disabled by default behind its separate
+`dynamo-operator.dgdrV1Beta2.plannerLiveRetune` Helm opt-in and requires explicit
+Planner configuration. See the [installation guide](../../kubernetes/installation/install-dynamo.md)
+for upgrade instructions and [Planner Live Retune](../../kubernetes/auto-deployment/planner-live-retune.md)
+for the additional configuration and permissions.
+
 ## Conversion views
 
 When the `nvidia.com/v1beta2` API is served, the API server represents a native
@@ -79,8 +105,8 @@ spec:
 
 ### v1beta2 DGD Overrides
 
-**Experimental; for development only.** Enable `dynamo-operator.dgdrV1Beta2.enabled`
-in the platform Helm chart to use `spec.overrides.dgd`. It accepts one partial
+**Experimental.** DGDR v1beta2 is not feature complete. It is available without a feature gate
+and may change incompatibly in future releases. `spec.overrides.dgd` accepts one partial
 `nvidia.com/v1beta1` DGD, applied to every selected Candidate across backends and topologies.
 Other DGD API versions are not accepted here.
 
@@ -1307,8 +1333,10 @@ kubectl get dgdr my-model -n $NAMESPACE \
 ## Replay a recorded trace (v1beta2)
 
 <Warning>
-The `nvidia.com/v1beta2` API is experimental and disabled by default. See the
-[installation guide](../../kubernetes/installation/install-dynamo.md) before you enable it.
+The `nvidia.com/v1beta2` Request, Run, and Candidate APIs are **Experimental** and not feature complete.
+They are available without a feature gate and may change incompatibly in future releases.
+See the [installation guide](../../kubernetes/installation/install-dynamo.md).
+Planner live retune remains a separate, disabled-by-default opt-in.
 </Warning>
 
 A native `v1beta2` request can evaluate every candidate against a recorded request trace instead
@@ -1451,7 +1479,7 @@ stay `Terminating` after every Run released it, until those Runs are retired or 
 deleted.
 </Note>
 
-If the operator is uninstalled, or the `v1beta2` API is disabled, while Runs are in flight, their
+If the operator is stopped or uninstalled while Runs are in flight, their
 finalizers stay on the claim and keep it from being deleted. List them, then remove only the
 `nvidia.com/dgdr-run-` finalizers (requires `jq`):
 

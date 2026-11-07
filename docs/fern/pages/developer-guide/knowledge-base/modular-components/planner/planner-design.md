@@ -297,7 +297,7 @@ In aggregated mode (`mode: agg`), engines handle both prefill and decode via chu
 > **Experimental.** With `retune.executor: local`, the default, retune runs only in
 > planner-in-the-loop offline replay, and a live Planner rejects it at startup. With
 > `executor: dgdr`, a live Planner on Kubernetes retunes three KV router knobs, and with scaling
-> its own Planner fields, through DGDR v1beta2 Requests; it is for development clusters only. See
+> its own Planner fields, through DGDR v1beta2 Requests; it is not feature complete. See
 > [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
 
 Retune periodically replays the last window of recorded traffic against a grid of router and
