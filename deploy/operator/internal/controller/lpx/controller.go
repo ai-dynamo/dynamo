@@ -227,8 +227,13 @@ func (r *graphReconciler) reconcileWorkloads(
 	// Resolve and render every workload before deleting the running PCS.
 	workloads, plans, err := r.resolveWorkloads(ctx, deployment, dgd)
 	if err != nil {
+		meta.SetStatusCondition(&deployment.Status.Conditions, metav1.Condition{
+			Type: placementResolvedCondition, Status: metav1.ConditionFalse,
+			ObservedGeneration: deployment.Generation, Reason: "InvalidWorkload", Message: truncateConditionMessage(err.Error()),
+		})
 		return ctrl.Result{}, err
 	}
+	setPlacementSourceCondition(ctx, deployment, workloads)
 
 	// Share the rendered identities with capacity management and request publication.
 	desiredPCS, resources, err := r.renderDesiredPodCliqueSet(ctx, deployment, dgd, workloads, plans, pcs)

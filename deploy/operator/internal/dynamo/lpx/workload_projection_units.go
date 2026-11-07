@@ -1,0 +1,131 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package lpx
+
+import (
+	"encoding/json"
+	"fmt"
+	"slices"
+
+	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
+)
+
+const unitsProjectionVersion = "lpu-units-node-local/v1"
+
+// appendUnitModelProjections projects a build whose compiler recorded lpuUnits.
+// The units supply reservations, sizes and connectors, so chains, packing and
+// extents are not derived here. intent.Build has units.
+func appendUnitModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
+	build := intent.Build
+	hybrid := intent.Pipeline == PipelineHybrid
+
+	// An LPU-only conductor launches exactly one unit for each model. The legacy
+	// projection accepts several LP20 partitions without a chain, but LPX then
+	// rejects the incomplete LPU-only chain, so units refuse them here.
+	if !hybrid && len(build.lpuUnits) != 1 {
+		return nil, fmt.Errorf("%w: LPU-only workloads require exactly one lpuUnits entry per model; this bundle has %d",
+			ErrUnsupportedRuntime, len(build.lpuUnits))
+	}
+	units, localPartitionIDs, err := selectRemoteUnits(intent.LocalPartitions, intent.Pipeline, build.lpuUnits)
+	if err != nil {
+		return nil, err
+	}
+
+	// Index the source partitions that reservations name.
+	sourcePartitions := make(map[int]buildPartition, len(build.partitions))
+	for _, partition := range build.partitions {
+		sourcePartitions[partition.sourcePartitionID] = partition
+	}
+	devicesPerNode := build.partitions[0].devicesPerNode
+
+	// Request one LPX partition per kept reservation, in Agent order, and join
+	// each unit's adjacent reservations.
+	var (
+		partitions    = make([]buildPartition, 0, len(units))
+		connectors    = make([]lpxv1alpha1.PropSyncConnectorRequest, 0)
+		agentReplicas = 0
+	)
+	for _, unit := range units {
+		first := len(partitions)
+		for _, reservation := range unit.Reservations {
+			partition := sourcePartitions[reservation.PartitionIDs[0]]
+			if build.family == BuildFamilyXT && devicesPerNode != 8 {
+				return nil, fmt.Errorf("%w: LP20 nodes projection requires devicesPerNode=8, got %d", ErrUnsupportedRuntime, devicesPerNode)
+			}
+			partition.numChips = reservation.Hosts * devicesPerNode
+			partition.hxExtent = slices.Clone(reservation.HXExtent)
+			if build.family == BuildFamilyHX {
+				if len(partition.hxExtent) == 0 {
+					if reservation.Hosts != 1 || devicesPerNode != 16 {
+						return nil, fmt.Errorf("%w: LP30 size.nodes requires one host with devicesPerNode=16; use a supported size.hx", ErrUnsupportedRuntime)
+					}
+					partition.hxExtent = []int64{16, 1, 1, 1}
+				}
+				extent := partition.hxExtent
+				if extent[0] != 16 || !supportedHXExtent(extent[1], extent[2], extent[3]) {
+					return nil, fmt.Errorf("%w: LP30 reservation extent %v is not supported by the HX profile", ErrUnsupportedRuntime, extent)
+				}
+			}
+
+			// The LPR CRD admits xtShape only from its closed enum (c8..c64, c96,
+			// c128), so a host count without a registered shape has no request
+			// encoding. The enum also caps an LP20 reservation at 128 devices,
+			// which keeps 256 reservations' Agent replicas within int32.
+			if build.family == BuildFamilyXT {
+				if _, err := xtShape(partition); err != nil {
+					return nil, err
+				}
+			}
+			partitions = append(partitions, partition)
+			agentReplicas += reservation.Hosts
+		}
+		for index, requirement := range unit.Connectors {
+			// The scheduler limits each connector independently of the graph size.
+			if requirement.Connections != nil && len(*requirement.Connections) > 512 {
+				return nil, fmt.Errorf("%w: HX connector %d has %d device pairs, limit is 512", ErrUnsupportedRuntime, index, len(*requirement.Connections))
+			}
+			connector := lpxv1alpha1.PropSyncConnectorRequest{
+				FromPartitionID: fmt.Sprintf("partition-%03d", first+index),
+				ToPartitionID:   fmt.Sprintf("partition-%03d", first+index+1),
+			}
+			requirement.DeepCopyInto(&connector.Requirement)
+			connectors = append(connectors, connector)
+		}
+	}
+
+	// The scheduler reads placement from partitions and connectors alone.
+	allocationMetadata := json.RawMessage(`{}`)
+
+	// Bind the compiler's units and the local selection into each model's identity.
+	encodedUnits, _ := json.Marshal(build.lpuUnits)
+	transcripts := newModelProjectionTranscripts(intent, unitsProjectionVersion)
+	for index := range transcripts {
+		transcript := &transcripts[index]
+		transcript.field("lpu-units", encodedUnits)
+		if len(localPartitionIDs) > 0 {
+			encoded, _ := json.Marshal(localPartitionIDs)
+			transcript.field("local-partition-ids", encoded)
+		}
+		transcript.field("allocation-metadata", allocationMetadata)
+		bindHybridRuntimeIO(transcript, intent.Pipeline, build.ioFPGACount, build.ioFanoutFactor)
+
+		dst = append(dst, &ModelProjection{
+			digest:                 transcript.sum(),
+			compilerSnapshotDigest: build.contentID,
+			contractFormat:         build.contractFormat,
+			runtimeBuildRef:        intent.RuntimeBuildRef,
+			model:                  intent.Models[index],
+			pipeline:               intent.Pipeline,
+			configuredBuild:        *build,
+			allocationMetadata:     allocationMetadata,
+			partitions:             partitions,
+			connectors:             connectors,
+			agentReplicas:          agentReplicas,
+			localPartitionIDs:      localPartitionIDs,
+		})
+	}
+	return dst, nil
+}

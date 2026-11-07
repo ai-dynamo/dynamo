@@ -19,7 +19,7 @@ import (
 
 // configureHybridCyborg consumes a fresh hybrid clique from an admitted source
 // whose conductor resources were validated during workload selection.
-// cyborgConfigMap is the nonnil Agent-address ConfigMap rendered for that workload.
+// A nil cyborgConfigMap selects compiler-owned units instead of legacy addresses.
 func configureHybridCyborg(
 	cyborg *grovev1alpha1.PodCliqueTemplateSpec,
 	projection *ModelProjection,
@@ -28,6 +28,7 @@ func configureHybridCyborg(
 	agentTemplateNames []string,
 	cyborgConfigMap *corev1.ConfigMap,
 	cyborgConfigHash string,
+	allocation string,
 ) error {
 	container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
 
@@ -53,8 +54,12 @@ func configureHybridCyborg(
 		lpxv1alpha1.PodRoleCyborgWorker,
 		workloadDigest,
 	)
-	ensureLPUConfigVolume(&cyborg.Spec.PodSpec, cyborgConfigMap.Name)
-	cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash] = cyborgConfigHash
+	if cyborgConfigMap != nil {
+		ensureLPUConfigVolume(&cyborg.Spec.PodSpec, cyborgConfigMap.Name)
+		cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash] = cyborgConfigHash
+	} else {
+		configureNodeLocalConductorRuntime(&cyborg.Spec.PodSpec, allocation)
+	}
 	cyborg.Spec.StartsAfter = slices.Clone(agentTemplateNames)
 	return nil
 }

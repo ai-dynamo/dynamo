@@ -90,6 +90,11 @@ func ResolveWorkload(
 			snapshot = acquired
 		}
 
+		// Paired readers share configuration; they must move to units together.
+		if len(projections) != 0 && projections[0].placesLPUUnits() != (len(snapshot.lpuUnits) != 0) {
+			return nil, fmt.Errorf("LPX workload mixes builds with and without lpuUnits: components %q and %q must use the same placement format", projections[0].stage, configuredModel)
+		}
+
 		// Validated model cardinality fixes one runtime shape for the selected workload.
 		if pipeline == "" {
 			pipeline = PipelineSingle
