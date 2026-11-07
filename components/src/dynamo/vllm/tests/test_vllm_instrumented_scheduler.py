@@ -312,6 +312,7 @@ def test_benchmark_wall_time_starts_at_post_go_schedule_timestamp():
 def test_benchmark_timing_stops_before_vllm_state_update(
     monkeypatch, adjust_host_launch
 ):
+    """Keep benchmark timing independent of launch correction and output bookkeeping."""
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._adjust_fpm_host_launch = adjust_host_launch
     stub._fpm_launch_durations = {123: 5.0}
@@ -376,6 +377,7 @@ def test_inline_launch_timing_requires_supported_execution(
     speculative,
     expected,
 ):
+    """Enable correction only when the constructed engine uses inline async launch."""
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             distributed_executor_backend=backend,
@@ -509,6 +511,7 @@ def test_async_fpm_assigns_long_launch_to_its_prefill(fpm_timing_run, adjust, ex
 
 
 def test_deferred_grammar_keeps_fpms_without_charging_the_output_wait(fpm_timing_run):
+    """Keep deferred batches without treating the earlier output wait as launch work."""
     run = fpm_timing_run
     decode = run.schedule(1.0)
     run.launch(1.001, decode)
@@ -528,6 +531,7 @@ def test_deferred_grammar_keeps_fpms_without_charging_the_output_wait(fpm_timing
 def test_missing_launch_callback_retains_the_output_and_releases_its_snapshot(
     fpm_timing_run,
 ):
+    """Emit fallback timing and release the snapshot when the callback is absent."""
     run = fpm_timing_run
     output = run.schedule(1.0, prefill=6144)
     run.update(1.022, output)
@@ -581,12 +585,14 @@ def test_fpm_grammar_callback_matches_vllm_engine_contract(
     sampling = Future()
 
     def execute_model(scheduled, *, non_block):
+        """Advance only submission time without completing a GPU future."""
         assert scheduled is output and non_block
         events.append("execute")
         clock.now += 0.008
         return execution
 
     def grammar_bitmask(requests, request_ids, speculative_tokens):
+        """Add distinguishable grammar work after the submission timer closes."""
         assert requests is scheduler.requests
         assert request_ids == ["request"] and speculative_tokens == {}
         events.append("grammar")
@@ -594,6 +600,7 @@ def test_fpm_grammar_callback_matches_vllm_engine_contract(
         return bitmask
 
     def sample_tokens(grammar_output, *, non_block):
+        """Check that sampling sees the measured launch and unchanged grammar result."""
         assert non_block
         assert scheduler._fpm_launch_durations[id(output)] == pytest.approx(0.008)
         assert scheduler._pending_fpm_launch is None
@@ -967,6 +974,7 @@ def test_dp_rank_prefers_data_parallel_index():
 
 
 def test_external_dp_schedulers_publish_on_distinct_global_rank_ports(monkeypatch):
+    """Keep separately constructed DP schedulers on distinct global-rank publishers."""
     base_port = 20000  # The mocked publisher never binds a socket.
     monkeypatch.setenv(instrumented_scheduler_module.ENV_FPM_PORT, str(base_port))
     monkeypatch.setenv(instrumented_scheduler_module.ENV_FPM_WORKER_ID, "dp-worker")
@@ -2676,6 +2684,7 @@ def test_explicit_runtime_failure_is_not_silently_skipped():
 
 
 def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
+    """Use vLLM's hash-block granularity when constructing benchmark request hashes."""
     parent_init_args = {}
 
     def fake_parent_init(self, **kwargs):
