@@ -54,8 +54,13 @@ def _write_synthetic_video(
     offset_y = int(rng.integers(0, span_y))
     speed_x = int(rng.integers(1, max(2, width // 8)))
     speed_y = int(rng.integers(1, max(2, height // 8)))
-    xx = np.arange(width, dtype=np.uint16)[None, :]
-    yy = np.arange(height, dtype=np.uint16)[:, None]
+    # int32, not uint16: the per-frame gradients add frame_idx * speed to
+    # these grids, and under NEP 50 a Python integer above 65535 raises
+    # OverflowError against a uint16 array instead of wrapping. Every use
+    # is reduced modulo 256 before the cast to uint8, so the wider grid
+    # changes no pixel value.
+    xx = np.arange(width, dtype=np.int32)[None, :]
+    yy = np.arange(height, dtype=np.int32)[:, None]
 
     with imageio.get_writer(
         str(path),
