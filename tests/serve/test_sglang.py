@@ -609,7 +609,7 @@ sglang_configs = {
         marks=[
             pytest.mark.multimodal,
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(4.7),  # parity with vLLM Qwen3.5-0.8B
+            pytest.mark.profiled_vram_gib(6.5),  # 5.9 GiB peak with the mamba cap
             # 4096 covers the b64 PNG image-token expansion (~2198 tokens
             # for our 1999x1125 LFS test asset under Qwen3.5-0.8B's vision
             # processor) + 100-token max response + headroom.
@@ -630,6 +630,10 @@ sglang_configs = {
             "--page-size",
             "1",
             "--frontend-decoding",
+            # SGLang sizes the Qwen3.5 mamba cache from free VRAM, not
+            # --max-total-tokens; without a cap it starves co-scheduled tests.
+            "--max-mamba-cache-size",
+            "64",
         ],
         delayed_start=0,
         timeout=360,

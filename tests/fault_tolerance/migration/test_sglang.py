@@ -581,7 +581,7 @@ def test_request_migration_sglang_aggregated(
 
 @pytest.mark.timeout(SGLANG_MIGRATION_TEST_TIMEOUT_S)
 @pytest.mark.nightly
-@pytest.mark.profiled_vram_gib(7.8)  # measured NVML peak with three workers
+@pytest.mark.profiled_vram_gib(9.0)  # 8.2 GiB NVML peak with three workers
 @pytest.mark.requested_sglang_kv_tokens(1024)
 @KV_TRANSFER_MIGRATION_PARAMETERS
 def test_request_migration_sglang_kv_transfer(
