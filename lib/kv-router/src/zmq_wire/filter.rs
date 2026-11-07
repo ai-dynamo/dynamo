@@ -74,6 +74,14 @@ impl KvCacheSpecKind {
         }
     }
 
+    /// Non-attention cache group whose events are forwarded to routers, if any.
+    pub(crate) fn cache_group(self) -> Option<crate::protocols::CacheGroup> {
+        match self {
+            Self::Mamba => Some(crate::protocols::CacheGroup::Mamba),
+            _ => None,
+        }
+    }
+
     pub(crate) fn is_main_attention(self) -> bool {
         matches!(
             self,

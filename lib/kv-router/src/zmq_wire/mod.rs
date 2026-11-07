@@ -94,6 +94,7 @@ pub struct ZmqEventNormalizer {
     /// partial tail (vLLM `--prefix-match-unit` below the block size), not a
     /// misconfiguration, and is filtered quietly instead of warned about.
     full_block_workers: FxHashSet<WorkerWithDpRank>,
+    forward_mamba: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +153,7 @@ impl ZmqEventNormalizer {
             cache_namespaces: FxHashMap::default(),
             engine_mm: mm_exclusion::EngineMmState::new(false),
             full_block_workers: FxHashSet::default(),
+            forward_mamba: false,
         }
     }
 
@@ -165,6 +167,7 @@ impl ZmqEventNormalizer {
             cache_namespaces: FxHashMap::default(),
             engine_mm: mm_exclusion::EngineMmState::new(false),
             full_block_workers: FxHashSet::default(),
+            forward_mamba: false,
         }
     }
 
@@ -191,6 +194,13 @@ impl ZmqEventNormalizer {
     /// models (leave unset).
     pub fn with_image_token_id(mut self, image_token_id: Option<u32>) -> Self {
         self.image_token_id = image_token_id;
+        self
+    }
+
+    /// Forward Mamba cache-group events (tagged `CacheGroup::Mamba`) instead of
+    /// filtering them. Off by default.
+    pub fn with_mamba_forwarding(mut self, forward_mamba: bool) -> Self {
+        self.forward_mamba = forward_mamba;
         self
     }
 
@@ -279,6 +289,12 @@ impl ZmqEventNormalizer {
             Some(reason) => return Err(reason),
             None => {}
         }
+        if self.tag_forwarded_group(&mut raw, metadata, worker.dp_rank) {
+            // A checkpoint hash equals the attention hash at the same boundary but has no
+            // namespace of its own; it must not touch the attention namespace chain or a
+            // worker's full-block history.
+            return Ok(raw);
+        }
         // Only blocks that survived group filtering count toward a worker's
         // full-block history, so a filtered (non-main-attention) group cannot
         // suppress a size-mismatch warning for the routed group. A clear resets
@@ -299,6 +315,40 @@ impl ZmqEventNormalizer {
             self.propagate_cache_namespace(&mut raw, worker)?;
         }
         Ok(raw)
+    }
+
+    /// When the event belongs to a forwarded non-attention group, make sure its
+    /// `kv_cache_spec_kind` is set (a `BlockRemoved` only carries `group_idx`) and
+    /// return true.
+    fn tag_forwarded_group(
+        &self,
+        raw: &mut RawKvEvent,
+        metadata: KvCacheEventMetadata,
+        dp_rank: DpRank,
+    ) -> bool {
+        let kind = metadata.kv_cache_spec_kind.or_else(|| {
+            metadata.group_idx.and_then(|group_idx| {
+                self.group_metadata
+                    .get(&(dp_rank, group_idx))
+                    .map(|group| group.kind)
+            })
+        });
+        let Some(kind) = kind.filter(|kind| self.forward_mamba && kind.cache_group().is_some())
+        else {
+            return false;
+        };
+        match raw {
+            RawKvEvent::BlockStored {
+                kv_cache_spec_kind, ..
+            }
+            | RawKvEvent::BlockRemoved {
+                kv_cache_spec_kind, ..
+            } => {
+                *kv_cache_spec_kind = Some(kind);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn normalize_preprocessed(
@@ -531,6 +581,9 @@ impl ZmqEventNormalizer {
             if kind == KvCacheSpecKind::Unknown {
                 return Some(ZmqEventFilterReason::UnknownKind);
             }
+            if self.forward_mamba && kind.cache_group().is_some() {
+                return None;
+            }
             return Some(ZmqEventFilterReason::NonMainAttentionKind);
         }
 
@@ -543,6 +596,9 @@ impl ZmqEventNormalizer {
             }
             if metadata.kind == KvCacheSpecKind::Unknown {
                 return Some(ZmqEventFilterReason::UnknownKind);
+            }
+            if self.forward_mamba && metadata.kind.cache_group().is_some() {
+                return None;
             }
             return Some(ZmqEventFilterReason::NonMainAttentionGroup);
         }

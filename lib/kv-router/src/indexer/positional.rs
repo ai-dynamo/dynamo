@@ -556,6 +556,7 @@ impl PositionalIndexer {
 
             for (pos, local_hash, seq_hash) in blocks {
                 events.push(RouterEvent {
+                    cache_group: None,
                     worker_id: worker.worker_id,
                     state_source: None,
                     session_id: None,

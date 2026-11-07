@@ -2459,6 +2459,7 @@ mod tests {
                 approx: None,
                 primary_records_routing_decisions: false,
                 session_updates: None,
+                mamba_checkpoints: None,
             },
         )
     }
@@ -2809,6 +2810,7 @@ mod tests {
             approx: None,
             primary_records_routing_decisions: false,
             session_updates: None,
+            mamba_checkpoints: None,
         };
         lower_tiers
             .get_or_create(StorageTier::HostPinned)

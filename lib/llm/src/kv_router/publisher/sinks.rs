@@ -9,7 +9,7 @@ use anyhow::Result;
 use dynamo_kv_router::RouterEventSink;
 use dynamo_kv_router::indexer::{KvRouterError, LocalKvIndexer};
 use dynamo_kv_router::protocols::{
-    KvCacheEvent, KvCacheEventData, ResidencyDomain, RouterEvent, StorageTier,
+    CacheGroup, KvCacheEvent, KvCacheEventData, ResidencyDomain, RouterEvent, StorageTier,
 };
 use dynamo_runtime::transports::event_plane::EventPublisher;
 
@@ -165,6 +165,7 @@ pub(super) async fn admit_local_event(
     local_indexer.apply_event_with_buffer(event.clone()).await
 }
 
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn emit(
     local_indexer: &Option<Arc<LocalKvIndexer>>,
     worker_id: u64,
@@ -172,11 +173,13 @@ pub(super) async fn emit(
     residency_domain: ResidencyDomain,
     event: KvCacheEvent,
     session_id: Option<String>,
+    cache_group: Option<CacheGroup>,
     output: &mut Vec<RouterEvent>,
 ) -> bool {
     let mut router_event =
         RouterEvent::with_residency_domain(worker_id, event, storage_tier, residency_domain);
     router_event.session_id = session_id;
+    router_event.cache_group = cache_group;
     let applied = match admit_local_event(local_indexer.as_deref(), &router_event).await {
         Ok(()) => true,
         Err(error) => {

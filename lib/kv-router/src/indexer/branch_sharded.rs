@@ -683,6 +683,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
                 continue;
             }
             let shard_event = RouterEvent {
+                cache_group: None,
                 worker_id: event.worker_id,
                 state_source: event.state_source,
                 session_id: event.session_id.clone(),
@@ -705,6 +706,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         if !broadcast_blocks.is_empty() {
             for shard in &self.shards {
                 let broadcast_event = RouterEvent {
+                    cache_group: None,
                     worker_id: event.worker_id,
                     state_source: event.state_source,
                     session_id: event.session_id.clone(),

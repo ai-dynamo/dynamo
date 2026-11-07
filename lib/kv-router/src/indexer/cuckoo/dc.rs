@@ -541,7 +541,14 @@ impl DcCkfState {
     }
 
     pub fn apply_event(&mut self, event: RouterEvent) -> DcCkfEventOutcome {
-        match event.targets_primary() {
+        // Non-attention cache-group checkpoints share attention block hashes and must not be
+        // admitted as attention residency.
+        let targets_primary = if event.cache_group.is_some() {
+            Ok(false)
+        } else {
+            event.targets_primary()
+        };
+        match targets_primary {
             Ok(true) => {}
             Ok(false) => {
                 return DcCkfEventOutcome {
@@ -1650,6 +1657,28 @@ mod tests {
         let unknown = state.apply_event(removed(worker, 3, &[99]));
         assert_eq!(unknown.unknown_removals(), 1);
         assert_eq!(state.stats().aggregation().unknown_removals(), 1);
+        assert_eq!(state.stats().aggregation().contribution_count(), 1);
+        assert!(state.contains(resident));
+    }
+
+    #[test]
+    fn cache_group_events_are_ignored_without_mutating_primary_state() {
+        use crate::protocols::CacheGroup;
+        let worker = WorkerWithDpRank::new(1, 0);
+        let resident = canonical_root(7);
+        let mut state = DcCkfState::new(CkfConfig::new(32)).unwrap();
+
+        let ignored =
+            state.apply_event(stored(worker, 1, &[8]).with_cache_group(CacheGroup::Mamba));
+        assert!(ignored.first_error().is_none());
+        assert!(!ignored.publication_boundary());
+        assert_eq!(state.stats().aggregation().contribution_count(), 0);
+
+        state.apply_event(stored(worker, 2, &[7]));
+        let ignored =
+            state.apply_event(removed(worker, 3, &[7]).with_cache_group(CacheGroup::Mamba));
+        assert_eq!(ignored.unknown_removals(), 0);
+        assert!(!ignored.publication_boundary());
         assert_eq!(state.stats().aggregation().contribution_count(), 1);
         assert!(state.contains(resident));
     }
