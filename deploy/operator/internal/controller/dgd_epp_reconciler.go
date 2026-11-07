@@ -108,7 +108,8 @@ func (r *dgdEPPReconciler) Reconcile(
 	}
 
 	eppServiceName := dynamo.GetDCDResourceName(dgd, componentName, "")
-	inferencePool, err := epp.GenerateInferencePool(dgd, componentName, eppServiceName)
+	// The pool must reference the Service by the name GenerateComponentService gives it.
+	inferencePool, err := epp.GenerateInferencePool(dgd, componentName, dynamo.ComponentServiceName(eppServiceName))
 	if err != nil {
 		logger.Error(err, "Failed to generate EPP InferencePool")
 		return fmt.Errorf("failed to generate EPP InferencePool: %w", err)

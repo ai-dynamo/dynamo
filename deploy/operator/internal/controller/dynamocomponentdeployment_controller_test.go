@@ -21,6 +21,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"testing"
@@ -53,6 +54,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
@@ -730,6 +732,96 @@ func TestStandaloneDCDServiceRenderingCharacterization(t *testing.T) {
 	require.Equal(t, int32(commonconsts.DynamoServicePort), service.Spec.Ports[0].Port)
 	require.Equal(t, dynamo.GetDCDKubeLabels(dcd), service.Labels)
 	require.Equal(t, dynamo.GetDCDKubeAnnotations(dcd), service.Annotations)
+}
+
+// A digit-leading DCD name needs a prefixed Service name, and the delete stub for a
+// non-frontend DCD must use that same name so cleanup finds the Service.
+func TestStandaloneDCDService_DigitLeadingName(t *testing.T) {
+	const name = "70b-llama-production"
+	newDCD := func(componentType v1beta1.ComponentType) *v1beta1.DynamoComponentDeployment {
+		return &v1beta1.DynamoComponentDeployment{
+			Name:      name,
+			Namespace: "default",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoNamespace: "dynamo-graph",
+			},
+			Spec: v1beta1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+					ComponentName: "frontend",
+					ComponentType: componentType,
+				},
+			},
+		}
+	}
+	r := &DynamoComponentDeploymentReconciler{Config: &configv1alpha1.OperatorConfiguration{}}
+
+	t.Log("Render the frontend Service and check that its name is a DNS-1035 label")
+	frontend, toDelete, err := r.generateService(context.Background(), generateResourceOption{
+		dynamoComponentDeployment: newDCD(v1beta1.ComponentTypeFrontend),
+	})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	require.Empty(t, validation.IsDNS1035Label(frontend.Name), "Service name %q", frontend.Name)
+	require.Equal(t, dynamo.ComponentServiceName(name), frontend.Name)
+
+	t.Log("Render the delete stub for a worker and check that it names the same Service")
+	stub, toDelete, err := r.generateService(context.Background(), generateResourceOption{
+		dynamoComponentDeployment: newDCD(v1beta1.ComponentTypeWorker),
+	})
+	require.NoError(t, err)
+	require.True(t, toDelete)
+	require.Equal(t, frontend.Name, stub.Name)
+}
+
+// The prefixed name of a digit-leading DCD can equal the name of another DCD,
+// such as "7foo-frontend" and "svc-7foo-frontend". The second DCD must not take
+// over the first DCD's Service.
+func TestDCDService_PrefixedNameCollisionIsAnOwnershipConflict(t *testing.T) {
+	t.Log("Build two frontend DCDs whose Service names are the same")
+	s := scheme.Scheme
+	require.NoError(t, v1beta1.AddToScheme(s))
+	require.NoError(t, corev1.AddToScheme(s))
+	newDCD := func(name string, uid types.UID) *v1beta1.DynamoComponentDeployment {
+		return &v1beta1.DynamoComponentDeployment{
+			Name:      name,
+			Namespace: "default",
+			UID:       uid,
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoNamespace: "dynamo-graph",
+			},
+			Spec: v1beta1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+					ComponentName: "frontend",
+					ComponentType: v1beta1.ComponentTypeFrontend,
+				},
+			},
+		}
+	}
+	first := newDCD("svc-7foo-frontend", "uid-svc-7foo")
+	second := newDCD("7foo-frontend", "uid-7foo")
+	require.Equal(t, dynamo.ComponentServiceName(first.Name), dynamo.ComponentServiceName(second.Name))
+
+	r := &DynamoComponentDeploymentReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(s).WithObjects(first, second).Build(),
+		Recorder: events.NewFakeRecorder(10),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+	}
+
+	t.Log("Create the Service for the first DCD")
+	_, err := r.createOrUpdateOrDeleteServices(context.Background(), generateResourceOption{dynamoComponentDeployment: first})
+	require.NoError(t, err)
+
+	t.Log("Reconcile the second DCD and expect an ownership conflict")
+	_, err = r.createOrUpdateOrDeleteServices(context.Background(), generateResourceOption{dynamoComponentDeployment: second})
+	_, conflict := errors.AsType[*controller_common.OwnershipConflictError](err)
+	require.True(t, conflict, "want an ownership conflict, got %v", err)
+
+	t.Log("Check that the Service still belongs to the first DCD")
+	service := &corev1.Service{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "svc-7foo-frontend", Namespace: "default"}, service))
+	owner := metav1.GetControllerOf(service)
+	require.NotNil(t, owner)
+	require.Equal(t, first.UID, owner.UID)
 }
 
 func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentService(t *testing.T) {

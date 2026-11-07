@@ -808,6 +808,20 @@ func NormalizeKubeResourceName(name string) string {
 	return strings.ToLower(strings.ReplaceAll(name, ".", "-"))
 }
 
+// componentServiceNamePrefix makes a Service name that would start with a digit
+// start with a letter instead.
+const componentServiceNamePrefix = "svc-"
+
+// ComponentServiceName returns the DNS-1035 name of a component's Service; every
+// reference must use it. Only digit-leading names change, so existing Services keep theirs.
+func ComponentServiceName(name string) string {
+	normalized := NormalizeKubeResourceName(name)
+	if normalized == "" || ('a' <= normalized[0] && normalized[0] <= 'z') {
+		return normalized
+	}
+	return shortenServiceName(componentServiceNamePrefix + normalized)
+}
+
 type SecretsRetriever interface {
 	GetSecrets(namespace, registry string) ([]string, error)
 }
@@ -997,9 +1011,8 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 	maps.Copy(annotations, params.Annotations)
 
 	service := &corev1.Service{
-		// Service names must be DNS-1035 labels (no dots). Replace dots with
-		// hyphens so model names like "Qwen3-0.6B" don't cause rejections.
-		Name:        NormalizeKubeResourceName(params.ServiceName),
+		// Service names must be DNS-1035 labels: no dots, and a leading letter.
+		Name:        ComponentServiceName(params.ServiceName),
 		Namespace:   params.Namespace,
 		Labels:      labels,
 		Annotations: annotations,
@@ -1023,7 +1036,12 @@ const maxServiceNameLength = 63
 // instead, as PCSNameForDGD does. The hash must be deterministic because the follower
 // derives this name independently rather than reading it back from the Service.
 func ElasticEPLeaderServiceName(componentServiceName string) string {
-	name := NormalizeKubeResourceName(componentServiceName + "-ray")
+	return shortenServiceName(ComponentServiceName(componentServiceName) + "-ray")
+}
+
+// shortenServiceName truncates a name past maxServiceNameLength with a deterministic
+// hash suffix, so callers that derive the name independently agree on it.
+func shortenServiceName(name string) string {
 	if len(name) <= maxServiceNameLength {
 		return name
 	}
@@ -1114,7 +1132,7 @@ func GenerateComponentIngress(ctx context.Context, componentName, componentNames
 							PathType: &[]networkingv1.PathType{networkingv1.PathTypePrefix}[0],
 							Backend: networkingv1.IngressBackend{
 								Service: &networkingv1.IngressServiceBackend{
-									Name: resourceName,
+									Name: ComponentServiceName(componentName),
 									Port: networkingv1.ServiceBackendPort{
 										Number: commonconsts.DynamoServicePort,
 									},
@@ -1173,7 +1191,7 @@ func GenerateComponentVirtualService(ctx context.Context, componentName, compone
 					Route: []*istioNetworking.HTTPRouteDestination{
 						{
 							Destination: &istioNetworking.Destination{
-								Host: resourceName,
+								Host: ComponentServiceName(componentName),
 								Port: &istioNetworking.PortSelector{
 									Number: commonconsts.DynamoServicePort,
 								},
@@ -1191,8 +1209,6 @@ func GenerateComponentVirtualService(ctx context.Context, componentName, compone
 // This tells the mesh sidecar how to connect to the EPP's gRPC endpoint,
 // avoiding double-TLS issues when the EPP serves TLS (SecureServing=true).
 func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig configv1alpha1.ServiceMeshConfiguration) *networkingv1beta1.DestinationRule {
-	// Normalize the service name the same way GenerateComponentService does
-	// so the DestinationRule host matches the actual Service DNS name.
 	normalizedName := NormalizeKubeResourceName(serviceName)
 
 	dr := &networkingv1beta1.DestinationRule{
@@ -1234,7 +1250,9 @@ func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig config
 	}
 
 	dr.Spec = istioNetworking.DestinationRule{
-		Host: fmt.Sprintf("%s.%s.svc.cluster.local", normalizedName, namespace),
+		// Name the Service the same way GenerateComponentService does so the
+		// host matches the actual Service DNS name.
+		Host: fmt.Sprintf("%s.%s.svc.cluster.local", ComponentServiceName(serviceName), namespace),
 		TrafficPolicy: &istioNetworking.TrafficPolicy{
 			Tls: tls,
 		},

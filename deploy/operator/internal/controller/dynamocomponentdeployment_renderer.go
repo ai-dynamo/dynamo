@@ -578,7 +578,7 @@ func (r *dcdWorkloadRenderer) generateService(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 ) (*corev1.Service, bool, error) {
 	deleteStub := &corev1.Service{
-		Name:      dynamo.NormalizeKubeResourceName(dcd.Name),
+		Name:      dynamo.ComponentServiceName(dcd.Name),
 		Namespace: dcd.Namespace,
 	}
 
@@ -635,7 +635,7 @@ func (r *dcdWorkloadRenderer) generateServiceForDGDComponent(
 	isK8sDiscovery := commonController.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, annotations)
 	componentType := string(component.ComponentType)
 	if !isK8sDiscovery && componentType != commonconsts.ComponentTypeFrontend {
-		return &corev1.Service{Name: dynamo.NormalizeKubeResourceName(serviceName), Namespace: dgd.Namespace}, true, nil
+		return &corev1.Service{Name: dynamo.ComponentServiceName(serviceName), Namespace: dgd.Namespace}, true, nil
 	}
 	dynamoNamespace := dynamo.GetDynamoNamespace(dgd, component)
 	if dynamoNamespace == "" {
@@ -765,7 +765,7 @@ func (r *dcdWorkloadRenderer) hasExistingLegacyWorkerSelector(
 		}
 	}
 
-	serviceName := dynamo.NormalizeKubeResourceName(workloadName)
+	serviceName := dynamo.ComponentServiceName(workloadName)
 	service := &corev1.Service{}
 	if err := r.reader.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: namespace}, service); err == nil {
 		return hasLegacyWorkerSelector(service.Spec.Selector, componentType), nil
