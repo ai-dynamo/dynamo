@@ -101,7 +101,7 @@ async fn standalone_router_metrics_follow_the_wire_observation_paths() {
         session_affinity_ttl_secs: None,
     };
     let selector = Arc::new(
-        Selector::new(&cfg, WorkerSelectionPolicyRegistry::default())
+        Selector::new(&cfg, RouterPluginRegistry::default())
             .await
             .unwrap(),
     );

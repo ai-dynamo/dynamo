@@ -18,16 +18,16 @@ use super::server::create_router;
 use super::*;
 use crate::identity::RoutingPartitionRef;
 use crate::indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
+use crate::plugins::worker_selection::{
+    WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicy,
+};
 use crate::protocols::{
     BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier, WorkerId,
     WorkerWithDpRank, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 use crate::scheduling::WorkerSelectionPolicyError;
 use crate::scheduling::overlap::build_overlap_scores_response;
-use crate::scheduling::selector::{
-    WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy,
-};
 use crate::{TrackingHashContext, TrackingHashScope};
 use tempfile::NamedTempFile;
 
@@ -70,7 +70,7 @@ struct WorkerIdScorer;
 
 impl WorkerScorer for WorkerIdScorer {
     fn score(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -86,7 +86,7 @@ struct LowestCostPicker;
 
 impl WorkerPicker for LowestCostPicker {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -104,7 +104,7 @@ struct NonFiniteScorer;
 
 impl WorkerScorer for NonFiniteScorer {
     fn score(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -120,7 +120,7 @@ struct InvalidRowPicker;
 
 impl WorkerPicker for InvalidRowPicker {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -132,7 +132,7 @@ struct RejectAllFilter;
 
 impl WorkerFilter for RejectAllFilter {
     fn keep(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         _candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -144,7 +144,7 @@ struct RejectWorker(WorkerId);
 
 impl WorkerFilter for RejectWorker {
     fn keep(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -310,10 +310,10 @@ where
         router_policy_config: Some(policy_file.path().display().to_string()),
         ..test_config()
     };
-    let factory: crate::WorkerSelectionPolicyFactory = Arc::new(factory);
-    let mut registry = WorkerSelectionPolicyRegistry::default();
+    let factory: crate::plugins::worker_selection::WorkerSelectionPolicyFactory = Arc::new(factory);
+    let mut registry = RouterPluginRegistry::default();
     registry
-        .register(
+        .register_worker_selection(
             "test",
             Arc::new(move |_| -> Result<_, WorkerSelectionPolicyProviderError> {
                 Ok(Arc::clone(&factory))
@@ -935,14 +935,8 @@ async fn threshold_free_policy_does_not_require_max_num_batched_tokens() {
     std::fs::write(
         policy_file.path(),
         r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: standard
-    policy_family: standard
-    cache_bucket: all
     quantum: 1
 "#,
     )
@@ -1180,21 +1174,14 @@ async fn standalone_policy_classes_apply_header_thresholds_and_structured_reject
     std::fs::write(
         policy_file.path(),
         r#"
-default_policy_family: latency
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
+default_policy_class: latency
 policy_classes:
   - name: latency
-    policy_family: latency
-    cache_bucket: all
     queue_policy: fcfs
     quantum: 1
     prefill_busy_threshold: 0
     request_queue_limit_per_worker: 0
   - name: batch
-    policy_family: batch
-    cache_bucket: all
     queue_policy: wspt
     quantum: 4
     prefill_busy_threshold: 1024
@@ -1861,9 +1848,9 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         config_a
             .service_builder(
                 crate::WorkerType::Aggregated,
-                WorkerSelectionPolicyRegistry::default().with_default_factory(Arc::new(
+                RouterPluginRegistry::default().with_default_factory(Arc::new(
                     |config, role, _| {
-                        crate::WorkerSelectionPolicy::reference(
+                        crate::plugins::worker_selection::WorkerSelectionPolicy::reference(
                             config.clone(),
                             role.default_selector_label(),
                         )
@@ -1878,14 +1865,12 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         SelectionServiceBuilder::new(
             test_config(),
             crate::WorkerType::Aggregated,
-            WorkerSelectionPolicyRegistry::default().with_default_factory(Arc::new(
-                |config, role, _| {
-                    crate::WorkerSelectionPolicy::reference(
-                        config.clone(),
-                        role.default_selector_label(),
-                    )
-                },
-            )),
+            RouterPluginRegistry::default().with_default_factory(Arc::new(|config, role, _| {
+                crate::plugins::worker_selection::WorkerSelectionPolicy::reference(
+                    config.clone(),
+                    role.default_selector_label(),
+                )
+            })),
         )
         .indexer_threads(1)
         .replica_sync(port_b, Vec::new())

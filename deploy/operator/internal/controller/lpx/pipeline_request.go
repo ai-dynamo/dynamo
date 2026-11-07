@@ -21,6 +21,7 @@ import (
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	grovev1beta1 "github.com/ai-dynamo/grove/operator/api/core/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -308,7 +309,10 @@ func (r *graphReconciler) removeReleasedAgentPod(ctx context.Context, pcsgs map[
 	}
 
 	cliqueOwner := metav1.GetControllerOf(pod)
-	if cliqueOwner == nil || cliqueOwner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() || cliqueOwner.Kind != "PodClique" {
+	// Converted children can carry either served Grove version in owner references.
+	if cliqueOwner == nil ||
+		(cliqueOwner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() && cliqueOwner.APIVersion != grovev1beta1.SchemeGroupVersion.String()) ||
+		cliqueOwner.Kind != "PodClique" {
 		return fmt.Errorf("released Agent Pod %q has no PodClique controller", pod.Name)
 	}
 	clique := &grovev1alpha1.PodClique{}
@@ -320,7 +324,9 @@ func (r *graphReconciler) removeReleasedAgentPod(ctx context.Context, pcsgs map[
 	}
 
 	groupOwner := metav1.GetControllerOf(clique)
-	if groupOwner == nil || groupOwner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() || groupOwner.Kind != "PodCliqueScalingGroup" {
+	if groupOwner == nil ||
+		(groupOwner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() && groupOwner.APIVersion != grovev1beta1.SchemeGroupVersion.String()) ||
+		groupOwner.Kind != "PodCliqueScalingGroup" {
 		return fmt.Errorf("released Agent Pod %q's PodClique has no PodCliqueScalingGroup controller", pod.Name)
 	}
 	if group := pcsgs[groupOwner.Name]; group == nil || group.UID != groupOwner.UID {

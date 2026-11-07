@@ -71,12 +71,20 @@ Added by an individual metric family. Each label appears only on the metrics not
   `[Shared]` On `dynamo_frontend_stage_requests` — the frontend pipeline stage a request currently occupies. See [Stage values](#stage-values).
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>preprocess</Badge> <Badge intent="note" minimal>route</Badge> <Badge intent="note" minimal>dispatch</Badge></span>
+
+  On `dynamo_epp_stage_duration_seconds` — one step of routing a request through the endpoint picker (EPP). See [EPP stage values](#epp-stage-values).
 </ParamField>
 
 <ParamField path="phase" type="string">
   `[Shared]` On `dynamo_frontend_stage_requests` — the serving phase. See [Phase values](#phase-values). The empty value is used when the stage does not distinguish phases (e.g. `preprocess`). Router input-token and KV-reuse families also carry this label; the standalone EPP reports input tokens under `aggregated`.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>aggregated</Badge> <Badge intent="note" minimal>"" (empty)</Badge></span>
+</ParamField>
+
+<ParamField path="task" type="string">
+  `[Shared]` On `dynamo_epp_task_poll_seconds` and `dynamo_epp_task_schedule_delay_seconds` — the kind of EPP task that held, or waited for, an async worker thread. See [EPP task values](#epp-task-values).
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>ext_proc_stream</Badge> <Badge intent="note" minimal>h2_connection</Badge> <Badge intent="note" minimal>hyper</Badge> <Badge intent="note" minimal>prefill_watcher</Badge> <Badge intent="note" minimal>other</Badge></span>
 </ParamField>
 
 <ParamField path="state" type="string">
@@ -102,11 +110,11 @@ Added by an individual metric family. Each label appears only on the metrics not
 </ParamField>
 
 <ParamField path="policy_class" type="string">
-  `[Shared]` On `dynamo_frontend_router_queue_*` — the resolved physical scheduler queue. With policy-family or cache-bucket configuration, this can differ from the family requested by the client.
+  `[Shared]` On `dynamo_frontend_router_queue_*` — the resolved policy class. A request that names no class is counted under the default class. A request whose class, after any request-classifier override, is unknown fails before it is queued, so these queue metrics do not count it.
 </ParamField>
 
 <ParamField path="reason" type="string">
-  `[Shared]` On `dynamo_frontend_router_queue_backpressure_total` — the configured queue limit that rejected the request.
+  `[Shared]` On `dynamo_frontend_router_queue_backpressure_total` — the configured queue limit that rejected the request. On `dynamo_frontend_router_admission_rejected_total` — why admission rejected the attempt: `due_time_passed`, `queue_size_exceeded`, or the reserved `predicted_miss`.
 </ParamField>
 
 <ParamField path="migration_type" type="string">
@@ -248,6 +256,40 @@ The `phase` label on `dynamo_frontend_stage_requests`.
 | `decode` | The request is being handled by a decode worker in disaggregated serving. |
 | `aggregated` | Aggregated (non-disaggregated) serving — a single worker handles both prefill and decode. |
 | `""` (empty) | The stage does not distinguish phases (used by `preprocess`). |
+
+### EPP stage values
+
+The `stage` label on `dynamo_epp_stage_duration_seconds`.
+
+| Stage | Measures |
+|---|---|
+| `receive_body` | From the request headers to the end of the request body: the gateway streaming the client's body to the EPP |
+| `model_probe` | Reading the `model` field out of the request body |
+| `parse` | Parsing the request body into the typed request |
+| `blocking_wait` | Waiting for a tokenization slot (one per core) and a blocking-pool thread before rendering the chat template, for chat requests |
+| `template` | Rendering the chat template, for chat requests |
+| `tokenize` | Tokenizing the rendered prompt, or a text `/v1/completions` prompt; for the latter it includes the waits for a tokenization slot and a blocking-pool thread |
+| `select` | Choosing the prefill and decode workers, including router queueing |
+| `book` | Registering the request with the router's load bookkeeping |
+| `pick` | The whole worker pick: `parse` through `book` and the waits between them |
+| `rewrite` | Rewriting the forwarded body: injecting `nvext.token_data`, stripping `nvext`, setting the cache salt |
+| `response_headers` | From the routing decision to the response headers: the gateway sending the body to the sidecar, and the sidecar reading it and answering. Streamed 2xx responses only |
+| `first_response` | From the routing decision to the first non-empty response chunk: the gateway, sidecar and worker producing the first token. Streamed 2xx responses only |
+| `epp_ttft` | From the request headers to the first non-empty response chunk: the time to first token as the EPP sees it. The client's time to first token minus this is the time spent outside the EPP's view, without comparing clocks across nodes. Streamed 2xx responses only |
+
+`parse` through `book` are recorded when the EPP discovers Dynamo workers. In standalone mode, which tokenizes through a render service, only `receive_body`, `model_probe`, `pick`, `rewrite`, `response_headers`, `first_response` and `epp_ttft` are recorded.
+
+### EPP task values
+
+The `task` label on `dynamo_epp_task_poll_seconds` and `dynamo_epp_task_schedule_delay_seconds`.
+
+| Task | Does |
+|---|---|
+| `ext_proc_stream` | One ext_proc stream: reads the gateway's messages, picks a worker and relays the response |
+| `h2_connection` | One gateway connection: TLS and every HTTP/2 frame of every stream on it |
+| `hyper` | A task hyper-util spawns: one per HTTP/2 request the EPP serves, which hands an ext_proc stream's responses to its connection, and the connection tasks of the EPP's own HTTP and gRPC clients |
+| `prefill_watcher` | The once-a-second scan for prefill workers |
+| `other` | Any other task |
 
 ## Related
 
