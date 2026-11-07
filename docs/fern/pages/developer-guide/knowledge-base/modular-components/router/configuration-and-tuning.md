@@ -83,13 +83,18 @@ its configuration even if the endpoint is unchanged.
 
 For how queue backpressure differs from candidate filtering and busy-threshold overload handling, see [Router Filtering](worker-filtering.md).
 
+`edf`, the default for policy-class YAML, orders by earliest due time: a request classifier's
+explicit deadline, else router ingress plus the class's `slo_ttft_ms`. A request with neither sorts
+after every request with a due time, and equal or absent due times keep enqueue order. Strict
+priority and priority jumps do not reorder `edf`.
 `fcfs` orders by adjusted arrival time (`priority_jump - arrival_offset`) and optimizes tail TTFT.
 `wspt` orders by `(1 + priority_jump) / scheduling_cost_tokens` and optimizes average TTFT, where
-`scheduling_cost_tokens = max(1, raw_isl_tokens - cached_tokens)`. Both the CLI and policy-class
-YAML accept only `fcfs` and `wspt`.
+`scheduling_cost_tokens = max(1, raw_isl_tokens - cached_tokens)`. The CLI accepts `fcfs`, its
+default, and `wspt`; policy-class YAML accepts `edf`, `fcfs`, and `wspt`.
 
-For each policy, the complete pending-queue key is
-`(strict_priority, due_at, policy_key)`. Higher strict tiers always win; see
+For `fcfs` and `wspt`, the complete pending-queue key is
+`(strict_priority, due_at, policy_key)`, where `due_at` is only a request classifier's explicit
+deadline. Higher strict tiers always win; see
 [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how due-time
 ordering applies within a tier.
 
@@ -275,11 +280,9 @@ default_policy_class: standard
 policy_classes:
   - name: priority
     quantum: 800
-    queue_policy: fcfs
     slo_ttft_ms: 1000
   - name: standard
     quantum: 200
-    queue_policy: fcfs
     slo_ttft_ms: 3000
 ```
 
@@ -295,7 +298,6 @@ class is the default and `default_policy_class` can be omitted:
 policy_classes:
   - name: standard
     quantum: 1000
-    queue_policy: fcfs
     slo_ttft_ms: 3000
 ```
 
@@ -308,9 +310,9 @@ per-worker `CACHE` rows. Cached tokens also set each request's default
 scheduling cost and queue accounting, and prefix overlap still guides worker
 selection.
 
-Each class owns a shared FCFS or WSPT heap plus one heap for each exact-worker
-lane, along with its busy thresholds, queue limits, quantum, deficit, and
-counters. Arbitration compares the shared head with the currently dispatchable
+Each class owns a shared heap plus one heap for each exact-worker lane, all
+ordered by the class's queue policy, along with its busy thresholds, queue
+limits, quantum, deficit, and counters. Arbitration compares the shared head with the currently dispatchable
 exact-worker lane heads. Absolute and fractional busy thresholds use OR
 semantics. The absolute `prefill_busy_threshold` is deprecated and will be
 removed in v1.7; use `prefill_busy_threshold_frac`.
@@ -343,12 +345,24 @@ bulk-credit behavior, see
 
 Class names must be unique within a profile and use metric-safe identifiers
 (`[A-Za-z0-9_.-]+`). `quantum` is a required positive integer, in uncached
-input tokens. `queue_policy` is `fcfs`, the default, or `wspt`. `slo_ttft_ms` is
-an optional time-to-first-token budget in whole milliseconds and must be a
-positive integer: leaving it unset means the class has no budget, and `0` is
-rejected. Currently the router only validates and stores `slo_ttft_ms`. It
-does not set request deadlines, reorder queues, or expire queued requests based
-on it.
+input tokens. `queue_policy` is `edf`, the default, `fcfs`, or `wspt`. An `edf`
+class ignores the `strict_priority` and soft `priority` request hints when it
+orders its queue; to let these hints reorder a class's queue, set its
+`queue_policy` to `fcfs` or `wspt`. The soft `priority` can still affect a
+backend engine that has priority scheduling enabled. Earlier releases read an
+omitted `queue_policy` as `fcfs` and reject `edf`, so while an older frontend
+reads the same policy file, set `queue_policy` to `fcfs` or `wspt` explicitly.
+`slo_ttft_ms` is an optional time-to-first-token budget in
+whole milliseconds and must be a positive integer of at most `4294967295`
+(about 49.7 days): leaving it unset means the class has no budget, and `0` is
+rejected. An `edf` class orders each request by its router ingress time plus
+`slo_ttft_ms`, unless a request classifier sets an explicit deadline, which
+takes precedence whether earlier or later. The budget counts from when the
+request entered the router, so classification and queue waits spend it, and a
+later capacity recheck or cache refresh does not restart it. `fcfs` and `wspt`
+classes do not order by it. A request whose class budget has passed is not
+rejected and can still be dispatched; only a classifier's explicit deadline
+expires queued requests.
 
 Profiles resolve in this order: exact model profile, root profile, then the
 synthetic single-class fallback. A model profile completely replaces the root
