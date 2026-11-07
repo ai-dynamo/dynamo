@@ -18,10 +18,12 @@ path = "src/bin/dynamo-epp-sidecar.rs"
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+bytes = { workspace = true }
 axum = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 thiserror = { workspace = true }
@@ -29,5 +31,4 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
