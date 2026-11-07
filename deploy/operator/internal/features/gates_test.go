@@ -56,16 +56,17 @@ func TestGateRegistryIsComplete(t *testing.T) {
 
 func allEnabledGates() Gates {
 	return Gates{
-		Checkpoint:       true,
-		Grove:            true,
-		LPX:              true,
-		LWS:              true,
-		DisaggregatedSet: true,
-		KaiScheduler:     true,
-		VolcanoScheduler: true,
-		DRA:              true,
-		Istio:            true,
-		GPUDiscovery:     true,
+		Checkpoint:         true,
+		Grove:              true,
+		LPX:                true,
+		LWS:                true,
+		DisaggregatedSet:   true,
+		KaiScheduler:       true,
+		VolcanoScheduler:   true,
+		DRA:                true,
+		Istio:              true,
+		MultiClusterExport: true,
+		GPUDiscovery:       true,
 	}
 }
 
