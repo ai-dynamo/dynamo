@@ -10269,6 +10269,36 @@ def test_power_window_is_skipped_when_the_latency_sample_is_incomplete(monkeypat
     assert stub._bench_power_result == _unavailable("latency_sample_incomplete")
 
 
+def test_prefill_point_without_a_sample_at_its_deadline_joins_the_power_round(
+    monkeypatch,
+):
+    """A rank still waiting for its prefill FPM at the deadline must not save
+    (send ``result``) while its peers open the window (send ``power_round``)."""
+    point = BenchmarkPoint(
+        point_type="prefill", total_prefill_tokens=16, total_kv_read_tokens=0
+    )
+    stub, clock = _power_window_stub(monkeypatch, point)
+    stub._bench_current_fpms = []
+    stub._bench_drain_pending = False
+    stub._bench_point_deadline = clock.now
+    stub.deferred_frees = deque()
+    rounds = []
+    stub._bench_power_round = lambda window, want, ok: rounds.append(ok) or (want, ok)
+    saved = []
+
+    def save():
+        saved.append(stub._bench_take_power_result())
+        stub._bench_current_point = None
+
+    stub._bench_save_current_point = save
+
+    # Requests are still alive: the rank joins the opening round first.
+    assert InstrumentedScheduler._bench_step_prefill(stub) is None
+    assert (rounds, saved) == ([False], [])
+    assert InstrumentedScheduler._bench_step_prefill(stub) is None
+    assert saved == [_unavailable("latency_sample_incomplete")]
+
+
 def _prefill_power_stub():
     stub = _vocab_stub(vocab_size=1000)
     stub._bench_hash_block_size = 16

@@ -5698,6 +5698,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 and not self._bench_current_fpms
                 and self._bench_point_result_timed_out()
             ):
+                if self._bench_power_window_pending():
+                    # Join the group's opening power round, which reports
+                    # latency_sample_incomplete; the save follows next pass.
+                    self._bench_power_window_step()
+                    return None
                 self._bench_save_current_point()
             if self._bench_power_window is not None:
                 # Runs while a repeat is in flight too: it prepares the next one.
