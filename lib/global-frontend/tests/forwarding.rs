@@ -6,11 +6,12 @@
 //! which streams the prompt back one character at a time.
 
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::http::HeaderMap;
-use dynamo_global_common::PoolKey;
+use dynamo_global_common::{PoolId, PoolKey};
 use dynamo_global_frontend::{Metrics, PoolSnapshot};
 use dynamo_global_router::{
     InFlightTracker, Pool, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
@@ -21,6 +22,7 @@ use dynamo_llm::http::service::service_v2::HttpService;
 use futures::StreamExt;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -142,6 +144,43 @@ async fn scripted_pool_frontend(sse: &'static str) -> (Server, Arc<Mutex<Vec<Hea
     (pool_frontend(app).await, seen)
 }
 
+/// A pool frontend that answers every chat request with `status` and
+/// `body`, and the number of requests it has received.
+async fn answering_pool_frontend(
+    status: StatusCode,
+    body: &'static str,
+) -> (Server, Arc<AtomicUsize>) {
+    let received = Arc::new(AtomicUsize::new(0));
+    let counter = received.clone();
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+            async move { (status, body) }
+        }),
+    );
+    (pool_frontend(app).await, received)
+}
+
+/// A pool frontend that reads each request and closes the connection
+/// without answering.
+async fn hanging_up_pool_frontend() -> Server {
+    let (listener, url) = bind().await;
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = tokio::select! {
+                _ = stop.cancelled() => return,
+                accepted = listener.accept() => accepted.unwrap(),
+            };
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request).await;
+        }
+    });
+    Server { url, cancel }
+}
+
 fn pool(dgd: &str, model: &str, frontend: &Url) -> Pool {
     let key = PoolKey::new("ohio", "dynamo", dgd).unwrap();
     Pool::new(&key, model, REGION, vec![frontend.clone()])
@@ -166,11 +205,29 @@ async fn global_frontend_with(
     selector: Arc<dyn PoolSelector>,
     in_flight: Arc<InFlightTracker>,
 ) -> GlobalFrontend {
+    global_frontend_failing_over(pools, selector, in_flight, 1).await
+}
+
+/// [`global_frontend_with`], sending a request its pool cannot take to up to
+/// `max_failovers` other pools.
+async fn global_frontend_failing_over(
+    pools: Vec<Pool>,
+    selector: Arc<dyn PoolSelector>,
+    in_flight: Arc<InFlightTracker>,
+    max_failovers: usize,
+) -> GlobalFrontend {
     let (sender, receiver) = watch::channel(Arc::new(PoolSnapshot::new(pools)));
     let (listener, url) = bind().await;
     let cancel = CancellationToken::new();
     let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
-    let app = dynamo_global_frontend::app(receiver, selector, in_flight, client(), metrics);
+    let app = dynamo_global_frontend::app(
+        receiver,
+        selector,
+        in_flight,
+        client(),
+        metrics,
+        max_failovers,
+    );
     tokio::spawn(dynamo_global_frontend::serve(listener, app, cancel.clone()));
     wait_until_ok(&url.join("live").unwrap()).await;
     GlobalFrontend {
@@ -786,7 +843,7 @@ async fn shutdown_lets_an_open_stream_finish_then_returns() {
     let in_flight = Arc::new(InFlightTracker::new());
     let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
     let selector = Arc::new(RoundRobinSelector::new());
-    let app = dynamo_global_frontend::app(receiver, selector, in_flight, client(), metrics);
+    let app = dynamo_global_frontend::app(receiver, selector, in_flight, client(), metrics, 1);
     let shutdown = CancellationToken::new();
     let serving = tokio::spawn(dynamo_global_frontend::serve(
         listener,
@@ -815,4 +872,442 @@ async fn shutdown_lets_an_open_stream_finish_then_returns() {
         .unwrap()
         .unwrap();
     drop(client);
+}
+
+const FAILOVERS: &str = "dynamo_global_frontend_failovers_total";
+const REQUESTS: &str = "dynamo_global_frontend_requests_total";
+const FAILOVER_REASONS: [&str; 3] = ["no_response", "unavailable", "overloaded"];
+
+/// The content of a non-streamed chat completion.
+async fn chat_content(response: reqwest::Response) -> String {
+    let body = ok_json(response).await;
+    body["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// The Global Frontend's metrics now. Counters are final once the client
+/// has the response.
+async fn metrics_now(global: &GlobalFrontend) -> String {
+    metrics_when(&global.server.url, |_| true).await
+}
+
+#[tokio::test]
+async fn fails_over_from_an_unavailable_or_overloaded_pool() {
+    let green = echo_pool_frontend().await;
+    for (status, reason) in [(503, "unavailable"), (529, "overloaded")] {
+        let status = StatusCode::from_u16(status).unwrap();
+        let (blue, blue_requests) = answering_pool_frontend(status, "busy").await;
+        let global = global_frontend(vec![
+            pool("blue", MODEL, &blue.url),
+            pool("green", MODEL, &green.url),
+        ])
+        .await;
+
+        let response = post(
+            &global.server.url,
+            "v1/chat/completions",
+            &chat(MODEL, "hi", false),
+        )
+        .await;
+        assert_eq!(chat_content(response).await, "hi", "{status}");
+        assert_eq!(blue_requests.load(Ordering::Relaxed), 1, "{status}");
+
+        // Each pool tried counts the request under its own answer.
+        let metrics = metrics_now(&global).await;
+        let blue = [("pool", "ohio/dynamo/blue"), ("status", status.as_str())];
+        let green = [("pool", "ohio/dynamo/green"), ("status", "200")];
+        assert_eq!(sample(&metrics, REQUESTS, &blue), Some(1.0), "{status}");
+        assert_eq!(sample(&metrics, REQUESTS, &green), Some(1.0), "{status}");
+        assert_eq!(
+            sample(&metrics, FAILOVERS, &[("reason", reason)]),
+            Some(1.0)
+        );
+    }
+}
+
+#[tokio::test]
+async fn fails_over_when_the_pool_does_not_answer() {
+    let green = echo_pool_frontend().await;
+    let (_socket, refused) = closed();
+    let hanging_up = hanging_up_pool_frontend().await;
+    for blue in [&refused, &hanging_up.url] {
+        let global = global_frontend(vec![
+            pool("blue", MODEL, blue),
+            pool("green", MODEL, &green.url),
+        ])
+        .await;
+
+        let response = post(
+            &global.server.url,
+            "v1/chat/completions",
+            &chat(MODEL, "hi", false),
+        )
+        .await;
+        assert_eq!(chat_content(response).await, "hi", "{blue}");
+
+        let metrics = metrics_now(&global).await;
+        let no_response = [("pool", "ohio/dynamo/blue"), ("status", "no_response")];
+        assert_eq!(
+            sample(&metrics, REQUESTS, &no_response),
+            Some(1.0),
+            "{blue}"
+        );
+        let reason = [("reason", "no_response")];
+        assert_eq!(sample(&metrics, FAILOVERS, &reason), Some(1.0), "{blue}");
+    }
+}
+
+#[tokio::test]
+async fn the_last_attempt_passes_through_what_it_got() {
+    let unavailable = StatusCode::SERVICE_UNAVAILABLE;
+    let overloaded = StatusCode::from_u16(529).unwrap();
+    let (blue, _) = answering_pool_frontend(unavailable, "blue is busy").await;
+    let (green, _) = answering_pool_frontend(overloaded, "green is overloaded").await;
+    let global = global_frontend(vec![
+        pool("blue", MODEL, &blue.url),
+        pool("green", MODEL, &green.url),
+    ])
+    .await;
+    let response = post(
+        &global.server.url,
+        "v1/chat/completions",
+        &chat(MODEL, "hi", false),
+    )
+    .await;
+    assert_eq!(response.status(), overloaded);
+    assert_eq!(response.text().await.unwrap(), "green is overloaded");
+    let metrics = metrics_now(&global).await;
+    let reason = |reason| [("reason", reason)];
+    assert_eq!(
+        sample(&metrics, FAILOVERS, &reason("unavailable")),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(&metrics, FAILOVERS, &reason("overloaded")),
+        Some(0.0)
+    );
+
+    // A last pool that cannot be reached gets the Global Frontend's own 503.
+    let (_socket, refused) = closed();
+    let global = global_frontend(vec![
+        pool("blue", MODEL, &blue.url),
+        pool("green", MODEL, &refused),
+    ])
+    .await;
+    let response = post(
+        &global.server.url,
+        "v1/chat/completions",
+        &chat(MODEL, "hi", false),
+    )
+    .await;
+    assert_eq!(response.status(), unavailable);
+    let body: Value = response.json().await.unwrap();
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(&format!(
+            "pool frontend {refused}v1/chat/completions failed"
+        )),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn pools_without_frontends_are_not_tried() {
+    let (blue, _) = answering_pool_frontend(StatusCode::SERVICE_UNAVAILABLE, "blue is busy").await;
+    let draining = Pool::new(
+        &PoolKey::new("ohio", "dynamo", "draining").unwrap(),
+        MODEL,
+        REGION,
+        Vec::new(),
+    );
+    let global = global_frontend(vec![pool("blue", MODEL, &blue.url), draining]).await;
+
+    let response = post(
+        &global.server.url,
+        "v1/chat/completions",
+        &chat(MODEL, "hi", false),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.text().await.unwrap(), "blue is busy");
+    let metrics = metrics_now(&global).await;
+    let reason = [("reason", "unavailable")];
+    assert_eq!(sample(&metrics, FAILOVERS, &reason), Some(0.0));
+    let rejected = "dynamo_global_frontend_rejected_requests_total";
+    assert_eq!(sample(&metrics, rejected, &[]), None);
+}
+
+#[tokio::test]
+async fn failover_tries_each_pool_once_up_to_the_limit() {
+    for (max_failovers, tried) in [(0, 1), (1, 2), (5, 3)] {
+        let mut servers = Vec::new();
+        let mut pools = Vec::new();
+        for dgd in ["blue", "green", "red"] {
+            let (server, received) =
+                answering_pool_frontend(StatusCode::SERVICE_UNAVAILABLE, "busy").await;
+            pools.push(pool(dgd, MODEL, &server.url));
+            servers.push((server, received));
+        }
+        let selector = Arc::new(RoundRobinSelector::new());
+        let in_flight = Arc::new(InFlightTracker::new());
+        let global = global_frontend_failing_over(pools, selector, in_flight, max_failovers).await;
+
+        let response = post(
+            &global.server.url,
+            "v1/chat/completions",
+            &chat(MODEL, "hi", false),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let received = servers
+            .iter()
+            .map(|(_, received)| received.load(Ordering::Relaxed))
+            .collect::<Vec<_>>();
+        assert!(received.iter().all(|count| *count <= 1), "{received:?}");
+        assert_eq!(received.iter().sum::<usize>(), tried, "{received:?}");
+        let metrics = metrics_now(&global).await;
+        let reason = [("reason", "unavailable")];
+        let failovers = (tried - 1) as f64;
+        assert_eq!(sample(&metrics, FAILOVERS, &reason), Some(failovers));
+    }
+}
+
+#[tokio::test]
+async fn other_statuses_pass_through_without_failing_over() {
+    let (green, green_requests) = answering_pool_frontend(StatusCode::OK, "green").await;
+    for status in [429, 500, 502] {
+        let status = StatusCode::from_u16(status).unwrap();
+        let (blue, _) = answering_pool_frontend(status, "blue says no").await;
+        let global = global_frontend(vec![
+            pool("blue", MODEL, &blue.url),
+            pool("green", MODEL, &green.url),
+        ])
+        .await;
+
+        let response = post(
+            &global.server.url,
+            "v1/chat/completions",
+            &chat(MODEL, "hi", false),
+        )
+        .await;
+        assert_eq!(response.status(), status);
+        assert_eq!(response.text().await.unwrap(), "blue says no");
+        // Every reason is exported from the start, at zero.
+        let metrics = metrics_now(&global).await;
+        for reason in FAILOVER_REASONS {
+            let labels = [("reason", reason)];
+            assert_eq!(sample(&metrics, FAILOVERS, &labels), Some(0.0), "{status}");
+        }
+    }
+    assert_eq!(green_requests.load(Ordering::Relaxed), 0);
+}
+
+/// Records, for each selection, the session it saw and the requests in
+/// flight to `watched`, and routes round robin.
+struct InFlightRecorder {
+    in_flight: Arc<InFlightTracker>,
+    watched: PoolId,
+    seen: Mutex<Vec<(Option<String>, u64)>>,
+    inner: RoundRobinSelector,
+}
+
+#[async_trait::async_trait]
+impl PoolSelector for InFlightRecorder {
+    async fn select<'a>(
+        &self,
+        request: &RoutingRequest<'_>,
+        candidates: &[&'a Pool],
+    ) -> Option<PoolTarget<'a>> {
+        let session = request.session.map(str::to_owned);
+        let in_flight = self.in_flight.get(&self.watched);
+        self.seen.lock().unwrap().push((session, in_flight));
+        self.inner.select(request, candidates).await
+    }
+}
+
+#[tokio::test]
+async fn a_failover_releases_the_first_pool_and_resends_the_request() {
+    let (blue, _) = answering_pool_frontend(StatusCode::SERVICE_UNAVAILABLE, "busy").await;
+    let sse = format!("data: {}\n\ndata: [DONE]\n\n", chat_chunk("green"));
+    let sse: &'static str = sse.leak();
+    let (green, seen) = scripted_pool_frontend(sse).await;
+    let blue = pool("blue", MODEL, &blue.url);
+    let green = pool("green", MODEL, &green.url);
+    let in_flight = Arc::new(InFlightTracker::new());
+    let recorder = Arc::new(InFlightRecorder {
+        in_flight: in_flight.clone(),
+        watched: blue.id.clone(),
+        seen: Mutex::default(),
+        inner: RoundRobinSelector::new(),
+    });
+    let ids = [blue.id.clone(), green.id.clone()];
+    let global = global_frontend_with(vec![blue, green], recorder.clone(), in_flight.clone()).await;
+
+    let request = chat(MODEL, "hi", true);
+    let response = client()
+        .post(global.server.url.join("v1/chat/completions").unwrap())
+        .header("x-dynamo-session-id", "session-123")
+        .header("authorization", "Bearer alice")
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.text().await.unwrap(), sse);
+
+    // Blue's request had left its count before the second selection, which
+    // saw no session and so could not move the session's pool.
+    assert_eq!(
+        *recorder.seen.lock().unwrap(),
+        [(Some("session-123".to_owned()), 0), (None, 0)]
+    );
+    // Green got the request as the client sent it.
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0]["x-dynamo-session-id"], "session-123");
+        assert_eq!(seen[0]["authorization"], "Bearer alice");
+        let length = serde_json::to_vec(&request).unwrap().len();
+        assert_eq!(seen[0]["content-length"], length.to_string().as_str());
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while ids.iter().any(|id| in_flight.get(id) != 0) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a request stayed in flight");
+}
+
+#[tokio::test]
+async fn a_failover_does_not_move_the_session_pin() {
+    use dynamo_global_router::affinity::{
+        AffinityConfig, InMemoryAffinityStore, StoreBackedSessionAffinity,
+    };
+    use dynamo_global_router::{AffinitySelector, PoolSignals};
+
+    // Blue, in the Global Frontend's region, is busy for its first request.
+    let busy = Arc::new(AtomicBool::new(true));
+    let blue_server = pool_frontend(axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(move || {
+            let busy = busy.swap(false, Ordering::Relaxed);
+            async move {
+                if busy {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(json!({"pool": "busy"})),
+                    )
+                } else {
+                    (StatusCode::OK, axum::Json(json!({"pool": "blue"})))
+                }
+            }
+        }),
+    ))
+    .await;
+    let green_server = pool_frontend(axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|| async { axum::Json(json!({"pool": "green"})) }),
+    ))
+    .await;
+    let mut blue = pool("blue", MODEL, &blue_server.url);
+    blue.location.region = "east".into();
+    let mut green = pool("green", MODEL, &green_server.url);
+    green.location.region = "west".into();
+    let in_flight = Arc::new(InFlightTracker::new());
+    let store = Arc::new(InMemoryAffinityStore::default());
+    let selector = Arc::new(AffinitySelector::new(
+        Arc::new(PoolSignals::new(in_flight.clone())),
+        "east".into(),
+        2.0,
+        Arc::new(StoreBackedSessionAffinity::new(store, Duration::from_secs(1800)).unwrap()),
+        AffinityConfig::default(),
+    ));
+    let stats = selector.stats();
+    let global = global_frontend_with(vec![blue, green], selector, in_flight).await;
+
+    let mut served = Vec::new();
+    for _ in 0..2 {
+        let response = client()
+            .post(global.server.url.join("v1/chat/completions").unwrap())
+            .header("x-dynamo-session-id", "session-123")
+            .json(&chat(MODEL, "hi", false))
+            .send()
+            .await
+            .unwrap();
+        served.push(ok_json(response).await["pool"].clone());
+    }
+    // Green serves the request blue could not take, but the session stays on
+    // blue, and the retry does not touch the store.
+    assert_eq!(served, ["green", "blue"]);
+    assert_eq!(stats.misses.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.hits.load(Ordering::Relaxed), 1);
+}
+
+/// Routes round robin for its first selection and finds no pool after that,
+/// as a selector may once the candidates are narrowed.
+#[derive(Default)]
+struct ChoosesOnce {
+    selections: AtomicUsize,
+    inner: RoundRobinSelector,
+}
+
+#[async_trait::async_trait]
+impl PoolSelector for ChoosesOnce {
+    async fn select<'a>(
+        &self,
+        request: &RoutingRequest<'_>,
+        candidates: &[&'a Pool],
+    ) -> Option<PoolTarget<'a>> {
+        if self.selections.fetch_add(1, Ordering::Relaxed) > 0 {
+            return None;
+        }
+        self.inner.select(request, candidates).await
+    }
+}
+
+#[tokio::test]
+async fn a_failure_passes_through_when_no_other_pool_is_chosen() {
+    let green = echo_pool_frontend().await;
+    let (busy, _) = answering_pool_frontend(StatusCode::SERVICE_UNAVAILABLE, "blue is busy").await;
+    let (_socket, refused) = closed();
+    for blue in [&busy.url, &refused] {
+        let blue_pool = pool("blue", MODEL, blue);
+        let id = blue_pool.id.clone();
+        let in_flight = Arc::new(InFlightTracker::new());
+        let selector = Arc::new(ChoosesOnce::default());
+        let global = global_frontend_with(
+            vec![blue_pool, pool("green", MODEL, &green.url)],
+            selector.clone(),
+            in_flight.clone(),
+        )
+        .await;
+
+        let response = post(
+            &global.server.url,
+            "v1/chat/completions",
+            &chat(MODEL, "hi", false),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{blue}");
+        let body = response.text().await.unwrap();
+        if blue == &busy.url {
+            assert_eq!(body, "blue is busy");
+        } else {
+            let body: Value = serde_json::from_str(&body).unwrap();
+            let message = body["error"]["message"].as_str().unwrap();
+            assert!(message.starts_with("pool frontend "), "{message}");
+        }
+        assert_eq!(selector.selections.load(Ordering::Relaxed), 2, "{blue}");
+        assert_eq!(in_flight.get(&id), 0, "{blue}");
+        let metrics = metrics_now(&global).await;
+        for reason in FAILOVER_REASONS {
+            let labels = [("reason", reason)];
+            assert_eq!(sample(&metrics, FAILOVERS, &labels), Some(0.0), "{blue}");
+        }
+        let rejected = "dynamo_global_frontend_rejected_requests_total";
+        assert_eq!(sample(&metrics, rejected, &[]), None, "{blue}");
+    }
 }
