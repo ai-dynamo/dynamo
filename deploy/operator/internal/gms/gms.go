@@ -36,6 +36,24 @@ const (
 	ServerModule = "gpu_memory_service.cli.server"
 )
 
+// ClientEnvironment returns the owned bindings independently of resource setup,
+// so renderers can compose them before installing the GMS sidecar and DRA claim.
+func ClientEnvironment(useV1 bool) []corev1.EnvVar {
+	bindings := []corev1.EnvVar{socketEnvironment()}
+	if useV1 {
+		bindings = append(bindings, v1Environment())
+	}
+	return bindings
+}
+
+func socketEnvironment() corev1.EnvVar {
+	return corev1.EnvVar{Name: EnvSocketDir, Value: SharedMountPath}
+}
+
+func v1Environment() corev1.EnvVar {
+	return corev1.EnvVar{Name: EnvUseV1, Value: "true"}
+}
+
 // EnsureServerSidecar adds the GMS server as a native sidecar (init +
 // restartPolicy=Always). With no StartupProbe, kubelet considers it Started
 // as soon as the process is running — clients ride out the sub-second
@@ -46,17 +64,31 @@ const (
 // Snapshot-coupled GMS uses the V1 protocol: sidecar, extra GMS clients,
 // and the engine container all receive DYN_GMS_USE_V1=true. Intra-pod
 // GMS without snapshot keeps the V0 sidecar and does not set that env.
-func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container, useV1 bool) {
+func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container, useV1 bool) []corev1.EnvVar {
 	if podSpec == nil || mainContainer == nil {
-		return
+		return nil
 	}
 
-	EnsureClient(podSpec, mainContainer)
+	bindings := EnsureClient(podSpec, mainContainer)
+	if useV1 {
+		bindings = append(bindings, EnableV1(mainContainer)...)
+	}
+	ensureServerSidecar(podSpec, mainContainer, useV1)
+	return bindings
+}
 
+// EnsureServerSidecarResources attaches the server and client resources without
+// changing the client's environment. podSpec and mainContainer must not be nil.
+func EnsureServerSidecarResources(podSpec *corev1.PodSpec, mainContainer *corev1.Container, useV1 bool) {
+	EnsureClientResources(podSpec, mainContainer)
+	ensureServerSidecar(podSpec, mainContainer, useV1)
+}
+
+// ensureServerSidecar leaves client env composition to the selected caller.
+func ensureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container, useV1 bool) {
 	sidecar := Container(ServerContainerName, ServerModule, mainContainer.Image)
 	if useV1 {
 		EnableV1(&sidecar)
-		EnableV1(mainContainer)
 	}
 	sidecar.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
 	for i := range podSpec.InitContainers {
@@ -68,28 +100,44 @@ func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Containe
 }
 
 // EnableV1 sets DYN_GMS_USE_V1=true on a GMS process container. Idempotent.
-func EnableV1(container *corev1.Container) {
+func EnableV1(container *corev1.Container) []corev1.EnvVar {
 	if container == nil {
-		return
+		return nil
 	}
+	binding := v1Environment()
 	for i := range container.Env {
 		if container.Env[i].Name == EnvUseV1 {
-			container.Env[i] = corev1.EnvVar{Name: EnvUseV1, Value: "true"}
-			return
+			container.Env[i] = binding
+			return []corev1.EnvVar{binding}
 		}
 	}
-	container.Env = append(container.Env, corev1.EnvVar{
-		Name:  EnvUseV1,
-		Value: "true",
-	})
+	container.Env = append(container.Env, binding)
+	return []corev1.EnvVar{binding}
 }
 
 // EnsureClient adds the GMS UDS socket volume, mount, GMS_SOCKET_DIR env var,
 // and DRA claim to a GMS client container. Idempotent.
-func EnsureClient(podSpec *corev1.PodSpec, container *corev1.Container) {
+func EnsureClient(podSpec *corev1.PodSpec, container *corev1.Container) []corev1.EnvVar {
 	if podSpec == nil || container == nil {
-		return
+		return nil
 	}
+	EnsureClientResources(podSpec, container)
+
+	// Legacy callers replace the first binding in place, preserving list order.
+	sharedEnv := socketEnvironment()
+	for i := range container.Env {
+		if container.Env[i].Name == EnvSocketDir {
+			container.Env[i] = sharedEnv
+			return []corev1.EnvVar{sharedEnv}
+		}
+	}
+	container.Env = append(container.Env, sharedEnv)
+	return []corev1.EnvVar{sharedEnv}
+}
+
+// EnsureClientResources attaches the socket volume, mount and DRA claim without
+// mutating environment sources. podSpec and container must not be nil.
+func EnsureClientResources(podSpec *corev1.PodSpec, container *corev1.Container) {
 	sharedVolume := corev1.Volume{
 		Name:     SharedVolumeName,
 		EmptyDir: &corev1.EmptyDirVolumeSource{},
@@ -119,19 +167,6 @@ func EnsureClient(podSpec *corev1.PodSpec, container *corev1.Container) {
 		container.VolumeMounts = append(container.VolumeMounts, sharedMount)
 	}
 
-	sharedEnv := corev1.EnvVar{Name: EnvSocketDir, Value: SharedMountPath}
-	foundEnv := false
-	for i := range container.Env {
-		if container.Env[i].Name == EnvSocketDir {
-			container.Env[i] = sharedEnv
-			foundEnv = true
-			break
-		}
-	}
-	if !foundEnv {
-		container.Env = append(container.Env, sharedEnv)
-	}
-
 	dra.RemoveGPUResources(container.Resources.Limits)
 	dra.RemoveGPUResources(container.Resources.Requests)
 	foundClaim := false
@@ -152,9 +187,7 @@ func Container(name, module, image string) corev1.Container {
 		Name:    name,
 		Image:   image,
 		Command: []string{"python3", "-m", module},
-		Env: []corev1.EnvVar{
-			{Name: EnvSocketDir, Value: SharedMountPath},
-		},
+		Env:     ClientEnvironment(false),
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: SharedVolumeName, MountPath: SharedMountPath},
 		},

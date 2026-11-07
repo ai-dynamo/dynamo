@@ -13,6 +13,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -28,6 +29,7 @@ func configureHybridCyborg(
 	agentTemplateNames []string,
 	cyborgConfigMap *corev1.ConfigMap,
 	cyborgConfigHash string,
+	environment semanticenv.ContainerLayers,
 ) error {
 	container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
 
@@ -42,11 +44,11 @@ func configureHybridCyborg(
 	if err := validateCyborgReplicas(&projection.configuredBuild, cyborg.Spec.Replicas); err != nil {
 		return err
 	}
-	if err := applyCyborgManifestPath(container, projection, modelStoragePath); err != nil {
+	if err := applyCyborgManifestPath(container, projection, modelStoragePath, environment); err != nil {
 		return err
 	}
-	applyLocalPartitionIDs(container, projection)
-	applyCyborgWeightsPath(container, projection, modelStoragePath)
+	applyLocalPartitionIDs(container, projection, environment)
+	applyCyborgWeightsPath(container, projection, modelStoragePath, environment)
 
 	cyborg.Annotations = roleAnnotations(
 		cyborg.Annotations,

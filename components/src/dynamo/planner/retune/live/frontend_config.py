@@ -67,6 +67,8 @@ from dynamo.common.configuration.groups.router_args import (
     add_worker_router_arguments,
 )
 from dynamo.common.configuration.utils import ArgEnv
+from dynamo.common.environment import compose_environment, ordered_environment_enabled
+from dynamo.common.operator_environment import owned_environment
 from dynamo.frontend.frontend_args import build_frontend_parser
 from dynamo.llm import KvRouterConfig
 from dynamo.planner.retune.controller import startup_router_domain
@@ -578,7 +580,10 @@ def _analyze(dgd: Mapping[str, Any], planner_mode: str) -> _Analysis:
         name, spec = find_frontend(dgd)
     except FrontendParseError as error:
         return _Analysis(error=str(error))
-    env = _component_env(dgd, spec)
+    try:
+        env = _component_env(dgd, spec)
+    except FrontendParseError as error:
+        return _Analysis(component=name, spec=spec, error=str(error))
     try:
         argv = _effective_argv(spec)
     except FrontendParseError as error:
@@ -890,8 +895,9 @@ def _component_env(dgd: Mapping[str, Any], spec: Mapping[str, Any]) -> _Env:
     The operator injects ``DYN_PARENT_DGD_K8S_*``, ``POD_*`` and the inert
     names of ``_operator_inert_env``, except into a native-sidecar main,
     which gets no base container; MergeEnvs overlays graph ``env`` and the
-    main container's ``env`` and sorts the result by name; Kubernetes
-    expands ``$(VAR)`` against earlier names and every ``envFrom`` key.
+    main container's ``env``. Origins before 1.8 sort by name; newer origins
+    compose sources without changing authored list order. Kubernetes expands
+    ``$(VAR)`` against earlier names and every ``envFrom`` key.
     """
 
     metadata = dgd.get("metadata") or {}
@@ -913,8 +919,15 @@ def _component_env(dgd: Mapping[str, Any], spec: Mapping[str, Any]) -> _Env:
             }
         operator_inert.update(_operator_inert_env(spec))
     main = _main_container(spec)
-    for entry in [*_graph_env(dgd), *(main.get("env") or [])]:
-        if isinstance(entry, Mapping) and entry.get("name"):
+    layers = [list(entries.values())]
+    for source in [_graph_env(dgd), main.get("env") or []]:
+        layer = [
+            entry
+            for entry in source
+            if isinstance(entry, Mapping) and entry.get("name")
+        ]
+        layers.append(layer)
+        for entry in layer:
             entries[str(entry["name"])] = entry
             operator_inert.discard(str(entry["name"]))
     env_from = tuple(
@@ -925,14 +938,55 @@ def _component_env(dgd: Mapping[str, Any], spec: Mapping[str, Any]) -> _Env:
     values: dict[str, str] = {}
     opaque: set[str] = set()
     inert: set[str] = set()
-    for name in sorted({*entries, *operator_inert}):
+    ordered = ordered_environment_enabled(metadata.get("annotations") or {})
+    if ordered:
+        try:
+            bindings, omitted = owned_environment(dgd, spec)
+        except ValueError as error:
+            raise FrontendParseError(
+                f"P4: invalid component backend: {error}"
+            ) from None
+        layers = [
+            [entry for entry in layer if entry["name"] not in omitted]
+            for layer in layers
+        ]
+        for name in omitted:
+            entries.pop(name, None)
+            operator_inert.discard(name)
+        owned = []
+        for name, value in bindings.items():
+            entry = {"name": name} if value is None else {"name": name, "value": value}
+            owned.append(entry)
+            entries[name] = entry
+            if value is None:
+                operator_inert.add(name)
+            else:
+                operator_inert.discard(name)
+        layers.append(owned)
+        try:
+            replay = compose_environment(*layers)
+        except ValueError as error:
+            raise FrontendParseError(
+                f"P4: invalid component environment: {error}"
+            ) from None
+        opaque.update(operator_inert)
+        inert.update(operator_inert)
+    else:
+        replay = [
+            entries.get(name, {"name": name})
+            for name in sorted({*entries, *operator_inert})
+        ]
+    for entry in replay:
+        name = str(entry["name"])
         if name in operator_inert:
             opaque.add(name)
             inert.add(name)
             continue
-        entry = entries[name]
         source = entry.get("valueFrom")
         if source is not None:
+            if ordered:
+                values.pop(name, None)
+                inert.discard(name)
             opaque.add(name)
             if _inert_source(source):
                 inert.add(name)
@@ -944,6 +998,12 @@ def _component_env(dgd: Mapping[str, Any], spec: Mapping[str, Any]) -> _Env:
             inert=inert,
             env_from_prefixes=prefixes,
         )
+
+        # A repeated definition expands against the previous value before replacing it.
+        if ordered:
+            values.pop(name, None)
+            opaque.discard(name)
+            inert.discard(name)
         if _UNREADABLE not in expanded:
             values[name] = expanded
             continue
@@ -1321,10 +1381,14 @@ def _worker_router_errors(
         if _type(component) not in WORKER_TYPES or _native_sidecar(component):
             continue
         name = str(component.get("name", ""))
-        roles = [
-            (role, spec, _component_env(dgd, spec))
-            for role, spec in _role_specs(component)
-        ]
+        try:
+            roles = [
+                (role, spec, _component_env(dgd, spec))
+                for role, spec in _role_specs(component)
+            ]
+        except FrontendParseError as error:
+            errors.append(f"P4: worker component {name}: {error}")
+            continue
         for role, spec, env in roles:
             argv, shell = _worker_argv(spec, env)
             detail = _worker_router_cached(
@@ -2451,11 +2515,15 @@ def _component_model_flags(
 ) -> list[tuple[str, Optional[str]]]:
     """``_model_flags`` of every pod template the component runs (``_role_specs``)."""
 
-    return [
-        flag
-        for _, spec in _role_specs(component)
-        for flag in _model_flags(spec, _component_env(dgd, spec))
-    ]
+    try:
+        return [
+            flag
+            for _, spec in _role_specs(component)
+            for flag in _model_flags(spec, _component_env(dgd, spec))
+        ]
+    except FrontendParseError:
+        # An invalid environment has no trustworthy served-model name; P4 reports it.
+        return []
 
 
 def _flag_model(flags: Sequence[tuple[str, Optional[str]]]) -> Optional[str]:

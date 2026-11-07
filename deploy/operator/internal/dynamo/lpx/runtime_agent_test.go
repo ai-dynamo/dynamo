@@ -99,7 +99,7 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 
 				t.Log("Apply runtime bindings for the selected family and role")
 				if role.conductor {
-					configureNodeLocalConductorRuntime(&pod, "allocation")
+					configureNodeLocalConductorRuntime(&pod, "allocation", nil)
 				} else {
 					configureAgentScheduling(&pod, role.family, role.devicesPerNode)
 				}
@@ -163,13 +163,13 @@ func TestAllocationPrecedesAuthoredReferences(t *testing.T) {
 			want.Env = append([]corev1.EnvVar{{Name: allocationEnvVar, Value: "agt0:agt1"}}, authored...)
 
 			t.Log("Publish exactly one authoritative allocation before references without changing startup or other environment")
-			configureNodeLocalConductorRuntime(&pod, "agt0:agt1")
+			configureNodeLocalConductorRuntime(&pod, "agt0:agt1", nil)
 			require.Equal(t, *want, pod.Containers[0])
 		})
 	}
 }
 
-func TestModelPathsPrecedeAuthoredReferences(t *testing.T) {
+func TestModelPathsResolveSelectedBuilds(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		family   BuildFamily
@@ -212,43 +212,10 @@ func TestModelPathsPrecedeAuthoredReferences(t *testing.T) {
 				want = append(want, corev1.EnvVar{Name: name, Value: path})
 			}
 
-			t.Log("Author dependent values before duplicate forged bindings")
-			runtimeVariable := "A_RUNTIME_MODEL"
-			if test.pipeline == PipelineHybrid {
-				runtimeVariable = "GAS_DIR"
-			}
-			authored := []corev1.EnvVar{
-				{Name: runtimeVariable, Value: "$(" + names[0] + ")"},
-				{Name: "OTHER", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
-			}
-			container := corev1.Container{Command: []string{"custom-runtime"}, Args: []string{"--unchanged"}, Env: slices.Clone(authored)}
-			for _, name := range names {
-				container.Env = append(container.Env, corev1.EnvVar{Name: name, Value: "stale"}, corev1.EnvVar{Name: name, Value: "duplicate"})
-			}
-			wantContainer := container.DeepCopy()
-			wantContainer.Env = append(slices.Clone(want), authored...)
-
-			t.Log("Include regular and init containers across Pods, including containers without model-path references")
-			containerLists := [][]corev1.Container{
-				{container},
-				{{Name: "prepare", Env: []corev1.EnvVar{{Name: "KEEP", Value: "unchanged"}}}},
-				{{Name: "metrics"}},
-				{*container.DeepCopy()},
-			}
-			wantLists := [][]corev1.Container{
-				{*wantContainer},
-				{{Name: "prepare", Env: append(slices.Clone(want), corev1.EnvVar{Name: "KEEP", Value: "unchanged"})}},
-				{{Name: "metrics", Env: slices.Clone(want)}},
-				{*wantContainer.DeepCopy()},
-			}
-
-			t.Log("Publish only the first draft and final target once in every container, before all authored references")
-			require.NoError(t, applyModelPaths(containerLists, projections, "/custom/models"))
-			require.Equal(t, wantLists, containerLists)
-
-			t.Log("Repeated rendering keeps environment order, startup and authoritative values unchanged")
-			require.NoError(t, applyModelPaths(containerLists, projections, "/custom/models"))
-			require.Equal(t, wantLists, containerLists)
+			t.Log("Publish only the first draft and final target with the resolved storage paths")
+			paths, err := modelPaths(projections, "/custom/models")
+			require.NoError(t, err)
+			require.Equal(t, want, paths)
 		})
 	}
 }
@@ -269,17 +236,11 @@ func TestModelPathsRejectInvalidReferences(t *testing.T) {
 				projections = append(projections, &ModelProjection{pipeline: test.pipeline})
 			}
 			projections[len(projections)-1].configuredBuild.path = "gs://registry/../outside"
-			containerLists := [][]corev1.Container{
-				{{Env: []corev1.EnvVar{{Name: "KEEP", Value: "unchanged"}}}},
-				{{Env: []corev1.EnvVar{{Name: "INIT", Value: "unchanged"}}}},
-			}
-			before := [][]corev1.Container{{*containerLists[0][0].DeepCopy()}, {*containerLists[1][0].DeepCopy()}}
-
-			t.Log("Report the failing binding without changing any container's environment")
-			err := applyModelPaths(containerLists, projections, "/custom/models")
+			t.Log("Report the failing binding before any environment mutation is possible")
+			paths, err := modelPaths(projections, "/custom/models")
 			require.ErrorContains(t, err, "resolve "+test.name)
 			require.ErrorContains(t, err, "bad path segment")
-			require.Equal(t, before, containerLists)
+			require.Nil(t, paths)
 		})
 	}
 }

@@ -243,7 +243,7 @@ func TestDeploymentContractAcquisitionAndRuntimePath(t *testing.T) {
 			require.Equal(t, buildContractDeploymentV1, projection.contractFormat)
 			require.Equal(t, test.family, projection.configuredBuild.family)
 			container := corev1.Container{Env: []corev1.EnvVar{{Name: "MODEL_PATH", Value: "$(GBUILD_MANIFEST_PATH)"}}}
-			require.NoError(t, applyCyborgManifestPath(&container, projection, "/models"))
+			require.NoError(t, applyCyborgManifestPath(&container, projection, "/models", nil))
 			require.Equal(t, []corev1.EnvVar{
 				{Name: gbuildManifestPathEnv, Value: filepath.Join(root, gbuildDeploymentV1CapnpFile)},
 				{Name: "MODEL_PATH", Value: "$(GBUILD_MANIFEST_PATH)"},

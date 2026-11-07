@@ -7,10 +7,10 @@ package lpx
 
 import (
 	"fmt"
-	"slices"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -18,23 +18,17 @@ import (
 func configureNodeLocalConductorRuntime(
 	conductorPodSpec *corev1.PodSpec,
 	allocation string,
+	environment semanticenv.ContainerLayers,
 ) {
 	// Bind placement data without interpreting the template's executable or arguments.
 	conductor := common.FindContainerByName(conductorPodSpec.Containers, commonconsts.MainContainerName)
 
 	// Kubernetes expands environment references in order; publish allocation before authored bindings.
-	env := make([]corev1.EnvVar, 0, len(conductor.Env)+1)
-	env = append(env, corev1.EnvVar{Name: allocationEnvVar, Value: allocation})
-	for _, variable := range conductor.Env {
-		if variable.Name != allocationEnvVar {
-			env = append(env, variable)
-		}
-	}
-	conductor.Env = env
+	environment.Prepend(conductor, "operator.lpx.allocation", []corev1.EnvVar{{Name: allocationEnvVar, Value: allocation}})
 }
 
-// applyModelPaths resolves nonempty canonical projections and rewrites each container's Env in place.
-func applyModelPaths(containerLists [][]corev1.Container, projections []*ModelProjection, modelStoragePath string) error {
+// modelPaths resolves every binding for nonempty canonical projections before any Pod is changed.
+func modelPaths(projections []*ModelProjection, modelStoragePath string) ([]corev1.EnvVar, error) {
 	// Single-model workloads publish one path; speculative workloads publish the first draft and final target.
 	type modelPathBinding struct {
 		name       string
@@ -52,24 +46,10 @@ func applyModelPaths(containerLists [][]corev1.Container, projections []*ModelPr
 		projection := binding.projection
 		path, err := buildRuntimePath(projection.configuredBuild.path, projection.runtimeBuildRef, modelStoragePath)
 		if err != nil {
-			return fmt.Errorf("resolve %s: %w", binding.name, err)
+			return nil, fmt.Errorf("resolve %s: %w", binding.name, err)
 		}
 		paths = append(paths, corev1.EnvVar{Name: binding.name, Value: path})
 	}
 
-	// Regular and init containers receive authoritative paths ahead of authored references.
-	for _, containers := range containerLists {
-		for i := range containers {
-			container := &containers[i]
-			env := make([]corev1.EnvVar, 0, len(paths)+len(container.Env))
-			env = append(env, paths...)
-			for _, variable := range container.Env {
-				if !slices.ContainsFunc(paths, func(path corev1.EnvVar) bool { return path.Name == variable.Name }) {
-					env = append(env, variable)
-				}
-			}
-			container.Env = env
-		}
-	}
-	return nil
+	return paths, nil
 }

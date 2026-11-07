@@ -15,6 +15,7 @@ import (
 type TRTLLMBackend struct {
 	MpiRunSecretName    string
 	roleLaunchOwnership roleLaunchOwnership
+	environment         *podEnvironment
 }
 
 // UpdateContainer configures the container for TRT-LLM multinode deployments.
@@ -61,7 +62,7 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		Name:  "OMPI_MCA_orte_keep_fqdn_hostnames",
 		Value: "1",
 	}
-	container.Env = append(container.Env, envVar)
+	b.environment.appendDefaults(container, []corev1.EnvVar{envVar})
 	if b.roleLaunchOwnership == roleLaunchOwnedByPodTemplate {
 		// The worker readiness probe above still targets the MPI SSH port, so
 		// a role-authored worker command must start sshd on that port.

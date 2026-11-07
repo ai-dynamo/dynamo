@@ -188,8 +188,8 @@ func TestRenderHXHybridCyborgAgentServers(t *testing.T) {
 			require.NoError(t, err)
 			pcs := renderTestPCS(true)
 			rendered, err := RenderNodeLocal(workload, plan, RenderInput{
-				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
-				Cyborg: pcs.Spec.Template.Cliques[0],
+				Stages: map[string]PodTemplate{testRenderComponentName: {Template: corev1.PodTemplateSpec{Spec: renderTestPodSpec()}}},
+				Cyborg: &CliqueTemplate{Template: pcs.Spec.Template.Cliques[0]},
 			})
 			require.NoError(t, err)
 

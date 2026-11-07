@@ -27,6 +27,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
@@ -112,7 +113,7 @@ func applyGMSSharedResources(podSpec *corev1.PodSpec, c *corev1.Container, rank 
 // overrides the engine's RestartPolicy to Never so the cohort can only be
 // recovered by the failover cascade controller; see
 // failover_cascade_controller.go.
-func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount int) *corev1.PodSpec {
+func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount int, environment *podEnvironment) *corev1.PodSpec {
 	podSpec := basePodSpec.DeepCopy()
 	if len(podSpec.Containers) == 0 {
 		return podSpec
@@ -131,10 +132,10 @@ func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount in
 	c.LivenessProbe = nil
 	c.ReadinessProbe = nil
 
-	c.Env = append(c.Env, corev1.EnvVar{
+	environment.bind(c, "operator.gpuMemoryService", []corev1.EnvVar{{
 		Name:  gmsruntime.EnvSocketDir,
 		Value: gmsSharedMountPath,
-	})
+	}})
 
 	applyGMSSharedResources(podSpec, c, rank)
 
@@ -191,14 +192,14 @@ func gmsEngineEnvVars() []corev1.EnvVar {
 //     isInterPodFailover is true, so forcing Never in the standalone case
 //     would strand engine pods in Failed state with nothing listening to
 //     force-delete them.
-func augmentEngineForGMS(podSpec *corev1.PodSpec, rank int32, isInterPodFailover bool) {
+func augmentEngineForGMS(podSpec *corev1.PodSpec, rank int32, isInterPodFailover bool, environment *podEnvironment) {
 	if len(podSpec.Containers) == 0 {
 		return
 	}
 	c := &podSpec.Containers[0]
 
-	c.Env = append(c.Env, gmsEngineEnvVars()...)
-	removeEnvVar(c, "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS")
+	environment.bind(c, "operator.gpuMemoryService", gmsEngineEnvVars())
+	environment.omit(c, "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS")
 
 	applyGMSSharedResources(podSpec, c, rank)
 	if isInterPodFailover {
@@ -269,17 +270,6 @@ func addGPUToleration(podSpec *corev1.PodSpec) {
 		}
 	}
 	podSpec.Tolerations = append(podSpec.Tolerations, toleration)
-}
-
-// removeEnvVar removes all occurrences of the named env var from a container.
-func removeEnvVar(c *corev1.Container, name string) {
-	filtered := c.Env[:0]
-	for _, e := range c.Env {
-		if e.Name != name {
-			filtered = append(filtered, e)
-		}
-	}
-	c.Env = filtered
 }
 
 // getGPUCount extracts the GPU count from the component's Kubernetes resource requirements.
@@ -486,22 +476,16 @@ func IntraPodFailoverEngineContainerNames() []string {
 // FPM is handled because WorkerDefaults automatically injects its port.
 // Other activation paths and runtime socket cleanup remain engine concerns.
 // Mutates container, which must not be nil.
-func PrepareSnapshotFailoverCapture(container *corev1.Container) {
+func PrepareSnapshotFailoverCapture(container *corev1.Container, environment semanticenv.ContainerLayers) {
 	// Remove the FPM port from the capture environment.
-	filtered := container.Env[:0]
-	for _, env := range container.Env {
-		if env.Name != "DYN_FORWARDPASS_METRIC_PORT" {
-			filtered = append(filtered, env)
-		}
-	}
-	container.Env = filtered
+	environment.Omit(container, "DYN_FORWARDPASS_METRIC_PORT")
 }
 
 // buildSnapshotFailoverPod prepares the restored active/standby pair for vLLM
 // and SGLang with GMS V1. TRT-LLM is gated until its restore/election path exists.
 // Collective ports are captured state, so cold shadow overrides do not apply.
 // Mutates podSpec, which must not be nil and must already have GMS resources.
-func buildSnapshotFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, backendFramework BackendFramework) error {
+func buildSnapshotFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, backendFramework BackendFramework, environment *podEnvironment) error {
 	// Defend direct rendering as well as objects that bypassed admission.
 	if !snapshotFailoverBackendSupported(backendFramework) {
 		return fmt.Errorf("Snapshot-backed intra-pod failover supports only vLLM and SGLang (detected: %s)", backendFramework)
@@ -510,14 +494,14 @@ func buildSnapshotFailoverPod(podSpec *corev1.PodSpec, numberOfNodes int32, back
 		return fmt.Errorf("Snapshot-backed intra-pod failover requires a single node setup")
 	}
 
-	return buildFailoverEnginePair(podSpec)
+	return buildFailoverEnginePair(podSpec, environment)
 }
 
 // buildFailoverEnginePair replaces main with two engine containers, preserving
 // sidecars and the already configured DRA claim and GMS shared mount. Both the
 // snapshot path and cold-start failover path use these identity/probe settings.
 // Mutates podSpec, which must not be nil and must have main as its first container.
-func buildFailoverEnginePair(podSpec *corev1.PodSpec) error {
+func buildFailoverEnginePair(podSpec *corev1.PodSpec, environment *podEnvironment) error {
 	if len(podSpec.Containers) == 0 {
 		return fmt.Errorf("pod spec must have at least one container for failover transformation")
 	}
@@ -527,15 +511,16 @@ func buildFailoverEnginePair(podSpec *corev1.PodSpec) error {
 	sidecars := podSpec.Containers[1:]
 	engines := make([]corev1.Container, failoverEngineCount, failoverEngineCount+len(sidecars))
 	for i := range failoverEngineCount {
-		engines[i] = buildEngineContainer(mainContainer, i, commonconsts.DynamoSystemPort+i)
+		engines[i] = buildEngineContainer(mainContainer, i, commonconsts.DynamoSystemPort+i, environment)
 	}
 	podSpec.Containers = append(engines, sidecars...)
+
 	return nil
 }
 
 // buildEngineContainer clones the main container with ENGINE_ID and failover env vars.
 // Each engine gets a unique system port and named port for probe targeting.
-func buildEngineContainer(base corev1.Container, engineID int, systemPort int) corev1.Container {
+func buildEngineContainer(base corev1.Container, engineID int, systemPort int, environment *podEnvironment) corev1.Container {
 	engine := *base.DeepCopy()
 	engine.Name = fmt.Sprintf("engine-%d", engineID)
 
@@ -553,23 +538,18 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 	// DYN_FORWARDPASS_METRIC_PORT is removed here so we can override it per engine
 	// below — both engines share the pod network namespace, so the base value
 	// stamped by component_worker.go collides on bind.
-	removeSet := map[string]bool{
-		"DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS": true,
-		"DYN_SYSTEM_PORT":                       true,
-		"DYN_SYSTEM_ENABLED":                    true,
-		"DYN_HEALTH_CHECK_ENABLED":              true,
-		"CONTAINER_NAME":                        true,
-		"DYN_FORWARDPASS_METRIC_PORT":           true,
+	omitted := []string{
+		"DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+		"DYN_SYSTEM_PORT",
+		"DYN_SYSTEM_ENABLED",
+		"DYN_HEALTH_CHECK_ENABLED",
+		"CONTAINER_NAME",
+		"DYN_FORWARDPASS_METRIC_PORT",
 		// Only the cold-start failover path re-enables shadow mode after cloning.
-		"DYN_VLLM_GMS_SHADOW_MODE": true,
+		"DYN_VLLM_GMS_SHADOW_MODE",
 	}
 
-	var filtered []corev1.EnvVar
-	for _, env := range engine.Env {
-		if !removeSet[env.Name] {
-			filtered = append(filtered, env)
-		}
-	}
+	environment.clone(&base, &engine, omitted)
 
 	failoverEnvs := []corev1.EnvVar{
 		{Name: "ENGINE_ID", Value: strconv.Itoa(engineID)},
@@ -583,7 +563,7 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 		// the same base port and engine-1 fails with EADDRINUSE.
 		{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: strconv.Itoa(commonconsts.DynamoFPMBasePort + engineID)},
 	}
-	engine.Env = append(filtered, failoverEnvs...)
+	environment.bind(&engine, "operator.failover", failoverEnvs)
 
 	// Retarget HTTP probes to this engine's named port. Each engine runs its
 	// system server on a staggered port (e.g. 9090, 9091), and the probes

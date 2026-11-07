@@ -168,7 +168,12 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
 </ParamField>
 
 <ParamField path="env" type="[]core/v1.EnvVar">
-  Environment variables prepended to each component's `main` container environment and, in Dynamo sidecar mode, its `runtime` init container environment. A container-specific `env` entry with the same name takes precedence and may reference values from this list.
+  General environment defaults for each component's regular `main` container and declared `runtime`
+  init container. Container-specific definitions take precedence. For operator origins 1.8.0 and
+  later, list order is preserved within each source and references between sources are
+  topologically ordered; cycles fail rendering. Generated DCDs preserve this list separately in
+  their own `spec.env`. Older or missing origins retain legacy sorted composition.
+  See [Environment Variable Order](../../kubernetes/model-deployment/deploy-with-dgd.md#environment-variable-order).
 
   <a href="https://pkg.go.dev/k8s.io/api/core/v1#EnvVar" target="_blank">core/v1.EnvVar</a>
 </ParamField>

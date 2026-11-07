@@ -14,6 +14,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -52,7 +53,9 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 		return nil, err
 	}
 	if workload.Pipeline() == PipelineHybrid {
-		input.Cyborg = pcs.Spec.Template.Cliques[0]
+		if input.Cyborg == nil {
+			input.Cyborg = &CliqueTemplate{Template: pcs.Spec.Template.Cliques[0]}
+		}
 	}
 	templates, err := RenderNodeLocal(workload, plan, input)
 	if err != nil {
@@ -61,6 +64,90 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 	pcs.Spec.Template.Cliques = templates.Cliques
 	pcs.Spec.Template.PodCliqueScalingGroupConfigs = []grovev1alpha1.PodCliqueScalingGroupConfig{templates.ScalingGroup}
 	return pcs, nil
+}
+
+func TestRenderFinalizesModelPathBindings(t *testing.T) {
+	for _, pipeline := range []Pipeline{PipelineSingle, PipelineHybrid} {
+		t.Run(string(pipeline), func(t *testing.T) {
+			t.Log("Retain graph dependencies until model paths are bound to every final LPX role")
+			projection := projectRenderFixture(t, pipeline, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+			pcs := renderTestPCS(pipeline == PipelineHybrid)
+			template := corev1.PodTemplateSpec{Spec: renderTestPodSpec()}
+			template.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "LPX_MODEL_PATH", Value: "$(MODEL)"}}
+			conductor := template.DeepCopy()
+			pods := []*corev1.PodSpec{&template.Spec, &conductor.Spec}
+			if pipeline == PipelineHybrid {
+				pod := &pcs.Spec.Template.Cliques[0].Spec.PodSpec
+				pod.Containers[0].Env = append(pod.Containers[0].Env, template.Spec.Containers[0].Env...)
+				pods = append(pods, pod)
+			}
+			collectors := make([]semanticenv.ContainerLayers, len(pods))
+			for i, pod := range pods {
+				pod.Containers = append(pod.Containers, corev1.Container{Name: "observer", Env: []corev1.EnvVar{{Name: "LPX_MODEL_PATH", Value: "$(MODEL)"}}})
+				pod.InitContainers = append(pod.InitContainers, corev1.Container{Name: "prepare", Env: []corev1.EnvVar{{Name: "LPX_MODEL_PATH", Value: "$(MODEL)"}}})
+				layers := make(semanticenv.ContainerLayers)
+				layers.Capture(pod)
+				for name, sources := range layers {
+					layers[name] = append([]semanticenv.Layer{{Source: "spec.env", Env: []corev1.EnvVar{{Name: "MODEL", Value: "$(LPX_MODEL_PATH)/model"}}}}, sources...)
+				}
+				collectors[i] = layers
+			}
+			input := RenderInput{
+				Stages:    map[string]PodTemplate{testRenderComponentName: {Template: template, Environment: collectors[0]}},
+				Conductor: &PodTemplate{Template: *conductor, Environment: collectors[1]},
+			}
+			if pipeline == PipelineHybrid {
+				input.Cyborg = &CliqueTemplate{Template: pcs.Spec.Template.Cliques[0], Environment: collectors[2]}
+			}
+			rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, input)
+			require.NoError(t, err)
+			for _, clique := range rendered.Spec.Template.Cliques {
+				for _, containers := range [][]corev1.Container{clique.Spec.PodSpec.Containers, clique.Spec.PodSpec.InitContainers} {
+					for _, container := range containers {
+						var relevant []string
+						for _, env := range container.Env {
+							if env.Name == "LPX_MODEL_PATH" || env.Name == "MODEL" {
+								relevant = append(relevant, env.Name)
+							}
+						}
+						require.Equal(t, []string{"LPX_MODEL_PATH", "MODEL"}, relevant, "%s/%s", clique.Name, container.Name)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestRenderRequiresPairedRoleTemplates(t *testing.T) {
+	for _, missing := range []string{"stage", "conductor", "Cyborg"} {
+		t.Run(missing, func(t *testing.T) {
+			t.Log("Require each selected role's template instead of silently losing its environment sources")
+			pipeline := PipelineSingle
+			if missing == "Cyborg" {
+				pipeline = PipelineHybrid
+			}
+			projection := projectRenderFixture(t, pipeline, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+			projection.stage = testRenderComponentName
+			workload := &Workload{modelProjections: []*ModelProjection{projection}, scalingGroupReplicas: 1}
+			serving := &v1beta1.DynamoComponentDeploymentSharedSpec{Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}}}
+			plan, err := workload.PlanNodeLocalMaterialization("test-pcs", serving)
+			require.NoError(t, err)
+			template := corev1.PodTemplateSpec{Spec: renderTestPodSpec()}
+			input := RenderInput{Stages: map[string]PodTemplate{testRenderComponentName: {Template: template}}, Conductor: &PodTemplate{Template: *template.DeepCopy()}}
+			if missing == "stage" {
+				delete(input.Stages, testRenderComponentName)
+			} else if missing == "conductor" {
+				input.Conductor = nil
+			}
+			before := template.DeepCopy()
+
+			t.Log("Report the omitted role before changing any Pod template")
+			_, err = RenderNodeLocal(workload, plan, input)
+			require.ErrorContains(t, err, "requires")
+			require.ErrorContains(t, err, missing)
+			require.Equal(t, *before, template)
+		})
+	}
 }
 
 func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
@@ -142,8 +229,8 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 
 			t.Log("Render into the fresh PCS without retaining stale runtime identity")
 			rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
-				Stages:    map[string]corev1.PodTemplateSpec{testRenderComponentName: template},
-				Conductor: template.DeepCopy(),
+				Stages:    map[string]PodTemplate{testRenderComponentName: {Template: template}},
+				Conductor: &PodTemplate{Template: *template.DeepCopy()},
 			})
 			require.NoError(t, err)
 			require.Same(t, pcs, rendered)
@@ -210,8 +297,8 @@ func TestRenderMaterializesAgentModelFromBasePodSpec(t *testing.T) {
 
 	t.Log("Render conductor and Agent roles from the base PodSpec")
 	rendered, err := renderSelectedForTest(renderTestPCS(false), []*ModelProjection{projection}, RenderInput{
-		Stages:    map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: conductorPodSpec}},
-		Conductor: &corev1.PodTemplateSpec{Spec: *conductorPodSpec.DeepCopy()},
+		Stages:    map[string]PodTemplate{testRenderComponentName: {Template: corev1.PodTemplateSpec{Spec: conductorPodSpec}}},
+		Conductor: &PodTemplate{Template: corev1.PodTemplateSpec{Spec: *conductorPodSpec.DeepCopy()}},
 	})
 	require.NoError(t, err)
 
@@ -283,7 +370,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	}
 
 	t.Log("Assign distinct runtime settings to each component and conductor")
-	stages := make(map[string]corev1.PodTemplateSpec)
+	stages := make(map[string]PodTemplate)
 	for _, component := range source.Spec.Components {
 		template := component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate
 		template.Labels = map[string]string{"owner": component.ComponentName}
@@ -294,7 +381,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 			{Name: "CONTAINER_NAME", Value: "main"},
 		}
 		template.Spec.Tolerations = []corev1.Toleration{{Key: "custom.example/stage", Operator: corev1.TolerationOpEqual, Value: component.ComponentName}}
-		stages[component.ComponentName] = *template.DeepCopy()
+		stages[component.ComponentName] = PodTemplate{Template: *template.DeepCopy()}
 	}
 	conductorTemplate := source.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate
 	conductorTemplate.Labels = map[string]string{"owner": "conductor"}
@@ -327,7 +414,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	plan, err := selected.PlanNodeLocalMaterialization(pcs.Name, source.GetComponentByName(selected.ServingComponentName()))
 	require.NoError(t, err)
 	templates, err := RenderNodeLocal(selected, plan, RenderInput{
-		Stages: stages, Conductor: conductorTemplate.DeepCopy(),
+		Stages: stages, Conductor: &PodTemplate{Template: *conductorTemplate.DeepCopy()},
 	})
 	require.NoError(t, err)
 

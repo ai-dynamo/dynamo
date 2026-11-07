@@ -156,7 +156,7 @@ func findRuntimeInitContainer(podSpec *corev1.PodSpec) *corev1.Container {
 func mergeDynamoSidecarDefaults(runtime *corev1.Container, context ComponentContext) error {
 	// User configuration overrides defaults, including entire probe handlers.
 	base := dynamoSidecarBaseContainer(context)
-	if err := mergeContainerByName(&base, runtime); err != nil {
+	if err := mergeContainerByName(&base, runtime, context.Annotations); err != nil {
 		return fmt.Errorf("merge runtime init container %q: %w", runtime.Name, err)
 	}
 	*runtime = base
