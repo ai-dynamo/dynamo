@@ -963,6 +963,28 @@ Emitted by the Global Frontend at `/metrics` on its serving port. It forwards ea
   **Experimental.** Requests this Global Frontend has sent to each pool and not yet finished. Other replicas count their own. Labeled by `pool` and `region`; read at scrape time, so a pool removed from the configuration loses its series.
 </ParamField>
 
+The following are served only with `--router-policy affinity`. They cover session requests, the ones that carry `x-dynamo-session-id`.
+
+<ParamField path="dynamo_global_frontend_overhead_affinity_store_ms" type="histogram">
+  **Experimental.** Time each session request spent in affinity storage, in milliseconds: the lookup, any write and its retry, up to `--affinity-timeout-ms`. A request whose budget ran out records the budget. Requests that skip storage while the breaker is open are not recorded. Named and bucketed like [`dynamo_router_overhead_shared_cache_query_ms`](#per-request-routing-overhead).
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_affinity_lookups_total" type="counter">
+  **Experimental.** Session requests whose affinity lookup found a live pin among the candidate pools (`outcome="hit"`) or not (`miss`).
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_affinity_store_errors_total" type="counter">
+  **Experimental.** Session requests that routed on headroom alone because affinity was lost, one count per request. Labeled by `kind`: `backend` (the store returned an error), `timeout` (the budget ran out), `conflict` (conditional writes kept losing), or `breaker_open` (storage was not consulted, after repeated failures).
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_affinity_store_writes_total" type="counter">
+  **Experimental.** Conditional writes sent to the affinity store. Labeled by `reason`: `create` (a session without a live pin), `move` (a session moving pools), `refresh` (a kept pin past half its idle window) or `repair` (a record no reader could decode). A request that keeps a fresh pin writes nothing.
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_affinity_cache_total" type="counter">
+  **Experimental.** Affinity store reads by whether the in-process cache answered them (`outcome="hit"`) or the store did (`miss`), and cache entries dropped (`invalidation`). Only a DynamoDB store is cached.
+</ParamField>
+
 ## Mocker Metrics
 
 The mocker (`python -m dynamo.mocker`) simulates an inference engine. It emits imitation engine metrics with simulated values on `DYN_SYSTEM_PORT`, choosing the set by `--engine-type`. They carry the engine's usual labels plus `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, `worker_id`, `model`, and `model_name`. These imitate engine metrics, so this table has no Labels, Description, or Status column; each metric means what it means in the engine it imitates.
