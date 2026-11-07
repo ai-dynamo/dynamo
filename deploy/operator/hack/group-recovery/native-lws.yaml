@@ -1,0 +1,299 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Native LeaderWorkerSet v0.10 fixture for a manual CPU group-recovery
+# characterization. Part of #17951. This is not a DynamoGraphDeployment,
+# DynamoComponentDeployment, DisaggregatedSet, or Grove workload.
+# Namespace is omitted so the caller applies it with an explicit namespace.
+# ConfigMap data is the only fault and repair control. Do not edit these Pod
+# templates during a run: that would change the LWS revision.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: recovery-target-gates
+data:
+  leader: healthy
+  follower: healthy
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: recovery-control-gates
+data:
+  leader: healthy
+  follower: healthy
+---
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: recovery-target
+spec:
+  replicas: 1
+  startupPolicy: LeaderCreated
+  leaderWorkerTemplate:
+    size: 2
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      spec:
+        terminationGracePeriodSeconds: 5
+        automountServiceAccountToken: false
+        enableServiceLinks: false
+        restartPolicy: Always
+        containers:
+          - name: leader
+            image: busybox:1.36.1
+            imagePullPolicy: IfNotPresent
+            command: ["/bin/sh", "-c"]
+            args:
+              - |
+                role=leader
+                gate_file=/gates/leader
+                while true; do
+                  if [ ! -r "${gate_file}" ]; then
+                    echo "${role} gate missing" >&2
+                    exit 24
+                  fi
+                  gate=$(tr -d '\r\n' < "${gate_file}")
+                  case "${gate}" in
+                    healthy)
+                      echo ready > /tmp/local-ready
+                      ;;
+                    fail)
+                      rm -f /tmp/local-ready
+                      echo "${role} gate fail" >&2
+                      exit 23
+                      ;;
+                    *)
+                      rm -f /tmp/local-ready
+                      echo "${role} gate invalid" >&2
+                      exit 25
+                      ;;
+                  esac
+                  sleep 2
+                done
+            readinessProbe:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - test -s /tmp/local-ready && test "$(tr -d '\r\n' < /gates/leader)" = healthy
+              initialDelaySeconds: 1
+              periodSeconds: 2
+              timeoutSeconds: 1
+              successThreshold: 1
+              failureThreshold: 3
+            resources:
+              requests:
+                cpu: 50m
+                memory: 32Mi
+              limits:
+                cpu: 100m
+                memory: 64Mi
+            volumeMounts:
+              - name: gates
+                mountPath: /gates
+        volumes:
+          - name: gates
+            configMap:
+              name: recovery-target-gates
+    workerTemplate:
+      spec:
+        terminationGracePeriodSeconds: 5
+        automountServiceAccountToken: false
+        enableServiceLinks: false
+        restartPolicy: Always
+        containers:
+          - name: worker
+            image: busybox:1.36.1
+            imagePullPolicy: IfNotPresent
+            command: ["/bin/sh", "-c"]
+            args:
+              - |
+                role=follower
+                gate_file=/gates/follower
+                while true; do
+                  if [ ! -r "${gate_file}" ]; then
+                    echo "${role} gate missing" >&2
+                    exit 24
+                  fi
+                  gate=$(tr -d '\r\n' < "${gate_file}")
+                  case "${gate}" in
+                    healthy)
+                      echo ready > /tmp/local-ready
+                      ;;
+                    fail)
+                      rm -f /tmp/local-ready
+                      echo "${role} gate fail" >&2
+                      exit 23
+                      ;;
+                    *)
+                      rm -f /tmp/local-ready
+                      echo "${role} gate invalid" >&2
+                      exit 25
+                      ;;
+                  esac
+                  sleep 2
+                done
+            readinessProbe:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - test -s /tmp/local-ready && test "$(tr -d '\r\n' < /gates/follower)" = healthy
+              initialDelaySeconds: 1
+              periodSeconds: 2
+              timeoutSeconds: 1
+              successThreshold: 1
+              failureThreshold: 3
+            resources:
+              requests:
+                cpu: 50m
+                memory: 32Mi
+              limits:
+                cpu: 100m
+                memory: 64Mi
+            volumeMounts:
+              - name: gates
+                mountPath: /gates
+        volumes:
+          - name: gates
+            configMap:
+              name: recovery-target-gates
+---
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: recovery-control
+spec:
+  replicas: 1
+  startupPolicy: LeaderCreated
+  leaderWorkerTemplate:
+    size: 2
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      spec:
+        terminationGracePeriodSeconds: 5
+        automountServiceAccountToken: false
+        enableServiceLinks: false
+        restartPolicy: Always
+        containers:
+          - name: leader
+            image: busybox:1.36.1
+            imagePullPolicy: IfNotPresent
+            command: ["/bin/sh", "-c"]
+            args:
+              - |
+                role=leader
+                gate_file=/gates/leader
+                while true; do
+                  if [ ! -r "${gate_file}" ]; then
+                    echo "${role} gate missing" >&2
+                    exit 24
+                  fi
+                  gate=$(tr -d '\r\n' < "${gate_file}")
+                  case "${gate}" in
+                    healthy)
+                      echo ready > /tmp/local-ready
+                      ;;
+                    fail)
+                      rm -f /tmp/local-ready
+                      echo "${role} gate fail" >&2
+                      exit 23
+                      ;;
+                    *)
+                      rm -f /tmp/local-ready
+                      echo "${role} gate invalid" >&2
+                      exit 25
+                      ;;
+                  esac
+                  sleep 2
+                done
+            readinessProbe:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - test -s /tmp/local-ready && test "$(tr -d '\r\n' < /gates/leader)" = healthy
+              initialDelaySeconds: 1
+              periodSeconds: 2
+              timeoutSeconds: 1
+              successThreshold: 1
+              failureThreshold: 3
+            resources:
+              requests:
+                cpu: 50m
+                memory: 32Mi
+              limits:
+                cpu: 100m
+                memory: 64Mi
+            volumeMounts:
+              - name: gates
+                mountPath: /gates
+        volumes:
+          - name: gates
+            configMap:
+              name: recovery-control-gates
+    workerTemplate:
+      spec:
+        terminationGracePeriodSeconds: 5
+        automountServiceAccountToken: false
+        enableServiceLinks: false
+        restartPolicy: Always
+        containers:
+          - name: worker
+            image: busybox:1.36.1
+            imagePullPolicy: IfNotPresent
+            command: ["/bin/sh", "-c"]
+            args:
+              - |
+                role=follower
+                gate_file=/gates/follower
+                while true; do
+                  if [ ! -r "${gate_file}" ]; then
+                    echo "${role} gate missing" >&2
+                    exit 24
+                  fi
+                  gate=$(tr -d '\r\n' < "${gate_file}")
+                  case "${gate}" in
+                    healthy)
+                      echo ready > /tmp/local-ready
+                      ;;
+                    fail)
+                      rm -f /tmp/local-ready
+                      echo "${role} gate fail" >&2
+                      exit 23
+                      ;;
+                    *)
+                      rm -f /tmp/local-ready
+                      echo "${role} gate invalid" >&2
+                      exit 25
+                      ;;
+                  esac
+                  sleep 2
+                done
+            readinessProbe:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - test -s /tmp/local-ready && test "$(tr -d '\r\n' < /gates/follower)" = healthy
+              initialDelaySeconds: 1
+              periodSeconds: 2
+              timeoutSeconds: 1
+              successThreshold: 1
+              failureThreshold: 3
+            resources:
+              requests:
+                cpu: 50m
+                memory: 32Mi
+              limits:
+                cpu: 100m
+                memory: 64Mi
+            volumeMounts:
+              - name: gates
+                mountPath: /gates
+        volumes:
+          - name: gates
+            configMap:
+              name: recovery-control-gates
