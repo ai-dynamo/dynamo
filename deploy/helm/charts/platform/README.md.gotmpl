@@ -115,6 +115,21 @@ A shared speculative pair must use one format; a mixed pair fails before replace
 Independent workloads in one graph may use different formats. Builds without units keep
 the legacy rendering path. There is no activation annotation.
 
+The units projection refuses:
+
+- Missing coverage, duplicate ownership, invalid sizes or connectors, and other nonempty invalid units.
+- More than one unit per model in an LPU-only workload (including `lpx` compilation mode without CUDA).
+- Different `devicesPerNode` values within one build, or an LP20 reservation whose width is not 8.
+- LP30 `size.nodes` other than one host with width 16; a partial partition on that host is allowed.
+- HX extents outside the supported profile: one rack with 1–8 trays per hemisphere and 1–2 hemispheres, or two full racks; the device width is 16.
+- More than 512 device pairs in any retained HX connector. This is not a total-graph pair limit.
+- GPU-local selection of an unknown partition or an interior unit member, and legacy `config` or `/configs` mounts on units templates.
+
+A refusal stops the migration during resolution/render validation, before new PCS replacement
+or LPR publication. The controller can still record a failure condition or complete cleanup
+of an already-releasing allocation. Runtime execution restrictions apply in addition to these
+operator projection limits.
+
 **Affected:** LPX workloads using new compiler builds, including builds that retain legacy
 placement fields. An operator-only upgrade activates units for such builds even without a
 DGD edit. A compatible PCS layout rolls; a different immutable layout replaces the entire
