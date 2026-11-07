@@ -248,3 +248,11 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
+
+# Temporary source override for https://github.com/ai-dynamo/frontend-crates/pull/556.
+# Replace with released frontend crates after that PR merges. Keep public types
+# from a single source in both this workspace and the standalone Python bindings.
+[patch.crates-io]
+dynamo-parsers = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "rmccormick/dgh-2431-gpt-oss-return-config" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "rmccormick/dgh-2431-gpt-oss-return-config" }
+dynamo-structural-tag = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "rmccormick/dgh-2431-gpt-oss-return-config" }
