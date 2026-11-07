@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DynamoGraphDeployment for the hello custom engine (v1beta1 schema).
+# CPU-only: the engine runs no model. One frontend (KV routing) plus
+# two custom-engine workers so KV-aware routing has a choice to make.
+#
+# Image: for a real cluster, push the image to a registry and replace
+# `hello-dynamo-engine:0.1.0` on BOTH components with the full
+# `<registry>/hello-dynamo-engine:0.1.0` reference. The bare local tag
+# only works on kind (after `kind load docker-image ...`).
+#
+# The operator injects DYN_DISCOVERY_BACKEND / DYN_NAMESPACE / NATS_SERVER;
+# the engine's from_args defers to those envs.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: hello-engine
+spec:
+  components:
+    - name: frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: hello-dynamo-engine:0.1.0
+              imagePullPolicy: IfNotPresent
+              command: ["python3", "-m", "dynamo.frontend"]
+              args: ["--http-port", "8000"]
+              env:
+                - name: DYN_ROUTER_MODE
+                  value: kv
+    - name: worker
+      type: worker
+      replicas: 2
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: hello-dynamo-engine:0.1.0
+              imagePullPolicy: IfNotPresent
+              command: ["python3", "-m", "hello_engine.main"]
