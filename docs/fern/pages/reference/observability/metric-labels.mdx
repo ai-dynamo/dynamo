@@ -102,7 +102,7 @@ Added by an individual metric family. Each label appears only on the metrics not
 </ParamField>
 
 <ParamField path="reason" type="string">
-  `[Shared]` On `dynamo_frontend_router_queue_backpressure_total` — the configured queue limit that rejected the request.
+  `[Shared]` On `dynamo_frontend_router_queue_backpressure_total` — the configured queue limit that rejected the request. On `dynamo_frontend_router_admission_rejected_total` — why admission rejected the attempt: `due_time_passed`, `queue_size_exceeded`, or the reserved `predicted_miss`.
 </ParamField>
 
 <ParamField path="migration_type" type="string">
