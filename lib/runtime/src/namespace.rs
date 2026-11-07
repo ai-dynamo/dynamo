@@ -14,8 +14,10 @@ pub enum NamespaceFilter {
     Global,
     /// Discover models only from an exact namespace match
     Exact(String),
-    /// Discover models from namespaces starting with the given prefix
-    /// (e.g., prefix "ns" matches "ns", "ns-abc123", "ns-def456")
+    /// Discover models from the prefix namespace and hyphen-delimited suffixes
+    /// (e.g., "ns" matches "ns" and "ns-abc123", but not "ns2"). A suffix can
+    /// also be a separately named deployment, such as "ns-other". An empty
+    /// prefix matches every namespace in either matching mode.
     Prefix(String),
 }
 
@@ -61,11 +63,29 @@ impl NamespaceFilter {
     }
 
     /// Check if a given namespace matches this filter.
+    ///
+    /// A prefix scope stops at a namespace boundary. A bare `starts_with` also
+    /// admits a sibling deployment whose name merely begins with the prefix:
+    /// `ComputeDynamoNamespace` builds `<k8s namespace>-<deployment name>`, so
+    /// under `DYN_NAMESPACE_PREFIX=myns-dgd` a bare match would take in
+    /// `myns-dgd2`, a different deployment in the same Kubernetes namespace.
+    /// The scope is the prefix itself plus hyphen-delimited suffixes. This
+    /// boundary does not distinguish worker generations from separately named
+    /// deployments such as `myns-dgd-other`. Use `matches_with_prefix_mode` with
+    /// `WorkerGeneration` for the operator's generation format. A prefix ending
+    /// in `-` already includes the boundary.
     pub fn matches(&self, namespace: &str) -> bool {
         match self {
             NamespaceFilter::Global => true,
             NamespaceFilter::Exact(target) => namespace == target,
-            NamespaceFilter::Prefix(prefix) => namespace.starts_with(prefix),
+            NamespaceFilter::Prefix(prefix) => {
+                namespace.strip_prefix(prefix.as_str()).is_some_and(|rest| {
+                    prefix.is_empty()
+                        || prefix.ends_with('-')
+                        || rest.is_empty()
+                        || rest.starts_with('-')
+                })
+            }
         }
     }
 
@@ -73,7 +93,7 @@ impl NamespaceFilter {
     pub fn matches_with_prefix_mode(&self, namespace: &str, mode: NamespacePrefixMode) -> bool {
         match (self, mode) {
             (NamespaceFilter::Prefix(prefix), NamespacePrefixMode::WorkerGeneration) => {
-                if namespace == prefix {
+                if prefix.is_empty() || namespace == prefix {
                     return true;
                 }
                 let Some(suffix) = namespace
@@ -165,6 +185,34 @@ mod tests {
         assert!(filter.matches("ns-def456"));
         assert!(!filter.matches("other-ns"));
         assert!(!filter.matches(""));
+        assert!(!filter.matches("ns2"));
+        assert!(!filter.matches("nsother-abc123"));
+
+        let filter = NamespaceFilter::Prefix("ns-".to_string());
+        assert!(filter.matches("ns-abc"));
+        assert!(!filter.matches("ns2-abc"));
+
+        let filter = NamespaceFilter::Prefix("myns-dgd".to_string());
+        assert!(filter.matches("myns-dgd"));
+        assert!(filter.matches("myns-dgd-abc123"));
+        assert!(!filter.matches("myns-dgd2"));
+        assert!(!filter.matches("myns"));
+    }
+
+    #[test]
+    fn empty_prefix_matches_every_namespace_in_both_modes() {
+        let filter = NamespaceFilter::Prefix(String::new());
+        for mode in [
+            NamespacePrefixMode::Literal,
+            NamespacePrefixMode::WorkerGeneration,
+        ] {
+            for namespace in ["", "ns", "ns-abc123", "other"] {
+                assert!(
+                    filter.matches_with_prefix_mode(namespace, mode),
+                    "{mode:?}: {namespace}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -183,10 +231,14 @@ mod tests {
                 "{namespace}"
             );
         }
+        assert!(!literal.matches("default-foobar"));
+        assert!(
+            !literal
+                .matches_with_prefix_mode("default-foobar", NamespacePrefixMode::WorkerGeneration)
+        );
         for namespace in [
             "default-foo-bar",
             "default-foo-bar-1a2b3c4d",
-            "default-foobar",
             "default-foo-DEADBEEF",
             "default-foo-1a2b3c4g",
             "default-foo-1a2b3c4",
