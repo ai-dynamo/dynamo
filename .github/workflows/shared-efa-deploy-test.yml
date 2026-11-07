@@ -1,0 +1,280 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: EFA Deploy Test
+
+# nightly-ci.yml calls this from one job holding a fixed concurrency group, which
+# stays in progress until efa-deploy-cleanup finishes, so runs never overlap.
+#
+# The only jobs here that run against real EFA hardware. Everything else
+# validates the -efa images statically; these deploy a 1P1D stack on aws-dev-02
+# (p5 / H100, 32 EFA devices per node) -- vLLM first, then SGLang -- and prove
+# the prefill->decode KV transfer rode NIXL -> LIBFABRIC -> EFA instead of
+# silently falling back to UCX.
+#
+# The two framework tests share one vCluster and run one after the other rather
+# than together, to keep peak GPU use on the shared CI pool at one 1P1D stack.
+# SGLang is gated on the vLLM job having *finished*, not on it having passed
+# (`!cancelled()` rather than `success()`), so a vLLM regression does not also
+# delete the SGLang result.
+#
+# It cannot reuse shared-deploy-test.yml: that workflow hardcodes its runner,
+# timeout, ACR image reference and `-m framework_only` selector, and forwards no
+# kube context, and this needs the Teleport kubeconfig pointed at aws-dev-02.
+#
+# No tolerations or nodeSelector appear in tests/deploy/efa/disagg-efa.yaml --
+# the cluster's Kyverno deploy-test-pod-policy injects them for GPU pods in the
+# dynamo-deploy-test namespace, and what it injects differs per cluster.
+#
+# Split setup / test / cleanup into three jobs, matching deploy-operator ->
+# deploy-test-* -> deploy-cleanup in nightly-ci.yml. Two properties of that
+# shape matter and neither survives collapsing it into one job:
+#
+#   * Setup carries no timeout-minutes. setup-dynamo-operator's own waits
+#     (vCluster 900s, CRD 1800s, operator readiness 1800s) can exceed any
+#     reasonable job ceiling, so a ceiling spanning setup + test can expire
+#     before the test even starts.
+#   * Cleanup is a separate job with job-level `if: always()` over `needs:`, so
+#     it fires however the upstream ended -- including job timeout, cancellation
+#     and a dead runner, none of which a step-level `if: always()` survives.
+#     That matters here because setup-dynamo-operator deliberately skips the
+#     nscleanup/ttl label for dynamo-deploy-test, so a leaked vCluster holds p5
+#     GPUs and EFA interfaces on a shared cluster with no automated reaper.
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: 'Commit SHA to check out and whose -efa images to test'
+        type: string
+        required: true
+      operator_tag:
+        description: 'Operator image tag to install in the vCluster'
+        type: string
+        required: true
+      vllm_efa_build_ok:
+        description: 'Whether the vLLM -efa image built; when false, only the vLLM test is skipped'
+        type: boolean
+        required: true
+      vllm_target_tag_plain:
+        description: 'target_tag_plain output of the vLLM -efa image build'
+        type: string
+        required: false
+        default: ''
+      sglang_efa_build_ok:
+        description: 'Whether the SGLang -efa image built; when false, only the SGLang test is skipped'
+        type: boolean
+        required: true
+      sglang_target_tag_plain:
+        description: 'target_tag_plain output of the SGLang -efa image build'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  efa-deploy-operator:
+    name: EFA Deploy Operator
+    runs-on: prod-deploy-tester-v1
+    permissions:
+      contents: read
+    env:
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02
+    outputs:
+      namespace: ${{ steps.setup.outputs.namespace }}
+      vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source_sha }}
+
+      - name: Set kubectl context to aws-dev-02
+        uses: ./.github/actions/set-kube-context
+
+      # An empty vcluster_namespace makes the action resolve the shared
+      # dynamo-deploy-test namespace, which is what aws-dev-02 expects.
+      - name: Setup vCluster and operator
+        id: setup
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: nightly-efa-${{ github.run_id }}
+          # From ECR, like the test images below: these nodes pull ECR without a secret.
+          registry: ${{ vars.ECR_REGISTRY }}
+          repository: ${{ vars.ECR_REPOSITORY }}
+          operator_tag: ${{ inputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+
+  efa-deploy-test-vllm:
+    name: vLLM EFA Deploy Test
+    needs: [efa-deploy-operator]
+    if: ${{ inputs.vllm_efa_build_ok }}
+    runs-on: prod-deploy-tester-v1
+    # Setup is already done in efa-deploy-operator, so this bounds the test alone.
+    # The test carries @pytest.mark.timeout(1200) and its readiness wait is capped
+    # at 900s below that, so pytest fails with a report first; this is the backstop
+    # for a hang outside pytest. Safe to keep tight now that teardown is a separate
+    # always() job rather than a step this would skip.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source_sha }}
+
+      - name: Set kubectl context to aws-dev-02
+        uses: ./.github/actions/set-kube-context
+
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.efa-deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.efa-deploy-operator.outputs.namespace }}
+
+      - name: Run EFA deploy test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: nightly
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ inputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          framework: vllm
+          test_name: vllm_efa
+          test_file: tests/deploy/test_deploy_efa.py
+          extra_pytest_args: -m framework_with_efa
+          # Pulled straight from ECR, no copy-to-ACR hop and no imagePullSecret:
+          # aws-dev-02 is an AWS cluster whose node instance role already grants
+          # ECR read. Tag shape must stay in sync with calculate-target-tag in
+          # shared-build-image.yml (cuda13 is the default, so it adds no suffix).
+          image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_sha }}-${{ inputs.vllm_target_tag_plain }}-nightly
+          platform_arch: amd64
+
+  efa-deploy-test-sglang:
+    name: SGLang EFA Deploy Test
+    needs: [efa-deploy-operator, efa-deploy-test-vllm]
+    # Runs after the vLLM test whatever that test concluded, so the two never hold
+    # GPUs on the shared CI pool at the same time, but a vLLM failure still leaves
+    # SGLang measured. Cancellation stops the lane; failure does not.
+    #
+    # `!cancelled()` replaces the default "every need succeeded" rule, so the two
+    # needs this job genuinely cannot run without -- the vCluster and the image --
+    # have to be spelled out again. Only efa-deploy-test-vllm is allowed to fail.
+    if: ${{ !cancelled() && needs.efa-deploy-operator.result == 'success' && inputs.sglang_efa_build_ok }}
+    runs-on: prod-deploy-tester-v1
+    # Same reasoning as the vLLM job. Bring-up is dominated by the cold image
+    # pull rather than by engine startup (measured on aws-dev-02: ~10 min to all
+    # pods ready cold, ~1.5 min once the image is on the nodes), which the test's
+    # own 900s readiness wait covers.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source_sha }}
+
+      - name: Set kubectl context to aws-dev-02
+        uses: ./.github/actions/set-kube-context
+
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.efa-deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.efa-deploy-operator.outputs.namespace }}
+
+      # The vLLM stack normally tears itself down in the test's own fixture, but
+      # that does not survive a job timeout or a lost runner, and
+      # dynamo-deploy-test's fallback cleanup cannot help: its GRAPH_NAME reads
+      # steps.deploy.outputs.graph_name, which the pytest step never sets, so it
+      # always reports "already cleaned up". Without this, a stranded vLLM stack
+      # would still hold GPUs while SGLang runs -- the one thing running the two
+      # lanes sequentially is meant to prevent.
+      - name: Delete any stranded vLLM EFA deployment
+        shell: bash
+        env:
+          KUBECONFIG_B64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          PREFLIGHT_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-preflight
+        run: |
+          set -euo pipefail
+          printf '%s' "${KUBECONFIG_B64}" | base64 -d > "${PREFLIGHT_KUBECONFIG}"
+          chmod 600 "${PREFLIGHT_KUBECONFIG}"
+          export KUBECONFIG="${PREFLIGHT_KUBECONFIG}"
+          kubectl delete dynamographdeployment vllm-disagg-efa \
+            -n default --ignore-not-found --timeout=180s
+          # Deletion returns once the DGD object is gone; the pods it owned can
+          # outlive it, and those are what hold the GPUs and EFA devices.
+          SEL="nvidia.com/dynamo-graph-deployment-name=vllm-disagg-efa"
+          if ! kubectl wait --for=delete pod -l "${SEL}" -n default --timeout=180s; then
+            # wait also exits non-zero when the selector matched nothing, which
+            # is the normal path. Only pods that outlived the timeout matter, and
+            # they are worth a warning rather than a failure: SGLang may still
+            # schedule, and a hard failure here would lose that run entirely.
+            REMAINING=$(kubectl get pod -l "${SEL}" -n default -o name | wc -l | tr -d ' ')
+            [ "${REMAINING}" -eq 0 ] || echo "::warning::${REMAINING} stranded vllm-disagg-efa pod(s) still hold GPUs/EFA devices"
+          fi
+          rm -f "${PREFLIGHT_KUBECONFIG}"
+
+      - name: Run EFA deploy test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_env: nightly
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ inputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          framework: sglang
+          test_name: sglang_efa
+          test_file: tests/deploy/test_deploy_efa_sglang.py
+          extra_pytest_args: -m framework_with_efa
+          # Straight from ECR, as for vLLM above.
+          image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_sha }}-${{ inputs.sglang_target_tag_plain }}-nightly
+          platform_arch: amd64
+
+  efa-deploy-cleanup:
+    name: EFA Deploy Cleanup
+    if: always()
+    needs: [efa-deploy-operator, efa-deploy-test-vllm, efa-deploy-test-sglang]
+    runs-on: prod-deploy-tester-v1
+    permissions:
+      contents: read
+    env:
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02
+    steps:
+      # No ref: here, matching deploy-cleanup in nightly-ci.yml. Teardown needs
+      # only the vCluster name and namespace, both passed in from
+      # efa-deploy-operator's outputs, so it does not depend on the commit this
+      # job checks out. Pinning the resolved SHA also tripped CodeQL's
+      # untrusted-checkout and cache-poisoning rules -- a false positive on a
+      # workflow with no pull_request trigger, but not worth carrying for no
+      # behavioural gain.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set kubectl context to aws-dev-02
+        uses: ./.github/actions/set-kube-context
+
+      - name: Teardown vCluster
+        if: needs.efa-deploy-operator.outputs.vcluster_name != '' && needs.efa-deploy-operator.outputs.namespace != ''
+        uses: ./.github/actions/teardown-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.efa-deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.efa-deploy-operator.outputs.namespace }}
