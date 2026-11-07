@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import inspect
 import json
 import logging
 import sys
@@ -108,6 +109,9 @@ class SglangUtils:
             sampling_params["min_new_tokens"] = stop_conditions.min_tokens
         if stop_conditions.ignore_eos:
             sampling_params["ignore_eos"] = stop_conditions.ignore_eos
+        native_sampling = (request.native_generate or {}).get("sampling_params")
+        if isinstance(native_sampling, dict):
+            sampling_params.update(native_sampling)
 
         sampling_params = apply_thinking_budget(
             request.request.model_dump(),
@@ -223,6 +227,34 @@ class StreamProcessor:
     """Unified stream processing for SGLang responses"""
 
     @staticmethod
+    async def process_native_generate_stream(
+        stream_source,
+        prompt_token_ids: list[int],
+        return_prompt_token_ids: bool = False,
+    ) -> AsyncIterator[str]:
+        """Forward SGLang chunks opaquely for the frontend's /generate fold.
+
+        ``prompt_token_ids`` is the placeholder-expanded prompt the engine saw,
+        which the client cannot otherwise recover.
+        """
+        async for res in stream_source:
+            output_ids = res.get("output_ids") or []
+            finish_reason = (res.get("meta_info") or {}).get("finish_reason")
+            response = dict(res)
+            output: dict[str, Any] = {
+                "token_ids": output_ids,
+                "engine_data": {"sglang_response": response},
+            }
+            if isinstance(finish_reason, dict):
+                # Final chunk only; the frontend fold keeps the last value.
+                if return_prompt_token_ids:
+                    response["prompt_token_ids"] = prompt_token_ids
+                output["finish_reason"] = normalize_finish_reason(
+                    finish_reason.get("type", "stop")
+                )
+            yield json.dumps(output)
+
+    @staticmethod
     async def process_sglang_stream(stream_source) -> AsyncIterator[str]:
         """Process SGLang stream output.
 
@@ -324,6 +356,50 @@ class ErrorResponseBuilder:
         if extra_fields:
             response.update(extra_fields)
         return json.dumps(response)
+
+
+# Set by the multimodal pipeline itself; a /generate body must not override them.
+_NATIVE_RESERVED_KWARGS = frozenset(
+    {
+        "prompt",
+        "input_ids",
+        "sampling_params",
+        "image_data",
+        "video_data",
+        "audio_data",
+        "stream",
+        "rid",
+        "bootstrap_host",
+        "bootstrap_port",
+        "bootstrap_room",
+        "external_trace_header",
+    }
+)
+
+
+def _native_engine_kwargs(
+    request: SglangMultimodalRequest, engine: Any
+) -> dict[str, Any]:
+    """/generate fields (return_logprob, return_routed_experts, ...) that
+    ``engine.async_generate`` accepts."""
+    if not request.native_generate:
+        return {}
+    accepted = inspect.signature(engine.async_generate).parameters
+    return {
+        key: value
+        for key, value in request.native_generate.items()
+        if key in accepted and key not in _NATIVE_RESERVED_KWARGS
+    }
+
+
+def _output_stream(request: SglangMultimodalRequest, stream) -> AsyncIterator[str]:
+    if request.native_generate is not None:
+        return StreamProcessor.process_native_generate_stream(
+            stream,
+            request.request.token_ids,
+            bool(request.native_generate.get("return_prompt_token_ids")),
+        )
+    return StreamProcessor.process_sglang_stream(stream)
 
 
 async def _build_mm_items(
@@ -593,12 +669,10 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
             raise ValueError("input_ids is required")
 
         request_data = request.request.model_dump()
-        validate_disagg_parallel_sampling(
-            {"sampling_params": {"n": request.request.sampling_options.n}}
-        )
         sampling_params = SglangUtils.build_sampling_params(
             request, self.config.server_args, self.engine
         )
+        validate_disagg_parallel_sampling({"sampling_params": sampling_params})
 
         # Request bootstrap info from prefill worker
         bootstrap_info = await self._get_bootstrap_from_prefill(
@@ -611,27 +685,29 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
 
         # Decode still needs the image/video grids to reconstruct M-RoPE positions.
         # Only prefill receives the encoded features through NIXL.
-        decode_stream = await self.engine.async_generate(
-            input_ids=input_ids,
-            sampling_params=sampling_params,
-            stream=True,
+        gen_params: dict[str, Any] = {
+            "input_ids": input_ids,
+            "sampling_params": sampling_params,
+            "stream": True,
             **require_reasoning_kwargs(
                 self.engine,
                 request_data,
                 thinking_budget_requested=thinking_budget_requested(request_data),
             ),
-            bootstrap_host=bootstrap_info["bootstrap_host"],
-            bootstrap_port=bootstrap_info["bootstrap_port"],
-            bootstrap_room=bootstrap_info["bootstrap_room"],
+            "bootstrap_host": bootstrap_info["bootstrap_host"],
+            "bootstrap_port": bootstrap_info["bootstrap_port"],
+            "bootstrap_room": bootstrap_info["bootstrap_room"],
             **_build_decode_mm_items(request, bootstrap_info["bootstrap_room"]),
-            external_trace_header=trace_header,
-            rid=context.trace_id if context else None,
-        )
+            "external_trace_header": trace_header,
+            "rid": context.trace_id if context else None,
+        }
+        gen_params.update(_native_engine_kwargs(request, self.engine))
+        decode_stream = await self.engine.async_generate(**gen_params)
 
         rng_first = _nvtx.start_range("mm:dec:first_token", color="purple")
         first_token = True
         try:
-            async for output in StreamProcessor.process_sglang_stream(decode_stream):
+            async for output in _output_stream(request, decode_stream):
                 if first_token:
                     end_ttft()
                     _nvtx.end_range(rng_first)
@@ -697,13 +773,14 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
                 gen_params["image_data"] = image_mm_items
             if video_data:
                 gen_params["video_data"] = video_data
+            gen_params.update(_native_engine_kwargs(request, self.engine))
 
             agg_stream = await self.engine.async_generate(**gen_params)
 
             rng_first = _nvtx.start_range("mm:dec:first_token", color="purple")
             first_token = True
             try:
-                async for output in StreamProcessor.process_sglang_stream(agg_stream):
+                async for output in _output_stream(request, agg_stream):
                     if first_token:
                         if tensor_id is not None:
                             self.embeddings_processor.release_embeddings(tensor_id)
@@ -1011,6 +1088,7 @@ class MultimodalPrefillWorkerHandler(
                     gen_params["image_data"] = image_mm_items
                 if video_data:
                     gen_params["video_data"] = video_data
+                gen_params.update(_native_engine_kwargs(request, self.engine))
 
                 results = await self.engine.async_generate(**gen_params)
         except BaseException:
