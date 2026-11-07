@@ -1,13 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from tokenizers import Tokenizer, decoders, models
 from transformers import TokenizersBackend
 from vllm.sampling_params import SamplingParams
 
+from dynamo.llm.exceptions import InvalidArgument, WorkerUnavailable
+from dynamo.vllm.generation_policy import PASSTHROUGH_GENERATION_POLICY
+from dynamo.vllm.handlers import DecodeWorkerHandler
+from dynamo.vllm.strict_rl_controller import StrictRLWeightTransferController
 from dynamo.vllm.strict_termination import StrictRLTermination
 
 pytestmark = [
@@ -36,9 +42,9 @@ def engine():
     )
 
 
-def completion(ids=(), *, finish=None, reason=None, text=""):
+def completion(ids=(), *, finish=None, reason=None, text="", index=0):
     return SimpleNamespace(
-        index=0,
+        index=index,
         token_ids=list(ids),
         text=text,
         finish_reason=finish,
@@ -75,7 +81,7 @@ def test_stream_counts_all_deltas_and_accepts_empty_terminal_delta(engine):
     state = initial.observe(completion([0, 0]))
     state = state.observe(completion([0, 0]))
     state = state.observe(completion(finish="length"))
-    assert state.finished and initial.token_ids == ()
+    assert state.finished and initial.token_count == 0
     with pytest.raises(ValueError, match="strict RL"):
         state.observe(completion([0]))
 
@@ -195,14 +201,14 @@ def test_string_stop_can_end_inside_a_token(engine, include):
 
 def test_string_stop_requires_actual_tokenizer_metadata(engine):
     engine.input_processor.tokenizer = None
-    with pytest.raises(ValueError, match="strict RL"):
+    with pytest.raises(InvalidArgument, match="strict RL"):
         validator(engine, stop=["!"])
 
 
 @pytest.mark.parametrize("limit", [None, 0, True])
 def test_unknown_context_limit_fails_closed(engine, limit):
     engine.model_config.max_model_len = limit
-    with pytest.raises(ValueError, match="strict RL"):
+    with pytest.raises(RuntimeError, match="strict RL"):
         validator(engine)
 
 
@@ -222,14 +228,14 @@ def test_unset_max_tokens_uses_only_the_actual_context_limit(engine):
 
 @pytest.mark.parametrize("prompt", [[], [0] * 8])
 def test_invalid_prompt_boundary_fails_closed(engine, prompt):
-    with pytest.raises(ValueError, match="strict RL"):
+    with pytest.raises(InvalidArgument, match="strict RL"):
         StrictRLTermination.from_engine(engine, SamplingParams(), prompt, "prompt")
 
 
 def test_invalid_effective_max_tokens_fails_closed(engine):
     params = SamplingParams()
     params.max_tokens = True
-    with pytest.raises(ValueError, match="strict RL"):
+    with pytest.raises(InvalidArgument, match="strict RL"):
         StrictRLTermination.from_engine(engine, params, [0], "invalid")
 
 
@@ -249,3 +255,309 @@ def test_malformed_delta_and_terminal_metadata_fail_closed(engine, output):
     state = validator(engine, min_tokens=2)
     with pytest.raises(ValueError, match="strict RL"):
         state.observe(output)
+
+
+@pytest.fixture
+async def worker(engine, advance_session):
+    handler = object.__new__(DecodeWorkerHandler)
+    handler.engine_client = engine
+    handler.generation_policy = StrictRLWeightTransferController(
+        engine, 8, asyncio.Lock(), MagicMock(), device_uuids=("GPU-test",)
+    )
+    await advance_session(handler.generation_policy.session, resume=True)
+    return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transition", ["install", "fail"])
+async def test_observer_rejects_policy_changes_after_admission(
+    worker, transition, advance_session
+):
+    policy = worker.generation_policy
+    observer = policy.request_observer(
+        SamplingParams(max_tokens=2), {"prompt_token_ids": [0, 1]}, "version-race"
+    )
+    if transition == "install":
+        await advance_session(policy.session, round_id=2, initialize=False, resume=True)
+    else:
+        policy.session.fail()
+    with pytest.raises(WorkerUnavailable, match="policy|failed"):
+        observer.observe(
+            SimpleNamespace(
+                prompt_token_ids=[0, 1], outputs=[completion([3], finish="stop")]
+            )
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transition", ["install", "fail"])
+async def test_observer_rejects_midstream_policy_changes_without_migration(
+    worker, transition, advance_session
+):
+    policy = worker.generation_policy
+    observer = policy.request_observer(
+        SamplingParams(max_tokens=2), {"prompt_token_ids": [0, 1]}, "midstream-race"
+    )
+    observer.observe(
+        SimpleNamespace(prompt_token_ids=[0, 1], outputs=[completion([0])])
+    )
+    if transition == "install":
+        await advance_session(policy.session, round_id=2, initialize=False, resume=True)
+    else:
+        policy.session.fail()
+    with pytest.raises(RuntimeError, match="policy|failed"):
+        observer.observe(
+            SimpleNamespace(
+                prompt_token_ids=[0, 1], outputs=[completion([3], finish="stop")]
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_observer_finishes_after_terminal_chunk_even_if_policy_changes(
+    worker, advance_session
+):
+    policy = worker.generation_policy
+    observer = policy.request_observer(
+        SamplingParams(max_tokens=2), {"prompt_token_ids": [0, 1]}, "completed-race"
+    )
+    observer.observe(
+        SimpleNamespace(
+            prompt_token_ids=[0, 1], outputs=[completion([3], finish="stop")]
+        )
+    )
+    await advance_session(policy.session, round_id=2, initialize=False, resume=True)
+    observer.finish()
+
+
+@pytest.mark.asyncio
+async def test_observer_accepts_pause_resume_without_policy_change(worker):
+    policy = worker.generation_policy
+    observer = policy.request_observer(
+        SamplingParams(max_tokens=2), {"prompt_token_ids": [0, 1]}, "same-policy"
+    )
+    rpc = AsyncMock()
+    await policy.session.pause(rpc, "wait")
+    await policy.session.resume(rpc)
+    observer.observe(
+        SimpleNamespace(
+            prompt_token_ids=[0, 1], outputs=[completion([3], finish="stop")]
+        )
+    )
+    observer.finish()
+
+
+def test_observer_checks_shared_engine_prompt_once(worker):
+    class CountingPrompt(list):
+        iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    prompt = CountingPrompt([0, 1])
+    observer = worker.generation_policy.request_observer(
+        SamplingParams(max_tokens=2), {"prompt_token_ids": [0, 1]}, "shared-prompt"
+    )
+    for output in (completion([0]), completion([3], finish="stop")):
+        observer.observe(SimpleNamespace(prompt_token_ids=prompt, outputs=[output]))
+    observer.finish()
+    assert prompt.iterations == 1
+
+
+def test_observer_rechecks_replaced_engine_prompt(worker):
+    observer = worker.generation_policy.request_observer(
+        SamplingParams(max_tokens=2), {"prompt_token_ids": [0, 1]}, "replaced-prompt"
+    )
+    observer.observe(
+        SimpleNamespace(prompt_token_ids=[0, 1], outputs=[completion([0])])
+    )
+    with pytest.raises(RuntimeError, match="admitted prompt"):
+        observer.observe(
+            SimpleNamespace(
+                prompt_token_ids=[0, 9], outputs=[completion([3], finish="stop")]
+            )
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["paused", "uninstalled"])
+async def test_session_state_rejections_are_worker_unavailable(engine, worker, state):
+    policy = worker.generation_policy
+    if state == "paused":
+        await policy.session.pause(AsyncMock(), "wait")
+    else:
+        policy = StrictRLWeightTransferController(
+            engine, 8, asyncio.Lock(), MagicMock(), device_uuids=("GPU-test",)
+        )
+    with pytest.raises(WorkerUnavailable):
+        policy.request_observer(
+            SamplingParams(max_tokens=2), {"prompt_token_ids": [0, 1]}, "unavailable"
+        )
+
+
+def test_invalid_request_and_forged_output_have_distinct_error_types(worker):
+    with pytest.raises(InvalidArgument, match="token prompt"):
+        worker.generation_policy.request_observer(
+            SamplingParams(max_tokens=2), "text", "invalid"
+        )
+    observer = worker.generation_policy.request_observer(
+        SamplingParams(max_tokens=2, stop=["!"]), {"prompt_token_ids": [0, 1]}, "forged"
+    )
+    with pytest.raises(RuntimeError, match="stop string"):
+        observer.observe(
+            SimpleNamespace(
+                prompt_token_ids=[0, 1],
+                outputs=[completion([0], finish="stop", reason="!", text="a")],
+            )
+        )
+
+
+def test_observer_requires_all_requested_completions(worker):
+    observer = worker.generation_policy.request_observer(
+        SamplingParams(n=2, max_tokens=2),
+        {"prompt_token_ids": [0, 1]},
+        "missing-choice",
+    )
+    observer.observe(
+        SimpleNamespace(
+            prompt_token_ids=[0, 1], outputs=[completion([3], finish="stop")]
+        )
+    )
+    with pytest.raises(RuntimeError, match="terminal evidence"):
+        observer.finish()
+
+
+def test_observer_accepts_all_requested_completions(worker):
+    observer = worker.generation_policy.request_observer(
+        SamplingParams(n=2, max_tokens=2), {"prompt_token_ids": [0, 1]}, "all-choices"
+    )
+    first = completion([3], finish="stop")
+    second = completion([3], finish="stop", index=1)
+    observer.observe(SimpleNamespace(prompt_token_ids=[0, 1], outputs=[first, second]))
+    observer.finish()
+
+
+@pytest.mark.parametrize("index", [-1, 2, True])
+def test_observer_rejects_invalid_choice_index(worker, index):
+    observer = worker.generation_policy.request_observer(
+        SamplingParams(n=2, max_tokens=2), {"prompt_token_ids": [0, 1]}, "bad-choice"
+    )
+    output = completion([3], finish="stop", index=index)
+    with pytest.raises(RuntimeError, match="choice index"):
+        observer.observe(SimpleNamespace(prompt_token_ids=[0, 1], outputs=[output]))
+
+
+async def generate_chunks(worker, outputs):
+    async def generate(*args, **kwargs):
+        for output in outputs:
+            yield SimpleNamespace(
+                prompt_token_ids=[0, 1],
+                outputs=[output],
+                prompt_logprobs=None,
+                num_cached_tokens=0,
+                kv_transfer_params=None,
+            )
+
+    worker.engine_client.generate = generate
+    return [
+        chunk
+        async for chunk in worker.generate_tokens(
+            {"prompt_token_ids": [0, 1]},
+            SamplingParams(max_tokens=2),
+            "handler-test",
+            report_kv_cache_hit=False,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish", ["length", "stop"])
+async def test_handler_rejects_unproven_terminal_before_emitting_it(worker, finish):
+    with pytest.raises(RuntimeError, match="strict RL"):
+        await generate_chunks(worker, [completion([0], finish=finish)])
+
+
+@pytest.mark.asyncio
+async def test_handler_checks_cumulative_deltas_and_terminal_token(worker):
+    chunks = await generate_chunks(
+        worker, [completion([0]), completion([3], finish="stop")]
+    )
+    assert [chunk["token_ids"] for chunk in chunks] == [[0], [3]]
+    assert chunks[-1]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_handler_rejects_stream_without_terminal_evidence(worker):
+    with pytest.raises(RuntimeError, match="strict RL"):
+        await generate_chunks(worker, [completion([0])])
+
+
+@pytest.mark.asyncio
+async def test_handler_rejects_empty_stream(worker):
+    with pytest.raises(RuntimeError, match="strict RL"):
+        await generate_chunks(worker, [])
+
+
+@pytest.mark.asyncio
+async def test_handler_rejects_engine_prompt_changes(worker):
+    async def generate(*args, **kwargs):
+        yield SimpleNamespace(
+            prompt_token_ids=[0], outputs=[completion([3], finish="stop")]
+        )
+
+    worker.engine_client.generate = generate
+    with pytest.raises(RuntimeError, match="admitted prompt"):
+        _ = [
+            chunk
+            async for chunk in worker.generate_tokens(
+                {"prompt_token_ids": [0, 1]},
+                SamplingParams(max_tokens=2),
+                "changed-prompt",
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_non_strict_handler_preserves_short_length_behavior(worker):
+    worker.generation_policy = PASSTHROUGH_GENERATION_POLICY
+    chunks = await generate_chunks(worker, [completion([0], finish="length")])
+    assert chunks[-1]["finish_reason"] == "length"
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        None,
+        [],
+        [{0: SimpleNamespace(logprob=-0.1)}],
+        [{3: SimpleNamespace(logprob=float("nan"))}],
+    ],
+)
+def test_request_observer_rejects_invalid_sampled_logprobs(worker, entries):
+    observer = worker.generation_policy.request_observer(
+        SamplingParams(max_tokens=2, logprobs=0),
+        {"prompt_token_ids": [0, 1]},
+        "logprobs",
+    )
+    output = completion([3], finish="stop")
+    output.logprobs = entries
+    with pytest.raises(RuntimeError, match="logprob"):
+        observer.observe(SimpleNamespace(prompt_token_ids=[0, 1], outputs=[output]))
+
+
+@pytest.mark.asyncio
+async def test_passthrough_policy_has_no_prompt_or_output_requirements():
+    policy = PASSTHROUGH_GENERATION_POLICY
+    observer = policy.request_observer(None, "text-only-prompt", "ordinary")
+    observer.observe(None)
+    observer.finish()
+    assert observer is policy.request_observer(None, None, "another-request")
+
+
+@pytest.mark.parametrize("prompt", [None, "text", {"prompt": "text"}])
+def test_strict_request_observer_requires_native_token_prompt(worker, prompt):
+    with pytest.raises(InvalidArgument, match="token prompt"):
+        worker.generation_policy.request_observer(
+            SamplingParams(max_tokens=2), prompt, "invalid-prompt"
+        )
