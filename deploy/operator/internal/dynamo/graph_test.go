@@ -11579,7 +11579,9 @@ func TestPCSNameForDGD(t *testing.T) {
 			},
 			// VllmPrefillWorker multinode: PCSG=17, PCLQ=17+1+3=21 → budget=38, pcsBudget=45-38=7
 			// 7 < minPCSNameLength(8), so clamped to 8
-			wantLen: 8,
+			// The prefix "my-" ends in a hyphen and must be kept: this name is
+			// valid, and trimming it would rename existing PodCliqueSets.
+			want: "my--4793",
 		},
 		{
 			name:       "empty components - no truncation needed",
