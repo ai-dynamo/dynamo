@@ -1655,6 +1655,55 @@ def test_vllm_client_error_preserves_http_status(error_type, expected_status):
     assert vllm_client_error_to_http_error(error).code == expected_status
 
 
+@pytest.mark.parametrize(
+    ("error_type", "expected_status"),
+    [
+        ("VLLMNotFoundError", 404),
+        ("VLLMUnprocessableEntityError", 422),
+    ],
+)
+def test_vllm_client_error_public_error_keeps_status_for_non_400(
+    error_type, expected_status
+):
+    from vllm import exceptions as vllm_exceptions
+
+    from dynamo.llm.exceptions import HttpError
+    from dynamo.vllm.errors import vllm_client_error_to_public_error
+
+    error = getattr(vllm_exceptions, error_type)("invalid request")
+    public_error = vllm_client_error_to_public_error(error)
+
+    assert isinstance(public_error, HttpError)
+    assert public_error.code == expected_status
+
+
+def test_vllm_validation_error_is_public_invalid_argument():
+    from vllm.exceptions import VLLMValidationError
+
+    from dynamo.llm.exceptions import InvalidArgument
+    from dynamo.vllm.errors import vllm_client_error_to_public_error
+
+    message = "The decoder prompt is longer than the maximum model length."
+    public_error = vllm_client_error_to_public_error(VLLMValidationError(message))
+
+    assert isinstance(public_error, InvalidArgument)
+    assert str(public_error) == message
+
+
+def test_vllm_validation_error_public_message_is_truncated():
+    from vllm.exceptions import VLLMValidationError
+
+    from dynamo.llm.exceptions import _MAX_MESSAGE_LENGTH, InvalidArgument
+    from dynamo.vllm.errors import vllm_client_error_to_public_error
+
+    message = "bad_words entry rejected: " + "x" * (2 * _MAX_MESSAGE_LENGTH)
+    public_error = vllm_client_error_to_public_error(VLLMValidationError(message))
+
+    assert isinstance(public_error, InvalidArgument)
+    assert len(str(public_error)) == _MAX_MESSAGE_LENGTH
+    assert str(public_error).startswith("bad_words entry rejected: ")
+
+
 def test_build_sampling_params_accepts_productive_recursive_guided_json():
     from dynamo.vllm.handlers import build_sampling_params
 
