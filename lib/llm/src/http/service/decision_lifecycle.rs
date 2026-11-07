@@ -71,22 +71,60 @@ pub(crate) enum DispatchWaitError {
 
 /// The task must own admission until its work completes and should observe `parent.kill()`.
 /// Cleanup runs separately so the response does not wait for the cancellation grace.
+/// Dropping this future before it resolves runs the same kill and drain as deadline expiry.
 /// Local completion does not establish physical GPU settlement.
 pub(crate) async fn dispatch_with_deadline<T: Send + 'static>(
-    mut task: tokio::task::JoinHandle<T>,
+    task: tokio::task::JoinHandle<T>,
     deadline: tokio::time::Instant,
     parent: Arc<dyn AsyncEngineContext>,
 ) -> Result<T, DispatchWaitError> {
-    match tokio::time::timeout_at(deadline, &mut task).await {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(cause)) => {
-            parent.kill();
-            Err(DispatchWaitError::Task(cause))
+    let mut waiter = DispatchWaiter {
+        task: Some(task),
+        parent,
+        span: tracing::Span::current(),
+    };
+    let task = waiter
+        .task
+        .as_mut()
+        .expect("the waiter owns the task until it resolves");
+    let joined = tokio::time::timeout_at(deadline, task).await;
+    match joined {
+        Ok(result) => {
+            waiter.task = None;
+            result.map_err(|cause| {
+                waiter.parent.kill();
+                DispatchWaitError::Task(cause)
+            })
         }
-        Err(_) => {
-            parent.kill();
-            tokio::spawn(drain_cancelled_task(task).in_current_span());
-            Err(DispatchWaitError::Deadline)
+        // The waiter's drop kills the parent and drains the task.
+        Err(_) => Err(DispatchWaitError::Deadline),
+    }
+}
+
+/// Owns an unresolved dispatch task so that deadline expiry and an abandoned waiter
+/// share one cleanup path. The span is captured at creation because the HTTP layer
+/// does not enter the request span when it drops a response future.
+struct DispatchWaiter<T: Send + 'static> {
+    task: Option<tokio::task::JoinHandle<T>>,
+    parent: Arc<dyn AsyncEngineContext>,
+    span: tracing::Span,
+}
+
+impl<T: Send + 'static> Drop for DispatchWaiter<T> {
+    fn drop(&mut self) {
+        let Some(task) = self.task.take() else {
+            return;
+        };
+        self.parent.kill();
+        // Never abort: the task keeps its admission permit until its local work finishes.
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(drain_cancelled_task(task).instrument(self.span.clone()));
+            }
+            Err(_) => tracing::warn!(
+                parent: &self.span,
+                "Decision waiter dropped outside a runtime; detaching task without cleanup"
+            ),
         }
     }
 }
@@ -234,6 +272,55 @@ mod tests {
         assert!(output.contains("exceeded cancellation grace"), "{output}");
         assert!(
             output.contains("request_id=\"cleanup-request\""),
+            "{output}"
+        );
+        assert_eq!(admission.available_permits(), 0);
+        release_tx.send(()).unwrap();
+        let permit = tokio::time::timeout(Duration::from_secs(1), admission.acquire_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(permit);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn abandoned_dispatch_kills_and_drains_with_request_span_and_keeps_admission() {
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(Arc::new(log.reopen().unwrap()))
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let parent = Context::new(()).context();
+        let admission = Arc::new(Semaphore::new(1));
+        let permit = admission.clone().acquire_owned().await.unwrap();
+        let (release_tx, release_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            let _ = release_rx.await;
+        });
+        let mut waiter = Box::pin(dispatch_with_deadline(
+            task,
+            tokio::time::Instant::now() + Duration::from_secs(60),
+            parent.clone(),
+        ));
+        let span = tracing::info_span!("http-request", request_id = "abandoned-request");
+        {
+            // Poll inside the request span, then drop outside it, as the HTTP layer does.
+            let _entered = span.enter();
+            assert!(futures::poll!(waiter.as_mut()).is_pending());
+        }
+        drop(waiter);
+        assert!(parent.is_killed());
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let output = std::fs::read_to_string(log.path()).unwrap();
+        assert!(output.contains("exceeded cancellation grace"), "{output}");
+        assert!(
+            output.contains("request_id=\"abandoned-request\""),
             "{output}"
         );
         assert_eq!(admission.available_permits(), 0);
