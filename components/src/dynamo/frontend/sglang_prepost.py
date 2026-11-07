@@ -757,7 +757,9 @@ def build_tool_call_guided_decoding(
             # for auto, unconstrained generation.
             constraint = None
 
-    guided_decoding = _serialize_tool_constraint(constraint)
+    guided_decoding = _serialize_tool_constraint(
+        constraint, stop_after_first=parallel_tool_calls is False
+    )
     if guided_decoding is not None:
         return guided_decoding
 
@@ -781,7 +783,9 @@ def build_tool_call_guided_decoding(
     return _serialize_tool_constraint(constraint)
 
 
-def _serialize_tool_constraint(constraint: Any) -> dict[str, Any] | None:
+def _serialize_tool_constraint(
+    constraint: Any, *, stop_after_first: bool = False
+) -> dict[str, Any] | None:
     if not (isinstance(constraint, tuple) and len(constraint) == 2):
         return None
     if constraint[0] == "json_schema":
@@ -792,10 +796,44 @@ def _serialize_tool_constraint(constraint: Any) -> dict[str, Any] | None:
     tag_value = constraint[1]
     # SGLang returns a Pydantic model (LegacyStructuralTagResponseFormat)
     # here. Convert to a plain dict before it hits the RPC layer because
-    # msgpack/serde_json cannot serialize BaseModel instances.
+    # msgpack/serde_json cannot serialize BaseModel instances. Dump by alias:
+    # the backend reads only "schema"; "schema_" leaves arguments unconstrained.
     if hasattr(tag_value, "model_dump"):
-        tag_value = tag_value.model_dump()
+        tag_value = tag_value.model_dump(by_alias=True)
+    if stop_after_first and isinstance(tag_value, dict) and "structures" in tag_value:
+        tag_value = _legacy_structural_tag_with_one_call(tag_value)
     return {"structural_tag": tag_value}
+
+
+def _legacy_structural_tag_with_one_call(tag: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite a legacy tool tag so generation ends after its first call.
+
+    The legacy format cannot express ``parallel_tool_calls=false``: after the
+    first call the grammar releases, and the model may add more calls or text
+    until ``max_tokens``. This is the xgrammar format the backend converts the
+    legacy tag to, plus ``stop_after_first``.
+    """
+    return {
+        "type": "structural_tag",
+        "format": {
+            "type": "triggered_tags",
+            "triggers": tag["triggers"],
+            "tags": [
+                {
+                    "type": "tag",
+                    "begin": structure["begin"],
+                    "content": {
+                        "type": "json_schema",
+                        "json_schema": structure.get("schema") or {},
+                    },
+                    "end": structure["end"],
+                }
+                for structure in tag["structures"]
+            ],
+            "at_least_one": tag.get("at_least_one", False),
+            "stop_after_first": True,
+        },
+    }
 
 
 def build_response_format_guided_decoding(

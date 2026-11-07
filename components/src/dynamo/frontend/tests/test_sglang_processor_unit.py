@@ -2234,6 +2234,72 @@ def test_structural_tag_respects_named_tool_choice(
     ]
 
 
+_QWEN25_SEARCH_CALL_HEAD = '<tool_call>\n{"name":"search_web", "arguments":'
+_QWEN25_SEARCH_CALL = (
+    _QWEN25_SEARCH_CALL_HEAD + '{"query":"population of Tokyo"}}\n</tool_call>'
+)
+
+
+@pytest.mark.core
+@pytest.mark.timeout(60)
+@pytest.mark.filterwarnings(
+    "ignore:max_rollback_tokens is deprecated.*:DeprecationWarning"
+)
+@pytest.mark.parametrize(
+    "output",
+    [
+        # Engine outputs that reached clients of the chained tool-use e2e test.
+        _QWEN25_SEARCH_CALL + "\n" + _QWEN25_SEARCH_CALL,
+        _QWEN25_SEARCH_CALL + "\n<think>\nOkay, the user wants",
+        _QWEN25_SEARCH_CALL_HEAD + '[{"query": "population of Tokyo"}]}\n</tool_call>',
+        _QWEN25_SEARCH_CALL_HEAD
+        + '"{\\"query\\": \\"population of Tokyo\\"}"}\n</tool_call>',
+    ],
+    ids=["second_call", "think_after_call", "list_arguments", "string_arguments"],
+)
+def test_named_single_call_structural_tag_enforced_by_backend(
+    tokenizer, tool_grammar_backend, output
+):
+    """The grammar the backend compiles allows one schema-valid call, then EOS."""
+    raw_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search_web",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "num_results": {"type": "integer"},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": True,
+                },
+            },
+        }
+    ]
+    guided = build_tool_call_guided_decoding(
+        {
+            "tools": raw_tools,
+            "tool_choice": {"type": "function", "function": {"name": "search_web"}},
+            "parallel_tool_calls": False,
+        },
+        tool_call_parser_name="qwen25",
+        sglang_tools=convert_tools(raw_tools),
+        structural_tag_mode="on",
+    )
+    assert guided is not None
+    grammar = tool_grammar_backend.dispatch_structural_tag(
+        json.dumps(guided["structural_tag"])
+    )
+    assert isinstance(grammar, XGrammarGrammar)
+
+    single_call = grammar.copy().matcher
+    assert single_call.accept_string(_QWEN25_SEARCH_CALL)
+    assert single_call.accept_token(tokenizer.convert_tokens_to_ids("<|im_end|>"))
+    assert not grammar.copy().matcher.accept_string(output)
+
+
 class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup for tool_choice
     # Keep SGLang's guidance decisions aligned with the shared backend matrix.
     @pytest.mark.parametrize(
