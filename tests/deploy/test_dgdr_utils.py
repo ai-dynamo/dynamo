@@ -382,6 +382,18 @@ async def test_get_output_dgd_retries_vcluster_connection_refusal(
     sleep.assert_awaited_once_with(5)
 
 
+async def test_ensure_absent_retries_vcluster_connection_refusal(monkeypatch) -> None:
+    manager = initialized_manager()
+    manager.get = AsyncMock(side_effect=[vcluster_connection_error(), None])
+    sleep = AsyncMock()
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
+
+    await manager.ensure_absent("request")
+
+    assert manager.get.await_count == 2
+    sleep.assert_awaited_once_with(5)
+
+
 async def test_cleanup_retries_vcluster_connection_failures(monkeypatch) -> None:
     manager = initialized_manager()
     assert manager.custom is not None

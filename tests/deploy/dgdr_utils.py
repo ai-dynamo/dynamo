@@ -639,7 +639,11 @@ class ManagedDGDR:
         )
 
     async def ensure_absent(self, name: str) -> None:
-        current = await self.get(name)
+        current = await self._retry_vcluster_api(
+            f"reading DGDR {self.config.namespace}/{name} before create",
+            self.get,
+            name,
+        )
         if current is None:
             return
         await self._cleanup_name(name, failed=False)
