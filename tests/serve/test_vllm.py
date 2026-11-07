@@ -47,6 +47,7 @@ from tests.utils.payloads import (
     EmbeddingMultiWorkerDispatchPayload,
     EmbeddingPayload,
     ToolCallingChatPayload,
+    VLLMEmbeddingMetricsPayload,
 )
 
 logger = logging.getLogger(__name__)
@@ -829,6 +830,14 @@ vllm_configs = {
                 repeat_count=1,
                 expected_log=[],
                 expected_response=["Generated 1 embeddings with dimension 128"],
+            ),
+            # Engine vllm:* metrics on the worker's system port (issue #18325).
+            VLLMEmbeddingMetricsPayload(
+                body={},
+                repeat_count=1,
+                expected_log=[],
+                expected_response=[],
+                min_num_requests=6,
             ),
         ],
     ),

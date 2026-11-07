@@ -3120,6 +3120,23 @@ class VLLMMetricsPayload(MetricsPayload):
 
 
 @dataclass
+class VLLMEmbeddingMetricsPayload(VLLMMetricsPayload):
+    """vLLM metrics for an ``--embedding-worker``.
+
+    Embedding workers skip the chat-shaped Dynamo gauges (KV stats, model load
+    time), so only the request and uptime checks apply from the common set.
+    """
+
+    def _get_common_metric_checks(self) -> list[MetricCheck]:
+        prefix = prometheus_names.name_prefix.COMPONENT
+        kept = {
+            f"{prefix}_{prometheus_names.work_handler.REQUESTS_TOTAL}",
+            f"{prefix}_{prometheus_names.distributed_runtime.UPTIME_SECONDS}",
+        }
+        return [c for c in super()._get_common_metric_checks() if c.name in kept]
+
+
+@dataclass
 class LMCacheMetricsPayload(MetricsPayload):
     """Metrics validation for lmcache"""
 

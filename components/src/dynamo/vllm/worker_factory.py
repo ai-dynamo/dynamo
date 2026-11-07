@@ -2144,7 +2144,9 @@ class WorkerFactory:
         - Forward-pass-metrics relay: relays decode-phase ZMQ metrics; no
           decode here.
         - StatLoggerFactory wiring: built around per-batch sampling/decoding
-          stats which the pooling engine does not emit.
+          stats which the pooling engine does not emit. vLLM's own
+          ``vllm:*`` Prometheus metrics are still forwarded through
+          ``setup_metrics_collection``.
         - InstrumentedScheduler: hard-codes ``pooling_params=None`` (see
           components/src/dynamo/vllm/instrumented_scheduler.py), which would
           silently disable the pooling pass. ``setup_vllm_engine`` only
@@ -2208,6 +2210,9 @@ class WorkerFactory:
         register_model_taint_route(runtime, generate_endpoint)
         logger.info("Starting to serve the embedding worker endpoint...")
         try:
+            # vLLM's own Prometheus stat logger still records pooling requests;
+            # forward its vllm:* families to this process's system port.
+            self.setup_metrics_collection(config, generate_endpoint, logger)
             await asyncio.gather(
                 generate_endpoint.serve_endpoint(
                     handler.generate,
