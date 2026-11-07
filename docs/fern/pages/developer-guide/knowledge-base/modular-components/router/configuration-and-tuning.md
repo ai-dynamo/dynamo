@@ -319,14 +319,16 @@ limits, quantum, deficit, and counters. Arbitration compares the shared head wit
 exact-worker lane heads. Absolute and fractional busy thresholds use OR
 semantics. The absolute `prefill_busy_threshold` is deprecated and will be
 removed in v1.7; use `prefill_busy_threshold_frac`.
-`decode_busy_threshold_frac` also marks a worker busy when the KV
-blocks its active requests hold exceed that fraction of its `total_kv_blocks`,
-so a worker filled by long-running decodes stops taking new work even after
-their prefill completes. Held blocks come from the router's active-block tracking: with `--no-router-track-active-blocks` the router tracks no held blocks and the decode threshold never fires, and the prefill KV router always runs that way. By default held blocks cover each request's prompt; `--router-track-output-blocks` (experimental, off by default) also counts the blocks generation adds, which a threshold aimed at long decodes needs. A worker that does
-not report `total_kv_blocks` skips the decode threshold. Some adapters advertise an aggregate or representative-rank value rather than each rank's own capacity; vLLM with data parallelism publishes the process total divided by the rank count, so on those workers the decode threshold is approximate. A class queues only
-when at least one threshold is configured and every eligible worker is busy
-for that class, but a new arrival cannot bypass an existing backlog in the
-same class.
+A class queues only when at least one threshold is configured and every eligible worker is busy for that class, but a new arrival cannot bypass an existing backlog in the same class.
+
+`decode_busy_threshold_frac` is a class's decode wait limit. A decode worker is busy for the class while the KV blocks its active requests hold exceed that fraction of its `total_kv_blocks`, so a pool filled by long-running decodes stops taking new work for the class even after their prefill completes. Where the limit is judged depends on the topology:
+
+- **Aggregated**: the router's one queue judges both class fractions on the same workers. A request waits until some eligible worker is within both.
+- **Disaggregated with KV routing**: the prefill router's queue is the only admission gate. It judges the class prefill fraction on the prefill workers and the class decode fraction on the decode router's booked load, and holds a request until both pools have room. Decode KV being freed wakes it. The decode router's queue does not hold a decode leg whose prefill already ran: it books the leg as soon as it arrives, without waiting on class limits or deadlines, because holding it would strand the prefill's KV. Router-wide reject thresholds such as `--active-decode-blocks-threshold` still apply when the decode worker is selected. A request that conditional disaggregation sends straight to a decode worker never passes the prefill router's queue, so the decode router's queue applies the full class gate to it, as in aggregated serving.
+
+In disaggregated serving the decode check is a pool-level gate: it passes while any reachable decode worker that serves the request's LoRA adapter is within the limit. It does not apply a decode worker pin, allowed-worker hints, routing constraints, or the KV-transfer domain of the chosen prefill worker. Decode worker selection still enforces all of those. If either hop is not KV-routed, nothing judges the decode limit.
+
+Held blocks come from the active-block tracking of the router that owns the decode workers: the aggregated router, or the decode router in disaggregated serving. The prefill router never tracks held blocks. With `--no-router-track-active-blocks` that router tracks none and the decode limit never fires. By default held blocks cover each request's prompt; `--router-track-output-blocks` (experimental, off by default) also counts the blocks generation adds, which a limit aimed at long decodes needs. A worker that does not report `total_kv_blocks` skips the decode limit. Some adapters advertise an aggregate or representative-rank value rather than each rank's own capacity; vLLM with data parallelism publishes the process total divided by the rank count, so on those workers the decode limit is approximate.
 
 Queue limits are configured per discovered worker endpoint with
 `request_queue_limit_per_worker`, `raw_isl_token_queue_limit_per_worker`, and

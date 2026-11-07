@@ -48,6 +48,10 @@ pub struct SelectionOperation<'a> {
     /// Cache the inputs under this id for a later `create_reservation` replay
     /// (unbooked admissions only).
     pub replay_id: Option<String>,
+    /// An upstream hop's policy-class queue already admitted this request (a
+    /// disaggregated decode leg after its prefill hop). The partition's queue books
+    /// it without waiting on class limits; reject thresholds still apply.
+    pub admitted_upstream: bool,
 }
 
 pub enum SelectionAdmission {

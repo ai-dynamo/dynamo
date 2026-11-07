@@ -105,6 +105,7 @@ impl SelectionCore {
                 track_active_blocks: true,
                 return_routing_hashes: false,
                 replay_id: req.selection_id.clone(),
+                admitted_upstream: false,
             })
             .await?;
         Ok(self.select_response(selected, endpoint, req.selection_id))
@@ -150,6 +151,7 @@ impl SelectionCore {
                 track_active_blocks: true,
                 return_routing_hashes: false,
                 replay_id: None,
+                admitted_upstream: false,
             })
             .await?;
         Ok(self.select_response(selected, endpoint, Some(selection_id)))
@@ -283,6 +285,7 @@ impl SelectionCore {
             track_active_blocks,
             return_routing_hashes,
             replay_id,
+            admitted_upstream,
         } = operation;
         let entry = self.ready_entry(&key)?;
         let book = admission.is_booking();
@@ -439,6 +442,7 @@ impl SelectionCore {
             allowed_worker_ids,
             routing_constraints,
             shared_cache_hits,
+            admitted_upstream,
         };
         // `booking` guards the booking until it is installed below: any early
         // return or drop before then frees it.

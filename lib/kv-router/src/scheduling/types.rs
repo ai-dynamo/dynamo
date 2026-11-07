@@ -19,6 +19,7 @@ use crate::protocols::{
     LocalBlockHash, RoutingConstraints, SelectionLogFields, SelectionTrace, SharedCacheHits,
     WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
+use crate::scheduling::policy_config::BusyThresholds;
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
 
@@ -90,6 +91,28 @@ impl AvailableWorkerIds {
             .store(Some(Arc::new((source, Arc::clone(&converted)))));
         Some(converted)
     }
+}
+
+/// Room in the worker pool that serves a request after this scheduler admits it: in
+/// disaggregated serving, the decode pool behind a prefill router.
+///
+/// A policy-class queue with a paired pool judges each class's
+/// `decode_busy_threshold_frac` on that pool, alongside its prefill limits on its own
+/// workers, so a request waits until both pools have room. The answer is a coarse
+/// admission gate: the paired pool's own selection still enforces exact eligibility.
+pub trait PairedPoolRoom: Send + Sync + 'static {
+    /// Whether some paired-pool rank that could serve `request` is within `limits`.
+    ///
+    /// `request` is this scheduler's request, so its pin and allowed workers name this
+    /// pool's workers, not the paired pool's. The answer may depend on the request only
+    /// through its `lora_name`: the queue shares one answer per gate pass among a class's
+    /// requests that name no LoRA. Runs on the admission actor's turn, so it must not
+    /// block, await, or message the paired pool's scheduler.
+    fn has_room(&self, request: &SchedulingRequest, limits: &BusyThresholds) -> bool;
+
+    /// A signal that changes whenever the paired pool may have gained room. `None` while
+    /// the pool is not yet available; the queue asks again when it next consults the pool.
+    fn room_changed(&self) -> Option<tokio::sync::watch::Receiver<()>>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -465,6 +488,11 @@ pub struct ScheduleRequest {
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub retain_kv_transfer_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
+    /// An upstream hop's policy-class queue already admitted this request, as the prefill
+    /// router does for a disaggregated decode leg. The queue books it directly without
+    /// waiting on its class limits or deadline; selection still applies the host's reject
+    /// thresholds.
+    pub admitted_upstream: bool,
 }
 
 /// Actor-owned admission request.

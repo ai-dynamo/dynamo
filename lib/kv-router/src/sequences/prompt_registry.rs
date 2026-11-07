@@ -19,9 +19,9 @@ use super::prompt_membership_trie::PromptMembershipTrie;
 use super::sharded_lock::ShardedRwLock;
 use super::single::PromptMembershipDelta;
 use super::topology::WorkerTopologyChange;
-use crate::plugins::worker_selection::WorkerCapacity;
+use crate::plugins::worker_selection::{WorkerCapacity, WorkerLoadInput};
 use crate::protocols::WorkerWithDpRank;
-use crate::scheduling::policy_config::FullRankCounts;
+use crate::scheduling::policy_config::{BusyThresholds, FullRankCounts};
 
 /// Ephemeral, request-specific view of worker load.
 ///
@@ -462,6 +462,32 @@ impl PromptRegistry {
             loads: self.loads.read(),
             decay_now,
         }
+    }
+
+    /// Whether any registered rank that `eligible` accepts has booked load within
+    /// `limits`, judged against the capacity that rank reports. Stops at the first rank
+    /// with room. With no eligible rank nothing is full, matching the queue gate, which
+    /// never holds a request on an empty eligible set.
+    pub(super) fn any_rank_has_room(
+        &self,
+        limits: &BusyThresholds,
+        decay_now: Instant,
+        mut eligible: impl FnMut(WorkerWithDpRank) -> bool,
+    ) -> bool {
+        let loads = self.loads.read();
+        let mut checked_any = false;
+        let has_room = loads.iter_indexed().any(|(index, worker, load)| {
+            if !eligible(worker) {
+                return false;
+            }
+            checked_any = true;
+            let projection = load.projection(decay_now, 0);
+            limits.has_room(
+                &WorkerLoadInput::from_projection(projection),
+                loads.capacity_at(index),
+            )
+        });
+        has_room || !checked_any
     }
 
     pub(super) fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {

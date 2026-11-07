@@ -37,7 +37,7 @@ use crate::plugins::worker_selection::WorkerCapacity;
 use crate::protocols::{
     ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId, WorkerWithDpRank,
 };
-use crate::scheduling::policy_config::FullRankCounts;
+use crate::scheduling::policy_config::{BusyThresholds, FullRankCounts};
 use crate::scheduling::{AttemptId, queue::SchedulerBookingDescriptor};
 
 // How often we force expire stale requests across all workers. See the comment
@@ -1349,6 +1349,19 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     .set_worker_capacity(WorkerWithDpRank::new(range.worker_id, dp_rank), capacity);
             }
         }
+    }
+
+    /// Whether any registered rank that `eligible` accepts has booked load within
+    /// `limits`, judged against the capacity recorded by [`Self::set_worker_capacities`].
+    /// True when no rank is eligible.
+    pub(crate) fn any_rank_has_room(
+        &self,
+        limits: &BusyThresholds,
+        decay_now: Instant,
+        eligible: impl FnMut(WorkerWithDpRank) -> bool,
+    ) -> bool {
+        self.prompt_registry
+            .any_rank_has_room(limits, decay_now, eligible)
     }
 
     #[cfg(feature = "bench")]

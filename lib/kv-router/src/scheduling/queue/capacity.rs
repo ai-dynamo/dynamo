@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossbeam_queue::ArrayQueue;
 use rustc_hash::FxHashSet;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 
 use crate::protocols::WorkerWithDpRank;
 
@@ -57,6 +57,36 @@ impl CapacityUpdates {
             self.notify.notify_one();
         }
         full_recheck
+    }
+}
+
+/// Broadcast hint that this scheduler's workers may have gained room, for the queue of
+/// a paired pool (a prefill router gating on decode room) to recheck its held requests.
+///
+/// Separate from [`CapacityUpdates`] on purpose: that signal wakes this scheduler's own
+/// actor with `notify_one`, so a second waiter would steal its permits. Any number of
+/// paired queues may watch this one, and a hint nobody watches costs one atomic load.
+pub(crate) struct RoomChanged {
+    tx: watch::Sender<()>,
+}
+
+impl RoomChanged {
+    pub(crate) fn new() -> Self {
+        Self {
+            tx: watch::Sender::new(()),
+        }
+    }
+
+    /// Wake every watcher. Hints coalesce: a watcher that has not yet observed the
+    /// previous one sees a single change.
+    pub(crate) fn notify(&self) {
+        if self.tx.receiver_count() > 0 {
+            self.tx.send_replace(());
+        }
+    }
+
+    pub(crate) fn subscribe(&self) -> watch::Receiver<()> {
+        self.tx.subscribe()
     }
 }
 
