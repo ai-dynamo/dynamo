@@ -3810,17 +3810,10 @@ async fn chat_completions(
         })?;
     drop(nvtx_lookup);
 
-    // Beam route, before generic validation (which rejects what these normalize): a
-    // `strict` tool whose schema is outside OpenAI's strict subset is served as
-    // non-strict instead of rejected, and a legacy `builtin_tools` declaration is
-    // promoted into `tools` (see `tool_choice::relax_noncompliant_strict_tools_for_beam`
-    // and `tool_choice::declare_legacy_builtin_tools_for_beam`).
+    // Beam route, before generic validation (which rejects what this normalizes): a
+    // legacy `builtin_tools` declaration is promoted into `tools` (see
+    // `tool_choice::declare_legacy_builtin_tools_for_beam`).
     crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
-        &mut request,
-        parsing_options.tool_call_parser.as_deref(),
-        parsing_options.reasoning_parser.as_deref(),
-    );
-    crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
         &mut request,
         parsing_options.tool_call_parser.as_deref(),
         parsing_options.reasoning_parser.as_deref(),
@@ -6867,6 +6860,18 @@ mod tests {
         let muse_tool_parser_only = ParsingOptions::new(Some("muse_glimmer".into()), None);
         assert!(request_stream_can_defer_all_output(
             &muse_tool_parser_only,
+            Some(&chat_template_args)
+        ));
+
+        // `reasoning_effort: "none"` reaches here as `thinking_mode: "disabled"`;
+        // M3 may still run its parser, so the fallback stays on.
+        let minimax_m3 = ParsingOptions::new(None, Some("minimax_m3".into()));
+        chat_template_args.insert(
+            "thinking_mode".to_string(),
+            serde_json::Value::String("disabled".to_string()),
+        );
+        assert!(request_stream_can_defer_all_output(
+            &minimax_m3,
             Some(&chat_template_args)
         ));
     }

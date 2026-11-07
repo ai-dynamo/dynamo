@@ -4,6 +4,7 @@
 [workspace]
 members = [
     "lib/llm",
+    "lib/lora",
     "lib/rl",
     "lib/runtime",
     "lib/tokens",
@@ -72,6 +73,7 @@ aisimulate-core = { version = "=0.13.0-dev.202610290000000087" }
 dynamo-runtime = { path = "lib/runtime", version = "1.7.0" }
 dynamo-global-discovery-client = { path = "lib/global-discovery-client", version = "1.7.0" }
 dynamo-llm = { path = "lib/llm", version = "1.7.0", default-features = false }
+dynamo-lora = { path = "lib/lora", version = "1.7.0" }
 dynamo-sglang-generate = { path = "lib/generate-formats/sglang", version = "1.7.0" }
 dynamo-vllm-generate = { path = "lib/generate-formats/vllm", version = "1.7.0" }
 dynamo-rl = { path = "lib/rl", version = "1.7.0" }
@@ -241,7 +243,7 @@ codegen-units = 1
 lto = "thin"
 
 # Profiling profile: release-like but retains debug symbols for perf/flamegraph/Nsight.
-# Build: cargo build --profile profiling --features nvtx
+# Build: cargo build --profile profiling --features dynamo-runtime/nvtx
 [profile.profiling]
 inherits = "release"
 debug = true
