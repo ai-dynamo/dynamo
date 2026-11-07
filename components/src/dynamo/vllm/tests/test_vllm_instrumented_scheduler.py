@@ -3686,6 +3686,58 @@ def test_prefill_real_seed_switch_parsing(monkeypatch):
     assert InstrumentedScheduler._bench_realseed_on(stub) is False
 
 
+def _realseed_layout_stub(*specs):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub.kv_cache_manager = SimpleNamespace(
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    kv_cache_spec=type(spec, (), {})()
+                    if isinstance(spec, str)
+                    else spec
+                )
+                for spec in specs
+            ]
+        )
+    )
+    return stub
+
+
+@pytest.mark.parametrize("value", [None, "auto", "AUTO"])
+def test_prefill_real_seed_auto_follows_recurrent_state_layout(monkeypatch, value):
+    """Synthetic prefix blocks carry no recurrent state, so a hybrid layout
+    never hits them; auto seeds real KV there and keeps fake seeding for
+    attention-only layouts."""
+    if value is None:
+        monkeypatch.delenv("DYN_BENCH_PREFILL_REAL_SEED", raising=False)
+    else:
+        monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", value)
+    state_subclass = type(
+        "GatedDeltaStateSpec", (instrumented_scheduler_module.MambaSpec,), {}
+    )
+    hybrid = _realseed_layout_stub("FullAttentionSpec", "MambaSpec")
+    hybrid_subclass = _realseed_layout_stub(
+        "FullAttentionSpec", state_subclass.__new__(state_subclass)
+    )
+    dense = _realseed_layout_stub("FullAttentionSpec", "SlidingWindowSpec")
+    assert InstrumentedScheduler._bench_realseed_on(hybrid) is True
+    assert InstrumentedScheduler._bench_realseed_on(hybrid_subclass) is True
+    assert InstrumentedScheduler._bench_realseed_on(dense) is False
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [("off", False), ("0", False), ("on", True)]
+)
+def test_prefill_real_seed_explicit_value_overrides_layout(
+    monkeypatch, value, expected
+):
+    monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", value)
+    hybrid = _realseed_layout_stub("FullAttentionSpec", "MambaSpec")
+    dense = _realseed_layout_stub("FullAttentionSpec")
+    assert InstrumentedScheduler._bench_realseed_on(hybrid) is expected
+    assert InstrumentedScheduler._bench_realseed_on(dense) is expected
+
+
 def test_seed_regime_for_prefill_rows():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     base = BenchmarkPoint(

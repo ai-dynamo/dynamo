@@ -3965,7 +3965,13 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _bench_realseed_on(self) -> bool:
         """Real-KV seeding for prefill points (``DYN_BENCH_PREFILL_REAL_SEED``,
-        default off).
+        default auto).
+
+        Auto: on when the KV-cache layout has a recurrent-state (Mamba/GDN/KDA)
+        group, off otherwise. Synthetic prefix blocks carry no recurrent state,
+        so a hybrid layout in Mamba "align" mode never reports a hit on them:
+        every past-KV prefill point would be skipped and the run rejected.
+        The layout is identical on every rank, so ranks still agree.
 
         Off: a point that reads past KV gets synthetic prefix blocks that are
         registered in the prefix cache but never computed (see
@@ -3984,11 +3990,18 @@ class InstrumentedScheduler(AsyncScheduler):
         skips the point on a miss, so an evicted prefix can never be measured
         silently as a fake one.
         """
-        return os.environ.get("DYN_BENCH_PREFILL_REAL_SEED", "off").lower() in (
-            "on",
-            "1",
-            "true",
-        )
+        value = os.environ.get("DYN_BENCH_PREFILL_REAL_SEED", "auto").lower()
+        if value in ("on", "1", "true"):
+            return True
+        if value == "auto":
+            config = getattr(
+                getattr(self, "kv_cache_manager", None), "kv_cache_config", None
+            )
+            return any(
+                self._kvwarm_is_state_spec(getattr(group, "kv_cache_spec", None))
+                for group in getattr(config, "kv_cache_groups", None) or []
+            )
+        return False
 
     def _bench_realseed_chain(self, batch_size: int) -> dict:
         """Per-batch seeding registry: one fixed cache salt per request slot
