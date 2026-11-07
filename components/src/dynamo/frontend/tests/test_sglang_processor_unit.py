@@ -2427,6 +2427,48 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         assert isinstance(guided, dict)
         assert "json" in guided
 
+    @staticmethod
+    def _function_tool(name, parameters):
+        return {
+            "type": "function",
+            "function": {"name": name, "parameters": parameters},
+        }
+
+    def test_required_tool_choice_preserves_local_references(self):
+        parameters = {
+            "type": "object",
+            "properties": {"value": {"$ref": "#/definitions/value"}},
+            "definitions": {"value": {"type": "string", "enum": ["a", "b"]}},
+        }
+        raw_tools = [self._function_tool("lookup", parameters)]
+        tools = convert_tools(raw_tools)
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "required", "tools": raw_tools},
+            tool_call_parser_name=None,
+            sglang_tools=tools,
+        )
+
+        assert guided is not None
+        schema = guided["json"]
+        entry = schema["items"]["anyOf"][0]
+        assert entry["properties"]["parameters"] == {"$ref": "#/$defs/tool_0"}
+        assert schema["$defs"]["tool_0"]["properties"]["value"]["$ref"] == (
+            "#/$defs/tool_0/definitions/value"
+        )
+        assert tools[0].function.parameters == parameters
+        xgr.Grammar.from_json_schema(json.dumps(schema))
+
+    def test_required_tool_choice_rejects_non_object_defs(self):
+        raw_tools = [self._function_tool("lookup", {"type": "object", "$defs": []})]
+
+        with pytest.raises(InvalidArgument, match=r"tool 'lookup' must be an"):
+            build_tool_call_guided_decoding(
+                {"tool_choice": "required", "tools": raw_tools},
+                tool_call_parser_name=None,
+                sglang_tools=convert_tools(raw_tools),
+            )
+
     def test_named_closed_zero_arg_tool_uses_exact_regex_guidance(self):
         tools = convert_tools(
             [
@@ -2472,7 +2514,7 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
 
         assert guided == {"regex": r"\{\}"}
 
-    def test_required_tool_choice_supports_older_sglang_constraint_signature(
+    def test_named_tool_choice_supports_older_sglang_constraint_signature(
         self, monkeypatch
     ):
         tools = convert_tools(
@@ -2492,7 +2534,7 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
 
         def old_get_json_schema_constraint(sglang_tools, tool_choice):
             assert sglang_tools == tools
-            assert tool_choice == "required"
+            assert tool_choice.function.name == "get_weather"
             return {"type": "array", "items": {"type": "object"}}
 
         monkeypatch.setattr(
@@ -2502,7 +2544,13 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         )
 
         guided = build_tool_call_guided_decoding(
-            {"tool_choice": "required", "parallel_tool_calls": False},
+            {
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                },
+                "parallel_tool_calls": False,
+            },
             tool_call_parser_name=None,
             sglang_tools=tools,
         )

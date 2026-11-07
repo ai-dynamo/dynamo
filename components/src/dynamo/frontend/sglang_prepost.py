@@ -30,7 +30,10 @@ from sglang.srt.parser.jinja_template_utils import (
 from sglang.srt.parser.reasoning_parser import GptOssDetector, ReasoningParser
 
 from dynamo.common.utils.engine_response import trailing_stop_prefix_len
-from dynamo.common.utils.guided_json import admits_only_empty_object
+from dynamo.common.utils.guided_json import (
+    admits_only_empty_object,
+    build_required_tool_schema,
+)
 from dynamo.llm.exceptions import InvalidArgument
 
 from .responses_history import responses_history_recipients, responses_tools_request
@@ -764,6 +767,22 @@ def build_tool_call_guided_decoding(
     if is_forced_choice:
         if named_closed_zero_arg_tool(request) is not None:
             return {"regex": r"\{\}"}
+
+        if not is_named_choice:
+            # SGLang's builder nests each parameter document without rebasing
+            # its local $refs and merges every tool's $defs into one map.
+            try:
+                return {
+                    "json": build_required_tool_schema(
+                        (
+                            (tool.function.name, tool.function.parameters)
+                            for tool in sglang_tools
+                        ),
+                        parallel_tool_calls=parallel_tool_calls,
+                    )
+                }
+            except ValueError as exc:
+                raise InvalidArgument(str(exc)) from exc
 
         # get_json_schema_constraint branches on isinstance(tool_choice,
         # ToolChoice) for the named-function case — passing our raw dict
