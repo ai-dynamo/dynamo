@@ -27,10 +27,12 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
 
+from .. import shipped
 from . import common
 
 logger = logging.getLogger("compliance.generators")
@@ -81,6 +83,16 @@ def main(argv: list[str] | None = None) -> int:
             "--break-system-packages into the system Python and there's no venv "
             "(e.g. lmsysorg/sglang upstream base)."
         ),
+    )
+    parser.add_argument(
+        "--shipped-sbom",
+        type=Path,
+        help="Native Syft inventory of the shipped filesystem",
+    )
+    parser.add_argument("--supplemental-sources", type=Path)
+    parser.add_argument("--shipped-root", type=Path, default=Path("/"))
+    parser.add_argument(
+        "--registry-cache", type=Path, default=Path("/tmp/compliance-registry")
     )
     parser.add_argument(
         "--output-dir",
@@ -283,6 +295,28 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("Generator failures: %s", failures)
         return 1
 
+    if args.shipped_sbom is not None:
+        additional = shipped.supplement(
+            json.loads(args.shipped_sbom.read_text()),
+            all_components,
+            args.shipped_root,
+            args.registry_cache,
+            subtract or set(),
+            args.output_dir,
+            sources_output=args.supplemental_sources,
+        )
+        all_components.extend(additional)
+        # Supplemental Go/native dependencies can exist even when the normal
+        # image generator set contains no Go builder SBOM. Keep existing writers.
+        merged_components = []
+        for ecosystem in sorted({c.ecosystem for c in all_components}):
+            components = common.dedupe_by_name_version(
+                [c for c in all_components if c.ecosystem == ecosystem]
+            )
+            common.write_notices(ecosystem, components, args.output_dir)
+            merged_components.extend(components)
+        all_components = merged_components
+
     # Unified OSRB outputs (delta-only — the accumulated components are already
     # baseline-subtracted): one merged CSV with a Notes column + one CycloneDX
     # SBOM. The merged CSV supersedes the per-ecosystem <eco>-deps.csv the
@@ -304,6 +338,9 @@ def main(argv: list[str] | None = None) -> int:
                     )
         except Exception as exc:  # don't fail generation over the Notes column
             logger.warning("could not load policy for Notes column: %s", exc)
+
+    if args.policy is not None and args.shipped_sbom is not None:
+        shipped.write_license_review(all_components, args.policy, args.output_dir)
 
     common.write_merged_csv(
         all_components, exception_reasons, args.output_dir / "osrb-deps.csv"
