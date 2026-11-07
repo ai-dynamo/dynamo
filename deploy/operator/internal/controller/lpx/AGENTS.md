@@ -230,6 +230,9 @@ SPDX-License-Identifier: Apache-2.0
   or `Failed`. Keep `SchedulingFailed` as independent failure and retry evidence,
   not duplicate timestamp/generation fields. An error may replace the Ready
   diagnostic without clearing scheduling failure.
+- `PlacementResolved` records the validated placement source for each workload
+  (`units` or `legacy`). It does not imply readiness. Invalid mixed-format workloads
+  set it false before replacement publication.
 - `Ready.LastTransitionTime` changes only when its boolean status changes.
   Renewing `SchedulingFailed` deliberately gives it a new timestamp even when
   it remains true.

@@ -106,6 +106,68 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 
 ### v1.7.0
 
+#### Experimental LPX Placement Compatibility
+
+**Change:** The LPX operator selects compiler-owned `lpuUnits` for a workload when every
+build in that workload contains a nonempty units list. It renders no placement ConfigMap
+and publishes `LPX_LOCAL_PARTITION_IDS` on Agents and `LPX_ALLOCATION` on Cyborg.
+A shared speculative pair must use one format; a mixed pair fails before replacement.
+Independent workloads in one graph may use different formats. Builds without units keep
+the legacy rendering path. There is no activation annotation.
+
+The units projection refuses:
+
+- Missing coverage, duplicate ownership, invalid sizes or connectors, and other nonempty invalid units.
+- More than one unit per model in an LPU-only workload (including `lpx` compilation mode without CUDA).
+- Different `devicesPerNode` values within one build, or an LP20 reservation whose width is not 8.
+- LP30 `size.nodes` other than one host with width 16; a partial partition on that host is allowed.
+- HX extents outside the supported profile: one rack with 1–8 trays per hemisphere and 1–2 hemispheres, or two full racks; the device width is 16.
+- More than 512 device pairs in any retained HX connector. This is not a total-graph pair limit.
+- GPU-local selection of an unknown partition or an interior unit member, and legacy `config` or `/configs` mounts on units templates.
+
+A refusal stops the migration during resolution/render validation, before new PCS replacement
+or LPR publication. The controller can still record a failure condition or complete cleanup
+of an already-releasing allocation. Runtime execution restrictions apply in addition to these
+operator projection limits.
+
+**Affected:** LPX workloads using new compiler builds, including builds that retain legacy
+placement fields. An operator-only upgrade activates units for such builds even without a
+DGD edit. A compatible PCS layout rolls; a different immutable layout replaces the entire
+PCS through foreground deletion. Extra replicas inside that PCS do not prevent the outage.
+
+**Action:** Block operator deployment until the release inventory names every DGD's exact
+build and runtime image digests and verifies this matrix:
+
+| Build | Runtime | New operator behavior |
+| --- | --- | --- |
+| Without units | Pinned legacy images | Existing legacy rendering |
+| Without units | Units-only images | Unsupported; restore the legacy images |
+| With units | Legacy images | Unsupported; return to the previous compatible build/image set before upgrading |
+| With units | Qualified units images | Units rendering, without a placement ConfigMap |
+| Mixed within one workload | Any | Rejected; migrate the pair together |
+
+Do not deploy a units-bearing build before both operator and runtime support are ready.
+Units-only images are also unsupported with the old operator, which does not supply the new
+environment. Keep the last legacy build/image digests for the support window. Freeze automatic
+image updates for legacy deployments. New runtime fixes require migration to a qualified units
+build; this release does not provide a transitional runtime reader.
+
+Before each move, validate the exact production artifact against the qualified placement
+oracle and supported operator/runtime shapes. Qualification of a development build with the
+same preset name does not qualify another artifact. Record the PCS layout/request diff and
+schedule an outage when replacement is required. Check backend, LPUD protocol and host firmware
+compatibility before scheduling. If no supported host/image set exists, leave the deployment on
+its pinned legacy set and report that its runtime upgrade is blocked.
+
+**Rollback:** Restore the previous build and runtime image digests together. This can replace
+the PCS again. Before downgrading the operator, return every units workload to its compatible
+legacy build/image set. Existing placement ConfigMaps remain until the replacement is Ready;
+that retention does not make an old runtime compatible with units rendering.
+
+The LPXGraphDeployment `PlacementResolved` condition records each workload's placement source.
+It does not indicate serving readiness. Invalid mixed workloads report `InvalidWorkload`.
+
+
 #### Deployment Tool Compatibility
 
 ##### Upgrade-Path Preflight Enforcement

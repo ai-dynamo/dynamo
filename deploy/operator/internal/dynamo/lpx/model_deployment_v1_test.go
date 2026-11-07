@@ -6,6 +6,7 @@
 package lpx
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -46,6 +47,235 @@ func newDeploymentV1ContractFixture(t *testing.T) deploymentcapnpv1.Deployment {
 	detail.SetNumChips(8)
 	detail.SetDevicesPerNode(8)
 	return deployment
+}
+
+// testUnitBundle describes a deployment.v1 contract with compiler-owned LPU units.
+type testUnitBundle struct {
+	architecture   deploymentcapnpv1.LpuArchitecture
+	devicesPerNode uint32
+	// hybrid compiles in lpx mode and adds one CUDA partition after the LPU partitions.
+	hybrid  bool
+	lpxMode bool
+	// cpuEmbeddings sets supportsCpuEmbeddings and standaloneTokenEmbeddings.
+	cpuEmbeddings bool
+	partitions    []testUnitPartition
+	chains        [][]uint32
+	// partSelect lists the selected LPU partitions; nil writes a full build.
+	partSelect []uint32
+	// units is written as config.lpuUnits; nil leaves the field unset.
+	units []testLPUUnit
+}
+
+type testUnitPartition struct {
+	id       uint32
+	numChips uint32
+	// shape is the HX16x8x2 partitionShape; nil omits topologyMetadata.
+	shape []uint32
+	// topology names the compiled topology; empty uses registryTestTopology.
+	topology string
+}
+
+type testLPUUnit struct {
+	reservations []testLPUReservation
+	connectors   []testLPUConnector
+}
+
+type testLPUReservation struct {
+	ids   []uint32
+	nodes uint32
+	// hx is {traysPerHemisphere, hemispheres, racks}; nil sizes the reservation in nodes.
+	hx []uint8
+}
+
+type testLPUConnector struct {
+	// hx selects hxPropSyncV1 with device pairs; otherwise xt8888Gap.
+	hx    bool
+	pairs [][2]uint32
+}
+
+// testUnitPartitions returns LPU partitions that share one geometry.
+func testUnitPartitions(numChips uint32, shape []uint32, ids ...uint32) []testUnitPartition {
+	partitions := make([]testUnitPartition, len(ids))
+	for index, id := range ids {
+		partitions[index] = testUnitPartition{id: id, numChips: numChips, shape: shape}
+	}
+	return partitions
+}
+
+func testNodesReservation(nodes uint32, ids ...uint32) testLPUReservation {
+	return testLPUReservation{ids: ids, nodes: nodes}
+}
+
+func testHXReservation(traysPerHemisphere, hemispheres, racks uint8, ids ...uint32) testLPUReservation {
+	return testLPUReservation{ids: ids, hx: []uint8{traysPerHemisphere, hemispheres, racks}}
+}
+
+// testSingleUnits places each reservation in its own unit.
+func testSingleUnits(reservations ...testLPUReservation) []testLPUUnit {
+	units := make([]testLPUUnit, len(reservations))
+	for index, reservation := range reservations {
+		units[index] = testLPUUnit{reservations: []testLPUReservation{reservation}}
+	}
+	return units
+}
+
+// testHXConventionConnector joins a source reservation's last host, device by
+// device, to the destination's first host, with lanes [4, 2, 1].
+func testHXConventionConnector(sourceHosts, devicesPerNode uint32) testLPUConnector {
+	connector := testLPUConnector{hx: true}
+	for device := range devicesPerNode {
+		connector.pairs = append(connector.pairs, [2]uint32{(sourceHosts-1)*devicesPerNode + device, device})
+	}
+	return connector
+}
+
+// encodeTestUnitBundle serializes the bundle as deployment.v1.capnp.bin bytes.
+func encodeTestUnitBundle(t *testing.T, bundle testUnitBundle) []byte {
+	t.Helper()
+	message, segment := capnp.NewSingleSegmentMessage(nil)
+	deployment, err := deploymentcapnpv1.NewRootDeployment(segment)
+	require.NoError(t, err)
+	deployment.SetContractRevision(deploymentcapnpv1.CurrentContractRevision)
+
+	t.Log("Encode the program, runtime I/O and selected chains")
+	config, err := deployment.NewConfig()
+	require.NoError(t, err)
+	config.SetCompilationMode(deploymentcapnpv1.CompilationMode_lpuOnly)
+	if bundle.hybrid || bundle.lpxMode {
+		config.SetCompilationMode(deploymentcapnpv1.CompilationMode_lpx)
+	}
+	program, err := config.NewProgram()
+	require.NoError(t, err)
+	program.SetSupportsCpuEmbeddings(bundle.cpuEmbeddings)
+	program.SetStandaloneTokenEmbeddings(bundle.cpuEmbeddings)
+	runtimeIO, err := config.NewRuntimeIo()
+	require.NoError(t, err)
+	runtimeIO.SetIoFpgaCount(1)
+	runtimeIO.SetFanoutFactor(1)
+	if bundle.chains != nil {
+		chains, err := config.NewSelectedPropSyncChains(int32(len(bundle.chains)))
+		require.NoError(t, err)
+		for chainIndex, chain := range bundle.chains {
+			ids, err := chains.At(chainIndex).NewPartitionIds(int32(len(chain)))
+			require.NoError(t, err)
+			for index, id := range chain {
+				ids.Set(index, id)
+			}
+		}
+	}
+
+	t.Log("Encode the compiler-owned units")
+	if bundle.units != nil {
+		units, err := config.NewLpuUnits(int32(len(bundle.units)))
+		require.NoError(t, err)
+		for unitIndex, unit := range bundle.units {
+			reservations, err := units.At(unitIndex).NewReservations(int32(len(unit.reservations)))
+			require.NoError(t, err)
+			for index, reservation := range unit.reservations {
+				ids, err := reservations.At(index).NewPartitionIds(int32(len(reservation.ids)))
+				require.NoError(t, err)
+				for idIndex, id := range reservation.ids {
+					ids.Set(idIndex, id)
+				}
+				size := reservations.At(index).Size()
+				if reservation.hx == nil {
+					size.SetNodes(reservation.nodes)
+					continue
+				}
+				extent, err := size.NewHx()
+				require.NoError(t, err)
+				extent.SetTraysPerHemisphere(reservation.hx[0])
+				extent.SetHemispheres(reservation.hx[1])
+				extent.SetRacks(reservation.hx[2])
+			}
+			connectors, err := units.At(unitIndex).NewConnectors(int32(len(unit.connectors)))
+			require.NoError(t, err)
+			for index, connector := range unit.connectors {
+				if !connector.hx {
+					connectors.At(index).SetXt8888Gap()
+					continue
+				}
+				hx, err := connectors.At(index).NewHxPropSyncV1()
+				require.NoError(t, err)
+				pairs, err := hx.NewConnections(int32(len(connector.pairs)))
+				require.NoError(t, err)
+				for pairIndex, pair := range connector.pairs {
+					pairs.At(pairIndex).SetFromDevice(pair[0])
+					pairs.At(pairIndex).SetToDevice(pair[1])
+				}
+			}
+		}
+	}
+
+	t.Log("Encode the partition selection, the LPU partitions and the hybrid CUDA partition")
+	if bundle.partSelect != nil {
+		selection, err := deployment.NewPartSelect()
+		require.NoError(t, err)
+		selected, err := selection.NewPartitions(int32(len(bundle.partSelect)))
+		require.NoError(t, err)
+		for index, id := range bundle.partSelect {
+			selected.At(index).SetDeviceType(commoncapnpv1.DeviceType_lpu)
+			selected.At(index).SetPartitionId(id)
+		}
+	}
+	count := len(bundle.partitions)
+	if bundle.hybrid {
+		count++
+	}
+	partitions, err := deployment.NewPartitions(int32(count))
+	require.NoError(t, err)
+	lastID := uint32(0)
+	for index, partition := range bundle.partitions {
+		ref, err := partitions.At(index).NewPartition()
+		require.NoError(t, err)
+		ref.SetDeviceType(commoncapnpv1.DeviceType_lpu)
+		ref.SetPartitionId(partition.id)
+		lastID = max(lastID, partition.id)
+		detail, err := partitions.At(index).Detail().NewLpu()
+		require.NoError(t, err)
+		require.NoError(t, detail.SetPath(fmt.Sprintf("part-%d", partition.id)))
+		topology := partition.topology
+		if topology == "" {
+			topology = registryTestTopology
+		}
+		require.NoError(t, detail.SetTopology(topology))
+		detail.SetArchitecture(bundle.architecture)
+		detail.SetNumChips(partition.numChips)
+		detail.SetDevicesPerNode(bundle.devicesPerNode)
+		if partition.shape != nil {
+			metadata, err := detail.NewTopologyMetadata()
+			require.NoError(t, err)
+			require.NoError(t, metadata.SetTopologyFamily(hxTopologyFamily))
+			shape, err := metadata.NewPartitionShape(int32(len(partition.shape)))
+			require.NoError(t, err)
+			for dimension, extent := range partition.shape {
+				shape.Set(dimension, extent)
+			}
+		}
+	}
+	if bundle.hybrid {
+		ref, err := partitions.At(len(bundle.partitions)).NewPartition()
+		require.NoError(t, err)
+		ref.SetDeviceType(commoncapnpv1.DeviceType_cuda)
+		ref.SetPartitionId(lastID + 1)
+		_, err = partitions.At(len(bundle.partitions)).Detail().NewCuda()
+		require.NoError(t, err)
+	}
+
+	data, err := message.Marshal()
+	require.NoError(t, err)
+	return data
+}
+
+// acquireTestUnitBundle publishes the bundle in a fresh build directory and
+// acquires it through the model registry.
+func acquireTestUnitBundle(t *testing.T, bundle testUnitBundle) (*Build, error) {
+	t.Helper()
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, gbuildDeploymentV1CapnpFile), encodeTestUnitBundle(t, bundle), 0o600))
+	registry, err := NewModelRegistry("", nil)
+	require.NoError(t, err)
+	return registry.AcquireBuild(t.Context(), root)
 }
 
 func TestDeploymentContractSelectsOneFormat(t *testing.T) {
@@ -481,4 +711,144 @@ func TestDeploymentContractTopologyFamilies(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestDeploymentUnitsContract(t *testing.T) {
+	t.Parallel()
+	xt := testUnitBundle{architecture: deploymentcapnpv1.LpuArchitecture_lp20, devicesPerNode: 8,
+		partitions: testUnitPartitions(8, nil, 0, 1),
+		units:      []testLPUUnit{{reservations: []testLPUReservation{testNodesReservation(1, 0), testNodesReservation(1, 1)}, connectors: []testLPUConnector{{}}}}}
+	hx := testUnitBundle{architecture: deploymentcapnpv1.LpuArchitecture_lp30, devicesPerNode: 16,
+		partitions: testUnitPartitions(16, nil, 0, 1),
+		units:      []testLPUUnit{{reservations: []testLPUReservation{testHXReservation(1, 1, 1, 0), testHXReservation(1, 1, 1, 1)}, connectors: []testLPUConnector{testHXConventionConnector(1, 16)}}}}
+	for _, tc := range []struct {
+		name    string
+		base    testUnitBundle
+		change  func(*testUnitBundle)
+		wantErr string
+	}{
+		{name: "XT units need no legacy chain", base: xt},
+		{name: "HX units need no legacy topology", base: hx},
+		{name: "legacy chain cannot override units", base: xt, change: func(b *testUnitBundle) { b.chains = [][]uint32{{99, 99}} }},
+		{name: "missing partition", base: xt, change: func(b *testUnitBundle) { b.units = testSingleUnits(testNodesReservation(1, 0)) }, wantErr: "omits LPU partition 1"},
+		{name: "missing zero is not a generic exception", base: xt, change: func(b *testUnitBundle) { b.units = testSingleUnits(testNodesReservation(1, 1)) }, wantErr: "omits LPU partition 0"},
+		{name: "CPU standalone zero can be omitted", base: xt, change: func(b *testUnitBundle) { b.cpuEmbeddings = true; b.units = testSingleUnits(testNodesReservation(1, 1)) }},
+		{name: "CPU standalone zero can be present", base: xt, change: func(b *testUnitBundle) { b.cpuEmbeddings = true }},
+		{name: "CUDA build cannot omit zero", base: xt, change: func(b *testUnitBundle) {
+			b.hybrid = true
+			b.cpuEmbeddings = true
+			b.units = testSingleUnits(testNodesReservation(1, 1))
+		}, wantErr: "omits LPU partition 0"},
+		{name: "duplicate coverage", base: xt, change: func(b *testUnitBundle) {
+			b.units = testSingleUnits(testNodesReservation(1, 0), testNodesReservation(1, 0))
+		}, wantErr: "repeats partition 0"},
+		{name: "unknown partition", base: xt, change: func(b *testUnitBundle) { b.units = testSingleUnits(testNodesReservation(1, 99)) }, wantErr: "not a deployed LPU partition"},
+		{name: "empty unit", base: xt, change: func(b *testUnitBundle) { b.units = []testLPUUnit{{}} }, wantErr: "reservations must not be empty"},
+		{name: "empty partition list", base: xt, change: func(b *testUnitBundle) { b.units = testSingleUnits(testNodesReservation(1)) }, wantErr: "partitionIds must not be empty"},
+		{name: "extra host", base: xt, change: func(b *testUnitBundle) { b.units = testSingleUnits(testNodesReservation(3, 0, 1)) }, wantErr: "reserves 3 hosts for 16 chips; want 2"},
+		{name: "missing host", base: xt, change: func(b *testUnitBundle) { b.units = testSingleUnits(testNodesReservation(1, 0, 1)) }, wantErr: "reserves 1 hosts for 16 chips; want 2"},
+		{name: "packed without CUDA", base: xt, change: func(b *testUnitBundle) { b.units = testSingleUnits(testNodesReservation(2, 0, 1)) }},
+		{name: "packed with CUDA", base: xt, change: func(b *testUnitBundle) { b.hybrid = true; b.units = testSingleUnits(testNodesReservation(2, 0, 1)) }, wantErr: "requires a bundle without CUDA"},
+		{name: "packed beside reservation", base: xt, change: func(b *testUnitBundle) {
+			b.units = []testLPUUnit{{reservations: []testLPUReservation{testNodesReservation(2, 0, 1), testNodesReservation(1, 0)}, connectors: []testLPUConnector{{}}}}
+		}, wantErr: "only reservation"},
+		{name: "connector count", base: xt, change: func(b *testUnitBundle) {
+			b.units = []testLPUUnit{{reservations: []testLPUReservation{testNodesReservation(1, 0), testNodesReservation(1, 1)}}}
+		}, wantErr: "0 connectors for 2 reservations"},
+		{name: "HX connector on XT", base: xt, change: func(b *testUnitBundle) { b.units = hx.units }, wantErr: "LP20 reservations use size.nodes"},
+		{name: "HX nodes greater than one", base: hx, change: func(b *testUnitBundle) { b.units = testSingleUnits(testNodesReservation(2, 0, 1)) }},
+		{name: "HX nodes form retains another width", base: hx, change: func(b *testUnitBundle) {
+			b.devicesPerNode = 8
+			b.partitions = testUnitPartitions(8, nil, 0)
+			b.units = testSingleUnits(testNodesReservation(1, 0))
+		}},
+		{name: "HX nodes one allows partial host", base: hx, change: func(b *testUnitBundle) {
+			b.partitions = testUnitPartitions(8, nil, 0)
+			b.units = testSingleUnits(testNodesReservation(1, 0))
+		}},
+		{name: "HX device pair out of bounds", base: hx, change: func(b *testUnitBundle) {
+			b.units = []testLPUUnit{{reservations: hx.units[0].reservations, connectors: []testLPUConnector{{hx: true, pairs: [][2]uint32{{16, 0}}}}}}
+		}, wantErr: "outside the joined reservations"},
+		{name: "HX repeated device pair", base: hx, change: func(b *testUnitBundle) {
+			b.units = []testLPUUnit{{reservations: hx.units[0].reservations, connectors: []testLPUConnector{{hx: true, pairs: [][2]uint32{{0, 0}, {0, 0}}}}}}
+		}, wantErr: "repeats device pair"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Decode a serialized compiler contract without derived legacy placement")
+			bundle := tc.base
+			if tc.change != nil {
+				tc.change(&bundle)
+			}
+			build, err := acquireTestUnitBundle(t, bundle)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, build.lpuUnits, len(bundle.units))
+			for i, unit := range bundle.units {
+				for j, reservation := range unit.reservations {
+					want := make([]int, len(reservation.ids))
+					for k, id := range reservation.ids {
+						want[k] = int(id)
+					}
+					require.Equal(t, want, build.lpuUnits[i].Reservations[j].PartitionIDs)
+				}
+			}
+		})
+	}
+}
+
+func TestDeploymentUnitsPreserveEncodedOrder(t *testing.T) {
+	t.Parallel()
+	t.Log("Read units whose unit and partition order differs from numeric ID order")
+	bundle := testUnitBundle{architecture: deploymentcapnpv1.LpuArchitecture_lp20, devicesPerNode: 8,
+		partitions: testUnitPartitions(8, nil, 0, 1, 2), units: testSingleUnits(testNodesReservation(2, 2, 0), testNodesReservation(1, 1))}
+	build, err := acquireTestUnitBundle(t, bundle)
+	require.NoError(t, err)
+	require.Equal(t, []int{2, 0}, build.lpuUnits[0].Reservations[0].PartitionIDs)
+	require.Equal(t, []int{1}, build.lpuUnits[1].Reservations[0].PartitionIDs)
+}
+
+func TestUnitsPlacementIgnoresClearedLegacyFields(t *testing.T) {
+	t.Parallel()
+	t.Log("Decode a units chain while all legacy placement fields remain populated")
+	bundle := testUnitBundle{architecture: deploymentcapnpv1.LpuArchitecture_lp30, devicesPerNode: 16, lpxMode: true,
+		chains: [][]uint32{{0, 1}}, partitions: testUnitPartitions(16, []uint32{16, 1, 1, 1}, 0, 1),
+		units: []testLPUUnit{{reservations: []testLPUReservation{testHXReservation(1, 1, 1, 0), testHXReservation(1, 1, 1, 1)}, connectors: []testLPUConnector{testHXConventionConnector(1, 16)}}}}
+	message, err := capnp.Unmarshal(encodeTestUnitBundle(t, bundle))
+	require.NoError(t, err)
+	original, err := deploymentcapnpv1.ReadRootDeployment(message)
+	require.NoError(t, err)
+	writable, _ := capnp.NewSingleSegmentMessage(nil)
+	require.NoError(t, writable.SetRoot(original.ToPtr()))
+	deployment, err := deploymentcapnpv1.ReadRootDeployment(writable)
+	require.NoError(t, err)
+	config, err := deployment.Config()
+	require.NoError(t, err)
+	config.SetNumLpuNodes(2)
+	before, err := buildFromGbuildDeploymentV1("fixture", deployment)
+	require.NoError(t, err)
+	beforeProjection, err := projectTestUnits(before, nil)
+	require.NoError(t, err)
+
+	t.Log("Clear every legacy placement field without changing units or partition execution artifacts")
+	config.SetNumLpuNodes(0)
+	require.NoError(t, config.SetSelectedPropSyncChains(deploymentcapnpv1.PropSyncChain_List{}))
+	partitions, err := deployment.Partitions()
+	require.NoError(t, err)
+	for i := 0; i < partitions.Len(); i++ {
+		detail, err := partitions.At(i).Detail().Lpu()
+		require.NoError(t, err)
+		require.NoError(t, detail.SetTopologyMetadata(deploymentcapnpv1.TopologyMetadata{}))
+	}
+	after, err := buildFromGbuildDeploymentV1("fixture", deployment)
+	require.NoError(t, err)
+	afterProjection, err := projectTestUnits(after, nil)
+	require.NoError(t, err)
+
+	t.Log("Keep the complete scheduler request and Agent count unchanged")
+	require.Equal(t, before.lpuUnits, after.lpuUnits)
+	require.Equal(t, beforeProjection[0].AgentReplicas(), afterProjection[0].AgentReplicas())
+	require.Equal(t, beforeProjection[0].RequestSpec(&MaterializationPlan{}, "agents"), afterProjection[0].RequestSpec(&MaterializationPlan{}, "agents"))
 }

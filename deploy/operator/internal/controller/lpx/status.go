@@ -13,14 +13,17 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
-	maxConditionMessageSize = 32768
+	maxConditionMessageSize    = 32768
+	placementResolvedCondition = "PlacementResolved"
 	// SchedulingFailed is durable expiry/retry evidence, separate from aggregate Ready.
 	schedulingFailedCondition             = "SchedulingFailed"
 	pipelineRequestDeadlineExceededReason = "LPXSchedulingDeadlineExceeded"
@@ -258,4 +261,35 @@ func truncateConditionMessage(message string) string {
 		last--
 	}
 	return message[:last] + suffix
+}
+
+// setPlacementSourceCondition records each resolved workload without changing readiness.
+func setPlacementSourceCondition(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, workloads map[string]*lpx.Workload) {
+	parts := make([]string, 0, len(workloads))
+	reason := ""
+	for _, name := range slices.Sorted(maps.Keys(workloads)) {
+		source := workloads[name].PlacementSource()
+		parts = append(parts, name+"="+source)
+		current := "Legacy"
+		if source == "units" {
+			current = "Units"
+		}
+		if reason == "" {
+			reason = current
+		} else if reason != current {
+			reason = "MultipleSources"
+		}
+	}
+	if reason == "" {
+		reason = "NoWorkloads"
+	}
+	message := truncateConditionMessage(strings.Join(parts, "; "))
+	previous := meta.FindStatusCondition(deployment.Status.Conditions, placementResolvedCondition)
+	if previous == nil || previous.Message != message || previous.Status != metav1.ConditionTrue {
+		log.FromContext(ctx).Info("LPX placement sources resolved", "workloads", parts)
+	}
+	meta.SetStatusCondition(&deployment.Status.Conditions, metav1.Condition{
+		Type: placementResolvedCondition, Status: metav1.ConditionTrue,
+		ObservedGeneration: deployment.Generation, Reason: reason, Message: message,
+	})
 }

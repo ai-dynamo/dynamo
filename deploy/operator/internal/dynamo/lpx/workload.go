@@ -46,3 +46,16 @@ func (w *Workload) ComponentNames() []string {
 func (w *Workload) ServingComponentName() string {
 	return w.modelProjections[len(w.modelProjections)-1].stage
 }
+
+// placesLPUUnits reports the workload-wide placement source validated by ResolveWorkload.
+func (w *Workload) placesLPUUnits() bool {
+	return w.modelProjections[0].placesLPUUnits()
+}
+
+// PlacementSource names the workload-wide contract selected during resolution.
+func (w *Workload) PlacementSource() string {
+	if w.placesLPUUnits() {
+		return "units"
+	}
+	return "legacy"
+}

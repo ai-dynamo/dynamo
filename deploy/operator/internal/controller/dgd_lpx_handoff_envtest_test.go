@@ -259,7 +259,6 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 		assert.Greater(c, child.Generation, child.Status.ObservedGeneration)
 		assert.Equal(c, child.Generation, failed.ObservedGeneration)
 		assert.Equal(c, metav1.ConditionFalse, failed.Status)
-		assert.Len(c, child.Status.Conditions, 1)
 		assert.Equal(c, v1alpha1.LPXReadyReasonFailed, failed.Reason)
 		assert.Contains(c, failed.Message, "exceeded quota: block-lpx-publication")
 		assert.Equal(c, v1beta1.DGDStateFailed, source.Status.State)
