@@ -1281,17 +1281,23 @@ fn validate_polynomial_comparison_spec(spec: &aisimulate_core::replay::ReplaySpe
         engine::{Backend, PreemptionMode, TimingModelConfig, TransferTimingMode},
         replay::{ReplayEngineConfig, ReplayTopology, WorkerStage},
     };
-    ensure!(
-        matches!(&spec.topology, ReplayTopology::Disaggregated { prefill, decode, .. }
-        if prefill.initial_workers == 2 && decode.initial_workers == 2),
-        "polynomial comparison requires the legacy 2P2D topology"
-    );
+    let stages: &[WorkerStage] = match &spec.topology {
+        ReplayTopology::Aggregated { workers } if workers.initial_workers == 1 => {
+            &[WorkerStage::Aggregated]
+        }
+        ReplayTopology::Disaggregated {
+            prefill, decode, ..
+        } if prefill.initial_workers == 2 && decode.initial_workers == 2 => {
+            &[WorkerStage::Prefill, WorkerStage::Decode]
+        }
+        _ => bail!("polynomial comparison requires one aggregated worker or legacy 2P2D"),
+    };
     ensure!(
         spec.adapters.placement.provider == "round_robin",
         "polynomial comparison must retain native round-robin placement, not Dynamo KV routing"
     );
     let engine: ReplayEngineConfig = serde_json::from_value(spec.engine.clone())?;
-    for stage in [WorkerStage::Prefill, WorkerStage::Decode] {
+    for &stage in stages {
         let role = engine.role(stage);
         let rank = role.rank;
         ensure!(
@@ -1315,12 +1321,14 @@ fn validate_polynomial_comparison_spec(spec: &aisimulate_core::replay::ReplaySpe
                 && rank.async_scheduling == Some(false),
             "polynomial comparison differs from the explicit legacy serving limits"
         );
-        ensure!(
-            rank.kv_transfer_bytes_per_token == Some(44928)
-                && rank.kv_transfer_bandwidth == Some(50.0)
-                && rank.kv_transfer_timing_mode == TransferTimingMode::FullPrompt,
-            "polynomial comparison differs from the explicit legacy transfer assumption"
-        );
+        if stage != WorkerStage::Aggregated {
+            ensure!(
+                rank.kv_transfer_bytes_per_token == Some(44928)
+                    && rank.kv_transfer_bandwidth == Some(50.0)
+                    && rank.kv_transfer_timing_mode == TransferTimingMode::FullPrompt,
+                "polynomial comparison differs from the explicit legacy transfer assumption"
+            );
+        }
         ensure!(
             rank.speedup_ratio == 1.0
                 && rank.decode_speedup_ratio == 1.0
@@ -1365,12 +1373,11 @@ fn polynomial_comparison_rejects_nonmatching_identity() -> Result<()> {
     let mut changed = prepared.spec.clone();
     let mut engine: aisimulate_core::replay::ReplayEngineConfig =
         serde_json::from_value(changed.engine.clone())?;
-    engine
-        .prefill
-        .as_mut()
-        .context("prefill role")?
-        .rank
-        .timing_model = aisimulate_core::engine::TimingModelConfig::Fixed {
+    let rank = match changed.topology {
+        aisimulate_core::replay::ReplayTopology::Aggregated { .. } => &mut engine.rank,
+        _ => &mut engine.prefill.as_mut().context("prefill role")?.rank,
+    };
+    rank.timing_model = aisimulate_core::engine::TimingModelConfig::Fixed {
         prefill_ms: 1.0,
         decode_ms: 2.0,
     };
@@ -1382,12 +1389,11 @@ fn polynomial_comparison_rejects_nonmatching_identity() -> Result<()> {
     let mut changed = prepared.spec;
     let mut engine: aisimulate_core::replay::ReplayEngineConfig =
         serde_json::from_value(changed.engine.clone())?;
-    engine
-        .decode
-        .as_mut()
-        .context("decode role")?
-        .rank
-        .num_gpu_blocks += 1;
+    let rank = match changed.topology {
+        aisimulate_core::replay::ReplayTopology::Aggregated { .. } => &mut engine.rank,
+        _ => &mut engine.decode.as_mut().context("decode role")?.rank,
+    };
+    rank.num_gpu_blocks += 1;
     changed.engine = serde_json::to_value(engine)?;
     ensure!(
         validate_polynomial_comparison_spec(&changed).is_err(),
