@@ -217,7 +217,7 @@ pub struct OutputSignal {
     pub cached_tokens: Option<usize>,
 }
 
-pub use crate::config::MockerConfig;
+pub use crate::config::{DpLoadBalanceMethod, MockerConfig};
 pub use aisimulate_core::engine::{
     Backend as EngineType, PreemptionMode, TransferTimingMode as KvTransferTimingMode, WorkerType,
 };

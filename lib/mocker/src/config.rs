@@ -28,6 +28,25 @@ pub struct MockerRuntimeOptions {
     pub zmq_kv_events_port: Option<u16>,
     pub zmq_replay_port: Option<u16>,
     pub router_queue_policy: Option<RouterQueuePolicy>,
+    pub dp_load_balance_method: DpLoadBalanceMethod,
+}
+
+/// How a worker places requests that carry no explicit `dp_rank` hint, mirroring SGLang's
+/// `--load-balance-method`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DpLoadBalanceMethod {
+    /// SGLang's default: `follow_bootstrap_room` on SGLang prefill workers, `round_robin`
+    /// everywhere else.
+    #[default]
+    Auto,
+    RoundRobin,
+    /// Place by `bootstrap_room % dp_size`; requests without a bootstrap room are rejected.
+    FollowBootstrapRoom,
+    /// Place on the rank with the fewest running plus waiting requests.
+    TotalRequests,
+    /// Place on the rank with the fewest KV tokens in use, breaking ties by requests.
+    TotalTokens,
 }
 
 impl Default for MockerRuntimeOptions {
@@ -41,6 +60,7 @@ impl Default for MockerRuntimeOptions {
             zmq_kv_events_port: None,
             zmq_replay_port: None,
             router_queue_policy: None,
+            dp_load_balance_method: DpLoadBalanceMethod::Auto,
         }
     }
 }
