@@ -6,14 +6,23 @@ SPDX-License-Identifier: Apache-2.0
 # Mocker-backed SGLang gRPC server
 
 `dynamo-sglang-mocker-server` implements the native
-`sglang.runtime.v1.SglangService` RPCs used by Dynamo's SGLang sidecar. It runs
-on CPU using the Dynamo Mocker scheduler, so sidecar discovery, streaming,
-cancellation, capacity, and disaggregated handoff behavior can be tested
-without SGLang, a model, or a GPU.
+`sglang.api.v1.SglangService` RPCs used by Dynamo's SGLang sidecar, the gRPC
+service of SGLang's Rust server. It runs on CPU using the Dynamo Mocker
+scheduler, so sidecar discovery, streaming, cancellation, capacity, and
+disaggregated handoff behavior can be tested without SGLang, a model, or a GPU.
 
 The mock server temporarily imports the generated contract from
 `dynamo_sglang_sidecar::proto`. Only tokenized `Generate`, `Abort`, health, and
-discovery RPCs are implemented; unrelated SGLang RPCs return `Unimplemented`.
+discovery RPCs are implemented; unrelated SGLang RPCs, including `Detokenize`
+and the HiCache storage RPCs, return `Unimplemented`.
+
+The service follows the Rust server's shapes: typed discovery with
+`deployment_info`, `GenerateStreamItem` frames whose terminal carries a typed
+`finish_reason`, prompt logprobs on the first frame only, and in-stream error
+items with HTTP status codes. A request that does not fit the context ends
+with a 400 item, `Abort` ends the stream with a 499 item and reports whether it
+matched an active request, and a request beyond the simulated KV capacity ends
+with a 503 item.
 
 ## Aggregated serving
 
@@ -44,46 +53,42 @@ inside the Mocker scheduler.
 
 Like regular mock workers, the server publishes KV cache events when prefix
 caching is enabled, except in decode mode. It uses the existing Mocker ZMQ
-publisher and reports the endpoint through native engine discovery. The
-sidecar forwards these events to Dynamo's router.
+publisher and reports the endpoint through native engine discovery as one
+`kv_event_sources` entry at `tcp://127.0.0.1:<port>`, a node-local address like
+the Rust server's, so the sidecar must run on the Mocker's host. The sidecar
+forwards these events to Dynamo's router.
 
 The event publisher binds a free port by default. For this gRPC server, an
-unset `zmq_kv_events_port` selects an automatic ZMQ port. The sidecar discovers
-the endpoint and replaces its wildcard address with the host from
-`--grpc-endpoint`. Use a frontend with `--router-mode kv`.
+unset `zmq_kv_events_port` selects an automatic ZMQ port. Use a frontend with
+`--router-mode kv`.
 
 The event and optional replay sockets bind to all IPv4 interfaces (`0.0.0.0`),
 independently of the gRPC `--listen` address. These sockets have no authentication,
 and stored events include token IDs from cached prompt and generated-token blocks.
-Use an IPv4 address, or a hostname reachable over IPv4, for `--grpc-endpoint`.
-An IPv6-only gRPC endpoint cannot receive events from this publisher.
 
 Publishing collects and queues token IDs even when no subscriber is connected.
 The background publisher task encodes and sends the events. This work also
 occurs when the frontend uses a routing mode that does not consume KV events.
 
-Automatic ports work for local processes and containers that share a network
-namespace, including containers in one Kubernetes pod. Use a fixed port when
-port mappings, a Service, or firewall rules need a known event port. For example:
+Because discovery reports the publisher at `127.0.0.1`, the sidecar must share
+the Mocker's network namespace: the same host, or containers in one Kubernetes
+pod. Use a fixed port when other tools need a known event port. For example:
 
 ```bash
 cargo run -p dynamo-sglang-mocker --bin dynamo-sglang-mocker-server -- \
-  --listen 0.0.0.0:30001 \
+  --listen 127.0.0.1:30001 \
   --model mocker-model \
   --extra-engine-args '{"engine":{"speedup_ratio":1000,"block_size":64},"dynamo":{"zmq_kv_events_port":5557}}'
 
 cargo run -p dynamo-sglang-sidecar --bin dynamo-sglang-sidecar -- \
-  --grpc-endpoint mock-host:30001
+  --grpc-endpoint 127.0.0.1:30001
 ```
 
-Replace `mock-host` with a host reachable from the sidecar. Expose both TCP
-ports on that host, preserving the event port number. For Docker port mapping,
-use `-p 30001:30001 -p 5557:5557` on the mock-server container. The sidecar will
-connect to `mock-host:5557` for events.
+The sidecar connects to `tcp://127.0.0.1:5557` for events.
 
 An explicit replay client can use the existing optional replay socket by adding
-`"zmq_replay_port":5558` under `dynamo` in the engine arguments. The current SGLang discovery
-descriptor does not advertise replay, and the sidecar receiver does not use it.
+`"zmq_replay_port":5558` under `dynamo` in the engine arguments. SGLang discovery
+does not advertise replay, and the sidecar receiver does not use it.
 The shared native PUB/SUB path
 can lose events before the subscription is ready, and restarting only the
 sidecar does not rebuild the index for blocks already in the mock server's
@@ -137,6 +142,12 @@ bootstrap socket, NIXL connection, or KV data movement is created.
 - Length and explicit stop-token termination follow SGLang's `min_new_tokens`
   and `ignore_eos` controls. Sampling, string stops, model EOS, and structured
   decoding are not simulated.
-- `Abort` releases Mocker scheduler state and terminates the gRPC stream with
-  `Cancelled`, matching SGLang's native gRPC bridge.
-- One Mocker data-parallel rank per server process.
+- `Abort` releases Mocker scheduler state and ends the stream with a 499 error
+  item, matching the Rust server.
+- `HealthCheck` reports healthy once the server starts; it does not simulate
+  SGLang's one-token probe.
+- The HiCache storage RPCs (`GetHiCacheStorage`, `AttachHiCacheStorage`,
+  `DetachHiCacheStorage`, `ClearHiCacheStorage`) return `Unimplemented`: the
+  Mocker has no storage backend.
+- One Mocker data-parallel rank per server process, reported as a single-rank
+  deployment.
