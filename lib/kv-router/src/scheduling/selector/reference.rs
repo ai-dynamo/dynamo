@@ -669,6 +669,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             input,
             None,
             None,
+            None,
         )
         .map(|(result, _)| result)
     }

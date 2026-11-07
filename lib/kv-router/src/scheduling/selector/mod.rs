@@ -47,6 +47,7 @@ use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{
     KvSchedulerError, SchedulingRequest, SchedulingResponse, WorkerSelectionPolicyError,
 };
+use crate::indexer::ResidentBlockCounts;
 use crate::protocols::{
     SelectionLogFields, SelectionTrace, SelectionTraceRow, SelectionTraceSpec, WorkerConfigLike,
     WorkerId, WorkerSelectionResult, WorkerWithDpRank,
@@ -344,6 +345,7 @@ fn cache_snapshot(request: &SchedulingRequest) -> CacheSnapshot<'_> {
         has_tier_matches: !request.overlap.tier_overlap_blocks.device.is_empty()
             || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
             || !request.overlap.tier_overlap_blocks.disk.is_empty(),
+        resident_blocks: None,
     }
 }
 
@@ -626,6 +628,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     worker_type: &'static str,
     state: WorkerSelectionPolicyStateRef<'_>,
     input: WorkerSelectionInput<'_, C>,
+    resident_blocks: Option<&ResidentBlockCounts>,
     trace: Option<SelectionTraceSpec>,
     prepared: Option<PreparedCandidates>,
 ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
@@ -646,6 +649,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
 
     let mut input = MaterializedSelectionInput::new(request, block_size);
     input.context.pinned_worker = eligibility.pinned_worker();
+    input.cache_snapshot.resident_blocks = resident_blocks;
     let selected = match state {
         #[cfg(any(test, feature = "bench"))]
         WorkerSelectionPolicyStateRef::Reference(kv_router_config, picker) => {
@@ -714,6 +718,10 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                         .contains(WorkerInputs::ACTIVE_REQUESTS)
                         .then_some(&active_requests),
                     &info,
+                    input
+                        .cache_snapshot
+                        .resident_blocks
+                        .filter(|_| picker_inputs.contains(WorkerInputs::RESIDENT_BLOCKS)),
                 );
                 let row = picker.pick(&input.context, picker_input)?;
                 let Some(candidate) = candidates.get(row) else {

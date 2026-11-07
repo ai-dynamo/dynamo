@@ -5,6 +5,7 @@
 
 mod config;
 mod context;
+pub mod experimental;
 pub(crate) mod inputs;
 mod runtime;
 

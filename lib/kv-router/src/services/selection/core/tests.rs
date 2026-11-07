@@ -8,6 +8,7 @@ use super::reservations::{
     Reservation, ReservationClaim, ReservationIndexObserver, sweep_reservation_index,
 };
 use super::*;
+use crate::plugins::worker_selection::experimental::resident_blocks::ResidentBlocksByRow;
 use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 use crate::protocols::{RoutingConstraints, StorageTier};
 use crate::services::common::replica_sync::HostReplicaChannels;
@@ -989,6 +990,114 @@ async fn wire_explicit_pin_does_not_report_affinity_overlap_loss() {
         tokio::time::timeout(Duration::from_millis(200), events_rx.recv())
             .await
             .is_err()
+    );
+}
+
+/// Picker that declares `inputs`, records the resident block count of row 0, and takes it.
+struct ResidentBlocksRecorder {
+    inputs: crate::plugins::worker_selection::WorkerInputs,
+    observed: Arc<parking_lot::Mutex<Vec<Option<u64>>>>,
+}
+
+impl crate::plugins::worker_selection::WorkerPicker for ResidentBlocksRecorder {
+    fn required_worker_inputs(&self) -> crate::plugins::worker_selection::WorkerInputs {
+        self.inputs
+    }
+
+    fn pick(
+        &self,
+        _context: &crate::plugins::worker_selection::WorkerSelectionContext<'_>,
+        input: crate::plugins::worker_selection::WorkerInputView<'_>,
+    ) -> Result<usize, crate::scheduling::WorkerSelectionPolicyError> {
+        self.observed.lock().push(input.resident_blocks(0));
+        Ok(0)
+    }
+}
+
+fn resident_blocks_core(
+    inputs: crate::plugins::worker_selection::WorkerInputs,
+) -> (SelectionCore, Arc<parking_lot::Mutex<Vec<Option<u64>>>>) {
+    let observed = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let factory_observed = Arc::clone(&observed);
+    let factory: WorkerSelectionPolicyFactory = Arc::new(move |config, worker_type, _partition| {
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            worker_type.as_str(),
+            Vec::new(),
+            Box::new(ResidentBlocksRecorder {
+                inputs,
+                observed: Arc::clone(&factory_observed),
+            }),
+        )
+    });
+    let core = core_with(
+        test_config(true),
+        SelectionHost::default(),
+        Some(factory),
+        WorkerType::Aggregated,
+        None,
+    );
+    (core, observed)
+}
+
+#[tokio::test]
+async fn declaring_policy_reads_live_resident_blocks() {
+    let (core, observed) = resident_blocks_core(
+        crate::plugins::worker_selection::WorkerInputs::CACHE
+            | crate::plugins::worker_selection::WorkerInputs::RESIDENT_BLOCKS,
+    );
+    core.upsert_worker(worker_with_kv_events(1))
+        .await
+        .expect("worker upsert");
+    let entry = core.entry(&default_key()).expect("entry");
+    entry
+        .indexer
+        .apply_event_routed(store_event(
+            1,
+            0,
+            1,
+            &[],
+            &[11, 12, 13],
+            StorageTier::Device,
+        ))
+        .await
+        .unwrap();
+    entry.indexer.flush().await;
+
+    core.select(select_request()).await.expect("select");
+    assert_eq!(observed.lock().last(), Some(&Some(3)));
+}
+
+#[tokio::test]
+async fn only_a_declaring_policy_tracks_resident_blocks() {
+    use crate::plugins::worker_selection::WorkerInputs;
+    let indexer = crate::services::indexer::backend::create_indexer(16, 1);
+    let key = default_key();
+    let track = |inputs| super::workers::track_resident_blocks(&key, inputs, &indexer);
+    assert!(track(WorkerInputs::CACHE | WorkerInputs::LOAD).is_none());
+    assert!(track(WorkerInputs::CACHE | WorkerInputs::RESIDENT_BLOCKS).is_some());
+}
+
+#[tokio::test]
+async fn partition_rejects_resident_blocks_without_cache() {
+    let (core, _) =
+        resident_blocks_core(crate::plugins::worker_selection::WorkerInputs::RESIDENT_BLOCKS);
+    let record = core
+        .upsert_worker(worker_with_kv_events(1))
+        .await
+        .expect("worker upsert");
+    assert_eq!(record.lifecycle, WorkerLifecycle::Incomplete);
+    assert!(
+        record
+            .not_schedulable_reasons
+            .iter()
+            .any(|reason| reason.contains("WorkerInputs::CACHE")),
+        "{:?}",
+        record.not_schedulable_reasons
+    );
+    assert!(
+        core.indexer_registry.get_indexer(&default_key()).is_none(),
+        "a rejected partition opened an indexer"
     );
 }
 

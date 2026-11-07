@@ -3,6 +3,7 @@
 
 //! Worker input groups, stored snapshots, and component-scoped borrowed views.
 
+use crate::indexer::ResidentBlockCounts;
 use crate::protocols::{SharedCacheHits, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::WorkerLoadProjection;
 use rustc_hash::FxHashMap;
@@ -103,6 +104,17 @@ impl<'a> WorkerCandidate<'a> {
             None
         }
     }
+
+    /// Backs `experimental::resident_blocks::ResidentBlocks`, which documents the contract: the
+    /// count only when this component declared RESIDENT_BLOCKS and the host has one for the rank.
+    pub(crate) fn resident_block_count(self) -> Option<u64> {
+        if !self.inputs.contains(WorkerInputs::RESIDENT_BLOCKS) {
+            return None;
+        }
+        self.cache_snapshot
+            .resident_blocks
+            .and_then(|counts| counts.get(self.data.worker))
+    }
 }
 
 /// Borrowed candidate batch restricted to one scorer's declared inputs.
@@ -190,6 +202,9 @@ impl WorkerInputs {
     pub const LOAD: Self = Self(1 << 1);
     /// Request preferred-taint routing metadata.
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
+    /// Request per-rank resident block counts. Public only as
+    /// `experimental::resident_blocks::RESIDENT_BLOCKS`; requires CACHE.
+    pub(crate) const RESIDENT_BLOCKS: Self = Self(1 << 3);
     /// Request each row's active request count, read through
     /// [`WorkerInputView::active_requests`]. Picker only: filters and scorers that declare it
     /// receive nothing.
@@ -231,6 +246,8 @@ impl BitOr for WorkerInputs {
 pub(crate) struct CacheSnapshot<'a> {
     pub(crate) shared_hits: Option<&'a SharedCacheHits>,
     pub(crate) has_tier_matches: bool,
+    /// Loaded only when a component declared RESIDENT_BLOCKS.
+    pub(crate) resident_blocks: Option<&'a ResidentBlockCounts>,
 }
 
 /// Rows and request-wide cache facts owned by a reader outside worker selection.
@@ -281,6 +298,7 @@ impl WorkerInputRows {
         let cache_snapshot = CacheSnapshot {
             shared_hits: self.shared_hits.as_ref(),
             has_tier_matches: self.has_tier_matches,
+            resident_blocks: None,
         };
         let info = |row: usize| WorkerInfo::new(self.rows[row].worker, self.capacities[row]);
         read(WorkerCandidates::new(
@@ -482,6 +500,8 @@ pub struct WorkerInputView<'a> {
     rows: PickerRows<'a>,
     cache: Option<WorkerCacheInputs<'a>>,
     load: Option<&'a [WorkerLoadInput]>,
+    // Set only on the KV path, for a picker that declared RESIDENT_BLOCKS.
+    resident_blocks: Option<&'a ResidentBlockCounts>,
 }
 
 /// Where a picker's rows come from.
@@ -697,6 +717,7 @@ impl<'a> WorkerInputView<'a> {
         load: Option<&'a [WorkerLoadInput]>,
         active_requests: Option<&'a dyn Fn(usize) -> u64>,
         info: WorkerInfoLookup<'a>,
+        resident_blocks: Option<&'a ResidentBlockCounts>,
     ) -> Self {
         Self {
             rows: PickerRows::Materialized {
@@ -706,6 +727,7 @@ impl<'a> WorkerInputView<'a> {
             },
             cache,
             load,
+            resident_blocks,
         }
     }
 
@@ -724,6 +746,7 @@ impl<'a> WorkerInputView<'a> {
             },
             cache: None,
             load: None,
+            resident_blocks: None,
         }
     }
 
@@ -815,5 +838,14 @@ impl<'a> WorkerInputView<'a> {
                     .map(|&worker_id| active_requests(worker_id))
             }
         }
+    }
+
+    /// Backs `experimental::resident_blocks::ResidentBlocksByRow`: the count for candidate `row`
+    /// when the picker declared RESIDENT_BLOCKS, or None for an out-of-range row.
+    pub(crate) fn resident_block_count(self, row: usize) -> Option<u64> {
+        let counts = self.resident_blocks?;
+        self.candidates()
+            .get(row)
+            .and_then(|candidate| counts.get(candidate.worker))
     }
 }
