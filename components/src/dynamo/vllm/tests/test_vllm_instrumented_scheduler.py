@@ -6485,10 +6485,31 @@ def test_kvwarm_gate_rejects_state_layers_outside_native_layouts(monkeypatch):
     assert stub._kvwarm_meta["skip_reason"] == "hybrid_state_layers_unsupported"
 
 
-def test_kvwarm_gate_admits_pure_attention_moe_ep(monkeypatch):
+@pytest.mark.parametrize("ep", [True, False])
+def test_kvwarm_gate_admits_pure_attention_moe(monkeypatch, ep):
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
-    stub = _kvwarm_gate_stub(state_groups=("FullAttentionSpec",))
+    stub = _kvwarm_gate_stub(state_groups=("FullAttentionSpec",), ep=ep)
     assert InstrumentedScheduler._kvwarm_warm_eligible(stub) is True
+    assert stub._kvwarm_native is False
+    assert stub._kvwarm_meta["skip_reason"] is None
+
+
+@pytest.mark.parametrize(
+    "experts,prefix,reason",
+    [
+        (0, True, "dense_model_content_insensitive"),
+        (8, False, "prefix_caching_disabled"),
+    ],
+)
+def test_kvwarm_pure_tp_keeps_content_and_prefix_requirements(
+    monkeypatch, experts, prefix, reason
+):
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = _kvwarm_gate_stub(
+        state_groups=("FullAttentionSpec",), experts=experts, ep=False, prefix=prefix
+    )
+    assert InstrumentedScheduler._kvwarm_warm_eligible(stub) is False
+    assert stub._kvwarm_meta["skip_reason"] == reason
 
 
 def test_kvwarm_gate_disables_warmup_when_dataset_unavailable(monkeypatch):

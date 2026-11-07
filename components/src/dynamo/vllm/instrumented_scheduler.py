@@ -5726,7 +5726,6 @@ class InstrumentedScheduler(AsyncScheduler):
             # Lightweight test schedulers may not carry vllm_config at all;
             # treat that as "cannot prove eligibility" rather than crashing.
             vllm_config = getattr(self, "vllm_config", None)
-            parallel = getattr(vllm_config, "parallel_config", None)
             model = getattr(vllm_config, "model_config", None)
             hf = getattr(model, "hf_config", None)
             hf_text = getattr(model, "hf_text_config", hf)
@@ -5741,7 +5740,6 @@ class InstrumentedScheduler(AsyncScheduler):
                     "moe_num_experts",
                 )
             )
-            ep_enabled = bool(getattr(parallel, "enable_expert_parallel", False))
             prefix_on = bool(
                 getattr(
                     getattr(self, "cache_config", None),
@@ -5768,8 +5766,6 @@ class InstrumentedScheduler(AsyncScheduler):
                 meta["initialization_strategy"] = "native_exact_context"
             elif not has_experts:
                 reason = "dense_model_content_insensitive"
-            elif not ep_enabled and not self._bench_random_kda:
-                reason = "moe_tp_balanced_by_construction"
             elif not prefix_on:
                 # The batch rungs rely on prefix-cache generational extension
                 # to deepen incrementally; with prefix cache off a full chain
@@ -5782,6 +5778,9 @@ class InstrumentedScheduler(AsyncScheduler):
             ):
                 reason = "hybrid_state_layers_unsupported"
             else:
+                # TP balances each expert across ranks, but activation and
+                # routing still depend on content. Pure-TP MoE needs the same
+                # real-KV preparation as EP before timing decode forwards.
                 reason = self._kvwarm_probe_content()
                 eligible = reason is None
         meta["warm_eligible"] = eligible
