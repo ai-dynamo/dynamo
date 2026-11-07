@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use crate::routing::RendezvousHasher;
 use crate::routing::table::LoraRoutingTable;
 use crate::state_tracker::{LoraObservedSnapshot, LoraStateTracker};
-use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 type WorkerId = u64;
 
@@ -22,7 +22,7 @@ pub struct LoraFilter {
     state_tracker: LoraStateTracker,
 }
 
-impl dynamo_kv_router::scheduling::LoraWorkerFilter for LoraFilter {
+impl dynamo_worker_selection::host::LoraWorkerFilter for LoraFilter {
     fn filter_worker_ids_for_lora(&self, lora_name: &str, available: &[WorkerId]) -> Vec<WorkerId> {
         self.filter_worker_ids_for_lora(Some(lora_name), available)
     }
@@ -250,7 +250,7 @@ mod tests {
     use crate::LoraInfo;
     use crate::routing::table::{LoraReplicaConfig, LoraRoutingTable};
     use crate::state_tracker::LoraStateTracker;
-    use dynamo_kv_router::protocols::WorkerWithDpRank;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use std::time::Instant;
 
     fn make_workers_map(ids: &[u64]) -> HashMap<WorkerId, ()> {

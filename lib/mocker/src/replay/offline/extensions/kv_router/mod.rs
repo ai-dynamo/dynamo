@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_router_policies::{DefaultWorkerSelector, DefaultWorkerSelectorControl};
+use crate::replay::default_selector::{DefaultWorkerSelector, DefaultWorkerSelectorControl};
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -9,34 +9,39 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use dynamo_kv_router::LocalBlockHash;
+use dynamo_admission::host::{
+    PolicyClassConfig, PolicyProfile, PolicyQueue, QueueMetadata, QueueSnapshot, WorkerPlacement,
+};
+use dynamo_kv_events::event::{KvCacheEventData, RouterEvent};
+use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
+use dynamo_kv_hints::KvTransferSourceChoice;
+use dynamo_kv_indexer::host::RadixTree;
+use dynamo_kv_indexer::host::{
+    KvIndexerInterface, LowerTierIndexers, LowerTierQueryOptions, SessionPrefixIndexer,
+    TieredMatchDetails, query_lower_tiers_with_options,
+};
+use dynamo_kv_indexer::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
-use dynamo_kv_router::indexer::{
-    KvIndexerInterface, LowerTierIndexers, LowerTierQueryOptions, TieredMatchDetails,
-    query_lower_tiers_with_options,
-};
-use dynamo_kv_router::kv_hints::{
-    KvTransferCandidateSource, KvTransferCandidates, KvTransferSourceChoice,
-};
 use dynamo_kv_router::plugins::worker_selection::WorkerCapacity;
-use dynamo_kv_router::protocols::{
-    BlockHashOptions, KvCacheEventData, PrefillLoadHint, RouterEvent, RoutingConstraints, WorkerId,
-    WorkerWithDpRank, compute_block_hash_for_seq,
+use dynamo_kv_router::scheduling::BusyThresholdsExt;
+use dynamo_kv_router::tracking_hash::tracking_hash_context;
+use dynamo_router_protocol::identity::RoutingPartitionRef;
+use dynamo_router_protocol::session::SessionContext;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_scheduler::host::{
+    CacheHitWeights, OverlapAnalysis, OverlapSignals, RoutingConstraints, ScheduleMode,
+    SchedulingContext, SchedulingRequest, TrackingHashAlgorithm, TrackingHashContext,
+    TrackingHashScope, WorkerCapacityExt, WorkerSelectionInput, WorkerSelector,
 };
-use dynamo_kv_router::scheduling::{
-    OverlapAnalysis, OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueMetadata,
-    QueueSnapshot, ScheduleMode, SchedulingContext, WorkerPlacement,
-};
-use dynamo_kv_router::sequences::topology::WorkerDpRange;
-use dynamo_kv_router::services::selection::affinity::{
+use dynamo_session_affinity::host::{
     AcquireStep, AffinityError, AffinityLease, AffinityTarget, Hold, SessionAffinity,
     SessionAffinityConfig, subagent_group_affinity_id,
 };
-use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, RadixTree, RoutingPartitionRef, SchedulingRequest, SequenceRequest,
-    SessionContext, SessionPrefixIndexer, TrackingHashAlgorithm, TrackingHashContext,
-    TrackingHashScope, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
+use dynamo_slot_tracker::host::{
+    ActiveSequencesMultiWorker, BusyRanksExt, PrefillLoadHint, SequenceRequest, WorkerDpRange,
+    WorkerLoadProjection,
 };
 use dynamo_tokens::SequenceHash;
 use futures::executor::block_on;
@@ -67,36 +72,36 @@ pub(in crate::replay) use composition::{KvReplayComposition, RoundRobinReplayCom
 #[derive(Clone, Copy)]
 enum KvEventSummary {
     Stored {
-        parent_hash: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
+        parent_hash: Option<dynamo_kv_hashing::ExternalSequenceBlockHash>,
         start_position: Option<u32>,
         count: usize,
-        first: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
-        last: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
+        first: Option<dynamo_kv_hashing::ExternalSequenceBlockHash>,
+        last: Option<dynamo_kv_hashing::ExternalSequenceBlockHash>,
     },
     Removed {
         count: usize,
-        first: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
-        last: Option<dynamo_kv_router::protocols::ExternalSequenceBlockHash>,
+        first: Option<dynamo_kv_hashing::ExternalSequenceBlockHash>,
+        last: Option<dynamo_kv_hashing::ExternalSequenceBlockHash>,
     },
     Cleared,
 }
 
 impl KvEventSummary {
-    fn from_data(data: &dynamo_kv_router::protocols::KvCacheEventData) -> Self {
+    fn from_data(data: &dynamo_kv_events::event::KvCacheEventData) -> Self {
         match data {
-            dynamo_kv_router::protocols::KvCacheEventData::Stored(stored) => Self::Stored {
+            dynamo_kv_events::event::KvCacheEventData::Stored(stored) => Self::Stored {
                 parent_hash: stored.parent_hash,
                 start_position: stored.start_position,
                 count: stored.blocks.len(),
                 first: stored.blocks.first().map(|block| block.block_hash),
                 last: stored.blocks.last().map(|block| block.block_hash),
             },
-            dynamo_kv_router::protocols::KvCacheEventData::Removed(removed) => Self::Removed {
+            dynamo_kv_events::event::KvCacheEventData::Removed(removed) => Self::Removed {
                 count: removed.block_hashes.len(),
                 first: removed.block_hashes.first().copied(),
                 last: removed.block_hashes.last().copied(),
             },
-            dynamo_kv_router::protocols::KvCacheEventData::Cleared => Self::Cleared,
+            dynamo_kv_events::event::KvCacheEventData::Cleared => Self::Cleared,
         }
     }
 }
@@ -732,9 +737,12 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
             if self.router.acquire_affinity(&mut request)? {
                 if let Some(hashes) = &request.block_hashes {
                     let tiered = self.router.indexer.find_matches_for_hashes(hashes.clone());
-                    request.overlap =
-                        OverlapAnalysis::new(&self.router.config, self.router.block_size, &tiered)
-                            .signals();
+                    request.overlap = OverlapAnalysis::new(
+                        &CacheHitWeights::from(&self.router.config),
+                        self.router.block_size,
+                        &tiered,
+                    )
+                    .signals();
                     request.kv_transfer_candidates = tiered.into_kv_transfer_candidates();
                 }
                 let effects = self.router.enqueue_or_admit(request, now_ms)?;
@@ -821,7 +829,7 @@ impl OfflineReplayRouter {
             config.validate().map_err(anyhow::Error::msg)?;
             indexer.session_prefix_index = Some(SessionPrefixIndexer::new());
         }
-        let tracking_hash = TrackingHashContext::from_config(&config)?;
+        let tracking_hash = tracking_hash_context(&config)?;
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = router_hints
             .iter()
@@ -1023,7 +1031,8 @@ impl OfflineReplayRouter {
         let decay_now = self.decay_now(now_ms);
         let class_index = self
             .profile
-            .resolve_class_index(pending.policy_class.as_deref())?;
+            .resolve_class_index(pending.policy_class.as_deref())
+            .map_err(dynamo_scheduler::host::KvSchedulerError::from)?;
         let class = self.profile.class(class_index);
         let should_queue = class.queueing_enabled()
             && (self.pending.has_backlog(class_index)
@@ -1373,7 +1382,12 @@ impl OfflineReplayRouter {
                 (tiered, token_seq)
             }
         };
-        let overlap = OverlapAnalysis::new(&self.config, self.block_size, &tiered).signals();
+        let overlap = OverlapAnalysis::new(
+            &CacheHitWeights::from(&self.config),
+            self.block_size,
+            &tiered,
+        )
+        .signals();
         // Lookups retain candidates only while hints are on.
         let kv_transfer_candidates = tiered.into_kv_transfer_candidates();
 
@@ -1633,13 +1647,18 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel, RouterQueuePolicy};
-    use dynamo_kv_router::protocols::{
-        BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
-        KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
-        WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+    use dynamo_admission::host::RouterQueuePolicy;
+    use dynamo_kv_events::event::{
+        KvCacheEvent, KvCacheEventData, KvCacheStoreData, KvCacheStoredBlockData, RouterEvent,
     };
-    use dynamo_kv_router::{PrefillLoadEstimator, TrackingHashAlgorithm};
+    use dynamo_kv_events::residency::StorageTier;
+    use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
+    use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
+    use dynamo_kv_router::config::KvRouterConfig;
+    use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+    use dynamo_scheduler::host::{
+        PrefillLoadEstimator, RouterPrefillLoadModel, TrackingHashAlgorithm,
+    };
     use rustc_hash::FxHashMap;
     use serde_json::Value;
     use tempfile::NamedTempFile;
@@ -1655,7 +1674,7 @@ mod tests {
         KvFetchAction, KvHints, Placement, PlacementDecision, PlacementPolicy,
         ReplayPromptTokenSource, ReplayRequestContext, WorkerTopology,
     };
-    use dynamo_kv_router::kv_hints::KvTransferCandidateSource;
+    use dynamo_kv_indexer::kv_hints::KvTransferCandidateSource;
 
     #[rstest::rstest]
     #[case(2, 1)]
@@ -1765,7 +1784,7 @@ mod tests {
     fn unknown_policy_class_fails_at_class_entry_and_releases_session_affinity() {
         use super::KvRouterPlacement as Policy;
         use aisimulate_core::replay::PlacementPolicy;
-        use dynamo_kv_router::scheduling::KvSchedulerError;
+        use dynamo_scheduler::host::KvSchedulerError;
         let mut policy = Policy::new_with_selector_seed(
             &queueing_args(),
             Some(queueing_router_config()),
@@ -2759,7 +2778,7 @@ models:
             .on_request_arrival(&fail_fast, None, 0.0)
             .unwrap_err();
         let rejection = error
-            .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+            .downcast_ref::<dynamo_admission::host::QueueRejection>()
             .expect("replay should preserve the typed queue rejection");
         assert_eq!(rejection.policy_class, "interactive");
         assert_eq!(rejection.current, 0);
@@ -2786,8 +2805,8 @@ models:
             .unwrap_err();
         assert!(
             matches!(
-                error.downcast_ref::<dynamo_kv_router::scheduling::KvSchedulerError>(),
-                Some(dynamo_kv_router::scheduling::KvSchedulerError::UnknownPolicyClass(name))
+                error.downcast_ref::<dynamo_scheduler::host::KvSchedulerError>(),
+                Some(dynamo_scheduler::host::KvSchedulerError::UnknownPolicyClass(name))
                     if name == "root"
             ),
             "a root class name is unknown to the model profile: {error:?}"
@@ -2798,7 +2817,7 @@ models:
             .on_request_arrival(&request(7, 7), None, 0.0)
             .unwrap_err();
         let rejection = error
-            .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+            .downcast_ref::<dynamo_admission::host::QueueRejection>()
             .expect("worker removal should retain the typed queue rejection");
         assert_eq!(
             rejection.policy_class, "latency",
@@ -3426,7 +3445,7 @@ policy_classes:
             KvCacheEvent {
                 event_id: 100,
                 dp_rank: rank,
-                data: KvCacheEventData::Removed(dynamo_kv_router::protocols::KvCacheRemoveData {
+                data: KvCacheEventData::Removed(dynamo_kv_events::event::KvCacheRemoveData {
                     block_hashes: hashes.into_iter().map(ExternalSequenceBlockHash).collect(),
                 }),
             },

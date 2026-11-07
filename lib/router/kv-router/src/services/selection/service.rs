@@ -1,0 +1,995 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use parking_lot::Mutex;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+use crate::config::KvRouterConfig;
+#[cfg(feature = "replica-sync-zmq")]
+use crate::services::common::replica_sync::{
+    PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
+};
+use crate::tracking_hash::tracking_hash_context;
+use dynamo_kv_indexer::backend::IndexerPolicy;
+use dynamo_router_protocol::worker::WorkerId;
+use dynamo_scheduler::config::RouterConfig;
+use dynamo_scheduler::protocols::PotentialLoad;
+use dynamo_scheduler::replication::AffinityBindingEvent;
+use dynamo_scheduler::types::WorkerSelectionPolicyFactory;
+
+#[cfg(feature = "ingest-zmq")]
+use super::zmq_ingress::ZmqDirectIngress;
+use crate::plugins::RouterPluginRegistry;
+use dynamo_router_protocol::WorkerType;
+#[cfg(feature = "ingest-zmq")]
+use dynamo_scheduler::host::HostCache;
+use dynamo_scheduler::host::SelectionCacheConfig;
+use dynamo_scheduler::host::SelectionError;
+use dynamo_scheduler::host::{KvIndexSource, SelectionCore, SelectionHost};
+use dynamo_scheduler::host::{
+    ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
+    ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
+    SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
+};
+use dynamo_session_affinity::{SessionAffinityConfig, SessionAffinityMode};
+
+pub struct SelectionServiceBuilder {
+    kv_router_config: KvRouterConfig,
+    indexer_threads: usize,
+    #[cfg(all(feature = "ingest-zmq", feature = "peer-recovery"))]
+    indexer_peers: Vec<String>,
+    #[cfg(feature = "replica-sync-zmq")]
+    replica_sync_port: Option<u16>,
+    #[cfg(feature = "replica-sync-zmq")]
+    replica_sync_peers: Vec<String>,
+    selection_cache: SelectionCacheConfig,
+    worker_type: WorkerType,
+    plugin_registry: RouterPluginRegistry,
+    host: SelectionHost,
+    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+    session_affinity_ttl: Option<Duration>,
+    session_affinity_mode: SessionAffinityMode,
+    session_replication_writer_id: Option<u64>,
+    host_manages_request_lifecycle: bool,
+}
+
+/// Warn when a host does not construct workers for explicitly configured policy roles.
+pub fn warn_for_unserved_worker_selection_policies(
+    kv_router_config: &KvRouterConfig,
+    served_worker_types: &[WorkerType],
+) -> anyhow::Result<()> {
+    let unserved_worker_types = kv_router_config
+        .explicit_worker_selection_policy_types()?
+        .into_iter()
+        .filter(|worker_type| !served_worker_types.contains(worker_type))
+        .collect::<Vec<_>>();
+    if !unserved_worker_types.is_empty() {
+        tracing::warn!(
+            ?served_worker_types,
+            ?unserved_worker_types,
+            "worker-selection policies configured for unserved worker types are ignored"
+        );
+    }
+    Ok(())
+}
+
+impl SelectionServiceBuilder {
+    pub fn new(
+        kv_router_config: KvRouterConfig,
+        worker_type: WorkerType,
+        plugin_registry: RouterPluginRegistry,
+    ) -> Self {
+        Self {
+            kv_router_config,
+            indexer_threads: 4,
+            #[cfg(all(feature = "ingest-zmq", feature = "peer-recovery"))]
+            indexer_peers: Vec::new(),
+            #[cfg(feature = "replica-sync-zmq")]
+            replica_sync_port: None,
+            #[cfg(feature = "replica-sync-zmq")]
+            replica_sync_peers: Vec::new(),
+            selection_cache: SelectionCacheConfig::default(),
+            worker_type,
+            plugin_registry,
+            // The standalone service's partitions index worker KV events
+            // published over ZMQ; `kv_index` and `host` override this. Without
+            // the ZMQ ingress the host feeds the index itself.
+            #[cfg(feature = "ingest-zmq")]
+            host: SelectionHost {
+                cache: HostCache {
+                    index: KvIndexSource::Owned(Arc::new(ZmqDirectIngress::default())),
+                    ..HostCache::default()
+                },
+                ..SelectionHost::default()
+            },
+            #[cfg(not(feature = "ingest-zmq"))]
+            host: SelectionHost::default(),
+            worker_selection_policy_factory: None,
+            session_affinity_ttl: None,
+            session_affinity_mode: SessionAffinityMode::default(),
+            session_replication_writer_id: None,
+            host_manages_request_lifecycle: false,
+        }
+    }
+
+    /// Use `factory` for every partition's worker-selection policy instead of
+    /// resolving one from router configuration through the registry.
+    pub fn worker_selection_policy_factory(
+        mut self,
+        factory: WorkerSelectionPolicyFactory,
+    ) -> Self {
+        self.worker_selection_policy_factory = Some(factory);
+        self
+    }
+
+    /// Where each partition's KV index comes from (see [`KvIndexSource`]).
+    /// Shorthand for setting `host.cache.index`.
+    pub fn kv_index(mut self, source: KvIndexSource) -> Self {
+        self.host.cache.index = source;
+        self
+    }
+
+    /// What the embedding host supplies to every partition this service creates.
+    pub fn host(mut self, host: SelectionHost) -> Self {
+        self.host = host;
+        self
+    }
+
+    pub fn indexer_threads(mut self, indexer_threads: usize) -> Self {
+        self.indexer_threads = indexer_threads;
+        self
+    }
+
+    /// Peer indexers whose state seeds this service's index at startup.
+    #[cfg(all(feature = "ingest-zmq", feature = "peer-recovery"))]
+    pub fn indexer_peers(mut self, indexer_peers: Vec<String>) -> Self {
+        self.indexer_peers = indexer_peers;
+        self
+    }
+
+    /// Pin each session id to the worker that served it for `ttl` after its
+    /// last request. Bindings replicate over the replica mesh when enabled.
+    pub fn session_affinity(mut self, ttl: Duration) -> Self {
+        self.session_affinity_ttl = Some(ttl);
+        self
+    }
+
+    /// Choose whether a live binding must be honored or may follow a new dispatch.
+    pub fn session_affinity_mode(mut self, mode: SessionAffinityMode) -> Self {
+        self.session_affinity_mode = mode;
+        self
+    }
+
+    /// Export bindings through a bounded channel instead of the built-in mesh.
+    /// The host supplies an id unique to this replica incarnation and carries
+    /// both commit updates and release-time TTL refreshes to its peers.
+    pub fn session_binding_replication(mut self, writer_id: u64) -> Self {
+        self.session_replication_writer_id = Some(writer_id);
+        self
+    }
+
+    /// Join the ZMQ replica mesh on `port`, seeded with `peers`.
+    #[cfg(feature = "replica-sync-zmq")]
+    pub fn replica_sync(mut self, port: u16, peers: Vec<String>) -> Self {
+        self.replica_sync_port = Some(port);
+        self.replica_sync_peers = peers;
+        self
+    }
+
+    pub fn selection_cache(mut self, config: SelectionCacheConfig) -> Self {
+        self.selection_cache = config;
+        self
+    }
+
+    /// The embedding host installs classifiers and drives their request lifecycle.
+    ///
+    /// Only hosts that enroll requests and report dispatch, completion, and abort
+    /// may enable this. Standalone selection cannot provide those callbacks.
+    pub fn host_manages_request_lifecycle(mut self) -> Self {
+        self.host_manages_request_lifecycle = true;
+        self
+    }
+
+    pub async fn build(mut self) -> anyhow::Result<SelectionService> {
+        if self.session_replication_writer_id.is_some() {
+            anyhow::ensure!(
+                self.session_affinity_ttl.is_some(),
+                "session binding replication requires session affinity"
+            );
+            #[cfg(feature = "replica-sync-zmq")]
+            anyhow::ensure!(
+                self.replica_sync_port.is_none(),
+                "host session binding replication cannot be combined with replica_sync"
+            );
+        }
+        self.kv_router_config
+            .apply_policy_config()
+            .map_err(anyhow::Error::msg)?;
+        if let Some(ttl) = self.session_affinity_ttl {
+            dynamo_session_affinity::SessionAffinity::validate_ttl(ttl)?;
+        }
+        self.kv_router_config
+            .validate_config()
+            .map_err(anyhow::Error::msg)?;
+        if !self.host_manages_request_lifecycle
+            && self.kv_router_config.request_classifier_config()?.is_some()
+        {
+            anyhow::bail!("standalone selection does not support request_classifier plugins");
+        }
+        let worker_selection_policy_factory = match self.worker_selection_policy_factory {
+            Some(factory) => factory,
+            None => self
+                .plugin_registry
+                .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?
+                .ok_or(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault)?,
+        };
+        let tracking_hash = Arc::new(tracking_hash_context(&self.kv_router_config)?);
+        let indexer_policy = IndexerPolicy::from_config(
+            &dynamo_kv_indexer::config::IndexerConfig::from(&self.kv_router_config),
+        )?;
+        let cancel_token = CancellationToken::new();
+        let mut startup_guard = StartupGuard::new(cancel_token.clone());
+        #[cfg(feature = "replica-sync-zmq")]
+        let replica_runtime = setup_replica_sync(
+            self.replica_sync_port,
+            &self.replica_sync_peers,
+            cancel_token.child_token(),
+        )?;
+        #[cfg(feature = "replica-sync-zmq")]
+        if replica_runtime.is_some() {
+            tracing::info!(
+                router_tracking_hash = %tracking_hash.algorithm(),
+                router_tracking_key_id = ?tracking_hash.key_id(),
+                "Selection replica synchronization initialized"
+            );
+        }
+        #[cfg(feature = "replica-sync-zmq")]
+        let replica_config = replica_runtime.as_ref().map(ReplicaSyncRuntime::config);
+        #[cfg(not(feature = "replica-sync-zmq"))]
+        let replica_config = None;
+        let config = RouterConfig::from(&self.kv_router_config)
+            .validate()
+            .map_err(anyhow::Error::from)?;
+        let core = SelectionCore::new(
+            config,
+            self.indexer_threads,
+            cancel_token.clone(),
+            replica_config,
+            worker_selection_policy_factory,
+            self.host,
+            self.worker_type,
+            false,
+            self.selection_cache,
+            tracking_hash,
+            indexer_policy,
+            self.session_affinity_ttl
+                .map(|ttl| SessionAffinityConfig::new(ttl).with_mode(self.session_affinity_mode)),
+        );
+        let (core, session_binding_rx) = match self.session_replication_writer_id {
+            Some(writer_id) => {
+                let (core, rx) = core.with_session_binding_publisher(writer_id);
+                (core, Some(Mutex::new(Some(rx))))
+            }
+            None => (core, None),
+        };
+        let core = Arc::new(core);
+
+        #[cfg(all(feature = "ingest-zmq", feature = "peer-recovery"))]
+        if !self.indexer_peers.is_empty() {
+            match crate::services::indexer::recovery::recover_from_peers(
+                &self.indexer_peers,
+                core.index_registry(),
+            )
+            .await
+            {
+                Ok(true) => tracing::info!("Selection indexer recovery completed"),
+                Ok(false) => {
+                    tracing::warn!(
+                        "No reachable selection indexer peers; starting with empty state"
+                    )
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Selection indexer recovery failed; starting with empty state")
+                }
+            }
+        }
+        core.signal_indexer_ready();
+
+        #[cfg(feature = "replica-sync-zmq")]
+        let peer_manager = if replica_runtime.is_some() {
+            let weak_core = Arc::downgrade(&core);
+            let affinity_core = Arc::downgrade(&core);
+            Some(Arc::new(PeerManager::start_with_affinity(
+                self.replica_sync_peers,
+                cancel_token.child_token(),
+                move |event| {
+                    if let Some(core) = weak_core.upgrade() {
+                        core.dispatch_replica_event(event);
+                    }
+                },
+                self.session_affinity_ttl.map(|_| {
+                    move |event| {
+                        if let Some(core) = affinity_core.upgrade() {
+                            core.dispatch_affinity_event(event);
+                        }
+                    }
+                }),
+            )?))
+        } else {
+            None
+        };
+
+        startup_guard.disarm();
+        Ok(SelectionService {
+            core,
+            session_binding_rx,
+            #[cfg(feature = "replica-sync-zmq")]
+            peer_manager,
+            #[cfg(feature = "replica-sync-zmq")]
+            replica_runtime,
+            #[cfg(feature = "replica-sync-zmq")]
+            replica_sync_port: self.replica_sync_port,
+            cancel_token,
+        })
+    }
+}
+
+/// A local selection core from the flat configuration: applies the policy file, validates,
+/// resolves the tracking hash and indexer policy, and builds the kernel over the passive
+/// index ingress. Tests, benches, and in-process hosts use it; the standalone service goes
+/// through [`SelectionServiceBuilder`].
+pub fn local_selection_core(
+    kv_router_config: KvRouterConfig,
+    indexer_threads: usize,
+    cancel_token: CancellationToken,
+    cache_config: SelectionCacheConfig,
+    policy_factory: WorkerSelectionPolicyFactory,
+) -> anyhow::Result<SelectionCore> {
+    local_selection_core_with_host(
+        kv_router_config,
+        indexer_threads,
+        cancel_token,
+        cache_config,
+        policy_factory,
+        SelectionHost::default(),
+    )
+}
+
+/// [`local_selection_core`] with an explicit host (ingress, load and cache signals).
+pub fn local_selection_core_with_host(
+    mut kv_router_config: KvRouterConfig,
+    indexer_threads: usize,
+    cancel_token: CancellationToken,
+    cache_config: SelectionCacheConfig,
+    policy_factory: WorkerSelectionPolicyFactory,
+    host: SelectionHost,
+) -> anyhow::Result<SelectionCore> {
+    kv_router_config
+        .apply_policy_config()
+        .map_err(anyhow::Error::msg)?;
+    kv_router_config
+        .validate_config()
+        .map_err(anyhow::Error::msg)?;
+    let tracking_hash = Arc::new(tracking_hash_context(&kv_router_config)?);
+    let indexer_policy = IndexerPolicy::from_config(
+        &dynamo_kv_indexer::config::IndexerConfig::from(&kv_router_config),
+    )?;
+    let config = RouterConfig::from(&kv_router_config).validate()?;
+    Ok(SelectionCore::new(
+        config,
+        indexer_threads,
+        cancel_token,
+        None,
+        policy_factory,
+        host,
+        WorkerType::Aggregated,
+        true,
+        cache_config,
+        tracking_hash,
+        indexer_policy,
+        None,
+    ))
+}
+
+/// The standalone selection service's configuration, as the CLI and the Python bindings
+/// hand it over; `service_builder` turns it into a builder.
+#[cfg(all(
+    feature = "ingest-zmq",
+    feature = "replica-sync-zmq",
+    feature = "peer-recovery"
+))]
+#[derive(Debug, Clone)]
+pub struct SelectionServiceConfig {
+    pub port: u16,
+    pub threads: usize,
+    pub indexer_peers: Vec<String>,
+    pub replica_sync_port: Option<u16>,
+    pub replica_sync_peers: Vec<String>,
+    pub kv_router_config: crate::config::KvRouterConfig,
+    pub selection_cache: SelectionCacheConfig,
+    /// Session stickiness TTL; `None` disables session affinity.
+    pub session_affinity_ttl: Option<Duration>,
+}
+
+#[cfg(all(
+    feature = "ingest-zmq",
+    feature = "replica-sync-zmq",
+    feature = "peer-recovery"
+))]
+impl SelectionServiceConfig {
+    pub fn service_builder(
+        &self,
+        worker_type: WorkerType,
+        plugin_registry: RouterPluginRegistry,
+    ) -> SelectionServiceBuilder {
+        let mut builder = SelectionServiceBuilder::new(
+            self.kv_router_config.clone(),
+            worker_type,
+            plugin_registry,
+        )
+        .indexer_threads(self.threads)
+        .indexer_peers(self.indexer_peers.clone())
+        .selection_cache(self.selection_cache.clone());
+        if let Some(port) = self.replica_sync_port {
+            builder = builder.replica_sync(port, self.replica_sync_peers.clone());
+        }
+        if let Some(ttl) = self.session_affinity_ttl {
+            builder = builder.session_affinity(ttl);
+        }
+        builder
+    }
+}
+
+struct StartupGuard {
+    cancel_token: CancellationToken,
+    armed: bool,
+}
+
+impl StartupGuard {
+    fn new(cancel_token: CancellationToken) -> Self {
+        Self {
+            cancel_token,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StartupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancel_token.cancel();
+        }
+    }
+}
+
+pub struct SelectionService {
+    core: Arc<SelectionCore>,
+    /// `None` when replication is disabled; the inner `None` once taken.
+    session_binding_rx: Option<Mutex<Option<mpsc::Receiver<AffinityBindingEvent>>>>,
+    #[cfg(feature = "replica-sync-zmq")]
+    peer_manager: Option<Arc<PeerManager>>,
+    #[cfg(feature = "replica-sync-zmq")]
+    replica_runtime: Option<ReplicaSyncRuntime>,
+    #[cfg(feature = "replica-sync-zmq")]
+    replica_sync_port: Option<u16>,
+    cancel_token: CancellationToken,
+}
+
+/// Session bindings that terminate when the service shuts down.
+pub struct SessionBindingUpdates {
+    rx: tokio::sync::Mutex<mpsc::Receiver<AffinityBindingEvent>>,
+    cancel_token: CancellationToken,
+}
+
+impl SessionBindingUpdates {
+    pub async fn recv_many(&self) -> Option<Vec<AffinityBindingEvent>> {
+        let mut rx = self.rx.lock().await;
+        let limit = rx.max_capacity();
+        let mut events = Vec::new();
+        tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => None,
+            received = rx.recv_many(&mut events, limit) => (received > 0).then_some(events),
+        }
+    }
+}
+
+impl SelectionService {
+    /// Session bindings this replica commits or refreshes, for the host to
+    /// broadcast to its peers. Ends when the service shuts down.
+    pub fn session_binding_updates(&self) -> Result<SessionBindingUpdates, SelectionError> {
+        let rx = self
+            .session_binding_rx
+            .as_ref()
+            .ok_or_else(|| {
+                SelectionError::Conflict("session binding stream is disabled".to_string())
+            })?
+            .lock()
+            .take()
+            .ok_or_else(|| {
+                SelectionError::Conflict("session binding stream already taken".to_string())
+            })?;
+        Ok(SessionBindingUpdates {
+            rx: tokio::sync::Mutex::new(rx),
+            cancel_token: self.cancel_token.clone(),
+        })
+    }
+
+    /// Reconcile a peer binding independently of request load. Importing does
+    /// not publish an update. A binding this replica cannot place yet is
+    /// dropped and converges on the owner's next refresh.
+    pub fn apply_session_binding(
+        &self,
+        binding: AffinityBindingEvent,
+    ) -> Result<(), SelectionError> {
+        self.core.ensure_running()?;
+        self.core.dispatch_affinity_event(binding);
+        Ok(())
+    }
+
+    #[cfg(all(
+        test,
+        feature = "http",
+        feature = "ingest-zmq",
+        feature = "replica-sync-zmq",
+        feature = "peer-recovery"
+    ))]
+    pub(super) fn new_local_for_test(
+        kv_router_config: KvRouterConfig,
+        indexer_threads: usize,
+    ) -> Self {
+        let cancel_token = CancellationToken::new();
+        Self {
+            session_binding_rx: None,
+            core: Arc::new(
+                local_selection_core_with_host(
+                    kv_router_config,
+                    indexer_threads,
+                    cancel_token.clone(),
+                    SelectionCacheConfig::default(),
+                    std::sync::Arc::new(|config, role, _| {
+                        dynamo_worker_selection::WorkerSelectionPolicy::reference(
+                            config.clone(),
+                            role.default_selector_label(),
+                        )
+                    }),
+                    SelectionHost {
+                        cache: HostCache {
+                            index: KvIndexSource::Owned(Arc::new(ZmqDirectIngress::default())),
+                            ..HostCache::default()
+                        },
+                        ..SelectionHost::default()
+                    },
+                )
+                .expect("valid test config"),
+            ),
+            peer_manager: None,
+            replica_runtime: None,
+            replica_sync_port: None,
+            cancel_token,
+        }
+    }
+
+    pub async fn upsert_worker(
+        &self,
+        req: WorkerRequest,
+    ) -> Result<WorkerCatalogRecord, SelectionError> {
+        self.core.upsert_worker(req).await
+    }
+
+    /// The core this service wraps, for hosts that drive its catalog directly.
+    pub fn core(&self) -> &Arc<SelectionCore> {
+        &self.core
+    }
+
+    /// The port this service uses for replica synchronization, if enabled.
+    #[cfg(feature = "replica-sync-zmq")]
+    pub fn replica_sync_port(&self) -> Option<u16> {
+        self.replica_sync_port
+    }
+
+    pub async fn patch_worker(
+        &self,
+        worker_id: WorkerId,
+        patch: WorkerPatchRequest,
+    ) -> Result<WorkerCatalogRecord, SelectionError> {
+        self.core.patch_worker(worker_id, patch).await
+    }
+
+    pub async fn delete_worker(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<WorkerCatalogRecord, SelectionError> {
+        self.core.delete_worker(worker_id).await
+    }
+
+    pub fn list_workers(
+        &self,
+        model_name: Option<&str>,
+        routing_group: Option<&str>,
+    ) -> Vec<WorkerCatalogRecord> {
+        self.core.list_workers(model_name, routing_group)
+    }
+
+    pub async fn select(&self, req: SelectRequest) -> Result<SelectResponse, SelectionError> {
+        self.core.select(req).await
+    }
+
+    pub async fn select_with_policy_class(
+        &self,
+        req: SelectRequest,
+        policy_class: Option<String>,
+    ) -> Result<SelectResponse, SelectionError> {
+        self.core.select_with_policy_class(req, policy_class).await
+    }
+
+    pub async fn select_and_reserve(
+        &self,
+        req: SelectAndReserveRequest,
+    ) -> Result<SelectResponse, SelectionError> {
+        self.core.select_and_reserve(req).await
+    }
+
+    pub async fn select_and_reserve_with_policy_class(
+        &self,
+        req: SelectAndReserveRequest,
+        policy_class: Option<String>,
+    ) -> Result<SelectResponse, SelectionError> {
+        self.core
+            .select_and_reserve_with_policy_class(req, policy_class)
+            .await
+    }
+
+    pub async fn create_reservation(
+        &self,
+        req: ReservationRequest,
+    ) -> Result<ReservationResponse, SelectionError> {
+        self.core.create_reservation(req).await
+    }
+
+    pub async fn prefill_complete(&self, selection_id: &str) -> Result<(), SelectionError> {
+        self.core.prefill_complete(selection_id).await
+    }
+
+    pub fn add_output_block(
+        &self,
+        selection_id: &str,
+        decay_fraction: Option<f64>,
+    ) -> Result<(), SelectionError> {
+        self.core.add_output_block(selection_id, decay_fraction)
+    }
+
+    pub async fn free_reservation(&self, selection_id: &str) -> Result<(), SelectionError> {
+        self.core.free_reservation(selection_id).await
+    }
+
+    pub fn ready(&self) -> ReadyResponse {
+        self.core.ready()
+    }
+
+    pub fn loads(
+        &self,
+        model_name: Option<&str>,
+        routing_group: Option<&str>,
+    ) -> Vec<ModelLoadResponse> {
+        self.core.loads(model_name, routing_group)
+    }
+
+    pub async fn potential_loads(
+        &self,
+        req: PotentialLoadsRequest,
+    ) -> Result<Vec<PotentialLoad>, SelectionError> {
+        self.core.potential_loads(req).await
+    }
+
+    pub async fn overlap_scores(
+        &self,
+        req: OverlapScoresRequest,
+    ) -> Result<OverlapScoresResponse, SelectionError> {
+        self.core.overlap_scores(req).await
+    }
+
+    #[cfg(feature = "replica-sync-zmq")]
+    pub async fn register_replica_peer(&self, endpoint: String) -> Result<bool, ReplicaPeerError> {
+        let peer_manager = self
+            .peer_manager
+            .as_ref()
+            .ok_or(ReplicaPeerError::Disabled)?;
+        peer_manager.register_peer(endpoint).await
+    }
+
+    #[cfg(feature = "replica-sync-zmq")]
+    pub async fn deregister_replica_peer(
+        &self,
+        endpoint: String,
+    ) -> Result<bool, ReplicaPeerError> {
+        let peer_manager = self
+            .peer_manager
+            .as_ref()
+            .ok_or(ReplicaPeerError::Disabled)?;
+        peer_manager.deregister_peer(endpoint).await
+    }
+
+    #[cfg(feature = "replica-sync-zmq")]
+    pub fn list_replica_peers(&self) -> Vec<String> {
+        self.peer_manager
+            .as_ref()
+            .map(|peer_manager| peer_manager.list_peers())
+            .unwrap_or_default()
+    }
+
+    // Only the HTTP server's replica-peer routes read it.
+    #[cfg(all(
+        feature = "http",
+        feature = "ingest-zmq",
+        feature = "replica-sync-zmq",
+        feature = "peer-recovery"
+    ))]
+    pub(crate) fn peer_manager(&self) -> Option<Arc<PeerManager>> {
+        self.peer_manager.clone()
+    }
+
+    /// The registry in the HTTP dump format the peer-recovery endpoint serves.
+    #[cfg(all(feature = "http", feature = "ingest-zmq"))]
+    pub async fn indexer_snapshot(&self) -> serde_json::Value {
+        crate::services::indexer::server::dump_registry(self.core.index_registry()).await
+    }
+
+    /// Replay `peers`' indexer state into this service's index.
+    #[cfg(all(feature = "ingest-zmq", feature = "peer-recovery"))]
+    pub async fn recover_indexer_from_peers(&self, peers: &[String]) -> anyhow::Result<bool> {
+        crate::services::indexer::recovery::recover_from_peers(peers, self.core.index_registry())
+            .await
+    }
+
+    pub async fn shutdown(&self) {
+        self.cancel_token.cancel();
+        self.core.shutdown();
+        #[cfg(feature = "replica-sync-zmq")]
+        if let (Some(peer_manager), Some(replica_runtime)) =
+            (&self.peer_manager, &self.replica_runtime)
+        {
+            tokio::join!(peer_manager.shutdown(), replica_runtime.shutdown());
+        } else if let Some(peer_manager) = &self.peer_manager {
+            peer_manager.shutdown().await;
+        } else if let Some(replica_runtime) = &self.replica_runtime {
+            replica_runtime.shutdown().await;
+        }
+    }
+}
+
+impl Drop for SelectionService {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
+        self.core.shutdown();
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "http",
+    feature = "ingest-zmq",
+    feature = "replica-sync-zmq",
+    feature = "peer-recovery"
+))]
+mod tests {
+    use std::net::TcpListener as StdTcpListener;
+    use std::time::Duration;
+
+    use axum::Json;
+    use axum::Router;
+    use axum::extract::State;
+    use axum::routing::get;
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    fn test_config() -> KvRouterConfig {
+        KvRouterConfig {
+            use_kv_events: false,
+            router_queue_threshold: None,
+            ..Default::default()
+        }
+    }
+
+    fn test_registry() -> RouterPluginRegistry {
+        RouterPluginRegistry::default().with_default_factory(Arc::new(|config, role, _| {
+            dynamo_worker_selection::WorkerSelectionPolicy::reference(
+                config.clone(),
+                role.default_selector_label(),
+            )
+        }))
+    }
+
+    #[tokio::test]
+    async fn missing_default_is_rejected_at_construction() {
+        let result = SelectionServiceBuilder::new(
+            test_config(),
+            WorkerType::Aggregated,
+            RouterPluginRegistry::default(),
+        )
+        .build()
+        .await;
+        let Err(error) = result else {
+            panic!("missing default accepted")
+        };
+        assert!(matches!(
+            error.downcast_ref::<crate::plugins::WorkerSelectionPolicyRegistryError>(),
+            Some(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault)
+        ));
+    }
+
+    fn reserve_tcp_port() -> u16 {
+        StdTcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[tokio::test]
+    async fn standalone_selection_rejects_request_classifier() {
+        let policy = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(policy.path(), "request_classifier: {type: test}").unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy.path().display().to_string()),
+            ..test_config()
+        };
+        let result = SelectionServiceBuilder::new(
+            config,
+            WorkerType::Aggregated,
+            RouterPluginRegistry::default(),
+        )
+        .build()
+        .await;
+        let Err(error) = result else {
+            panic!("classifier ignored")
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("standalone selection does not support request_classifier")
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_custom_policy_requires_linked_policy_type_at_construction() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  prefill: custom
+  instances:
+    - name: custom
+      type: acme
+      parameters: {}
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..test_config()
+        };
+
+        let error = match SelectionServiceBuilder::new(
+            config,
+            WorkerType::Prefill,
+            RouterPluginRegistry::default(),
+        )
+        .build()
+        .await
+        {
+            Ok(_) => panic!("a configured custom policy needs a linked policy type"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("unknown worker-selection policy type \"acme\""),
+            "{error}"
+        );
+    }
+
+    async fn build(port: u16) -> anyhow::Result<SelectionService> {
+        SelectionServiceBuilder::new(test_config(), WorkerType::Aggregated, test_registry())
+            .indexer_threads(1)
+            .replica_sync(port, Vec::new())
+            .build()
+            .await
+    }
+
+    async fn build_on_port(port: u16) -> SelectionService {
+        tokio::time::timeout(Duration::from_secs(5), async move {
+            loop {
+                match build(port).await {
+                    Ok(service) => return service,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
+            }
+        })
+        .await
+        .expect("replica port was not released")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_and_shutdown_release_replica_resources() {
+        let port = reserve_tcp_port();
+        let failed =
+            SelectionServiceBuilder::new(test_config(), WorkerType::Aggregated, test_registry())
+                .indexer_threads(1)
+                .replica_sync(port, vec!["invalid".to_string()])
+                .build()
+                .await;
+        assert!(failed.is_err());
+
+        let service = build_on_port(port).await;
+        assert_eq!(service.replica_sync_port(), Some(port));
+        let weak_core = Arc::downgrade(&service.core);
+        service.shutdown().await;
+        let replacement = build(port)
+            .await
+            .expect("shutdown releases the replica port");
+        drop(service);
+        assert!(weak_core.upgrade().is_none());
+        replacement.shutdown().await;
+
+        let drop_port = reserve_tcp_port();
+        let dropped = build_on_port(drop_port).await;
+        let dropped_core = Arc::downgrade(&dropped.core);
+        drop(dropped);
+        assert!(dropped_core.upgrade().is_none());
+        let replacement = build_on_port(drop_port).await;
+        replacement.shutdown().await;
+    }
+
+    #[derive(Clone)]
+    struct RecoveryGate {
+        requested: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    async fn gated_dump(State(gate): State<RecoveryGate>) -> Json<serde_json::Value> {
+        gate.requested.notify_one();
+        gate.release.notified().await;
+        Json(serde_json::json!({}))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_waits_for_indexer_recovery() {
+        let gate = RecoveryGate {
+            requested: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer_url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/dump", get(gated_dump))
+            .with_state(gate.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let build = tokio::spawn(
+            SelectionServiceBuilder::new(test_config(), WorkerType::Aggregated, test_registry())
+                .indexer_threads(1)
+                .indexer_peers(vec![peer_url])
+                .build(),
+        );
+        tokio::time::timeout(Duration::from_secs(3), gate.requested.notified())
+            .await
+            .expect("recovery peer was not queried");
+        assert!(!build.is_finished());
+
+        gate.release.notify_one();
+        let service = build.await.unwrap().unwrap();
+        service.shutdown().await;
+        server.abort();
+    }
+}

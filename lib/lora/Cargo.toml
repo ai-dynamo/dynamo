@@ -15,8 +15,10 @@ repository.workspace = true
 testing = []
 
 [dependencies]
-dynamo-kv-router = { workspace = true }
+dynamo-router-protocol = { workspace = true }
 dynamo-runtime = { workspace = true }
+dynamo-slot-tracker = { workspace = true }
+dynamo-worker-selection = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = "1.9.1"
 async-trait = { workspace = true }

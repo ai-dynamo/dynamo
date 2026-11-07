@@ -434,7 +434,7 @@ impl RoutingHost {
                     }
                     let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
                     let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
-                    dynamo_kv_router::indexer::RoutingDecisionHashes {
+                    dynamo_kv_indexer::host::RoutingDecisionHashes {
                         local_hashes,
                         sequence_hashes,
                     }

@@ -144,7 +144,7 @@ done
 ```
 
 Set `"model"` to the model your launcher serves. With
-`DYN_LOG=info,dynamo_kv_router::scheduling=debug,dynamo_llm::kv_router=debug`, the frontend logs a
+`DYN_LOG=info,dynamo_scheduler=debug,dynamo_admission=debug,dynamo_worker_selection=debug,dynamo_llm::kv_router=debug`, the frontend logs a
 `[ROUTING] Best: worker_<id> … with <n>/<total> blocks overlap` line for each
 request; the second request should report more overlap than the first.
 

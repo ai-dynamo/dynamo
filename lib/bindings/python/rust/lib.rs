@@ -39,9 +39,10 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
+use dynamo_kv_router::config::KvRouterConfig;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::plugins::RouterPluginRegistry;
-use dynamo_kv_router::{KvRouterConfig, plugins::RouterPlugins};
+use dynamo_kv_router::plugins::RouterPlugins;
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
 

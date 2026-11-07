@@ -29,16 +29,7 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::KvRouterConfig;
-use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCacheInputs, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
-    WorkerSelectionPolicyFactory,
-};
-use dynamo_kv_router::plugins::{
-    RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
-    WorkerSelectionPolicyRegistryError,
-};
+use dynamo_kv_router::plugins::prelude::*;
 
 /// Policy type selected by `worker_selection.instances[].type`.
 pub const POLICY_TYPE: &str = "dynamo-two-tier-cost-fn";
@@ -166,7 +157,7 @@ fn provider(
     parameters.validate()?;
 
     Ok(Arc::new(
-        move |config: &KvRouterConfig, worker_type, _partition| {
+        move |config: &SelectionConfig, worker_type, _partition| {
             WorkerSelectionPolicy::new(
                 config.clone(),
                 worker_type.as_str(),
@@ -187,11 +178,9 @@ pub fn register(
 mod tests {
     use std::collections::HashMap;
 
-    use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank};
-    use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
-    use dynamo_kv_router::{
-        SchedulingRequest, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
-    };
+    use dynamo_kv_router::plugins::prelude::*;
+    use dynamo_scheduler::host::WorkerSelectionInput;
+    use dynamo_scheduler::host::WorkerSelector;
 
     use super::*;
 
@@ -267,7 +256,7 @@ mod tests {
         }
         let configs = HashMap::from(workers.map(|(id, _, _)| (id, TestWorker)));
         WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
+            SelectionConfig::default(),
             "test",
             Vec::new(),
             Box::new(TwoTierCostFnPicker { parameters }),

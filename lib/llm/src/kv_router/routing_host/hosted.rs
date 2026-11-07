@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::selector::HostedSelectionRequest;
+use dynamo_worker_selection::host::HostedSelectionRequest;
 
 /// The request metadata a hosted picker reads. The routing host tracks no KV block size, so
 /// [`request_blocks`](dynamo_kv_router::plugins::worker_selection::WorkerSelectionContext::request_blocks) reads 0.
@@ -57,7 +57,8 @@ impl RoutingHost {
         }
         let target = lora
             .picker
-            .select(&candidates, None, &hosted_request(request))?;
+            .select(&candidates, None, &hosted_request(request))
+            .map_err(KvSchedulerError::from)?;
         tracing::debug!(
             lora = %lora_name,
             worker_id = target,
@@ -135,7 +136,9 @@ impl RoutingHost {
                             if let Some(worker_id) = preferred_worker {
                                 Ok(worker_id)
                             } else {
-                                picker.select(ids, None, &hosted_request(request.content()))
+                                picker
+                                    .select(ids, None, &hosted_request(request.content()))
+                                    .map_err(KvSchedulerError::from)
                             }
                         })??,
                     };
@@ -444,8 +447,8 @@ impl RoutingHost {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::selector::HostedWorkerPicker;
     use dynamo_runtime::pipeline::RouterMode;
+    use dynamo_worker_selection::host::HostedWorkerPicker;
 
     use super::super::builder::hosted_picker;
     use super::*;

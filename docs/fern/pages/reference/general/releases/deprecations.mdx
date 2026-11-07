@@ -74,6 +74,10 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Update `use` paths and registry calls in custom policy crates and catalogs. The types and traits are unchanged, so no other code changes are needed.
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Router log targets follow the crate split** ([#18055](https://github.com/ai-dynamo/dynamo/pull/18055)). The KV indexer, slot tracker, session affinity, admission, worker selection, scheduler kernel, KV hints, and KV event code moved out of the `dynamo-kv-router` crate into crates of their own, so `DYN_LOG` directives that name `dynamo_kv_router` or `dynamo_kv_router::scheduling` no longer enable those logs.
+
+  > **Migrate:** Replace `dynamo_kv_router::scheduling::selector=<level>` with `dynamo_scheduler::selector=<level>`, and `dynamo_kv_router::scheduling=<level>` with `dynamo_scheduler=<level>,dynamo_admission=<level>,dynamo_worker_selection=<level>`. Where you set `dynamo_kv_router=<level>`, also set `dynamo_scheduler`, `dynamo_kv_indexer`, `dynamo_slot_tracker`, `dynamo_session_affinity`, `dynamo_admission`, `dynamo_worker_selection`, `dynamo_kv_hints`, and `dynamo_kv_events` to that level. The shipped recipes, launch scripts, and docs already carry the new targets.
+
 <a id="v160"></a>
 
 ## v1.6.0 - Oct 22, 2026
