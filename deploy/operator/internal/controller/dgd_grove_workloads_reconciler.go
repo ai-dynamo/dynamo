@@ -25,6 +25,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	enginegroupcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/enginegroup"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
@@ -51,6 +52,7 @@ type groveWorkloadsReconciler struct {
 	renderer        *groveWorkloadRenderer
 	scaler          *groveScaler
 	stableResources *groveStableResourcesReconciler
+	engineGroups    *enginegroupcontroller.GroveChildrenReconciler
 }
 
 func newGroveWorkloadsReconciler(
@@ -73,6 +75,7 @@ func newGroveWorkloadsReconciler(
 		),
 		scaler:          newGroveScaler(kubeClient),
 		stableResources: newGroveStableResourcesReconciler(kubeClient, recorder, config),
+		engineGroups:    &enginegroupcontroller.GroveChildrenReconciler{Client: kubeClient},
 	}
 }
 
@@ -166,7 +169,9 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	applyComponentGPUShapes(result.ComponentStatus, renderedPodCliqueSet.gpuShapes)
 	applyComponentRuntimeStatuses(result.ComponentStatus, renderedPodCliqueSet.runtimeStatuses)
 
-	return groveWorkloadResult{ReconcileResult: result, ScalingDeferred: scalingDeferred}, scaleErr
+	// Preserve ordinary scaling errors and partial status while observing managed worlds.
+	groupErr := r.reconcileEngineGroups(ctx, req, syncedPodCliqueSet, &result)
+	return groveWorkloadResult{ReconcileResult: result, ScalingDeferred: scalingDeferred}, errors.Join(scaleErr, groupErr)
 }
 
 // reconcilePodCliqueSet returns the current PCS and whether it was created or updated.
