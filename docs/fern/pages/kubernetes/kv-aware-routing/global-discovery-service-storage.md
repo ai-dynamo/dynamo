@@ -13,6 +13,10 @@ in every mode. This page explains when to use each store, how to set up DynamoDB
 verify the service. For every flag and endpoint, see
 [Global Discovery Service Configuration](../../reference/components/global-discovery-service-configuration.md).
 
+For an AWS CDK deployment that owns the DynamoDB tables and separates foundation, global services,
+and pools, see the experimental [Global Router infrastructure example](https://github.com/ai-dynamo/dynamo/tree/main/examples/global-router).
+The example documents its runtime prerequisites, including router self-registration.
+
 ## Choose a store
 
 | | `memory` (default) | `dynamodb` |
