@@ -196,6 +196,7 @@ The backends do not share one administration schema. Use the exact route returne
 | Worker discovery | RL-enabled Python workers and the native sidecar register with `/v1/rl/workers` | Not currently registered; obtain trusted worker URLs from the framework or deployment |
 | Administration route family | Python workers advertise names such as `/engine/pause_generation`; the native sidecar advertises `/engine/control/*` and `/engine/update/*` | Built-in controls use `/engine/control/*` |
 | Stop and resume work | Python `pause_generation` / `resume_generation`; native-sidecar control routes reflect the installed vLLM RL API | `release_memory_occupation` unregisters and drains the worker; `resume_memory_occupation` restores it |
+| Free and restore GPU memory | Python `control/sleep` / `control/wake_up` with `--enable-sleep-mode`; see [Sleep and Wake a Python vLLM Worker](#sleep-and-wake-a-python-vllm-worker) | `release_memory_occupation` / `resume_memory_occupation` with `tags`; a worker paused with `pause_generation` stays unregistered until `continue_generation` |
 | Clear KV state | Python `flush_cache`; native-sidecar behavior follows the advertised lifecycle route and vLLM configuration | `clear_kv_blocks` is a Dynamo worker request-plane endpoint, not a built-in `/engine/control/*` route, and rejects active requests |
 | Apply weights | Python disk or distributed update routes and group lifecycle; native sidecar init/start/update/finish routes when weight transfer is enabled | Built-in disk, tensor, distributed, or IPC update routes using the installed SGLang request schemas |
 | Weight version | Python `get_weight_version` reads the last declared version; `set_weight_version` declares metadata without loading weights; native sidecar exposes get/update controls | `update_weight_version` changes metadata and can abort requests; it does not replace tensors |
@@ -203,6 +204,18 @@ The backends do not share one administration schema. Use the exact route returne
 | Success body | Python RL routes commonly return a `status` field; native-sidecar routes follow vLLM's RL schemas | Built-in update routes commonly return `success` and `message`; check both HTTP status and body |
 
 Even two vLLM deployments can expose different route families because the Python worker and native sidecar adapt different backend control APIs. Never prepend, remove, or rename route segments returned in `routes`.
+
+### Sleep and Wake a Python vLLM Worker
+
+A Python vLLM worker started with `--enable-sleep-mode` serves `/engine/control/sleep` (`{"level": 1|2}`) and `/engine/control/wake_up` (`{"tags": [...]}`, or `{}` for everything) on its system port. These routes are not listed in `routes`.
+
+- `control/sleep` removes the worker from discovery, pauses generation, and releases GPU memory.
+- A `control/wake_up` that leaves any memory asleep, such as `{"tags": ["weights"]}` after a level 2 sleep, returns `"is_sleeping": true`. The worker stays paused and unregistered. The wake that restores the last tag resumes generation and registers the worker again.
+- `resume_generation` on a sleeping worker returns immediately with `"is_sleeping": true` and leaves generation paused until that last wake.
+- `control/sleep` after a partial wake releases the woken memory again. It returns an error if the weights are still asleep, because vLLM cannot put the KV cache back to sleep while the weights sleep.
+- If that sleep fails midway, partial wakes and sleeps return an error until a full `control/wake_up` with `{}`. As after any level 2 sleep, reload the weights after that wake.
+
+Workers from releases before this behavior answer a partial wake with "Engine woke" and resume generation with memory still asleep. Send them only `control/wake_up` with `{}`.
 
 ### Read and Declare the Weight Version
 
