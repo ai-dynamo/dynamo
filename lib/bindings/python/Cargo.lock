@@ -2067,7 +2067,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-backend-common"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2103,7 +2103,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-generate-format-catalog"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "dynamo-llm",
@@ -2113,7 +2113,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-global-common"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "blake3",
  "prost 0.13.5",
@@ -2126,7 +2126,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-global-discovery-client"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "dynamo-global-common",
  "reqwest 0.12.28",
@@ -2141,7 +2141,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-global-view-broadcaster"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "parking_lot",
  "tokio",
@@ -2151,7 +2151,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-hashing"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "derive_builder",
  "dynamo-tokens",
@@ -2162,7 +2162,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2207,7 +2207,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -2320,7 +2320,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-lora"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2350,7 +2350,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -2367,7 +2367,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "aisimulate-core",
  "anyhow",
@@ -2462,7 +2462,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-py3"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "aisimulate-core",
  "anyhow",
@@ -2528,7 +2528,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-rl"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2543,7 +2543,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-router-policies"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "async-trait",
  "dynamo-kv-router",
@@ -2558,7 +2558,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2639,7 +2639,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sglang-generate"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2653,7 +2653,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sglang-sidecar"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2681,7 +2681,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sidecar-common"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2737,7 +2737,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -2752,7 +2752,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-trtllm-sidecar"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2780,14 +2780,14 @@ dependencies = [
 
 [[package]]
 name = "dynamo-truthy"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-vllm-generate"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2803,7 +2803,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-vllm-sidecar"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2829,7 +2829,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-worker-selection-policy-catalog"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "dynamo-kv-router",
 ]
