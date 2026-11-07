@@ -65,6 +65,14 @@ async fn streaming_events_preserve_native_json() {
             Ok(())
         }
 
+        fn migrate(
+            &mut self,
+            _: usize,
+            _: &mut crate::protocols::common::llm_backend::PreprocessedRequest,
+        ) -> Result<Option<LLMEngineOutput>, String> {
+            Ok(None)
+        }
+
         fn finish(&mut self) -> Result<Option<Value>, DynamoError> {
             Ok(None)
         }
@@ -78,7 +86,7 @@ async fn streaming_events_preserve_native_json() {
         engine_data: Some(native.clone()),
         ..Default::default()
     })]);
-    let exchange: Box<dyn GenerateExchange> = Box::new(Passthrough);
+    let exchange: SharedExchange = Arc::new(Mutex::new(Box::new(Passthrough)));
     let response = Sse::new(events(stream, exchange)).into_response();
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
