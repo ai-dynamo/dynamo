@@ -24,6 +24,7 @@ from tests.utils.engine_metrics import (
 )
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
+from tests.utils.multimodal import make_image_payload_b64
 from tests.utils.payload_builder import (
     chat_logprobs_and_structured_output_payloads,
     disaggregated_kv_routing_payload,
@@ -615,6 +616,25 @@ sidecar_configs = {
         request_payloads=[
             kv_routing_payload((1,), block_size=KV_ROUTING_BLOCK_SIZE, dp_ranks=(0, 1))
         ],
+    ),
+    "vllm_aggregated_image": SidecarConfig(
+        name="vllm_aggregated_image",
+        directory=vllm_sidecar_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.vllm,
+            pytest.mark.multimodal,
+            pytest.mark.gpu_1,
+            pytest.mark.timeout(780),
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        env={
+            "PYTHONUNBUFFERED": "1",
+            "DYN_REQUEST_PLANE": "tcp",
+            "VLLM_DATA_PARALLEL_SIZE": "1",
+        },
+        request_payloads=[make_image_payload_b64(["green"])],
     ),
 }
 
