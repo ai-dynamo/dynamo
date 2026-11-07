@@ -265,7 +265,9 @@ mutated request to the selected Frontend sidecar.
 </ParamField>
 
 For supported body-bearing OpenAI requests, the EPP can inject precomputed token data into
-`nvext.token_data` so the Frontend sidecar does not repeat tokenization.
+`nvext.token_data` so the Frontend sidecar does not repeat tokenization. Chat requests skip
+tokenization only with the default chat processor; `--dyn-chat-processor vllm` or `sglang`
+ignores `nvext.token_data` and tokenizes the messages again.
 
 ## Service Mesh Configuration
 

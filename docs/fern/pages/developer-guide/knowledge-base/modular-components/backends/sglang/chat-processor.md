@@ -147,6 +147,10 @@ Key differences:
 | Reasoning | Not supported | Supported |
 | Endpoints | `v1/chat/completions` only | `v1/chat/completions` only |
 
+## Limitations
+
+- **Pre-tokenized chat input:** The SGLang chat processor ignores `nvext.token_data` on `v1/chat/completions`. It always renders and tokenizes the prompt from `messages`, both inline and in the preprocessing worker pool (`--dyn-preprocess-workers`). The request is not rejected. To send your own token IDs, use `v1/completions` or the default chat processor.
+
 ## See Also
 
 - **[Tool Calling](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx)**: General tool calling guide
