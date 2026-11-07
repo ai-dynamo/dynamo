@@ -12,12 +12,34 @@ from typing import Optional, Tuple
 from .messages import Message, decode_message, encode_message
 
 HEADER_SIZE = 4  # 4-byte big-endian length prefix
+# Same bound the V1 protocol applies (v1/protocol.py MAX_FRAME). The length
+# prefix is 4 bytes, so without a cap a desynchronized or buggy peer can ask the
+# reader for up to 4 GiB and the receive loop below will keep extending its
+# buffer until it gets there.
+MAX_FRAME = 1 << 20
 
 
 def _frame_message(msg: Message) -> bytes:
     """Encode and frame a message with length prefix."""
     data = encode_message(msg)
+    if len(data) > MAX_FRAME:
+        raise RuntimeError("GMS RPC frame is too large")
     return struct.pack("!I", len(data)) + data
+
+
+def _reject_truncated_ancillary(flags: int, fds: list) -> None:
+    """Fail on a truncated SCM_RIGHTS payload instead of proceeding on part of it.
+
+    recv_fds is called with maxfds=1. If a peer sends more, the kernel drops the
+    surplus and sets MSG_CTRUNC, so the loop over ``fds[1:]`` above never sees
+    them and the descriptor that did arrive cannot be matched to its message with
+    any confidence. V1 already treats this as fatal (v1/protocol.py, "GMS RPC
+    ancillary data was truncated"); V0 discarded the flag entirely.
+    """
+    if flags & socket.MSG_CTRUNC:
+        for fd in fds:
+            os.close(fd)
+        raise RuntimeError("GMS RPC ancillary data was truncated")
 
 
 def _try_extract_message(
@@ -31,6 +53,8 @@ def _try_extract_message(
         return None, recv_buffer, HEADER_SIZE - len(recv_buffer)
 
     length = struct.unpack("!I", bytes(recv_buffer[:HEADER_SIZE]))[0]
+    if length > MAX_FRAME:
+        raise RuntimeError("GMS RPC frame is too large")
     total_needed = HEADER_SIZE + length
 
     if len(recv_buffer) < total_needed:
@@ -93,11 +117,12 @@ async def recv_message(
 
     # Receive more data
     if raw_sock is not None:
-        raw_msg, fds, _flags, _addr = await loop.run_in_executor(
+        raw_msg, fds, flags, _addr = await loop.run_in_executor(
             None, lambda: socket.recv_fds(raw_sock, 65536, 1)
         )
         for extra_fd in fds[1:]:
             os.close(extra_fd)
+        _reject_truncated_ancillary(flags, fds)
         if not raw_msg:
             if fds:
                 os.close(fds[0])
@@ -160,9 +185,10 @@ def recv_message_sync(
         return msg, -1, remaining
 
     # Receive more data (with potential FD)
-    raw_msg, fds, _flags, _addr = socket.recv_fds(sock, 65536, 1)
+    raw_msg, fds, flags, _addr = socket.recv_fds(sock, 65536, 1)
     for extra_fd in fds[1:]:
         os.close(extra_fd)
+    _reject_truncated_ancillary(flags, fds)
     if not raw_msg:
         if fds:
             os.close(fds[0])
