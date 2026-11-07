@@ -114,6 +114,8 @@ struct FunctionCallState {
     accumulated_args: String,
     pending_arg_deltas: Vec<String>,
     output_index: Option<u32>,
+    // False for placeholders allocated below a higher backend index.
+    seen: bool,
     started: bool,
     deferred: bool,
     output_status: Option<OutputStatus>,
@@ -528,9 +530,6 @@ impl ResponseStreamConverter {
         if boundary_can_flush && !self.deferred_tool_calls.is_empty() {
             for choice in &chunk.inner.choices {
                 for call in choice.delta.tool_calls.iter().flatten() {
-                    if self.params.parallel_tool_calls == Some(false) && call.index > 0 {
-                        continue;
-                    }
                     if let Some(state) = self.function_call_items.get_mut(call.index as usize)
                         && state.deferred
                         && let Some(arguments) =
@@ -648,15 +647,6 @@ impl ResponseStreamConverter {
 
             // Handle tool call deltas
             if let Some(tool_calls) = &delta.tool_calls {
-                // Match the chat-completions post-parse fallback: when the
-                // caller disables parallel tool calls, retain only tool-call
-                // index 0. Filter before starting the reasoning boundary or
-                // allocating converter state so suppressed calls cannot emit
-                // any Responses API events at finish or EOF.
-                let enforce_single_tool_call = self.params.parallel_tool_calls == Some(false);
-                let tool_calls = tool_calls
-                    .iter()
-                    .filter(|tc| !enforce_single_tool_call || tc.index == 0);
                 for tc in tool_calls {
                     let tc_index = tc.index as usize;
 
@@ -674,11 +664,13 @@ impl ResponseStreamConverter {
                             accumulated_args: String::new(),
                             pending_arg_deltas: Vec::new(),
                             output_index: None,
+                            seen: false,
                             started: false,
                             deferred: false,
                             output_status: None,
                         });
                     }
+                    self.function_call_items[tc_index].seen = true;
 
                     // Update call_id and name if provided
                     if let Some(id) = &tc.id {
@@ -712,49 +704,15 @@ impl ResponseStreamConverter {
                         }
                     }
 
-                    // Identity and arguments can arrive in either order. Custom
-                    // items have no incomplete status, so defer their publication
-                    // and preserve the order of any following parallel calls.
-                    let (should_start, should_defer, disallowed_name) = {
-                        let state = &self.function_call_items[tc_index];
-                        let has_identity = state.has_identity();
-                        let is_allowed = state.is_allowed;
-                        let new_call = !state.started
-                            && !state.deferred
-                            && state.output_status.is_none()
-                            && has_identity
-                            && is_allowed;
-                        let defer = state.custom || !self.deferred_tool_calls.is_empty();
-                        (
-                            new_call && !defer,
-                            new_call && defer,
-                            (has_identity && !is_allowed).then(|| state.name.clone()),
-                        )
+                    let publishable_index = if self.single_tool_call() {
+                        self.single_tool_call_index(false)
+                    } else {
+                        Some(tc_index)
                     };
-                    if let Some(name) = disallowed_name {
-                        let error = ResponseError {
-                            misalignment: None,
-                            code: ResponseErrorCode::ServerError,
-                            message: format!(
-                                "Backend returned function '{name}' outside allowed_tools"
-                            ),
-                        };
-                        let terminal_event = self.append_error_events(error, events);
-                        events.push(terminal_event);
-                        self.terminal_failure_emitted = true;
+                    if let Some(index) = publishable_index
+                        && self.append_function_call_progress(index, events)
+                    {
                         return true;
-                    }
-                    if should_defer {
-                        self.function_call_items[tc_index].deferred = true;
-                        self.deferred_tool_calls.push(tc_index);
-                    }
-                    if should_start || should_defer {
-                        // Starting an allowed tool call is an explicit reasoning
-                        // phase boundary, independent of the finish reason.
-                        self.append_active_reasoning_done_events(events, OutputStatus::Completed);
-                    }
-                    if should_start || self.function_call_items[tc_index].started {
-                        self.append_function_call_delta_events(tc_index, events);
                     }
                 }
             }
@@ -779,10 +737,111 @@ impl ResponseStreamConverter {
         }
 
         if should_finish_function_calls {
+            if self.append_single_tool_call_fallback(events) {
+                return true;
+            }
             let output_status = self.output_status();
             self.append_pending_function_call_done_events(events, output_status, true);
         }
 
+        false
+    }
+
+    fn single_tool_call(&self) -> bool {
+        self.params.parallel_tool_calls == Some(false)
+    }
+
+    /// Match the chat-completions single-call policy: the lowest-index call
+    /// keeps the slot while its identity can still arrive. Once the stream is
+    /// `terminal`, the lowest-index call with a complete identity wins.
+    fn single_tool_call_index(&self, terminal: bool) -> Option<usize> {
+        if let Some(selected) = self
+            .function_call_items
+            .iter()
+            .position(|call| call.started || call.deferred)
+        {
+            return Some(selected);
+        }
+        let mut seen = self
+            .function_call_items
+            .iter()
+            .enumerate()
+            .filter(|(_, call)| call.seen);
+        let (first, call) = seen.next()?;
+        if call.has_identity() {
+            return Some(first);
+        }
+        if !terminal {
+            return None;
+        }
+        seen.find(|(_, call)| call.has_identity())
+            .map(|(index, _)| index)
+    }
+
+    /// Publish the selected call if an identity-incomplete earlier call held
+    /// the single slot until termination. Returns `true` after a terminal failure.
+    fn append_single_tool_call_fallback(
+        &mut self,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+    ) -> bool {
+        if !self.single_tool_call() {
+            return false;
+        }
+        match self.single_tool_call_index(true) {
+            Some(index) => self.append_function_call_progress(index, events),
+            None => false,
+        }
+    }
+
+    /// Start, defer or extend the call at `tc_index` once its identity is
+    /// complete. Returns `true` after appending a terminal failure.
+    fn append_function_call_progress(
+        &mut self,
+        tc_index: usize,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+    ) -> bool {
+        // Identity and arguments can arrive in either order. Custom
+        // items have no incomplete status, so defer their publication
+        // and preserve the order of any following parallel calls.
+        let (should_start, should_defer, disallowed_name) = {
+            let state = &self.function_call_items[tc_index];
+            let has_identity = state.has_identity();
+            let is_allowed = state.is_allowed;
+            let new_call = !state.started
+                && !state.deferred
+                && state.output_status.is_none()
+                && has_identity
+                && is_allowed;
+            let defer = state.custom || !self.deferred_tool_calls.is_empty();
+            (
+                new_call && !defer,
+                new_call && defer,
+                (has_identity && !is_allowed).then(|| state.name.clone()),
+            )
+        };
+        if let Some(name) = disallowed_name {
+            let error = ResponseError {
+                misalignment: None,
+                code: ResponseErrorCode::ServerError,
+                message: format!("Backend returned function '{name}' outside allowed_tools"),
+            };
+            let terminal_event = self.append_error_events(error, events);
+            events.push(terminal_event);
+            self.terminal_failure_emitted = true;
+            return true;
+        }
+        if should_defer {
+            self.function_call_items[tc_index].deferred = true;
+            self.deferred_tool_calls.push(tc_index);
+        }
+        if should_start || should_defer {
+            // Starting an allowed tool call is an explicit reasoning
+            // phase boundary, independent of the finish reason.
+            self.append_active_reasoning_done_events(events, OutputStatus::Completed);
+        }
+        if should_start || self.function_call_items[tc_index].started {
+            self.append_function_call_delta_events(tc_index, events);
+        }
         false
     }
 
@@ -1200,9 +1259,13 @@ impl ResponseStreamConverter {
     }
 
     /// Append remaining output completion events and `response.completed` at stream end.
-    pub fn append_end_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+    /// Returns `true` when the single-call fallback appended a terminal failure.
+    pub fn append_end_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) -> bool {
         if self.terminal_failure_emitted {
-            return;
+            return false;
+        }
+        if self.append_single_tool_call_fallback(events) {
+            return true;
         }
 
         let output_status = self.output_status();
@@ -1229,7 +1292,7 @@ impl ResponseStreamConverter {
             );
             events.push(terminal);
             self.terminal_failure_emitted = true;
-            return;
+            return false;
         }
         let terminal_status = self.terminal_status();
         let response = self.make_response(terminal_status.clone(), self.completed_output());
@@ -1245,6 +1308,7 @@ impl ResponseStreamConverter {
             })
         };
         events.push(self.make_sse_event(&terminal));
+        false
     }
 
     /// Emit error events when the stream ends due to a backend error.
@@ -2858,6 +2922,158 @@ mod tests {
         assert_eq!(call.name, "get_weather");
     }
 
+    fn single_function_call(
+        conv: &ResponseStreamConverter,
+    ) -> dynamo_protocols::types::responses::FunctionToolCall {
+        let output = conv.completed_output();
+        assert_eq!(output.len(), 1, "expected one output item: {output:?}");
+        let OutputItem::FunctionCall(call) = &output[0] else {
+            panic!("expected function call, got {:?}", output[0]);
+        };
+        call.clone()
+    }
+
+    #[test]
+    fn test_parallel_tool_calls_false_falls_back_to_later_complete_call() {
+        let params = ResponseParams {
+            parallel_tool_calls: Some(false),
+            ..default_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let _ = conv.emit_start_events();
+
+        let first_types = event_types(&conv.process_chunk(&tool_call_chunk(
+            0,
+            None,
+            Some("read_file"),
+            Some("{\"path\":\"/a\"}"),
+        )));
+        assert!(first_types.is_empty());
+        let second_types = event_types(&conv.process_chunk(&tool_call_chunk(
+            1,
+            Some("call_b"),
+            Some("read_file"),
+            Some("{\"path\":\"/b\"}"),
+        )));
+        assert!(
+            second_types.is_empty(),
+            "a later call must wait while call 0 can still complete: {second_types:?}"
+        );
+
+        let finish_types = event_types(&conv.process_chunk(&finish_chunk(FinishReason::ToolCalls)));
+        assert_eq!(
+            finish_types,
+            vec![
+                "response.output_item.added".to_string(),
+                "response.function_call_arguments.delta".to_string(),
+                "response.function_call_arguments.done".to_string(),
+                "response.output_item.done".to_string(),
+            ]
+        );
+        let call = single_function_call(&conv);
+        assert_eq!(call.call_id, "call_b");
+        assert_eq!(call.arguments, "{\"path\":\"/b\"}");
+    }
+
+    #[test]
+    fn test_parallel_tool_calls_false_keeps_first_call_when_identity_arrives_late() {
+        let params = ResponseParams {
+            parallel_tool_calls: Some(false),
+            ..default_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let _ = conv.emit_start_events();
+
+        let _ = conv.process_chunk(&tool_call_chunk(0, None, None, Some("{\"path\":")));
+        let _ = conv.process_chunk(&tool_call_chunk(
+            1,
+            Some("call_b"),
+            Some("read_file"),
+            Some("{\"path\":\"/b\"}"),
+        ));
+        let identity_types = event_types(&conv.process_chunk(&tool_call_chunk(
+            0,
+            Some("call_a"),
+            Some("read_file"),
+            Some("\"/a\"}"),
+        )));
+        assert_eq!(
+            identity_types,
+            vec![
+                "response.output_item.added".to_string(),
+                "response.function_call_arguments.delta".to_string(),
+                "response.function_call_arguments.delta".to_string(),
+            ]
+        );
+        let _ = conv.process_chunk(&finish_chunk(FinishReason::ToolCalls));
+
+        let call = single_function_call(&conv);
+        assert_eq!(call.call_id, "call_a");
+        assert_eq!(call.arguments, "{\"path\":\"/a\"}");
+    }
+
+    #[test]
+    fn test_parallel_tool_calls_false_falls_back_at_stream_end() {
+        let params = ResponseParams {
+            parallel_tool_calls: Some(false),
+            ..default_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let _ = conv.emit_start_events();
+
+        let _ = conv.process_chunk(&tool_call_chunk(0, Some("call_a"), None, Some("{}")));
+        let _ = conv.process_chunk(&tool_call_chunk(
+            1,
+            Some("call_b"),
+            Some("get_time"),
+            Some("{}"),
+        ));
+        let end_types = event_types(&conv.emit_end_events());
+        assert_eq!(
+            end_types,
+            vec![
+                "response.output_item.added".to_string(),
+                "response.function_call_arguments.delta".to_string(),
+                "response.function_call_arguments.done".to_string(),
+                "response.output_item.done".to_string(),
+                "response.completed".to_string(),
+            ]
+        );
+        assert_eq!(single_function_call(&conv).call_id, "call_b");
+    }
+
+    #[test]
+    fn test_parallel_tool_calls_false_disallowed_fallback_fails_at_stream_end() {
+        let params = ResponseParams {
+            parallel_tool_calls: Some(false),
+            tool_choice: Some(
+                serde_json::from_value(serde_json::json!({
+                    "type": "allowed_tools",
+                    "mode": "auto",
+                    "tools": [{"type": "function", "name": "read_file"}]
+                }))
+                .unwrap(),
+            ),
+            ..default_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let _ = conv.emit_start_events();
+
+        let _ = conv.process_chunk(&tool_call_chunk(0, None, Some("read_file"), Some("{}")));
+        let _ = conv.process_chunk(&tool_call_chunk(
+            1,
+            Some("call_b"),
+            Some("delete_file"),
+            Some("{}"),
+        ));
+        let mut events = Vec::new();
+        assert!(conv.append_end_events(&mut events));
+        assert_eq!(
+            event_types(&events).last().map(String::as_str),
+            Some("response.failed")
+        );
+        assert!(!event_types(&events).contains(&"response.completed".to_string()));
+    }
     #[test]
     fn test_tool_call_without_finish_reason_closes_at_stream_end() {
         let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
