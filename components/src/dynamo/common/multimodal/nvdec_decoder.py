@@ -37,6 +37,8 @@ import math
 import os
 import tempfile
 import warnings
+from collections.abc import Iterator
+from typing import TypeVar
 
 import numpy as np
 
@@ -56,41 +58,250 @@ FALLBACK_FPS = 30.0
 # Codecs routed to NVDEC. VP8/VP9/AV1 stay on the existing royalty-free path.
 HW_ROUTED_CODECS = frozenset({"h264", "hevc"})
 
-# Container byte markers -> codec id. A video file carries exactly one video
-# codec, so the first match wins. Covers ISO-BMFF (mp4/mov) sample-entry fourccs
-# and Matroska/WebM CodecID strings. HEVC/AV1 checked before H.264 so a more
-# specific marker is not shadowed. This is a routing hint, not a full demux --
-# PyNvVideoCodec re-parses the stream authoritatively at decode time.
-_CODEC_MARKERS: tuple[tuple[bytes, str], ...] = (
-    (b"hev1", "hevc"),
-    (b"hvc1", "hevc"),
-    (b"V_MPEGH/ISO/HEVC", "hevc"),
-    (b"av01", "av1"),
-    (b"V_AV1", "av1"),
-    (b"avc1", "h264"),
-    (b"avc3", "h264"),
-    (b"V_MPEG4/ISO/AVC", "h264"),
-    (b"vp09", "vp9"),
-    (b"V_VP9", "vp9"),
-    (b"vp08", "vp8"),
-    (b"V_VP8", "vp8"),
+# Read only codec fields in video tracks. Metadata, brands and compressed payloads
+# can contain these same byte strings and must never influence decoder routing.
+_CODEC_ROUTING_PRIORITY = ("hevc", "av1", "h264", "vp9", "vp8")
+_MP4_SAMPLE_ENTRY_CODECS = {
+    b"hev1": "hevc",
+    b"hvc1": "hevc",
+    b"av01": "av1",
+    b"avc1": "h264",
+    b"avc3": "h264",
+    b"vp09": "vp9",
+    b"vp08": "vp8",
+}
+_MATROSKA_CODEC_IDS = {
+    b"V_MPEGH/ISO/HEVC": "hevc",
+    b"V_AV1": "av1",
+    b"V_MPEG4/ISO/AVC": "h264",
+    b"V_VP9": "vp9",
+    b"V_VP8": "vp8",
+}
+
+# Include one byte beyond the longest known ID to reject longer non-null IDs.
+_MATROSKA_CODEC_ID_PREFIX_SIZE = max(map(len, _MATROSKA_CODEC_IDS)) + 1
+
+
+# Direct Cluster children, plus the global Void and CRC-32 elements. Their
+# payloads must be skipped even when the Cluster itself has no declared size.
+_MATROSKA_CLUSTER_CHILD_IDS = frozenset(
+    {
+        0xE7,  # Timestamp
+        0x5854,  # SilentTracks
+        0xA7,  # Position
+        0xAB,  # PrevSize
+        0xA3,  # SimpleBlock
+        0xA0,  # BlockGroup
+        0xAF,  # EncryptedBlock
+        0xEC,  # Void
+        0xBF,  # CRC-32
+    }
 )
 
 
-def probe_video_codec(data: bytes) -> str | None:
-    """Best-effort codec identification from container bytes.
+def _iter_mp4_boxes(
+    data: bytes, start: int, end: int
+) -> Iterator[tuple[bytes, int, int]]:
+    """Yield (type, payload start, end) without copying or scanning payloads."""
+    while start < end:
+        if end - start < 8:
+            raise ValueError("Truncated MP4 box")
+        size = int.from_bytes(data[start : start + 4], "big")
+        kind = data[start + 4 : start + 8]
+        header_size = 8
+        if size == 1:
+            if end - start < 16:
+                raise ValueError("Truncated extended MP4 box")
+            size = int.from_bytes(data[start + 8 : start + 16], "big")
+            header_size = 16
+        elif size == 0:
+            size = end - start
+        if size < header_size or size > end - start:
+            raise ValueError("Invalid MP4 box size")
+        yield kind, start + header_size, start + size
+        start += size
 
-    Returns a codec id (``"h264"``/``"hevc"``/``"vp9"``/``"vp8"``/``"av1"``) or
-    ``None`` when it can't tell. Scans the whole buffer because an mp4 ``moov``
-    (which holds the codec fourcc) may sit at the end of a non-faststart file;
-    multimodal clips are small and already in memory.
+
+_Element = TypeVar("_Element")
+
+
+def _iter_complete_elements(elements: Iterator[_Element]) -> Iterator[_Element]:
+    """Stop at an invalid outer boundary without discarding earlier elements.
+
+    Use only outside track metadata. Errors while parsing a yielded element's
+    contents must still propagate to reject incomplete or invalid tracks.
     """
-    if not data:
+    while True:
+        try:
+            element = next(elements)
+        except (StopIteration, ValueError):
+            return
+        yield element
+
+
+def _iter_mp4_path(
+    data: bytes, start: int, end: int, path: tuple[bytes, ...]
+) -> Iterator[tuple[int, int]]:
+    # Recursion is bounded by the fixed container path, not by untrusted input.
+    boxes = _iter_mp4_boxes(data, start, end)
+    if path[0] == b"moov":
+        # Only the file boundary is tolerant; moov and its children are strict.
+        boxes = _iter_complete_elements(boxes)
+    for kind, payload_start, box_end in boxes:
+        if kind == path[0]:
+            if len(path) == 1:
+                yield payload_start, box_end
+            else:
+                yield from _iter_mp4_path(data, payload_start, box_end, path[1:])
+
+
+def _probe_mp4_codecs(data: bytes) -> set[str]:
+    codecs: set[str] = set()
+    for start, end in _iter_mp4_path(data, 0, len(data), (b"moov", b"trak", b"mdia")):
+        is_video = any(
+            data[payload_start + 8 : payload_start + 12] == b"vide"
+            for payload_start, box_end in _iter_mp4_path(data, start, end, (b"hdlr",))
+            if box_end - payload_start >= 12
+        )
+        if not is_video:
+            continue
+        for payload_start, box_end in _iter_mp4_path(
+            data, start, end, (b"minf", b"stbl", b"stsd")
+        ):
+            if box_end - payload_start < 8:
+                raise ValueError("Truncated MP4 sample description")
+            # stsd is a FullBox followed by entry_count and sample entries.
+            entry_count = int.from_bytes(
+                data[payload_start + 4 : payload_start + 8], "big"
+            )
+            entries_read = 0
+            for kind, entry_start, entry_end in _iter_mp4_boxes(
+                data, payload_start + 8, box_end
+            ):
+                # A VisualSampleEntry has a 78-byte fixed payload.
+                if entry_end - entry_start < 78:
+                    raise ValueError("Truncated MP4 visual sample entry")
+                codec = _MP4_SAMPLE_ENTRY_CODECS.get(kind)
+                if codec is not None:
+                    codecs.add(codec)
+                entries_read += 1
+            if entries_read != entry_count:
+                raise ValueError("Invalid MP4 sample entry count")
+    return codecs
+
+
+def _read_ebml_vint(
+    data: bytes, start: int, end: int, *, element_id: bool = False
+) -> tuple[int, int]:
+    """Read an EBML ID or size and return its value and the next offset.
+
+    Unknown sizes are returned as -1; IDs retain their VINT marker bit.
+    """
+    if start >= end or data[start] == 0:
+        raise ValueError("Invalid EBML integer")
+    width = 9 - data[start].bit_length()
+    if width > (4 if element_id else 8) or start + width > end:
+        raise ValueError("Truncated EBML integer")
+    value = int.from_bytes(data[start : start + width], "big")
+    if not element_id:
+        value &= (1 << (7 * width)) - 1
+        if value == (1 << (7 * width)) - 1:
+            value = -1  # unknown-size master element
+    return value, start + width
+
+
+def _unknown_cluster_end(data: bytes, start: int, end: int) -> int:
+    """Skip Cluster children up to the next sibling element or end of segment."""
+    while start < end:
+        kind, size_start = _read_ebml_vint(data, start, end, element_id=True)
+        if kind not in _MATROSKA_CLUSTER_CHILD_IDS:
+            return start
+        size, payload_start = _read_ebml_vint(data, size_start, end)
+        if size < 0 or size > end - payload_start:
+            raise ValueError("Invalid Matroska Cluster child size")
+        start = payload_start + size
+    return end
+
+
+def _iter_ebml_elements(
+    data: bytes, start: int, end: int
+) -> Iterator[tuple[int, int, int]]:
+    while start < end:
+        kind, payload_start = _read_ebml_vint(data, start, end, element_id=True)
+        size, payload_start = _read_ebml_vint(data, payload_start, end)
+        if size == -1:
+            if kind == 0x18538067:  # Segment
+                size = end - payload_start
+            elif kind == 0x1F43B675:  # Cluster
+                size = _unknown_cluster_end(data, payload_start, end) - payload_start
+            else:
+                raise ValueError("Unsupported unknown-size EBML element")
+        if size > end - payload_start:
+            raise ValueError("Truncated EBML element")
+        yield kind, payload_start, payload_start + size
+        start = payload_start + size
+
+
+def _iter_ebml_path(
+    data: bytes, start: int, end: int, path: tuple[int, ...]
+) -> Iterator[tuple[int, int]]:
+    elements = _iter_ebml_elements(data, start, end)
+    if path[0] in (0x18538067, 0x1654AE6B):  # file or Segment boundary
+        elements = _iter_complete_elements(elements)
+    for kind, payload_start, element_end in elements:
+        if kind == path[0]:
+            if len(path) == 1:
+                yield payload_start, element_end
+            else:
+                yield from _iter_ebml_path(data, payload_start, element_end, path[1:])
+
+
+def _probe_matroska_codecs(data: bytes) -> set[str]:
+    codecs: set[str] = set()
+    # Segment / Tracks / TrackEntry. Only TrackType=1 is video; CodecID in an
+    # audio track, attachment, tag or CodecPrivate blob is not a video codec.
+    for start, end in _iter_ebml_path(
+        data, 0, len(data), (0x18538067, 0x1654AE6B, 0xAE)
+    ):
+        track_type = None
+        codec_id = None
+        for kind, payload_start, element_end in _iter_ebml_elements(data, start, end):
+            if kind == 0x83 and 0 < element_end - payload_start <= 8:
+                track_type = int.from_bytes(data[payload_start:element_end], "big")
+            elif kind == 0x86:
+                # EBML strings end at the first null and may have arbitrary padding.
+                prefix_end = min(
+                    element_end, payload_start + _MATROSKA_CODEC_ID_PREFIX_SIZE
+                )
+                codec_id = data[payload_start:prefix_end].split(b"\0", 1)[0]
+        if track_type == 1 and codec_id is not None:
+            codec = _MATROSKA_CODEC_IDS.get(codec_id)
+            if codec is not None:
+                codecs.add(codec)
+    return codecs
+
+
+def probe_video_codec(data: bytes) -> str | None:
+    """Identify a routing codec from MP4/MOV or Matroska/WebM video tracks.
+
+    Skip payloads by their declared sizes, including an mdat before moov in a
+    non-faststart MP4. Ignore invalid outer tails after complete track metadata.
+    Return None for unrecognized or incomplete track metadata;
+    never fall back to searching arbitrary bytes for codec markers. This is a
+    routing hint; the selected decoder still selects and parses the stream.
+    Container traversal is synchronous; async callers must offload it.
+    """
+    try:
+        if data.startswith(b"\x1a\x45\xdf\xa3"):
+            codecs = _probe_matroska_codecs(data)
+        else:
+            codecs = _probe_mp4_codecs(data)
+    except ValueError:
         return None
-    for marker, codec in _CODEC_MARKERS:
-        if marker in data:
-            return codec
-    return None
+    # Preserve the existing routing preference for multi-track files. The first
+    # track need not be the stream selected by the decoder (e.g. a later track
+    # may be marked as default). Only actual video codec fields are candidates.
+    return next((codec for codec in _CODEC_ROUTING_PRIORITY if codec in codecs), None)
 
 
 def should_use_nvdec(codec: str | None) -> bool:
