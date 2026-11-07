@@ -102,7 +102,8 @@ pub(crate) fn build_generate_request_with_routing(
             (allow_dp_rank && rank.is_some()).then_some(request_id)
         })
         .map(str::to_string);
-    let include_stop_in_output = has_visible_stop_tokens(&request).then_some(true);
+    let include_stop_in_output =
+        (needs_stop_text(&request) || has_visible_stop_tokens(&request)).then_some(true);
     let input = request_input(&mut request, limits)?;
     let sampling = &request.sampling_options;
     let stop = &request.stop_conditions;
@@ -137,8 +138,8 @@ pub(crate) fn build_generate_request_with_routing(
             conditions,
             ignore_eos: stop.ignore_eos,
             // Keeps a matched visible stop token (e.g. Harmony's `<|call|>`) in
-            // the output. A visible token equal to `end_id` finishes as END_ID
-            // and may still be dropped.
+            // the output, or any matched stop when the request keeps stop text. A
+            // stop equal to `end_id` finishes as END_ID and may still be dropped.
             include_stop_in_output,
         }),
         response: Some(pb::ResponseOptions {
@@ -698,16 +699,34 @@ fn has_visible_stop_tokens(request: &PreprocessedRequest) -> bool {
         .is_some_and(|ids| !ids.is_empty())
 }
 
+/// The frontend needs token IDs through the matched stop when it keeps stop
+/// text (`no_stop_trim` or `retain_model_stop_token_text`); without them it
+/// fails the request or loses the stop text.
+fn needs_stop_text(request: &PreprocessedRequest) -> bool {
+    let output = &request.output_options;
+    output.no_stop_trim == Some(true) || output.retain_model_stop_token_text == Some(true)
+}
+
 /// Hidden stop IDs to remove when the engine confirms they ended generation.
+/// User stops still trim when only model stop text is retained.
 fn retained_hidden_stop_ids(request: &PreprocessedRequest) -> BTreeSet<u32> {
+    if request.output_options.no_stop_trim == Some(true) {
+        return BTreeSet::new();
+    }
     let visible = request
         .stop_conditions
         .stop_token_ids_visible
         .as_deref()
         .unwrap_or_default();
+    let user = request
+        .stop_conditions
+        .stop_token_ids
+        .as_deref()
+        .unwrap_or_default();
+    let retain_model = request.output_options.retain_model_stop_token_text == Some(true);
     stop_token_ids(request)
         .into_iter()
-        .filter(|id| !visible.contains(id))
+        .filter(|id| !visible.contains(id) && (!retain_model || user.contains(id)))
         .collect()
 }
 
@@ -892,6 +911,10 @@ pub(crate) struct ResponseState {
     /// See [`retained_hidden_stop_ids`]. Dropped when the terminal matched it.
     hidden_stop_ids: BTreeSet<u32>,
     pending_stop: Option<pb::TokenInfo>,
+    /// Without a tokenizer, delay one event so a returned stop string reaches
+    /// the frontend with terminal usage rather than ending its stream early.
+    needs_stop_text_holdback: bool,
+    pending_stop_text: Vec<pb::TokenInfo>,
     phase: Phase,
 }
 
@@ -931,6 +954,14 @@ impl ResponseState {
             held_stop_ids: stop_token_ids(request).into_iter().collect(),
             hidden_stop_ids: retained_hidden_stop_ids(request),
             pending_stop: None,
+            needs_stop_text_holdback: (needs_stop_text(request)
+                || has_visible_stop_tokens(request))
+                && request
+                    .stop_conditions
+                    .stop
+                    .as_ref()
+                    .is_some_and(|stops| !stops.is_empty()),
+            pending_stop_text: Vec::new(),
             phase: if mode.is_prefill() {
                 Phase::Prefill { held: Vec::new() }
             } else {
@@ -1036,12 +1067,19 @@ impl ResponseState {
             .completion_tokens
             .saturating_add(token.tokens.len() as u32);
         let mut tokens = token.tokens;
+        if self.needs_stop_text_holdback {
+            if tokens.is_empty() {
+                return Ok(None);
+            }
+            tokens = std::mem::replace(&mut self.pending_stop_text, tokens);
+        }
         if let Some(pending) = self.pending_stop.take() {
             tokens.insert(0, pending);
         }
-        if tokens
-            .last()
-            .is_some_and(|info| self.held_stop_ids.contains(&info.token_id))
+        if !self.needs_stop_text_holdback
+            && tokens
+                .last()
+                .is_some_and(|info| self.held_stop_ids.contains(&info.token_id))
         {
             self.pending_stop = tokens.pop();
         }
@@ -1127,7 +1165,11 @@ impl ResponseState {
                 )));
             }
             Phase::Prefill { held } => std::mem::take(held),
-            Phase::Stream { .. } => self.pending_stop.take().into_iter().collect(),
+            Phase::Stream { .. } => {
+                let mut held = std::mem::take(&mut self.pending_stop_text);
+                held.extend(self.pending_stop.take());
+                held
+            }
         };
         let stop_match = finished
             .stop_match
