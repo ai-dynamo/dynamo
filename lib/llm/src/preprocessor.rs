@@ -6208,7 +6208,7 @@ impl OpenAIPreprocessor {
         Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
     {
         Self::transform_postprocessor_stream_with_image_tokens(
-            stream,
+            Box::pin(stream),
             generator,
             context,
             emit_payload_usage_chunk,
@@ -6219,6 +6219,9 @@ impl OpenAIPreprocessor {
         )
     }
 
+    /// The response transform over `stream`, Backend's items. The stream is held as it is, not
+    /// boxed: on the Dynamo path it is already a box, and a second one cost an allocation per
+    /// request.
     #[allow(clippy::too_many_arguments)]
     fn transform_postprocessor_stream_with_image_tokens<S, Resp>(
         stream: S,
@@ -6229,9 +6232,9 @@ impl OpenAIPreprocessor {
         trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
         mm_counts: MultimodalCounts,
         image_tokens: Option<usize>,
-    ) -> impl Stream<Item = Annotated<Resp>> + Send
+    ) -> impl Stream<Item = Annotated<Resp>> + Send + use<S, Resp>
     where
-        S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
+        S: Stream<Item = Annotated<BackendOutput>> + Send + Unpin + 'static,
         Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
     {
         struct DetokenizeMetricsGuard {
@@ -6257,11 +6260,11 @@ impl OpenAIPreprocessor {
             }
         }
 
-        struct State<Resp>
+        struct State<S, Resp>
         where
             Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
         {
-            response_stream: Pin<Box<dyn Stream<Item = Annotated<BackendOutput>> + Send>>,
+            response_stream: S,
             response_generator: Box<dyn DeltaGeneratorExt<Resp>>,
             detokenize_metrics: DetokenizeMetricsGuard,
             context: Arc<dyn AsyncEngineContext>,
@@ -6282,7 +6285,7 @@ impl OpenAIPreprocessor {
 
         let tracker = generator.tracker();
         let state = State {
-            response_stream: Box::pin(stream),
+            response_stream: stream,
             response_generator: generator,
             detokenize_metrics: DetokenizeMetricsGuard { tracker },
             context: context.clone(),
@@ -6304,19 +6307,23 @@ impl OpenAIPreprocessor {
         /// and the item through a new future on every item. `None` once the stream has ended,
         /// which drops the state, and so flushes the detokenize metrics, when this stream
         /// ends rather than when its caller drops it.
-        struct Postprocessed<Resp>
+        struct Postprocessed<S, Resp>
         where
             Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
         {
-            state: Option<State<Resp>>,
+            state: Option<State<S, Resp>>,
         }
 
-        // Nothing in the state is pinned: the stream below is boxed, and the rest is moved
+        // Nothing in the state is pinned: the stream below is `Unpin`, and the rest is moved
         // and edited freely.
-        impl<Resp> Unpin for Postprocessed<Resp> where Resp: Send + Sync + Clone + 'static + std::fmt::Debug {}
+        impl<S: Unpin, Resp> Unpin for Postprocessed<S, Resp> where
+            Resp: Send + Sync + Clone + 'static + std::fmt::Debug
+        {
+        }
 
-        impl<Resp> Stream for Postprocessed<Resp>
+        impl<S, Resp> Stream for Postprocessed<S, Resp>
         where
+            S: Stream<Item = Annotated<BackendOutput>> + Unpin,
             Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
         {
             type Item = Annotated<Resp>;
@@ -6337,8 +6344,9 @@ impl OpenAIPreprocessor {
             }
         }
 
-        impl<Resp> State<Resp>
+        impl<S, Resp> State<S, Resp>
         where
+            S: Stream<Item = Annotated<BackendOutput>> + Unpin,
             Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
         {
             /// The next chunk of the response, or `None` when it has ended.
@@ -8983,7 +8991,7 @@ impl
 
         // transform the postprocessor stream. Legacy `/v1/completions` is
         // text-only, so multimodal counts are always zero here.
-        let stream = Self::transform_postprocessor_stream(
+        let stream = Self::transform_postprocessor_stream_with_image_tokens(
             response_stream,
             response_generator,
             context.clone(),
@@ -8991,6 +8999,7 @@ impl
             trace_tokens_enabled,
             trace_finish_reason_metadata,
             MultimodalCounts::default(),
+            None,
         );
 
         let stream =
