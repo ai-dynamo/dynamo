@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from types import SimpleNamespace
 
@@ -299,6 +300,71 @@ def test_tito_adapter_rejects_unsupported_execution_paths(
             vllm_config=_vllm_config(),
             default_sampling_params={},
         )
+
+
+_IMAGE_PART = {"type": "image_url", "url": "data:image/png;base64,AA=="}
+
+
+def test_tito_adapter_carries_content_parts_for_worker_expansion():
+    from dynamo.vllm.engine_generate import adapt_engine_generate_request
+
+    adapted = adapt_engine_generate_request(
+        _request(content_parts=[_IMAGE_PART], return_token_ids=True),
+        enable_multimodal=True,
+        decode_capable=True,
+        vllm_config=_vllm_config(),
+        default_sampling_params={},
+    )
+
+    assert adapted is not None
+    assert adapted.prompt["prompt_token_ids"] == [11, 22, 33]
+    assert adapted.content_parts == [_IMAGE_PART]
+    assert adapted.return_token_ids is True
+
+
+@pytest.mark.parametrize(
+    ("enable_multimodal", "allow_multimodal_features", "match"),
+    [(False, True, "--enable-multimodal"), (True, False, "aggregated vLLM worker")],
+)
+def test_tito_adapter_rejects_content_parts_without_multimodal_worker(
+    enable_multimodal, allow_multimodal_features, match
+):
+    from dynamo.vllm.engine_generate import adapt_engine_generate_request
+
+    with pytest.raises(ValueError, match=match):
+        adapt_engine_generate_request(
+            _request(content_parts=[_IMAGE_PART]),
+            enable_multimodal=enable_multimodal,
+            decode_capable=True,
+            vllm_config=_vllm_config(),
+            default_sampling_params={},
+            allow_multimodal_features=allow_multimodal_features,
+        )
+
+
+def test_render_content_parts_maps_unreachable_media_to_400(monkeypatch):
+    import aiohttp
+    from vllm.renderers import chat_utils
+
+    from dynamo.common.http import HttpStatusError
+    from dynamo.vllm.engine_generate import render_content_parts
+
+    class Tracker:
+        def __init__(self, _model_config):
+            pass
+
+        def create_parser(self):
+            return SimpleNamespace(parse_image=lambda url, uuid: None)
+
+        async def resolve_items(self):
+            raise aiohttp.ClientConnectionError("unreachable")
+
+    monkeypatch.setattr(chat_utils, "AsyncMultiModalItemTracker", Tracker)
+    with pytest.raises(HttpStatusError) as excinfo:
+        asyncio.run(render_content_parts(None, None, {}, [_IMAGE_PART]))
+
+    assert excinfo.value.status == 400
+    assert isinstance(excinfo.value.__cause__, aiohttp.ClientConnectionError)
 
 
 @pytest.mark.parametrize(
