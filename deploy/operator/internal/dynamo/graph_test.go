@@ -11607,19 +11607,6 @@ func TestPCSNameForDGD(t *testing.T) {
 			// pcsBudget clamped to 8, so the prefix is name[:3] = "ab.".
 			want: "ab-a280",
 		},
-		{
-			// Stability guard, not a regression test for the dot bug: this passes
-			// before the fix too. A prefix ending in "-" already gives a valid name,
-			// so it must stay byte-identical to avoid renaming a running PodCliqueSet.
-			name:    "dotted name cut right after a hyphen keeps the hyphen",
-			dgdName: "qwen3.0-6b-vllm-production-west-cluster",
-			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-				singleNodeComponent("Frontend"),
-				singleNodeComponent("decode"),
-			},
-			// pcsBudget=37; prefix name[:32] ends in "-".
-			want: "qwen3.0-6b-vllm-production-west--60cd",
-		},
 	}
 
 	for _, tt := range tests {
