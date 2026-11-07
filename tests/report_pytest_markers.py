@@ -62,6 +62,7 @@ STUB_MODULES = [
     "urllib3.exceptions",
     "kr8s",
     "kr8s.objects",
+    "kr8s._async_utils",
     "tritonclient",
     "tritonclient.grpc",
     # gRPC core + generated protobuf modules — required by planner
