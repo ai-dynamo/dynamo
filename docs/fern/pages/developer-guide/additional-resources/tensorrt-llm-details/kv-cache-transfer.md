@@ -199,3 +199,31 @@ NixlTransferAgent mAddress: 100.x.x.x:32939
 
 - `srd/rdmap*` confirms SRD transport over EFA devices
 - Multiple `rdmap` entries correspond to one EFA device per GPU
+
+## Experimental Retained-Prefix Requests
+
+**Experimental.** This request extension requires a TensorRT-LLM build that provides `tensorrt_llm.retained_prefix.parse_retained_prefix`, the native `DisaggregatedParams.retain_prefix` and `retained_prefix` fields, and an enabled `native_retained_prefix` engine configuration. Releases without that native API reject the opt-in request. Setting the HTTP extension does not enable the engine provider.
+
+In a disaggregated deployment, request a native decoder export with:
+
+```json
+{
+  "nvext": {
+    "extra_fields": ["engine_data"],
+    "trtllm_retained_prefix": {
+      "retain_prefix": true
+    }
+  }
+}
+```
+
+Read the engine-generated reference from `nvext.engine_data.trtllm_retained_prefix.retained_prefix`. On the next request, supply that complete reference as `nvext.trtllm_retained_prefix.retained_prefix`. Build the next prompt from the original input and that trajectory's actual output token IDs before appending the new input. A reference identifies the engine's materialized prefix; it does not authorize reuse of unmaterialized output tokens.
+
+| Field | Type | Default | Behavior |
+|---|---|---|---|
+| `retain_prefix` | Boolean | `false` | Ask the engine to retain and export the completed decoder prefix. |
+| `retained_prefix` | Native reference object or `null` | `null` | Supply an engine-generated reference for prefill-side validation and import. |
+
+The extension rejects unknown outer fields. TensorRT-LLM validates the reference, compatibility, identity, peers and lifetime; Dynamo never interprets caller metadata as a memory address. Prefill remains context-only, and decode consumes the new forward handoff rather than reimporting the prior decoder reference. Unsupported probes and bypass requests reject the extension before generation.
+
+When the extension is absent, ordinary prefill-to-decode handoffs omit the new default fields. Requests do not change sampling, token limits or cache salt. An export or successful forward transfer alone does not demonstrate completed-decode-to-next-prefill reuse. Native transfer evidence must separately establish coverage, source ownership and retirement; memory-tier and transport evidence must distinguish retained GPU memory from host staging or a shared store. This boundary extension makes no tensor-parallel compatibility or performance claim.
