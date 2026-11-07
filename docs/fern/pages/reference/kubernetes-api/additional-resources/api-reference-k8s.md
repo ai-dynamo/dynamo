@@ -2538,7 +2538,7 @@ _Underlying type:_ _string_
 GPUSKUType identifies a supported GPU for discovery and profiling.
 
 _Validation:_
-- Enum: [vr_nvl72 gb200 gb200_sxm gb10 b300_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300]
+- Enum: [vr_nvl72 gb200 gb200_sxm gb10 b300_sxm b200_sxm rtx_pro_6000_server h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300]
 
 _Appears in:_
 - [HardwareSpec](#hardwarespec)
@@ -2551,6 +2551,7 @@ _Appears in:_
 | `gb10` |  |
 | `b300_sxm` |  |
 | `b200_sxm` |  |
+| `rtx_pro_6000_server` |  |
 | `h200_sxm` | --- Hopper ---<br /> |
 | `h100_sxm` |  |
 | `h100_pcie` |  |
@@ -2602,7 +2603,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU selects the GPU type to target.<br />When omitted, auto-detected as the GPU type of the node with the most GPUs<br />(ties broken by highest VRAM per GPU). In mixed-GPU clusters, set this to<br />choose which GPU type to use. Discovery and totalGpus are then<br />restricted to nodes matching this SKU.<br />The legacy value gb200_sxm is deprecated; use gb200 instead. |  | Enum: [vr_nvl72 gb200 gb200_sxm gb10 b300_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300] <br />Optional: \{\} <br /> |
+| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU selects the GPU type to target.<br />When omitted, auto-detected as the GPU type of the node with the most GPUs<br />(ties broken by highest VRAM per GPU). In mixed-GPU clusters, set this to<br />choose which GPU type to use. Discovery and totalGpus are then<br />restricted to nodes matching this SKU.<br />The legacy value gb200_sxm is deprecated; use gb200 instead. |  | Enum: [vr_nvl72 gb200 gb200_sxm gb10 b300_sxm b200_sxm rtx_pro_6000_server h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300] <br />Optional: \{\} <br /> |
 | `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB.<br />When omitted, auto-detected from cluster GPU nodes. An explicit value within 10%<br />of the auto-selected shape's measured VRAM permits automatic GPU-budget discovery.<br />This tolerance applies only to the requested value; aggregating discovered nodes<br />still requires equal measured VRAM. When this value differs by more than 10%<br />and totalGpus is omitted, automatic GPU-budget discovery fails and the DGDR<br />enters phase Failed before a profiling Job is created; set totalGpus explicitly<br />to use that override. |  | Optional: \{\} <br /> |
 | `totalGpus` _integer_ | TotalGPUs is the GPU budget for profiling and deployment.<br />The profiler uses this to determine parallelism and replica count.<br />When omitted, computed by summing GPUs on nodes matching the auto-selected<br />shape: GPU type, GPUs per node, and VRAM per GPU. The result is temporarily<br />capped at 32 to limit profiler search space. For example, same-type nodes<br />with 8 and 4 GPUs represent 12 GPUs of inventory, while the auto-selected 8-GPU<br />shape yields an automatic budget of 8. This cap may be removed in a future<br />release. Set this field explicitly to override the derived budget, use a<br />different numGpusPerNode, or use a vramMb value more than 10% from the<br />auto-selected shape's measured VRAM. These shape overrides require an explicit<br />totalGpus. |  | Optional: \{\} <br /> |
 | `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node.<br />When omitted, auto-detected as the highest GPU count on any discovered node<br />of the selected GPU type. In clusters whose nodes have different GPU counts,<br />set this explicitly to the node size you intend to schedule on. When this value<br />differs from the auto-selected shape and totalGpus is omitted, automatic<br />GPU-budget discovery fails and the DGDR enters phase Failed before a profiling<br />Job is created; set totalGpus explicitly to use that override. |  | Optional: \{\} <br /> |
