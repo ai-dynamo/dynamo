@@ -7,8 +7,8 @@ before changing locking, versioning, split, remove, or lookup-repair behavior.
 
 - Do not casually change the indexer's lock or versioning semantics.
 - If a change tangentially affects locking, shape gates, version validation, or
-  retry logic, confirm with PeaBrane first and explicitly ask whether to run the
-  relevant benchmark, or remind the user to run it, to check for regressions.
+  retry logic, say so explicitly and ask whether to run the relevant benchmark,
+  or remind the user to run it, to check for regressions.
 - Do not change split semantics without a white-box test proving the suffix
   keeps original children.
 - Do not change remove semantics to structurally split or merge nodes.
