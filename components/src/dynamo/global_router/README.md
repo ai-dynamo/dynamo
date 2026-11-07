@@ -14,7 +14,7 @@ The Global Router supports two modes:
 - **Disagg mode** (default): Registers as both prefill and decode worker. Routes prefill requests based on (ISL, TTFT) and decode requests based on (request token count, ITL) to separate pool types. The decode strategy retains the `context_length_*` configuration names.
 - **Agg mode**: Registers as a single generate worker. Routes all requests by (TTFT target, ITL target), with an optional ISL dimension, to unified pools that handle both prefill and decode.
 
-Both modes support priority-based pool overrides from agent hints and optional priority retry to faster pools.
+Both modes support priority-based pool overrides from agent hints and optional priority retry to faster pools. Prefill and agg strategies additionally support uncached-tokens overrides that route by the client-declared compute volume (`nvext.router.uncached_tokens`) instead of raw input length.
 
 ## Supported Backends
 
@@ -108,7 +108,7 @@ The configuration file format depends on the mode. The `mode` field determines w
     "prefill_pool_dynamo_namespaces": [],
     "decode_pool_dynamo_namespaces": [],
     "prefill_pool_priorities": [],         // Optional, lower integer = faster pool
-    "decode_pool_priorities": [],          // Optional, lower integer = faster pool
+    "decode_pool_priorities": [],         // Optional, lower integer = faster pool
 
     "prefill_pool_selection_strategy": {
         "isl_min": <int>,
@@ -118,7 +118,8 @@ The configuration file format depends on the mode. The `mode` field determines w
         "ttft_max_ms": <float>,
         "ttft_resolution": <int>,
         "prefill_pool_mapping": [[]],     // 2D array [isl_resolution][ttft_resolution] -> pool index
-        "priority_overrides": []          // Optional
+        "priority_overrides": [],         // Optional
+        "uncached_overrides": []          // Optional
     },
 
     "decode_pool_selection_strategy": {
@@ -148,14 +149,15 @@ The configuration file format depends on the mode. The `mode` field determines w
         "ttft_min_ms": <float>,              // Minimum TTFT target (ms)
         "ttft_max_ms": <float>,              // Maximum TTFT target (ms)
         "ttft_resolution": <int>,         // Number of grid rows for TTFT dimension
-        "itl_min_ms": <float>,              // Minimum ITL target (ms)
-        "itl_max_ms": <float>,              // Maximum ITL target (ms)
+        "itl_min_ms": <float>,               // Minimum ITL target (ms)
+        "itl_max_ms": <float>,               // Maximum ITL target (ms)
         "itl_resolution": <int>,          // Number of grid columns for ITL dimension
         "isl_min": <int>,                  // Optional: minimum input sequence length
         "isl_max": <int>,                  // Optional: maximum input sequence length
         "isl_resolution": <int>,           // Optional: number of ISL grid rows
         "agg_pool_mapping": [[]],         // 2D [ttft][itl], or 3D [isl][ttft][itl] when all isl_* fields are set
-        "priority_overrides": []          // Optional
+        "priority_overrides": [],         // Optional
+        "uncached_overrides": []          // Optional
     }
 }
 ```
@@ -247,6 +249,39 @@ Priority is set by the client via the NVIDIA OpenAI extension:
 }
 ```
 
+### Uncached-Tokens-Based Pool Override
+
+The prefill and agg strategies support optional `uncached_overrides` rules that route by the request's **uncached compute volume** — the number of prompt tokens expected to require fresh prefill computation — instead of its raw input length. This separates two requests the ISL grid cannot tell apart: a 120K-token agent multi-turn request whose prefix is already cached (small uncached volume) and a 120K-token cold request (large uncached volume). Routing the latter to a dedicated compute pool keeps long cold prefills from blocking cache-friendly traffic.
+
+The value comes from `nvext.router.uncached_tokens`, a **client-declared estimate**. The client (agent framework or gateway) knows how many tokens it is adding on this turn; the router never validates the estimate against actual cache state. Requests without the field keep the grid result.
+
+```jsonc
+"uncached_overrides": [
+    {
+        "min_uncached_tokens": 100000,    // inclusive lower bound
+        "max_uncached_tokens": null,      // optional inclusive upper bound; null/omitted = unbounded
+        "target_pool": 1                 // pool index to route to
+    }
+]
+```
+
+Rules are evaluated in list order; the first rule whose `[min_uncached_tokens, max_uncached_tokens]` range contains the estimate wins. When both a priority override and an uncached override match, the priority override wins.
+
+The client sets the estimate via:
+
+```json
+{
+    "messages": [...],
+    "nvext": {
+        "router": {
+            "uncached_tokens": 131072
+        }
+    }
+}
+```
+
+Decode pool selection is unaffected: the decode strategy has no `uncached_overrides` because prefill compute, not decode, is what the estimate sizes.
+
 ### Priority Retry
 
 Set `enable_priority_retry` to `true` to retry a request on faster pools when forwarding to the selected pool fails before any response has been streamed. Pool speed is configured with `prefill_pool_priorities`, `decode_pool_priorities`, or `agg_pool_priorities` depending on the mode. Lower integer values mean faster pools.
@@ -277,7 +312,8 @@ Clients can pass TTFT and ITL targets via `nvext.router` in the request:
     "nvext": {
         "router": {
             "ttft_target": 100,
-            "itl_target": 20
+            "itl_target": 20,
+            "uncached_tokens": 131072
         }
     }
 }
