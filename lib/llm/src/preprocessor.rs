@@ -2967,6 +2967,19 @@ impl OpenAIPreprocessor {
                 reasoning_parser = ?mdc.runtime_config.reasoning_parser,
                 "Selected model parser route"
             );
+            for (slot, parser) in [
+                ("tool_call_parser", tool_call_parser.as_deref()),
+                (
+                    "reasoning_parser",
+                    mdc.runtime_config.reasoning_parser.as_deref(),
+                ),
+            ] {
+                if let Some(warning) = parser.and_then(
+                    crate::protocols::openai::chat_completions::unified_parser::deprecated_alias_warning,
+                ) {
+                    tracing::warn!(model = %mdc.display_name, slot, "{warning}");
+                }
+            }
         }
         let parser_requires_special_tokens = mdc.model_type.supports_chat()
             && Self::parser_requires_special_tokens(
