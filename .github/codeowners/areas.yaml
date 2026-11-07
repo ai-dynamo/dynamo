@@ -647,6 +647,10 @@ shared:
   owners:
   - process
   - observability
+- glob: .ai/metrics-review.md
+  owners:
+  - process
+  - observability
 - glob: .github/workflows/fern-docs.yml
   owners:
   - ops
