@@ -9,9 +9,10 @@ use std::{
 };
 
 use dynamo_kv_router::{
+    plugins::{request_classifier::AbortCause, worker_selection::WorkerInputs},
     protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
-    scheduling::{AbortCause, KvSchedulerError},
-    selector::{WorkerInputs, WorkerSelector},
+    scheduling::KvSchedulerError,
+    selector::{HostedSelectionRequest, HostedWorkerPicker},
 };
 use dynamo_runtime::{
     error::{DynamoError, ErrorType, match_error_chain},
@@ -49,15 +50,15 @@ use crate::{
 };
 
 mod builder;
-mod builtin;
 mod cancellation;
+mod hosted;
 mod kv;
 mod kv_selection;
 mod occupancy;
 mod request_guard;
 
+pub(crate) use builder::hosted_picker;
 pub use builder::{LlmDispatch, MultimodalCache, RoutingHostBuilder};
-use builtin::BuiltinWorkerSelector;
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
@@ -268,7 +269,7 @@ fn into_monitored_response(
 
 enum RoutingPolicy {
     Kv(Arc<KvRouter>),
-    Builtin(BuiltinWorkerSelector),
+    Hosted(HostedWorkerPicker),
     Direct,
     DeviceAwareWeighted,
 }
@@ -276,7 +277,7 @@ enum RoutingPolicy {
 struct LoraRouting {
     filter: Arc<LoraFilter>,
     load_estimator: Arc<LoadEstimator>,
-    selector: BuiltinWorkerSelector,
+    picker: HostedWorkerPicker,
 }
 
 struct LoraSelection {
@@ -405,9 +406,9 @@ impl RoutingHost {
     pub fn required_worker_inputs(&self) -> WorkerInputs {
         match &self.policy {
             RoutingPolicy::Kv(chooser) => chooser.required_worker_inputs(),
-            RoutingPolicy::Builtin(selector) => selector.required_worker_inputs(),
+            RoutingPolicy::Hosted(picker) => picker.inputs(),
             RoutingPolicy::Direct => WorkerInputs::NONE,
-            RoutingPolicy::DeviceAwareWeighted => WorkerInputs::OCCUPANCY,
+            RoutingPolicy::DeviceAwareWeighted => WorkerInputs::ACTIVE_REQUESTS,
         }
     }
 
@@ -433,7 +434,7 @@ impl RoutingHost {
     pub(crate) fn kv_router_if_enabled(&self) -> Option<&Arc<KvRouter>> {
         match &self.policy {
             RoutingPolicy::Kv(chooser) => Some(chooser),
-            RoutingPolicy::Builtin(_)
+            RoutingPolicy::Hosted(_)
             | RoutingPolicy::Direct
             | RoutingPolicy::DeviceAwareWeighted => None,
         }
@@ -441,13 +442,15 @@ impl RoutingHost {
 
     pub(crate) fn peek_next_worker(&self) -> Option<u64> {
         match &self.policy {
-            RoutingPolicy::Builtin(selector) => match &self.hosted_occupancy {
-                Some(occupancy) => occupancy.peek(&self.inner, selector),
+            RoutingPolicy::Hosted(picker) => match &self.hosted_occupancy {
+                Some(occupancy) => occupancy.peek(&self.inner, picker),
                 None => self
                     .inner
                     .with_selectable_worker_ids(|ids| {
-                        selector.peek_worker(
-                            dynamo_kv_router::selector::WorkerSelectionInput::hosted(ids, None),
+                        picker.select(
+                            ids,
+                            None,
+                            &HostedSelectionRequest::new(0).with_preview(true),
                         )
                     })
                     .ok()
@@ -664,7 +667,7 @@ impl RoutingHost {
             && explicit.is_none()
             && matches!(
                 &self.policy,
-                RoutingPolicy::Builtin(_) | RoutingPolicy::DeviceAwareWeighted
+                RoutingPolicy::Hosted(_) | RoutingPolicy::DeviceAwareWeighted
             )
             && operation
                 .target()
@@ -701,7 +704,7 @@ impl RoutingHost {
     {
         match &self.policy {
             RoutingPolicy::Kv(_) => self.select_and_dispatch_kv_prefill(request, prepare).await,
-            RoutingPolicy::Builtin(_)
+            RoutingPolicy::Hosted(_)
             | RoutingPolicy::Direct
             | RoutingPolicy::DeviceAwareWeighted => {
                 let (metadata, stream) = self

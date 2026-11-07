@@ -27,7 +27,9 @@ use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, HttpFrontend, PrefillRoutedEngine};
-use dynamo_llm::frontend_config::{FrontendApiConfig, MetricsConfig};
+use dynamo_llm::frontend_config::{
+    ChatTemplateDefaults, FrontendApiConfig, MediaRejectionConfig, MetricsConfig,
+};
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::runtime_config::TokenizerBackend;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
@@ -285,7 +287,7 @@ impl KvRouterConfig {
                  selects worker-selection policy instance {instance:?} for {worker_type}"
             )));
         }
-        dynamo_custom_policy_builtin::startup_policy_parameters(&self.inner, role)
+        dynamo_router_policies::startup_policy_parameters(&self.inner, role)
             .into_iter()
             .map(|(name, value)| match value.as_f64() {
                 Some(value) => Ok((name, value)),
@@ -517,6 +519,7 @@ pub(crate) struct EntrypointArgs {
     batch_gateway_url: Option<String>,
     metrics_config: Option<MetricsConfig>,
     frontend_api_config: Option<FrontendApiConfig>,
+    chat_template_defaults: ChatTemplateDefaults,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     tls_client_ca_cert_path: Option<PathBuf>,
@@ -537,7 +540,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, enable_systemone_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, enable_systemone_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None, reject_media=None, reject_media_status_code=None, default_chat_template_kwargs=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -574,6 +577,9 @@ impl EntrypointArgs {
         tokenizer_backend: Option<String>,
         tokenizer_fallback: Option<bool>,
         batch_gateway_url: Option<String>,
+        reject_media: Option<bool>,
+        reject_media_status_code: Option<u16>,
+        default_chat_template_kwargs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -620,6 +626,19 @@ impl EntrypointArgs {
             })
             .transpose()?;
 
+        let mut chat_template_defaults = ChatTemplateDefaults::default();
+        chat_template_defaults.set_default_chat_template_kwargs(
+            default_chat_template_kwargs
+                .map(|kwargs| {
+                    pythonize::depythonize(kwargs).map_err(|err| {
+                        PyValueError::new_err(format!(
+                            "default_chat_template_kwargs must be a JSON object: {err}"
+                        ))
+                    })
+                })
+                .transpose()?,
+        );
+
         let mut runtime_config = runtime_config.unwrap_or_default();
         if let Some(tokenizer_backend) = tokenizer_backend {
             runtime_config
@@ -632,6 +651,26 @@ impl EntrypointArgs {
                 .set_tokenizer_fallback_enabled(Some(tokenizer_fallback));
         }
         runtime_config.validate_config()?;
+
+        let mut frontend_api_config = FrontendApiConfig::from_optional_flags(
+            enable_anthropic_api,
+            enable_systemone_api,
+            strip_anthropic_preamble,
+            enable_streaming_tool_dispatch,
+            enable_streaming_reasoning_dispatch,
+            reasoning_field,
+        );
+        if reject_media.is_some() || reject_media_status_code.is_some() {
+            let config = frontend_api_config.get_or_insert_with(FrontendApiConfig::default);
+            let defaults = config.media_rejection();
+            config.set_media_rejection(
+                MediaRejectionConfig::new(
+                    reject_media.unwrap_or_else(|| defaults.enabled()),
+                    reject_media_status_code.unwrap_or_else(|| defaults.status_code()),
+                )
+                .map_err(|e| PyValueError::new_err(e.to_string()))?,
+            );
+        }
 
         Ok(EntrypointArgs {
             engine_type,
@@ -646,14 +685,8 @@ impl EntrypointArgs {
             http_metrics_port,
             batch_gateway_url,
             metrics_config: metrics_prefix.map(|prefix| MetricsConfig::new(Some(prefix))),
-            frontend_api_config: FrontendApiConfig::from_optional_flags(
-                enable_anthropic_api,
-                enable_systemone_api,
-                strip_anthropic_preamble,
-                enable_streaming_tool_dispatch,
-                enable_streaming_reasoning_dispatch,
-                reasoning_field,
-            ),
+            frontend_api_config,
+            chat_template_defaults,
             tls_cert_path,
             tls_key_path,
             tls_client_ca_cert_path,
@@ -712,6 +745,7 @@ pub fn make_engine<'p>(
     if let Some(frontend_api_config) = args.frontend_api_config.clone() {
         builder.frontend_api_config(frontend_api_config);
     }
+    builder.chat_template_defaults(args.chat_template_defaults.clone());
     builder
         .tls_cert_path(args.tls_cert_path.clone())
         .tls_key_path(args.tls_key_path.clone())
@@ -985,7 +1019,7 @@ mod plugin_input_tests {
     #[test]
     fn explicit_policy_retains_frontend_restrictions() {
         let plugins = RouterPlugins::default()
-            .with_worker_selection(dynamo_custom_policy_builtin::default_factory());
+            .with_worker_selection(dynamo_router_policies::default_factory());
         assert!(validate_router_plugin_input(&plugins, &Input::Http, true).is_ok());
         assert_eq!(
             validate_router_plugin_input(&plugins, &Input::Http, false),

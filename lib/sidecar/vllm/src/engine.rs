@@ -26,7 +26,7 @@ use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{
     ResponseState, build_generate_request, consume_reasoning_parser_args, data_parallel_rank,
-    normalize_response_options, request_has_multimodal_input, require_proto_0_6_controls,
+    request_has_multimodal_input, require_proto_0_6_controls,
 };
 use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, resolve_source_path};
 use crate::model::DiscoveredModel;
@@ -45,6 +45,9 @@ pub struct VllmSidecarEngine {
     lifecycle: lora::LoraLifecycle,
     routing_image_token_id: OnceCell<Option<u32>>,
     cancel: CancellationToken,
+    /// Cancelled once vLLM stops serving after `start`, with the reason set first.
+    lost: CancellationToken,
+    lost_reason: Arc<std::sync::OnceLock<String>>,
     /// vLLM's reasoning parser decides when Dynamo's tool grammars apply, so
     /// they exclude the reasoning phase; set by `from_discovered`.
     engine_gates_reasoning: bool,
@@ -75,6 +78,8 @@ impl VllmSidecarEngine {
             lifecycle: lora::LoraLifecycle::default(),
             routing_image_token_id: OnceCell::new(),
             cancel: CancellationToken::new(),
+            lost: CancellationToken::new(),
+            lost_reason: Arc::default(),
             engine_gates_reasoning: false,
         }
     }
@@ -241,8 +246,11 @@ impl VllmSidecarEngine {
         let mut engine = Self::new(endpoint, model.clone(), mode, transport);
         engine.engine_gates_reasoning =
             model.reports_proto_0_6() && model.reasoning_parser().is_some();
-        // Off by default until vLLM's gRPC server uses xgrammar (vllm-project/vllm#61892).
-        let structural_tag = args.sidecar.common.structural_tag(false);
+        // TODO: Remove this version check and default to `true` once the sidecar drops vLLM < 0.33.
+        let structural_tag = args
+            .sidecar
+            .common
+            .structural_tag(model.compiles_structural_tags());
         let config = WorkerConfig {
             runtime: args.sidecar.common.runtime,
             namespace: args.sidecar.common.namespace,
@@ -818,6 +826,7 @@ impl LLMEngine for VllmSidecarEngine {
             .set(routing_image_token_id)
             .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
         let connection_count = client.connection_count();
+        let health = client.health_channel();
         self.client
             .set(client)
             .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
@@ -829,6 +838,18 @@ impl LLMEngine for VllmSidecarEngine {
             mode = %self.mode,
             "vLLM gRPC services are ready"
         );
+        let (stop, lost) = (self.cancel.child_token(), self.lost.clone());
+        let reason = Arc::clone(&self.lost_reason);
+        let open_timeout = self.transport.connect_attempt_timeout;
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = stop.cancelled() => {}
+                why = client::watch_health(health, open_timeout) => {
+                    let _ = reason.set(why);
+                    lost.cancel();
+                }
+            }
+        });
         Ok(engine_config)
     }
 
@@ -848,7 +869,7 @@ impl LLMEngine for VllmSidecarEngine {
             .get()
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
-        let mut request = normalize_response_options(request)?;
+        let mut request = request;
         if !self.model.reports_proto_0_6()
             && consume_reasoning_parser_args(&mut request.extra_args)
             && let Some(parser) = self.model.reasoning_parser()
@@ -989,8 +1010,8 @@ impl LLMEngine for VllmSidecarEngine {
                         break;
                     }
                     Ok(None) => {
-                        yield Err(client::protocol_error(
-                            "GenerateStream ended before a terminal response",
+                        yield Err(client::stream_incomplete(
+                            "vLLM GenerateStream ended before a terminal response",
                         ));
                         break;
                     }
@@ -1003,7 +1024,7 @@ impl LLMEngine for VllmSidecarEngine {
                         break;
                     }
                     Err(status) => {
-                        yield Err(client::status_to_dynamo("GenerateStream", status));
+                        yield Err(client::stream_status_to_dynamo("GenerateStream", status));
                         break;
                     }
                 }
@@ -1218,6 +1239,12 @@ impl LLMEngine for VllmSidecarEngine {
         self.unpublish_all_loras().await;
         self.cancel.cancel();
         Ok(())
+    }
+
+    async fn engine_lost(&self) -> DynamoError {
+        self.lost.cancelled().await;
+        let reason = self.lost_reason.get().map_or("unknown", String::as_str);
+        client::engine_shutdown(format!("vLLM engine lost: {reason}"))
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
@@ -1668,6 +1695,34 @@ mod tests {
                     result.err()
                 ),
             }
+        }
+    }
+
+    #[test]
+    fn structural_tags_default_on_from_vllm_0_33() {
+        for (flags, engine_version, expected) in [
+            (&[][..], "0.33.0", true),
+            (&[][..], "0.33.0rc1.dev649+gc3fd4ff44", true),
+            (&[][..], "0.32.0", false),
+            (&[][..], "", false),
+            (&["--dyn-structural-tag"][..], "0.32.0", true),
+            (&["--dyn-structural-tag", "false"][..], "0.33.0", false),
+        ] {
+            let args = Args::try_parse_from(
+                ["sidecar", "--grpc-endpoint", "127.0.0.1:12345"]
+                    .iter()
+                    .chain(flags),
+            )
+            .unwrap();
+            let mut server = server_info();
+            server.engine_version = engine_version.to_string();
+            let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
+            let (_, config) = VllmSidecarEngine::from_discovered(args, model, None).unwrap();
+            assert_eq!(
+                config.structural_tag.is_some(),
+                expected,
+                "{flags:?} {engine_version:?}"
+            );
         }
     }
 

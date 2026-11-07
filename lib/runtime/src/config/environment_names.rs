@@ -414,6 +414,10 @@ pub mod llm {
     /// LoRA cache directory path
     pub const DYN_LORA_PATH: &str = "DYN_LORA_PATH";
 
+    /// Skip TLS certificate verification for S3 LoRA downloads (set to "true" to enable).
+    /// Intended for trusted internal networks with private-CA or self-signed S3 endpoints.
+    pub const DYN_LORA_S3_TLS_INSECURE: &str = "DYN_LORA_S3_TLS_INSECURE";
+
     /// Enable the experimental Anthropic Messages API endpoint (/v1/messages)
     pub const DYN_ENABLE_ANTHROPIC_API: &str = "DYN_ENABLE_ANTHROPIC_API";
 
@@ -469,6 +473,15 @@ pub mod llm {
     /// from the system prompt before forwarding to the target model. The preamble
     /// varies per session and per release, wasting tokens and breaking prompt caching.
     pub const DYN_STRIP_ANTHROPIC_PREAMBLE: &str = "DYN_STRIP_ANTHROPIC_PREAMBLE";
+
+    /// When truthy, refuse chat requests that carry image, video, or audio
+    /// content in any message before they are routed. For frontends serving
+    /// text-only models.
+    pub const DYN_REJECT_MEDIA: &str = "DYN_REJECT_MEDIA";
+
+    /// HTTP status (4xx or 5xx) for a request refused by `DYN_REJECT_MEDIA`.
+    /// Defaults to 415.
+    pub const DYN_REJECT_MEDIA_STATUS_CODE: &str = "DYN_REJECT_MEDIA_STATUS_CODE";
 
     /// When truthy, force usage in streaming chat and text-completion responses
     /// regardless of the request's `stream_options.include_usage` value.
@@ -852,6 +865,11 @@ pub mod model {
 
 /// KV Router configuration environment variables
 pub mod router {
+    /// Most sessions each session-affinity table holds; defaults to 65,536.
+    /// The Python frontend exports `--router-session-affinity-max-entries` here.
+    pub const DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES: &str =
+        "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES";
+
     /// Scale applied to adjusted prompt-side prefill load after overlap/cache-hit credits.
     pub const DYN_ROUTER_PREFILL_LOAD_SCALE: &str = "DYN_ROUTER_PREFILL_LOAD_SCALE";
 
@@ -932,7 +950,7 @@ pub mod response_plane {
     /// service also listens on TCP, so a frontend and worker set differently
     /// still reach each other, and the worker reports the mismatch.
     pub const DYN_VELO_RESPONSE_TRANSPORT: &str = "DYN_VELO_RESPONSE_TRANSPORT";
-    /// Maximum Velo response batching delay in milliseconds (default: 5).
+    /// Maximum Velo response batching delay in milliseconds (default: 2).
     /// Set to 0 for greedy flushing after transport admission. Full batches and
     /// lifecycle records can flush sooner. Read once when the service starts.
     pub const DYN_VELO_RESPONSE_BATCH_MS: &str = "DYN_VELO_RESPONSE_BATCH_MS";
@@ -1222,6 +1240,7 @@ mod tests {
             llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
+            llm::DYN_LORA_S3_TLS_INSECURE,
             llm::DYN_ENABLE_ANTHROPIC_API,
             llm::DYN_SERVING_LOAD_PUBLISH,
             llm::DYN_ENABLE_SYSTEMONE_API,
@@ -1235,6 +1254,8 @@ mod tests {
             llm::DYN_FRONTEND_ADMIN_HOST,
             llm::DYN_FRONTEND_ADMIN_PORT,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
+            llm::DYN_REJECT_MEDIA,
+            llm::DYN_REJECT_MEDIA_STATUS_CODE,
             llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
