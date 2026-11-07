@@ -98,7 +98,9 @@ impl Parameters {
             (Some(capacity), Some(fraction)) => {
                 let ppm = (fraction * PPM).round() as u128;
                 // `decode_cost` counts whole blocks, so the cast to an integer drops nothing.
-                rank.decode_cost as u128 * PPM as u128 <= ppm * u128::from(capacity)
+                // Saturate: a fraction too large to multiply out means everything fits.
+                (rank.decode_cost as u128).saturating_mul(PPM as u128)
+                    <= ppm.saturating_mul(u128::from(capacity))
             }
             _ => true,
         }
@@ -404,6 +406,19 @@ mod tests {
             ),
             [0]
         );
+        // A huge fraction cannot overflow the fit test; everything fits.
+        for fraction in [1e30, 1e300] {
+            let p = parameters(fraction, true, 0.0);
+            for capacity in [1, u64::MAX] {
+                let rank = Rank {
+                    decode_cost: u64::MAX as f64,
+                    requests: 0,
+                    capacity: Some(capacity),
+                    taint: None,
+                };
+                assert!(p.fits(&rank), "{fraction} x {capacity}");
+            }
+        }
         // A rank without a capacity is not filtered.
         assert_eq!(
             ties(
