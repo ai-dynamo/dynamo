@@ -122,6 +122,12 @@ Set it on all of them. The Relay cannot see a frontend or router that does not p
 only some do, their load reads as the complete load. Without it anywhere, every serving-load view
 is `UNAVAILABLE`, and after 30 seconds the Relay logs a warning naming the variable.
 
+## Recent-Session Hints
+
+**Experimental.** To report raw session IDs and last-seen times to Global Router through the Relay, set both `DYN_SESSION_HINTS_PUBLISH=1` and `DYN_SERVING_LOAD_PUBLISH=1` on frontends. Session reporting is off by default. Current routing policies do not use these hints.
+
+Hints are best effort and expire ten minutes after the last observed request. IDs are limited to 256 bytes, and each frontend and Relay report is limited to 4,096 hints.
+
 ## Producer Tuning
 
 These environment-only overrides also work without a WAN listener. All values must be positive

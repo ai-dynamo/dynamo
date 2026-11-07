@@ -213,9 +213,125 @@ async fn global_view_sender_follows_directory_and_reconnects_with_live_state() {
     fixture.shutdown().await;
 }
 
+#[tokio::test]
+async fn frontend_session_reports_reach_global_views_and_withdraw_on_source_loss() {
+    use crate::frontend_load::{
+        FRONTEND_LOAD_TOPIC, FrontendLoadFrame, FrontendModelLoad, SessionObservation,
+    };
+    use crate::pool_relay::serving_load::ServingLoadAggregator;
+    use dynamo_global_common::PoolKey as RoutingPoolKey;
+    use dynamo_runtime::transports::event_plane::EventPublisher;
+    use prost::Message;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio_util::task::AbortOnDropHandle;
+
+    let fixture = RelayFixture::start(|config| config.load_window_ms = 10).await;
+    let cancel = CancellationToken::new();
+    let (mut snapshots, aggregator) = ServingLoadAggregator::spawn(
+        &fixture.component,
+        fixture.registry.clone(),
+        fixture.topology.clone(),
+        Duration::from_millis(10),
+        cancel.clone(),
+    );
+    let _aggregator = AbortOnDropHandle::new(aggregator);
+    let serving = fixture.serving_load.clone();
+    let _forward = AbortOnDropHandle::new(tokio::spawn(async move {
+        while snapshots.changed().await.is_ok() {
+            serving.send_replace(snapshots.borrow_and_update().clone());
+        }
+    }));
+    let (router, mut frames, _receiver) = global_receiver_probe().await;
+    let (_directory, routers) = watch::channel(HashSet::from([router]));
+    fixture.transport.broadcast_global_views(
+        RoutingPoolKey::new("east", "dynamo", "blue").unwrap(),
+        routers,
+    );
+    captured_state(&mut frames, true, |_| true).await;
+    let publisher = tokio::time::timeout(
+        IO_TIMEOUT,
+        EventPublisher::for_namespace(fixture.component.namespace(), FRONTEND_LOAD_TOPIC),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let observation = |session: &str, last_seen_ms| SessionObservation {
+        session_id: session.to_string(),
+        last_seen_ms,
+    };
+    let (updates, mut observations) = watch::channel(vec![observation("old", now - 2)]);
+    let source = AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut sequence = 0;
+        let mut interval = tokio::time::interval(Duration::from_millis(30));
+        loop {
+            interval.tick().await;
+            sequence += 1;
+            let frame = FrontendLoadFrame {
+                frontend_instance_id: 42,
+                incarnation: 1,
+                sequence,
+                is_serving_ready: true,
+                models: vec![FrontendModelLoad {
+                    model: "llama".to_string(),
+                    is_ready: true,
+                    sessions: observations.borrow_and_update().clone(),
+                    ..Default::default()
+                }],
+            };
+            publisher.publish(&frame).await.unwrap();
+        }
+    }));
+    let has_sessions = |state: &dynamo_global_common::grpc::PoolState, expected: &[(&str, u64)]| {
+        if state.serving_load.is_empty() {
+            return false;
+        }
+        let load = proto::ServingLoadUpdate::decode(state.serving_load.clone()).unwrap();
+        let Some(model) = load
+            .models
+            .iter()
+            .find(|model| model.canonical_model_id == "llama")
+        else {
+            return false;
+        };
+        proto::validate_model_serving_load(model).unwrap();
+        model.sessions.len() == expected.len()
+            && expected.iter().all(|(id, at)| {
+                model
+                    .sessions
+                    .iter()
+                    .any(|seen| seen.session_id == *id && seen.last_seen_ms == *at)
+            })
+    };
+    captured_state(&mut frames, false, |state| {
+        has_sessions(state, &[("old", now - 2)])
+    })
+    .await;
+    updates.send_replace(vec![observation("old", now - 1), observation("new", now)]);
+    captured_state(&mut frames, false, |state| {
+        has_sessions(state, &[("old", now - 1), ("new", now)])
+    })
+    .await;
+    updates.send_replace(vec![observation("new", now)]);
+    captured_state(&mut frames, false, |state| {
+        has_sessions(state, &[("new", now)])
+    })
+    .await;
+    // Stop the actual event-plane publisher. Its last report must age out even
+    // while the Relay continues publishing fresh serving-load windows.
+    drop(source);
+    captured_state(&mut frames, false, |state| has_sessions(state, &[])).await;
+    cancel.cancel();
+    fixture.shutdown().await;
+}
+
 static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(1);
 
 struct RelayFixture {
+    component: dynamo_runtime::component::Component,
     address: SocketAddr,
     transport: GrpcTransport,
     registry: Arc<PoolRegistry>,
@@ -296,6 +412,7 @@ impl RelayFixture {
             .bound_address
             .expect("transport must expose its bound address");
         Self {
+            component,
             address,
             transport,
             registry,

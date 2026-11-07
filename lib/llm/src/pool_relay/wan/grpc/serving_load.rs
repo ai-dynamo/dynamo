@@ -5,6 +5,8 @@
 
 use std::time::Duration;
 
+use prost::Message;
+
 use super::identity::{pool_id_to_wire, producer_to_wire, relay_identity_to_wire, unix_timestamp};
 use super::load::window_ms;
 use super::protocol as proto;
@@ -18,7 +20,7 @@ pub(super) fn serving_load_update(
     window: Duration,
     sequence: u64,
 ) -> proto::ServingLoadUpdate {
-    proto::ServingLoadUpdate {
+    let mut update = proto::ServingLoadUpdate {
         protocol_version: proto::RELAY_PROTOCOL_VERSION,
         relay: Some(relay_identity_to_wire(relay)),
         window_sequence: sequence,
@@ -27,7 +29,17 @@ pub(super) fn serving_load_update(
         pools: snapshot.pools.iter().map(pool_to_wire).collect(),
         models: snapshot.models.iter().map(model_to_wire).collect(),
         contract_marker: proto::RELAY_CONTRACT_MARKER,
+    };
+    // Keep optional hints within tonic's default subscription decoding limit.
+    // Existing load fields retain their behavior if they already exceed it.
+    if update.models.iter().any(|model| !model.sessions.is_empty())
+        && update.encoded_len() > 4 * 1024 * 1024
+    {
+        for model in &mut update.models {
+            model.sessions.clear();
+        }
     }
+    update
 }
 
 /// The aggregate when complete, and the view's status.
@@ -66,6 +78,14 @@ fn model_to_wire(model: &ModelServingLoad) -> proto::ModelServingLoad {
     let (gauges, status) = coverage_to_wire(model.gauges);
     let totals = model.totals;
     proto::ModelServingLoad {
+        sessions: model
+            .sessions
+            .iter()
+            .map(|session| proto::SessionObservation {
+                session_id: session.session_id.clone(),
+                last_seen_ms: session.last_seen_ms,
+            })
+            .collect(),
         namespace: model.namespace.clone(),
         canonical_model_id: model.model.clone(),
         load: Some(proto::LoadView {
@@ -145,6 +165,10 @@ mod tests {
             observed_frontends: 1,
             ready_frontends: 1,
             serving_pools: vec![producer(1).pool_id()],
+            sessions: vec![crate::frontend_load::SessionObservation {
+                session_id: "session".to_string(),
+                last_seen_ms: 5,
+            }],
         }
     }
 
@@ -216,6 +240,13 @@ mod tests {
         );
 
         let degraded = &update.models[0];
+        assert_eq!(
+            degraded.sessions,
+            vec![proto::SessionObservation {
+                session_id: "session".to_string(),
+                last_seen_ms: 5,
+            }]
+        );
         proto::validate_model_serving_load(degraded).unwrap();
         let load = degraded.load.as_ref().unwrap();
         assert_eq!(load.status, proto::DataStatus::Degraded as i32);
@@ -234,5 +265,79 @@ mod tests {
         let requests = complete.load.as_ref().unwrap().requests.as_ref().unwrap();
         assert_eq!(requests.requests_awaiting_first_token, Some(3));
         assert_eq!(requests.requests_generating, Some(0));
+    }
+    #[test]
+    fn full_session_budget_with_maximum_ids_fits_transport_message_limit() {
+        use crate::frontend_load::{
+            MAX_FRONTEND_SESSIONS, MAX_SESSION_ID_BYTES, SessionObservation,
+        };
+        use prost::Message;
+        let models = (0..4)
+            .map(|index| {
+                let mut load = model(Coverage::Partial);
+                load.model = format!("model-{index}");
+                load.sessions = (0..MAX_FRONTEND_SESSIONS / 4)
+                    .map(|id| SessionObservation {
+                        session_id: format!("{id:0width$}", width = MAX_SESSION_ID_BYTES),
+                        last_seen_ms: u64::MAX,
+                    })
+                    .collect();
+                load
+            })
+            .collect();
+        let update = serving_load_update(
+            PoolRelayIdentity::new(1, 2),
+            &ServingLoadSnapshot {
+                pools: Vec::new(),
+                models,
+            },
+            Duration::from_secs(1),
+            1,
+        );
+        assert_eq!(
+            update
+                .models
+                .iter()
+                .map(|model| model.sessions.len())
+                .sum::<usize>(),
+            MAX_FRONTEND_SESSIONS
+        );
+        assert!(update.encoded_len() < 4 * 1024 * 1024);
+        for model in &update.models {
+            proto::validate_model_serving_load(model).unwrap();
+        }
+    }
+    #[test]
+    fn session_hints_cannot_displace_serving_load_from_a_subscription_window() {
+        let mut load = model(Coverage::Partial);
+        load.namespace = "n".repeat(4 * 1024 * 1024 - 512);
+        load.sessions = (0..8)
+            .map(|index| crate::frontend_load::SessionObservation {
+                session_id: format!("{index:0256}"),
+                last_seen_ms: 1,
+            })
+            .collect();
+        let snapshot = ServingLoadSnapshot {
+            pools: Vec::new(),
+            models: vec![load],
+        };
+        let mut expected = model_to_wire(&snapshot.models[0]);
+        assert!(expected.encoded_len() > 4 * 1024 * 1024);
+        expected.sessions.clear();
+        let update = serving_load_update(
+            PoolRelayIdentity::new(1, 2),
+            &snapshot,
+            Duration::from_secs(1),
+            17,
+        );
+        assert_eq!(update.models, vec![expected]);
+        assert_eq!(update.window_sequence, 17);
+        assert_eq!(update.window_ms, 1000);
+        assert_eq!(
+            update.relay,
+            Some(relay_identity_to_wire(PoolRelayIdentity::new(1, 2)))
+        );
+        assert!(update.encoded_len() < 4 * 1024 * 1024);
+        proto::validate_model_serving_load(&update.models[0]).unwrap();
     }
 }

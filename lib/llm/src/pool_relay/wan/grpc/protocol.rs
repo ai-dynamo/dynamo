@@ -26,8 +26,8 @@ pub use v1::{
 };
 pub use v1::{
     DataStatus, LoadView, ModelDeploymentStatus, ModelServingLoad, PoolDeploymentStatus,
-    PoolServingLoad, RequestLifecycleStats, ServingLoadUpdate, SubscribeServingLoadRequest,
-    TokenLoadStats,
+    PoolServingLoad, RequestLifecycleStats, ServingLoadUpdate, SessionObservation,
+    SubscribeServingLoadRequest, TokenLoadStats,
 };
 
 pub use v1::kv_event_relay_server::{KvEventRelay, KvEventRelayServer};
@@ -43,6 +43,8 @@ pub use wire::{
 
 /// Compatibility major; additive v1 changes do not increment this value.
 pub const RELAY_PROTOCOL_VERSION: u32 = 1;
+/// Maximum age of a recent-session hint. Heartbeats do not refresh this age.
+pub const SESSION_HINT_RETENTION_MS: u64 = 600_000;
 /// Marker carried by every top-level message for the Relay WAN v1 contract.
 pub const RELAY_CONTRACT_MARKER: u32 = 0x4B56_5231;
 /// Current composition of cache semantics, routing scope, and DC identity.
@@ -413,6 +415,7 @@ mod tests {
                 deployment: Some(PoolDeploymentStatus::default()),
             }],
             models: vec![ModelServingLoad {
+                sessions: Vec::new(),
                 namespace: "ns".into(),
                 canonical_model_id: "llama".into(),
                 load: Some(LoadView {
@@ -557,5 +560,47 @@ mod tests {
             validate_pool_serving_load(&with_requests),
             Err(WireIdentityError::LoadViewField(_))
         ));
+    }
+    #[test]
+    fn model_session_observations_validate_bounds_and_duplicates() {
+        let mut model = serving_load_update().models.remove(0);
+        model.sessions = vec![SessionObservation {
+            session_id: "session".into(),
+            last_seen_ms: 10,
+        }];
+        validate_model_serving_load(&model).unwrap();
+        let valid = model.clone();
+        model.sessions.push(model.sessions[0].clone());
+        assert!(validate_model_serving_load(&model).is_err());
+        for invalid in [
+            SessionObservation {
+                session_id: String::new(),
+                last_seen_ms: 1,
+            },
+            SessionObservation {
+                session_id: "x".repeat(crate::frontend_load::MAX_SESSION_ID_BYTES + 1),
+                last_seen_ms: 1,
+            },
+            SessionObservation {
+                session_id: "session".into(),
+                last_seen_ms: 0,
+            },
+            SessionObservation {
+                session_id: "bad\nID".into(),
+                last_seen_ms: 1,
+            },
+        ] {
+            model = valid.clone();
+            model.sessions = vec![invalid];
+            assert!(validate_model_serving_load(&model).is_err());
+        }
+        model = valid;
+        model.sessions = (0..=crate::frontend_load::MAX_FRONTEND_SESSIONS)
+            .map(|index| SessionObservation {
+                session_id: index.to_string(),
+                last_seen_ms: 1,
+            })
+            .collect();
+        assert!(validate_model_serving_load(&model).is_err());
     }
 }

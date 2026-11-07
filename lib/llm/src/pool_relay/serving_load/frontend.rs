@@ -28,8 +28,9 @@ use super::super::load::Coverage;
 use super::super::topology::TopologySnapshot;
 use super::{ModelServingLoad, SOURCE_RETENTION, freshness};
 use crate::frontend_load::{
-    FRONTEND_LOAD_PUBLISH_INTERVAL, FRONTEND_LOAD_TOPIC, FrontendLoadFrame, FrontendModelLoad,
-    RequestGauges, RequestTotals,
+    FRONTEND_LOAD_PUBLISH_INTERVAL, FRONTEND_LOAD_TOPIC, FRONTEND_SESSION_RETENTION,
+    FrontendLoadFrame, FrontendModelLoad, MAX_FRONTEND_SESSIONS, MAX_SESSION_ID_BYTES,
+    RequestGauges, RequestTotals, SessionObservation,
 };
 use crate::utils::retry::{Backoff, FailureStreak};
 
@@ -259,6 +260,22 @@ impl FrontendReports {
         };
 
         let mut models = frame.models;
+        let mut session_budget = MAX_FRONTEND_SESSIONS;
+        for model in &mut models {
+            model.sessions.retain(|session| {
+                let valid = !session.session_id.is_empty()
+                    && session.session_id.len() <= MAX_SESSION_ID_BYTES
+                    && session.session_id.trim() == session.session_id
+                    && !session.session_id.chars().any(char::is_control)
+                    && session.last_seen_ms != 0
+                    && session.last_seen_ms <= published_at_ms
+                    && session_budget > 0;
+                if valid {
+                    session_budget -= 1;
+                }
+                valid
+            });
+        }
         models.retain(|model| {
             let valid = CanonicalModelId::new(model.model.as_str()).is_ok();
             if !valid && !std::mem::replace(&mut source.warned_invalid_model, true) {
@@ -350,10 +367,28 @@ impl FrontendReports {
                 let aggregate = models.entry((namespace, model.model.as_str())).or_default();
                 aggregate.ready_frontends += u64::from(source.serving_ready && model.is_ready);
                 aggregate.gauges.add(&model.gauges);
+                if source.serving_ready && model.is_ready {
+                    for session in &model.sessions {
+                        let age = Duration::from_millis(
+                            source.published_at_ms.saturating_sub(session.last_seen_ms),
+                        )
+                        .saturating_add(now.saturating_duration_since(source.received_at));
+                        if age >= FRONTEND_SESSION_RETENTION {
+                            continue;
+                        }
+                        aggregate
+                            .sessions
+                            .entry(session.session_id.clone())
+                            .and_modify(|last_seen| {
+                                *last_seen = (*last_seen).max(session.last_seen_ms)
+                            })
+                            .or_insert(session.last_seen_ms);
+                    }
+                }
             }
         }
         let mut coverage = HashMap::<&str, NamespaceCoverage>::new();
-        models
+        let mut models: Vec<_> = models
             .into_iter()
             .map(|((namespace, model), aggregate)| {
                 let relay_load = relay_home(&homes, model, relay_namespace) == Some(namespace);
@@ -383,9 +418,38 @@ impl FrontendReports {
                     observed_frontends: model_coverage.observed,
                     ready_frontends: aggregate.ready_frontends,
                     serving_pools: aggregate.serving_pools.into_iter().collect(),
+                    sessions: aggregate
+                        .sessions
+                        .into_iter()
+                        .map(|(session_id, last_seen_ms)| SessionObservation {
+                            session_id,
+                            last_seen_ms,
+                        })
+                        .collect(),
                 }
             })
-            .collect()
+            .collect();
+        let mut sessions: Vec<_> = models
+            .iter_mut()
+            .enumerate()
+            .flat_map(|(model, load)| {
+                std::mem::take(&mut load.sessions)
+                    .into_iter()
+                    .map(move |session| (model, session))
+            })
+            .collect();
+        sessions.sort_unstable_by(|(left_model, left), (right_model, right)| {
+            right
+                .last_seen_ms
+                .cmp(&left.last_seen_ms)
+                .then_with(|| left_model.cmp(right_model))
+                .then_with(|| left.session_id.cmp(&right.session_id))
+        });
+        sessions.truncate(MAX_FRONTEND_SESSIONS);
+        for (model, session) in sessions {
+            models[model].sessions.push(session);
+        }
+        models
     }
 
     fn cached_coverage<'a>(
@@ -503,6 +567,7 @@ struct ModelAggregate {
     serving_pools: BTreeSet<PoolId>,
     ready_frontends: u64,
     gauges: RequestGauges,
+    sessions: BTreeMap<String, u64>,
 }
 
 #[cfg(test)]
@@ -555,6 +620,7 @@ mod tests {
         FrontendModelLoad {
             model: model.to_string(),
             is_ready: true,
+            sessions: Vec::new(),
             gauges: RequestGauges {
                 requests_awaiting_first_token: awaiting,
                 awaiting_first_token_input_tokens: 17,
@@ -617,6 +683,159 @@ mod tests {
             Coverage::Complete(gauges) => Some(gauges.requests_awaiting_first_token),
             Coverage::Partial | Coverage::Missing => None,
         }
+    }
+
+    fn session(id: &str, last_seen_ms: u64) -> SessionObservation {
+        SessionObservation {
+            session_id: id.to_string(),
+            last_seen_ms,
+        }
+    }
+
+    fn session_event(
+        frontend: u64,
+        sequence: u64,
+        published_at_ms: u64,
+        sessions: Vec<SessionObservation>,
+    ) -> FrontendEvent {
+        let mut model = model_load("a", 0, 0);
+        model.sessions = sessions;
+        let mut frame = frame(1, sequence, vec![model]);
+        frame.frontend_instance_id = frontend;
+        let mut event = event(frontend, frame);
+        event.published_at_ms = published_at_ms;
+        event
+    }
+
+    #[test]
+    fn sessions_replace_reports_and_merge_duplicate_ids_by_latest_observation() {
+        let mut reports = FrontendReports::default();
+        reports.record(
+            NS.into(),
+            session_event(10, 1, 100, vec![session("same", 80), session("old", 90)]),
+        );
+        reports.record(
+            NS.into(),
+            session_event(20, 1, 100, vec![session("same", 100)]),
+        );
+        assert_eq!(
+            only_model(&reports, &listed(&[])).sessions,
+            vec![session("same", 100), session("old", 90)]
+        );
+        reports.record(NS.into(), session_event(10, 2, 101, Vec::new()));
+        assert_eq!(
+            only_model(&reports, &listed(&[])).sessions,
+            vec![session("same", 100)]
+        );
+        reports.record(NS.into(), session_event(20, 2, 101, Vec::new()));
+        assert!(only_model(&reports, &listed(&[])).sessions.is_empty());
+    }
+
+    #[test]
+    fn sessions_withdraw_when_a_frontend_stales_or_is_not_ready() {
+        let mut reports = FrontendReports::default();
+        let mut stale = session_event(10, 1, 100, vec![session("stale", 100)]);
+        stale.received_at -= FRONTEND_FRESHNESS + Duration::from_millis(1);
+        reports.record(NS.into(), stale);
+        let mut not_ready = session_event(20, 1, 100, vec![session("not-ready", 100)]);
+        not_ready.frame.is_serving_ready = false;
+        reports.record(NS.into(), not_ready);
+        let mut model_not_ready = session_event(30, 1, 100, vec![session("model-not-ready", 100)]);
+        model_not_ready.frame.models[0].is_ready = false;
+        reports.record(NS.into(), model_not_ready);
+        assert!(only_model(&reports, &listed(&[])).sessions.is_empty());
+    }
+
+    #[test]
+    fn session_heartbeats_do_not_refresh_observations_or_extend_retention() {
+        let mut reports = FrontendReports::default();
+        reports.record(
+            NS.into(),
+            session_event(10, 1, 100, vec![session("session", 100)]),
+        );
+        reports.record(
+            NS.into(),
+            session_event(10, 2, 200, vec![session("session", 100)]),
+        );
+        assert_eq!(
+            only_model(&reports, &listed(&[])).sessions,
+            vec![session("session", 100)]
+        );
+        let expired_at = 100 + FRONTEND_SESSION_RETENTION.as_millis() as u64 + 1;
+        reports.record(
+            NS.into(),
+            session_event(10, 3, expired_at, vec![session("session", 100)]),
+        );
+        assert!(only_model(&reports, &listed(&[])).sessions.is_empty());
+    }
+
+    #[test]
+    fn sessions_reject_invalid_values_and_keep_a_bounded_recent_union() {
+        let mut reports = FrontendReports::default();
+        let sessions: Vec<_> = (1..=MAX_FRONTEND_SESSIONS as u64)
+            .map(|index| session(&format!("s-{index}"), index))
+            .collect();
+        reports.record(NS.into(), session_event(10, 1, 10_000, sessions));
+        reports.record(
+            NS.into(),
+            session_event(
+                20,
+                1,
+                10_000,
+                vec![
+                    session("latest", 10_000),
+                    session("", 1),
+                    session(" future ", 1),
+                    session("future", 10_001),
+                    session("zero", 0),
+                    session(&"x".repeat(MAX_SESSION_ID_BYTES + 1), 1),
+                ],
+            ),
+        );
+        let model = only_model(&reports, &listed(&[]));
+        assert_eq!(model.sessions.len(), MAX_FRONTEND_SESSIONS);
+        assert_eq!(model.sessions[0], session("latest", 10_000));
+        assert!(
+            !model
+                .sessions
+                .iter()
+                .any(|session| session.session_id == "s-1")
+        );
+        assert_eq!(model.sessions.last().unwrap().last_seen_ms, 2);
+    }
+
+    #[test]
+    fn session_budget_is_shared_across_models_and_frontends() {
+        let mut reports = FrontendReports::default();
+        for model_index in 0..4 {
+            let mut model = model_load(&format!("model-{model_index}"), 0, 0);
+            model.sessions = (0..MAX_FRONTEND_SESSIONS)
+                .map(|id| session(&format!("{id:0256}"), 100 + model_index))
+                .collect();
+            let mut source = frame(1, 1, vec![model]);
+            source.frontend_instance_id = model_index;
+            let mut event = event(model_index, source);
+            event.published_at_ms = 200;
+            reports.record(NS.into(), event);
+        }
+        let models =
+            reports.model_loads(&catalog(Vec::new()), RELAY_NS, &listed(&[]), Instant::now());
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.sessions.len())
+                .sum::<usize>(),
+            MAX_FRONTEND_SESSIONS
+        );
+        assert!(models[..3].iter().all(|model| model.sessions.is_empty()));
+        assert_eq!(models[3].sessions.len(), MAX_FRONTEND_SESSIONS);
+        assert!(
+            models[3]
+                .sessions
+                .iter()
+                .all(|session| session.session_id.len() == MAX_SESSION_ID_BYTES
+                    && session.last_seen_ms == 103)
+        );
     }
 
     #[test]
