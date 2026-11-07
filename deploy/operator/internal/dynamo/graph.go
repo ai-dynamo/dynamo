@@ -3474,95 +3474,12 @@ func getBackendFrameworkFromComponent(
 	return determineBackendFrameworkForComponent(component, dynamoDeployment.Spec.BackendFramework)
 }
 
-// ConvertDynamoComponentDeploymentToSpec converts a DynamoComponentDeployment to our component spec interface
-// This is a helper for the controller to use our backend logic
-func ConvertDynamoComponentDeploymentToSpec(dynComponent *v1beta1.DynamoComponentDeployment) *v1beta1.DynamoComponentDeploymentSharedSpec {
-	return dynComponent.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy()
-}
-
 // GetBackendFrameworkFromDynamoComponent determines backend framework for a DynamoComponentDeployment
 func GetBackendFrameworkFromDynamoComponent(dynComponent *v1beta1.DynamoComponentDeployment) (BackendFramework, error) {
 	return determineBackendFrameworkForComponent(
 		&dynComponent.Spec.DynamoComponentDeploymentSharedSpec,
 		dynComponent.Spec.BackendFramework,
 	)
-}
-
-type GenerateBasePodSpecForControllerOptions struct {
-	// WorkloadComponentType overrides the component type used for pod workload
-	// defaults and env vars. Empty means use dynComponent.Spec.ComponentType.
-	WorkloadComponentType v1beta1.ComponentType
-}
-
-// GenerateBasePodSpecForController generates a PodSpec using backend logic for controller usage
-// This preserves the base pod generation while allowing controller-specific enhancements
-func GenerateBasePodSpecForController(
-	dynComponent *v1beta1.DynamoComponentDeployment,
-	secretsRetriever SecretsRetriever,
-	operatorConfig *configv1alpha1.OperatorConfiguration,
-	role Role,
-	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
-	containerGPUs ContainerGPUCount,
-	options GenerateBasePodSpecForControllerOptions,
-) (*corev1.PodSpec, error) {
-	// Validate the complete component before selecting its authored role template.
-	componentSpec, roleLaunchOwnership, nativeSidecar, err := lowerComponentForRole(&dynComponent.Spec.DynamoComponentDeploymentSharedSpec, role)
-	if err != nil {
-		return nil, err
-	}
-	if options.WorkloadComponentType != "" {
-		componentSpec.ComponentType = options.WorkloadComponentType
-	}
-	if workerHash := GetDCDEffectiveWorkerHash(dynComponent); workerHash != "" && IsWorkerComponent(string(componentSpec.ComponentType)) {
-		ensurePodTemplate(componentSpec).Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
-	}
-
-	numberOfNodes := componentSpec.GetNumberOfNodes()
-
-	// Backend configuration belongs to the engine in main, independently of the runtime launch.
-	var command, args []string
-	if main := GetMainContainer(componentSpec); main != nil {
-		command = main.Command
-		args = main.Args
-	}
-	backendFramework, err := determineBackendFramework(
-		string(componentSpec.ComponentType),
-		command,
-		args,
-		dynComponent.Spec.BackendFramework,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to determine backend framework: %w", err)
-	}
-
-	parentGraphDeploymentName := dynComponent.GetParentGraphDeploymentName()
-	if parentGraphDeploymentName == "" {
-		parentGraphDeploymentName = dynComponent.Name
-	}
-
-	// Generate base PodSpec with standard env vars using merged component envs
-	componentName := GetDCDComponentName(dynComponent)
-	podSpec, err := generateBasePodSpec(
-		componentSpec,
-		backendFramework,
-		secretsRetriever,
-		parentGraphDeploymentName,
-		dynComponent.Namespace,
-		role,
-		numberOfNodes,
-		operatorConfig,
-		multinodeDeploymentType,
-		componentName,
-		nil, // use default deployer
-		roleLaunchOwnership,
-		nativeSidecar,
-		containerGPUs,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return podSpec, nil
 }
 
 // getDefaultCompilationCacheMountPoint returns the default mount point for compilation cache based on backend framework
