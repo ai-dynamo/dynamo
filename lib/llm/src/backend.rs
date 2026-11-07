@@ -66,8 +66,8 @@ pub struct Backend {
 /// Internal state for managing token decoding and stream processing
 /// Supports n>1 (multiple choices) by maintaining per-choice decoders.
 #[allow(dead_code)]
-struct DecoderUnfoldState {
-    stream: ManyOut<ExecutionOutputStream>,
+struct DecoderUnfoldState<S = ManyOut<ExecutionOutputStream>> {
+    stream: S,
     decoders: HashMap<u32, Decoder>,
     finished_choices: HashSet<u32>,
     validate_engine_decode: bool,
@@ -90,6 +90,26 @@ struct DecoderUnfoldState {
     /// When `false`, `jailed_text` is left unset on every chunk rather than snapshotting the
     /// decoder's withheld state for a checkpoint nothing can ever consume.
     migration_possible: bool,
+}
+
+impl DecoderUnfoldState<()> {
+    /// The state reading `stream`, the engine's response to the request it was built for.
+    fn reading<S>(self, stream: S) -> DecoderUnfoldState<S> {
+        DecoderUnfoldState {
+            stream,
+            decoders: self.decoders,
+            finished_choices: self.finished_choices,
+            validate_engine_decode: self.validate_engine_decode,
+            no_stop_trim: self.no_stop_trim,
+            retain_model_stop_token_text: self.retain_model_stop_token_text,
+            finished: self.finished,
+            tokenizer: self.tokenizer,
+            skip_special_tokens: self.skip_special_tokens,
+            pending_flush: self.pending_flush,
+            stream_ended: self.stream_ended,
+            migration_possible: self.migration_possible,
+        }
+    }
 }
 
 /// Decodes one vocabulary ID for per-token logprob metadata.
@@ -200,11 +220,9 @@ impl Backend {
         }
     }
 
-    fn decoder(
-        &self,
-        stream: ManyOut<ExecutionOutputStream>,
-        params: DecoderParams,
-    ) -> anyhow::Result<DecoderUnfoldState> {
+    /// The decoders for one request, before its stream: the check that the request can be
+    /// decoded at all (a tokenizer, and a migration checkpoint that fits the prompt).
+    fn decoder(&self, params: DecoderParams) -> anyhow::Result<DecoderUnfoldState<()>> {
         let Some(tokenizer) = self.tokenizer.as_ref() else {
             anyhow::bail!("Backend built from blank ModelDeploymentCard, no tokenizer");
         };
@@ -219,7 +237,7 @@ impl Backend {
         }
 
         Ok(DecoderUnfoldState {
-            stream,
+            stream: (),
             decoders,
             finished_choices: HashSet::new(),
             validate_engine_decode: self.validate_engine_decode,
@@ -249,12 +267,14 @@ impl
         request: SingleIn<PreprocessedRequest>,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<BackendOutput>>> {
-        let decoder_params = DecoderParams::from_request(&request);
+        // Checked before the request is sent on: a request this Backend cannot decode never
+        // reaches the engine, and an eager error below cannot hide the reason.
+        let state = self.decoder(DecoderParams::from_request(&request))?;
 
         let next_stream = next.generate(request).await?;
 
         let context = next_stream.context();
-        let state = self.decoder(next_stream, decoder_params)?;
+        let state = state.reading(next_stream);
 
         let processed_stream = stream::unfold(state, |mut state| async move {
             // If we've already detected a local stop condition, end the stream
@@ -2977,6 +2997,49 @@ mod tests {
             finishes,
             vec![FinishReason::Error("worker failed".to_string())],
             "the worker's error must survive a local EOS stop in the same chunk: {outputs:?}"
+        );
+    }
+
+    /// An engine that counts its calls and fails each one eagerly.
+    #[derive(Default)]
+    struct CountingFailEngine {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for CountingFailEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(anyhow::anyhow!("the engine is unavailable"))
+        }
+    }
+
+    /// A Backend that cannot decode (no tokenizer) fails before it sends the request on: the
+    /// engine is never called, and its eager error cannot hide the reason.
+    #[tokio::test]
+    async fn a_backend_that_cannot_decode_fails_before_dispatch() {
+        let backend = Backend::from_mdc(&ModelDeploymentCard::with_name_only("blank"));
+        let engine = Arc::new(CountingFailEngine::default());
+        let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            engine.clone();
+        let error =
+            match Operator::generate(backend.as_ref(), SingleIn::new(jailing_request(1)), next)
+                .await
+            {
+                Ok(_) => panic!("a Backend without a tokenizer must fail"),
+                Err(error) => error,
+            };
+        assert!(error.to_string().contains("no tokenizer"), "{error:#}");
+        assert_eq!(
+            engine.calls.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the engine must not be called"
         );
     }
 }
