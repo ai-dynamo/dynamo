@@ -45,6 +45,8 @@ pub(super) struct PrefillLoadSnapshot {
     pub(super) prefill_full_tokens_sum: usize,
     pub(super) anchored_prefill: Option<AnchoredPrefillSnapshot>,
     pub(super) total_modeled_prefill_time_ms: Option<u64>,
+    pub(super) discarded_completed_tokens: usize,
+    pub(super) discarded_elapsed_ms: u64,
 }
 
 impl Default for PrefillLoadSnapshot {
@@ -53,6 +55,8 @@ impl Default for PrefillLoadSnapshot {
             prefill_full_tokens_sum: 0,
             anchored_prefill: None,
             total_modeled_prefill_time_ms: Some(0),
+            discarded_completed_tokens: 0,
+            discarded_elapsed_ms: 0,
         }
     }
 }
@@ -71,7 +75,8 @@ impl PrefillLoadSnapshot {
             anchored_prefill.initial_effective_prefill_tokens,
             anchored_prefill.expected_prefill_duration,
             now.saturating_duration_since(anchored_prefill.anchored_since),
-        );
+        )
+        .saturating_sub(self.discarded_completed_tokens);
         self.prefill_full_tokens_sum
             .saturating_sub(completed_tokens)
     }
@@ -103,11 +108,14 @@ impl PrefillLoadSnapshot {
     /// Return modeled remaining prefill time in non-negative milliseconds.
     ///
     /// Formula:
-    /// `total_modeled_prefill_ms.saturating_sub(elapsed_since_oldest_anchor_ms)`.
+    /// `total_modeled_prefill_ms.saturating_sub(elapsed_ms - discarded_elapsed_ms)`,
+    /// with both subtractions saturating at zero.
     ///
     /// Elapsed time from the oldest active prefill is intentionally applied to the
     /// aggregate modeled backlog, so work can spill past the front request and
-    /// reduce later modeled prefills. The final worker backlog is clipped at zero.
+    /// reduce later modeled prefills. Progress beyond available work is discarded
+    /// before adding a new prefill, so it cannot consume work before its arrival.
+    /// The final worker backlog is clipped at zero.
     ///
     /// `Err(MissingExpectedDuration)` means at least one active prefill was added
     /// without a modeled duration, which is expected when AIS is absent or
@@ -130,7 +138,7 @@ impl PrefillLoadSnapshot {
             .ok_or(PrefillTimeLoadError::MissingExpectedDuration)?;
         let elapsed_ms =
             duration_millis_u64(now.saturating_duration_since(anchored_prefill.anchored_since));
-        Ok(total_modeled_ms.saturating_sub(elapsed_ms))
+        Ok(total_modeled_ms.saturating_sub(elapsed_ms.saturating_sub(self.discarded_elapsed_ms)))
     }
 }
 
@@ -221,6 +229,9 @@ pub(super) struct PrefillLoadTracker {
     /// Sum of `duration_millis_u64` over modeled active prefills, so snapshots
     /// need not walk them. Never overflows: each term is below `2^64`.
     modeled_prefill_ms: u128,
+    /// Modeled progress that exceeded available work before a later arrival.
+    discarded_completed_tokens: usize,
+    discarded_elapsed_ms: u64,
 }
 
 impl PrefillLoadTracker {
@@ -230,6 +241,7 @@ impl PrefillLoadTracker {
         prefill: PrefillLoadState,
         decay_now: Instant,
     ) {
+        self.discard_prearrival_progress(decay_now);
         let order = self.next_order;
         self.next_order += 1;
         self.prefill_order.insert(order, request_id.clone());
@@ -250,6 +262,41 @@ impl PrefillLoadTracker {
             self.anchored_prefill = Some((request_id.clone(), decay_now));
             self.anchored_load = Some(prefill);
         }
+    }
+
+    fn discard_prearrival_progress(&mut self, now: Instant) {
+        let (Some((_, anchored_since)), Some(load)) =
+            (self.anchored_prefill.as_ref(), self.anchored_load)
+        else {
+            return;
+        };
+        let Some(duration) = load.expected_prefill_duration else {
+            return;
+        };
+        let elapsed = now.saturating_duration_since(*anchored_since);
+        let (available_tokens, available_ms) = if self.unmodeled_prefill_count == 0 {
+            (
+                self.prefill_full_tokens_sum,
+                self.modeled_prefill_ms.min(u128::from(u64::MAX)) as u64,
+            )
+        } else {
+            // The mixed path only decays the anchor, not later requests.
+            (
+                load.initial_effective_prefill_tokens,
+                duration_millis_u64(duration),
+            )
+        };
+        self.discarded_completed_tokens = self.discarded_completed_tokens.max(
+            completed_prefill_tokens(
+                load.initial_effective_prefill_tokens,
+                Some(duration),
+                elapsed,
+            )
+            .saturating_sub(available_tokens),
+        );
+        self.discarded_elapsed_ms = self
+            .discarded_elapsed_ms
+            .max(duration_millis_u64(elapsed).saturating_sub(available_ms));
     }
 
     pub(super) fn remove(
@@ -301,9 +348,22 @@ impl PrefillLoadTracker {
             .checked_add(duration)
             .unwrap_or(max_anchor_time);
         *anchored_since = shifted.min(max_anchor_time);
+        let elapsed = max_anchor_time.saturating_duration_since(*anchored_since);
+        self.discarded_elapsed_ms = self.discarded_elapsed_ms.min(duration_millis_u64(elapsed));
+        if let Some(load) = self.anchored_load {
+            self.discarded_completed_tokens =
+                self.discarded_completed_tokens
+                    .min(completed_prefill_tokens(
+                        load.initial_effective_prefill_tokens,
+                        load.expected_prefill_duration,
+                        elapsed,
+                    ));
+        }
     }
 
     pub(super) fn set_anchor_to_front(&mut self, now: Instant) {
+        self.discarded_completed_tokens = 0;
+        self.discarded_elapsed_ms = 0;
         self.anchored_prefill = self
             .prefill_order
             .first_key_value()
@@ -333,6 +393,8 @@ impl PrefillLoadTracker {
                 }
             }),
             total_modeled_prefill_time_ms,
+            discarded_completed_tokens: self.discarded_completed_tokens,
+            discarded_elapsed_ms: self.discarded_elapsed_ms,
         }
     }
 
@@ -861,5 +923,144 @@ mod tests {
         tracker.assert_consistent();
         assert_eq!(tracker.prefill_order.values().next(), Some(&anchor));
         assert_eq!(tracker.prefill_order.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod arrival_regressions {
+    use super::*;
+
+    fn modeled(tokens: usize, millis: u64) -> PrefillLoadState {
+        PrefillLoadState {
+            initial_effective_prefill_tokens: tokens,
+            expected_prefill_duration: Some(Duration::from_millis(millis)),
+        }
+    }
+
+    #[test]
+    fn new_arrival_keeps_its_work_when_token_and_time_models_drain_separately() {
+        for (first, second, arrival_ms) in [
+            (modeled(100, 10), None, 15),
+            (modeled(100, 10), None, 30),
+            (modeled(100, 10), Some(modeled(10, 100)), 30),
+            (modeled(10, 10), Some(modeled(100, 1)), 30),
+            (modeled(100, 0), Some(modeled(60, 6)), 30),
+        ] {
+            let epoch = Instant::now();
+            let now = epoch + Duration::from_millis(arrival_ms);
+            let mut tracker = PrefillLoadTracker::default();
+            tracker.insert(&"A".into(), first, epoch);
+            if let Some(second) = second {
+                tracker.insert(&"older".into(), second, epoch);
+            }
+            let before = tracker.snapshot();
+            tracker.insert(&"new".into(), modeled(100, 10), now);
+            tracker.assert_consistent();
+            let after = tracker.snapshot();
+            assert_eq!(
+                after.active_tokens_at(now),
+                before.active_tokens_at(now) + 100
+            );
+            assert_eq!(
+                after.modeled_remaining_prefill_time_ms_at(now),
+                before
+                    .modeled_remaining_prefill_time_ms_at(now)
+                    .map(|ms| ms + 10),
+            );
+        }
+    }
+
+    #[test]
+    fn arrival_progress_survives_nonfront_completion_and_resets_with_new_front() {
+        for (duration, remaining_tokens, remaining_ms) in [(10, 180, 18), (100, 200, 20)] {
+            let epoch = Instant::now();
+            let mut tracker = PrefillLoadTracker::default();
+            tracker.insert(&"A".into(), modeled(100, 10), epoch);
+            tracker.insert(
+                &"B".into(),
+                modeled(100, 10),
+                epoch + Duration::from_millis(30),
+            );
+            let next = epoch + Duration::from_millis(31);
+            assert_eq!(tracker.snapshot().active_tokens_at(next), 90);
+            assert_eq!(
+                tracker
+                    .snapshot()
+                    .modeled_remaining_prefill_time_ms_at(next),
+                Ok(9)
+            );
+            tracker.insert(&"C".into(), modeled(100, duration), next);
+            let completion = epoch + Duration::from_millis(32);
+            tracker.remove(&"C".into(), completion);
+            tracker.assert_consistent();
+            let after = tracker.snapshot();
+            assert_eq!(after.active_tokens_at(completion), remaining_tokens);
+            assert_eq!(
+                after.modeled_remaining_prefill_time_ms_at(completion),
+                Ok(remaining_ms)
+            );
+            let later = completion + Duration::from_millis(1);
+            assert_eq!(after.active_tokens_at(later), remaining_tokens - 10);
+            assert_eq!(
+                after.modeled_remaining_prefill_time_ms_at(later),
+                Ok(remaining_ms - 1)
+            );
+            tracker.remove(&"A".into(), later);
+            assert_eq!(tracker.snapshot().active_tokens_at(later), 100);
+            assert_eq!(
+                tracker
+                    .snapshot()
+                    .modeled_remaining_prefill_time_ms_at(later),
+                Ok(10)
+            );
+            tracker.remove(&"B".into(), later);
+            let reuse = epoch + Duration::from_millis(100);
+            tracker.insert(&"A".into(), modeled(100, 10), reuse);
+            tracker.assert_consistent();
+            assert_eq!(tracker.snapshot().active_tokens_at(reuse), 100);
+            assert_eq!(
+                tracker
+                    .snapshot()
+                    .modeled_remaining_prefill_time_ms_at(reuse),
+                Ok(10)
+            );
+        }
+    }
+
+    #[test]
+    fn modeled_arrival_is_not_erased_when_unmodeled_work_is_removed() {
+        let epoch = Instant::now();
+        let mut tracker = PrefillLoadTracker::default();
+        tracker.insert(&"A".into(), modeled(100, 10), epoch);
+        tracker.insert(
+            &"unknown".into(),
+            PrefillLoadState {
+                initial_effective_prefill_tokens: 100,
+                expected_prefill_duration: None,
+            },
+            epoch,
+        );
+        let now = epoch + Duration::from_millis(30);
+        tracker.insert(&"B".into(), modeled(100, 10), now);
+        assert_eq!(tracker.snapshot().active_tokens_at(now), 200);
+        assert_eq!(
+            tracker.snapshot().modeled_remaining_prefill_time_ms_at(now),
+            Err(PrefillTimeLoadError::MissingExpectedDuration)
+        );
+        tracker.remove(&"unknown".into(), now);
+        tracker.assert_consistent();
+        assert_eq!(tracker.snapshot().active_tokens_at(now), 100);
+        assert_eq!(
+            tracker.snapshot().modeled_remaining_prefill_time_ms_at(now),
+            Ok(10)
+        );
+        let later = now + Duration::from_millis(1);
+        assert_eq!(tracker.snapshot().active_tokens_at(later), 90);
+        assert_eq!(
+            tracker
+                .snapshot()
+                .modeled_remaining_prefill_time_ms_at(later),
+            Ok(9)
+        );
     }
 }

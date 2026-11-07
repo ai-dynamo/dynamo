@@ -77,6 +77,11 @@ aggregate modeled backlog, so spillover can reduce later modeled prefills before
 backlog clips at zero. That behavior is intentional because engines may batch or overlap multiple
 prefills faster than the per-request model represents.
 
+Before a new prefill is inserted, modeled progress beyond previously available work is discarded.
+Token and duration progress are settled independently because their estimates can drain at different
+times. The discarded progress belongs to the current effective anchor and resets when the front
+request changes. This prevents elapsed time before an arrival from consuming the new work.
+
 The active-token load view uses the same aggregate spillover only when all active prefills have
 modeled durations. If any active prefill lacks an expected duration, token load falls back to
 anchor-only decay so unmodeled no-AIC/default requests do not decay. A zero-duration anchor is treated

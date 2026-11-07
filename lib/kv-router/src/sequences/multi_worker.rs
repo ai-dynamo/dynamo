@@ -1376,7 +1376,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ///
     /// Values are non-negative milliseconds. For workers whose active prefills
     /// all have modeled durations, the formula is:
-    /// `total_modeled_prefill_ms.saturating_sub(elapsed_since_oldest_anchor_ms)`.
+    /// the total modeled duration minus elapsed anchor time, excluding modeled
+    /// progress discarded before later arrivals. The result clips at zero.
     ///
     /// Elapsed time from the oldest active prefill can reduce later modeled
     /// backlog, then the final worker backlog is clipped at zero. This accounts
