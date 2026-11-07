@@ -9,9 +9,11 @@ commonLabels:
 resources:
 - ../../../recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/deploy.yaml
 - ../../../recipes/kimi-k2.5/model-cache/compute-domain.yaml
+- ../../../recipes/kimi-k2.5/model-cache/model-download.yaml
 - ../../../recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/perf.yaml
 patches:
 - path: patch-deploy.yaml
+- path: ../kimi-k25-model-cache.yaml
 - path: patch-prefill-config.yaml
 - path: patch-perf.yaml
 - target:
@@ -43,3 +45,10 @@ patches:
     - op: replace
       path: /spec/services/decode/extraPodSpec/volumes/0/persistentVolumeClaim/claimName
       value: shared-model-cache
+- target:
+    kind: Job
+    name: model-download
+  patch: |-
+    - op: replace
+      path: /metadata/name
+      value: kimi-k25-disagg-model-download

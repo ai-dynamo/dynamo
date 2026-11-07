@@ -28,7 +28,7 @@ jobs:
     name: ${{ inputs.recipe }}
     runs-on: prod-deploy-tester-v1
     # Allow model loading and cleanup around each recipe's AIPerf run.
-    timeout-minutes: ${{ startsWith(inputs.recipe, 'kimi-k25-') && 180 || 960 }}
+    timeout-minutes: ${{ startsWith(inputs.recipe, 'kimi-k25-') && 240 || 960 }}
     defaults:
       run:
         shell: bash
@@ -210,6 +210,22 @@ jobs:
         run: |
           k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
           "${k[@]}" create -f "$ARTIFACTS/prerequisites.yaml"
+      - name: Wait for model cache
+        if: ${{ !inputs.preflight_only && startsWith(inputs.recipe, 'kimi-k25-') }}
+        # Workers use HF_HUB_OFFLINE=1; populate both the model and Eagle3 head first.
+        # The download Job has a one-hour deadline; leave time to observe failure.
+        timeout-minutes: 65
+        run: |
+          k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
+          job="$RECIPE-model-download"
+          until "${k[@]}" wait "job/$job" --for=condition=Complete --timeout=5s; do
+            "${k[@]}" get job "$job" -o json |
+              jq -e 'all(.status.conditions[]?; .type != "Failed" or .status != "True")' >/dev/null
+            "${k[@]}" get pods -l "job-name=$job" -o wide
+            timeout 60s "${k[@]}" logs --request-timeout=0 -f "job/$job" \
+              --timestamps --since=1m --tail=20 --ignore-errors || true
+            sleep 5
+          done
       - name: Deploy and wait for readiness
         if: ${{ !inputs.preflight_only }}
         # DeepSeek V4 Pro disagg needs extra margin for four-node scheduling
