@@ -37,6 +37,7 @@ from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.request_handlers.handler_base import (
     BYPASS_REMOTE_PREFILL_ANNOTATION,
     HandlerBase,
+    _DeferredAbort,
 )
 
 pytestmark = [
@@ -630,6 +631,131 @@ class TestDeferredAbortGuard:
             await task
         # Shutdown calls guard.abort() → since no first token, spawns background task
         # The important thing is EngineShutdown is raised and abort path is entered
+
+    def _make_pending_stop_context(
+        self, *, stopped: bool = False, killed: bool = False
+    ) -> MagicMock:
+        """Context whose stop flag may be set while its notification future is
+        still pending, as after consumer_gone() calls stop_generating()."""
+        context = MagicMock()
+        context.async_killed_or_stopped.return_value = (
+            asyncio.get_event_loop().create_future()
+        )
+        context.is_stopped.return_value = stopped
+        context.is_killed.return_value = killed
+        context.id.return_value = "test-monitor-cleanup"
+        return context
+
+    @pytest.mark.asyncio
+    @pytest.mark.fault_tolerance
+    @pytest.mark.timeout(5)
+    @pytest.mark.parametrize(
+        ("stopped", "killed"), [(True, False), (False, True)], ids=["stopped", "killed"]
+    )
+    async def test_monitor_cleanup_aborts_when_context_stopped_before_notification(
+        self, stopped, killed
+    ):
+        handler = self._make_handler()
+        generation_result = MagicMock()
+        generation_result.finished = False
+        context = self._make_pending_stop_context(stopped=stopped, killed=killed)
+
+        async with handler._cancellation_monitor(generation_result, context):
+            await asyncio.sleep(0)
+
+        generation_result.abort.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.fault_tolerance
+    @pytest.mark.timeout(5)
+    async def test_monitor_cleanup_skips_abort_when_not_cancelled(self):
+        handler = self._make_handler()
+        generation_result = MagicMock()
+        generation_result.finished = False
+        context = self._make_pending_stop_context()
+
+        async with handler._cancellation_monitor(generation_result, context):
+            await asyncio.sleep(0)
+
+        generation_result.abort.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.fault_tolerance
+    @pytest.mark.timeout(5)
+    async def test_monitor_cleanup_respects_finished_guard(self):
+        handler = self._make_handler()
+        generation_result = MagicMock()
+        generation_result.finished = True
+        context = self._make_pending_stop_context(stopped=True)
+
+        async with handler._cancellation_monitor(generation_result, context):
+            await asyncio.sleep(0)
+
+        generation_result.abort.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.fault_tolerance
+    @pytest.mark.timeout(5)
+    async def test_monitor_cleanup_defers_abort_before_first_token(self, monkeypatch):
+        handler = self._make_handler()
+        generation_result = MagicMock()
+        generation_result.finished = False
+        result_queue = asyncio.Queue()
+
+        async def mock_anext(self_mock):
+            return await result_queue.get()
+
+        generation_result.__aiter__ = MagicMock(return_value=generation_result)
+        generation_result.__anext__ = lambda self: mock_anext(self)
+
+        original_create_task = asyncio.create_task
+        deferred_tasks = []
+
+        def track_deferred_task(coro, **kwargs):
+            task = original_create_task(coro, **kwargs)
+            if coro.__name__ == "_wait_and_abort":
+                deferred_tasks.append(task)
+            return task
+
+        monkeypatch.setattr(asyncio, "create_task", track_deferred_task)
+
+        guard = _DeferredAbort(generation_result)
+        context = self._make_pending_stop_context(stopped=True)
+
+        async with handler._cancellation_monitor(guard, context):
+            await asyncio.sleep(0)
+
+        generation_result.abort.assert_not_called()
+
+        assert len(deferred_tasks) == 1
+        await result_queue.put("first_token")
+        await deferred_tasks[0]
+
+        generation_result.abort.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.fault_tolerance
+    @pytest.mark.timeout(5)
+    async def test_monitor_cleanup_does_not_double_abort(self):
+        """Monitor aborts, then is cancelled while draining its shutdown waiter;
+        cleanup must not abort a second time."""
+        handler = self._make_handler()
+        handler.shutdown_event = asyncio.Event()
+        generation_result = MagicMock()
+        generation_result.finished = False
+        context = self._make_pending_stop_context(stopped=True)
+        context.async_killed_or_stopped.return_value.set_result(None)
+
+        async with handler._cancellation_monitor(
+            generation_result, context
+        ) as monitor_task:
+            while not generation_result.abort.called:
+                await asyncio.sleep(0)
+            # Still parked on the cancelled shutdown waiter, so cleanup takes
+            # the cancel path rather than the done path.
+            assert not monitor_task.done()
+
+        generation_result.abort.assert_called_once()
 
 
 class TestMultimodalGuard:
