@@ -112,7 +112,10 @@ from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
-from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    CrossAttentionManager,
+    FullAttentionManager,
+)
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, SlidingWindowSpec
 from vllm.v1.request import Request, RequestStatus
@@ -127,6 +130,7 @@ from dynamo.common.forward_pass_metrics import (
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.benchmark_points import (
     BENCHMARK_MODES,
+    FPM_POWER_MIN_WINDOW_S,
     RANDOM_KDA_BOUND,
     RANDOM_KDA_POLICY,
     RANDOM_KDA_REQUEST_PREFIX,
@@ -153,6 +157,12 @@ ENV_FPM_BENCHMARK_OUTPUT_PATH = "DYN_FPM_BENCHMARK_OUTPUT_PATH"
 ENV_FPM_BENCH_COLLECT_IMBALANCED = "DYN_FPM_BENCH_COLLECT_IMBALANCED"
 ENV_BENCH_CONTENT_SEED = "DYN_BENCH_CONTENT_SEED"
 EPHEMERAL_PORT_RANGE_PATH = "/proc/sys/net/ipv4/ip_local_port_range"
+
+# Rank artifact schema. Version 3, written only with the power window on, adds
+# the ``power`` block to every FPM; without the window the artifact stays 2.
+BENCHMARK_RESULT_SCHEMA_VERSION = 3
+# Hard cap on the iterations of one point's power window.
+FPM_POWER_MAX_WINDOW_ITERATIONS = 2000
 
 
 def _utc_now_rfc3339() -> str:
@@ -576,6 +586,152 @@ def recurrent_shadow_range(
 
 
 # ---------------------------------------------------------------------------
+# Power window: NVML energy over repeated iterations of one point
+# ---------------------------------------------------------------------------
+
+
+class _BenchPowerUnavailable(Exception):
+    """A power window cannot be measured; ``reason`` goes into the artifact."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _bench_power_unavailable(reason: str) -> dict:
+    """The artifact's ``unavailable`` power block: every key, no zero-fill."""
+    return {
+        "status": "unavailable",
+        "unavailable_reason": reason,
+        "gpu_energy": [],
+        "window_s": None,
+        "window_iterations": None,
+        "kv_drift_tokens": None,
+    }
+
+
+def _bench_power_block(
+    start_mj: Sequence[tuple[str, int]],
+    end_mj: Sequence[tuple[str, int]],
+    *,
+    window_s: float,
+    window_iterations: int,
+    kv_drift_tokens: int,
+    min_window_s: float,
+) -> dict:
+    """Power block of one finished window from the edge counter readings.
+
+    NVML's total-energy counter is in mJ, which equals W*ms, so the delta is
+    the window energy with no unit conversion. A window shorter than the
+    minimum (iteration cap reached first), a counter that went backwards
+    (wrap or driver reload) or did not advance is reported unavailable,
+    never as a short or zero measurement.
+    """
+    if window_iterations < 1 or not math.isfinite(window_s) or window_s < min_window_s:
+        return _bench_power_unavailable("window_below_minimum")
+    gpu_energy = []
+    for (gpu_uuid, start), (_, end) in zip(start_mj, end_mj, strict=True):
+        if end < start:
+            return _bench_power_unavailable("counter_wrap")
+        if end == start:
+            return _bench_power_unavailable("counter_not_advancing")
+        gpu_energy.append({"gpu_uuid": gpu_uuid, "energy_wms": float(end - start)})
+    return {
+        "status": "measured",
+        "unavailable_reason": None,
+        "gpu_energy": gpu_energy,
+        "window_s": float(window_s),
+        "window_iterations": int(window_iterations),
+        "kv_drift_tokens": int(kv_drift_tokens),
+    }
+
+
+def _bench_nvml_reason(error: Exception) -> str:
+    try:
+        import pynvml
+    except ImportError:
+        return "nvml_error"
+    if isinstance(error, pynvml.NVMLError) and getattr(error, "value", None) == (
+        pynvml.NVML_ERROR_NO_PERMISSION
+    ):
+        return "nvml_permission"
+    return "nvml_error"
+
+
+def _bench_power_device_ids(parallel_config: Any, visible: str | None) -> list[str]:
+    """Device ids (NVML index or UUID) of the GPUs this attention-DP rank drives.
+
+    Mirrors vLLM's worker device choice (``gpu_worker.Worker.init_device``):
+    under in-node multiprocess DP, every engine core keeps the full
+    ``CUDA_VISIBLE_DEVICES``, and worker ``i`` of DP-local rank ``d`` uses
+    logical device ``d * world_size + i``, mapped through
+    ``assigned_physical_gpu_ids`` when it is set. Integer entries are NVML
+    indices, which follow PCI bus order like CUDA does under
+    ``CUDA_DEVICE_ORDER=PCI_BUS_ID`` or on a node of identical GPUs. Ray,
+    external-launcher and multi-node layouts have no local mapping.
+    """
+    if (
+        getattr(parallel_config, "distributed_executor_backend", None)
+        in ("ray", "external_launcher")
+        or getattr(parallel_config, "data_parallel_backend", None) == "ray"
+        or getattr(parallel_config, "nnodes_within_dp", 1) != 1
+    ):
+        raise _BenchPowerUnavailable("gpu_mapping_unavailable")
+    world_size = int(getattr(parallel_config, "world_size", 1) or 1)
+    dp_local_rank = getattr(parallel_config, "data_parallel_rank_local", None)
+    if dp_local_rank is None:
+        dp_local_rank = getattr(parallel_config, "data_parallel_index", 0) or 0
+    logical = range(dp_local_rank * world_size, (dp_local_rank + 1) * world_size)
+    assigned = getattr(parallel_config, "assigned_physical_gpu_ids", None)
+    if assigned is not None:
+        entries = [str(device) for device in assigned]
+    elif visible is not None:
+        entries = [entry.strip() for entry in visible.split(",") if entry.strip()]
+    else:
+        return [str(device) for device in logical]
+    if logical.stop > len(entries):
+        raise _BenchPowerUnavailable("gpu_mapping_unavailable")
+    return [entries[device] for device in logical]
+
+
+def _bench_open_power_gpus(device_ids: Sequence[str]) -> list[tuple[str, Any]]:
+    """NVML handles and UUIDs of ``device_ids`` (NVML indices or UUIDs)."""
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        gpus = []
+        for entry in device_ids:
+            handle = (
+                pynvml.nvmlDeviceGetHandleByIndex(int(entry))
+                if entry.isdigit()
+                else pynvml.nvmlDeviceGetHandleByUUID(entry)
+            )
+            uuid_value = pynvml.nvmlDeviceGetUUID(handle)
+            if isinstance(uuid_value, bytes):
+                uuid_value = uuid_value.decode()
+            gpus.append((str(uuid_value), handle))
+        return gpus
+    except Exception as error:
+        logger.warning("Power window: cannot open the rank's GPUs", exc_info=True)
+        raise _BenchPowerUnavailable(_bench_nvml_reason(error)) from error
+
+
+def _bench_read_gpu_energy(gpus: Sequence[tuple[str, Any]]) -> list[tuple[str, int]]:
+    """Cumulative NVML energy counter (mJ) of every GPU, in ``gpus`` order."""
+    try:
+        import pynvml
+
+        return [
+            (uuid_value, int(pynvml.nvmlDeviceGetTotalEnergyConsumption(handle)))
+            for uuid_value, handle in gpus
+        ]
+    except Exception as error:
+        logger.warning("Power window: NVML energy read failed", exc_info=True)
+        raise _BenchPowerUnavailable(_bench_nvml_reason(error)) from error
+
+
+# ---------------------------------------------------------------------------
 # Benchmark mode dataclasses
 # ---------------------------------------------------------------------------
 
@@ -602,6 +758,9 @@ class BenchmarkConfig:
     # explicit --benchmark-points-file; see the flag's comment in backend_args
     # for why this defaults off.
     collect_imbalanced: bool = False
+    # Minimum power window per point in seconds; 0 disables the window. The
+    # latency sample is collected the same way either way.
+    power_window_s: float = 0.0
 
 
 def _bench_point_is_imbalanced(candidate: PrefillPointCandidate) -> bool:
@@ -1588,6 +1747,85 @@ class _BenchmarkSynchronizer:
             raise
         return _BenchmarkStageRound(all_done, verdict)
 
+    def power_round(
+        self, benchmark_id: int, seq: int, want: bool, ok: bool
+    ) -> tuple[bool, bool]:
+        """One power-window group barrier; blocking.
+
+        Every rank reports whether it wants another window iteration and
+        whether it can run one; every rank leaves with the same group view
+        ``(any rank wants one, every rank can run one)`` only after all ranks
+        arrived, so the window's edges and its iteration count are shared.
+        ``seq`` counts the rounds of the point's window; a rank at another
+        ``seq`` has fallen out of lockstep, which is a protocol error.
+        """
+        status = {
+            "type": "power_round",
+            "benchmark_id": benchmark_id,
+            "dp_rank": self.dp_rank,
+            "seq": seq,
+            "want": want,
+            "ok": ok,
+        }
+        if self.dp_rank == 0:
+            return self._coordinate_power_round(status)
+        deadline = time.monotonic() + self.timeout_seconds
+        self._socket.send_json(status)
+        reply = self._recv_follower(deadline, benchmark_id, "power_round_result")
+        any_want, all_ok = reply.get("want"), reply.get("ok")
+        if (
+            reply.get("seq") != seq
+            or not isinstance(any_want, bool)
+            or not isinstance(all_ok, bool)
+        ):
+            raise RuntimeError(f"invalid attention-DP power-window result: {reply}")
+        return any_want, all_ok
+
+    def _coordinate_power_round(self, local: dict) -> tuple[bool, bool]:
+        benchmark_id = local["benchmark_id"]
+        deadline = time.monotonic() + self.timeout_seconds
+        any_want, all_ok = local["want"], local["ok"]
+        identities: dict[int, bytes] = {}
+        try:
+            while len(identities) < self.dp_size - 1:
+                identity, message = self._recv_router(deadline, benchmark_id)
+                rank = message.get("dp_rank")
+                if (
+                    message.get("type") != "power_round"
+                    or not isinstance(rank, int)
+                    or not 1 <= rank < self.dp_size
+                    or rank in identities
+                    or identity != str(rank).encode()
+                    or not isinstance(message.get("want"), bool)
+                    or not isinstance(message.get("ok"), bool)
+                ):
+                    raise RuntimeError(
+                        f"invalid attention-DP power-window round: {message}"
+                    )
+                if message.get("seq") != local["seq"]:
+                    raise RuntimeError(
+                        "attention-DP power-window ranks are not in lockstep: "
+                        f"rank 0 is at round {local['seq']}, rank {rank} at "
+                        f"round {message.get('seq')}"
+                    )
+                identities[rank] = identity
+                any_want = any_want or message["want"]
+                all_ok = all_ok and message["ok"]
+            self._send_to_all(
+                identities,
+                {
+                    "type": "power_round_result",
+                    "benchmark_id": benchmark_id,
+                    "seq": local["seq"],
+                    "want": any_want,
+                    "ok": all_ok,
+                },
+            )
+        except Exception as error:
+            self._notify_error(self._all_follower_identities(), str(error))
+            raise
+        return any_want, all_ok
+
     @staticmethod
     def _deadline_elapsed(deadline: float | None) -> bool:
         return deadline is not None and time.monotonic() >= deadline
@@ -2487,6 +2725,9 @@ class InstrumentedScheduler(AsyncScheduler):
                 forward_index = self._bench_forward_index
                 self._bench_forward_index += 1
                 self._bench_observe_warmup(scheduled)
+                window = self._bench_power_window
+                if window is not None:
+                    window["completed"] += 1
                 if is_benchmark_point:
                     # Older vLLM versions may not expose this optional output
                     # field. Absence is unknown, never evidence of eager mode.
@@ -2646,7 +2887,9 @@ class InstrumentedScheduler(AsyncScheduler):
         self, scheduled: ScheduledRequestMetrics
     ) -> bool:
         point = getattr(self, "_bench_current_point", None)
-        if point is None:
+        if point is None or self._bench_power_window is not None:
+            # Power-window iterations are never FPM samples: they stay out of
+            # the point's latency and of measured_iteration_seconds.
             return False
         if point.point_type == "prefill":
             return scheduled.num_prefill_requests > 0
@@ -2700,6 +2943,15 @@ class InstrumentedScheduler(AsyncScheduler):
     _bench_warmup_evidence: list[_BenchmarkWarmupEvidence] | None = None
     _bench_active_warmup: _BenchmarkWarmupEvidence | None = None
     _bench_eager_warmup: _BenchmarkWarmupEvidence | None = None
+    # Power window (``--benchmark-power-window-s``): the window in progress
+    # for the current point, the finished block awaiting the point's save,
+    # the rank's GPUs (or why they cannot be read), the GPU count of this
+    # rank, and the prompts and salts of the last prefill injection.
+    _bench_power_window: dict | None = None
+    _bench_power_result: dict | None = None
+    _bench_power_gpus: list[tuple[str, Any]] | str | None = None
+    _bench_power_device_ids: list[str] | str = "gpu_mapping_unavailable"
+    _bench_last_prefill: tuple[list[list[int]], list[str] | None] | None = None
 
     def _bench_init(self, vllm_config: "VllmConfig") -> None:
         """Parse benchmark config and initialise state machine."""
@@ -2771,6 +3023,16 @@ class InstrumentedScheduler(AsyncScheduler):
             )
         if self._bench_config.timeout <= 0:
             raise ValueError("benchmark timeout must be positive")
+        power_window_s = float(self._bench_config.power_window_s or 0.0)
+        if power_window_s != 0.0 and not (
+            math.isfinite(power_window_s) and power_window_s >= FPM_POWER_MIN_WINDOW_S
+        ):
+            # A shorter window could never be reported as measured.
+            raise ValueError(
+                "benchmark power_window_s must be 0 (disabled) or a finite value "
+                f"of at least {FPM_POWER_MIN_WINDOW_S}"
+            )
+        self._bench_config.power_window_s = power_window_s
         if (
             self._bench_config.max_batch_size is not None
             and self._bench_config.max_batch_size < 1
@@ -2940,6 +3202,13 @@ class InstrumentedScheduler(AsyncScheduler):
 
         parallel_config = vllm_config.parallel_config
         self._bench_dp_size = parallel_config.data_parallel_size
+        # GPUs this attention-DP rank drives, read by the power window.
+        try:
+            self._bench_power_device_ids = _bench_power_device_ids(
+                parallel_config, os.environ.get("CUDA_VISIBLE_DEVICES")
+            )
+        except _BenchPowerUnavailable as error:
+            self._bench_power_device_ids = error.reason
         self._bench_run_id = uuid.uuid4().hex
         if self._bench_dp_size > 1:
             sync_port = (
@@ -4508,6 +4777,42 @@ class InstrumentedScheduler(AsyncScheduler):
         request (real-seed shots pair a seeded prefix with a fresh tail); the
         salt still names the prefix-cache entry.
         """
+        built = self._bench_build_prefill_requests(
+            prompt_lens,
+            max_tokens,
+            cache_salts=cache_salts,
+            expected_kv_read_tokens=expected_kv_read_tokens,
+            prompt_token_ids_list=prompt_token_ids_list,
+            content_salts=content_salts,
+        )
+        if built is None:
+            return 0
+        requests, prompts = built
+        self._bench_record_prompt_evidence(prompts)
+        self._bench_last_prefill = (
+            prompts,
+            list(cache_salts) if cache_salts is not None else None,
+        )
+        self._bench_admit_requests(requests)
+        return len(requests)
+
+    def _bench_admit_requests(self, requests: Sequence[Request]) -> None:
+        self._bench_seq += len(requests)
+        for req in requests:
+            self.add_request(req)
+            self._bench_active_req_ids.add(req.request_id)
+
+    def _bench_build_prefill_requests(
+        self,
+        prompt_lens: Sequence[int],
+        max_tokens: int,
+        cache_salts: Sequence[str] | None = None,
+        expected_kv_read_tokens: Sequence[int] | None = None,
+        prompt_token_ids_list: Sequence[Sequence[int]] | None = None,
+        content_salts: Sequence[str] | None = None,
+    ) -> tuple[list[Request], list[list[int]]] | None:
+        """Requests of ``_bench_inject_prefill`` without enqueueing them; None
+        when a request's prefix-cache hit differs from its expected length."""
         batch_size = len(prompt_lens)
         if cache_salts is not None and len(cache_salts) != batch_size:
             raise ValueError("cache_salts must match prompt_lens")
@@ -4569,17 +4874,11 @@ class InstrumentedScheduler(AsyncScheduler):
                         expected_tokens,
                         actual_kv_read_tokens,
                     )
-                    return 0
+                    return None
 
             requests.append(req)
             prompts.append(prompt)
-
-        self._bench_record_prompt_evidence(prompts)
-        self._bench_seq += len(requests)
-        for req in requests:
-            self.add_request(req)
-            self._bench_active_req_ids.add(req.request_id)
-        return len(requests)
+        return requests, prompts
 
     def _bench_inject_fake_decode(
         self, context_lengths: Sequence[int]
@@ -4629,7 +4928,9 @@ class InstrumentedScheduler(AsyncScheduler):
             req = Request(
                 request_id=req_id,
                 prompt_token_ids=prompt,
-                sampling_params=SamplingParams(max_tokens=100_000),
+                # ignore_eos: a sampled EOS would end the request mid power
+                # window; the forward pass is the same either way.
+                sampling_params=SamplingParams(max_tokens=100_000, ignore_eos=True),
                 pooling_params=None,
                 block_hasher=self._bench_block_hasher,
                 cache_salt=req_id,
@@ -4802,7 +5103,15 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _bench_synchronize_output(self, output: SchedulerOutput) -> None:
         """Release one measured point only after every ADP rank is ready."""
-        if not self._bench_sync_pending or output.total_num_scheduled_tokens <= 0:
+        window = self._bench_power_window
+        check_window = (
+            window is not None
+            and window["point"].point_type == "prefill"
+            and window["failure"] is None
+        )
+        if output.total_num_scheduled_tokens <= 0 or not (
+            self._bench_sync_pending or check_window
+        ):
             return
         point = self._bench_current_point
         if point is None:
@@ -4818,6 +5127,15 @@ class InstrumentedScheduler(AsyncScheduler):
             "sum_decode_kv_tokens": scheduled.sum_decode_kv_tokens,
         }
         validation_error = self._bench_output_validation_error(point, output_summary)
+        if not self._bench_sync_pending:
+            # A prefill repeat of the power window must run the latency
+            # sample's shape; a different one leaves the point unpowered.
+            if validation_error is not None and window is not None:
+                logger.warning(
+                    "Power window repeat shape mismatch: %s", validation_error
+                )
+                window["failure"] = "window_shape_mismatch"
+            return
         if self._bench_synchronizer is not None:
             self._bench_run_id = self._bench_synchronizer.synchronize(
                 point,
@@ -4871,6 +5189,8 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_sync_pending = False
         self._bench_extra_steps_left = 0
         self._bench_expected_fpms = 1
+        self._bench_power_window = None
+        self._bench_power_result = None
         self._schedule_times.clear()
         self._last_update_time = 0.0
         self._kvwarm_release_heavy_state()
@@ -5379,7 +5699,14 @@ class InstrumentedScheduler(AsyncScheduler):
                 and self._bench_point_result_timed_out()
             ):
                 self._bench_save_current_point()
+            if self._bench_power_window is not None:
+                # Runs while a repeat is in flight too: it prepares the next one.
+                self._bench_power_window_step()
+                return None
             if still_alive:
+                return None
+            if self._bench_power_window_pending():
+                self._bench_power_window_step()
                 return None
             self._bench_save_current_point()
             self._bench_cleanup_requests()
@@ -7145,6 +7472,20 @@ class InstrumentedScheduler(AsyncScheduler):
         isolation is guaranteed by the per-request cache salts and the
         post-benchmark ``reset_prefix_cache``).
         """
+        allocation = self._bench_allocate_steady_step()
+        if allocation is None:
+            return None
+        return self._bench_steady_step_output(*allocation)
+
+    def _bench_allocate_steady_step(
+        self, *, power_window: bool = False
+    ) -> tuple[list[Request], dict[str, Any]] | None:
+        """Slots for one steady decode step, or None when they do not fit.
+
+        Kept apart from ``_bench_steady_step_output`` so the power window can
+        allocate before its group round and build the step only once the
+        group goes ahead.
+        """
         reqs = [
             request
             for request in self.running
@@ -7157,9 +7498,11 @@ class InstrumentedScheduler(AsyncScheduler):
         new_blocks: dict[str, Any] = {}
         try:
             for request in reqs:
-                if request.request_id in kvwarm_borrowed:
+                if request.request_id in kvwarm_borrowed and not power_window:
                     # KVWARM shadow: blocks borrowed from a parked chain; depth headroom
-                    # already covers the steady write -- zero allocation.
+                    # already covers the steady write -- zero allocation. A power
+                    # window outgrows that headroom, so there the shadow extends its
+                    # own table like any request (see _bench_power_decode_step).
                     new_blocks[request.request_id] = None
                     continue
                 blocks = self.kv_cache_manager.allocate_slots(
@@ -7169,8 +7512,10 @@ class InstrumentedScheduler(AsyncScheduler):
                     delay_cache_blocks=True,
                 )
                 if blocks is None:
-                    if self._kvwarm_native_active:
+                    if self._kvwarm_native_active and not power_window:
                         # The stage already proved fleet headroom on every rank.
+                        # The power window's extra steps were never planned:
+                        # its caller reports the failure to the group instead.
                         # A partial allocation cannot be retried safely or skipped
                         # on one rank while peers execute a collective.
                         raise RuntimeError(
@@ -7184,6 +7529,11 @@ class InstrumentedScheduler(AsyncScheduler):
             if self._kvwarm_native:
                 self._kvwarm_take_cow_copies()
             raise
+        return reqs, new_blocks
+
+    def _bench_steady_step_output(
+        self, reqs: list[Request], new_blocks: dict[str, Any]
+    ) -> SchedulerOutput:
         native_resumes = self._kvwarm_native_resume_ids or set()
         # V1 dropped parked requests from its persistent batch. Restore their
         # full native tables and sampled token history. V2 retains the table
@@ -7274,6 +7624,8 @@ class InstrumentedScheduler(AsyncScheduler):
             if len(self._bench_current_fpms) < getattr(self, "_bench_expected_fpms", 1):
                 if not self._bench_point_result_timed_out():
                     return None
+            if self._bench_power_window_pending():
+                return self._bench_power_window_step()
             self._bench_save_current_point()
             self._bench_cleanup_requests()
             if self._bench_transition_to_timeout_done():
@@ -7434,9 +7786,315 @@ class InstrumentedScheduler(AsyncScheduler):
             and time.monotonic() >= self._bench_point_deadline
         )
 
+    # -- Power window ---------------------------------------------------
+
+    def _bench_power_window_s(self) -> float:
+        config = getattr(self, "_bench_config", None)
+        return float(getattr(config, "power_window_s", 0.0) or 0.0)
+
+    def _bench_power_window_pending(self) -> bool:
+        """Whether the current point still owes its power window."""
+        if self._bench_power_window_s() <= 0:
+            return False
+        point = getattr(self, "_bench_current_point", None)
+        return (
+            point is not None
+            and EAGER_WARMUP_REASON not in point.sample_reasons
+            and self._bench_power_result is None
+        )
+
+    def _bench_take_power_result(self) -> dict | None:
+        """The current point's power block (None with the window off);
+        consumed by the point's save."""
+        result = self._bench_power_result
+        self._bench_power_result = None
+        return result
+
+    def _bench_power_round(
+        self, window: dict, want: bool, ok: bool
+    ) -> tuple[bool, bool]:
+        seq = window["rounds"]
+        window["rounds"] += 1
+        if self._bench_synchronizer is None:
+            return want, ok
+        return self._bench_synchronizer.power_round(
+            window["point"].benchmark_id, seq, want, ok
+        )
+
+    def _bench_power_kv_tokens(self) -> int:
+        return sum(
+            self.requests[req_id].num_computed_tokens
+            for req_id in self._bench_active_req_ids
+            if req_id in self.requests
+        )
+
+    def _bench_power_window_step(self) -> SchedulerOutput | None:
+        """Advance the current point's power window by one scheduler pass.
+
+        The latency sample is already recorded. The point then repeats until
+        the elapsed time since the window's opening group barrier reaches
+        ``power_window_s``. Every repeat is decided in a group round
+        (``power_round``) before it is issued, so all ranks run the same
+        iterations and stop together. Decode repeats go out back to back;
+        a prefill repeat is decided and built while the previous one runs and
+        is admitted as soon as that one drained. A closing round follows the
+        completion of every issued iteration, and the NVML counters are read
+        right after the opening and the closing round. No repeat is an FPM
+        sample, so none of them enters the point's latency or
+        ``measured_iteration_seconds``.
+        """
+        point = self._bench_current_point
+        assert point is not None
+        prefill = point.point_type == "prefill"
+        window = self._bench_power_window
+        if window is None:
+            if prefill and self._bench_frees_pending():
+                return None  # open only once the latency sample has drained
+            window = self._bench_power_open(point)
+            if window is None:
+                return None
+        if prefill:
+            if not window["stopping"] and window["next"] is None:
+                window["next"] = self._bench_power_decide(point, window)
+            if (
+                window["completed"] < window["dispatched"]
+                or any(req_id in self.requests for req_id in self._bench_active_req_ids)
+                or self._bench_frees_pending()
+            ):
+                return None
+            if window["stopping"]:
+                self._bench_power_close(window)
+                return None
+            # Every earlier repeat has drained and freed; drop its IDs so the
+            # per-pass scans over the active set stay one repeat long instead
+            # of growing with the window (their cost lands inside the
+            # energy window).
+            self._bench_active_req_ids.clear()
+            self._bench_admit_requests(window["next"])
+            window["next"] = None
+            window["dispatched"] += 1
+            return None
+        if window["stopping"]:
+            if window["completed"] == window["dispatched"]:
+                self._bench_power_close(window)
+            return None
+        allocation = self._bench_power_decide(point, window)
+        if allocation is None:
+            return None
+        window["dispatched"] += 1
+        return self._bench_steady_step_output(*allocation)
+
+    def _bench_power_decide(self, point: BenchmarkPoint, window: dict) -> Any:
+        """Group decision on the next repeat: its prepared inputs, or None
+        once the group stops (``window["stopping"]``)."""
+        elapsed = time.monotonic() - window["t0"]
+        capped = window["dispatched"] >= FPM_POWER_MAX_WINDOW_ITERATIONS
+        want = not capped and elapsed < self._bench_power_window_s()
+        candidate: Any = None
+        cause: str | None = None
+        if not capped:
+            # Prepared before the round: a rank that cannot run the next
+            # repeat must say so before any rank issues it.
+            candidate, cause = (
+                self._bench_power_prefill_requests(point, window)
+                if point.point_type == "prefill"
+                else self._bench_power_decode_step(point)
+            )
+        any_want, all_ok = self._bench_power_round(
+            window, want, capped or candidate is not None
+        )
+        if any_want and all_ok:
+            return candidate
+        if any_want:
+            # The group stopped before the window reached its minimum.
+            if cause is not None:
+                logger.warning(
+                    "Power window of benchmark_id=%d stopped after %d "
+                    "iteration(s): %s",
+                    point.benchmark_id,
+                    window["dispatched"],
+                    cause,
+                )
+            window["failure"] = window["failure"] or cause or "window_step_unavailable"
+        if candidate is not None and self._kvwarm_native:
+            # A dropped decode allocation keeps its slots until the point's
+            # cleanup; its copy-on-write forks must not reach a later step.
+            self._kvwarm_take_cow_copies()
+        window["stopping"] = True
+        return None
+
+    def _bench_power_open(self, point: BenchmarkPoint) -> dict | None:
+        """Opening group barrier and start readings; None when the group
+        cannot run the window (the point then reports ``unavailable``)."""
+        if self._bench_power_gpus is None:
+            try:
+                device_ids = self._bench_power_device_ids
+                if isinstance(device_ids, str):
+                    raise _BenchPowerUnavailable(device_ids)
+                self._bench_power_gpus = _bench_open_power_gpus(device_ids)
+            except _BenchPowerUnavailable as error:
+                self._bench_power_gpus = error.reason
+        local_reason: str | None = None
+        if isinstance(self._bench_power_gpus, str):
+            local_reason = self._bench_power_gpus
+        elif len(self._bench_current_fpms) < self._bench_expected_fpms:
+            local_reason = "latency_sample_incomplete"
+        window: dict[str, Any] = {
+            "point": point,
+            "rounds": 0,
+            "dispatched": 0,
+            "completed": 0,
+            "stopping": False,
+            "failure": None,
+            "next": None,
+        }
+        _, all_ok = self._bench_power_round(window, True, local_reason is None)
+        if not all_ok:
+            self._bench_power_result = _bench_power_unavailable(
+                local_reason or "power_window_peer_unavailable"
+            )
+            return None
+        assert isinstance(self._bench_power_gpus, list)
+        window["gpus"] = self._bench_power_gpus
+        window["t0"] = time.monotonic()
+        try:
+            window["start"] = _bench_read_gpu_energy(window["gpus"])
+        except _BenchPowerUnavailable as error:
+            # Keep running the group's iterations; only this rank is unpowered.
+            window["start"] = []
+            window["failure"] = error.reason
+        if point.point_type == "prefill":
+            assert self._bench_last_prefill is not None
+            window["prompts"], window["salts"] = self._bench_last_prefill
+            window["kv_tokens"] = 0
+        else:
+            window["kv_tokens"] = self._bench_power_kv_tokens()
+        self._bench_power_window = window
+        return window
+
+    def _bench_power_close(self, window: dict) -> None:
+        """Closing group barrier, end readings and the point's power block."""
+        point = window["point"]
+        self._bench_power_round(window, False, True)
+        window_s = time.monotonic() - window["t0"]
+        failure = window["failure"]
+        end: list[tuple[str, int]] = []
+        if failure is None:
+            try:
+                end = _bench_read_gpu_energy(window["gpus"])
+            except _BenchPowerUnavailable as error:
+                failure = error.reason
+        # Decode repeats append one token per request per iteration (D2);
+        # prefill repeats are new requests and move no resident KV.
+        drift = (
+            0
+            if point.point_type == "prefill"
+            else self._bench_power_kv_tokens() - window["kv_tokens"]
+        )
+        result = (
+            _bench_power_unavailable(failure)
+            if failure is not None
+            else _bench_power_block(
+                window["start"],
+                end,
+                window_s=window_s,
+                window_iterations=window["dispatched"],
+                kv_drift_tokens=drift,
+                min_window_s=self._bench_power_window_s(),
+            )
+        )
+        self._bench_power_result = result
+        self._bench_power_window = None
+        logger.info(
+            "Power window benchmark_id=%d: %d iteration(s) in %.3fs, %s (%s)",
+            point.benchmark_id,
+            window["dispatched"],
+            window_s,
+            result["status"],
+            result["unavailable_reason"],
+        )
+
+    def _bench_power_decode_step(
+        self, point: BenchmarkPoint
+    ) -> tuple[tuple[list[Request], dict[str, Any]] | None, str | None]:
+        """Slots for the next decode repeat over the resident requests, or why
+        there are none."""
+        requests = [
+            request
+            for request in self.running
+            if request.request_id in self._bench_active_req_ids
+            and not request.is_finished()
+        ]
+        if len(requests) != point.batch_size:
+            return None, "window_request_finished"
+        borrowed: set[str] = getattr(self, "_kvwarm_borrowed_ids", set())
+        if any(request.request_id in borrowed for request in requests) and not all(
+            type(manager) is FullAttentionManager
+            and self._kvwarm_admission_cap(manager) is None
+            for manager in self.kv_cache_manager.coordinator.single_type_managers
+        ):
+            # A KV warm-up shadow owns private tail blocks for the latency
+            # sample's steady steps only. Past them it extends its own table,
+            # a plain append only on positional full-attention groups. V1
+            # limitation: other layouts (hybrid, sliding window, Mamba) keep
+            # latency without power; follow-up is per-layout tail extension
+            # with GPU validation.
+            return None, "kvwarm_shadow_headroom"
+        max_model_len = self._bench_capacity_limit("max_model_len")
+        if any(request.num_computed_tokens + 2 > max_model_len for request in requests):
+            return None, "max_model_len_reached"
+        allocation = self._bench_allocate_steady_step(power_window=True)
+        if allocation is None:
+            return None, "kv_capacity_exhausted"
+        return allocation, None
+
+    def _bench_power_prefill_requests(
+        self, point: BenchmarkPoint, window: dict
+    ) -> tuple[list[Request] | None, str | None]:
+        """Next prefill repeat: the latency sample's prompts with fresh suffixes.
+
+        Each request keeps the prefix tokens it read from the prefix cache and
+        its cache salt, so it hits exactly the staged prefix again; the rest
+        is drawn from the same synthetic generator under a per-repeat salt, so
+        no block of it hits an earlier repeat. A cached-token count that
+        differs from the latency sample's leaves the point unpowered (D9).
+        """
+        kv_read_lengths = self._bench_prefill_kv_read_lengths(
+            point.total_kv_read_tokens, point.batch_size, point.partition, point.rows
+        )
+        point_key = self._bench_point_content_key(point)
+        repeat = window["dispatched"]
+        prompts = []
+        for slot, (prompt, kv_read_tokens) in enumerate(
+            zip(window["prompts"], kv_read_lengths, strict=True)
+        ):
+            prefix_len = (
+                self._bench_seed_prompt_len(kv_read_tokens) if kv_read_tokens > 0 else 0
+            )
+            prompts.append(
+                list(prompt[:prefix_len])
+                + list(
+                    self._bench_synthetic_token_ids(
+                        f"point:{point_key}:power{repeat}:slot{slot}",
+                        len(prompt) - prefix_len,
+                    )
+                )
+            )
+        built = self._bench_build_prefill_requests(
+            [len(prompt) for prompt in prompts],
+            max_tokens=1,
+            cache_salts=window["salts"],
+            expected_kv_read_tokens=kv_read_lengths,
+            prompt_token_ids_list=prompts,
+        )
+        if built is None:
+            return None, "prefill_cache_mismatch"
+        return built[0], None
+
     def _bench_save_current_point(self) -> None:
         if self._bench_current_point is not None:
             point = self._bench_current_point
+            power = self._bench_take_power_result()
             local_fpms = list(self._bench_current_fpms)
             raw_fpms = deepcopy(local_fpms)
             reduction = "single_step"
@@ -7498,6 +8156,9 @@ class InstrumentedScheduler(AsyncScheduler):
                         "raw_sample_indices": sample_indices,
                     },
                 }
+                if power is not None:
+                    # Exchanged with the FPM, so the group copy carries it too.
+                    local_fpms[0]["power"] = power
             if self._bench_synchronizer is not None:
                 group_result = self._bench_synchronizer.collect_result(
                     point,
@@ -7782,7 +8443,9 @@ class InstrumentedScheduler(AsyncScheduler):
             and timing_valid
         )
         output = {
-            "schema_version": 2,
+            "schema_version": BENCHMARK_RESULT_SCHEMA_VERSION
+            if self._bench_power_window_s() > 0
+            else 2,
             **(
                 {"kvwarm": self._kvwarm_meta}
                 if getattr(self, "_kvwarm_meta", None) is not None
@@ -7826,7 +8489,12 @@ class InstrumentedScheduler(AsyncScheduler):
                 "completed_points": completed_points,
                 "skipped_points": skipped_points,
             },
-            "config": asdict(self._bench_config),
+            # Without the power window the config reads exactly as before it.
+            "config": {
+                key: value
+                for key, value in asdict(self._bench_config).items()
+                if key != "power_window_s" or value
+            },
             "limits": {
                 "max_num_scheduled_tokens": self.max_num_scheduled_tokens,
                 "max_num_running_reqs": self.max_num_running_reqs,
