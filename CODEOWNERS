@@ -74,6 +74,9 @@
 /components/src/dynamo/frontend/                                                                        @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/frontend/tests/                                                                  @ai-dynamo/dynamo-frontend-codeowners
 
+# === agents  (@ai-dynamo/dynamo-agents-codeowners) ===
+/examples/agents/                                                                                       @ai-dynamo/dynamo-agents-codeowners
+
 # === router  (@ai-dynamo/dynamo-router-codeowners) ===
 /lib/router/                                                                                            @ai-dynamo/dynamo-router-codeowners
 /lib/kv-events/                                                                                         @ai-dynamo/dynamo-router-codeowners
