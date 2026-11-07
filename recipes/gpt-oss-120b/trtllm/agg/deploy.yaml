@@ -16,19 +16,26 @@ data:
     moe_config:
         backend: CUTLASS
 ---
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: gpt-oss-agg
 spec:
   backendFramework: trtllm
-  pvcs:
-    - name: model-cache
-      create: false
-  services:
-    Frontend:
-      componentType: frontend
-      extraPodSpec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - python3 -m dynamo.frontend --router-mode round-robin --http-port 8000
         affinity:
           podAntiAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -39,33 +46,18 @@ spec:
                   values:
                   - gpt-oss-agg-frontend
               topologyKey: kubernetes.io/hostname
-        mainContainer:
-          args:
-          - python3 -m dynamo.frontend --router-mode round-robin --http-port 8000
+  - name: TrtllmWorker
+    type: worker
+    replicas: 1
+    sharedMemorySize: 80Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
-      replicas: 1
-    TrtllmWorker:
-      componentType: worker
-      envFromSecret: hf-token-secret
-      volumeMounts:
-        - name: model-cache
-          mountPoint: /opt/models
-      sharedMemory:
-        size: 80Gi
-      extraPodSpec:
-        affinity:
-          nodeAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              nodeSelectorTerms:
-              - matchExpressions:
-                - key: nvidia.com/gpu.present
-                  operator: In
-                  values:
-                  - "true"
-        mainContainer:
           args:
           - |
             python3 -m dynamo.trtllm \
@@ -76,10 +68,7 @@ spec:
               --expert-parallel-size 4 \
               --max-batch-size 800 \
               --free-gpu-memory-fraction 0.9
-          command:
-          - /bin/sh
-          - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          workingDir: /workspace/examples/backends/trtllm
           env:
           - name: TRTLLM_ENABLE_PDL
             value: "1"
@@ -93,18 +82,33 @@ spec:
             value: "openai/gpt-oss-120b"
           - name: HF_HOME
             value: /opt/models
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            requests:
+              nvidia.com/gpu: "4"
+            limits:
+              nvidia.com/gpu: "4"
           volumeMounts:
           - mountPath: /opt/dynamo/configs
             name: llm-config
             readOnly: true
-          workingDir: /workspace/examples/backends/trtllm
+          - name: model-cache
+            mountPath: /opt/models
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
         volumes:
         - configMap:
             name: llm-config
           name: llm-config
-      replicas: 1
-      resources:
-        limits:
-          gpu: "4"
-        requests:
-          gpu: "4"
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache

@@ -37,18 +37,24 @@
 #       --image nvcr.io/.../vllm-runtime:tag \
 #       --tokenizers hf,fastokens --concurrency 20 --isl 8192
 ---
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: ${DGD_NAME}
 spec:
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: ${FRONTEND_REPLICAS}
-      extraPodSpec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: ${FRONTEND_REPLICAS}
+    podTemplate:
+      spec:
 ${FRONTEND_IMAGE_PULL_SECRETS_BLOCK}
-        mainContainer:
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+        containers:
+        - name: main
           image: ${IMAGE}
           imagePullPolicy: IfNotPresent
           command:
@@ -71,21 +77,23 @@ ${FRONTEND_IMAGE_PULL_SECRETS_BLOCK}
           volumeMounts:
             - name: model-cache
               mountPath: /model-store
-        volumes:
-          - name: model-cache
-            persistentVolumeClaim:
-              claimName: model-cache
 
-    worker:
-      componentType: worker
-      replicas: ${WORKER_REPLICAS}
-      extraPodSpec:
+  - name: worker
+    type: worker
+    replicas: ${WORKER_REPLICAS}
+    podTemplate:
+      spec:
 ${WORKER_IMAGE_PULL_SECRETS_BLOCK}
         tolerations:
           - effect: NoSchedule
             key: nvidia.com/gpu
             operator: Exists
-        mainContainer:
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+        containers:
+        - name: main
           image: ${IMAGE}
           imagePullPolicy: IfNotPresent
           command:
@@ -114,7 +122,3 @@ ${WORKER_IMAGE_PULL_SECRETS_BLOCK}
           volumeMounts:
             - name: model-cache
               mountPath: /model-store
-        volumes:
-          - name: model-cache
-            persistentVolumeClaim:
-              claimName: model-cache

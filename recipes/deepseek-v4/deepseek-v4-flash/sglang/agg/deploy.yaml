@@ -13,27 +13,21 @@
 #   curl http://localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 #     -d '{"model":"deepseek-ai/DeepSeek-V4-Flash","messages":[{"role":"user","content":"Hello"}]}'
 
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: sglang-dsv4-flash
 spec:
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      volumeMounts:
-        - name: shared-model-cache
-          mountPoint: /models
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.3
           imagePullPolicy: Always
-          env:
-            - name: HF_HOME
-              value: /models
-            - name: HF_HUB_OFFLINE
-              value: "1"
           startupProbe:
             httpGet:
               path: /health
@@ -42,74 +36,58 @@ spec:
             timeoutSeconds: 10
             failureThreshold: 360
 
-    decode:
-      componentType: worker
-      subComponentType: decode
-      replicas: 1
-      resources:
-        limits:
-          gpu: "4"
-      volumeMounts:
+          env:
+          - name: HF_HOME
+            value: /models
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /models
+        volumes:
         - name: shared-model-cache
-          mountPoint: /models
-      sharedMemory:
-        size: 200Gi
-      extraPodSpec:
-        nodeSelector:
-          nvidia.com/gpu.product: NVIDIA-B200
-        tolerations:
-          - key: nvidia.com/gpu
-            operator: Equal
-            value: "true"
-            effect: NoSchedule
-        mainContainer:
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+  - name: decode
+    type: decode
+    replicas: 1
+    sharedMemorySize: 200Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.3
           imagePullPolicy: Always
-          workingDir: /workspace
           command:
-            - python3
-            - -m
-            - dynamo.sglang
+          - python3
+          - -m
+          - dynamo.sglang
           args:
-            - --model-path
-            - deepseek-ai/DeepSeek-V4-Flash
-            - --served-model-name
-            - deepseek-ai/DeepSeek-V4-Flash
-            - --trust-remote-code
-            - --tp
-            - "4"
-            - --moe-runner-backend
-            - flashinfer_mxfp4
-            - --speculative-algo
-            - EAGLE
-            - --speculative-num-steps
-            - "3"
-            - --speculative-eagle-topk
-            - "1"
-            - --speculative-num-draft-tokens
-            - "4"
-            - --chunked-prefill-size
-            - "4096"
-            - --disable-flashinfer-autotune
-            - --dyn-tool-call-parser
-            - deepseek_v4
-            - --dyn-reasoning-parser
-            - deepseek_v4
-          env:
-            - name: HF_HOME
-              value: /models
-            - name: HF_HUB_OFFLINE
-              value: "1"
-            - name: CUDA_VISIBLE_DEVICES
-              value: "0,1,2,3,4,5,6,7"
-            - name: SGLANG_JIT_DEEPGEMM_PRECOMPILE
-              value: "0"
-            - name: SGLANG_JIT_DEEPGEMM_FAST_WARMUP
-              value: "1"
-            - name: NCCL_CUMEM_ENABLE
-              value: "1"
-            - name: GLOO_SOCKET_IFNAME
-              value: eth0
+          - --model-path
+          - deepseek-ai/DeepSeek-V4-Flash
+          - --served-model-name
+          - deepseek-ai/DeepSeek-V4-Flash
+          - --trust-remote-code
+          - --tp
+          - "4"
+          - --moe-runner-backend
+          - flashinfer_mxfp4
+          - --speculative-algo
+          - EAGLE
+          - --speculative-num-steps
+          - "3"
+          - --speculative-eagle-topk
+          - "1"
+          - --speculative-num-draft-tokens
+          - "4"
+          - --chunked-prefill-size
+          - "4096"
+          - --disable-flashinfer-autotune
+          - --dyn-tool-call-parser
+          - deepseek_v4
+          - --dyn-reasoning-parser
+          - deepseek_v4
+          workingDir: /workspace
           startupProbe:
             httpGet:
               path: /health
@@ -118,6 +96,35 @@ spec:
             timeoutSeconds: 10
             failureThreshold: 360
 
-  pvcs:
-    - name: shared-model-cache
-      create: false
+          env:
+          - name: HF_HOME
+            value: /models
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: CUDA_VISIBLE_DEVICES
+            value: "0,1,2,3,4,5,6,7"
+          - name: SGLANG_JIT_DEEPGEMM_PRECOMPILE
+            value: "0"
+          - name: SGLANG_JIT_DEEPGEMM_FAST_WARMUP
+            value: "1"
+          - name: NCCL_CUMEM_ENABLE
+            value: "1"
+          - name: GLOO_SOCKET_IFNAME
+            value: eth0
+          resources:
+            limits:
+              nvidia.com/gpu: "4"
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /models
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache

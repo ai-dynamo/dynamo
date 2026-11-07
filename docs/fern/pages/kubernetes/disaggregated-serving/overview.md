@@ -25,27 +25,25 @@ Structurally, that difference is one worker versus two. The rest of the
 <Tab title="Aggregated (1 worker)">
 
 ```yaml
-  services:
-    Frontend:
-      componentType: frontend
-    worker:
-      componentType: worker
-      # one worker does both prefill and decode
+  components:
+  - name: Frontend
+    type: frontend
+  - name: worker
+    type: worker
+    # one worker does both prefill and decode
 ```
 
 </Tab>
 <Tab title="Disaggregated (prefill + decode)">
 
 ```yaml
-  services:
-    Frontend:
-      componentType: frontend
-    prefill:
-      componentType: worker
-      subComponentType: prefill   # prompt processing only
-    decode:
-      componentType: worker
-      subComponentType: decode    # token generation only
+  components:
+  - name: Frontend
+    type: frontend
+  - name: prefill
+    type: prefill            # prompt processing only
+  - name: decode
+    type: decode             # token generation only
 ```
 
 </Tab>
@@ -86,7 +84,7 @@ prefill and decode across **multiple nodes** adds RDMA networking — see
 For the single-node example in this guide you need:
 
 1. **A node with multiple GPUs** — one per prefill and decode worker (this
-   example uses 8×H100 with `gpu: "1"` per worker).
+   example uses 8×H100 with one GPU per worker).
 2. **ETCD and NATS** deployed for Dynamo coordination.
 3. **A HuggingFace token secret** (`hf-token-secret`) if the model is gated.
 
@@ -106,19 +104,21 @@ Begin with the DGD skeleton — just a frontend. This is identical to an
 aggregated deployment; nothing about disaggregation changes it.
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: dynamo-disagg
   namespace: your-namespace
 spec:
   backendFramework: vllm
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
           imagePullPolicy: IfNotPresent
 ```
@@ -130,23 +130,19 @@ spec:
 The prefill worker runs the prompt phase. Two things make it a prefill worker
 rather than a plain worker:
 
-- `subComponentType: prefill` tags the role for the operator and router.
+- `type: prefill` tags the role for the operator and router.
 - `--disaggregation-mode prefill` tells the engine to stop after producing the
   KV cache instead of generating tokens.
 
 ```yaml
-    prefill:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      subComponentType: prefill
-      replicas: 3
-      resources:
-        limits:
-          gpu: "1"
-      sharedMemory:
-        size: 16Gi
-      extraPodSpec:
-        mainContainer:
+  - name: prefill
+    type: prefill
+    replicas: 3
+    sharedMemorySize: 16Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
           imagePullPolicy: IfNotPresent
           command: ["python3", "-m", "dynamo.vllm"]
@@ -155,11 +151,17 @@ rather than a plain worker:
             - Qwen/Qwen3-32B
             - --disaggregation-mode
             - prefill
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
 ```
 
-Qwen3-32B fits on a single H100, so each worker takes `gpu: "1"` with no tensor
+Qwen3-32B fits on a single H100, so each worker takes one GPU with no tensor
 parallelism. `replicas: 3` gives three prefill workers; size the count for your
-prompt load independently of decode. (`sharedMemory` is explained in the KV
+prompt load independently of decode. (`sharedMemorySize` is explained in the KV
 transfer step.)
 
 </Step>
@@ -167,23 +169,19 @@ transfer step.)
 <Step title="Add the decode worker">
 
 The decode worker continues generation after prefill hands off the KV cache. It
-mirrors the prefill worker with `subComponentType: decode` and
+mirrors the prefill worker with `type: decode` and
 `--disaggregation-mode decode`, and its replica count is sized for concurrency
 rather than prompt load.
 
 ```yaml
-    decode:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      subComponentType: decode
-      replicas: 4
-      resources:
-        limits:
-          gpu: "1"
-      sharedMemory:
-        size: 16Gi
-      extraPodSpec:
-        mainContainer:
+  - name: decode
+    type: decode
+    replicas: 4
+    sharedMemorySize: 16Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
           imagePullPolicy: IfNotPresent
           command: ["python3", "-m", "dynamo.vllm"]
@@ -192,6 +190,12 @@ rather than prompt load.
             - Qwen/Qwen3-32B
             - --disaggregation-mode
             - decode
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
 ```
 
 > [!WARNING]
@@ -214,7 +218,7 @@ The one field you do set is shared memory, already in the worker specs above:
 
 | Setting | Why |
 |---|---|
-| `sharedMemory.size: 16Gi` | NIXL stages transfer metadata through the pod's `/dev/shm`. The pod default (64 MB) is too small and NIXL fails to initialize. `16Gi` is comfortable headroom, not a tightly-computed per-request budget — it does not consume that memory unless needed. |
+| `sharedMemorySize: 16Gi` | NIXL stages transfer metadata through the pod's `/dev/shm`. The pod default (64 MB) is too small and NIXL fails to initialize. `16Gi` is comfortable headroom, not a tightly-computed per-request budget — it does not consume that memory unless needed. |
 
 That is the entire KV-transfer configuration for a single node: two workers
 tagged prefill/decode, matching `--model`, and enough shared memory for NIXL.
@@ -242,7 +246,7 @@ You want to see NIXL bring up a backend, for example:
 NIXL INFO Backend UCX was instantiated
 ```
 
-If NIXL fails to initialize, the usual cause is `sharedMemory.size` left at the
+If NIXL fails to initialize, the usual cause is `sharedMemorySize` left at the
 default. Symptoms of a broken transfer path include high TTFT despite free
 prefill capacity, decode workers sitting idle while prefill is busy, or
 disaggregated throughput falling below your aggregated baseline.

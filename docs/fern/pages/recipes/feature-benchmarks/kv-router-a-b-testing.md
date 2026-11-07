@@ -112,65 +112,49 @@ Expect operator, etcd, and nats pods Running before deploying the graph.
 Create `router-off-deployment.yaml` (baseline):
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-agg-no-router
 spec:
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           env:
-            - name: POD_UID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.uid
-    worker:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      replicas: 8
-      resources:
-        limits:
-          gpu: "1"
-      extraPodSpec:
-        affinity:
-          nodeAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              nodeSelectorTerms:
-                - matchExpressions:
-                    - key: node.kubernetes.io/instance-type
-                      operator: In
-                      values:
-                        - gpu-h100-sxm  # Adjust to your GPU node type
-        mainContainer:
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+  - name: worker
+    type: decode
+    replicas: 8
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
-          workingDir: /workspace
           command:
-            - /bin/sh
-            - -c
+          - /bin/sh
+          - -c
           args:
-            - >-
-              python3 -m dynamo.vllm
-              --model Qwen/Qwen3-32B
-              --quantization fp8
-              --kv-cache-dtype fp8
-              --max-model-len 131072
-              --hf-overrides '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
-              --gpu-memory-utilization 0.90
-              --block-size 64
-              --async-scheduling
-              --no-enable-log-requests
-          env:
-            - name: DYN_HEALTH_CHECK_ENABLED
-              value: "false"
-            - name: POD_UID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.uid
+          - >-
+            python3 -m dynamo.vllm
+            --model Qwen/Qwen3-32B
+            --quantization fp8
+            --kv-cache-dtype fp8
+            --max-model-len 131072
+            --hf-overrides '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+            --gpu-memory-utilization 0.90
+            --block-size 64
+            --async-scheduling
+            --no-enable-log-requests
+          workingDir: /workspace
           startupProbe:
             httpGet:
               path: /health
@@ -179,6 +163,19 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 60
+          env:
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: "false"
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
           livenessProbe:
             httpGet:
               path: /live
@@ -195,74 +192,65 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 10
-      subComponentType: decode
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: node.kubernetes.io/instance-type
+                  operator: In
+                  values:
+                  - gpu-h100-sxm        # Adjust to your GPU node type
 ```
 
 Create `router-on-deployment.yaml` (KV router ON):
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-agg-router
 spec:
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           env:
-            - name: POD_UID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.uid
-      envs:
-        - name: DYN_ROUTER_MODE
-          value: kv  # KEY DIFFERENCE: Enable KV Smart Router
-    worker:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      replicas: 8
-      resources:
-        limits:
-          gpu: "1"
-      extraPodSpec:
-        affinity:
-          nodeAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              nodeSelectorTerms:
-                - matchExpressions:
-                    - key: node.kubernetes.io/instance-type
-                      operator: In
-                      values:
-                        - gpu-h100-sxm  # Adjust to your GPU node type
-        mainContainer:
+          - name: DYN_ROUTER_MODE
+            value: kv # KEY DIFFERENCE: Enable KV Smart Router
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+  - name: worker
+    type: decode
+    replicas: 8
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
-          workingDir: /workspace
           command:
-            - /bin/sh
-            - -c
+          - /bin/sh
+          - -c
           args:
-            - >-
-              python3 -m dynamo.vllm
-              --model Qwen/Qwen3-32B
-              --quantization fp8
-              --kv-cache-dtype fp8
-              --max-model-len 131072
-              --hf-overrides '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
-              --gpu-memory-utilization 0.90
-              --block-size 64
-              --async-scheduling
-              --no-enable-log-requests
-          env:
-            - name: DYN_HEALTH_CHECK_ENABLED
-              value: "false"
-            - name: POD_UID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.uid
+          - >-
+            python3 -m dynamo.vllm
+            --model Qwen/Qwen3-32B
+            --quantization fp8
+            --kv-cache-dtype fp8
+            --max-model-len 131072
+            --hf-overrides '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+            --gpu-memory-utilization 0.90
+            --block-size 64
+            --async-scheduling
+            --no-enable-log-requests
+          workingDir: /workspace
           startupProbe:
             httpGet:
               path: /health
@@ -271,6 +259,19 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 60
+          env:
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: "false"
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
           livenessProbe:
             httpGet:
               path: /live
@@ -287,7 +288,15 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 10
-      subComponentType: decode
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: node.kubernetes.io/instance-type
+                  operator: In
+                  values:
+                  - gpu-h100-sxm        # Adjust to your GPU node type
 ```
 
 ### Step 2.2: Deploy Router-ON First
@@ -321,20 +330,23 @@ spec:
 
 Apply it: `kubectl apply -f pvc-model-cache.yaml`
 
-Then reference the existing PVC in your DynamoGraphDeployment by adding the following under `spec` (and under `worker`, add `volumeMounts`):
+Then reference the existing PVC in your DynamoGraphDeployment by adding the following to the `worker` component:
 
 ```yaml
 spec:
-  pvcs:
-    - create: false
-      name: model-cache
-      size: "0"
-  services:
-    worker:
-      volumeMounts:
-        - mountPoint: /root/.cache/huggingface
-          name: model-cache
-          useAsCompilationCache: false
+  components:
+  - name: worker
+    podTemplate:
+      spec:
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        containers:
+        - name: main
+          volumeMounts:
+            - mountPath: /root/.cache/huggingface
+              name: model-cache
 ```
 
 With this configuration, the first run has one worker download; the rest load from cache. The main benefit is on redeploy: the model stays on the PVC, so new pods load from cache and come up in ~5–10 minutes instead of downloading again.
@@ -744,7 +756,7 @@ The deployment YAMLs in this guide set `failureThreshold: 60`, allowing up to 32
 
 ```bash
 kubectl patch dynamographdeployment <deployment-name> -n dynamo-bench --type='json' \
-  -p='[{"op": "replace", "path": "/spec/services/worker/extraPodSpec/mainContainer/startupProbe/failureThreshold", "value": 80}]'
+  -p='[{"op": "replace", "path": "/spec/components/0/podTemplate/spec/containers/0/startupProbe/failureThreshold", "value": 80}]'
 ```
 
 The relevant startup probe fields:
@@ -803,8 +815,9 @@ Replace the Mooncake trace with your own JSONL file:
 For advanced testing, add separate prefill workers:
 
 ```yaml
-prefill:
-  componentType: worker
+components:
+- name: prefill
+  type: prefill
   replicas: 2
   # ... configuration
 ```

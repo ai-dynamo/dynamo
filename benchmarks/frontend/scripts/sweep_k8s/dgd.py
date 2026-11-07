@@ -157,6 +157,33 @@ def dgd_wait_all_ready(
     wait_model_ready(endpoint, model_name, max_wait, namespace=namespace)
 
 
+def _frontend_component(dgd_json: dict) -> tuple[int, dict] | None:
+    """Return (index, component) of the Frontend v1beta1 component, if found."""
+    for i, comp in enumerate(dgd_json.get("spec", {}).get("components", [])):
+        if comp.get("name") == "Frontend":
+            return i, comp
+    return None
+
+
+def _frontend_main_env(dgd_json: dict) -> tuple[int, int, list]:
+    """Return (component index, main-container index, env list) for Frontend.
+
+    Indices are -1 when the component or container is missing.
+    """
+    found = _frontend_component(dgd_json)
+    if found is None:
+        return -1, -1, []
+    comp_idx, comp = found
+    containers = comp.get("podTemplate", {}).get("spec", {}).get("containers", [])
+    main_idx = next(
+        (i for i, c in enumerate(containers) if c.get("name") == "main"),
+        0 if containers else -1,  # defensive: first container if none is named main
+    )
+    if main_idx < 0:
+        return comp_idx, -1, []
+    return comp_idx, main_idx, containers[main_idx].get("env") or []
+
+
 def dgd_switch_backend(
     dgd_name: str,
     namespace: str,
@@ -174,24 +201,18 @@ def dgd_switch_backend(
         f"\n--- Switching DGD tokenizer backend -> {mapped_backend} (dgd={dgd_name}) ---"
     )
 
-    # Find the index of DYN_TOKENIZER in the Frontend env array
+    # Find the index of DYN_TOKENIZER in the Frontend main-container env array
+    # (v1beta1: spec.components[name=Frontend].podTemplate.spec.containers[main].env)
     try:
         dgd_json = get_json("dgd", dgd_name, namespace)
-        env_list = (
-            dgd_json.get("spec", {})
-            .get("services", {})
-            .get("Frontend", {})
-            .get("extraPodSpec", {})
-            .get("mainContainer", {})
-            .get("env", [])
-        )
+        frontend_idx, main_idx, env_list = _frontend_main_env(dgd_json)
         idx = None
-        for i, env_var in enumerate(env_list):
+        for i, env_var in enumerate(env_list or []):
             if env_var.get("name") == "DYN_TOKENIZER":
                 idx = i
                 break
     except Exception:
-        idx = None
+        frontend_idx, main_idx, idx = -1, -1, None
 
     # Capture the current frontend pod name BEFORE patching so we track
     # the right pod for deletion (avoids racing with the operator).
@@ -200,7 +221,7 @@ def dgd_switch_backend(
         namespace,
     )
 
-    if idx is not None:
+    if frontend_idx >= 0 and main_idx >= 0 and idx is not None:
         patch_json(
             "dgd",
             dgd_name,
@@ -208,12 +229,12 @@ def dgd_switch_backend(
             [
                 {
                     "op": "replace",
-                    "path": f"/spec/services/Frontend/extraPodSpec/mainContainer/env/{idx}/value",
+                    "path": f"/spec/components/{frontend_idx}/podTemplate/spec/containers/{main_idx}/env/{idx}/value",
                     "value": mapped_backend,
                 }
             ],
         )
-    else:
+    elif frontend_idx >= 0 and main_idx >= 0:
         patch_json(
             "dgd",
             dgd_name,
@@ -221,11 +242,13 @@ def dgd_switch_backend(
             [
                 {
                     "op": "add",
-                    "path": "/spec/services/Frontend/extraPodSpec/mainContainer/env/-",
+                    "path": f"/spec/components/{frontend_idx}/podTemplate/spec/containers/{main_idx}/env/-",
                     "value": {"name": "DYN_TOKENIZER", "value": mapped_backend},
                 }
             ],
         )
+    else:
+        print("  WARNING: could not locate Frontend main container; DGD not patched")
 
     print("  DGD patched -- waiting for frontend pod replacement...")
     if old_pod:
@@ -293,11 +316,16 @@ def dgd_restart_graph(
     restart_id = f"bench-{time.strftime('%Y%m%d-%H%M%S')}-{random.randint(0, 9999)}"
     print(f"  Restarting full DGD deployment (id={restart_id})...")
 
-    # Discover service names from the DGD spec so the restart order is correct
-    # for any backend (mocker, vllm, trtllm, etc.)
+    # Discover component names from the DGD spec so the restart order is
+    # correct for any backend (mocker, vllm, trtllm, etc.). Supports both
+    # v1beta1 (spec.components list) and v1alpha1 (spec.services map).
     try:
         dgd_spec = get_json("dgd", dgd_name, namespace, timeout=60)
-        services = list(dgd_spec.get("spec", {}).get("services", {}).keys())
+        spec = dgd_spec.get("spec", {})
+        if isinstance(spec.get("components"), list):
+            services = [c.get("name", "") for c in spec["components"]]
+        else:
+            services = list(spec.get("services", {}).keys())
         # Put workers before frontend: restart workers first, then frontend
         frontend_names = [s for s in services if s.lower() == "frontend"]
         worker_names = [s for s in services if s.lower() != "frontend"]

@@ -37,6 +37,8 @@ def _indent_block(text: str, spaces: int) -> str:
 def _build_image_pull_secrets_block(image_pull_secret: str) -> str:
     if not image_pull_secret:
         return ""
+    # Indent to sit under podTemplate.spec in the v1beta1 DGD templates
+    # (dgd/templates/*.yaml).
     return _indent_block(
         f"""imagePullSecrets:
   - name: {image_pull_secret}""",

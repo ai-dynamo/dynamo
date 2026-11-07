@@ -21,18 +21,20 @@
 #       --dgd-name dynamo-bench-mocker --image nvcr.io/.../image:tag \
 #       --tokenizers hf,fastokens --concurrency 50,100 --isl 512
 ---
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: ${DGD_NAME}
 spec:
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: ${FRONTEND_REPLICAS}
-      extraPodSpec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: ${FRONTEND_REPLICAS}
+    podTemplate:
+      spec:
 ${FRONTEND_IMAGE_PULL_SECRETS_BLOCK}
-        mainContainer:
+        containers:
+        - name: main
           image: ${IMAGE}
           imagePullPolicy: IfNotPresent
           command:
@@ -51,12 +53,14 @@ ${FRONTEND_IMAGE_PULL_SECRETS_BLOCK}
                   name: ${HF_TOKEN_SECRET_NAME}
                   key: HF_TOKEN
 
-    MockerWorker:
-      componentType: worker
-      replicas: ${WORKER_REPLICAS}
-      extraPodSpec:
+  - name: MockerWorker
+    type: worker
+    replicas: ${WORKER_REPLICAS}
+    podTemplate:
+      spec:
 ${WORKER_IMAGE_PULL_SECRETS_BLOCK}
-        mainContainer:
+        containers:
+        - name: main
           image: ${IMAGE}
           imagePullPolicy: IfNotPresent
           command:

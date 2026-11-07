@@ -1,24 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: dsv4-pro-agg
 spec:
   priorityClassName: ci-nightly-high-priority
-  pvcs:
-  - name: shared-model-cache
-    create: false
-  services:
-    Frontend:
-      extraPodMetadata:
+  components:
+  - name: Frontend
+    podTemplate:
+      metadata:
         annotations:
           nvidia.com/disable-image-pull-secret-discovery: "true"
-      volumeMounts:
-      - name: shared-model-cache
-        mountPoint: /opt/models
-      extraPodSpec:
+      spec:
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
         priorityClassName: ci-nightly-high-priority
         imagePullSecrets:
         - name: acr-token-secret
@@ -44,18 +43,21 @@ spec:
                 - key: cloud.google.com/gke-nodepool
                   operator: In
                   values: [customer-gpu-o7v, customer-gpu-w0e]
-    worker:
-      extraPodMetadata:
+        containers:
+        - name: main
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /opt/models
+  - name: worker
+    podTemplate:
+      metadata:
         annotations:
           nvidia.com/disable-image-pull-secret-discovery: "true"
-      envs:
-      # Allow long prefills and cold JIT before marking workers unhealthy.
-      - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
-        value: "1200"
-      volumeMounts:
-      - name: shared-model-cache
-        mountPoint: /opt/models
-      extraPodSpec:
+      spec:
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
         priorityClassName: ci-nightly-high-priority
         imagePullSecrets:
         - name: acr-token-secret
@@ -90,3 +92,12 @@ spec:
                 - key: nvidia.com/dynamo-component-type
                   operator: In
                   values: [worker, decode]
+        containers:
+        - name: main
+          env:
+          # Allow long prefills and cold JIT before marking workers unhealthy.
+          - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+            value: "1200"
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /opt/models

@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Recipe Contribution Guide
 
-Use `nvidia.com/v1beta1` for new recipes. `nvidia.com/v1alpha1` is deprecated; use alpha only when maintaining an existing alpha recipe. Kustomize patches must target the base manifest's API and cannot convert between the alpha and beta shapes.
+Use `nvidia.com/v1beta1` for new recipes. The `nvidia.com/v1alpha1` DynamoGraphDeployment API is deprecated and no longer served by the operator; every recipe in this tree (except the deliberately paired `deploy-v1alpha1.template.yaml` catalog entries) now authors `v1beta1`. Kustomize patches must target the base manifest's API and cannot convert between the alpha and beta shapes.
 
 Review rejects a new or refreshed base recipe whose standard role names deviate from the canon. Aggregate bases use `Frontend` and `Worker`. Disaggregated bases use `Frontend`, `PrefillWorker`, and `DecodeWorker`. Beta bases keep that literal order and place optional components afterward. Review the complete [template field contract](templates/README.md#field-contract) before contributing.
 

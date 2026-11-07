@@ -411,13 +411,11 @@ DGD; it cannot add a new worker, EPP, or other topology component. See
 for the current profiler names by backend and topology.
 
 > [!IMPORTANT]
-> Older overrides used the `nvidia.com/v1alpha1` DGD shape. They remain supported for compatibility,
-> but their merge behavior differs: `spec.services` entries merge by service name, and worker
-> `extraPodSpec.mainContainer.args` values append to the generated arguments. In `v1beta1`, map lists
+> Older overrides used the `nvidia.com/v1alpha1` DGD shape, which is no longer served — author
+> overrides in `v1beta1`. Beyond the field rename, the merge behavior differs: `v1beta1` map lists
 > such as components, containers, and environment variables merge by `name`, while atomic lists such
-> as graph-level `spec.env` and container `args` replace the generated list. Use `v1beta1` for new
-> overrides. Include the complete desired argument list for replacement, or use the append modifier
-> described below.
+> as graph-level `spec.env` and container `args` replace the generated list. Include the complete
+> desired argument list for replacement, or use the append modifier described below.
 
 For example, append KV routing flags to the generated frontend arguments:
 

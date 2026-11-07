@@ -1,55 +1,58 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: provider-aks-ib
 spec:
-  services:
-    Frontend:
-      resources:
-        requests:
-          custom:
-            ephemeral-storage: 30Gi
-    PrefillWorker:
-      extraPodSpec:
-        tolerations: &gpuTolerations
-          - key: nvidia.com/gpu
-            operator: Exists
-            effect: NoSchedule
-        mainContainer:
+  components:
+  - name: DecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           env: &aksEnvironment
-            - name: UCX_NET_DEVICES
-              value: mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1
-            - name: UCX_IB_GPU_DIRECT_RDMA
-              value: "yes"
-            - name: NCCL_SOCKET_IFNAME
-              value: eth0
+          - name: UCX_NET_DEVICES
+            value: mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1
+          - name: UCX_IB_GPU_DIRECT_RDMA
+            value: "yes"
+          - name: NCCL_SOCKET_IFNAME
+            value: eth0
+          resources:
+            requests:
+              rdma/shared_ib: "1"
+            limits:
+              rdma/shared_ib: "1"
           volumeMounts: &aksVolumeMounts
-            - name: ib
-              mountPath: /dev/infiniband
-        volumes: &aksVolumes
           - name: ib
-            hostPath:
-              path: /dev/infiniband
-      resources:
-        limits:
-          custom:
-            rdma/shared_ib: "1"
-        requests:
-          custom:
-            rdma/shared_ib: "1"
-    DecodeWorker:
-      extraPodSpec:
-        tolerations: *gpuTolerations
-        mainContainer:
+            mountPath: /dev/infiniband
+        tolerations: &gpuTolerations
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        volumes: &aksVolumes
+        - name: ib
+          hostPath:
+            path: /dev/infiniband
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          resources:
+            requests:
+              ephemeral-storage: 30Gi
+  - name: PrefillWorker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           env: *aksEnvironment
+          resources:
+            requests:
+              rdma/shared_ib: "1"
+            limits:
+              rdma/shared_ib: "1"
           volumeMounts: *aksVolumeMounts
+        tolerations: *gpuTolerations
         volumes: *aksVolumes
-      resources:
-        limits:
-          custom:
-            rdma/shared_ib: "1"
-        requests:
-          custom:
-            rdma/shared_ib: "1"

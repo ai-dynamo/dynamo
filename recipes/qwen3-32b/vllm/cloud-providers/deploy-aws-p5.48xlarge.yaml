@@ -10,24 +10,20 @@
 # You may edit a copy before applying it.
 
 # Qwen3-32B BF16 disagg, 1 prefill + 1 decode, with provider-specific RDMA in overlays.
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: q32b-1p1d-cloud-provider
 spec:
-  pvcs:
-  - create: false
-    name: model-cache
-  services:
-    DecodeWorker:
-      componentType: worker
-      envFromSecret: hf-token-secret
-      extraPodMetadata:
+  components:
+  - name: DecodeWorker
+    podTemplate:
+      metadata:
         annotations:
           prometheus.io/path: /metrics
           prometheus.io/port: "19090"
           prometheus.io/scrape: "true"
-      extraPodSpec:
+      spec:
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -51,8 +47,8 @@ spec:
                   values:
                   - worker
               topologyKey: topology.kubernetes.io/zone
-        mainContainer:
-          args:
+        containers:
+        - args:
           - |
             exec python3 -m dynamo.vllm \
               --model "${MODEL_NAME}" \
@@ -113,7 +109,19 @@ spec:
             value: /model-cache
           - name: VLLM_LOGGING_LEVEL
             value: INFO
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "4"
+              vpc.amazonaws.com/efa: "16"
+            requests:
+              ephemeral-storage: 2Gi
+              nvidia.com/gpu: "4"
+              vpc.amazonaws.com/efa: "16"
           securityContext:
             capabilities:
               add:
@@ -129,53 +137,17 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
-      replicas: 1
-      resources:
-        limits:
-          custom:
-            vpc.amazonaws.com/efa: "16"
-          gpu: "4"
-        requests:
-          custom:
-            ephemeral-storage: 2Gi
-            vpc.amazonaws.com/efa: "16"
-          gpu: "4"
-      subComponentType: decode
-    Frontend:
-      componentType: frontend
-      envs:
-      - name: HF_HOME
-        value: /model-cache
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
-          securityContext:
-            runAsUser: 0
-          volumeMounts:
-          - mountPath: /model-cache
-            name: model-cache
-          workingDir: /workspace
-        volumes:
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
-      replicas: 1
-      resources:
-        limits:
-          cpu: "8"
-        requests:
-          cpu: "4"
-      subComponentType: null
-    # Provider Components target backend-neutral worker service keys.
-    PrefillWorker:
-      componentType: worker
-      envFromSecret: hf-token-secret
-      extraPodMetadata:
+    replicas: 1
+    type: decode
+  # Provider Components target backend-neutral worker service keys.
+  - name: PrefillWorker
+    podTemplate:
+      metadata:
         annotations:
           prometheus.io/path: /metrics
           prometheus.io/port: "19090"
           prometheus.io/scrape: "true"
-      extraPodSpec:
+      spec:
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -199,8 +171,8 @@ spec:
                   values:
                   - worker
               topologyKey: topology.kubernetes.io/zone
-        mainContainer:
-          args:
+        containers:
+        - args:
           - |
             exec python3 -m dynamo.vllm \
               --model "${MODEL_NAME}" \
@@ -260,7 +232,19 @@ spec:
             value: /model-cache
           - name: VLLM_LOGGING_LEVEL
             value: INFO
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "4"
+              vpc.amazonaws.com/efa: "16"
+            requests:
+              ephemeral-storage: 2Gi
+              nvidia.com/gpu: "4"
+              vpc.amazonaws.com/efa: "16"
           securityContext:
             capabilities:
               add:
@@ -276,15 +260,31 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
-      replicas: 1
-      resources:
-        limits:
-          custom:
-            vpc.amazonaws.com/efa: "16"
-          gpu: "4"
-        requests:
-          custom:
-            ephemeral-storage: 2Gi
-            vpc.amazonaws.com/efa: "16"
-          gpu: "4"
-      subComponentType: prefill
+    replicas: 1
+    type: prefill
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - env:
+          - name: HF_HOME
+            value: /model-cache
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
+          name: main
+          resources:
+            limits:
+              cpu: "8"
+            requests:
+              cpu: "4"
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+          - mountPath: /model-cache
+            name: model-cache
+          workingDir: /workspace
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+    replicas: 1
+    type: frontend

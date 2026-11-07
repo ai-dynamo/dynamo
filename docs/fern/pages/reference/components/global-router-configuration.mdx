@@ -53,37 +53,38 @@ The Global Router reads a JSON file at the path given to `--config`. There is no
         }
     ---
     # 2. Control DGD: GlobalRouter service with the ConfigMap mounted
-    apiVersion: nvidia.com/v1alpha1
+    apiVersion: nvidia.com/v1beta1
     kind: DynamoGraphDeployment
     metadata:
       name: gp-ctrl
     spec:
-      services:
-        GlobalRouter:
-          componentType: default
-          replicas: 1
-          extraPodSpec:
-            volumes:
-              - name: global-router-config
-                configMap:
-                  name: gp-global-router-config
-            mainContainer:
+      components:
+      - name: GlobalRouter
+        replicas: 1
+        podTemplate:
+          spec:
+            containers:
+            - name: main
               image: ${DYNAMO_IMAGE}
               command:
-                - python3
-                - -m
-                - dynamo.global_router
+              - python3
+              - -m
+              - dynamo.global_router
               args:
-                - --config
-                - /config/global_router_config.json
-                - --model-name
-                - ${MODEL_NAME}
-                - --namespace
-                - ${K8S_NAMESPACE}-gp-ctrl
+              - --config
+              - /config/global_router_config.json
+              - --model-name
+              - ${MODEL_NAME}
+              - --namespace
+              - ${K8S_NAMESPACE}-gp-ctrl
               volumeMounts:
-                - name: global-router-config
-                  mountPath: /config
-                  readOnly: true
+              - name: global-router-config
+                mountPath: /config
+                readOnly: true
+            volumes:
+            - name: global-router-config
+              configMap:
+                name: gp-global-router-config
     ```
 
     See [examples/global_planner/global-planner-vllm-test.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-vllm-test.yaml) for the complete end-to-end example with two prefill pools and one decode pool.

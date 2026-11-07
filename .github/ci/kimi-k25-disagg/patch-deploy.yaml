@@ -1,25 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: kimi-k25-disagg-kv-eagle
 spec:
   backendFramework: trtllm
   priorityClassName: ci-nightly-high-priority
-  pvcs:
-  - name: shared-model-cache
-    create: false
-  services:
-    Frontend:
-      extraPodMetadata: &podMetadata
+  components:
+  - name: Frontend
+    podTemplate:
+      metadata: &podMetadata
         annotations:
           nvidia.com/disable-image-pull-secret-discovery: "true"
-      volumeMounts:
-      - name: shared-model-cache
-        mountPoint: /opt/models
-      extraPodSpec:
+      spec:
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
         priorityClassName: ci-nightly-high-priority
         imagePullSecrets:
         - name: acr-token-secret
@@ -55,15 +54,17 @@ spec:
                   matchExpressions:
                   - key: nvidia.com/dynamo-graph-deployment-name
                     operator: Exists
-    prefill:
-      replicas: 1
-      resources:
-        requests:
-          gpu: "4"
-      sharedMemory:
-        size: 179Gi
-      extraPodMetadata: *podMetadata
-      extraPodSpec:
+        containers:
+        - name: main
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /opt/models
+  - name: decode
+    replicas: 1
+    sharedMemorySize: 179Gi
+    podTemplate:
+      metadata: *podMetadata
+      spec:
         priorityClassName: ci-nightly-high-priority
         imagePullSecrets:
         - name: acr-token-secret
@@ -80,15 +81,17 @@ spec:
                 - key: nvidia.com/dynamo-component-type
                   operator: In
                   values: [prefill, decode]
-    decode:
-      replicas: 1
-      resources:
-        requests:
-          gpu: "4"
-      sharedMemory:
-        size: 179Gi
-      extraPodMetadata: *podMetadata
-      extraPodSpec:
+        containers:
+        - name: main
+          resources:
+            requests:
+              nvidia.com/gpu: "4"
+  - name: prefill
+    replicas: 1
+    sharedMemorySize: 179Gi
+    podTemplate:
+      metadata: *podMetadata
+      spec:
         priorityClassName: ci-nightly-high-priority
         imagePullSecrets:
         - name: acr-token-secret
@@ -97,3 +100,8 @@ spec:
         affinity:
           nodeAffinity: *gb200NodeAffinity
           podAffinity: *workerPodAffinity
+        containers:
+        - name: main
+          resources:
+            requests:
+              nvidia.com/gpu: "4"
