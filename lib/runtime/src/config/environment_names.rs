@@ -76,6 +76,9 @@ pub mod logging {
         /// Service name for OTLP traces and logs
         pub const OTEL_SERVICE_NAME: &str = "OTEL_SERVICE_NAME";
 
+        /// Opt into experimental OpenTelemetry semantic conventions (comma-separated).
+        pub const OTEL_SEMCONV_STABILITY_OPT_IN: &str = "OTEL_SEMCONV_STABILITY_OPT_IN";
+
         /// Set to "otlp" to export metrics over OTLP. Any other value disables it.
         /// Prometheus scraping is unaffected either way.
         pub const OTEL_METRICS_EXPORTER: &str = "OTEL_METRICS_EXPORTER";
