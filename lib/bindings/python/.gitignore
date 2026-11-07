@@ -1,2 +1,4 @@
 /target
 python/dynamo/.*.so
+# Bundled jemalloc, copied in by wheel builds (container/deps/jemalloc/build.sh)
+src/dynamo/libjemalloc_dynamo.*

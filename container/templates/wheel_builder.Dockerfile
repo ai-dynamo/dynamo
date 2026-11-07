@@ -615,6 +615,13 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 FROM wheel_builder_base AS runtime_wheel_builder
 
 {% if target not in ("dev", "local-dev") %}
+# jemalloc shared library bundled in the ai-dynamo-runtime wheel: Dynamo's Python entrypoints
+# preload it unless DYN_DISABLE_JEMALLOC is set. Built on this manylinux base so its glibc
+# symbol versions match the wheel's platform tag, and before the source COPY so it stays cached.
+COPY container/deps/jemalloc/build.sh /tmp/build_jemalloc.sh
+RUN /tmp/build_jemalloc.sh {{ context.dynamo.jemalloc_version }} {{ context.dynamo.jemalloc_sha256 }} \
+        /opt/jemalloc-dynamo /tmp/native-sources
+
 # Copy source code (order matters for layer caching)
 COPY .cargo/ /opt/dynamo/.cargo/
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
@@ -641,6 +648,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
+    cp /opt/jemalloc-dynamo/libjemalloc_dynamo.so.2 src/dynamo/ && \
+    cp /opt/jemalloc-dynamo/COPYING src/dynamo/libjemalloc_dynamo.COPYING && \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     # Skip maturin's built-in repair: it would graft the in-tree libav* into the
     # wheel, which the codec gate rejects. Repair with those sonames excluded so

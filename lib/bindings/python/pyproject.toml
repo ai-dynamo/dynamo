@@ -49,6 +49,10 @@ module-name = "dynamo._core"
 manifest-path = "Cargo.toml"
 python-packages = ["dynamo"]
 python-source = "src"
+# The bundled jemalloc (libjemalloc_dynamo.so.2 and its license) that wheel builds put in
+# src/dynamo/ (container/deps/jemalloc/build.sh); see src/dynamo/_jemalloc.py. Listed
+# explicitly because they are gitignored build outputs. Absent from `maturin develop` builds.
+include = [{ path = "src/dynamo/libjemalloc_dynamo.*", format = "wheel" }]
 
 [build-system]
 requires = ["maturin>=1.0,<2.0", "patchelf"]
