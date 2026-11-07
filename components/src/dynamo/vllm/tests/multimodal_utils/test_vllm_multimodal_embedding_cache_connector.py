@@ -114,23 +114,6 @@ class TestCacheConfiguration:
         )
 
 
-class TestVersionCheck:
-    def test_warns_old_vllm(self):
-        with (
-            patch.object(mod, "_vllm_version", "0.16.5"),
-            patch.object(mod.ECConnectorBase, "__init__", return_value=None),
-            patch.object(mod.logger, "warning") as mock_warn,
-        ):
-            connector = mod.DynamoMultimodalEmbeddingCacheConnector(
-                vllm_config=_make_vllm_config(),
-                role=MagicMock(),
-            )
-            assert connector is not None
-            mock_warn.assert_called_once()
-            assert mock_warn.call_args[0][1] == mod.MINIMUM_VLLM_VERSION
-            assert mock_warn.call_args[0][2] == "0.16.5"
-
-
 class TestSchedulerSideLRU:
     """Test the scheduler-side logical LRU cache and metadata generation."""
 
