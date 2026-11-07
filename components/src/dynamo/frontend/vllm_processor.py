@@ -56,6 +56,7 @@ from .utils import (
     as_error_envelope,
     backend_invalid_argument_to_http_error,
     extract_mm_urls,
+    finish_reason_error_message,
     handle_engine_error,
     make_internal_error,
     nvext_extra_field_requested,
@@ -391,19 +392,6 @@ class _ReasoningUsageAnnotator:
             details["reasoning_tokens"] = self.total
         annotated["completion_tokens_details"] = details
         return annotated
-
-
-def _finish_reason_error_message(
-    raw_reason: str | dict[str, Any] | None,
-) -> str | None:
-    """Extract a backend error before OpenAI finish-reason projection."""
-    if isinstance(raw_reason, dict):
-        error_message = raw_reason.get("error")
-        return error_message if isinstance(error_message, str) else None
-    if isinstance(raw_reason, str) and raw_reason.startswith("error"):
-        _, separator, detail = raw_reason.partition(":")
-        return detail.strip() if separator and detail.strip() else raw_reason
-    return None
 
 
 def map_finish_reason(
@@ -1334,7 +1322,7 @@ class VllmProcessor:
                     break
 
                 raw_finish_reason = engine_response.get("finish_reason")
-                error_message = _finish_reason_error_message(raw_finish_reason)
+                error_message = finish_reason_error_message(raw_finish_reason)
                 if error_message is not None:
                     logger.error(
                         "Router reported a generation error for request %s: %s",
