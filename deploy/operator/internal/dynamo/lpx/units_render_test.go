@@ -7,6 +7,7 @@ package lpx
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -114,5 +115,64 @@ func TestRenderUnitsHaveNoLegacyConfig(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestUnitsSpecDecodePeerBuildPaths(t *testing.T) {
+	t.Parallel()
+	t.Log("Keep both builds mounted while each Quasar names its peer through an authored argument")
+	bundle := testUnitBundle{architecture: deploymentcapnpv1.LpuArchitecture_lp20, devicesPerNode: 8,
+		partitions: testUnitPartitions(8, nil, 0), units: testSingleUnits(testNodesReservation(1, 0))}
+	build, err := acquireTestUnitBundle(t, bundle)
+	require.NoError(t, err)
+	stages := map[string]corev1.PodTemplateSpec{}
+	for _, stage := range []string{"draft", "target"} {
+		spec := renderTestPodSpec()
+		spec.Containers[0].VolumeMounts = slices.DeleteFunc(spec.Containers[0].VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == lpuConfigVolumeName })
+		own, peer := "LPX_DRAFT_MODEL_PATH", "LPX_TARGET_MODEL_PATH"
+		if stage == "target" {
+			own, peer = peer, own
+		}
+		spec.Containers[0].Command = []string{"quasar"}
+		spec.Containers[0].Args = []string{"--model-path", "$(" + own + ")", "--peer-model-path", "$(" + peer + ")"}
+		stages[stage] = corev1.PodTemplateSpec{Spec: spec}
+	}
+	draftTemplate, targetTemplate := stages["draft"], stages["target"]
+	source := newSelectedTestDGD(t, "units-pair",
+		testLPXComponent("draft", "draft-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &draftTemplate}),
+		testLPXComponent("target", "target-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &targetTemplate}, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: targetTemplate.DeepCopy()}),
+	)
+	selected, err := ResolveWorkload(t.Context(), fake.NewClientBuilder().Build(), source, singleGroupComponents(t, source), staticModelRegistry{"draft-build": build, "target-build": build})
+	require.NoError(t, err)
+	plan, err := selected.PlanNodeLocalMaterialization("units-pair", source.GetComponentByName(selected.ServingComponentName()))
+	require.NoError(t, err)
+	rendered, err := RenderNodeLocal(selected, plan, RenderInput{Stages: stages, Conductor: targetTemplate.DeepCopy()})
+	require.NoError(t, err)
+	require.Empty(t, rendered.Resources)
+	require.Len(t, rendered.Cliques, 3)
+	for index, agent := range plan.Agents {
+		var cliqueIndex int
+		for i, clique := range rendered.Cliques {
+			if clique.Name == agent.TemplateName {
+				cliqueIndex = i
+			}
+		}
+		clique := rendered.Cliques[cliqueIndex]
+		main := clique.Spec.PodSpec.Containers[0]
+		require.Contains(t, main.Env, corev1.EnvVar{Name: "LPX_DRAFT_MODEL_PATH", Value: "/models/draft-build"})
+		require.Contains(t, main.Env, corev1.EnvVar{Name: "LPX_TARGET_MODEL_PATH", Value: "/models/target-build"})
+		stage := []string{"draft", "target"}[index]
+		require.Equal(t, stages[stage].Spec.Containers[0].Args, main.Args)
+		require.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: "model-storage", MountPath: "/models"})
+		require.Contains(t, clique.Spec.PodSpec.Volumes, corev1.Volume{Name: "model-storage", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"}}})
+		// Kubernetes expands these command arguments using the already-published
+		// container environment. The operator preserves the authored CLI itself.
+		own, peer := "/models/draft-build", "/models/target-build"
+		if stage == "target" {
+			own, peer = peer, own
+		}
+		expand := strings.NewReplacer("$(LPX_DRAFT_MODEL_PATH)", testContainerEnvValue(main.Env, "LPX_DRAFT_MODEL_PATH"), "$(LPX_TARGET_MODEL_PATH)", testContainerEnvValue(main.Env, "LPX_TARGET_MODEL_PATH"))
+		require.Equal(t, own, expand.Replace(main.Args[1]))
+		require.Equal(t, peer, expand.Replace(main.Args[3]))
 	}
 }
