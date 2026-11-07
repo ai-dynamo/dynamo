@@ -11,7 +11,7 @@ use crate::identity::CacheOwnerId;
 use crate::kv_hints::KvTransferCandidates;
 use crate::protocols::*;
 use dynamo_tokens::SequenceHash;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 #[cfg(feature = "bench")]
 use super::{EventCompletionBuffer, EventCompletionWriter, ObservationSeal};
@@ -446,6 +446,174 @@ impl dynamo_runtime::protocols::maybe_error::MaybeError for IndexerRecordRouting
     }
 }
 
+/// Confirmed device caps independent of mutable overlap scores.
+///
+/// A uniform result owns the exact query worker set, allowing the tree's set to
+/// move here without allocating and hashing another map. Zero remains a known
+/// cap; a worker outside the set has no cap. Nonuniform updates materialize the
+/// explicit representation and preserve every previously confirmed entry.
+#[derive(Debug, Clone)]
+pub enum HybridResumeCaps {
+    Explicit(FxHashMap<WorkerWithDpRank, u32>),
+    UniformConfirmed {
+        workers: FxHashSet<WorkerWithDpRank>,
+        cap: u32,
+    },
+}
+
+impl Default for HybridResumeCaps {
+    fn default() -> Self {
+        Self::Explicit(FxHashMap::default())
+    }
+}
+
+impl HybridResumeCaps {
+    pub fn uniform_confirmed(workers: FxHashSet<WorkerWithDpRank>, cap: u32) -> Self {
+        Self::UniformConfirmed { workers, cap }
+    }
+
+    pub fn get(&self, worker: &WorkerWithDpRank) -> Option<&u32> {
+        match self {
+            Self::Explicit(caps) => caps.get(worker),
+            Self::UniformConfirmed { workers, cap } => workers.contains(worker).then_some(cap),
+        }
+    }
+
+    pub fn contains_key(&self, worker: &WorkerWithDpRank) -> bool {
+        self.get(worker).is_some()
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Explicit(caps) => caps.len(),
+            Self::UniformConfirmed { workers, .. } => workers.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn iter(&self) -> HybridResumeCapsIter<'_> {
+        match self {
+            Self::Explicit(caps) => HybridResumeCapsIter::Explicit(caps.iter()),
+            Self::UniformConfirmed { workers, cap } => HybridResumeCapsIter::Uniform {
+                workers: workers.iter(),
+                cap,
+            },
+        }
+    }
+
+    pub fn insert(&mut self, worker: WorkerWithDpRank, cap: u32) -> Option<u32> {
+        self.materialize().insert(worker, cap)
+    }
+
+    pub fn reserve(&mut self, additional: usize) {
+        if additional > 0 {
+            self.materialize().reserve(additional);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        match self {
+            Self::Explicit(caps) => caps.clear(),
+            Self::UniformConfirmed { workers, .. } => workers.clear(),
+        }
+    }
+
+    fn materialize(&mut self) -> &mut FxHashMap<WorkerWithDpRank, u32> {
+        if let Self::UniformConfirmed { workers, cap } = self {
+            let cap = *cap;
+            let entries = std::mem::take(workers)
+                .into_iter()
+                .map(|worker| (worker, cap))
+                .collect();
+            *self = Self::Explicit(entries);
+        }
+        let Self::Explicit(caps) = self else {
+            unreachable!("uniform caps were materialized")
+        };
+        caps
+    }
+}
+
+impl FromIterator<(WorkerWithDpRank, u32)> for HybridResumeCaps {
+    fn from_iter<T: IntoIterator<Item = (WorkerWithDpRank, u32)>>(entries: T) -> Self {
+        Self::Explicit(entries.into_iter().collect())
+    }
+}
+
+impl Extend<(WorkerWithDpRank, u32)> for HybridResumeCaps {
+    fn extend<T: IntoIterator<Item = (WorkerWithDpRank, u32)>>(&mut self, entries: T) {
+        self.materialize().extend(entries);
+    }
+}
+
+impl PartialEq for HybridResumeCaps {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len()
+            && self
+                .iter()
+                .all(|(worker, cap)| other.get(worker) == Some(cap))
+    }
+}
+
+impl Eq for HybridResumeCaps {}
+
+impl PartialEq<FxHashMap<WorkerWithDpRank, u32>> for HybridResumeCaps {
+    fn eq(&self, other: &FxHashMap<WorkerWithDpRank, u32>) -> bool {
+        self.len() == other.len()
+            && self
+                .iter()
+                .all(|(worker, cap)| other.get(worker) == Some(cap))
+    }
+}
+
+impl PartialEq<HybridResumeCaps> for FxHashMap<WorkerWithDpRank, u32> {
+    fn eq(&self, other: &HybridResumeCaps) -> bool {
+        other == self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum HybridResumeCapsIter<'a> {
+    Explicit(std::collections::hash_map::Iter<'a, WorkerWithDpRank, u32>),
+    Uniform {
+        workers: std::collections::hash_set::Iter<'a, WorkerWithDpRank>,
+        cap: &'a u32,
+    },
+}
+
+impl<'a> Iterator for HybridResumeCapsIter<'a> {
+    type Item = (&'a WorkerWithDpRank, &'a u32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Explicit(entries) => entries.next(),
+            Self::Uniform { workers, cap } => workers.next().map(|worker| (worker, *cap)),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Explicit(entries) => entries.size_hint(),
+            Self::Uniform { workers, .. } => workers.size_hint(),
+        }
+    }
+}
+
+impl ExactSizeIterator for HybridResumeCapsIter<'_> {}
+impl std::iter::FusedIterator for HybridResumeCapsIter<'_> {}
+
+impl<'a> IntoIterator for &'a HybridResumeCaps {
+    type Item = (&'a WorkerWithDpRank, &'a u32);
+    type IntoIter = HybridResumeCapsIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 /// Rich non-wire query result for router-local device tier lookups.
 #[derive(Debug, Clone, Default)]
 pub struct MatchDetails {
@@ -456,7 +624,7 @@ pub struct MatchDetails {
     /// Optional root-aligned device candidates used to build compact KV transfer hints.
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
     /// Confirmed device resume caps, including zero for known hybrid workers.
-    pub hybrid_resume_caps: FxHashMap<WorkerWithDpRank, u32>,
+    pub hybrid_resume_caps: HybridResumeCaps,
 }
 
 impl MatchDetails {
@@ -669,4 +837,88 @@ pub(super) struct RoutingDecisionRequest {
     pub(super) worker: WorkerWithDpRank,
     pub(super) local_hashes: Vec<LocalBlockHash>,
     pub(super) sequence_hashes: Vec<SequenceHash>,
+}
+
+#[cfg(test)]
+mod hybrid_resume_caps_tests {
+    use super::*;
+
+    #[test]
+    fn uniform_caps_remain_confirmed_when_scores_change() {
+        let first = WorkerWithDpRank::new(7, 0);
+        let second = WorkerWithDpRank::new(7, 1);
+        let outside = WorkerWithDpRank::new(8, 0);
+        let workers = FxHashSet::from_iter([first, second]);
+        let capacity = workers.capacity();
+        let mut details = MatchDetails {
+            hybrid_resume_caps: HybridResumeCaps::UniformConfirmed { workers, cap: 8 },
+            ..Default::default()
+        };
+        details
+            .overlap_scores
+            .scores
+            .extend([(first, 8), (second, 8)]);
+        details.overlap_scores.scores.insert(first, 99);
+        details.overlap_scores.scores.remove(&second);
+        details.overlap_scores.scores.insert(outside, 100);
+
+        assert_eq!(details.hybrid_resume_caps.get(&first), Some(&8));
+        assert_eq!(details.hybrid_resume_caps.get(&second), Some(&8));
+        assert_eq!(details.hybrid_resume_caps.get(&outside), None);
+        assert_eq!(details.hybrid_resume_caps.len(), 2);
+        let HybridResumeCaps::UniformConfirmed { workers, .. } = &details.hybrid_resume_caps else {
+            panic!("reading caps must preserve their uniform representation")
+        };
+        assert_eq!(workers.capacity(), capacity);
+        let mut entries = details.hybrid_resume_caps.iter();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.next().map(|(_, cap)| *cap), Some(8));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries.clone().count(), 1);
+    }
+
+    #[test]
+    fn materializing_uniform_caps_preserves_zero_and_unrelated_workers() {
+        let first = WorkerWithDpRank::new(1, 0);
+        let second = WorkerWithDpRank::new(2, 0);
+        let outside = WorkerWithDpRank::new(3, 1);
+        let mut caps = HybridResumeCaps::UniformConfirmed {
+            workers: FxHashSet::from_iter([first, second]),
+            cap: 0,
+        };
+        assert_eq!(caps.insert(first, 4), Some(0));
+        assert!(matches!(caps, HybridResumeCaps::Explicit(_)));
+        assert_eq!(caps.get(&second), Some(&0));
+        assert_eq!(caps.insert(outside, 12), None);
+        caps.extend([(first, 5), (outside, 13)]);
+        assert_eq!(
+            caps,
+            FxHashMap::from_iter([(first, 5), (second, 0), (outside, 13)])
+        );
+        caps.clear();
+        assert!(caps.is_empty());
+        assert_eq!(caps.get(&second), None);
+    }
+
+    #[test]
+    fn explicit_and_uniform_caps_have_the_same_entry_semantics() {
+        let worker = WorkerWithDpRank::new(1, 2);
+        let uniform = HybridResumeCaps::UniformConfirmed {
+            workers: FxHashSet::from_iter([worker]),
+            cap: 0,
+        };
+        let explicit = HybridResumeCaps::from_iter([(worker, 0)]);
+        assert_eq!(uniform, explicit);
+        assert_eq!(FxHashMap::from_iter([(worker, 0)]), uniform);
+        let mut empty = uniform.clone();
+        empty.clear();
+        assert_eq!(uniform.get(&worker), Some(&0));
+        assert_eq!(empty, HybridResumeCaps::default());
+        assert_eq!(empty.iter().len(), 0);
+        assert!(!empty.contains_key(&worker));
+        assert!(matches!(
+            HybridResumeCaps::default(),
+            HybridResumeCaps::Explicit(_)
+        ));
+    }
 }

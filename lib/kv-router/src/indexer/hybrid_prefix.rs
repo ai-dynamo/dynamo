@@ -14,6 +14,116 @@ use crate::protocols::{
     StorageTier, WorkerWithDpRank,
 };
 
+/// Speculates on an exact, event-published certificate for a common endpoint.
+/// Obvious misses collect ordinary evidence during the same walk. Inconclusive
+/// attempts are discarded before retrying the ordinary evaluator on the full
+/// query, preserving its first-observation and revision semantics.
+pub(crate) struct EndpointPrefixProof<'a> {
+    residency: &'a KvCacheGroupResidency,
+    cutoff: u64,
+    certificate: Option<super::kv_cache_groups::EndpointCertificateRead>,
+    certificate_hash: Option<ExternalSequenceBlockHash>,
+    fallback: Option<HybridPrefixEvaluator>,
+    allow_early_fallback: bool,
+}
+
+impl<'a> EndpointPrefixProof<'a> {
+    pub(crate) fn new(residency: &'a KvCacheGroupResidency) -> Self {
+        Self {
+            residency,
+            cutoff: 0,
+            certificate: None,
+            certificate_hash: None,
+            fallback: None,
+            allow_early_fallback: true,
+        }
+    }
+
+    pub(crate) fn bounded(residency: &'a KvCacheGroupResidency) -> Self {
+        Self {
+            allow_early_fallback: false,
+            ..Self::new(residency)
+        }
+    }
+
+    pub(crate) fn confirms(&self, details: &MatchDetails) -> bool {
+        details.overlap_scores.scores.is_empty()
+            || (!details.hybrid_resume_caps.is_empty()
+                && self.certificate.as_ref().is_some_and(|certificate| {
+                    self.residency.is_certificate_read_valid(certificate)
+                }))
+    }
+
+    pub(crate) fn finish(&mut self, details: &mut MatchDetails) -> bool {
+        if let Some(evaluator) = &mut self.fallback {
+            evaluator.prepare_device(details);
+            evaluator.finish(details, &mut Default::default(), &Default::default());
+            true
+        } else {
+            self.confirms(details)
+        }
+    }
+}
+
+impl MatchObserver for EndpointPrefixProof<'_> {
+    fn observes_path(&self) -> bool {
+        self.fallback.is_some()
+    }
+
+    fn reserve_workers(&mut self, _count: usize) {
+        self.cutoff = self.residency.capture_cutoff();
+    }
+
+    fn begin_path(&mut self, count: usize, endpoint_hint: Option<ExternalSequenceBlockHash>) {
+        self.reserve_workers(count);
+        if let Some(hash) = endpoint_hint {
+            self.certificate = self.residency.endpoint_certificate_read(hash, self.cutoff);
+            self.certificate_hash = Some(hash);
+            if self.allow_early_fallback
+                && self
+                    .certificate
+                    .as_ref()
+                    .is_none_or(|certificate| certificate.workers().len() < count)
+            {
+                self.certificate = None;
+                self.certificate_hash = None;
+                let mut evaluator = HybridPrefixEvaluator::new(self.residency, None);
+                evaluator.reserve_workers(count);
+                self.fallback = Some(evaluator);
+            }
+        }
+    }
+
+    fn observe_worker(&mut self, worker: WorkerWithDpRank) {
+        if let Some(evaluator) = &mut self.fallback {
+            evaluator.observe_worker(worker);
+        }
+    }
+
+    fn observe_block(&mut self, position: usize, hash: ExternalSequenceBlockHash) {
+        if let Some(evaluator) = &mut self.fallback {
+            evaluator.observe_block(position, hash);
+        }
+    }
+
+    fn uniform_resume_workers(
+        &mut self,
+        _position: u32,
+        hash: ExternalSequenceBlockHash,
+    ) -> Option<&FxHashSet<WorkerWithDpRank>> {
+        if self.fallback.is_some() {
+            return None;
+        }
+        if self.certificate_hash != Some(hash) {
+            self.certificate = self.residency.endpoint_certificate_read(hash, self.cutoff);
+            self.certificate_hash = Some(hash);
+        }
+        self.certificate
+            .as_ref()
+            .map(|certificate| certificate.workers())
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Checkpoint {
     position: usize,
@@ -1267,6 +1377,43 @@ mod tests {
             crate::test_utils::recurrent_store(worker, StorageTier::Device, position, 0, 1);
         event.kv_cache_group.as_mut().unwrap().alignment_blocks = Some(alignment);
         residency.apply(&event);
+    }
+
+    #[test]
+    fn early_proof_rejection_finishes_the_same_walk_and_freezes_unknown_layout() {
+        let residency = KvCacheGroupResidency::new();
+        let known = WorkerWithDpRank::new(1, 0);
+        let initially_unknown = WorkerWithDpRank::new(2, 0);
+        residency.declare_groups(ResidencyOwner::worker(known), &[0]);
+        store_device_checkpoint(&residency, known, 11, 1);
+        let mut proof = EndpointPrefixProof::new(&residency);
+        proof.begin_path(2, Some(ExternalSequenceBlockHash(11)));
+        assert!(
+            proof.observes_path(),
+            "insufficient membership enters the ordinary evaluator early"
+        );
+        proof.observe_worker(known);
+        proof.observe_worker(initially_unknown);
+        assert!(
+            proof.fallback.as_ref().unwrap().workers[&initially_unknown]
+                .captured
+                .is_none()
+        );
+        // A later registration cannot replace this walk's first None capture.
+        residency.declare_groups(ResidencyOwner::worker(initially_unknown), &[0]);
+        store_device_checkpoint(&residency, initially_unknown, 11, 1);
+        proof.observe_block(1, ExternalSequenceBlockHash(11));
+        let mut raw = MatchDetails::default();
+        raw.overlap_scores
+            .scores
+            .extend([(known, 1), (initially_unknown, 1)]);
+        assert!(
+            proof.finish(&mut raw),
+            "early fallback must finish without a second tree walk"
+        );
+        assert_eq!(raw.hybrid_resume_caps.get(&known), Some(&1));
+        assert_eq!(raw.hybrid_resume_caps.get(&initially_unknown), None);
+        assert_eq!(raw.overlap_scores.scores.get(&initially_unknown), Some(&1));
     }
 
     #[test]

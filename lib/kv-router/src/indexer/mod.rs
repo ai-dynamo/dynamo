@@ -62,6 +62,8 @@ fn warn_on_unit_block_size(indexer_type: &'static str, kv_block_size: u32) {
         );
     }
 }
+// The standalone-indexer lookup is the optional consumer of this module.
+#[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
 pub(crate) mod hybrid_prefix;
 mod kv_cache_groups;
 mod kv_indexer;

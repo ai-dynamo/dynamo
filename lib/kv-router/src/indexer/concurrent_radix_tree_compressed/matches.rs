@@ -78,7 +78,7 @@ impl ConcurrentRadixTreeCompressed {
         sequence: S,
         early_exit: bool,
         retain_kv_transfer_chain: bool,
-        observer: Option<&mut dyn MatchObserver>,
+        mut observer: Option<&mut dyn MatchObserver>,
     ) -> MatchDetails {
         let mut details = MatchDetails::new();
         if sequence.len() == 0 {
@@ -101,11 +101,13 @@ impl ConcurrentRadixTreeCompressed {
                 scores,
                 Some(last_matched_hashes),
                 kv_transfer_chain.as_mut(),
-                observer,
+                observer
+                    .as_mut()
+                    .map(|observer| &mut **observer as &mut dyn MatchObserver),
             )
         };
 
-        Self::record_surviving_details(&mut details, &walk_result);
+        Self::record_surviving_details(&mut details, walk_result, observer);
         if let Some(block_hashes) = kv_transfer_chain {
             details.retain_kv_transfer_candidates(block_hashes);
         }
@@ -185,14 +187,50 @@ impl ConcurrentRadixTreeCompressed {
         }
     }
 
-    fn record_surviving_details(details: &mut MatchDetails, walk_result: &MatchWalkResult) {
-        for worker in &walk_result.active {
-            details
-                .overlap_scores
-                .scores
-                .insert(*worker, walk_result.matched_depth);
-            if let Some(hash) = walk_result.prev_edge_last_hash {
-                details.last_matched_hashes.insert(*worker, hash);
+    fn record_surviving_details(
+        details: &mut MatchDetails,
+        walk_result: MatchWalkResult,
+        mut observer: Option<&mut dyn MatchObserver>,
+    ) {
+        // A uniform result has no earlier cutoffs or workers dropped at a node
+        // boundary. Its already-owned active set can carry the immutable caps.
+        let eligible = if details.overlap_scores.scores.is_empty() && !walk_result.active.is_empty()
+        {
+            walk_result.prev_edge_last_hash.and_then(|hash| {
+                observer.as_mut().and_then(|observer| {
+                    observer.uniform_resume_workers(walk_result.matched_depth, hash)
+                })
+            })
+        } else {
+            None
+        };
+        if let Some(eligible) = eligible {
+            let mut confirmed = true;
+            for worker in &walk_result.active {
+                confirmed &= eligible.contains(worker);
+                details
+                    .overlap_scores
+                    .scores
+                    .insert(*worker, walk_result.matched_depth);
+                if let Some(hash) = walk_result.prev_edge_last_hash {
+                    details.last_matched_hashes.insert(*worker, hash);
+                }
+            }
+            if confirmed {
+                details.hybrid_resume_caps = super::super::HybridResumeCaps::uniform_confirmed(
+                    walk_result.active.into_workers(),
+                    walk_result.matched_depth,
+                );
+            }
+        } else {
+            for worker in &walk_result.active {
+                details
+                    .overlap_scores
+                    .scores
+                    .insert(*worker, walk_result.matched_depth);
+                if let Some(hash) = walk_result.prev_edge_last_hash {
+                    details.last_matched_hashes.insert(*worker, hash);
+                }
             }
         }
     }

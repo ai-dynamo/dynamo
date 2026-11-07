@@ -85,6 +85,8 @@ impl LowerTierIndexers {
         self.set_residency_routing_snapshot(ResidencyRoutingSnapshot::from_projection(projection));
     }
 
+    // The hybrid bridge is consumed by the optional standalone-indexer lookup.
+    #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
     pub(crate) fn routing_snapshot(&self) -> Arc<ResidencyRoutingSnapshot> {
         self.routing_snapshot.load_full()
     }
@@ -335,6 +337,8 @@ pub fn query_lower_tiers_with_options_and_snapshot(
     query_lower_tiers_inner(indexers, sequence, device_matches, options, snapshot, None)
 }
 
+// The hybrid bridge is consumed by the optional standalone-indexer lookup.
+#[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
 pub(crate) fn query_lower_tiers_with_hybrid(
     indexers: &LowerTierIndexers,
     sequence: &[LocalBlockHash],
@@ -448,12 +452,50 @@ mod tests {
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
+    use crate::indexer::HybridResumeCaps;
     use crate::indexer::KvIndexerInterface;
     use crate::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
     };
     use crate::test_utils::{router_event, stored_blocks_with_sequence_hashes};
+
+    #[test]
+    fn tiered_wire_caps_preserve_explicit_zero_for_both_native_representations() {
+        let first = WorkerWithDpRank::new(7, 0);
+        let zero = WorkerWithDpRank::new(7, 1);
+        for caps in [
+            HybridResumeCaps::from_iter([(first, 3), (zero, 0)]),
+            HybridResumeCaps::UniformConfirmed {
+                workers: [first, zero].into_iter().collect(),
+                cap: 0,
+            },
+        ] {
+            let mut native = TieredMatchDetails::default();
+            native.device.overlap_scores.scores.insert(first, 3);
+            native.device.hybrid_resume_caps = caps;
+            let wire = WireTieredMatchDetails::from(&native);
+            assert_eq!(wire.hybrid_resume_caps.len(), 2);
+            assert!(wire.hybrid_resume_caps.contains(&(zero, 0)));
+            let value = serde_json::to_value(&wire).unwrap();
+            assert!(value["hybrid_resume_caps"].is_array());
+            let decoded = serde_json::from_value::<WireTieredMatchDetails>(value).unwrap();
+            let restored = TieredMatchDetails::from(decoded);
+            assert_eq!(
+                restored.device.hybrid_resume_caps,
+                native.device.hybrid_resume_caps
+            );
+            assert_eq!(restored.device.hybrid_resume_caps.get(&zero), Some(&0));
+            assert!(matches!(
+                restored.device.hybrid_resume_caps,
+                HybridResumeCaps::Explicit(_)
+            ));
+            assert_eq!(
+                restored.device.overlap_scores.scores,
+                native.device.overlap_scores.scores
+            );
+        }
+    }
 
     #[test]
     fn tiered_matches_json_round_trip_preserves_device_and_lower_tier_scores() {

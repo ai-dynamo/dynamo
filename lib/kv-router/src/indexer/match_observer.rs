@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::protocols::{ExternalSequenceBlockHash, ResidencyOwnerKey, WorkerWithDpRank};
+use rustc_hash::FxHashSet;
 
 /// Optional query-local evidence collection during an attention-tree walk.
 ///
@@ -11,12 +12,35 @@ use crate::protocols::{ExternalSequenceBlockHash, ResidencyOwnerKey, WorkerWithD
 /// only use query-local state or immutable snapshots: concurrent trees invoke
 /// them under their existing node read guard.
 pub trait MatchObserver: Send {
+    /// A proof-only observer needs the first-node boundary and final endpoint,
+    /// but no per-worker or per-block callbacks. Returning false never changes
+    /// the attention walk itself.
+    fn observes_path(&self) -> bool {
+        true
+    }
     /// Optional first-node candidate count, delivered before worker callbacks.
     /// This is a capacity hint; final match scores still determine coverage.
     fn reserve_workers(&mut self, _count: usize) {}
+    /// A final hash is available without another tree lookup when the request
+    /// ends inside the first edge. This is only an admission hint: hashes still
+    /// undergo their ordinary comparisons before any result is emitted.
+    fn begin_path(&mut self, count: usize, _endpoint_hint: Option<ExternalSequenceBlockHash>) {
+        self.reserve_workers(count);
+    }
     fn observe_worker(&mut self, worker: WorkerWithDpRank);
     fn observe_cache_owner(&mut self, _owner: ResidencyOwnerKey) {}
     fn observe_block(&mut self, position: usize, hash: ExternalSequenceBlockHash);
+
+    /// Exact eligible workers at a common final endpoint. The tree verifies
+    /// every returned worker while emitting its ordinary result. The observer
+    /// must revalidate its evidence after the walk before using the caps.
+    fn uniform_resume_workers(
+        &mut self,
+        _position: u32,
+        _hash: ExternalSequenceBlockHash,
+    ) -> Option<&FxHashSet<WorkerWithDpRank>> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -66,6 +90,112 @@ mod tests {
 
     fn query() -> Vec<LocalBlockHash> {
         vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(99)]
+    }
+
+    struct UniformProofObserver {
+        eligible: FxHashSet<WorkerWithDpRank>,
+        started: bool,
+        endpoint: Option<(u32, ExternalSequenceBlockHash)>,
+    }
+
+    impl MatchObserver for UniformProofObserver {
+        fn observes_path(&self) -> bool {
+            false
+        }
+
+        fn reserve_workers(&mut self, _count: usize) {
+            assert!(!self.started);
+            self.started = true;
+        }
+
+        fn observe_worker(&mut self, _worker: WorkerWithDpRank) {
+            panic!("proof-only observers do not capture individual workers");
+        }
+
+        fn observe_block(&mut self, _position: usize, _hash: ExternalSequenceBlockHash) {
+            panic!("proof-only observers do not capture individual blocks");
+        }
+
+        fn uniform_resume_workers(
+            &mut self,
+            position: u32,
+            hash: ExternalSequenceBlockHash,
+        ) -> Option<&FxHashSet<WorkerWithDpRank>> {
+            assert!(self.started);
+            self.endpoint = Some((position, hash));
+            Some(&self.eligible)
+        }
+    }
+
+    #[tokio::test]
+    async fn uniform_proof_requires_exact_workers_and_preserves_attention_results() {
+        let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 16);
+        for worker in [1, 2] {
+            indexer
+                .apply_event_and_wait(make_store_event(worker, &[11, 12, 13]))
+                .await
+                .unwrap();
+        }
+        let query = query();
+        let expected = indexer.backend().find_match_details_impl(&query, false);
+        for eligible_ids in [[1, 2], [1, 3]] {
+            let mut observer = UniformProofObserver {
+                eligible: eligible_ids
+                    .into_iter()
+                    .map(|worker| WorkerWithDpRank::new(worker, 0))
+                    .collect(),
+                started: false,
+                endpoint: None,
+            };
+            let details = indexer.backend().find_match_details_impl_with_observer(
+                &query,
+                false,
+                false,
+                &mut observer,
+            );
+            assert_eq!(
+                details.overlap_scores.scores,
+                expected.overlap_scores.scores
+            );
+            assert_eq!(details.last_matched_hashes, expected.last_matched_hashes);
+            assert_eq!(observer.endpoint.unwrap().0, 2);
+            if eligible_ids == [1, 2] {
+                assert_eq!(details.hybrid_resume_caps.len(), 2);
+                assert_eq!(
+                    details.hybrid_resume_caps.get(&WorkerWithDpRank::new(2, 0)),
+                    Some(&2)
+                );
+            } else {
+                // Equal cardinality is not evidence of equal worker identities.
+                assert!(details.hybrid_resume_caps.is_empty());
+            }
+        }
+        indexer
+            .apply_event_and_wait(make_remove_event_with_parent(2, &[11], &[12, 13]))
+            .await
+            .unwrap();
+        let mut observer = UniformProofObserver {
+            eligible: [WorkerWithDpRank::new(1, 0), WorkerWithDpRank::new(2, 0)]
+                .into_iter()
+                .collect(),
+            started: false,
+            endpoint: None,
+        };
+        let details = indexer.backend().find_match_details_impl_with_observer(
+            &query,
+            false,
+            false,
+            &mut observer,
+        );
+        assert!(
+            observer.endpoint.is_none(),
+            "mixed cutoffs require the ordinary evaluator"
+        );
+        assert!(details.hybrid_resume_caps.is_empty());
+        assert_eq!(
+            details.overlap_scores.scores[&WorkerWithDpRank::new(2, 0)],
+            1
+        );
     }
 
     fn assert_observed_prefix(observer: &RecordingObserver, details: &MatchDetails) {

@@ -17,15 +17,16 @@
 use std::{
     cell::OnceCell,
     sync::{
-        Arc,
+        Arc, OnceLock, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, Guard};
 use parking_lot::{Mutex, RwLock};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::concurrent_radix_tree_compressed::mix_worker;
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheGroupKind, KvCacheGroupTag,
     KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, ResetScope, ResidencyDomain,
@@ -35,12 +36,111 @@ use crate::protocols::{
 type GroupPresence = FxHashMap<u32, FxHashMap<u64, u8>>;
 
 const CHECKPOINT_SHARDS: usize = 256;
+const COHORT_CACHE_CELLS: usize = 64;
 const GENERATION_WORD_MASK: u64 = u64::MAX >> 6;
 const GENERATION_TIER_SHIFT: u32 = 62;
 const GENERATION_LEVEL_SHIFT: u32 = 60;
 
 type CheckpointShardMap = FxHashMap<u64, Arc<CompleteMembership>>;
 type CapturedCheckpointShards = [OnceCell<Arc<CheckpointShardMap>>; CHECKPOINT_SHARDS];
+
+/// The existing per-owner layout allocation also carries a certificate-only
+/// epoch. Zero closes certification before affected shard proofs are invalidated;
+/// a nonzero value qualifies exactly that complete, alignment-one generation.
+#[derive(Debug, Default)]
+struct OwnerLayoutHandle {
+    snapshot: ArcSwap<CapturedLayout>,
+    eligible_generation: AtomicU64,
+}
+
+/// Event-published exact Device endpoint eligibility. This is a speculative
+/// shortcut only: the query must check its first-observation publication cutoff,
+/// cover every scored worker, and revalidate after constructing the result.
+#[derive(Debug)]
+pub(crate) struct EndpointCertificate {
+    cohort: Arc<CheckpointCohort>,
+    // Table identity is checked by the optional standalone-indexer lookup.
+    #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+    table: Arc<AtomicU64>,
+    publication: AtomicU64,
+}
+
+impl EndpointCertificate {
+    #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+    pub(crate) fn workers(&self) -> &FxHashSet<WorkerWithDpRank> {
+        &self.cohort.workers
+    }
+
+    pub(crate) fn publication_id(&self) -> u64 {
+        self.publication.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        self.publication_id() != 0
+    }
+
+    fn invalidate(&self) {
+        self.publication.store(0, Ordering::Release);
+    }
+}
+
+/// Immutable exact eligibility can be shared across hashes and generations;
+/// each endpoint still owns its independent publication and invalidation flag.
+#[derive(Debug)]
+struct CheckpointCohort {
+    workers: FxHashSet<WorkerWithDpRank>,
+    // A cache selector only. Equality and transition reuse remain owner-exact.
+    fingerprint: u64,
+}
+
+#[derive(Debug)]
+struct CohortTransition {
+    // The Weak keeps the previous allocation's identity from being reused.
+    previous: Weak<CheckpointCohort>,
+    worker: WorkerWithDpRank,
+    include: bool,
+}
+
+#[derive(Debug, Default)]
+struct CohortCacheEntry {
+    fingerprint: u64,
+    cohort: Weak<CheckpointCohort>,
+    transition: Option<CohortTransition>,
+}
+
+/// One query-scoped shard guard protects the immutable proof without cloning
+/// its hot Arc. Hash lookup derives each borrow, so this has no self-reference.
+#[derive(Debug)]
+#[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+pub(crate) struct EndpointCertificateRead {
+    snapshot: Guard<Arc<CheckpointShardMap>>,
+    hash: u64,
+}
+
+// This proof reader is used by the optional standalone-indexer lookup.
+#[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+impl EndpointCertificateRead {
+    fn certificate(&self) -> &EndpointCertificate {
+        self.snapshot
+            .get(&self.hash)
+            .and_then(|membership| membership.endpoint_certificate.as_deref())
+            .expect("a protected endpoint proof remains in its immutable snapshot")
+    }
+
+    pub(crate) fn workers(&self) -> &FxHashSet<WorkerWithDpRank> {
+        self.certificate().workers()
+    }
+
+    #[cfg(test)]
+    fn publication_id(&self) -> u64 {
+        self.certificate().publication_id()
+    }
+
+    #[cfg(test)]
+    fn is_valid(&self) -> bool {
+        self.certificate().is_valid()
+    }
+}
 
 fn compare_owners(left: &ResidencyOwner, right: &ResidencyOwner) -> std::cmp::Ordering {
     match (left, right) {
@@ -159,6 +259,7 @@ impl<'a> CheckpointMembershipView<'a> {
 #[repr(C)]
 struct CompleteMembership {
     revision: u64,
+    endpoint_certificate: Option<Arc<EndpointCertificate>>,
     // Sorted by the exact logical owner, with one generation per owner/tier.
     owners: [Vec<(ResidencyOwner, u64)>; 4],
     // One sparse sidecar shared by all tiers. High two key bits encode tier;
@@ -262,12 +363,18 @@ struct CheckpointShard {
 #[derive(Debug)]
 struct CheckpointMembershipIndex {
     shards: [CheckpointShard; CHECKPOINT_SHARDS],
+    publication: Arc<AtomicU64>,
+    // Fixed-size, weak-only writer cache. Dense-only tables allocate no cells,
+    // and dead cohorts never retain their worker tables through this cache.
+    cohorts: OnceLock<Box<[Mutex<CohortCacheEntry>; COHORT_CACHE_CELLS]>>,
 }
 
 impl Default for CheckpointMembershipIndex {
     fn default() -> Self {
         Self {
             shards: std::array::from_fn(|_| CheckpointShard::default()),
+            publication: Arc::default(),
+            cohorts: OnceLock::new(),
         }
     }
 }
@@ -279,9 +386,136 @@ impl CheckpointMembershipIndex {
         (hash ^ (hash >> 32) ^ (hash >> 16) ^ (hash >> 8)) as usize & (CHECKPOINT_SHARDS - 1)
     }
 
+    fn cohort_cell(&self, fingerprint: u64) -> &Mutex<CohortCacheEntry> {
+        &self.cohorts.get_or_init(|| {
+            Box::new(std::array::from_fn(|_| {
+                Mutex::new(CohortCacheEntry::default())
+            }))
+        })[Self::shard(fingerprint) & (COHORT_CACHE_CELLS - 1)]
+    }
+
+    fn intern_cohort(
+        &self,
+        workers: FxHashSet<WorkerWithDpRank>,
+        fingerprint: u64,
+    ) -> Arc<CheckpointCohort> {
+        let mut cached = self.cohort_cell(fingerprint).lock();
+        if cached.fingerprint == fingerprint
+            && let Some(cohort) = cached.cohort.upgrade()
+            && cohort.workers == workers
+        {
+            return cohort;
+        }
+        let cohort = Arc::new(CheckpointCohort {
+            workers,
+            fingerprint,
+        });
+        *cached = CohortCacheEntry {
+            fingerprint,
+            cohort: Arc::downgrade(&cohort),
+            transition: None,
+        };
+        cohort
+    }
+
+    fn transition_cohort(
+        &self,
+        previous: &Arc<CheckpointCohort>,
+        worker: WorkerWithDpRank,
+        include: bool,
+    ) -> Option<Arc<CheckpointCohort>> {
+        if previous.workers.contains(&worker) == include {
+            return Some(previous.clone());
+        }
+        if !include && previous.workers.len() == 1 {
+            return None;
+        }
+        let fingerprint = previous.fingerprint ^ mix_worker(worker);
+        let mut cached = self.cohort_cell(fingerprint).lock();
+        if cached.fingerprint == fingerprint
+            && let Some(cohort) = cached.cohort.upgrade()
+        {
+            let same_transition = cached.transition.as_ref().is_some_and(|transition| {
+                transition.previous.as_ptr() == Arc::as_ptr(previous)
+                    && transition.worker == worker
+                    && transition.include == include
+            });
+            // A selector collision, or a different path to the same cohort,
+            // must establish the complete expected set relation exactly.
+            let exact_transition = same_transition
+                || if include {
+                    cohort.workers.len() == previous.workers.len() + 1
+                        && cohort.workers.contains(&worker)
+                        && previous.workers.is_subset(&cohort.workers)
+                } else {
+                    cohort.workers.len() + 1 == previous.workers.len()
+                        && !cohort.workers.contains(&worker)
+                        && cohort.workers.is_subset(&previous.workers)
+                };
+            if exact_transition {
+                if !same_transition {
+                    cached.transition = Some(CohortTransition {
+                        previous: Arc::downgrade(previous),
+                        worker,
+                        include,
+                    });
+                }
+                return Some(cohort);
+            }
+        }
+        let mut workers = previous.workers.clone();
+        if include {
+            workers.insert(worker);
+        } else {
+            workers.remove(&worker);
+        }
+        let cohort = Arc::new(CheckpointCohort {
+            workers,
+            fingerprint,
+        });
+        *cached = CohortCacheEntry {
+            fingerprint,
+            cohort: Arc::downgrade(&cohort),
+            transition: Some(CohortTransition {
+                previous: Arc::downgrade(previous),
+                worker,
+                include,
+            }),
+        };
+        Some(cohort)
+    }
+
+    /// The owner is already closed and write-locked. A rebuilding writer either
+    /// precedes this shard lock (and its new proof is invalidated here), or sees
+    /// the closed/new generation. Never acquire an owner lock from this path.
+    fn invalidate_certificates(&self, hashes: impl Iterator<Item = u64>) {
+        let mut batches: FxHashMap<usize, Vec<u64>> = FxHashMap::default();
+        for hash in hashes {
+            batches.entry(Self::shard(hash)).or_default().push(hash);
+        }
+        for (index, hashes) in batches {
+            let shard = &self.shards[index];
+            let _writer = shard.writer.lock();
+            let current = shard.entries.load();
+            for hash in hashes {
+                if let Some(certificate) = current
+                    .get(&hash)
+                    .and_then(|membership| membership.endpoint_certificate.as_ref())
+                {
+                    certificate.invalidate();
+                }
+            }
+        }
+    }
+
     /// The caller holds the owner's write guard through publication. Shard
     /// writers serialize different owners and never hold two shard locks.
-    fn publish(&self, owner: ResidencyOwner, updates: Vec<(u64, u64, u8)>) {
+    fn publish(
+        &self,
+        owner: ResidencyOwner,
+        updates: Vec<(u64, u64, u8)>,
+        registry: Option<&Arc<OwnerRegistry>>,
+    ) {
         let mut batches: FxHashMap<usize, Vec<(u64, u64, u8)>> = FxHashMap::default();
         for update in updates {
             batches
@@ -299,21 +533,110 @@ impl CheckpointMembershipIndex {
                 *counter = revision;
             }
             let mut next = (*shard.entries.load_full()).clone();
+            let mut certificates = Vec::new();
             for (hash, generation, mask) in updates {
+                let previous = next
+                    .get(&hash)
+                    .and_then(|entry| entry.endpoint_certificate.as_ref())
+                    .cloned();
+                // Preserve this decision before invalidating our own old proof.
+                // Another owner's close is serialized by this same shard lock.
+                let reuse = previous.as_ref().filter(|proof| proof.is_valid());
+                if let Some(previous) = &previous {
+                    previous.invalidate();
+                }
                 let mut membership = next
                     .get(&hash)
                     .map(|entry| (**entry).clone())
                     .unwrap_or_default();
                 membership.update(owner, generation, mask);
                 membership.revision = revision;
+                membership.endpoint_certificate =
+                    registry.filter(|_| revision != 0).and_then(|registry| {
+                        self.build_certificate(&membership, registry, owner, reuse)
+                    });
+                if let Some(certificate) = &membership.endpoint_certificate {
+                    certificates.push((hash, certificate.clone()));
+                }
                 if membership.is_empty() {
                     next.remove(&hash);
                 } else {
                     next.insert(hash, Arc::new(membership));
                 }
             }
-            shard.entries.store(Arc::new(next));
+            let next = Arc::new(next);
+            shard.entries.store(next.clone());
+            // Allocation occurs only after the map is visible. A query's cutoff
+            // can never admit a proof of facts first published after that cutoff.
+            for (hash, certificate) in certificates {
+                if !next
+                    .get(&hash)
+                    .and_then(|membership| membership.endpoint_certificate.as_ref())
+                    .is_some_and(|current| Arc::ptr_eq(current, &certificate))
+                {
+                    continue;
+                }
+                if let Ok(previous) =
+                    self.publication
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                            value.checked_add(1)
+                        })
+                {
+                    certificate
+                        .publication
+                        .store(previous + 1, Ordering::Release);
+                }
+            }
         }
+    }
+
+    fn build_certificate(
+        &self,
+        membership: &CompleteMembership,
+        registry: &Arc<OwnerRegistry>,
+        changed_owner: ResidencyOwner,
+        previous: Option<&Arc<EndpointCertificate>>,
+    ) -> Option<Arc<EndpointCertificate>> {
+        let eligible = |owner, generation| {
+            generation != 0
+                && registry.layouts.get(&owner).is_some_and(|handle| {
+                    handle.eligible_generation.load(Ordering::Acquire) == generation
+                })
+        };
+        let cohort = if let Some(previous) = previous {
+            if let Some(worker) = changed_owner.as_worker() {
+                let generation = membership.owners[0]
+                    .binary_search_by(|entry| compare_owners(&entry.0, &changed_owner))
+                    .ok()
+                    .map(|index| membership.owners[0][index].1);
+                let include =
+                    generation.is_some_and(|generation| eligible(changed_owner, generation));
+                self.transition_cohort(&previous.cohort, worker, include)?
+            } else {
+                previous.cohort.clone()
+            }
+        } else {
+            let mut workers = FxHashSet::default();
+            let mut fingerprint = 0;
+            workers.reserve(membership.owners[0].len());
+            for &(owner, generation) in &membership.owners[0] {
+                if let Some(worker) = owner.as_worker()
+                    && eligible(owner, generation)
+                    && workers.insert(worker)
+                {
+                    fingerprint ^= mix_worker(worker);
+                }
+            }
+            if workers.is_empty() {
+                return None;
+            }
+            self.intern_cohort(workers, fingerprint)
+        };
+        Some(Arc::new(EndpointCertificate {
+            cohort,
+            table: self.publication.clone(),
+            publication: AtomicU64::new(0),
+        }))
     }
 }
 
@@ -340,15 +663,29 @@ struct OwnerPresence {
     alignment_blocks: usize,
     generation: u64,
     retired: bool,
-    layout_snapshot: Arc<ArcSwap<CapturedLayout>>,
+    layout_snapshot: Arc<OwnerLayoutHandle>,
 }
 
 impl OwnerPresence {
     fn publish_layout(&self) {
-        self.layout_snapshot.store(Arc::new(CapturedLayout {
-            layout: self.layout(),
-            generation: self.generation,
-        }));
+        debug_assert_eq!(
+            self.layout_snapshot
+                .eligible_generation
+                .load(Ordering::Relaxed),
+            0
+        );
+        let layout = self.layout();
+        self.layout_snapshot
+            .snapshot
+            .store(Arc::new(CapturedLayout {
+                layout,
+                generation: self.generation,
+            }));
+        let eligible = layout.complete_layout && layout.alignment_blocks <= 1;
+        self.layout_snapshot.eligible_generation.store(
+            if eligible { self.generation } else { 0 },
+            Ordering::Release,
+        );
     }
 
     fn layout(&self) -> CheckpointLayout {
@@ -465,7 +802,7 @@ pub struct CheckpointLayout {
 #[derive(Debug, Default, Clone)]
 struct OwnerRegistry {
     owners: FxHashMap<ResidencyOwner, Arc<RwLock<OwnerPresence>>>,
-    layouts: FxHashMap<ResidencyOwner, Arc<ArcSwap<CapturedLayout>>>,
+    layouts: FxHashMap<ResidencyOwner, Arc<OwnerLayoutHandle>>,
     cache_owners: FxHashMap<ResidencyOwnerKey, ResidencyOwner>,
 }
 
@@ -526,7 +863,7 @@ impl CheckpointReadView {
         self.registry
             .layouts
             .get(&owner)
-            .map(|snapshot| **snapshot.load())
+            .map(|handle| **handle.snapshot.load())
     }
 
     /// Seeds a legacy lookup with the caller's first capture for this same
@@ -543,7 +880,7 @@ impl CheckpointReadView {
                 registry
                     .layouts
                     .get(&owner)
-                    .map(|snapshot| **snapshot.load())
+                    .map(|handle| **handle.snapshot.load())
             })
             .map(CapturedLayout::layout)
     }
@@ -707,6 +1044,56 @@ impl KvCacheGroupResidency {
         self.active.load(Ordering::Relaxed)
     }
 
+    /// Freeze the publication frontier at the speculative query's first worker
+    /// observation, before it decides to skip legacy per-worker layout capture.
+    #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+    pub(crate) fn capture_cutoff(&self) -> u64 {
+        self.memberships.publication.load(Ordering::Acquire)
+    }
+
+    /// Return only a proof of facts published before the captured frontier.
+    /// A later proof must never learn a newly eligible owner for this attempt.
+    #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+    pub(crate) fn endpoint_certificate_read(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        cutoff: u64,
+    ) -> Option<EndpointCertificateRead> {
+        let snapshot = self.memberships.shards[CheckpointMembershipIndex::shard(hash.0)]
+            .entries
+            .load();
+        let certificate = snapshot.get(&hash.0)?.endpoint_certificate.as_ref()?;
+        let born = certificate.publication_id();
+        (born != 0 && born <= cutoff && self.is_certificate_valid(certificate)).then_some(
+            EndpointCertificateRead {
+                snapshot,
+                hash: hash.0,
+            },
+        )
+    }
+
+    #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+    pub(crate) fn is_certificate_read_valid(&self, read: &EndpointCertificateRead) -> bool {
+        self.is_certificate_valid(read.certificate())
+    }
+
+    #[cfg(test)]
+    fn endpoint_certificate(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        cutoff: u64,
+    ) -> Option<Arc<EndpointCertificate>> {
+        let read = self.endpoint_certificate_read(hash, cutoff)?;
+        read.snapshot.get(&hash.0)?.endpoint_certificate.clone()
+    }
+
+    /// Recheck after result construction. Invalidation is irreversible, and an
+    /// unrelated residency table's coincident epoch must not validate this proof.
+    #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+    pub(crate) fn is_certificate_valid(&self, certificate: &EndpointCertificate) -> bool {
+        Arc::ptr_eq(&self.memberships.publication, &certificate.table) && certificate.is_valid()
+    }
+
     pub fn read_view(&self) -> CheckpointReadView {
         CheckpointReadView {
             registry: self.registry.load_full(),
@@ -722,6 +1109,20 @@ impl KvCacheGroupResidency {
 
     fn fresh_generation(&self) -> u64 {
         self.next_generation.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn publish_memberships(&self, owner: ResidencyOwner, updates: Vec<(u64, u64, u8)>) {
+        let registry = self.registry.load_full();
+        self.memberships.publish(owner, updates, Some(&registry));
+    }
+
+    fn close_layout_certificates(&self, state: &OwnerPresence) {
+        state
+            .layout_snapshot
+            .eligible_generation
+            .store(0, Ordering::Release);
+        self.memberships
+            .invalidate_certificates(state.complete_checkpoints.keys().copied());
     }
 
     fn publish_reset(
@@ -743,10 +1144,11 @@ impl KvCacheGroupResidency {
                 .iter()
                 .map(|(&hash, &mask)| (hash, state.generation, mask)),
         );
-        self.memberships.publish(owner, updates);
+        self.publish_memberships(owner, updates);
     }
 
     fn clear_owner(&self, owner: ResidencyOwner, state: &mut OwnerPresence) {
+        self.close_layout_certificates(state);
         let previous = std::mem::take(&mut state.complete_checkpoints);
         let previous_generation = state.generation;
         state.clear_checkpoints();
@@ -809,6 +1211,9 @@ impl KvCacheGroupResidency {
             || !groups.iter().all(|group| state.groups.contains_key(group))
             || previous_expected_count != Some(groups.len())
             || alignment.is_some_and(|alignment| state.alignment_blocks.max(1) != alignment);
+        if layout_changed {
+            self.close_layout_certificates(&state);
+        }
         let previous = layout_changed.then(|| std::mem::take(&mut state.complete_checkpoints));
         let previous_generation = state.generation;
         let changed = state.declared
@@ -881,6 +1286,9 @@ impl KvCacheGroupResidency {
                     || tag.alignment_blocks.is_some_and(|alignment| {
                         state.alignment_blocks.max(1) != alignment.max(1) as usize
                     });
+                if layout_changed {
+                    self.close_layout_certificates(&state);
+                }
                 let previous =
                     layout_changed.then(|| std::mem::take(&mut state.complete_checkpoints));
                 let previous_generation = state.generation;
@@ -911,7 +1319,7 @@ impl KvCacheGroupResidency {
                     state.publish_layout();
                     self.publish_reset(owner, previous_generation, previous, &state);
                 } else {
-                    self.memberships.publish(owner, updates);
+                    self.publish_memberships(owner, updates);
                 }
             }
             KvCacheEventData::Removed(data) => {
@@ -937,7 +1345,7 @@ impl KvCacheGroupResidency {
                             updates.push((hash.0, state.generation, new));
                         }
                     }
-                    self.memberships.publish(owner, updates);
+                    self.publish_memberships(owner, updates);
                 }
             }
             KvCacheEventData::Cleared => self.clear_event(event),
@@ -1131,6 +1539,622 @@ mod tests {
         let mut owners = Vec::new();
         view.for_each_owner_at_revision(hash, tier, revision, |owner| owners.push(owner));
         owners
+    }
+
+    fn endpoint_proof(
+        table: &KvCacheGroupResidency,
+        hash: ExternalSequenceBlockHash,
+    ) -> Arc<EndpointCertificate> {
+        table
+            .endpoint_certificate(hash, table.capture_cutoff())
+            .expect("an eligible endpoint has a published proof")
+    }
+
+    #[test]
+    fn cohort_interning_requires_exact_workers_even_with_identical_fingerprints() {
+        let index = CheckpointMembershipIndex::default();
+        let first = WorkerWithDpRank::new(7, 0);
+        let other_rank = WorkerWithDpRank::new(7, 1);
+        // Zero is a legal selector, and deliberately collides here.
+        let initial = index.intern_cohort(FxHashSet::from_iter([first]), 0);
+        let identical = index.intern_cohort(FxHashSet::from_iter([first]), 0);
+        assert!(Arc::ptr_eq(&initial, &identical));
+        let different = index.intern_cohort(FxHashSet::from_iter([other_rank]), 0);
+        assert!(!Arc::ptr_eq(&initial, &different));
+        assert_eq!(different.workers, FxHashSet::from_iter([other_rank]));
+        let original_again = index.intern_cohort(FxHashSet::from_iter([first]), 0);
+        assert_eq!(original_again.workers, initial.workers);
+        assert!(!Arc::ptr_eq(&original_again, &different));
+    }
+
+    #[test]
+    fn cohort_transitions_validate_collisions_and_share_exact_add_remove_results() {
+        let index = CheckpointMembershipIndex::default();
+        let first = WorkerWithDpRank::new(7, 0);
+        let second = WorkerWithDpRank::new(7, 1);
+        let wrong = WorkerWithDpRank::new(8, 0);
+        let original = index.intern_cohort(FxHashSet::from_iter([first]), mix_worker(first));
+        let fingerprint = original.fingerprint ^ mix_worker(second);
+        let collision = index.intern_cohort(FxHashSet::from_iter([first, wrong]), fingerprint);
+        let added = index.transition_cohort(&original, second, true).unwrap();
+        assert!(!Arc::ptr_eq(&added, &collision));
+        assert_eq!(added.workers, FxHashSet::from_iter([first, second]));
+        let repeated = index.transition_cohort(&original, second, true).unwrap();
+        assert!(Arc::ptr_eq(&added, &repeated));
+        let unchanged = index.transition_cohort(&added, second, true).unwrap();
+        assert!(Arc::ptr_eq(&added, &unchanged));
+
+        // A different prior cohort reaches the same result through exact set
+        // comparison, without the cached previous-allocation transition proof.
+        let other_prior = Arc::new(CheckpointCohort {
+            workers: FxHashSet::from_iter([second]),
+            fingerprint: mix_worker(second),
+        });
+        let same_result = index.transition_cohort(&other_prior, first, true).unwrap();
+        assert!(Arc::ptr_eq(&added, &same_result));
+
+        let removed = index.transition_cohort(&added, first, false).unwrap();
+        assert_eq!(removed.workers, FxHashSet::from_iter([second]));
+        let repeated_remove = index.transition_cohort(&added, first, false).unwrap();
+        assert!(Arc::ptr_eq(&removed, &repeated_remove));
+        assert!(index.transition_cohort(&removed, second, false).is_none());
+        assert_eq!(added.workers, FxHashSet::from_iter([first, second]));
+    }
+
+    #[test]
+    fn cohort_cache_is_lazy_bounded_and_keeps_only_weak_references() {
+        let index = CheckpointMembershipIndex::default();
+        assert!(index.cohorts.get().is_none());
+        let mut retired = Vec::new();
+        for id in 0..(COHORT_CACHE_CELLS * 4) as u64 {
+            let worker = WorkerWithDpRank::new(id, 0);
+            let cohort = index.intern_cohort(FxHashSet::from_iter([worker]), mix_worker(worker));
+            let next = index
+                .transition_cohort(&cohort, WorkerWithDpRank::new(id, 1), true)
+                .unwrap();
+            retired.push(Arc::downgrade(&cohort));
+            retired.push(Arc::downgrade(&next));
+        }
+        assert!(retired.iter().all(|weak| weak.upgrade().is_none()));
+        let cells = index.cohorts.get().unwrap();
+        assert_eq!(cells.len(), COHORT_CACHE_CELLS);
+        for cell in cells.iter() {
+            let cell = cell.lock();
+            assert!(cell.cohort.upgrade().is_none());
+            assert!(
+                cell.transition
+                    .as_ref()
+                    .is_none_or(|transition| transition.previous.upgrade().is_none())
+            );
+        }
+        let worker = WorkerWithDpRank::new(1, 0);
+        let live = index.intern_cohort(FxHashSet::from_iter([worker]), mix_worker(worker));
+        assert_eq!(live.workers, FxHashSet::from_iter([worker]));
+    }
+
+    #[test]
+    fn endpoint_cohorts_share_workers_without_sharing_endpoint_validity() {
+        let table = KvCacheGroupResidency::new();
+        let hashes = [ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(12)];
+        let first = WorkerWithDpRank::new(7, 0);
+        let second = WorkerWithDpRank::new(7, 1);
+        for worker in [first, second] {
+            table.declare_layout(ResidencyOwner::worker(worker), &[0, 1], 1);
+            for hash in hashes {
+                for group in [0, 1] {
+                    table.apply(&checkpoint(
+                        worker,
+                        StorageTier::Device,
+                        group,
+                        hash.0,
+                        Some(2),
+                    ));
+                }
+            }
+        }
+        let previous = hashes.map(|hash| endpoint_proof(&table, hash));
+        assert!(Arc::ptr_eq(&previous[0].cohort, &previous[1].cohort));
+        assert!(!Arc::ptr_eq(&previous[0], &previous[1]));
+        assert_ne!(previous[0].publication_id(), previous[1].publication_id());
+
+        let mut remove = checkpoint(first, StorageTier::Device, 1, hashes[0].0, Some(2));
+        remove.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: vec![hashes[0]],
+        });
+        table.apply(&remove);
+        assert!(!previous[0].is_valid());
+        assert!(previous[1].is_valid());
+        assert_eq!(
+            previous[0].workers(),
+            &FxHashSet::from_iter([first, second])
+        );
+        assert_eq!(
+            endpoint_proof(&table, hashes[0]).workers(),
+            &FxHashSet::from_iter([second])
+        );
+
+        table.apply(&checkpoint(
+            first,
+            StorageTier::Device,
+            1,
+            hashes[0].0,
+            Some(2),
+        ));
+        let restored = endpoint_proof(&table, hashes[0]);
+        assert!(Arc::ptr_eq(&restored.cohort, &previous[1].cohort));
+        assert!(previous[1].is_valid());
+
+        // A new owner generation may reuse immutable workers, but every H's
+        // old certificate must still close independently before publication.
+        table.clear_worker(first);
+        assert!(!restored.is_valid());
+        assert!(!previous[1].is_valid());
+        for hash in hashes {
+            for group in [0, 1] {
+                table.apply(&checkpoint(
+                    first,
+                    StorageTier::Device,
+                    group,
+                    hash.0,
+                    Some(2),
+                ));
+            }
+        }
+        let current = hashes.map(|hash| endpoint_proof(&table, hash));
+        assert!(Arc::ptr_eq(&current[0].cohort, &current[1].cohort));
+        assert_eq!(current[0].workers(), &FxHashSet::from_iter([first, second]));
+        assert!(current.iter().all(|proof| proof.is_valid()));
+        assert!(previous.iter().all(|proof| !proof.is_valid()));
+    }
+
+    #[test]
+    fn endpoint_read_is_send_and_protects_invalidation_without_cloning_certificate() {
+        fn assert_send<T: Send>() {}
+        assert_send::<EndpointCertificateRead>();
+        let table = KvCacheGroupResidency::new();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let hash = ExternalSequenceBlockHash(11);
+        let event = checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1));
+        table.apply(&event);
+        let certificate = endpoint_proof(&table, hash);
+        let references = Arc::strong_count(&certificate);
+        let cutoff = table.capture_cutoff();
+        let read = table.endpoint_certificate_read(hash, cutoff).unwrap();
+        assert_eq!(Arc::strong_count(&certificate), references);
+        assert_eq!(read.publication_id(), certificate.publication_id());
+        assert_eq!(read.workers(), &FxHashSet::from_iter([worker]));
+        assert!(table.is_certificate_read_valid(&read));
+        assert!(!KvCacheGroupResidency::new().is_certificate_read_valid(&read));
+        assert!(read.is_valid());
+        let (ready_send, ready_receive) = std::sync::mpsc::channel();
+        let (resume_send, resume_receive) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            ready_send.send(()).unwrap();
+            resume_receive.recv().unwrap();
+            assert!(!read.is_valid());
+            assert_eq!(read.workers(), &FxHashSet::from_iter([worker]));
+        });
+        ready_receive.recv().unwrap();
+        let mut remove = event.clone();
+        remove.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: vec![hash],
+        });
+        table.apply(&remove);
+        assert!(!certificate.is_valid());
+        table.apply(&event);
+        assert!(table.endpoint_certificate_read(hash, cutoff).is_none());
+        assert!(
+            table
+                .endpoint_certificate_read(hash, table.capture_cutoff())
+                .is_some()
+        );
+        resume_send.send(()).unwrap();
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn endpoint_certificate_contains_only_exact_current_complete_device_workers() {
+        let table = KvCacheGroupResidency::new();
+        let full = WorkerWithDpRank::new(7, 2);
+        let incomplete = WorkerWithDpRank::new(8, 0);
+        let aligned = WorkerWithDpRank::new(9, 0);
+        let host = WorkerWithDpRank::new(10, 0);
+        let hash = ExternalSequenceBlockHash(11);
+        table.declare_layout(ResidencyOwner::worker(full), &[0], 1);
+        table.declare_layout(ResidencyOwner::worker(incomplete), &[0, 1], 1);
+        table.declare_layout(ResidencyOwner::worker(aligned), &[0], 2);
+        table.declare_layout(ResidencyOwner::worker(host), &[0], 1);
+        table.apply(&checkpoint(
+            incomplete,
+            StorageTier::Device,
+            0,
+            hash.0,
+            Some(2),
+        ));
+        let mut event = checkpoint(aligned, StorageTier::Device, 0, hash.0, Some(1));
+        event.kv_cache_group.as_mut().unwrap().alignment_blocks = Some(2);
+        table.apply(&event);
+        table.apply(&checkpoint(
+            host,
+            StorageTier::HostPinned,
+            0,
+            hash.0,
+            Some(1),
+        ));
+        table.apply(&checkpoint(full, StorageTier::Device, 0, hash.0, Some(1)));
+        let proof = endpoint_proof(&table, hash);
+        assert_eq!(proof.workers(), &FxHashSet::from_iter([full]));
+        assert!(!proof.workers().contains(&WorkerWithDpRank::new(7, 0)));
+        assert!(proof.is_valid());
+        assert!(table.is_certificate_valid(&proof));
+        assert!(!KvCacheGroupResidency::new().is_certificate_valid(&proof));
+        assert_ne!(proof.publication_id(), 0);
+        assert!(
+            table
+                .endpoint_certificate(hash, proof.publication_id() - 1)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn endpoint_certificate_cutoff_and_same_hash_mutations_fail_closed() {
+        let table = KvCacheGroupResidency::new();
+        let first = WorkerWithDpRank::new(7, 0);
+        let second = WorkerWithDpRank::new(8, 0);
+        let hash = ExternalSequenceBlockHash(11);
+        let before_registration = table.capture_cutoff();
+        let mut old_view = table.read_view();
+        assert!(
+            old_view
+                .track_owner(ResidencyOwner::worker(first))
+                .is_none()
+        );
+        for worker in [first, second] {
+            table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+        }
+        table.apply(&checkpoint(first, StorageTier::Device, 0, hash.0, Some(1)));
+        let old = endpoint_proof(&table, hash);
+        let cutoff = table.capture_cutoff();
+        assert!(
+            table
+                .endpoint_certificate(hash, before_registration)
+                .is_none()
+        );
+        assert!(
+            old_view
+                .track_owner(ResidencyOwner::worker(first))
+                .is_none()
+        );
+        table.apply(&checkpoint(second, StorageTier::Device, 0, hash.0, Some(1)));
+        assert!(!old.is_valid());
+        assert!(table.endpoint_certificate(hash, cutoff).is_none());
+        let current = endpoint_proof(&table, hash);
+        let current_publication = current.publication_id();
+        assert_eq!(current.workers(), &FxHashSet::from_iter([first, second]));
+        let mut remove = checkpoint(second, StorageTier::Device, 0, hash.0, Some(1));
+        remove.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: vec![hash],
+        });
+        table.apply(&remove);
+        assert!(!current.is_valid());
+        assert_eq!(
+            endpoint_proof(&table, hash).workers(),
+            &FxHashSet::from_iter([first])
+        );
+        table.apply(&checkpoint(second, StorageTier::Device, 0, hash.0, Some(1)));
+        assert!(!current.is_valid());
+        assert!(endpoint_proof(&table, hash).publication_id() > current_publication);
+    }
+
+    #[test]
+    fn endpoint_certificate_invalidates_only_affected_layout_endpoints() {
+        let table = KvCacheGroupResidency::new();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let hash = ExternalSequenceBlockHash(11);
+        let event = checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1));
+        table.apply(&event);
+        let original = endpoint_proof(&table, hash);
+        table.declare_layout(ResidencyOwner::worker(WorkerWithDpRank::new(8, 0)), &[0], 1);
+        assert!(original.is_valid());
+        assert!(Arc::ptr_eq(&original, &endpoint_proof(&table, hash)));
+        // Neither unrelated registration nor duplicate storage changes this H.
+        table.apply(&event);
+        assert!(Arc::ptr_eq(&original, &endpoint_proof(&table, hash)));
+        table.clear_worker(worker);
+        assert!(!original.is_valid());
+        table.apply(&event);
+        let cleared = endpoint_proof(&table, hash);
+        table.declare_layout(ResidencyOwner::worker(worker), &[3], 1);
+        assert!(!cleared.is_valid());
+        table.apply(&checkpoint(worker, StorageTier::Device, 3, hash.0, Some(1)));
+        let remapped = endpoint_proof(&table, hash);
+        table.remove_worker_rank(worker);
+        assert!(!remapped.is_valid());
+        table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+        table.apply(&event);
+        let readded = endpoint_proof(&table, hash);
+        assert!(readded.is_valid());
+        assert!(!original.is_valid());
+        assert!(!cleared.is_valid());
+        assert!(!remapped.is_valid());
+    }
+
+    #[test]
+    fn endpoint_certificate_counters_exhaust_without_aba_or_legacy_loss() {
+        let table = KvCacheGroupResidency::new();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let hash = ExternalSequenceBlockHash(11);
+        let event = checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1));
+        table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+        table
+            .memberships
+            .publication
+            .store(u64::MAX, Ordering::Release);
+        table.apply(&event);
+        assert!(table.endpoint_certificate(hash, u64::MAX).is_none());
+        assert!(has_checkpoint(
+            &table,
+            ResidencyOwner::worker(worker),
+            hash.0,
+            StorageTier::Device
+        ));
+        table.clear_worker(worker);
+        table.apply(&event);
+        assert_eq!(table.capture_cutoff(), u64::MAX);
+        assert!(table.endpoint_certificate(hash, u64::MAX).is_none());
+        assert!(has_checkpoint(
+            &table,
+            ResidencyOwner::worker(worker),
+            hash.0,
+            StorageTier::Device
+        ));
+    }
+
+    #[test]
+    fn concurrent_checkpoint_writer_cannot_recertify_an_owner_being_cleared() {
+        use std::time::{Duration, Instant};
+        let table = KvCacheGroupResidency::new();
+        let first = WorkerWithDpRank::new(7, 0);
+        let second = WorkerWithDpRank::new(8, 0);
+        let hash = ExternalSequenceBlockHash(11);
+        for worker in [first, second] {
+            table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+        }
+        for worker in [first, second] {
+            table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
+        }
+        let old = endpoint_proof(&table, hash);
+        let handle = table.registry.load().layouts[&ResidencyOwner::worker(first)].clone();
+        let generation = handle.snapshot.load().generation;
+        let done = AtomicU64::new(0);
+        std::thread::scope(|scope| {
+            let shard = &table.memberships.shards[CheckpointMembershipIndex::shard(hash.0)];
+            let hold_publication = shard.writer.lock();
+            scope.spawn(|| {
+                table.clear_worker(first);
+                done.fetch_add(1, Ordering::Release);
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let transitioned = loop {
+                if handle.eligible_generation.load(Ordering::Acquire) == 0 {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::yield_now();
+            };
+            assert_eq!(handle.snapshot.load().generation, generation);
+            scope.spawn(|| {
+                let mut removed = checkpoint(second, StorageTier::Device, 0, hash.0, Some(1));
+                removed.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![hash],
+                });
+                table.apply(&removed);
+                table.apply(&checkpoint(second, StorageTier::Device, 0, hash.0, Some(1)));
+                done.fetch_add(1, Ordering::Release);
+            });
+            drop(hold_publication);
+            assert!(
+                transitioned,
+                "clear must close eligibility before waiting for the shard"
+            );
+            while done.load(Ordering::Acquire) != 2 {
+                if let Some(proof) = table.endpoint_certificate(hash, table.capture_cutoff()) {
+                    // Before all affected Hs are invalidated the old layout is
+                    // still published. After publication no old proof may win.
+                    if handle.snapshot.load().generation != generation && proof.is_valid() {
+                        assert!(!proof.workers().contains(&first));
+                    }
+                }
+                std::thread::yield_now();
+            }
+        });
+        assert!(!old.is_valid());
+        assert_eq!(
+            endpoint_proof(&table, hash).workers(),
+            &FxHashSet::from_iter([second])
+        );
+    }
+
+    #[test]
+    fn concurrent_layout_publishers_leave_only_current_generation_endpoint_facts() {
+        let table = KvCacheGroupResidency::new();
+        let hash = ExternalSequenceBlockHash(11);
+        let workers: Vec<_> = (1..=8).map(|id| WorkerWithDpRank::new(id, 0)).collect();
+        for &worker in &workers {
+            table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+        }
+        std::thread::scope(|scope| {
+            for &worker in &workers {
+                let table = &table;
+                scope.spawn(move || {
+                    for _ in 0..12 {
+                        table.clear_worker(worker);
+                        table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            endpoint_proof(&table, hash).workers(),
+            &workers.into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn incremental_endpoint_update_uses_post_mutation_generation_for_stale_removal() {
+        let table = KvCacheGroupResidency::new();
+        let hash = ExternalSequenceBlockHash(11);
+        let workers = [WorkerWithDpRank::new(7, 0), WorkerWithDpRank::new(8, 0)];
+        for worker in workers {
+            table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+        }
+        for worker in workers {
+            table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
+        }
+        let previous = endpoint_proof(&table, hash);
+        let owner = ResidencyOwner::worker(workers[0]);
+        let state = table.owner(owner).unwrap();
+        let state = state.write();
+        assert!(state.generation > 0);
+        table.publish_memberships(owner, vec![(hash.0, state.generation - 1, 0)]);
+        assert!(!previous.is_valid());
+        assert_eq!(
+            endpoint_proof(&table, hash).workers(),
+            &FxHashSet::from_iter(workers)
+        );
+    }
+
+    #[test]
+    fn closed_owner_cannot_reenter_a_rebuilt_proof_before_new_layout_publication() {
+        let table = KvCacheGroupResidency::new();
+        let hash = ExternalSequenceBlockHash(11);
+        let first = WorkerWithDpRank::new(7, 0);
+        let second = WorkerWithDpRank::new(8, 0);
+        for worker in [first, second] {
+            table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+        }
+        for worker in [first, second] {
+            table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
+        }
+        let old = endpoint_proof(&table, hash);
+        let owner = ResidencyOwner::worker(first);
+        let state = table.owner(owner).unwrap();
+        let state = state.write();
+        table.close_layout_certificates(&state);
+        assert!(!old.is_valid());
+        assert!(
+            state
+                .layout_snapshot
+                .snapshot
+                .load()
+                .layout()
+                .complete_layout
+        );
+        assert_eq!(
+            state
+                .layout_snapshot
+                .eligible_generation
+                .load(Ordering::Acquire),
+            0
+        );
+        // A different owner rebuilds while the legacy payload still looks old
+        // and complete. The closed atomic epoch, not that payload, rejects first.
+        let mut remove = checkpoint(second, StorageTier::Device, 0, hash.0, Some(1));
+        remove.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: vec![hash],
+        });
+        table.apply(&remove);
+        table.apply(&checkpoint(second, StorageTier::Device, 0, hash.0, Some(1)));
+        assert_eq!(
+            endpoint_proof(&table, hash).workers(),
+            &FxHashSet::from_iter([second])
+        );
+    }
+
+    #[test]
+    fn closing_owner_invalidates_a_replacement_published_by_the_old_shard_writer() {
+        use std::time::{Duration, Instant};
+        let table = KvCacheGroupResidency::new();
+        let hash = ExternalSequenceBlockHash(11);
+        let first = WorkerWithDpRank::new(7, 0);
+        let second = WorkerWithDpRank::new(8, 0);
+        for worker in [first, second] {
+            table.declare_layout(ResidencyOwner::worker(worker), &[0], 1);
+        }
+        for worker in [first, second] {
+            table.apply(&checkpoint(worker, StorageTier::Device, 0, hash.0, Some(1)));
+        }
+        let previous = endpoint_proof(&table, hash);
+        let first_handle = table.registry.load().layouts[&ResidencyOwner::worker(first)].clone();
+        let old_generation = first_handle.snapshot.load().generation;
+        let second_state = table.owner(ResidencyOwner::worker(second)).unwrap();
+        let mut second_writer = second_state.write();
+        std::thread::scope(|scope| {
+            let shard = &table.memberships.shards[CheckpointMembershipIndex::shard(hash.0)];
+            let mut shard_writer = shard.writer.lock();
+            let clearing = scope.spawn(|| table.clear_worker(first));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let closed = loop {
+                if first_handle.eligible_generation.load(Ordering::Acquire) == 0 {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::yield_now();
+            };
+            // Force the already-running other-owner publisher to finish after
+            // first closed, but before its invalidation can obtain this shard.
+            let replacement = if closed {
+                assert!(previous.is_valid());
+                assert_eq!(first_handle.snapshot.load().generation, old_generation);
+                let registry = table.registry.load_full();
+                let mut next = (**shard.entries.load()).clone();
+                let mut membership = (**next.get(&hash.0).unwrap()).clone();
+                second_writer.store(0, hash.0, StorageTier::HostPinned);
+                membership.update(
+                    ResidencyOwner::worker(second),
+                    second_writer.generation,
+                    second_writer.complete_checkpoints[&hash.0],
+                );
+                let replacement = table
+                    .memberships
+                    .build_certificate(
+                        &membership,
+                        &registry,
+                        ResidencyOwner::worker(second),
+                        Some(&previous),
+                    )
+                    .unwrap();
+                assert!(replacement.workers().contains(&first));
+                previous.invalidate();
+                *shard_writer += 1;
+                membership.revision = *shard_writer;
+                membership.endpoint_certificate = Some(replacement.clone());
+                next.insert(hash.0, Arc::new(membership));
+                shard.entries.store(Arc::new(next));
+                let born = table.memberships.publication.fetch_add(1, Ordering::AcqRel) + 1;
+                replacement.publication.store(born, Ordering::Release);
+                assert!(replacement.is_valid());
+                Some(replacement)
+            } else {
+                None
+            };
+            drop(shard_writer);
+            clearing.join().unwrap();
+            assert!(
+                closed,
+                "clear must close before waiting for shard invalidation"
+            );
+            assert!(!replacement.unwrap().is_valid());
+            assert_ne!(first_handle.snapshot.load().generation, old_generation);
+        });
+        assert_eq!(
+            endpoint_proof(&table, hash).workers(),
+            &FxHashSet::from_iter([second])
+        );
     }
 
     #[test]
@@ -1355,6 +2379,7 @@ mod tests {
             table.memberships.publish(
                 ResidencyOwner::worker(WorkerWithDpRank::new(index as u64 + 8, 0)),
                 vec![(hash.0, word << 6, 0b0101)],
+                None,
             );
         }
         let view = table.read_view();

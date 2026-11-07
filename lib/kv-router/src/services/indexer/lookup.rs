@@ -13,7 +13,7 @@ use crate::protocols::{LocalBlockHash, OverlapScores};
 use crate::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
 
 use super::backend::{Indexer, RemotePrimary, SideIndexer};
-use crate::indexer::hybrid_prefix::{HybridPrefixEvaluator, cap_side_overlay};
+use crate::indexer::hybrid_prefix::{EndpointPrefixProof, HybridPrefixEvaluator, cap_side_overlay};
 
 /// Block hashes for one lookup, borrowed when the caller keeps them and owned
 /// when it does not, so a borrowed query is copied only at the one boundary
@@ -242,6 +242,13 @@ impl<'a> LookupPipeline<'a> {
     ) -> Result<MatchDetails, KvRouterError> {
         let residency = self.group_residency().filter(|_| self.lower_tier.is_some());
         let mut details = if let Some(residency) = residency {
+            if (!with_side || self.side.is_none())
+                && let Some(details) = self
+                    .primary
+                    .try_endpoint_proof(sequence, retain, max_blocks, residency)
+            {
+                return Ok(details);
+            }
             let evaluator = HybridPrefixEvaluator::new(residency, max_blocks);
             let (mut raw, mut evaluator) = self
                 .primary
@@ -292,6 +299,20 @@ impl<'a> LookupPipeline<'a> {
             return Ok(TieredMatchDetails::default());
         };
         let (mut device, lower) = if let Some(residency) = self.group_residency() {
+            if lower_tier.is_empty()
+                && (!with_side || self.side.is_none())
+                && let Some(device) = self.primary.try_endpoint_proof(
+                    sequence,
+                    options.retain_kv_transfer_chain,
+                    options.max_reusable_blocks,
+                    residency,
+                )
+            {
+                return Ok(TieredMatchDetails {
+                    device,
+                    lower_tier: Default::default(),
+                });
+            }
             let evaluator = HybridPrefixEvaluator::new(residency, options.max_reusable_blocks);
             let (mut raw, mut evaluator) = self
                 .primary
@@ -398,6 +419,38 @@ impl<'a> LookupPipeline<'a> {
 }
 
 impl<'a> PrimaryLookup<'a> {
+    fn try_endpoint_proof(
+        &self,
+        sequence: &HashInput<'_>,
+        retain: bool,
+        max_blocks: Option<usize>,
+        residency: &KvCacheGroupResidency,
+    ) -> Option<MatchDetails> {
+        let Self::Concurrent(primary) = self else {
+            return None;
+        };
+        let sequence = sequence.as_slice();
+        let end = max_blocks.unwrap_or(sequence.len()).min(sequence.len());
+        if end == 0 && !sequence.is_empty() {
+            return None;
+        }
+        // A bounded walk is accepted only when its exact complete cohort is
+        // proven hybrid. Otherwise retry the full query: an unknown dense
+        // worker must retain the general evaluator's original raw coverage.
+        let mut proof = if end < sequence.len() {
+            EndpointPrefixProof::bounded(residency)
+        } else {
+            EndpointPrefixProof::new(residency)
+        };
+        let mut details = primary.backend().find_match_details_impl_with_observer(
+            &sequence[..end],
+            false,
+            retain,
+            &mut proof,
+        );
+        proof.finish(&mut details).then_some(details)
+    }
+
     async fn find_observed(
         &self,
         sequence: &HashInput<'_>,
@@ -554,6 +607,7 @@ pub(super) async fn merge_side_or_warn(
 
 #[cfg(test)]
 mod tests {
+    use super::{EndpointPrefixProof, HybridPrefixEvaluator};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -656,6 +710,204 @@ mod tests {
                 }
             }
             Indexer::Remote { .. } | Indexer::None => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn endpoint_proof_matches_general_evaluator_and_rejects_removed_state() {
+        use crate::indexer::HybridResumeCaps;
+
+        for missing in [false, true] {
+            let indexer = make_test_concurrent_indexer();
+            let sequence: Vec<_> = [11, 12, 13].into_iter().map(LocalBlockHash).collect();
+            let chain = compute_seq_hash_for_block(&sequence);
+            let workers = [WorkerWithDpRank::new(1, 0), WorkerWithDpRank::new(2, 0)];
+            // Finish all layout publications before storing the common endpoint.
+            for worker in workers {
+                indexer.declare_recurrent_layout(worker, &[0, 1], 1);
+            }
+            for worker in workers {
+                indexer
+                    .try_apply_event(store_event(
+                        worker.worker_id,
+                        0,
+                        1,
+                        &[],
+                        &[11, 12, 13],
+                        StorageTier::Device,
+                    ))
+                    .await
+                    .unwrap();
+                for group in [0, 1] {
+                    indexer
+                        .try_apply_event(checkpoint(
+                            worker,
+                            StorageTier::Device,
+                            if missing && worker == workers[1] {
+                                chain[1]
+                            } else {
+                                chain[2]
+                            },
+                            group,
+                            2,
+                        ))
+                        .await
+                        .unwrap();
+                }
+            }
+            flush_indexer(&indexer).await;
+            let Indexer::Concurrent {
+                primary,
+                lower_tier,
+                ..
+            } = &indexer
+            else {
+                unreachable!()
+            };
+            let mut evaluator = HybridPrefixEvaluator::new(lower_tier.group_residency(), None);
+            let mut expected = primary.backend().find_match_details_impl_with_observer(
+                &sequence,
+                false,
+                true,
+                &mut evaluator,
+            );
+            evaluator.prepare_device(&expected);
+            evaluator.finish(&mut expected, &mut Default::default(), &Default::default());
+            let actual = indexer
+                .find_matches_by_tier_with_options(
+                    sequence.clone(),
+                    LowerTierQueryOptions {
+                        retain_kv_transfer_chain: true,
+                        max_reusable_blocks: None,
+                    },
+                )
+                .await
+                .unwrap()
+                .device;
+            assert_eq!(actual.overlap_scores.scores, expected.overlap_scores.scores);
+            assert_eq!(actual.last_matched_hashes, expected.last_matched_hashes);
+            assert_eq!(actual.hybrid_resume_caps, expected.hybrid_resume_caps);
+            assert_eq!(
+                actual.kv_transfer_candidates,
+                expected.kv_transfer_candidates
+            );
+            if !missing {
+                assert!(matches!(
+                    actual.hybrid_resume_caps,
+                    HybridResumeCaps::UniformConfirmed { .. }
+                ));
+                let mut proof = EndpointPrefixProof::new(lower_tier.group_residency());
+                let speculative = primary
+                    .backend()
+                    .find_match_details_impl_with_observer(&sequence, false, false, &mut proof);
+                assert!(proof.confirms(&speculative));
+                lower_tier.group_residency().clear_worker(workers[0]);
+                assert!(
+                    !proof.confirms(&speculative),
+                    "state invalidation fences an in-flight proof"
+                );
+            } else {
+                assert!(matches!(
+                    actual.hybrid_resume_caps,
+                    HybridResumeCaps::Explicit(_)
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_endpoint_proof_matches_general_caps_and_keeps_dense_fallback_coverage() {
+        use crate::indexer::HybridResumeCaps;
+
+        for with_dense_worker in [false, true] {
+            let indexer = make_test_concurrent_indexer();
+            let sequence: Vec<_> = [11, 12, 13].into_iter().map(LocalBlockHash).collect();
+            let chain = compute_seq_hash_for_block(&sequence);
+            for id in [1, 2] {
+                indexer.declare_recurrent_layout(WorkerWithDpRank::new(id, 0), &[0], 1);
+            }
+            for id in 1..=if with_dense_worker { 3 } else { 2 } {
+                indexer
+                    .try_apply_event(store_event(
+                        id,
+                        0,
+                        1,
+                        &[],
+                        &[11, 12, 13],
+                        StorageTier::Device,
+                    ))
+                    .await
+                    .unwrap();
+                if id != 3 {
+                    for &hash in &chain {
+                        indexer
+                            .try_apply_event(checkpoint(
+                                WorkerWithDpRank::new(id, 0),
+                                StorageTier::Device,
+                                hash,
+                                0,
+                                1,
+                            ))
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+            flush_indexer(&indexer).await;
+            let Indexer::Concurrent {
+                primary,
+                lower_tier,
+                ..
+            } = &indexer
+            else {
+                unreachable!()
+            };
+            for limit in [Some(0), Some(1), Some(2), Some(3), Some(8), None] {
+                let mut evaluator = HybridPrefixEvaluator::new(lower_tier.group_residency(), limit);
+                let mut expected = primary.backend().find_match_details_impl_with_observer(
+                    &sequence,
+                    false,
+                    true,
+                    &mut evaluator,
+                );
+                evaluator.prepare_device(&expected);
+                evaluator.finish(&mut expected, &mut Default::default(), &Default::default());
+                let actual = indexer
+                    .find_matches_by_tier_with_options(
+                        sequence.clone(),
+                        LowerTierQueryOptions {
+                            retain_kv_transfer_chain: true,
+                            max_reusable_blocks: limit,
+                        },
+                    )
+                    .await
+                    .unwrap()
+                    .device;
+                assert_eq!(
+                    actual.overlap_scores.scores, expected.overlap_scores.scores,
+                    "dense={with_dense_worker}, limit={limit:?}"
+                );
+                assert_eq!(actual.last_matched_hashes, expected.last_matched_hashes);
+                assert_eq!(actual.hybrid_resume_caps, expected.hybrid_resume_caps);
+                assert_eq!(
+                    actual.kv_transfer_candidates,
+                    expected.kv_transfer_candidates
+                );
+                if with_dense_worker {
+                    assert_eq!(
+                        actual
+                            .overlap_scores
+                            .scores
+                            .get(&WorkerWithDpRank::new(3, 0)),
+                        Some(&3)
+                    );
+                } else if limit != Some(0) {
+                    assert!(matches!(
+                        actual.hybrid_resume_caps,
+                        HybridResumeCaps::UniformConfirmed { .. }
+                    ));
+                }
+            }
         }
     }
 

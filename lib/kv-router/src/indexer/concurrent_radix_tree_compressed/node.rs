@@ -636,8 +636,15 @@ impl Node {
         let mut edge_match_len = 1;
         if let Some(observer) = input.observer.as_deref_mut() {
             if input.first_node {
-                observer
-                    .reserve_workers(state.full_edge_workers.len() + state.worker_cutoffs.len());
+                let endpoint_hint =
+                    (walk_len == input.sequence.len()).then(|| state.edge[walk_len - 1].1);
+                observer.begin_path(
+                    state.full_edge_workers.len() + state.worker_cutoffs.len(),
+                    endpoint_hint,
+                );
+            }
+            let observes_path = observer.observes_path();
+            if input.first_node && observes_path {
                 for &worker in &state.full_edge_workers {
                     observer.observe_worker(worker);
                 }
@@ -645,12 +652,16 @@ impl Node {
                     observer.observe_worker(worker);
                 }
             }
-            observer.observe_block(input.seq_pos + 1, state.edge[0].1);
+            if observes_path {
+                observer.observe_block(input.seq_pos + 1, state.edge[0].1);
+            }
             for i in 1..walk_len {
                 if state.edge[i].0 != input.sequence.at(input.seq_pos + i) {
                     break;
                 }
-                observer.observe_block(input.seq_pos + i + 1, state.edge[i].1);
+                if observes_path {
+                    observer.observe_block(input.seq_pos + i + 1, state.edge[i].1);
+                }
                 edge_match_len += 1;
             }
         } else {
