@@ -28,6 +28,12 @@ var _ RuntimeProvider = (*runtimeProvider)(nil)
 func (p *runtimeProvider) Resolve(ctx context.Context, group *api.DynamoGraphDeploymentEngineGroup) (Runtime, error) {
 	// Never let one backend consume another backend's identities or control protocol.
 	switch group.Labels[consts.KubeLabelDynamoEngineGroupRuntime] {
+	case consts.KubeLabelDynamoEngineGroupSGLang:
+		world, err := p.Workload.Resolve(ctx, group)
+		if err != nil {
+			return Runtime{}, err
+		}
+		return (&sglangRuntimeResolver{client: p.Client, httpClient: p.HTTP}).Resolve(ctx, group, world)
 	default:
 		return Runtime{}, fmt.Errorf("%w: unsupported Engine Group runtime %q", ErrRuntimeUnavailable,
 			group.Labels[consts.KubeLabelDynamoEngineGroupRuntime])
