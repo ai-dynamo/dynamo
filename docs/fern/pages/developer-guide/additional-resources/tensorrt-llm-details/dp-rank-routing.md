@@ -13,7 +13,7 @@ TensorRT-LLM supports [attention data parallelism](https://lmsys.org/blog/2024-1
 ### Dynamo vs TRT-LLM Internal Routing
 
 - **Dynamo DP Rank Routing**: The router selects the optimal DP rank based on KV cache overlap and instructs TRT-LLM to use that rank with strict routing (`attention_dp_relax=False`). Use this with `--router-mode kv` for cache-aware routing.
-- **TRT-LLM Internal Routing**: TRT-LLM's scheduler assigns DP ranks internally. Use this with `--router-mode round-robin` or `random` when KV-aware routing isn't needed.
+- **TRT-LLM Internal Routing**: TRT-LLM's scheduler assigns DP ranks internally. Use this with `--router-mode round-robin` or `random` when KV-aware routing isn't needed. With [session affinity](../../knowledge-base/modular-components/router/configuration-and-tuning.md#session-affinity) in `hard` mode, Dynamo pins each session to one rank, so those requests use strict routing to that rank unless conversation-aware routing is enabled with the default `engine` rank source (see below).
 
 ### Conversation-Aware DP Rank Routing
 

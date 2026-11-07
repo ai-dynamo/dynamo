@@ -207,6 +207,14 @@ impl Hold {
         }
     }
 
+    /// The binding key this hold was acquired under.
+    pub fn session_id(&self) -> &str {
+        match self {
+            Self::Initialize(initialization) => &initialization.session_id,
+            Self::Bound { lease, .. } => lease.session_id(),
+        }
+    }
+
     pub fn invalidate(self) {
         if let Self::Bound { mut lease, .. } = self {
             lease.invalidate();

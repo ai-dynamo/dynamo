@@ -73,6 +73,31 @@ impl RoutingHost {
         }))
     }
 
+    /// The DP rank a hard session binding uses on `worker_id`: the bound rank, or one
+    /// chosen from the worker's declared ranks by the binding key so every turn agrees.
+    fn hard_affinity_dp_rank(
+        &self,
+        worker_id: u64,
+        bound: Option<AffinityTarget>,
+        binding_key: &str,
+    ) -> Option<u32> {
+        if let Some(dp_rank) = bound
+            .filter(|bound| bound.worker_id == worker_id)
+            .and_then(|bound| bound.dp_rank)
+        {
+            return Some(dp_rank);
+        }
+        let dp_ranks = self
+            .routing_context
+            .as_ref()?
+            .monitor()?
+            .declared_dp_ranks(worker_id)?;
+        let dp_size = dp_ranks.len() as u64;
+        (dp_size > 1).then(|| {
+            dp_ranks.start + (xxhash_rust::xxh3::xxh3_64(binding_key.as_bytes()) % dp_size) as u32
+        })
+    }
+
     pub(super) fn select_hosted_worker(
         &self,
         request: &SingleIn<PreprocessedRequest>,
@@ -246,19 +271,26 @@ impl RoutingHost {
             selected_occupancy,
             device_aware_telemetry,
         } = selection;
-        let soft_affinity_target = if self.session_affinity_mode == SessionAffinityMode::Soft {
-            operation.as_ref().and_then(Hold::target).map(from_table)
-        } else {
-            None
-        };
+        let bound_target = operation.as_ref().and_then(Hold::target).map(from_table);
+        let hard_binding_key = operation
+            .as_ref()
+            .filter(|_| self.session_affinity_mode == SessionAffinityMode::Hard)
+            .map(Hold::session_id);
         let target_for_worker = |worker_id| {
-            AffinityTarget::new(
-                worker_id,
-                soft_affinity_target
+            let dp_rank = match hard_binding_key {
+                Some(binding_key) => {
+                    self.hard_affinity_dp_rank(worker_id, bound_target, binding_key)
+                }
+                None => bound_target
                     .filter(|target| target.worker_id == worker_id)
                     .and_then(|target| target.dp_rank),
-            )
+            };
+            AffinityTarget::new(worker_id, dp_rank)
         };
+        let target_constraint = target_constraint.map(|target| match target.dp_rank {
+            None if hard_binding_key.is_some() => target_for_worker(target.worker_id),
+            _ => target,
+        });
         let uses_occupancy = self
             .required_worker_inputs()
             .contains(WorkerInputs::ACTIVE_REQUESTS);
