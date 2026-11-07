@@ -26,7 +26,7 @@ use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{
     ResponseState, build_generate_request, consume_reasoning_parser_args, data_parallel_rank,
-    request_has_multimodal_input, require_proto_0_6_controls,
+    request_has_multimodal_input, require_proto_0_6_controls, validate_remote_media_urls,
 };
 use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, resolve_source_path};
 use crate::model::DiscoveredModel;
@@ -51,6 +51,8 @@ pub struct VllmSidecarEngine {
     /// vLLM's reasoning parser decides when Dynamo's tool grammars apply, so
     /// they exclude the reasoning phase; set by `from_discovered`.
     engine_gates_reasoning: bool,
+    /// `DYN_MM_ALLOW_REMOTE_URLS`, read once at startup; enabled by default.
+    pub(crate) allow_remote_media_urls: bool,
 }
 
 fn cancelled(state: &ResponseState) -> LLMEngineOutput {
@@ -81,6 +83,7 @@ impl VllmSidecarEngine {
             lost: CancellationToken::new(),
             lost_reason: Arc::default(),
             engine_gates_reasoning: false,
+            allow_remote_media_urls: true,
         }
     }
 
@@ -114,10 +117,10 @@ impl VllmSidecarEngine {
         DynamoError,
     > {
         let args = <Args as clap::Parser>::parse();
-        let vllm_http_url = Self::validate_args(&args)?;
+        let (vllm_http_url, allow_remote_media_urls) = Self::validate_args(&args)?;
         Ok((
             args.sidecar.common.runtime.clone(),
-            Self::from_parsed_async(args, vllm_http_url, false),
+            Self::from_parsed_async(args, vllm_http_url, allow_remote_media_urls, false),
         ))
     }
 
@@ -133,27 +136,34 @@ impl VllmSidecarEngine {
         SidecarStartupError,
     > {
         let args = <Args as clap::Parser>::try_parse_from(argv)?;
-        let vllm_http_url = Self::validate_args(&args)?;
+        let (vllm_http_url, allow_remote_media_urls) = Self::validate_args(&args)?;
         Ok((
             args.sidecar.common.runtime.clone(),
-            Self::from_parsed_async(args, vllm_http_url, false),
+            Self::from_parsed_async(args, vllm_http_url, allow_remote_media_urls, false),
         ))
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
-        let vllm_http_url = Self::validate_args(&args)?;
+        let (vllm_http_url, allow_remote_media_urls) = Self::validate_args(&args)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| client::engine_shutdown(format!("bootstrap runtime: {error}")))?;
-        runtime.block_on(Self::from_parsed_async(args, vllm_http_url, true))
+        runtime.block_on(Self::from_parsed_async(
+            args,
+            vllm_http_url,
+            allow_remote_media_urls,
+            true,
+        ))
     }
 
-    fn validate_args(args: &Args) -> Result<Option<RlAdminBaseUrl>, DynamoError> {
+    /// Returns the RL admin URL and the remote media URL policy.
+    fn validate_args(args: &Args) -> Result<(Option<RlAdminBaseUrl>, bool), DynamoError> {
         // Reject overflow before runtime connections, but start the actual
         // engine deadline only when the bootstrap future is polled.
         client::startup_deadline(args.sidecar.grpc.config().startup_deadline)?;
-        args.vllm_http_endpoint
+        let vllm_http_url = args
+            .vllm_http_endpoint
             .as_ref()
             .map(|endpoint| {
                 RlAdminBaseUrl::parse(endpoint.as_str()).map_err(|error| {
@@ -162,12 +172,23 @@ impl VllmSidecarEngine {
                     ))
                 })
             })
-            .transpose()
+            .transpose()?;
+        let remote_urls = std::env::var("DYN_MM_ALLOW_REMOTE_URLS")
+            .map(Some)
+            .or_else(|error| match error {
+                std::env::VarError::NotPresent => Ok(None),
+                _ => Err(client::invalid_argument(
+                    "DYN_MM_ALLOW_REMOTE_URLS must be valid UTF-8",
+                )),
+            })?;
+        let allow_remote_media_urls = crate::args::allow_remote_media_urls(remote_urls.as_deref())?;
+        Ok((vllm_http_url, allow_remote_media_urls))
     }
 
     async fn from_parsed_async(
         args: Args,
         vllm_http_url: Option<RlAdminBaseUrl>,
+        allow_remote_media_urls: bool,
         bootstrap: bool,
     ) -> Result<(Self, WorkerConfig), DynamoError> {
         let endpoint = &args.sidecar.grpc_endpoint;
@@ -183,7 +204,9 @@ impl VllmSidecarEngine {
                 "Discovering vLLM model metadata");
         }
         let model = bootstrap_discover(endpoint, transport, bootstrap_deadline, bootstrap).await?;
-        Self::from_discovered(args, model, vllm_http_url)
+        let (mut engine, config) = Self::from_discovered(args, model, vllm_http_url)?;
+        engine.allow_remote_media_urls = allow_remote_media_urls;
+        Ok((engine, config))
     }
 
     fn from_discovered(
@@ -894,6 +917,7 @@ impl LLMEngine for VllmSidecarEngine {
                 "max_thinking_tokens requires vLLM to run a reasoning parser",
             ));
         }
+        validate_remote_media_urls(&request, self.allow_remote_media_urls)?;
         let mut state = ResponseState::new(&request, self.mode);
         let data_parallel_rank = data_parallel_rank(&request, self.mode);
         let mut proto_request = build_generate_request(request, request_id, self.mode)?;
@@ -1634,7 +1658,7 @@ mod tests {
             "qwen3",
         ])
         .unwrap();
-        let vllm_http_url = VllmSidecarEngine::validate_args(&args).unwrap();
+        let (vllm_http_url, _) = VllmSidecarEngine::validate_args(&args).unwrap();
         // Native parser names differ from the explicit Dynamo configuration.
         let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
         let (_, config) = VllmSidecarEngine::from_discovered(args, model, vllm_http_url).unwrap();
