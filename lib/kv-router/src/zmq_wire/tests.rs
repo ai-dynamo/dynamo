@@ -1922,3 +1922,101 @@ fn test_unrecognized_media_do_not_pollute_cache_namespace_state() {
     };
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
 }
+
+/// vLLM's CPU offload tier publishes a HostPinned placeholder with the same hash,
+/// no parent and no salt (ai-dynamo/dynamo#18052). It is a lower-tier copy of
+/// the salted GPU block, so the salted chain must keep inheriting the namespace.
+#[test]
+fn test_host_pinned_unsalted_copy_keeps_cache_namespace() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+
+    let salted_gpu = namespaced_block_stored(1, None, Some("tenant-a"), "GPU");
+    assert!(normalizer.preprocess(salted_gpu, worker).is_some());
+
+    let mut cpu_placeholder = namespaced_block_stored(1, None, None, "CPU");
+    if let RawKvEvent::BlockStored { token_ids, .. } = &mut cpu_placeholder {
+        token_ids.clear();
+    }
+    let cpu_placeholder = normalizer
+        .preprocess(cpu_placeholder, worker)
+        .expect("CPU placeholder must still be applied");
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = cpu_placeholder
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace, None);
+    assert!(matches!(
+        &normalizer.cache_namespaces[&(worker, 1)],
+        CacheNamespaceState::Namespaced(ns) if ns.as_ref() == "tenant-a"
+    ));
+
+    let gpu_child = namespaced_block_stored(2, Some(1), None, "GPU");
+    let child = normalizer
+        .preprocess(gpu_child, worker)
+        .expect("CPU copy must not make the salted parent ambiguous");
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = child
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+/// Evicting the CPU copy must not drop the namespace the resident GPU block owns.
+#[test]
+fn test_host_pinned_removal_keeps_cache_namespace() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+
+    let salted_gpu = namespaced_block_stored(1, None, Some("tenant-a"), "GPU");
+    assert!(normalizer.preprocess(salted_gpu, worker).is_some());
+    let cpu_copy = namespaced_block_stored(1, None, None, "CPU");
+    assert!(normalizer.preprocess(cpu_copy, worker).is_some());
+
+    let cpu_eviction = RawKvEvent::BlockRemoved {
+        block_hashes: vec![BlockHashValue::Unsigned(1)],
+        medium: Some("CPU".to_string()),
+        group_idx: None,
+        kv_cache_spec_kind: None,
+        kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
+    };
+    assert!(normalizer.preprocess(cpu_eviction, worker).is_some());
+
+    let gpu_child = namespaced_block_stored(2, Some(1), None, "GPU");
+    let child = normalizer
+        .preprocess(gpu_child, worker)
+        .expect("salted GPU parent is still resident");
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = child
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+/// A device-tier store without a salt reusing a salted hash is still ambiguous.
+#[test]
+fn test_device_unsalted_store_still_marks_cache_namespace_ambiguous() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+
+    let salted_gpu = namespaced_block_stored(1, None, Some("tenant-a"), "GPU");
+    assert!(normalizer.preprocess(salted_gpu, worker).is_some());
+    let unsalted_gpu = namespaced_block_stored(1, None, None, "GPU");
+    assert!(normalizer.preprocess(unsalted_gpu, worker).is_some());
+
+    let gpu_child = namespaced_block_stored(2, Some(1), None, "GPU");
+    assert_eq!(
+        normalizer
+            .preprocess_with_reason(gpu_child, worker)
+            .unwrap_err(),
+        ZmqEventFilterReason::AmbiguousCacheNamespace
+    );
+}
