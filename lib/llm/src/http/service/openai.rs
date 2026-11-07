@@ -2791,11 +2791,11 @@ pub(super) fn parse_json_request<T>(endpoint: &'static str, body: &[u8]) -> Resu
 where
     T: DeserializeOwned,
 {
-    match serde_json::from_slice(body) {
+    match from_slice_dedup_reasoning(endpoint, body) {
         Ok(request) => Ok(request),
         Err(original_error) => {
             if let Some(escaped_body) = escape_json_string_control_chars(body) {
-                match serde_json::from_slice(&escaped_body) {
+                match from_slice_dedup_reasoning(endpoint, &escaped_body) {
                     Ok(request) => {
                         tracing::warn!(
                             endpoint,
@@ -2814,18 +2814,66 @@ where
     }
 }
 
+/// Deserialize `body`, retrying once without `reasoning` on messages that also carry
+/// `reasoning_content`. `reasoning` is an alias of `reasoning_content` on assistant
+/// messages, so a client that echoes both (as some SDKs do) trips serde's duplicate-field
+/// check. Every recovery path (control-character escaping, lossy UTF-8) goes through
+/// here, so a body needing both fixes still parses.
+fn from_slice_dedup_reasoning<T>(
+    endpoint: &'static str,
+    body: &[u8],
+) -> Result<T, serde_json::Error>
+where
+    T: DeserializeOwned,
+{
+    match serde_json::from_slice(body) {
+        Ok(request) => Ok(request),
+        Err(error)
+            if error
+                .to_string()
+                .contains("duplicate field `reasoning_content`") =>
+        {
+            match drop_duplicate_reasoning(body).map(|deduped| serde_json::from_slice(&deduped)) {
+                Some(Ok(request)) => {
+                    tracing::warn!(
+                        endpoint,
+                        "Dropped `reasoning` duplicating `reasoning_content` in a message"
+                    );
+                    Ok(request)
+                }
+                _ => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Remove `reasoning` from every message that also carries `reasoning_content`.
+fn drop_duplicate_reasoning(body: &[u8]) -> Option<Vec<u8>> {
+    let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let messages = value.get_mut("messages")?.as_array_mut()?;
+    for message in messages.iter_mut() {
+        if let Some(object) = message.as_object_mut()
+            && object.contains_key("reasoning_content")
+        {
+            object.remove("reasoning");
+        }
+    }
+    serde_json::to_vec(&value).ok()
+}
+
 fn parse_json_request_lossy<T>(endpoint: &'static str, body: &[u8]) -> Result<T, serde_json::Error>
 where
     T: DeserializeOwned,
 {
     let lossy_body = String::from_utf8_lossy(body);
     if lossy_body.as_bytes() == body {
-        return serde_json::from_slice(body);
+        return from_slice_dedup_reasoning(endpoint, body);
     }
 
     let escaped_body = escape_json_string_control_chars(lossy_body.as_bytes())
         .unwrap_or_else(|| lossy_body.into_owned().into_bytes());
-    let request = serde_json::from_slice(&escaped_body)?;
+    let request = from_slice_dedup_reasoning(endpoint, &escaped_body)?;
     tracing::warn!(
         endpoint,
         "Accepted request after replacing invalid UTF-8 and escaping unescaped control characters in JSON strings"
@@ -6663,6 +6711,48 @@ mod tests {
             panic!("expected text content");
         };
         assert_eq!(content, "log \u{1b}[33mPK\u{3}\u{4}");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_drops_duplicate_reasoning() {
+        let body = br#"{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"a","reasoning":"r1","reasoning_content":"r2"},{"role":"user","content":"again"}]}"#;
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        assert_eq!(request.inner.messages.len(), 3);
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "r2");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_still_rejects_other_duplicate_fields() {
+        let body = br#"{"model":"m","model":"n","messages":[{"role":"user","content":"hi"}]}"#;
+        assert!(
+            parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body).is_err()
+        );
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_drops_duplicate_reasoning_with_control_chars() {
+        let body = b"{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"line1\nline2\"},{\"role\":\"assistant\",\"content\":\"a\",\"reasoning\":\"r1\",\"reasoning_content\":\"r2\"}]}";
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        assert_eq!(request.inner.messages.len(), 2);
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "r2");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_drops_duplicate_reasoning_with_invalid_utf8() {
+        let mut body = br#"{"model":"m","messages":[{"role":"user","content":"bad "#.to_vec();
+        body.push(0xff);
+        body.extend_from_slice(
+            br#" byte"},{"role":"assistant","content":"a","reasoning":"r1","reasoning_content":"r2"}]}"#,
+        );
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", &body).expect("request should parse");
+        assert_eq!(request.inner.messages.len(), 2);
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "r2");
     }
 
     #[test]
