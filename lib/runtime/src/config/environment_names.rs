@@ -865,6 +865,9 @@ pub mod model {
 
 /// KV Router configuration environment variables
 pub mod router {
+    /// Opt-in frontend-local aggregated decoder progress; independent of TRACE logging.
+    pub const DYN_ROUTER_DECODE_PROGRESS: &str = "DYN_ROUTER_DECODE_PROGRESS";
+
     /// Most sessions each session-affinity table holds; defaults to 65,536.
     /// The Python frontend exports `--router-session-affinity-max-entries` here.
     pub const DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES: &str =
@@ -1326,6 +1329,7 @@ mod tests {
             model::huggingface::HF_ENDPOINT,
             model::huggingface::HF_HUB_OFFLINE,
             // Router
+            router::DYN_ROUTER_DECODE_PROGRESS,
             router::DYN_ROUTER_PREFILL_LOAD_SCALE,
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,

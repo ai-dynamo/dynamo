@@ -44,6 +44,7 @@ impl HostedSelectionRequest {
 
     fn context(&self) -> WorkerSelectionContext<'_> {
         WorkerSelectionContext {
+            decode_progress: None,
             #[cfg(any(test, feature = "bench"))]
             request: None,
             isl_tokens: self.isl_tokens,
@@ -302,6 +303,14 @@ mod tests {
             (
                 "LOAD",
                 policy(Vec::new(), Vec::new(), declaring(WorkerInputs::LOAD)),
+            ),
+            (
+                "DECODE_PROGRESS",
+                policy(
+                    Vec::new(),
+                    Vec::new(),
+                    declaring(WorkerInputs::DECODE_PROGRESS),
+                ),
             ),
             (
                 "PREFERRED_TAINT",

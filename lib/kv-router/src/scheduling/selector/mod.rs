@@ -105,6 +105,18 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         self.select_worker(input).map(|result| (result, None))
     }
 
+    /// Supply current scheduler-scoped progress without retaining it in prepared rows.
+    #[doc(hidden)]
+    fn select_worker_with_decode_progress(
+        &self,
+        input: WorkerSelectionInput<'_, C>,
+        prepared: Option<PreparedCandidates>,
+        trace: Option<SelectionTraceSpec>,
+        _progress: Option<&super::decode_progress::DecodeProgressProvider<'_>>,
+    ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
+        self.select_worker_prepared(input, prepared, trace)
+    }
+
     /// Builds candidate rows before the request reaches the scheduler actor, for
     /// selectors whose rows depend only on the request and worker configuration
     /// until load inputs are filled.
@@ -187,6 +199,7 @@ impl<'a> MaterializedSelectionInput<'a> {
             request,
             cache_snapshot: cache_snapshot(request),
             context: WorkerSelectionContext {
+                decode_progress: None,
                 #[cfg(any(test, feature = "bench"))]
                 request: Some(request),
                 isl_tokens: request.isl_tokens,
@@ -619,15 +632,16 @@ pub(crate) fn log_selection(request_id: Option<&str>, response: &SchedulingRespo
     }
 }
 
-#[inline(always)]
 // DefaultWorkerSelector and SelectionService both converge here. Only the scorer/picker stage is
 // dispatched; eligibility outcomes and result construction stay host-owned and shared.
+#[inline(always)]
 fn select_worker_with_policy<C: WorkerConfigLike>(
     worker_type: &'static str,
     state: WorkerSelectionPolicyStateRef<'_>,
     input: WorkerSelectionInput<'_, C>,
     trace: Option<SelectionTraceSpec>,
     prepared: Option<PreparedCandidates>,
+    progress: Option<&super::decode_progress::DecodeProgressProvider<'_>>,
 ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
     let (workers, request, eligibility, block_size) = input.into_configured();
     eligibility.validate_pinned_worker_allowed()?;
@@ -715,7 +729,20 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                         .then_some(&active_requests),
                     &info,
                 );
-                let row = picker.pick(&input.context, picker_input)?;
+                let decode_progress = picker_inputs
+                    .contains(WorkerInputs::DECODE_PROGRESS)
+                    .then(|| {
+                        super::decode_progress::DecodeProgressSnapshot::capture(
+                            candidates.iter().map(|row| row.worker()),
+                            progress,
+                        )
+                    })
+                    .flatten();
+                let picker_context = WorkerSelectionContext {
+                    decode_progress: decode_progress.as_ref(),
+                    ..input.context
+                };
+                let row = picker.pick(&picker_context, picker_input)?;
                 let Some(candidate) = candidates.get(row) else {
                     return Err(WorkerSelectionPolicyError::InvalidPickerRow {
                         row,

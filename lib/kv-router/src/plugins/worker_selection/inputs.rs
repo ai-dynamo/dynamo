@@ -190,6 +190,9 @@ impl WorkerInputs {
     pub const LOAD: Self = Self(1 << 1);
     /// Request preferred-taint routing metadata.
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
+    /// Request a frontend-local active-decoder snapshot during the picker callback only.
+    /// Filters/scorers do not receive this snapshot. No work is added to CACHE/LOAD.
+    pub const DECODE_PROGRESS: Self = Self(1 << 3);
     /// Request each row's active request count, read through
     /// [`WorkerInputView::active_requests`]. Picker only: filters and scorers that declare it
     /// receive nothing.

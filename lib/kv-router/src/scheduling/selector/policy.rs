@@ -744,7 +744,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
         input: WorkerSelectionInput<'_, C>,
         trace: Option<SelectionTraceSpec>,
     ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
-        self.select(input, trace, None)
+        self.select(input, trace, None, None)
     }
 
     fn candidate_preparer(&self) -> Option<CandidatePreparer> {
@@ -768,7 +768,17 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
         prepared: Option<PreparedCandidates>,
         trace: Option<SelectionTraceSpec>,
     ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
-        self.select(input, trace, prepared)
+        self.select(input, trace, prepared, None)
+    }
+
+    fn select_worker_with_decode_progress(
+        &self,
+        input: WorkerSelectionInput<'_, C>,
+        prepared: Option<PreparedCandidates>,
+        trace: Option<SelectionTraceSpec>,
+        progress: Option<&super::super::decode_progress::DecodeProgressProvider<'_>>,
+    ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
+        self.select(input, trace, prepared, progress)
     }
 }
 
@@ -778,6 +788,7 @@ impl WorkerSelectionPolicy {
         input: WorkerSelectionInput<'_, C>,
         trace: Option<SelectionTraceSpec>,
         prepared: Option<PreparedCandidates>,
+        progress: Option<&super::super::decode_progress::DecodeProgressProvider<'_>>,
     ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
         let state = match &self.state {
             #[cfg(any(test, feature = "bench"))]
@@ -788,7 +799,7 @@ impl WorkerSelectionPolicy {
                 WorkerSelectionPolicyStateRef::Composed(state)
             }
         };
-        select_worker_with_policy(self.worker_label, state, input, trace, prepared)
+        select_worker_with_policy(self.worker_label, state, input, trace, prepared, progress)
     }
 }
 

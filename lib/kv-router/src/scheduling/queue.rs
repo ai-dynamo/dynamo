@@ -2440,8 +2440,9 @@ impl<
             } else {
                 None
             };
+            let progress = |worker| self.slots.decode_progress_for(worker);
             self.selector
-                .select_worker_prepared(
+                .select_worker_with_decode_progress(
                     WorkerSelectionInput::configured(
                         &workers,
                         request,
@@ -2450,6 +2451,7 @@ impl<
                     ),
                     prepared,
                     trace,
+                    Some(&progress),
                 )
                 .map(|(mut selection, selection_trace)| {
                     // Measure affinity selections against every eligible worker so cache
@@ -4607,6 +4609,20 @@ policy_classes:
             }
             self.inner.select_worker_prepared(input, prepared, trace)
         }
+
+        fn select_worker_with_decode_progress(
+            &self,
+            input: WorkerSelectionInput<'_, SimpleWorkerConfig>,
+            prepared: Option<PreparedCandidates>,
+            trace: Option<SelectionTraceSpec>,
+            progress: Option<&super::super::decode_progress::DecodeProgressProvider<'_>>,
+        ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
+            if prepared.is_some() {
+                self.prepared_selections.fetch_add(1, Ordering::Relaxed);
+            }
+            self.inner
+                .select_worker_with_decode_progress(input, prepared, trace, progress)
+        }
     }
 
     /// Picks the least-loaded worker; ties go to the lowest worker.
@@ -4776,6 +4792,101 @@ policy_classes:
         let later = later_rx.await.unwrap().unwrap().best_worker;
         assert_eq!(later, WorkerWithDpRank::new(1, 0));
         assert_eq!(prepared_queue.prepared_selections(), 2);
+    }
+
+    #[tokio::test]
+    async fn prepared_rows_read_decode_progress_at_actor_selection() {
+        use crate::plugins::worker_selection::{
+            WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
+        };
+        use crate::scheduling::decode_progress::DecodeProgressUpdate;
+
+        struct ProgressPicker;
+        impl WorkerPicker for ProgressPicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::DECODE_PROGRESS
+            }
+
+            fn pick(
+                &self,
+                context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, crate::WorkerSelectionPolicyError> {
+                let progress = &context.decode_progress().unwrap().entries()[0];
+                assert_eq!(progress.remaining_token_budget(), 48);
+                Ok(input
+                    .candidates()
+                    .iter()
+                    .position(|row| row.worker().worker_id == 1)
+                    .unwrap())
+            }
+        }
+        let prepared_selections = Arc::new(AtomicUsize::new(0));
+        let policy = || CountingPreparedPolicy {
+            inner: WorkerSelectionPolicy::new(
+                crate::KvRouterConfig::default(),
+                "test",
+                vec![],
+                Box::new(ProgressPicker),
+            ),
+            prepared_selections: Arc::clone(&prepared_selections),
+        };
+        let (queue, slots) = make_queue_with_custom_selector(2, 16, 64, None, policy());
+        let mut actor = actor_with_selector_for_test(&queue, &slots, policy());
+        let request_id = "background".to_string();
+        let worker = WorkerWithDpRank::new(0, 0);
+        let attempt = slots
+            .add_request_if_registered_admitted(
+                crate::SequenceRequest {
+                    request_id: request_id.clone(),
+                    token_sequence: None,
+                    expected_output_tokens: None,
+                    track_prefill_tokens: false,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                Instant::now(),
+            )
+            .unwrap();
+        slots
+            .mark_prefill_completed(&request_id, Instant::now())
+            .unwrap();
+        slots
+            .update_output_if_booking(
+                &request_id,
+                worker,
+                attempt,
+                0,
+                None,
+                Some(DecodeProgressUpdate::observed(128, 8)),
+            )
+            .unwrap();
+        let (request, mut rx) = make_request("prepared-progress", 16);
+        let prepared = queue.prepare_candidates(&request);
+        assert!(prepared.is_some());
+        slots
+            .update_output_if_booking(
+                &request_id,
+                worker,
+                attempt,
+                0,
+                None,
+                Some(DecodeProgressUpdate::observed(128, 80)),
+            )
+            .unwrap();
+        actor.refresh_workers_generation();
+        assert_eq!(
+            actor.with_projected_loads(request, Instant::now(), |actor, request| {
+                actor.admit_one_projected(AdmissionContext::untracked(0, None), request, prepared)
+            }),
+            Admission::Booked
+        );
+        assert_eq!(
+            rx.try_recv().unwrap().unwrap().best_worker,
+            WorkerWithDpRank::new(1, 0)
+        );
+        assert_eq!(prepared_selections.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

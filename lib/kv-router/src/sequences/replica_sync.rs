@@ -224,6 +224,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                         decay_now,
                     );
                     let load = seq.worker_load_snapshot();
+                    self.project_decode_progress(event_worker, &seq);
                     self.prompt_registry
                         .apply_membership_delta_and_load_without_cleanup(
                             event_worker,
@@ -264,6 +265,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                         return;
                     };
                     let load = seq.worker_load_snapshot();
+                    self.project_decode_progress(current.worker, &seq);
                     self.prompt_registry
                         .apply_membership_delta_and_load_without_cleanup(
                             current.worker,
@@ -308,6 +310,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                         return;
                     }
                     let load = seq.worker_load_snapshot();
+                    self.project_decode_progress(current.worker, &seq);
                     self.prompt_registry
                         .replace_worker_load_state(current.worker, load);
                     (completion, load)

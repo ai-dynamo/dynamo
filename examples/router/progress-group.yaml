@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Experimental calibration profile, not a generally calibrated routing policy.
+# Enable DYN_ROUTER_DECODE_PROGRESS=1 on the aggregated frontend.
+# Also set router_track_active_blocks: true and router_track_output_blocks: true
+# in the frontend router configuration; this file configures only the picker.
+worker_selection:
+  aggregated: progress-group
+  instances:
+    - name: progress-group
+      type: dynamo-two-tier-cost-fn
+      parameters:
+        progress_group:
+          source_active_requests: 8
+          min_prefix_tokens: 16384
+          min_remaining_tokens: 256
+          max_progress_age_ms: 100
