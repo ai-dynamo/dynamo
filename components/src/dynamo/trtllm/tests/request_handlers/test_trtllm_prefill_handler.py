@@ -3,6 +3,9 @@
 
 """Unit tests for PrefillHandler."""
 
+import logging
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 import torch
 
@@ -16,6 +19,7 @@ from tensorrt_llm.llmapi import DisaggregatedParams
 
 from dynamo.trtllm.request_handlers.handlers import PrefillHandler
 from dynamo.trtllm.tests.request_handlers.utils import (
+    create_mock_context,
     create_mock_encoder_cache,
     run_generate_with_mock_fetch,
     setup_multimodal_config,
@@ -82,3 +86,42 @@ class TestPrefillHandlerGenerate:
 
         assert embeddings is None
         assert ep_params is expected_params
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("scheme", ["https", "s3"])
+    async def test_embedding_paths_log_keeps_signed_url_out(self, caplog, scheme):
+        """The query of a presigned URL is a bearer credential; the NIXL
+        embedding path must log only scheme, host and path."""
+        signature = "c2f1e9d8b7a6deadbeef0123456789abcdef"
+        signed_url = (
+            f"{scheme}://user:private-password@bucket.s3.amazonaws.com/emb.safetensors"
+            "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+            f"&X-Amz-Signature={signature}"
+        )
+        config = create_mock_request_handler_config(disaggregation_mode="prefill")
+        config.multimodal_processor = MagicMock()
+        config.multimodal_processor.extract_prompt_and_media_from_request = MagicMock(
+            return_value=("text", [], [signed_url])
+        )
+        config.encode_client = MagicMock()
+        config.connector = MagicMock()
+        handler = PrefillHandler(config, encoder_cache=None)
+
+        class _StopAfterLog(Exception):
+            pass
+
+        with patch.object(
+            handler,
+            "remote_encode_with_nixl",
+            AsyncMock(side_effect=_StopAfterLog),
+        ) as remote_encode, caplog.at_level(logging.DEBUG):
+            with pytest.raises(_StopAfterLog):
+                async for _ in handler.generate({}, create_mock_context()):
+                    pass
+
+        remote_encode.assert_awaited_once()
+        assert "PrefillHandler: embedding_paths=" in caplog.text
+        assert "bucket.s3.amazonaws.com/emb.safetensors" in caplog.text
+        assert signature not in caplog.text
+        assert "X-Amz-" not in caplog.text
+        assert "private-password" not in caplog.text

@@ -8,8 +8,10 @@ None."""
 import base64
 import http.server
 import json
+import logging
 import threading
 import time
+import traceback
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -33,6 +35,7 @@ from dynamo.common.http.aiohttp_client import AiohttpClient
 from dynamo.common.http.base import HttpClient
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.trtllm import multimodal_processor as mmp
+from dynamo.trtllm.encode_helper import EncodeHelper
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 
 pytestmark = [
@@ -897,12 +900,14 @@ def embedding_server():
     """Serve one body on loopback and record each requested path.
 
     ``chunks`` and ``gap`` send the body in pieces, ``gap`` seconds apart.
-    ``stall`` sends one byte and then nothing more.
+    ``stall`` sends one byte and then nothing more. ``status`` is the HTTP
+    status sent with the body.
     """
     state = SimpleNamespace(
         body=safetensors_save({"mm_embeddings": _EMBEDDING}),
         hits=[],
         url="",
+        status=200,
         chunks=1,
         gap=0.0,
         stall=False,
@@ -912,7 +917,7 @@ def embedding_server():
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802 - http.server API
             state.hits.append(self.path)
-            self.send_response(200)
+            self.send_response(state.status)
             self.send_header("Content-Length", str(len(state.body)))
             self.end_headers()
             try:
@@ -1230,3 +1235,93 @@ async def test_proxy_fault_is_an_error_payload_from_the_encode_worker(
         await EncodeHelper.read_embeddings_from_encode_response(
             responses[0], MagicMock()
         )
+
+
+# A presigned URL's query is a bearer credential: anyone holding it can read
+# the object until it expires, so no part of it may reach a log line.
+_SIGNATURE = "c2f1e9d8b7a6deadbeef0123456789abcdef"
+_SIGNED_QUERY = (
+    "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+    "&X-Amz-Credential=AKIAEXAMPLE%2F20261105%2Fus-east-1%2Fs3%2Faws4_request"
+    f"&X-Amz-Signature={_SIGNATURE}"
+)
+
+
+def _assert_no_signed_query(text: str) -> None:
+    assert _SIGNATURE not in text
+    assert "X-Amz-" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)
+async def test_loaded_embedding_log_keeps_signed_url_out(
+    embedding_server, shared_client, caplog
+) -> None:
+    processor = _embedding_processor()
+    processor._url_policy = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+    signed_url = f"{embedding_server.url}/emb.safetensors{_SIGNED_QUERY}"
+
+    with caplog.at_level(logging.DEBUG):
+        await processor.process_openai_request(
+            _embedding_request(signed_url),
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+
+    # The signed URL went out on the wire, so the client had the credential.
+    assert len(embedding_server.hits) == 1
+    assert _SIGNATURE in embedding_server.hits[0]
+    assert "Loaded 1 embedding file(s)" in caplog.text
+    _assert_no_signed_query(caplog.text)
+    host_and_path = f"{embedding_server.url.removeprefix('http://')}/emb.safetensors"
+    assert host_and_path in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize("scheme", ["http", "s3"])
+async def test_encode_worker_download_failure_keeps_signed_url_out(
+    embedding_server, shared_client, caplog, scheme
+) -> None:
+    """S3 answers an expired or wrong signature with 403. The worker logs the
+    source before the fetch, so the log line exists even when it fails."""
+    embedding_server.status = 403
+    embedding_server.body = b"<Error><Code>AccessDenied</Code></Error>"
+    processor = _embedding_processor()
+    processor._url_policy = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+    signed_url = (
+        f"{embedding_server.url}/emb.safetensors{_SIGNED_QUERY}"
+        if scheme == "http"
+        else f"s3://user:private-password@bucket/emb.safetensors{_SIGNED_QUERY}"
+    )
+    expected_error = HttpStatusError if scheme == "http" else RuntimeError
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(expected_error) as excinfo:
+            async for _ in EncodeHelper.process_encode_request(
+                request=_embedding_request(signed_url),
+                multimodal_processor=processor,
+                connector=MagicMock(),
+            ):
+                pass
+
+    if scheme == "http":
+        # The signed URL went out on the wire, so the client had the credential.
+        assert len(embedding_server.hits) == 1
+        assert _SIGNATURE in embedding_server.hits[0]
+        assert excinfo.value.status == 403
+    else:
+        assert embedding_server.hits == []
+        assert str(excinfo.value) == "Unsupported URL scheme: s3"
+    assert "EncodeHelper: loading embeddings from" in caplog.text
+    _assert_no_signed_query(caplog.text)
+    assert "private-password" not in caplog.text
+    _assert_no_signed_query(str(excinfo.value))
+    # Some handlers log with exc_info=True, which prints the whole chain.
+    _assert_no_signed_query("".join(traceback.format_exception(excinfo.value)))
+    host_and_path = (
+        f"{embedding_server.url.removeprefix('http://')}/emb.safetensors"
+        if scheme == "http"
+        else "bucket/emb.safetensors"
+    )
+    assert host_and_path in caplog.text

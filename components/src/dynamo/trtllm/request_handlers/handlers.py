@@ -10,6 +10,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.multimodal.media_source import describe_media_source
 from dynamo.common.utils.token_ids import normalize_request_token_ids
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.encode_helper import EncodeHelper
@@ -172,7 +173,15 @@ class PrefillHandler(HandlerBase):
             # Handle embedding paths (NIXL transfer of pre-computed embeddings)
             if embedding_paths:
                 if self.encode_client and self.connector:
-                    logging.info(f"PrefillHandler: embedding_paths={embedding_paths}")
+                    # A signed URL's query is a bearer credential; log only
+                    # scheme, host and path.
+                    logging.info(
+                        "PrefillHandler: embedding_paths=%s",
+                        ", ".join(
+                            describe_media_source(path, redact_non_http_urls=True)
+                            for path in embedding_paths
+                        ),
+                    )
                     embeddings_tensor = await self.remote_encode_with_nixl(
                         request, context=context
                     )

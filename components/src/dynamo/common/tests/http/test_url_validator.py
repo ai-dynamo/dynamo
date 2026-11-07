@@ -624,6 +624,24 @@ def test_http_source_label_redacts_credentials(source, expected) -> None:
     assert describe_media_source(source) == expected
 
 
+@pytest.mark.parametrize("scheme", ["s3", "gs", "ftp"])
+def test_non_http_source_label_redaction_is_opt_in(scheme) -> None:
+    source = f"{scheme}://user:password@bucket/emb.safetensors?sig=secret#fragment"
+
+    assert describe_media_source(source) == source
+    assert describe_media_source(source, redact_non_http_urls=True) == (
+        f"{scheme}://bucket/emb.safetensors"
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["/tmp/emb.safetensors?literal#name", "file:///tmp/emb.safetensors?literal#name"],
+)
+def test_source_label_redaction_keeps_local_paths(source) -> None:
+    assert describe_media_source(source, redact_non_http_urls=True) == source
+
+
 def test_validate_local_path_keeps_an_ordinary_path_intact(tmp_path) -> None:
     """Control: bounding must not change the message for a normal path."""
     policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
