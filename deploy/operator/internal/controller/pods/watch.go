@@ -27,11 +27,8 @@ import (
 type OwnerName func(client.Object) (string, bool)
 
 // DCDName returns the DCD whose Deployment selects obj. A DCD's Deployment
-// shares its name and selects Pods by dynamo.DCDSelectorLabelValue of that name,
-// which is shortened with a hash for names longer than a label value allows. The
-// full name is recovered from the controlling ReplicaSet, which the Deployment
-// controller names "<deployment>-<pod-template-hash>". Grove Pods carry the same
-// label but belong to no DCD.
+// shares its name. The selector label hashes long names, so the name comes from
+// the controlling ReplicaSet when present. Grove Pods belong to no DCD.
 func DCDName(obj client.Object) (string, bool) {
 	labels := obj.GetLabels()
 	name := labels[commonconsts.KubeLabelDynamoSelector]

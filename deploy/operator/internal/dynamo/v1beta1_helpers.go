@@ -22,12 +22,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
-// DCDSelectorLabelValue returns the nvidia.com/selector value for a DCD's
-// workload. Every producer and consumer of that label for a DCD workload must
-// use it. Names that fit in a label value are kept unchanged, so existing
-// immutable Deployment selectors do not change. Longer names are shortened with
-// a 16-character SHA-256 suffix of the full name, as in ComputeDynamoNamespace.
-// dcdName must be a valid DCD name.
+// DCDSelectorLabelValue returns a DCD's nvidia.com/selector value; all users of that
+// label must call it. Names that fit stay unchanged (selectors are immutable).
 func DCDSelectorLabelValue(dcdName string) string {
 	if len(dcdName) <= validation.LabelValueMaxLength {
 		return dcdName

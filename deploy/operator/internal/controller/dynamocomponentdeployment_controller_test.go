@@ -3229,9 +3229,8 @@ func Test_generateDeployment_Strategy(t *testing.T) {
 	}
 }
 
-// TestStandaloneDCDLongNameSelectorLabelFits renders standalone DCDs whose
-// names exceed a label value and checks the rendered selector identity. It only
-// inspects rendered output, so it does not depend on how the value is bounded.
+// TestStandaloneDCDLongNameSelectorLabelFits checks the rendered selector of
+// standalone DCDs whose names exceed a label value.
 func TestStandaloneDCDLongNameSelectorLabelFits(t *testing.T) {
 	s := scheme.Scheme
 	require.NoError(t, v1beta1.AddToScheme(s))
