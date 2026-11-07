@@ -506,6 +506,15 @@ jobs:
       run: |
         cargo check --locked -p dynamo-kv-router --no-default-features --features standalone-slot-tracker
         cargo check --locked -p dynamo-kv-router --no-default-features --features standalone-indexer
+    - name: Keep mm-routing out of the default Python wheel
+      # Sidecar defaults must not reach the wheel through feature unification (#18132).
+      working-directory: lib/bindings/python
+      run: |
+        tree=$(cargo tree --locked -e normal,features -i dynamo-llm --prefix none --target all)
+        if grep -q 'dynamo-llm feature "mm-routing"' <<< "$tree"; then
+          echo "::error::default dynamo-py3 build enables dynamo-llm/mm-routing; enable it only via --features mm-routing"
+          exit 1
+        fi
     - name: Run standalone slot-tracker feature tests
       # No workspace member requests standalone-slot-tracker, so it needs an explicit run here.
       run: cargo test --locked -p dynamo-kv-router --features standalone-slot-tracker --lib 'services::'
