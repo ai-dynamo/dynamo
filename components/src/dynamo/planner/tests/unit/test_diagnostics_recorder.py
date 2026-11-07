@@ -7,11 +7,12 @@ import gzip
 import json
 import os
 import tempfile
+from unittest.mock import patch
 
 import pytest
 
 try:
-    import plotly  # noqa: F401
+    import plotly.graph_objects as go  # type: ignore[import-untyped]
 except ImportError:
     pytest.skip("plotly required for report tests", allow_module_level=True)
 
@@ -279,6 +280,27 @@ class TestDiagnosticsRecorder:
             assert "Load Scaling Decisions" in content
             assert "Throughput Scaling Decisions" in content
             assert "Planner Diagnostics Report" in content
+
+    def test_report_links_x_axes_across_subplots(self):
+        figures: list[go.Figure] = []
+        to_html = go.Figure.to_html
+
+        def capture_figure(fig, *args, **kwargs):
+            figures.append(fig)
+            return to_html(fig, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            recorder = DiagnosticsRecorder(config=_make_config(tmp_dir))
+            for ti, eff, obs, gpu in _synthetic_ticks(num_ticks=10):
+                recorder.record(ti, eff, obs, gpu)
+
+            with patch.object(go.Figure, "to_html", capture_figure):
+                recorder._build_report_html(list(recorder._snapshots))
+
+        (fig,) = figures
+        x_axes = list(fig.select_xaxes())
+        assert len(x_axes) == 14
+        assert all(axis.matches == "x" for axis in x_axes)
 
     def test_generate_report_creates_gzip_snapshot_log(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
