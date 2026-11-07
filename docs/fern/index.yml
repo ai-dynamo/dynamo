@@ -552,6 +552,8 @@ navigation:
                     path: pages/developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md
                   - page: Profiler Examples
                     path: pages/developer-guide/knowledge-base/modular-components/profiler/profiler-examples.md
+                  - page: DGDR Future Design (Proposed)
+                    path: pages/developer-guide/knowledge-base/modular-components/profiler/dgdr-future-design.md
               - section: Backends
                 collapsed: open-by-default
                 contents:
