@@ -170,11 +170,13 @@ spec:
 
 | Component | `nsightToolArgs` | NVTX environment |
 |---|---|---|
-| Frontend | `-t nvtx,osrt --python-sampling=true` | `DYN_ENABLE_RUST_NVTX=1` adds per-request ranges: `preprocess.*`, `transport.*`, `detokenize`, and `route.*` with KV routing. Dynamo 1.6.0 and newer only. |
-| Workers | `-t cuda,nvtx,osrt --cuda-graph-trace=node --python-sampling=true` | vLLM: `VLLM_NVTX_SCOPES_FOR_PROFILING=1` adds scheduler ranges. Leave `DYN_NVTX` unset (see [Limitations](#limitations)). |
+| Frontend | `-t nvtx,osrt --python-sampling=true` | `DYN_NVTX=1` adds per-request ranges: `preprocess.*`, `transport.*`, `detokenize`, and `route.*` with KV routing. Builds newer than v1.7.0 also add `frontend.http.*`. On Dynamo 1.6.x, set `DYN_ENABLE_RUST_NVTX=1` instead; 1.6.x has the same ranges without `frontend.http.*`. |
+| Workers | `-t cuda,nvtx,osrt --cuda-graph-trace=node --python-sampling=true` | `DYN_NVTX=1` adds the `worker.*` and `pybridge.*` ranges. vLLM: `VLLM_NVTX_SCOPES_FOR_PROFILING=1` adds scheduler ranges. On Dynamo 1.6.x, leave `DYN_NVTX` unset (see [Limitations](#limitations)). |
 
 - `--cuda-graph-trace=node` shows every kernel inside CUDA graphs and costs the most. For lower overhead, use
   `--cuda-graph-trace=graph`, which shows each graph launch as one item.
+- For every Dynamo range and how to read the gaps between them, see
+  [NVTX Profiling](../../reference/observability/nvtx-profiling.md).
 - Set the NVTX variables in the component's container `env`, or in the DGD's `spec.env` to set them on every
   component, before the pods start.
 - Keep each window at 300 seconds or less; Nsight Systems does not officially support longer runs.
@@ -292,9 +294,9 @@ kubectl exec -n $NS $POD -c main -- cat /tmp/tmpkro1yevt/<report>.nsys-rep > ./r
   `${NVDT_POD_FULLNAME}`, silently put the pod on the `default` tag.
 - **Leave out `--pytorch=autograd-nvtx`.** Nsight's helper adds it by default. It can create a CUDA context on GPU 0
   for every rank, which can shrink the KV cache.
-- **Leave `DYN_NVTX` unset on workers.** On Dynamo 1.6.0, `DYN_NVTX=1` makes `python -m dynamo.vllm` fail at import
-  under `nsys`, because some NVTX color names need matplotlib, which the runtime images do not ship. SGLang workers
-  load the same module.
+- **On Dynamo 1.6.x, leave `DYN_NVTX` unset on workers.** There, `DYN_NVTX=1` makes `python -m dynamo.vllm` fail at
+  import under `nsys`, because some NVTX color names need matplotlib, which the runtime images do not ship. SGLang
+  workers load the same module. Dynamo 1.7.0 resolves the colors without matplotlib.
 - **Keep profiled runs out of measured benchmarks.** During a 30-second window with node-level CUDA graph tracing on one
   vLLM worker, end-to-end latency rose by about 18%; a frontend-only window changed it by less than 1%.
 - **Use one profiler per process.** If your image already starts Dynamo under `nsys`, use an image without that
