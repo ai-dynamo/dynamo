@@ -52,7 +52,7 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 use crate::frontend_config::{
-    DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, FrontendApiConfig, MetricsConfig,
+    ChatTemplateDefaults, DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, FrontendApiConfig, MetricsConfig,
 };
 
 /// Middleware that echoes `x-request-id` from request to response headers.
@@ -899,6 +899,10 @@ impl State {
     /// Response field used for emitted OpenAI-compatible reasoning content.
     pub fn reasoning_field(&self) -> ReasoningField {
         self.frontend_api_config.reasoning_field()
+    }
+
+    pub fn chat_template_defaults(&self) -> &ChatTemplateDefaults {
+        self.frontend_api_config.chat_template_defaults()
     }
 }
 
