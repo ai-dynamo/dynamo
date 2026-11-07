@@ -78,9 +78,38 @@ _WARNING = (
 )
 
 
+# crd-ref-docs emits valueless markers as ``Optional: {}``, ``Required: {}``,
+# ``EmbeddedResource: {}`` and ``Schemaless: {}``, often already
+# Markdown-escaped as ``\{\}``. Escaping those braces again for MDX surfaces
+# ``\&#123;\&#125;`` noise (#17194).
+_VALUELESS_MARKER_RE = re.compile(
+    r"\b(Optional|Required|EmbeddedResource|Schemaless):\s*(?:\\\{\\\}|\{\s*\})"
+)
+# Inline code spans and ``Enum: [...]`` value lists may contain marker-like
+# literals that are real values, so they are left untouched.
+_PROTECTED_SPAN_RE = re.compile(r"(`+)(?:.+?)\1|\[[^\]]*\]", re.DOTALL)
+
+
+def _drop_valueless_markers(text: str) -> str:
+    """Strip valueless-marker braces outside inline code and value lists."""
+    out: list[str] = []
+    pos = 0
+    for match in _PROTECTED_SPAN_RE.finditer(text):
+        out.append(_VALUELESS_MARKER_RE.sub(r"\1", text[pos : match.start()]))
+        out.append(match.group(0))
+        pos = match.end()
+    out.append(_VALUELESS_MARKER_RE.sub(r"\1", text[pos:]))
+    return "".join(out)
+
+
 def _prose(text: str) -> str:
     """Escape crd-ref-docs prose for MDX, collapsing its ``<br />`` wraps."""
     return escape_mdx_prose(BR_RE.sub(" ", text))
+
+
+def _validation(text: str) -> str:
+    """Like ``_prose``, but also strips valueless-marker braces."""
+    return _prose(_drop_valueless_markers(text))
 
 
 def render_mdx(reference: KubernetesReference) -> str:
@@ -175,7 +204,7 @@ def _type_metadata(type_: KubernetesType, valid_anchors: set[str]) -> list[str]:
     if type_.underlying_type:
         lines.append(f"**Underlying type:** `{_plain(type_.underlying_type)}`")
     if type_.validation:
-        lines.append(f"**Validation:** {_prose(type_.validation)}")
+        lines.append(f"**Validation:** {_validation(type_.validation)}")
     refs = dict.fromkeys(ref for ref in type_.appears_in if ref.anchor in valid_anchors)
     if refs:
         joined = ", ".join(f"[{ref.name}](#{ref.anchor})" for ref in refs)
@@ -210,7 +239,7 @@ def _field_footnotes(field: KubernetesField, valid_anchors: set[str]) -> list[st
     if links:
         lines.append(f"See {', '.join(links)}.")
     if field.validation:
-        lines.append(f"**Validation:** {_prose(field.validation)}")
+        lines.append(f"**Validation:** {_validation(field.validation)}")
     return lines
 
 

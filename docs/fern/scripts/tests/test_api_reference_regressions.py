@@ -825,6 +825,63 @@ def test_kubernetes_sources_use_supported_admonitions() -> None:
     assert "> [!WARNING]" in rendered
 
 
+def test_kubernetes_validation_drops_valueless_optional_required_braces() -> None:
+    """crd-ref-docs valueless markers must not become escaped empty braces (#17194)."""
+    for raw in (
+        "MaxLength: 63  Optional: {}  Required: {}  Enum: [a, b]",
+        r"MaxLength: 63 <br />Optional: \{\} <br />Required: \{\} <br />Enum: [a, b]",
+    ):
+        rendered = kubernetes_api_rendering._validation(raw)
+        assert "Optional" in rendered
+        assert "Required" in rendered
+        assert "{}" not in rendered
+        assert "&#123;" not in rendered
+        assert "&#125;" not in rendered
+        assert "Enum: [a, b]" in rendered
+
+
+def test_kubernetes_validation_drops_embedded_and_schemaless_braces() -> None:
+    """EmbeddedResource / Schemaless valueless markers lose their braces too."""
+    for raw in (
+        "EmbeddedResource: {}  Optional: {}",
+        r"Schemaless: \{\} <br />Type: object <br />Optional: \{\}",
+    ):
+        rendered = kubernetes_api_rendering._validation(raw)
+        assert "&#123;" not in rendered
+        assert "&#125;" not in rendered
+        assert "{}" not in rendered
+
+
+def test_kubernetes_valueless_marker_strip_skips_inline_code() -> None:
+    """Literal ``Optional: {}`` inside an inline code span is left intact."""
+    raw = "Set `Optional: {}` to opt in. Optional: {}"
+    rendered = kubernetes_api_rendering._validation(raw)
+    assert "`Optional: {}`" in rendered
+    assert rendered.endswith("Optional")
+
+
+def test_kubernetes_description_keeps_valueless_marker_braces() -> None:
+    """Marker cleanup applies to validation cells only, not descriptions."""
+    rendered = kubernetes_api_rendering._prose("Use Required: {} to opt in.")
+    assert "Required: &#123;&#125;" in rendered
+
+
+def test_kubernetes_valueless_marker_strip_skips_multiline_inline_code() -> None:
+    """An inline code span wrapped across a newline is still left intact."""
+    raw = "Set `x\nOptional: {}` to opt in. Optional: {}"
+    stripped = kubernetes_api_rendering._drop_valueless_markers(raw)
+    assert "`x\nOptional: {}`" in stripped
+    assert stripped.endswith("Optional")
+
+
+def test_kubernetes_valueless_marker_strip_skips_enum_values() -> None:
+    """A marker-like value inside ``Enum: [...]`` is an allowed value, not a marker."""
+    raw = "Enum: [Optional: {} b]  Optional: {}"
+    stripped = kubernetes_api_rendering._drop_valueless_markers(raw)
+    assert "Enum: [Optional: {} b]" in stripped
+    assert stripped.endswith("Optional")
+
+
 def test_kubernetes_table_parser_preserves_literal_pipes() -> None:
     row = r"| `field` _string_ | uses `a|b` and x \| y |  | Required: {} |"
 
