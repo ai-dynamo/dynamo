@@ -464,10 +464,8 @@ class OmniHandler(BaseOmniHandler):
                     fps=inputs.fps,
                     response_format=inputs.response_format,
                     output_format=inputs.output_format,
-                    # No previous_text: text chat sends no sampling_params_list,
-                    # so vLLM-Omni's resolve_sampling_params_list streams the
-                    # text stage as DELTA and each outputs[0].text is new text
-                    # to emit whole.
+                    # No previous_text: with no sampling_params_list the text stage
+                    # streams as DELTA, so each outputs[0].text is new text to emit.
                     speed=inputs.speed,
                     audio_stream_state=audio_stream_state,
                     audio_aggregate_state=audio_aggregate_state,
