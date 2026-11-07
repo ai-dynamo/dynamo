@@ -1469,10 +1469,8 @@ func PCSNameForDGD(
 	hash := fnv.New32a()
 	hash.Write([]byte(dgd.Name))
 	suffix := fmt.Sprintf("%04x", hash.Sum32()&0xFFFF)
-	// A cut right after a "." would yield ".-", an invalid DNS-1123 subdomain.
-	// Trim only dots: a prefix ending in "-" already gives a valid name, and
-	// changing it would rename the PodCliqueSet of a running DGD. The prefix
-	// cannot become empty because a DGD name starts with an alphanumeric.
+	// Trim only dots, since ".-" is not a valid DNS-1123 subdomain. Trimming "-"
+	// too would rename the PodCliqueSet of a running DGD.
 	prefix := strings.TrimRight(dgd.Name[:pcsBudget-5], ".")
 	return prefix + "-" + suffix
 }
