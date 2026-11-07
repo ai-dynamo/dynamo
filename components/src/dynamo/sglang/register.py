@@ -44,6 +44,7 @@ from dynamo.llm import (
 from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     sglang_uses_mla_backend,
+    sglang_uses_ssm_state,
     supports_disagg_prefill_cancel_anytime,
 )
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
@@ -558,18 +559,22 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
     }
 
 
-def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
-    """Whether to publish ``ModelRuntimeConfig.enable_eagle`` for this speculative algorithm.
+def _eagle_enabled_for(
+    speculative_algorithm: Optional[str], model_config: Any = None
+) -> bool:
+    """Whether to publish ``ModelRuntimeConfig.enable_eagle``: does sglang bigram-key KV events?
 
-    Derived from sglang's ``SpeculativeAlgorithm.is_eagle()`` -- the SAME predicate the radix
-    cache uses to bigram-key its KV-event block hashes (``srt/managers/scheduler.py``). The KV
-    router uses ``enable_eagle`` to bigram-align the frontend's prompt-block hashes; deriving it
-    from ``is_eagle()`` (instead of a hand-maintained name set) keeps the two in lockstep and
-    covers every eagle variant -- currently EAGLE, EAGLE3, FROZEN_KV_MTP. (NEXTN/EAGLE are
-    normalized to EAGLE/FROZEN_KV_MTP in ServerArgs before we see them.)
+    The KV router uses ``enable_eagle`` to bigram-align the frontend's prompt-block hashes, so it
+    must follow the radix tree's own rule (``srt/mem_cache/unified_cache/unified_tree_core.py``):
+    bigram keys only when ``SpeculativeAlgorithm.is_eagle()`` holds AND the tree has no Mamba
+    component. sglang adds that component exactly when ``uses_ssm_state(model_config)`` holds, so
+    hybrid linear-attention models (Qwen3-Next, Qwen3.5, Nemotron-H, Kimi-Linear, ...) publish
+    single-token keys even under EAGLE/MTP. ``is_eagle()`` covers every eagle variant -- currently
+    EAGLE, EAGLE3, FROZEN_KV_MTP. (NEXTN/EAGLE are normalized to EAGLE/FROZEN_KV_MTP in ServerArgs
+    before we see them.) Without ``model_config`` only ``is_eagle()`` is checked.
     """
     try:
-        return SpeculativeAlgorithm.from_string(speculative_algorithm).is_eagle()
+        is_eagle = SpeculativeAlgorithm.from_string(speculative_algorithm).is_eagle()
     except Exception as e:
         # Graceful degradation: registration must not crash on an unexpected speculative-algorithm
         # value. ``from_string`` raises ValueError on unknown/unregistered names (and returns NONE for
@@ -583,6 +588,22 @@ def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
             e,
         )
         return False
+    if not is_eagle or model_config is None:
+        return is_eagle
+    try:
+        uses_ssm_state = sglang_uses_ssm_state(model_config)
+    except Exception as e:
+        # Same graceful degradation as above. Keep the is_eagle()-only answer this function gave
+        # before it looked at the model; that is wrong only for hybrid linear-attention models.
+        logging.warning(
+            "Could not tell whether the model keeps SSM state: %s; deriving enable_eagle from "
+            "speculative_algorithm %r alone.",
+            e,
+            speculative_algorithm,
+        )
+        return True
+    # None: this sglang predates uses_ssm_state; keep the is_eagle()-only answer.
+    return uses_ssm_state is not True
 
 
 def _get_token_budget(engine: sgl.Engine, server_args: ServerArgs) -> TokenBudget:
@@ -733,7 +754,10 @@ async def get_runtime_config(
     if base_capacity.max_num_batched_tokens is not None:
         runtime_config.max_num_batched_tokens = base_capacity.max_num_batched_tokens
 
-    if _eagle_enabled_for(server_args.speculative_algorithm):
+    # The tokenizer manager's ModelConfig comes from the same server args as the scheduler's,
+    # which decides the radix tree's KV-event hash mode. Encode-only workers have no engine.
+    model_config = engine.tokenizer_manager.model_config if engine is not None else None
+    if _eagle_enabled_for(server_args.speculative_algorithm, model_config):
         runtime_config.enable_eagle = True
 
     spec_decode_runtime_data = get_spec_decode_runtime_data(server_args)
