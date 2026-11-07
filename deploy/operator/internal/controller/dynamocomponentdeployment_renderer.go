@@ -427,7 +427,7 @@ func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(
 		return nil, errors.New("no containers found in base pod spec")
 	}
 
-	podLabels[commonconsts.KubeLabelDynamoSelector] = workloadName
+	podLabels[commonconsts.KubeLabelDynamoSelector] = dynamo.DCDSelectorLabelValue(workloadName)
 	if commonController.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, podAnnotations) {
 		podLabels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
 		podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
