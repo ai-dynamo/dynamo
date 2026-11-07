@@ -40,6 +40,7 @@ async def test_connector_does_not_fallback_on_client_error(client_error, monkeyp
     parent_fetch = AsyncMock()
     monkeypatch.setattr(connector_class.__mro__[1], "fetch_image_async", parent_fetch)
     connector = object.__new__(connector_class)
+    connector.allowed_media_domains = None
     connector._image_loader = AsyncMock()
     connector._image_loader.load_image.side_effect = client_error
 
@@ -48,6 +49,29 @@ async def test_connector_does_not_fallback_on_client_error(client_error, monkeyp
 
     assert exc_info.value is client_error
     parent_fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_connector_applies_allowed_media_domains_to_images():
+    """vLLM's --allowed-media-domains applies to images, which ImageLoader
+    fetches, as it does to audio and video, which vLLM fetches."""
+    connector_class = getattr(media_connector_module, "DynamoMediaConnector", None)
+    if connector_class is None:
+        pytest.skip("vLLM is not installed")
+
+    connector = object.__new__(connector_class)
+    connector.allowed_media_domains = ["example.com"]
+    connector._image_loader = AsyncMock()
+    connector._image_loader.load_image.return_value = _make_pil_image()
+
+    with pytest.raises(ValueError, match="allowed domains"):
+        await connector.fetch_image_async("http://169.254.169.254/latest/meta-data/")
+    connector._image_loader.load_image.assert_not_awaited()
+
+    image = await connector.fetch_image_async("https://example.com/x.jpg")
+    assert image.size == (4, 4)
+    # data: URLs have no domain, so the allowlist does not apply.
+    await connector.fetch_image_async("data:image/png;base64,AAAA")
 
 
 @pytest.mark.asyncio

@@ -830,6 +830,39 @@ vllm_configs = {
                 expected_log=[],
                 expected_response=["Generated 1 embeddings with dimension 128"],
             ),
+            # Chat-style input runs vLLM's real renderer (the unit tests mock
+            # it), so a vLLM API change on that path fails here. One
+            # conversation sent in `input`, as vLLM accepts it...
+            EmbeddingPayload(
+                body={
+                    "input": [
+                        {"role": "user", "content": "What is the capital of France?"}
+                    ],
+                },
+                repeat_count=1,
+                expected_log=[],
+                expected_response=["Generated 1 embeddings with dimension"],
+            ),
+            # ...and a batch in `messages`, one vector per conversation.
+            EmbeddingPayload(
+                body={
+                    "messages": [
+                        [{"role": "user", "content": "The sky is blue."}],
+                        [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "Machine learning"},
+                                    {"type": "text", "text": "is fascinating."},
+                                ],
+                            }
+                        ],
+                    ],
+                },
+                repeat_count=1,
+                expected_log=[],
+                expected_response=["Generated 2 embeddings with dimension"],
+            ),
         ],
     ),
     "classify_agg": VLLMConfig(
