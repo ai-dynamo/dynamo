@@ -2820,15 +2820,25 @@ where
     }
 }
 
-/// Remove `reasoning` from every message that also carries `reasoning_content`.
+/// Collapse `reasoning` / `reasoning_content` pairs to a single key per message.
+///
+/// `reasoning_content` is authoritative. It is dropped only when it is null and `reasoning`
+/// carries a value, so a null on one side never erases the real reasoning on the other.
 fn drop_duplicate_reasoning(body: &[u8]) -> Option<Vec<u8>> {
     let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
     let messages = value.get_mut("messages")?.as_array_mut()?;
     for message in messages.iter_mut() {
         if let Some(object) = message.as_object_mut()
             && object.contains_key("reasoning_content")
+            && object.contains_key("reasoning")
         {
-            object.remove("reasoning");
+            let content_is_null = object["reasoning_content"].is_null();
+            let reasoning_is_null = object["reasoning"].is_null();
+            if content_is_null && !reasoning_is_null {
+                object.remove("reasoning_content");
+            } else {
+                object.remove("reasoning");
+            }
         }
     }
     serde_json::to_vec(&value).ok()
@@ -6615,6 +6625,33 @@ mod tests {
         assert_eq!(request.inner.messages.len(), 3);
         let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
         assert_eq!(value["reasoning_content"], "r2");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_keeps_reasoning_when_reasoning_content_is_null() {
+        let body = br#"{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"a","reasoning":"real thinking","reasoning_content":null}]}"#;
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "real thinking");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_keeps_reasoning_content_when_reasoning_is_null() {
+        let body = br#"{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"a","reasoning":null,"reasoning_content":"real thinking"}]}"#;
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "real thinking");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_keeps_non_null_reasoning_with_control_chars() {
+        let body = b"{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"line1\nline2\"},{\"role\":\"assistant\",\"content\":\"a\",\"reasoning\":\"real\",\"reasoning_content\":null}]}";
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+        let value = serde_json::to_value(&request.inner.messages[1]).unwrap();
+        assert_eq!(value["reasoning_content"], "real");
     }
 
     #[test]
