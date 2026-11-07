@@ -37,6 +37,7 @@ import (
 	"gotest.tools/v3/golden"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -1540,7 +1541,7 @@ func TestClientIdentityMountsOnlyAgentMainContainer(t *testing.T) {
 				require.Len(t, clique.Spec.PodSpec.Containers, 1+len(sidecars), clique.Name)
 				var mounted []string
 				for _, container := range clique.Spec.PodSpec.Containers {
-					if slices.Contains(container.VolumeMounts, mount) {
+					if slices.ContainsFunc(container.VolumeMounts, func(m corev1.VolumeMount) bool { return apiequality.Semantic.DeepEqual(m, mount) }) {
 						mounted = append(mounted, container.Name)
 					}
 				}
