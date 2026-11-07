@@ -253,7 +253,7 @@ largest device-KV overlap when that overlap covers more than 50% of the request'
 
 Each worker pool keeps its own bindings, so prefill and decode stages bind sessions independently. The table holds at most 65,536 bindings and ignores session IDs longer than 256 bytes; requests that cannot be bound go to the least-loaded worker.
 
-**Experimental.** Available since v1.7. `dynamo-kv-capacity-aware` places a decode request only on a rank it fits on. For each rank it reads `D`, the KV blocks booked on the rank plus this request's (`decode_cost_blocks`); `N`, the rank's active requests; and the rank's capacity, the `total_kv_blocks` it advertises:
+**Experimental.** Available since v1.8. `dynamo-kv-capacity-aware` places a decode request only on a rank it fits on. For each rank it reads `D`, the KV blocks booked on the rank plus this request's (`decode_cost_blocks`); `N`, the rank's active requests; and the rank's capacity, the `total_kv_blocks` it advertises:
 
 ```yaml
 worker_selection:
