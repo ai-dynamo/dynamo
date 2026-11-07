@@ -19,7 +19,16 @@ from __future__ import annotations
 import copy
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import Any, Dict, Optional, Tuple, Type
+
+
+def _has_remote_blocks(incoming: Optional[Mapping[str, Any]]) -> bool:
+    if incoming is None:
+        return False
+    if not isinstance(incoming, Mapping):
+        raise TypeError("Native kv_transfer_params must be an object.")
+    return any(incoming.get("remote_block_ids") or ())
 
 
 class KvConnectorProtocol(ABC):
@@ -33,7 +42,9 @@ class KvConnectorProtocol(ABC):
         self._vllm_config = vllm_config
 
     @abstractmethod
-    def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
+    def prefill_request_kv_transfer_params(
+        self, incoming: Optional[Mapping[str, Any]] = None
+    ) -> Dict[str, Any]:
         """``kv_transfer_params`` for the prefill request to vLLM."""
 
     @abstractmethod
@@ -48,8 +59,10 @@ class KvConnectorProtocol(ABC):
 class NixlConnectorProtocol(KvConnectorProtocol):
     """Pull-based: decode-side params come straight off the engine response."""
 
-    def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
-        return {
+    def prefill_request_kv_transfer_params(
+        self, incoming: Optional[Mapping[str, Any]] = None
+    ) -> Dict[str, Any]:
+        params = {
             "do_remote_decode": True,
             "do_remote_prefill": False,
             "remote_engine_id": None,
@@ -57,6 +70,24 @@ class NixlConnectorProtocol(KvConnectorProtocol):
             "remote_host": None,
             "remote_port": None,
         }
+        has_source = _has_remote_blocks(incoming)
+        if has_source:
+            config = self._vllm_config.kv_transfer_config
+            if config is None or not config.get_from_extra_config(
+                "bidirectional_kv_xfer", False
+            ):
+                raise ValueError(
+                    "Native decoder KV reuse requires NixlConnector with "
+                    "bidirectional_kv_xfer enabled."
+                )
+        if incoming is not None:
+            # Only the native /generate adapter supplies these coordinates.
+            # vLLM owns their schema, TP mapping, expiry and failure policy.
+            params.update(copy.deepcopy(incoming))
+            # P must pull a partial decoder prefix and then export its KV to D.
+            # do_remote_prefill=True instead requests a full-prompt remote load.
+            params.update(do_remote_decode=True, do_remote_prefill=False)
+        return params
 
     def decode_request_kv_transfer_params(
         self, prefill_response: Any
@@ -91,7 +122,11 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
         self._get_bootstrap_addr = get_mooncake_bootstrap_addr
         self._transfer_id: str = str(uuid.uuid4())
 
-    def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
+    def prefill_request_kv_transfer_params(
+        self, incoming: Optional[Mapping[str, Any]] = None
+    ) -> Dict[str, Any]:
+        if _has_remote_blocks(incoming):
+            raise ValueError("Native decoder KV reuse requires NixlConnector.")
         return {
             "do_remote_decode": True,
             "do_remote_prefill": False,
@@ -120,7 +155,11 @@ class LMCacheMPConnectorProtocol(KvConnectorProtocol):
 
     produces_kv_transfer_params = False
 
-    def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
+    def prefill_request_kv_transfer_params(
+        self, incoming: Optional[Mapping[str, Any]] = None
+    ) -> Dict[str, Any]:
+        if _has_remote_blocks(incoming):
+            raise ValueError("Native decoder KV reuse requires NixlConnector.")
         return {}
 
     def decode_request_kv_transfer_params(

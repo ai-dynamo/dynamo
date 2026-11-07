@@ -1971,6 +1971,127 @@ async def test_prefill_non_probe_keeps_protocol_handoff(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_native_prefill_decoder_reuse_reaches_engine_and_keeps_handoff(
+    prefill_probe_handler, enabled
+):
+    handler = prefill_probe_handler
+    handler.engine_client.vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="NixlConnector",
+            get_from_extra_config=lambda key, default: enabled,
+        ),
+    )
+    incoming = {
+        "do_remote_prefill": True,
+        "do_remote_decode": False,
+        "remote_engine_id": "decoder-engine",
+        "remote_request_id": "previous-turn",
+        "remote_host": "127.0.0.1",
+        "remote_port": 5557,
+        "remote_block_ids": [[0, 1]],
+        "remote_num_tokens": 128,
+        "remote_blocks_expiry_time": 1234.5,
+    }
+    request = _make_raw_frontend_request()
+    request["stop_conditions"] = {"max_tokens": 128, "min_tokens": 8}
+    request["extra_args"] = {
+        "kv_transfer_params": {"remote_engine_id": "must-not-win"},
+        "vllm_tito": {
+            "request_id": "next-turn",
+            "cache_salt": "native-next-turn-salt",
+            "sampling_params": {"max_tokens": 128, "min_tokens": 8},
+            "kv_transfer_params": incoming,
+        },
+    }
+    if not enabled:
+        with pytest.raises(mod.InvalidArgument, match="bidirectional_kv_xfer"):
+            _ = [chunk async for chunk in handler.generate(request, MagicMock())]
+        handler.engine_client.generate.assert_not_called()
+        return
+
+    chunks = [chunk async for chunk in handler.generate(request, MagicMock())]
+    prompt = handler.engine_client.generate.call_args.args[0]
+    assert prompt["cache_salt"] == "dynamo-cache-salt:native-next-turn-salt"
+    sampling = handler.engine_client.generate.call_args.args[1]
+    assert sampling.max_tokens == sampling.min_tokens == 1
+    assert sampling.extra_args["kv_transfer_params"] == {
+        **incoming,
+        "do_remote_decode": True,
+        "do_remote_prefill": False,
+    }
+    assert request["extra_args"]["vllm_tito"]["sampling_params"] == {
+        "max_tokens": 128,
+        "min_tokens": 8,
+    }
+    assert incoming["do_remote_decode"] is False
+    assert incoming["do_remote_prefill"] is True
+    assert chunks[0]["disaggregated_params"]["kv_transfer_params"] == {
+        "do_remote_decode": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_native_prefill_probe_does_not_forward_coordinates(
+    prefill_probe_handler,
+):
+    request = _make_raw_frontend_request()
+    request[HEALTH_CHECK_KEY] = True
+    request["extra_args"] = {"vllm_tito": "must not be adapted"}
+    chunks = [
+        chunk async for chunk in prefill_probe_handler.generate(request, MagicMock())
+    ]
+    sampling = prefill_probe_handler.engine_client.generate.call_args.args[1]
+    assert "kv_transfer_params" not in (sampling.extra_args or {})
+    assert chunks[0]["disaggregated_params"] is None
+
+
+@pytest.mark.asyncio
+async def test_prefill_ignores_coordinates_without_native_envelope(
+    prefill_probe_handler,
+):
+    request = _make_raw_frontend_request()
+    incoming = {"remote_block_ids": [[0]], "remote_num_tokens": 128}
+    request["extra_args"] = {
+        "kv_transfer_params": incoming,
+        "sampling_options": {"vllm_xargs": {"kv_transfer_params": incoming}},
+    }
+    chunks = [
+        chunk async for chunk in prefill_probe_handler.generate(request, MagicMock())
+    ]
+    sampling = prefill_probe_handler.engine_client.generate.call_args.args[1]
+    assert sampling.extra_args["kv_transfer_params"] == {
+        "do_remote_decode": True,
+        "do_remote_prefill": False,
+        "remote_engine_id": None,
+        "remote_block_ids": None,
+        "remote_host": None,
+        "remote_port": None,
+    }
+    assert chunks[0]["disaggregated_params"]["kv_transfer_params"] == {
+        "do_remote_decode": False,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "envelope",
+    ["invalid", {"kv_transfer_params": []}, {"kv_transfer_params": "invalid"}],
+)
+async def test_prefill_rejects_malformed_native_coordinates_before_generation(
+    prefill_probe_handler, envelope
+):
+    request = _make_raw_frontend_request()
+    request["extra_args"] = {"vllm_tito": envelope}
+    with pytest.raises(mod.InvalidArgument, match="must be an object"):
+        _ = [
+            chunk
+            async for chunk in prefill_probe_handler.generate(request, MagicMock())
+        ]
+    prefill_probe_handler.engine_client.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_prefill_probe_preserves_engine_error(prefill_probe_handler):
     handler = prefill_probe_handler
     handler.engine_client.generate.side_effect = RuntimeError("engine failed")
