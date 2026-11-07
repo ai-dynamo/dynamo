@@ -85,6 +85,11 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Use real inference workers instead of GPU-free mocker workers.",
     )
     parser.addoption(
+        "--dgdr-runtime-version",
+        default="",
+        help="Runtime semantic version for DGDR images without a version tag.",
+    )
+    parser.addoption(
         "--dgdr-profiling-timeout",
         type=int,
         default=3600,
@@ -380,6 +385,7 @@ async def dgdr_manager(
             pvc_mount_path=request.config.getoption("--model-cache-mount"),
             total_gpus=request.config.getoption("--dgdr-total-gpus"),
             hf_token_secret=request.config.getoption("--dgdr-hf-token-secret"),
+            runtime_version=request.config.getoption("--dgdr-runtime-version"),
         )
     )
     await manager.init()

@@ -1221,7 +1221,7 @@ pub fn init() {
 fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let tokio_console_layer = console_subscriber::ConsoleLayer::builder()
         .with_default_env()
-        .server_addr(([0, 0, 0, 0], console_subscriber::Server::DEFAULT_PORT))
+        .server_addr(([127, 0, 0, 1], console_subscriber::Server::DEFAULT_PORT))
         .spawn();
     let tokio_console_target = tracing_subscriber::filter::Targets::new()
         .with_default(LevelFilter::ERROR)

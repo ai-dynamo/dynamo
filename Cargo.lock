@@ -2948,6 +2948,7 @@ dependencies = [
  "dynamo-kv-router",
  "dynamo-router-policies",
  "dynamo-tokens",
+ "dynamo-truthy",
  "flate2",
  "futures",
  "ndarray 0.16.1",
