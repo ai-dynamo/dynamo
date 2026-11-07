@@ -372,7 +372,7 @@ func TestResolveGroveGPUShapesCountsInterPodSharedGPUsOnce(t *testing.T) {
 				nil,
 				nil,
 				false,
-				nil,
+				nil, nil,
 			)
 			require.NoError(t, err)
 

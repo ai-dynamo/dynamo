@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"time"
@@ -129,6 +130,21 @@ func (p *groveProgram) Reconcile(
 		IsDelegated: (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController,
 	}
 	programResult = newWorkloadProgramResult(req.DGD)
+
+	// Classify workload failures, then reconcile topology; the power controller owns cap propagation.
+	defer func() {
+		if errors.Is(retErr, reconcile.TerminalError(nil)) {
+			return
+		}
+		if retErr != nil {
+			reason := reasonFailedToReconcileResources
+			if classified, ok := workloadProgramFailureReason(retErr); ok {
+				reason = classified
+			}
+			programResult.Fail(req.DGD.Generation, reason, retErr)
+		}
+		p.topology.Reconcile(ctx, req, &programResult)
+	}()
 	clearComponentGPUShapes(programResult.Status.Components)
 	clearComponentRuntimeStatuses(programResult.Status.Components)
 
@@ -141,16 +157,6 @@ func (p *groveProgram) Reconcile(
 		programResult.Fail(req.DGD.Generation, reasonSelectedWorkloadProviderUnavailable, err)
 		return programResult, reconcile.TerminalError(err)
 	}
-	defer func() {
-		if retErr != nil {
-			reason := reasonFailedToReconcileResources
-			if classified, ok := workloadProgramFailureReason(retErr); ok {
-				reason = classified
-			}
-			programResult.Fail(req.DGD.Generation, reason, retErr)
-		}
-		p.topology.Reconcile(ctx, req, &programResult)
-	}()
 	log.FromContext(ctx).Info(
 		"Reconciling Grove resources",
 		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),

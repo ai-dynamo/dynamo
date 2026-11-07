@@ -110,7 +110,7 @@ func TestGroveProgram_CoherentScalingWaitsForCurrentGeneration(t *testing.T) {
 			config := &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}}
 			runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}
 			secrets := &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}
-			pcs, err := dynamo.GenerateGrovePodCliqueSet(ctx, dgd, nil, config, runtimeConfig, nil, secrets, nil, nil, false, nil)
+			pcs, err := dynamo.GenerateGrovePodCliqueSet(ctx, dgd, nil, config, runtimeConfig, nil, secrets, nil, nil, false, nil, nil)
 			require.NoError(t, err)
 			pcs.Generation = 8
 			pcs.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment"))}
@@ -1094,7 +1094,7 @@ func TestGroveProgram_ScalingDuringUpdatesPreservesStatus(t *testing.T) {
 			config := &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}}
 			runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LPX: true}}
 			secrets := &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}
-			pcs, err := dynamo.GenerateGrovePodCliqueSet(t.Context(), dgd, (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController, config, runtimeConfig, nil, secrets, nil, nil, true, nil)
+			pcs, err := dynamo.GenerateGrovePodCliqueSet(t.Context(), dgd, (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController, config, runtimeConfig, nil, secrets, nil, nil, true, nil, nil)
 			require.NoError(t, err)
 			pcs.Generation = 1
 			pcs.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment"))}
@@ -1282,7 +1282,7 @@ func TestGroveProgram_CrashLoopFailsGraph(t *testing.T) {
 			config := &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}}
 			runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}
 			secrets := &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}
-			pcs, err := dynamo.GenerateGrovePodCliqueSet(t.Context(), dgd, (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController, config, runtimeConfig, nil, secrets, nil, nil, true, nil)
+			pcs, err := dynamo.GenerateGrovePodCliqueSet(t.Context(), dgd, (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController, config, runtimeConfig, nil, secrets, nil, nil, true, nil, nil)
 			require.NoError(t, err)
 			pcs.Generation = 1
 			pcs.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment"))}

@@ -100,7 +100,13 @@ the `dynamo_planner_power_budget_utilization` gauge reports the ratio.
 > recreate the DGD, then start the Planner against the replacement. Restart the
 > Planner after changing `total_gpu_power_limit`.
 
-Power awareness currently assumes a static, uniform GPU count and cap per
+This Planner-based example assumes a static, uniform GPU count and cap per
 component. Mixed GPU generations within one component, dynamic cap retargeting,
 and GPU allocation through DRA resource claims are not supported by this
 projection.
+
+Live cap updates without worker restarts are supported only for DGDs without a
+Planner or LPX components that use Grove or single-node component workloads, set
+each cap on the worker's own pod template, and have no worker with automatic
+checkpoints. That mode does not refresh Planner
+budgets and does not apply to this example.

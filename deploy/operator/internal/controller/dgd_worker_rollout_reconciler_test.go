@@ -274,7 +274,7 @@ func TestGenerateGrovePodCliqueSetWorkerHashSuffix(t *testing.T) {
 			pcs, err := dynamo.GenerateGrovePodCliqueSet(
 				t.Context(), dgd, req.IsDelegated,
 				&configv1alpha1.OperatorConfiguration{}, &commonController.RuntimeConfig{},
-				nil, nil, nil, nil, tt.workerHashSuffix, nil,
+				nil, nil, nil, nil, tt.workerHashSuffix, nil, nil,
 			)
 			require.NoError(t, err)
 			worker := podCliqueSetCliqueForComponent(pcs, "worker")
@@ -326,7 +326,7 @@ func TestGenerateGrovePodCliqueSetWorkerHashSuffixAppliesToEveryRoleTemplate(t *
 	pcs, err := dynamo.GenerateGrovePodCliqueSet(
 		t.Context(), dgd, (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController,
 		&configv1alpha1.OperatorConfiguration{}, &commonController.RuntimeConfig{},
-		nil, nil, nil, nil, true, nil,
+		nil, nil, nil, nil, true, nil, nil,
 	)
 	require.NoError(t, err)
 	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)

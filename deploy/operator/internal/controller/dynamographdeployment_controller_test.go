@@ -3266,6 +3266,7 @@ func TestComponentWorkloadsReconciler_Reconcile(t *testing.T) {
 				dgd,
 				nil,
 				nil,
+				nil,
 			)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 

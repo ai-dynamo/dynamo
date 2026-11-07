@@ -19,9 +19,11 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -68,6 +70,21 @@ func (p *componentProgram) Reconcile(
 	req workloadProgramRequest,
 ) (programResult workloadProgramResult, retErr error) {
 	programResult = newWorkloadProgramResult(req.DGD)
+	caps := dynamo.DesiredWorkerPowerCaps(req.DGD)
+
+	// Classify workload failures; the power controller owns cap propagation.
+	defer func() {
+		if errors.Is(retErr, reconcile.TerminalError(nil)) {
+			return
+		}
+		if retErr != nil {
+			reason := reasonFailedToReconcileResources
+			if classified, ok := workloadProgramFailureReason(retErr); ok {
+				reason = classified
+			}
+			programResult.Fail(req.DGD.Generation, reason, retErr)
+		}
+	}()
 	clearComponentGPUShapes(programResult.Status.Components)
 	clearComponentRuntimeStatuses(programResult.Status.Components)
 
@@ -86,18 +103,6 @@ func (p *componentProgram) Reconcile(
 		return programResult, reconcile.TerminalError(err)
 	}
 
-	// Classify failures from normal component reconciliation.
-	defer func() {
-		if retErr == nil {
-			return
-		}
-		reason := reasonFailedToReconcileResources
-		if classified, ok := workloadProgramFailureReason(retErr); ok {
-			reason = classified
-		}
-		programResult.Fail(req.DGD.Generation, reason, retErr)
-	}()
-
 	log.FromContext(ctx).Info(
 		"Reconciling Dynamo components deployments",
 		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),
@@ -105,10 +110,12 @@ func (p *componentProgram) Reconcile(
 	)
 
 	previousRolloutPhase := rollingUpdatePhase(programResult.Status.RollingUpdate)
-	if err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status); err != nil {
-		return programResult, err
+	if len(caps) == 0 {
+		if err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status); err != nil {
+			return programResult, err
+		}
+		p.recordRollingUpdateTransition(req.DGD, previousRolloutPhase, &programResult)
 	}
-	p.recordRollingUpdateTransition(req.DGD, previousRolloutPhase, &programResult)
 	checkpoints, err := p.sharedResources.Reconcile(ctx, req.DGD)
 	if checkpoints.Statuses != nil {
 		programResult.Status.Checkpoints = checkpoints.Statuses
@@ -127,13 +134,28 @@ func (p *componentProgram) Reconcile(
 		)
 		return programResult, failWorkloadProgram(reasonNoMultinodeOrchestrator, err)
 	}
+	// Resolve the cap exception before rollout; restart then applies in place to retained workers.
+	var retained *componentPowerCapPreservation
+	if len(caps) > 0 {
+		retained, err = p.workloads.resolvePowerCapPreservation(ctx, req.DGD, checkpoints.Infos)
+		if err != nil {
+			return programResult, err
+		}
+		if retained == nil {
+			if err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status); err != nil {
+				return programResult, err
+			}
+		}
+		p.recordRollingUpdateTransition(req.DGD, previousRolloutPhase, &programResult)
+	}
+
+	// Commit restart resolution after the selected rollout decision is reflected in status.
 	previousRestart := programResult.Status.Restart
-	restart := p.restart.Resolve(
-		ctx,
-		req.DGD,
-		&programResult.Status,
-		p.restartProgress.Resolve,
-	)
+	resolveRestartProgress := p.restartProgress.Resolve
+	if retained != nil {
+		resolveRestartProgress = p.restartProgress.retainedResolver(retained.hash)
+	}
+	restart := p.restart.Resolve(ctx, req.DGD, &programResult.Status, resolveRestartProgress)
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
 
@@ -142,7 +164,9 @@ func (p *componentProgram) Reconcile(
 		req.DGD,
 		restart.State,
 		checkpoints.Infos,
+		retained,
 	)
+	applyDesiredPowerCaps(result.ComponentStatus, req.DGD)
 	if err != nil {
 		// Preserve newly observed component status while leaving the generation unobserved.
 		if result.ComponentStatus != nil {

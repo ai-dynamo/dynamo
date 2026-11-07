@@ -118,7 +118,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	}
 
 	// Defer commit if the PCS was written this reconcile; the informer hasn't caught up yet.
-	if workerHashTransition.needsCommit() && !pcsWasWritten {
+	if workerHashTransition.needsCommit() && !pcsWasWritten && !renderedPodCliqueSet.powerCapPreserved {
 		// Pre-existing legacy PCS without a suffix is the only case where unstamped is valid.
 		isLegacyUnsuffixed := workerHashTransition.noCurrentAnnotation &&
 			renderedPodCliqueSet.existing != nil &&
@@ -137,6 +137,23 @@ func (r *groveWorkloadsReconciler) Reconcile(
 					fmt.Errorf("project observed Grove worker hash: %w", err),
 				)
 			}
+		}
+	}
+
+	// A retained generation written before its hash commit is what the workers run; record it once observed.
+	// A graph with no recorded hash records its first generation, as a first deploy does, with no rollout warning.
+	if current := currentWorkerHashes(req.DGD); renderedPodCliqueSet.powerCapPreserved && !pcsWasWritten && renderedPodCliqueSet.powerCapHash != "" &&
+		!current.contains(renderedPodCliqueSet.powerCapHash) {
+		transition := unsupportedWorkerHashTransition{
+			next:                workerGenerationHashes{v2: renderedPodCliqueSet.powerCapHash},
+			noCurrentAnnotation: current.empty(),
+			hashChanged:         !current.empty(),
+		}
+		if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, req.DGD, transition, true); err != nil {
+			return groveWorkloadResult{}, failWorkloadProgram(
+				reasonRollingUpdateFailed,
+				fmt.Errorf("project retained Grove worker hash: %w", err),
+			)
 		}
 	}
 
@@ -165,6 +182,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	result := checkGroveResourcesReadiness(resources, readiness.Classification)
 	applyComponentGPUShapes(result.ComponentStatus, renderedPodCliqueSet.gpuShapes)
 	applyComponentRuntimeStatuses(result.ComponentStatus, renderedPodCliqueSet.runtimeStatuses)
+	applyDesiredPowerCaps(result.ComponentStatus, req.DGD)
 
 	return groveWorkloadResult{ReconcileResult: result, ScalingDeferred: scalingDeferred}, scaleErr
 }

@@ -2874,6 +2874,7 @@ func resolveGroveSchedulerQueue(
 // GenerateGrovePodCliqueSet reads the provider inputs needed to construct the
 // desired PodCliqueSet. The predicate excludes components delegated to another
 // controller while the complete DGD remains available for graph-wide settings.
+// selectedIdentity may be nil to derive identity and caps from the DGD normally.
 func GenerateGrovePodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
@@ -2886,6 +2887,7 @@ func GenerateGrovePodCliqueSet(
 	existingPodCliqueSet *grovev1alpha1.PodCliqueSet,
 	workerHashSuffix bool,
 	checkpointInfoByComponent map[string]*checkpoint.CheckpointInfo,
+	selectedIdentity *GroveWorkerIdentity,
 ) (*grovev1alpha1.PodCliqueSet, error) {
 	// Construct the common PCS envelope before rendering ordinary components.
 	gangSet, err := newGrovePodCliqueSet(dynamoDeployment, operatorConfig, runtimeConfig, existingPodCliqueSet)
@@ -2924,6 +2926,9 @@ func GenerateGrovePodCliqueSet(
 			return nil, fmt.Errorf("compute Grove worker hash suffix: %w", err)
 		}
 	}
+	if selectedIdentity != nil {
+		workerHash = selectedIdentity.Hash
+	}
 
 	for i := range dynamoDeployment.Spec.Components {
 		sourceComponent := &dynamoDeployment.Spec.Components[i]
@@ -2931,6 +2936,11 @@ func GenerateGrovePodCliqueSet(
 			continue
 		}
 		component := sourceComponent.DeepCopy()
+		if selectedIdentity != nil && component.PodTemplate != nil {
+			if cap, retained := selectedIdentity.PowerCaps[component.ComponentName]; retained {
+				component.PodTemplate.Annotations[commonconsts.KubeAnnotationGPUPowerLimit] = cap
+			}
+		}
 		prepareGroveComponentForRendering(component, existingPodCliqueSet, workerHash)
 		componentName := component.ComponentName
 		// Determine backend framework using hybrid approach

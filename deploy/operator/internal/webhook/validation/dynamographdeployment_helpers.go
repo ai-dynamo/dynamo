@@ -29,11 +29,13 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
@@ -244,8 +246,7 @@ func dgdPowerLimit(
 }
 
 // validateDGDPowerLimitValue checks that the power-limit annotation value is a
-// positive decimal integer. The annotation is made immutable on creation, so an
-// invalid value that slips through requires a DGD delete-and-recreate to correct.
+// positive decimal integer. Hardware watt ranges and power budgets are outside admission's contract.
 func validateDGDPowerLimitValue(value string, fldPath *field.Path) *field.Error {
 	watts, err := strconv.Atoi(value)
 	if err != nil {
@@ -432,4 +433,28 @@ func difference(a, b map[string]struct{}) []string {
 		}
 	}
 	return result
+}
+
+// livePowerCapUpdateDetail derives graph-wide admission context without changing shared DCD validation.
+// An empty result admits an existing worker cap value change; otherwise it is the rejection message.
+func livePowerCapUpdateDetail(newDGD, oldDGD *nvidiacomv1beta1.DynamoGraphDeployment) string {
+	for _, dgd := range []*nvidiacomv1beta1.DynamoGraphDeployment{oldDGD, newDGD} {
+		if reason, supported := dynamo.LivePowerCapSupport(dgd); !supported {
+			return apivalidation.FieldImmutableErrorMsg + ": " + reason
+		}
+	}
+	if oldDGD.Status.RollingUpdate != nil {
+		switch phase := oldDGD.Status.RollingUpdate.Phase; phase {
+		case nvidiacomv1beta1.RollingUpdatePhasePending, nvidiacomv1beta1.RollingUpdatePhaseInProgress, nvidiacomv1beta1.RollingUpdatePhaseFailed:
+			return fmt.Sprintf("cannot change power cap while rolling update is %s: workers may span generations; resolve the rollout and retry after Completed or None", phase)
+		}
+	}
+
+	// Preservation requires the additive v2 worker hash; the legacy sentinel graduates only through a rollout.
+	_, hasV1 := oldDGD.Annotations[consts.AnnotationCurrentWorkerHash]
+	_, hasV2 := oldDGD.Annotations[consts.AnnotationCurrentWorkerHashV2]
+	if hasV1 && !hasV2 {
+		return "cannot change power cap until the operator records " + consts.AnnotationCurrentWorkerHashV2 + ": worker hash migration is incomplete; retry after the DGD is reconciled"
+	}
+	return ""
 }

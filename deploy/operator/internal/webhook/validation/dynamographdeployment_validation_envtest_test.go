@@ -1596,16 +1596,13 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "v1beta1 power annotation change is rejected by the webhook",
+			name: "v1beta1 existing worker power annotation change is accepted",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaWorkerPowerInputs(dgd, "350", "1", 2)
 			}),
-			wantWebhookErrs: []string{
-				`spec.components[1].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "350": ` + apivalidation.FieldImmutableErrorMsg,
-			},
 		},
 		{
 			name: "v1beta1 power annotation addition is rejected by the webhook",
@@ -1717,16 +1714,13 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1alpha1 power annotation change is rejected after conversion by the webhook",
+			name: "v1alpha1 existing worker power annotation change is accepted after conversion",
 			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				setAlphaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				setAlphaWorkerPowerInputs(dgd, "350", "1", 2)
 			}),
-			wantWebhookErrs: []string{
-				`spec.components[0].podTemplate.metadata.annotations[dynamo.nvidia.com/gpu-power-limit]: Invalid value: "350": ` + apivalidation.FieldImmutableErrorMsg,
-			},
 		},
 		{
 			name: "v1alpha1 power annotation with GMS DRA is rejected after conversion",
@@ -4250,6 +4244,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 
 	t.Log("Add complete-probe cases to the admission table for both API versions")
 	tests = append(tests, probeDGDAdmissionCases()...)
+	tests = append(tests, powerCapAdmissionCases()...)
 
 	t.Log("Add the LPX scenarios to the same DGD admission table")
 	tests = append(tests, lpxDGDAdmissionCases()...)

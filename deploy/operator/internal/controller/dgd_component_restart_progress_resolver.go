@@ -59,6 +59,23 @@ func (r *componentRestartProgressResolver) Resolve(
 	return updatedInProgress
 }
 
+// retainedResolver observes restart progress on the worker generation a cap-only edit retains,
+// instead of the generation the edited spec would select.
+func (r *componentRestartProgressResolver) retainedResolver(workerHash string) restartProgressResolver {
+	return func(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
+		logger := log.FromContext(ctx)
+		updatedInProgress := make([]string, 0, len(inProgress))
+		for _, componentName := range inProgress {
+			isFullyUpdated, reason := r.checkComponentReadyAtWorkerHashes(ctx, dgd, componentName, []string{workerHash})
+			if !isFullyUpdated {
+				logger.V(1).Info("component not fully updated", "componentName", componentName, "reason", reason)
+				updatedInProgress = append(updatedInProgress, componentName)
+			}
+		}
+		return updatedInProgress
+	}
+}
+
 func (r *componentRestartProgressResolver) checkComponentFullyUpdated(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -74,8 +91,19 @@ func (r *componentRestartProgressResolver) checkComponentFullyUpdated(
 		return false, err.Error()
 	}
 
+	return r.checkComponentReadyAtWorkerHashes(ctx, dgd, componentName, activeWorkerHashCandidates(dgd, hashes))
+}
+
+// checkComponentReadyAtWorkerHashes reports readiness of the first existing worker DCD among workerHashes.
+// dgd must be non-nil.
+func (r *componentRestartProgressResolver) checkComponentReadyAtWorkerHashes(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	componentName string,
+	workerHashes []string,
+) (bool, string) {
 	var lastReason string
-	for _, hash := range activeWorkerHashCandidates(dgd, hashes) {
+	for _, hash := range workerHashes {
 		resourceName := dynamo.GetDCDResourceName(dgd, componentName, hash)
 		ready, reason := checkDCDReady(ctx, r.reader, resourceName, dgd.Namespace)
 		if ready || reason != dcdNotFoundReason {
