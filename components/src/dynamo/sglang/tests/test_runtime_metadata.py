@@ -46,14 +46,14 @@ def register():
     [
         ("kimi_k3", False, True, True, True, [163588, 39964, 163589], True),
         (None, False, True, True, True, [163588], False),
-        ("kimi_k3", True, True, True, True, [163588], False),
-        ("kimi_k3", False, False, True, True, [163588], False),
-        ("kimi_k3", False, True, False, True, [163588], False),
-        ("kimi_k3", False, True, True, False, [163588], False),
-        ("kimi_k3", False, True, True, True, [], False),
+        ("kimi_k3", True, True, True, True, [163588], None),
+        ("kimi_k3", False, False, True, True, [163588], None),
+        ("kimi_k3", False, True, False, True, [163588], None),
+        ("kimi_k3", False, True, True, False, [163588], None),
+        ("kimi_k3", False, True, True, True, [], None),
     ],
 )
-def test_structural_tag_reasoning_policy_advertises_only_an_available_gate(
+def test_structural_tag_reasoning_policy_advertises_gate_availability(
     register,
     parser,
     skip_tokenizer_init,
@@ -91,9 +91,10 @@ def test_structural_tag_reasoning_policy_advertises_only_an_available_gate(
     )
 
     key = register.TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY
-    assert (key in runtime_config.runtime_data) is expected
-    if expected:
-        assert json.loads(runtime_config.runtime_data[key]) is True
+    if expected is None:
+        assert key not in runtime_config.runtime_data
+    else:
+        assert json.loads(runtime_config.runtime_data[key]) is expected
 
 
 @pytest.mark.parametrize(
@@ -295,6 +296,8 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     assert (reasoning_gate in runtime_config.runtime_data) is (
         runtime_supported and not enable_multimodal
     )
+    if reasoning_gate in runtime_config.runtime_data:
+        assert json.loads(runtime_config.runtime_data[reasoning_gate]) is True
     assert "Failed to get runtime config" not in caplog.text
 
 

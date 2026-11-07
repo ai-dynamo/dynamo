@@ -353,8 +353,20 @@ Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. 
         TensorRT-LLM also supports Dynamo's reasoning/content separation. The
         native grammar-gate behavior described here is specific to SGLang and
         vLLM; it does not configure TensorRT-LLM guided decoding.
+
+        When the selected worker advertises that bare `response_format` JSON
+        constraints apply from the first generated token, V2 streams JSON
+        directly, preserving literal reasoning markers inside JSON strings even
+        if the rendered prompt ends in `<think>`. Workers that defer constraints
+        until reasoning ends keep reasoning separate. With older workers or an
+        unknown gate policy, Dynamo may buffer output until a channel boundary
+        or the response ends.
       </Accordion>
     </AccordionGroup>
+
+    <Note>
+    GLM may still emit reasoning with `chat_template_kwargs: {"enable_thinking": false}` or `chat_template_kwargs: {"thinking": false}`. These controls affect the model's chat template. With a compatible Dynamo parser configured, emitted reasoning stays in `reasoning_content` and the answer is returned in `content`.
+    </Note>
   </Accordion>
 
   <Accordion title="Nemotron">
