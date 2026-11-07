@@ -12,7 +12,9 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	"github.com/stretchr/testify/assert"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -23,6 +25,7 @@ func TestOwnerNames(t *testing.T) {
 		name      string
 		ownerName OwnerName
 		labels    map[string]string
+		owner     string // name of a controlling ReplicaSet, if any
 		want      string
 		owned     bool
 	}{
@@ -32,6 +35,28 @@ func TestOwnerNames(t *testing.T) {
 			labels:    map[string]string{commonconsts.KubeLabelDynamoSelector: "graph-frontend"},
 			want:      "graph-frontend",
 			owned:     true,
+		},
+		{
+			name:      "DCD with a bounded selector label by ReplicaSet owner",
+			ownerName: DCDName,
+			labels: map[string]string{
+				commonconsts.KubeLabelDynamoSelector:   "nemotron-3-5-super-vl-120b-a12b-vllm-disagg-b2-ccd25a4e5dbfcb99",
+				appsv1.DefaultDeploymentUniqueLabelKey: "7d9c6b5f4",
+			},
+			owner: "nemotron-3-5-super-vl-120b-a12b-vllm-disagg-b200-swebenchpro-decode-7d9c6b5f4",
+			want:  "nemotron-3-5-super-vl-120b-a12b-vllm-disagg-b200-swebenchpro-decode",
+			owned: true,
+		},
+		{
+			name:      "ReplicaSet owner without the pod-template-hash suffix",
+			ownerName: DCDName,
+			labels: map[string]string{
+				commonconsts.KubeLabelDynamoSelector:   "graph-frontend",
+				appsv1.DefaultDeploymentUniqueLabelKey: "7d9c6b5f4",
+			},
+			owner: "other-replicaset",
+			want:  "graph-frontend",
+			owned: true,
 		},
 		{
 			name:      "no selector label",
@@ -62,7 +87,16 @@ func TestOwnerNames(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Resolve the owner of a Pod with the case's labels")
-			name, owned := tt.ownerName(testPod("inference", "pod", tt.labels, 0))
+			pod := testPod("inference", "pod", tt.labels, 0)
+			if tt.owner != "" {
+				pod.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: appsv1.SchemeGroupVersion.String(),
+					Kind:       "ReplicaSet",
+					Name:       tt.owner,
+					Controller: new(true),
+				}}
+			}
+			name, owned := tt.ownerName(pod)
 
 			t.Log("Verify the owner and whether the Pod has one")
 			assert.Equal(t, tt.owned, owned)

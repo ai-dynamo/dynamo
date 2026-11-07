@@ -910,7 +910,7 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 		Replicas: opt.dynamoComponentDeployment.Spec.Replicas,
 		Selector: &metav1.LabelSelector{
 			MatchLabels: map[string]string{
-				commonconsts.KubeLabelDynamoSelector: kubeName,
+				commonconsts.KubeLabelDynamoSelector: dynamo.DCDSelectorLabelValue(kubeName),
 			},
 		},
 		Template: *podTemplateSpec,

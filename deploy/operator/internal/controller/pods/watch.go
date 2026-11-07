@@ -7,11 +7,14 @@ package pods
 
 import (
 	"context"
+	"strings"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	poddiagnostics "github.com/ai-dynamo/dynamo/deploy/operator/internal/pods"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -24,12 +27,25 @@ import (
 type OwnerName func(client.Object) (string, bool)
 
 // DCDName returns the DCD whose Deployment selects obj. A DCD's Deployment
-// shares its name and selects Pods by that name. Grove Pods carry the same label
-// but belong to no DCD.
+// shares its name and selects Pods by dynamo.DCDSelectorLabelValue of that name,
+// which is shortened with a hash for names longer than a label value allows. The
+// full name is recovered from the controlling ReplicaSet, which the Deployment
+// controller names "<deployment>-<pod-template-hash>". Grove Pods carry the same
+// label but belong to no DCD.
 func DCDName(obj client.Object) (string, bool) {
 	labels := obj.GetLabels()
 	name := labels[commonconsts.KubeLabelDynamoSelector]
-	return name, name != "" && labels[grovecommon.LabelPodClique] == ""
+	if name == "" || labels[grovecommon.LabelPodClique] != "" {
+		return name, false
+	}
+	if hash := labels[appsv1.DefaultDeploymentUniqueLabelKey]; hash != "" {
+		if owner := metav1.GetControllerOf(obj); owner != nil && owner.Kind == "ReplicaSet" {
+			if deployment, ok := strings.CutSuffix(owner.Name, "-"+hash); ok && deployment != "" {
+				return deployment, true
+			}
+		}
+	}
+	return name, true
 }
 
 // DGDName returns the graph whose component obj is labeled for.

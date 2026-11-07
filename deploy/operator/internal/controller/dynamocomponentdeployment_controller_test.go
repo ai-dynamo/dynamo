@@ -51,8 +51,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
@@ -3225,6 +3227,130 @@ func Test_generateDeployment_Strategy(t *testing.T) {
 			g.Expect(deployment.Spec.Strategy).To(gomega.Equal(tt.wantStrategy))
 		})
 	}
+}
+
+// TestStandaloneDCDLongNameSelectorLabelFits renders standalone DCDs whose
+// names exceed a label value and checks the rendered selector identity. It only
+// inspects rendered output, so it does not depend on how the value is bounded.
+func TestStandaloneDCDLongNameSelectorLabelFits(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, v1beta1.AddToScheme(s))
+	require.NoError(t, corev1.AddToScheme(s))
+	require.NoError(t, appsv1.AddToScheme(s))
+
+	sharedPrefix := strings.Repeat("a", 63)
+	dotted := strings.Repeat("long.", 39) + "worker" // 201 characters
+	tests := []struct {
+		name    string
+		dcdName string
+	}{
+		{name: "ticket name", dcdName: "nemotron-3-5-super-vl-120b-a12b-vllm-disagg-b200-swebenchpro-decode"},
+		{name: "dotted name", dcdName: dotted},
+		{name: "shared prefix one", dcdName: sharedPrefix + "-one"},
+		{name: "shared prefix two", dcdName: sharedPrefix + "-two"},
+		{name: "name at the label limit", dcdName: strings.Repeat("b", 63)},
+		{name: "short name", dcdName: "short-worker"},
+	}
+
+	render := func(t *testing.T, dcdName string) *appsv1.Deployment {
+		t.Helper()
+		dcd := &v1beta1.DynamoComponentDeployment{
+			Name:      dcdName,
+			Namespace: "default",
+			Spec: v1beta1.DynamoComponentDeploymentSpec{
+				BackendFramework: string(dynamo.BackendFrameworkVLLM),
+				DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+					ComponentName: "worker",
+					ComponentType: v1beta1.ComponentTypeDecode,
+					Replicas:      new(int32(1)),
+					PodTemplate: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:  commonconsts.MainContainerName,
+								Image: "nvcr.io/nvidia/dynamo:latest",
+							}},
+						},
+					},
+				},
+			},
+		}
+		reconciler := &DynamoComponentDeploymentReconciler{
+			Client:        fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
+			Recorder:      events.NewFakeRecorder(100),
+			Config:        &configv1alpha1.OperatorConfiguration{},
+			RuntimeConfig: &controller_common.RuntimeConfig{},
+			DockerSecretRetriever: &mockDockerSecretRetriever{
+				GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+					return nil, nil
+				},
+			},
+		}
+		deployment, toDelete, err := reconciler.generateDeployment(context.Background(), generateResourceOption{
+			dynamoComponentDeployment: dcd,
+		})
+		require.NoError(t, err)
+		require.False(t, toDelete)
+		require.NotNil(t, deployment)
+		return deployment
+	}
+
+	selectorValues := map[string]string{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Render the standalone DCD's Deployment")
+			deployment := render(t, tt.dcdName)
+			assert.Equal(t, tt.dcdName, deployment.Name, "the Deployment keeps the DCD name")
+			templateLabels := deployment.Spec.Template.Labels
+			selectorValue := deployment.Spec.Selector.MatchLabels[commonconsts.KubeLabelDynamoSelector]
+			require.NotEmpty(t, selectorValue)
+
+			t.Log("Verify every Pod template label and the selector are valid label values")
+			for key, value := range templateLabels {
+				assert.Empty(t, validation.IsValidLabelValue(value), "Pod template label %s=%q", key, value)
+			}
+			assert.Empty(t, validation.IsValidLabelValue(selectorValue), "selector %q", selectorValue)
+
+			t.Log("Verify the Deployment selector matches its Pod template")
+			selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+			require.NoError(t, err)
+			assert.True(t, selector.Matches(labels.Set(templateLabels)))
+
+			t.Log("Verify the value is deterministic")
+			again := render(t, tt.dcdName)
+			assert.Equal(t, selectorValue, again.Spec.Selector.MatchLabels[commonconsts.KubeLabelDynamoSelector])
+
+			if len(tt.dcdName) <= validation.LabelValueMaxLength {
+				t.Log("Verify a name that fits keeps its existing selector value")
+				assert.Equal(t, tt.dcdName, selectorValue)
+			}
+
+			t.Log("Verify a Pod of the Deployment maps back to the DCD")
+			const podTemplateHash = "7d9c6b5f4"
+			podLabels := map[string]string{appsv1.DefaultDeploymentUniqueLabelKey: podTemplateHash}
+			for key, value := range templateLabels {
+				podLabels[key] = value
+			}
+			pod := &corev1.Pod{
+				Name:      deployment.Name + "-" + podTemplateHash + "-x7k2p",
+				Namespace: "default",
+				Labels:    podLabels,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: appsv1.SchemeGroupVersion.String(),
+					Kind:       "ReplicaSet",
+					Name:       deployment.Name + "-" + podTemplateHash,
+					Controller: new(true),
+				}},
+			}
+			owner, owned := podcontroller.DCDName(pod)
+			assert.True(t, owned)
+			assert.Equal(t, tt.dcdName, owner)
+
+			selectorValues[tt.name] = selectorValue
+		})
+	}
+
+	t.Log("Verify names that share their first 63 characters get different values")
+	assert.NotEqual(t, selectorValues["shared prefix one"], selectorValues["shared prefix two"])
 }
 
 func TestGenerateWorkerPodTemplateSpecDoesNotRequireGPUResource(t *testing.T) {

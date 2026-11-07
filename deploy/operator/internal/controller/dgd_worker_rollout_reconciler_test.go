@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -4013,6 +4014,8 @@ func TestOldWorkerPodsTerminated(t *testing.T) {
 	oldDCDs := []*nvidiacomv1beta1.DynamoComponentDeployment{
 		{Name: "old-worker-a", Labels: map[string]string{consts.KubeLabelDynamoWorkerHash: "old-hash"}},
 		{Name: "old-worker-b"},
+		// Longer than a label value, so its Pods carry a hashed selector value.
+		{Name: "old-worker-c-" + strings.Repeat("x", 60)},
 	}
 	newPod := func(name, selector string, phase corev1.PodPhase) corev1.Pod {
 		return corev1.Pod{
@@ -4063,6 +4066,11 @@ func TestOldWorkerPodsTerminated(t *testing.T) {
 				newPod("succeeded", "old-worker-b", corev1.PodSucceeded),
 			},
 			want: true,
+		},
+		{
+			name: "running old pod with a bounded selector value blocks",
+			pods: []corev1.Pod{newPod("running", "old-worker-c-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-639a828eda663eec", corev1.PodRunning)},
+			want: false,
 		},
 		{
 			name: "non-terminal new generation pod does not block",

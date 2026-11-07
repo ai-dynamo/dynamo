@@ -6,17 +6,37 @@
 package dynamo
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"maps"
+	"strings"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
+
+// DCDSelectorLabelValue returns the nvidia.com/selector value for a DCD's
+// workload. Every producer and consumer of that label for a DCD workload must
+// use it. Names that fit in a label value are kept unchanged, so existing
+// immutable Deployment selectors do not change. Longer names are shortened with
+// a 16-character SHA-256 suffix of the full name, as in ComputeDynamoNamespace.
+// dcdName must be a valid DCD name.
+func DCDSelectorLabelValue(dcdName string) string {
+	if len(dcdName) <= validation.LabelValueMaxLength {
+		return dcdName
+	}
+	sum := sha256.Sum256([]byte(dcdName))
+	suffix := hex.EncodeToString(sum[:8])
+	prefix := strings.TrimRight(dcdName[:validation.LabelValueMaxLength-len(suffix)-1], "-")
+	return prefix + "-" + suffix
+}
 
 // ComponentPodTemplates returns every authored complete PodTemplate source.
 // A valid component has either the component template or role templates, never
