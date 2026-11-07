@@ -293,26 +293,72 @@ async def test_wait_for_phase_retries_vcluster_connection_refusals(
     sleep.assert_awaited_once_with(5)
 
 
-@pytest.mark.timeout(30)
-async def test_wait_for_phase_limits_vcluster_connection_retries(
-    monkeypatch,
-) -> None:
-    manager = initialized_manager()
-    connection_key = MagicMock(host="127.0.0.1", port=1234, ssl=False)
-    manager.get = AsyncMock(
-        side_effect=aiohttp.ClientConnectorError(
-            connection_key,
-            ConnectionRefusedError(111, "vCluster tunnel unavailable"),
-        )
+class FakeClock:
+    """Monotonic clock that only advances when the code under test sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def use_fake_clock(monkeypatch) -> FakeClock:
+    clock = FakeClock()
+    monkeypatch.setattr(
+        "tests.deploy.dgdr_utils.time", SimpleNamespace(monotonic=clock.monotonic)
     )
-    sleep = AsyncMock()
-    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
+    # Patches asyncio.sleep for both the wait loop and the shared retry helper.
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", clock.sleep)
+    return clock
+
+
+@pytest.mark.timeout(30)
+async def test_wait_for_phase_survives_vcluster_tunnel_outage(monkeypatch) -> None:
+    # CI saw the vCluster port-forward refuse connections for about 64 s and then
+    # recover; the shared retry helper alone gives up after about 15 s.
+    clock = use_fake_clock(monkeypatch)
+    manager = initialized_manager()
+
+    async def get(name: str) -> dict:
+        if clock.now < 64:
+            raise vcluster_connection_error()
+        return {"status": {"phase": "Ready"}}
+
+    manager.get = AsyncMock(side_effect=get)
+
+    result = await manager.wait_for_phase("request", "Ready", timeout=600)
+
+    assert result == {"status": {"phase": "Ready"}}
+    assert 64 <= clock.now < 120
+
+
+@pytest.mark.timeout(30)
+async def test_wait_for_phase_limits_vcluster_tunnel_outage(monkeypatch) -> None:
+    clock = use_fake_clock(monkeypatch)
+    manager = initialized_manager()
+    manager.get = AsyncMock(side_effect=vcluster_connection_error())
+
+    with pytest.raises(aiohttp.ClientConnectorError, match="tunnel unavailable"):
+        await manager.wait_for_phase("request", "Ready", timeout=600)
+
+    # Gives up once the outage budget is spent, well before the wait deadline.
+    assert 120 <= clock.now < 600
+
+
+@pytest.mark.timeout(30)
+async def test_wait_for_phase_tunnel_outage_ends_at_deadline(monkeypatch) -> None:
+    clock = use_fake_clock(monkeypatch)
+    manager = initialized_manager()
+    manager.get = AsyncMock(side_effect=vcluster_connection_error())
 
     with pytest.raises(aiohttp.ClientConnectorError, match="tunnel unavailable"):
         await manager.wait_for_phase("request", "Ready", timeout=30)
 
-    assert manager.get.await_count == 4
-    assert sleep.await_count == 3
+    assert clock.now < 60
 
 
 async def test_get_output_dgd_retries_vcluster_connection_refusal(
