@@ -501,9 +501,8 @@ class ManagedDGDR:
                     name,
                 )
             except aiohttp.ClientConnectionError as error:
-                # The port-forward watchdog can take longer to restore the tunnel
-                # than the per-call retries allow, so keep polling for a bounded
-                # outage instead of ending the whole wait.
+                # The tunnel watchdog can outlast the per-call retries, so keep
+                # polling through a bounded outage instead of ending the wait.
                 if outage_started is None:
                     outage_started = read_started
                 now = time.monotonic()
