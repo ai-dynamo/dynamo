@@ -400,6 +400,11 @@ class MultimodalRequestProcessor:
         """
         self.previous_decoded_text = ""
 
+        handoff = getattr(ep_disaggregated_params, "multimodal", None)
+        layout = handoff.get("request_layout") if handoff is not None else None
+        if layout is not None:
+            return {"prompt_token_ids": layout["prompt_token_ids"]}
+
         # EPD Flow Case 1: Encoder has fully processed the prompt
         # The encode worker has done everything: vision encoding, prompt processing, tokenization
         # Return the encoder's processed prompt and tokens directly
