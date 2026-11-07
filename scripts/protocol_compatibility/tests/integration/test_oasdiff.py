@@ -30,6 +30,7 @@ from scripts.protocol_compatibility.assessment.responses import (
     response_document,
 )
 from scripts.protocol_compatibility.inputs import write_json
+from scripts.protocol_compatibility.reporting.findings import build_findings
 from scripts.protocol_compatibility.tests.assessment import test_openapi as fixtures
 from scripts.protocol_compatibility.tests.assessment.test_openapi import document
 from scripts.protocol_compatibility.tests.assessment.test_responses import (
@@ -267,6 +268,60 @@ class ComparatorIntegrationTests(unittest.TestCase):
         }
         self.assertEqual(self.differences(native, dynamo), [])
 
+    def test_nested_gap_keeps_field_findings_alongside_real_coarse_diff(self):
+        """Real coarse deltas expose unaffected fields in the ordinary finding inventory."""
+        native = document()
+        del native["components"]["schemas"]["Request"]["properties"]["recursive"]
+        native["components"]["schemas"]["Request"]["properties"].update(
+            {
+                "unaffected": {"type": "string"},
+                "tuple": {"type": "array", "prefixItems": [{"type": "integer"}]},
+            }
+        )
+        own = copy.deepcopy(native)
+        schema = own["components"]["schemas"]["Request"]
+        del schema["properties"]["unaffected"]
+        own["components"]["schemas"]["Request"] = {"allOf": [schema]}
+        documents, paths, gaps = {}, [], []
+        for side, raw in (("framework", native), ("dynamo", own)):
+            documents[side], missing = request_document(raw)
+            gaps.extend({"kind": "request", "side": side, **gap} for gap in missing)
+            path = self.root / f"{side}.json"
+            write_json(path, documents[side])
+            paths.append(path)
+        raw_diff, command = compare(self.binary, *paths, flatten=False)
+        self.assertNotIn("--flatten-allof", command)
+        self.assertTrue(request_differences(raw_diff))
+        before = copy.deepcopy(documents)
+        report = {"differences": request_differences(raw_diff), "coverage_gaps": gaps}
+        inventory = build_findings(
+            report,
+            {
+                f"{side}.requests.normalized.json": doc
+                for side, doc in documents.items()
+            },
+        )
+        self.assertEqual(documents, before)
+        for endpoint in native["paths"]:
+            row = next(
+                row
+                for row in inventory["findings"]
+                if row["endpoint"] == endpoint and row["field"] == "unaffected"
+            )
+            self.assertEqual(row["category"], "target_only")
+            self.assertTrue(row["raw_report_pointers"])
+            shared = next(
+                row
+                for row in inventory["findings"]
+                if row["endpoint"] == endpoint and row["field"] == "value"
+            )
+            self.assertEqual(shared["category"], "representation_ambiguity")
+        self.assertEqual(
+            inventory["accounting"]["raw_terminal_count"],
+            inventory["accounting"]["owned_terminal_count"],
+        )
+        self.assertTrue(all("prefixItems" in gap["reason"] for gap in gaps))
+
     def test_nullable_string_representation_is_equivalent_in_both_directions(self):
         native = document()
         native["components"]["schemas"]["Request"]["properties"]["value"] = {
@@ -280,6 +335,50 @@ class ComparatorIntegrationTests(unittest.TestCase):
         }
         self.assertEqual(self.differences(native, dynamo), [])
         self.assertEqual(self.differences(dynamo, native), [])
+
+    def test_nested_gap_does_not_hide_supported_sibling_constraint_changes(self):
+        """Unsupported tuples leave recognized scalar changes comparable on both endpoints."""
+        native = document()
+        schema = native["components"]["schemas"]["Request"]
+        del schema["properties"]["recursive"]
+        schema["properties"]["tuple"] = {
+            "type": "array",
+            "prefixItems": [{"type": "integer"}],
+        }
+        schema["properties"]["value"]["maxLength"] = 10
+        dynamo = copy.deepcopy(native)
+        dynamo["components"]["schemas"]["Request"]["properties"]["value"][
+            "maxLength"
+        ] = 5
+        projections, paths, gaps = {}, [], []
+        for side, raw in (("framework", native), ("dynamo", dynamo)):
+            scoped, missing = request_document(raw)
+            projections[f"{side}.requests.normalized.json"] = scoped
+            gaps.extend({"kind": "request", "side": side, **gap} for gap in missing)
+            path = self.root / f"{side}-sibling.json"
+            write_json(path, scoped)
+            paths.append(path)
+        delta, _ = compare(self.binary, *paths, flatten=False)
+        inventory = build_findings(
+            {"differences": request_differences(delta), "coverage_gaps": gaps},
+            projections,
+        )
+        rows = [row for row in inventory["findings"] if row["field"] == "value"]
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(
+            all(
+                row["category"] == "both_declared_mismatch"
+                and row["change"] == "maxLength"
+                for row in rows
+            )
+        )
+        self.assertTrue(
+            any(
+                row["category"] == "missing_coverage"
+                and "prefixItems" in row["interpretation"]
+                for row in inventory["findings"]
+            )
+        )
 
     def test_alias_value_probe_preserves_real_differences_and_raw_name_delta(self):
         own, native = fixtures.AliasMatchingTests().pair()
