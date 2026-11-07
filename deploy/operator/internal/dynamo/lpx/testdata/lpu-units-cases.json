@@ -579,7 +579,11 @@
           "leaderPodIndex": 1
         }
       ],
-      "note": "no ascending-ID rule"
+      "note": "no ascending-ID rule",
+      "consumers": {
+        "operator": "restriction: an LPU-only model projects exactly one unit",
+        "quasar": "restriction: --serve runs exactly one unit"
+      }
     },
     {
       "name": "partition-0-left-out-for-host-token-embeddings",
@@ -626,6 +630,63 @@
         ]
       },
       "valid": true
+    },
+    {
+      "name": "cpu-partition-shares-an-lpu-id",
+      "deployment": {
+        "compilationMode": "lpx",
+        "supportsCpuEmbeddings": false,
+        "standaloneTokenEmbeddings": false,
+        "partitions": [
+          {
+            "id": 0,
+            "cpu": {}
+          },
+          {
+            "id": 0,
+            "lpu": {
+              "numChips": 16,
+              "devicesPerNode": 16,
+              "architecture": "lp30"
+            }
+          }
+        ],
+        "lpuUnits": [
+          {
+            "reservations": [
+              {
+                "partitionIds": [
+                  0
+                ],
+                "size": {
+                  "hx": {
+                    "traysPerHemisphere": 1,
+                    "hemispheres": 1,
+                    "racks": 1
+                  }
+                }
+              }
+            ],
+            "connectors": []
+          }
+        ]
+      },
+      "valid": true,
+      "agents": [
+        {
+          "podIndex": 0,
+          "localRoots": [],
+          "unitIndex": 0,
+          "reservationIndex": 0,
+          "rank": 0,
+          "rankPartitions": [
+            0
+          ],
+          "unitOffset": 0,
+          "leaderPodIndex": 0
+        }
+      ],
+      "note": "partition IDs are device-scoped; lpuUnits name LPU partitions, and the CPU partition 0 is listed first"
     },
     {
       "name": "lp30-nodes-size-schema-valid",
@@ -3234,6 +3295,66 @@
               {
                 "partitionIds": [
                   3
+                ],
+                "size": {
+                  "hx": {
+                    "traysPerHemisphere": 1,
+                    "hemispheres": 1,
+                    "racks": 1
+                  }
+                }
+              }
+            ],
+            "connectors": []
+          }
+        ]
+      },
+      "valid": false,
+      "rule": "undeployed-partition"
+    },
+    {
+      "name": "unit-names-a-cpu-only-id",
+      "deployment": {
+        "compilationMode": "lpx",
+        "supportsCpuEmbeddings": false,
+        "standaloneTokenEmbeddings": false,
+        "partitions": [
+          {
+            "id": 0,
+            "lpu": {
+              "numChips": 16,
+              "devicesPerNode": 16,
+              "architecture": "lp30"
+            }
+          },
+          {
+            "id": 1,
+            "cpu": {}
+          }
+        ],
+        "lpuUnits": [
+          {
+            "reservations": [
+              {
+                "partitionIds": [
+                  0
+                ],
+                "size": {
+                  "hx": {
+                    "traysPerHemisphere": 1,
+                    "hemispheres": 1,
+                    "racks": 1
+                  }
+                }
+              }
+            ],
+            "connectors": []
+          },
+          {
+            "reservations": [
+              {
+                "partitionIds": [
+                  1
                 ],
                 "size": {
                   "hx": {

@@ -9,17 +9,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commoncapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/common/v1"
 	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
+	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/stretchr/testify/require"
 )
 
 // These fixtures are shared with Sonata gbuild-contract. They are hand-written
 // from capnp v12.8.0, not derived from either reader's output.
-// Source: lpu-monorepo 6d8a76ddc17, Sonata gbuild-contract/testdata/lpu-units-cases.json.
+// Source: lpu-monorepo c4253aaabed, Sonata gbuild-contract/testdata/lpu-units-cases.json.
 type unitsContractCase struct {
 	Name      string
 	Valid     bool
@@ -40,6 +42,7 @@ type unitsContractCase struct {
 				Architecture             string
 			}
 			CUDA *struct{}
+			CPU  *struct{}
 		}
 		LpuUnits []struct {
 			Reservations []struct {
@@ -82,6 +85,12 @@ func encodeUnitsContractCase(t *testing.T, tc unitsContractCase) deploymentcapnp
 		ref, err := partitions.At(i).NewPartition()
 		require.NoError(t, err)
 		ref.SetPartitionId(p.ID)
+		if p.CPU != nil {
+			ref.SetDeviceType(commoncapnpv1.DeviceType_cpu)
+			_, err = partitions.At(i).Detail().NewCpu()
+			require.NoError(t, err)
+			continue
+		}
 		if p.CUDA != nil {
 			ref.SetDeviceType(commoncapnpv1.DeviceType_cuda)
 			_, err = partitions.At(i).Detail().NewCuda()
@@ -164,7 +173,7 @@ func TestSharedUnitsContract(t *testing.T) {
 	ruleMessages := map[string]string{
 		"coverage": "omits LPU partition", "duplicate-partition": "repeats partition", "undeployed-partition": "not a deployed LPU partition",
 		"empty-reservation": "partitionIds must not be empty", "empty-unit": "reservations must not be empty", "host-count": "reserves",
-		"zero-size": "must be", "hx-not-lp30": "LP20 reservations use size.nodes", "connector-count": "connectors for",
+		"zero-size": ".size.", "hx-not-lp30": "LP20 reservations use size.nodes", "connector-count": "connectors for",
 		"connector-family": "units use", "empty-device-pairs": "connections must not be empty", "device-pair-range": "outside the joined reservations",
 		"repeated-device-pair": "repeats device pair", "mixed-architecture": "mixes XT and HX", "mixed-reservation-shape": "devicesPerNode",
 		"packed-not-sole": "only reservation", "packed-with-cuda": "requires a bundle without CUDA", "zero-partition-geometry": "numChips must be",
@@ -188,32 +197,67 @@ func TestSharedUnitsContract(t *testing.T) {
 			}
 			if tc.Valid {
 				require.NoError(t, err)
-				require.Len(t, build.lpuUnits, len(tc.Deployment.LpuUnits))
+				assertSharedDecodedUnits(t, tc, build)
 				if tc.Consumers["operator"] != "" && tc.Name != "lp30-nodes-size-schema-valid" {
 					projections, projectionErr := projectTestUnits(build, nil)
 					require.Nil(t, projections)
 					require.ErrorIs(t, projectionErr, ErrUnsupportedRuntime)
-					switch tc.Name {
-					case "lp20-non-8-device-width":
+					switch tc.Consumers["operator"] {
+					case "restriction: LP20 projects nodes n -> C(8n) only with devicesPerNode 8":
 						require.ErrorContains(t, projectionErr, "LP20 nodes projection requires devicesPerNode=8")
-					case "connector-with-513-pairs":
+					case "restriction: at most 512 pairs per connector (scheduler/CRD)":
 						require.ErrorContains(t, projectionErr, "513 device pairs, limit is 512")
-					case "lp30-nodes-size-schema-valid":
-						require.ErrorContains(t, projectionErr, "LP30 size.nodes")
+					case "restriction: an LPU-only model projects exactly one unit":
+						require.ErrorContains(t, projectionErr, "exactly one lpuUnits entry")
 					default:
 						t.Fatalf("unmapped consumer restriction %q", tc.Name)
 					}
 				}
+				if tc.Name == "lp30-nodes-size-schema-valid" {
+					projections, err := projectTestUnits(build, nil)
+					require.NoError(t, err)
+					require.Equal(t, &[]int64{16, 1, 1, 1}, projections[0].RequestSpec(&MaterializationPlan{}, "agents").Partitions[0].Extent)
+				}
 				for _, agent := range tc.Agents {
-					if len(agent.LocalRoots) == 0 {
+					var selection *v1beta1.LPXLocalPartitions
+					if len(agent.LocalRoots) > 0 {
+						selection = &v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeIDs, IDs: agent.LocalRoots}
+					}
+					projections, projectionErr := projectTestUnits(build, selection)
+					if agent.Rule == "local-root-not-unit-root" {
+						require.Error(t, projectionErr)
 						continue
 					}
-					_, _, selectionErr := selectRemoteUnits(&v1beta1.LPXLocalPartitions{Mode: v1beta1.LPXLocalPartitionsModeIDs, IDs: agent.LocalRoots}, PipelineHybrid, build.lpuUnits)
-					if agent.Rule == "local-root-not-unit-root" {
-						require.Error(t, selectionErr)
-					} else {
-						require.NoError(t, selectionErr)
+					if tc.Consumers["operator"] == "restriction: an LPU-only model projects exactly one unit" {
+						require.ErrorIs(t, projectionErr, ErrUnsupportedRuntime)
+						require.ErrorContains(t, projectionErr, "exactly one lpuUnits entry")
+						continue
 					}
+					require.NoError(t, projectionErr)
+					var wantIDs []int64
+					wantHosts := 0
+					for _, unit := range tc.Deployment.LpuUnits {
+						if slices.Contains(agent.LocalRoots, int64(unit.Reservations[0].PartitionIDs[0])) {
+							continue
+						}
+						for _, reservation := range unit.Reservations {
+							wantIDs = append(wantIDs, int64(reservation.PartitionIDs[0]))
+							hosts := int(reservation.Size.Nodes)
+							if hx := reservation.Size.HX; hx != nil {
+								hosts = int(hx.TraysPerHemisphere) * int(hx.Hemispheres) * int(hx.Racks)
+							}
+							wantHosts += hosts
+						}
+					}
+					projection := projections[0]
+					require.Equal(t, wantHosts, projection.AgentReplicas())
+					require.Equal(t, agent.Rule == "pod-index-out-of-range", agent.PodIndex >= projection.AgentReplicas())
+					request := projection.RequestSpec(&MaterializationPlan{}, "agents")
+					var gotIDs []int64
+					for _, partition := range request.Partitions {
+						gotIDs = append(gotIDs, partition.CompilerPartitionID)
+					}
+					require.Equal(t, wantIDs, gotIDs)
 				}
 				return
 			}
@@ -221,5 +265,51 @@ func TestSharedUnitsContract(t *testing.T) {
 			require.True(t, ok, "unmapped shared rule %q", tc.Rule)
 			require.ErrorContains(t, err, message)
 		})
+	}
+}
+
+// assertSharedDecodedUnits checks every placement value against the shared input,
+// including encoded order and device pairs, before consumer restrictions apply.
+func assertSharedDecodedUnits(t *testing.T, tc unitsContractCase, build *Build) {
+	t.Helper()
+	require.Len(t, build.lpuUnits, len(tc.Deployment.LpuUnits))
+	widths := make(map[uint32]int)
+	for _, p := range tc.Deployment.Partitions {
+		if p.LPU != nil {
+			widths[p.ID] = int(p.LPU.DevicesPerNode)
+		}
+	}
+	for i, want := range tc.Deployment.LpuUnits {
+		got := build.lpuUnits[i]
+		require.Len(t, got.Reservations, len(want.Reservations))
+		for j, r := range want.Reservations {
+			var ids []int
+			for _, id := range r.PartitionIDs {
+				ids = append(ids, int(id))
+			}
+			require.Equal(t, ids, got.Reservations[j].PartitionIDs)
+			if hx := r.Size.HX; hx != nil {
+				require.Equal(t, int(hx.TraysPerHemisphere)*int(hx.Hemispheres)*int(hx.Racks), got.Reservations[j].Hosts)
+				require.Equal(t, []int64{int64(widths[r.PartitionIDs[0]]), int64(hx.TraysPerHemisphere), int64(hx.Hemispheres), int64(hx.Racks)}, got.Reservations[j].HXExtent)
+			} else {
+				require.EqualValues(t, r.Size.Nodes, got.Reservations[j].Hosts)
+				require.Nil(t, got.Reservations[j].HXExtent)
+			}
+		}
+		require.Len(t, got.Connectors, len(want.Connectors))
+		for j, c := range want.Connectors {
+			if c.HxPropSyncV1 != nil {
+				require.Equal(t, lpxv1alpha1.PropSyncConnectorKindHxPropSyncV1, got.Connectors[j].Kind)
+				pairs := make([]lpxv1alpha1.HxLogicalConnection, 0, len(c.HxPropSyncV1.Connections))
+				for _, p := range c.HxPropSyncV1.Connections {
+					pairs = append(pairs, lpxv1alpha1.HxLogicalConnection{FromLogicalDevice: int64(p.FromDevice), ToLogicalDevice: int64(p.ToDevice)})
+				}
+				require.Equal(t, &pairs, got.Connectors[j].Connections)
+			} else {
+				require.Equal(t, lpxv1alpha1.PropSyncConnectorKindXt8888Gap, got.Connectors[j].Kind)
+				require.Nil(t, got.Connectors[j].Connections)
+				require.Equal(t, new(int64(0)), got.Connectors[j].MaxInterPartitionOffset)
+			}
+		}
 	}
 }

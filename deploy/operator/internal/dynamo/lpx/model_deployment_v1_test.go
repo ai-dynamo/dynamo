@@ -811,6 +811,7 @@ func TestDeploymentUnitsPreserveEncodedOrder(t *testing.T) {
 }
 
 func TestUnitsPlacementIgnoresClearedLegacyFields(t *testing.T) {
+	t.Parallel()
 	t.Log("Decode a units chain while all legacy placement fields remain populated")
 	bundle := testUnitBundle{architecture: deploymentcapnpv1.LpuArchitecture_lp30, devicesPerNode: 16, lpxMode: true,
 		chains: [][]uint32{{0, 1}}, partitions: testUnitPartitions(16, []uint32{16, 1, 1, 1}, 0, 1),
