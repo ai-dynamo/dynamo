@@ -620,6 +620,140 @@ async fn streaming_text_baseline() {
     .await;
 }
 
+fn logprob_tokens(logprobs: &Value) -> Vec<&str> {
+    logprobs
+        .as_array()
+        .expect("logprobs is an array")
+        .iter()
+        .map(|entry| entry["token"].as_str().unwrap())
+        .collect()
+}
+
+/// `include: message.output_text.logprobs` turns on backend scoring and puts every
+/// chat token record, including the hidden EOS score on the finish chunk, on the
+/// output text part; the response echoes the requested `top_logprobs`.
+#[tokio::test]
+#[serial]
+async fn unary_text_logprobs_reach_output_text() {
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([
+            load_agent_fixture("text-logprobs.sse").await.unwrap(),
+            load_agent_fixture("text-logprobs.sse").await.unwrap(),
+        ])
+        .await;
+
+        let response = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "input": "ping",
+                "stream": false,
+                "max_output_tokens": 64,
+                "include": ["message.output_text.logprobs"],
+                "top_logprobs": 2
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: Value = response.json().await.unwrap();
+        let text = &body["output"][0]["content"][0];
+        assert_eq!(text["text"], "Pong.");
+        assert_eq!(logprob_tokens(&text["logprobs"]), ["Pong", ".", ""]);
+        assert_eq!(text["logprobs"][0]["logprob"], -0.25);
+        assert_eq!(text["logprobs"][0]["bytes"], json!([80, 111, 110, 103]));
+        assert_eq!(text["logprobs"][0]["top_logprobs"][1]["token"], "Ping");
+        assert_eq!(text["logprobs"][2]["bytes"], json!([]));
+        assert_eq!(body["top_logprobs"], 2);
+
+        // Without the include selector the arrays stay empty and nothing is
+        // requested from the backend.
+        let response = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "input": "ping",
+                "stream": false,
+                "max_output_tokens": 64,
+                "top_logprobs": 2
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["output"][0]["content"][0]["logprobs"], json!([]));
+        assert_eq!(body["top_logprobs"], 2);
+
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].inner.logprobs, Some(true));
+        assert_eq!(requests[0].inner.top_logprobs, Some(2));
+        assert_eq!(requests[1].inner.logprobs, None);
+        assert_eq!(requests[1].inner.top_logprobs, None);
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+/// Each text delta carries the scores received since the previous delta; the
+/// EOS score on the finish chunk completes the record on `output_text.done`
+/// and on the completed output.
+#[tokio::test]
+#[serial]
+async fn streaming_text_logprobs_ride_on_deltas_and_done() {
+    temp_env::async_with_vars(ENV, async {
+        let svc =
+            HarnessService::start([load_agent_fixture("text-logprobs.sse").await.unwrap()]).await;
+        let response = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "input": "ping",
+                "stream": true,
+                "max_output_tokens": 64,
+                "include": ["message.output_text.logprobs"],
+                "top_logprobs": 2
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let raw = response.text().await.unwrap();
+        let events = parse_responses_sse(&raw).await.unwrap();
+
+        let deltas: Vec<_> = events
+            .iter()
+            .filter(|event| event.event == "response.output_text.delta")
+            .collect();
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(logprob_tokens(&deltas[0].data["logprobs"]), ["Pong"]);
+        assert_eq!(
+            deltas[0].data["logprobs"][0]["top_logprobs"][1]["token"],
+            "Ping"
+        );
+        assert_eq!(logprob_tokens(&deltas[1].data["logprobs"]), ["."]);
+
+        let done = events
+            .iter()
+            .find(|event| event.event == "response.output_text.done")
+            .expect("output_text.done");
+        assert_eq!(done.data["text"], "Pong.");
+        assert_eq!(logprob_tokens(&done.data["logprobs"]), ["Pong", ".", ""]);
+
+        let completed = events
+            .iter()
+            .find(|event| event.event == "response.completed")
+            .expect("response.completed");
+        let text = &completed.data["response"]["output"][0]["content"][0];
+        assert_eq!(logprob_tokens(&text["logprobs"]), ["Pong", ".", ""]);
+        assert_eq!(text["logprobs"][2]["bytes"], json!([]));
+        assert_eq!(completed.data["response"]["top_logprobs"], 2);
+
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 #[rstest::rstest]
 #[case::text(false)]
 #[case::refusal(true)]

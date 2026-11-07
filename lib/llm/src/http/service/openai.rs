@@ -4536,6 +4536,7 @@ async fn responses(
         text: request.inner.text.clone(),
         service_tier: request.inner.service_tier.clone(),
         include: request.inner.include.clone(),
+        top_logprobs: request.inner.top_logprobs,
         truncation: request.inner.truncation,
         // Upstream `CreateResponse` doesn't carry these yet; plumbed through so
         // the response serializer can default to 0.0 without hardcoding at the
