@@ -29,6 +29,9 @@ pub struct Truth {
     /// Chunk ends as output positions; the last is `output.len()`.
     pub cuts: Vec<usize>,
     pub cached_tokens: u32,
+    /// Stream like SGLang's Rust server: input logprobs on the first chunk only,
+    /// and no `input_top_logprobs` when that list is empty.
+    pub rust_server: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,7 +180,7 @@ pub fn stream(
         if return_logprob {
             let (tokens, tops) = input_logprobs();
             meta["input_token_logprobs"] = json!(tokens);
-            if top_k > 0 {
+            if top_k > 0 && !(truth.rust_server && tops.is_empty()) {
                 meta["input_top_logprobs"] = json!(tops);
             }
         }
@@ -212,6 +215,7 @@ pub fn stream(
     };
     for to in ends {
         let last = to == end;
+        let input = from == 0 || !truth.rust_server;
         let tokens: Vec<(u32, f64)> = (from..to).map(|p| truth.token(p)).collect();
         let mut meta = json!({
             "id": rid,
@@ -229,7 +233,11 @@ pub fn stream(
             };
         }
         if return_logprob {
-            meta["input_token_logprobs"] = json!(prompt_logprobs);
+            meta["input_token_logprobs"] = if input {
+                json!(prompt_logprobs)
+            } else {
+                json!([])
+            };
             meta["output_token_logprobs_length"] = json!(to);
             meta["output_token_logprobs"] = Value::Array(
                 tokens
@@ -238,7 +246,10 @@ pub fn stream(
                     .collect(),
             );
             if top_k > 0 {
-                meta["input_top_logprobs"] = json!(prompt_tops);
+                let tops = if input { prompt_tops.as_slice() } else { &[] };
+                if !(truth.rust_server && tops.is_empty()) {
+                    meta["input_top_logprobs"] = json!(tops);
+                }
                 meta["output_top_logprobs"] = Value::Array(
                     tokens
                         .iter()
