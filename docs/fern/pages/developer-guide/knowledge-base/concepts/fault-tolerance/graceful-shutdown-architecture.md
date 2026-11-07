@@ -121,8 +121,10 @@ finally:
 ```
 
 The handler's `cleanup()` method:
+- Stops the vLLM engine monitor's health and stats tasks
 - Removes temporary directories (LoRA adapters, etc.)
-- Releases engine resources
+
+The worker factory owns the `AsyncLLM` engine and shuts it down separately.
 
 ### SGLang Worker Cleanup
 
