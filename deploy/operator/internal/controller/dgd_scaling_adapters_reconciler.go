@@ -212,6 +212,28 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 	return nil
 }
 
+// ReconcileUnlessWaitingForCheckpoint runs after checkpoint readiness is applied and skips
+// adapters only while pending on a checkpoint; other pending reasons and failures reconcile.
+// dgd must be non-nil.
+func (r *dgdScalingAdaptersReconciler) ReconcileUnlessWaitingForCheckpoint(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	result ReconcileResult,
+) error {
+	// Creating adapters now would expose scaling controls before checkpoint startup is ready.
+	if result.State == nvidiacomv1beta1.DGDStatePending && result.Reason == reasonWaitingForCheckpoint {
+		return nil
+	}
+
+	// Adapter failures must stop callers before they record the workload result.
+	if err := r.Reconcile(ctx, dgd); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to reconcile scaling adapters")
+		return fmt.Errorf("failed to reconcile scaling adapters: %w", err)
+	}
+
+	return nil
+}
+
 func generateAdapterName(dgdName, componentName string) string {
 	name := fmt.Sprintf("%s-%s", dgdName, strings.ToLower(componentName))
 	if len(k8svalidation.IsDNS1123Subdomain(name)) == 0 {
