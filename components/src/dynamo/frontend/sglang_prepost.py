@@ -1218,6 +1218,7 @@ class SglangStreamingPostProcessor:
         sglang_tools: list[SglangTool] | None = None,
         tool_call_parser_name: str | None = None,
         named_zero_arg_tool: str | None = None,
+        named_tool: str | None = None,
         eos_token_ids: list[int] | None = None,
         prompt_token_ids: list[int] | None = None,
         stop_strings: set[str] | None = None,
@@ -1234,6 +1235,7 @@ class SglangStreamingPostProcessor:
             tool_call_parser_name
         )
         self._named_zero_arg_tool = named_zero_arg_tool
+        self._named_tool = named_tool or named_zero_arg_tool
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
         # Preserve special tokens when a parser is active so tool-call and
         # reasoning delimiters remain visible during incremental decoding.
@@ -1793,8 +1795,9 @@ class SglangStreamingPostProcessor:
                     normal_text
                 )
             content_text = parsed_text
-            if self._named_zero_arg_tool is not None:
-                # The exact regex emits the argument object, not user-visible text.
+            if self._is_json_array_parser:
+                # Forced calls may use native markup when JSON guidance is not
+                # enforced. Hold it for finish-time recovery, not answer text.
                 content_text = ""
 
             for tc in tool_calls:
@@ -1839,9 +1842,14 @@ class SglangStreamingPostProcessor:
             # When guided decoding is not enforced the streaming parser
             # can misidentify words in the prompt (e.g. a person's name)
             # as function names.
+            full_text = "".join(self._tool_text_parts)
+            # JSON-looking or model-native tool output stays hidden if recovery fails.
+            tool_markup = bool(
+                re.match(r'\s*(?:\[\s*(?:\{|]|$)|\{\s*(?:"|}|$))', full_text)
+            )
             known_names = (
-                {self._named_zero_arg_tool}
-                if self._named_zero_arg_tool is not None
+                {self._named_tool}
+                if self._named_tool is not None
                 else (
                     {t.function.name for t in self._sglang_tools}
                     if self._sglang_tools
@@ -1870,17 +1878,17 @@ class SglangStreamingPostProcessor:
                 idx not in self._tool_call_args for idx in self._tool_call_names
             )
             should_reparse = False
-            full_text = ""
-            if missing_names or missing_args:
-                full_text = "".join(self._tool_text_parts)
+            # A complete early call does not prove streaming saw the whole array.
+            if self._is_json_array_parser or missing_names or missing_args:
                 # Skip the re-parse when the accumulated text has no
                 # tool-call markers.  Avoids wasted `parse_non_stream`
                 # work on plain-text responses (common when tools are
                 # offered but the model replies without calling any) and
                 # guards against detectors that raise on arbitrary input.
-                should_reparse = bool(
-                    full_text
-                ) and self.tool_call_parser.has_tool_call(full_text)
+                should_reparse = bool(full_text) and (
+                    self._is_json_array_parser
+                    or self.tool_call_parser.has_tool_call(full_text)
+                )
 
             if should_reparse:
                 if self._is_json_array_parser:
@@ -1906,6 +1914,12 @@ class SglangStreamingPostProcessor:
                         not final_calls
                         and self._tool_call_parser_name
                         and self._sglang_tools
+                        # Both Hunyuan dialects start with this prefix. Avoid
+                        # scanning the tokenizer vocabulary for ordinary text.
+                        and (
+                            self._tool_call_parser_name != "hunyuan"
+                            or "<tool_calls" in full_text
+                        )
                     ):
                         try:
                             fcp = FunctionCallParser(
@@ -1915,7 +1929,10 @@ class SglangStreamingPostProcessor:
                                     FunctionCallParser, self.tokenizer
                                 ),
                             )
-                            _, final_calls = fcp.parse_non_stream(full_text)
+                            native_tool_markup = fcp.has_tool_call(full_text)
+                            tool_markup = tool_markup or native_tool_markup
+                            if native_tool_markup:
+                                _, final_calls = fcp.parse_non_stream(full_text)
                         except (
                             ValueError,
                             KeyError,
@@ -1974,21 +1991,24 @@ class SglangStreamingPostProcessor:
                     dropped_names,
                 )
 
-            if self._named_zero_arg_tool is not None and not self._tool_call_names:
-                # A backend that cannot enforce the regex may return ordinary text.
-                # It was held back to avoid leaking the exact `{}` argument payload,
-                # so restore it when no zero-argument tool call was recovered.
-                fallback_content = "".join(self._tool_text_parts)
-                if fallback_content.strip() != "{}":
-                    delta["content"] = fallback_content
+            if self._is_json_array_parser and not self._tool_call_names:
+                # Preserve the zero-argument fallback; other forced choices restore
+                # only ordinary text, never unrecovered tool markup.
+                restore_text = (
+                    full_text.strip() != "{}"
+                    if self._named_zero_arg_tool is not None
+                    else not tool_markup
+                )
+                if restore_text:
+                    delta["content"] = full_text
                     has_content = True
 
         if finish_reason and self._tool_call_names:
             tool_calls_out: list[dict[str, Any]] = []
-            for idx in sorted(self._tool_call_names):
+            for output_index, idx in enumerate(sorted(self._tool_call_names)):
                 tool_calls_out.append(
                     {
-                        "index": idx,
+                        "index": output_index,
                         "id": self._tool_call_ids[idx],
                         "type": "function",
                         "function": {
