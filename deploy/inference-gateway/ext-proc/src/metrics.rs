@@ -1212,7 +1212,9 @@ mod tests {
     /// scrape.
     #[test]
     fn global_metrics_are_exposed_by_the_scrape_registry() {
-        Metrics::global().start_request().finish(Outcome::ResponseEos);
+        Metrics::global()
+            .start_request()
+            .finish(Outcome::ResponseEos);
 
         let (status, body) = encode(&REGISTRY);
         assert_eq!(status, StatusCode::OK);
