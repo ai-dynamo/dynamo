@@ -247,7 +247,7 @@ func TestLPXInputRevision(t *testing.T) {
 		"component/build": true, "agent/image": true, "conductor/image": true,
 		"conductor/arguments": true, "shared/environment": true, "ordinary/image": true,
 		"component/replicas": false, "component/min-available": false, "conductor/replicas": false,
-		"scheduling/deadline": false, "ignored/ordinary-replicas": false, "ignored/role-order": false,
+		"scheduling/deadline": false, "scheduling/priority": false, "ignored/ordinary-replicas": false, "ignored/role-order": false,
 	}
 	for _, test := range []struct {
 		name       string
@@ -306,6 +306,9 @@ func TestLPXInputRevision(t *testing.T) {
 		}},
 		{"scheduling/deadline", true, func(d *v1beta1.DynamoGraphDeployment) {
 			d.GetComponentByName("decode").LPX.Scheduling.AttemptDeadlineSeconds = new(int64(60))
+		}},
+		{"scheduling/priority", true, func(d *v1beta1.DynamoGraphDeployment) {
+			d.GetComponentByName("decode").LPX.Scheduling.PriorityClassName = new("interactive")
 		}},
 		{"shared/labels", true, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Labels = map[string]string{"workload": "new"} }},
 		{"shared/annotations", true, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Annotations = map[string]string{"workload": "new"} }},

@@ -65,6 +65,7 @@ DynamoComponentDeploymentSpec.lpx.buildId
 DynamoComponentDeploymentSpec.lpx.experimental.localPartitions.ids
 DynamoComponentDeploymentSpec.lpx.experimental.localPartitions.mode
 DynamoComponentDeploymentSpec.lpx.scheduling.attemptDeadlineSeconds
+DynamoComponentDeploymentSpec.lpx.scheduling.priorityClassName
 DynamoComponentDeploymentSpec.minAvailable
 DynamoComponentDeploymentSpec.modelRef.name
 DynamoComponentDeploymentSpec.modelRef.revision
@@ -143,6 +144,7 @@ DynamoGraphDeploymentSpec.components.lpx.buildId
 DynamoGraphDeploymentSpec.components.lpx.experimental.localPartitions.ids
 DynamoGraphDeploymentSpec.components.lpx.experimental.localPartitions.mode
 DynamoGraphDeploymentSpec.components.lpx.scheduling.attemptDeadlineSeconds
+DynamoGraphDeploymentSpec.components.lpx.scheduling.priorityClassName
 DynamoGraphDeploymentSpec.components.minAvailable
 DynamoGraphDeploymentSpec.components.modelRef.name
 DynamoGraphDeploymentSpec.components.modelRef.revision

@@ -93,6 +93,14 @@ SPDX-License-Identifier: Apache-2.0
 
 # Publication
 
+- Resolve `lpx.scheduling.priorityClassName` from each workload's serving
+  component and copy it only into newly created LPRs. A shared draft may omit
+  the class or repeat its target's class; independent groups own their policy.
+- Ignore only the priority reference when matching published LPR intent.
+  Preserve the actual observed object, including its original class and
+  scheduling clocks. Priority edits advance the input revision without changing
+  worker hashes, PCS identity, or templates. Partial publication may leave
+  different historical classes in one group; missing requests use current policy.
 - Retain matching LPRs and their status across input edits. Collect missing
   requests in the same ordered pass that constructs desired requests. An
   immutable mismatch waits for its Grove engine to roll and LPX to release the
@@ -217,6 +225,9 @@ SPDX-License-Identifier: Apache-2.0
 - A new input revision bypasses previous-revision failure. Resolve the new
   desired state first; if it errors, report that error instead of applying
   deadline cleanup to the old revision.
+- A priority-only edit is such a retry revision. Preserve failed-cycle cleanup
+  and finalizer barriers before creating its replacement with the new policy;
+  preserve healthy survivors and external capacity ownership.
 - Retained requests keep their scheduling timestamps. An already-expired request
   covered by a durable failure uses that record for cleanup even after an input
   edit; preserve its original failure generation so the edit still permits retry.

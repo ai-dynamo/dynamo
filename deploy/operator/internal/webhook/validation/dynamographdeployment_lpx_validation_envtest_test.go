@@ -4,6 +4,9 @@
 package validation_test
 
 import (
+	"fmt"
+	"strings"
+
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -1166,6 +1169,107 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			tests = append(tests, test)
 		}
 	}
+
+	// Native source schemas validate names before conversion and public admission.
+	for _, name := range []string{"batch.example", strings.Repeat("a", 253), "", "High", "a..b", strings.Repeat("a", 254)} {
+		alpha := alphaLPXDGDForAdmission(nil)
+		beta := betaLPXDGDForAdmission(nil)
+		alpha.Spec.Services["lpx"].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{PriorityClassName: new(name)}
+		beta.Spec.Components[0].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{PriorityClassName: new(name)}
+		for _, version := range []struct {
+			name, path string
+			object     runtime.Object
+		}{
+			{"alpha", "spec.services.lpx.lpx.scheduling.priorityClassName", alpha},
+			{"beta", "spec.components[0].lpx.scheduling.priorityClassName", beta},
+		} {
+			test := dgdAdmissionTestCase{name: version.name + " LPX priority name " + name, deployment: version.object}
+			if name == "" {
+				test.wantAdmissionErrs = append(test.wantAdmissionErrs, fmt.Sprintf("%s: Invalid value: %q: %s in body should be at least 1 chars long", version.path, name, version.path))
+			}
+			if name == "High" || name == "a..b" {
+				test.wantAdmissionErrs = append(test.wantAdmissionErrs, fmt.Sprintf(`%s: Invalid value: %q: %s in body should match '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'`, version.path, name, version.path))
+			}
+			if len(name) > 253 {
+				test.wantAdmissionErrs = append(test.wantAdmissionErrs, fmt.Sprintf("%s: Too long: may not be longer than 253", version.path))
+			}
+			tests = append(tests, test)
+		}
+	}
+
+	// Shared targets own priority, including an agent-hosted serving endpoint.
+	for _, policy := range []struct {
+		name                  string
+		draft, target         *string
+		conflict, independent bool
+	}{
+		{name: "inherit", target: new("high")},
+		{name: "repeat", draft: new("high"), target: new("high")},
+		{name: "conflict", draft: new("low"), target: new("high"), conflict: true},
+		{name: "target omission", draft: new("high"), conflict: true},
+		{name: "independent", draft: new("low"), target: new("high"), independent: true},
+	} {
+		for _, agentRuntime := range []bool{false, true} {
+			beta := betaLPXDGDForAdmission(nil)
+			setBetaLPXSpecDec(beta, nil)
+			beta.Spec.Components[0].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{PriorityClassName: policy.draft}
+			beta.Spec.Components[1].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{PriorityClassName: policy.target}
+			if policy.independent {
+				beta.Spec.Components[0].Roles = append(beta.Spec.Components[0].Roles, *beta.Spec.Components[1].Roles[1].DeepCopy())
+			}
+			if agentRuntime {
+				target := &beta.Spec.Components[1]
+				target.Roles = target.Roles[:1]
+				target.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: new(corev1.ContainerRestartPolicyAlways)}}
+			}
+			alpha := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+			if err := alpha.ConvertFrom(beta); err != nil {
+				panic(err)
+			}
+			for _, version := range []struct {
+				name   string
+				object runtime.Object
+			}{{"alpha", alpha}, {"beta", beta}} {
+				test := dgdAdmissionTestCase{name: fmt.Sprintf("%s LPX priority %s agent-runtime=%t", version.name, policy.name, agentRuntime), deployment: version.object}
+				if policy.conflict {
+					test.wantWebhookErrs = []string{fmt.Sprintf("spec.components[0].lpx.scheduling.priorityClassName: Invalid value: %q: must be omitted or match the shared target's priorityClassName", *policy.draft)}
+				}
+				tests = append(tests, test)
+			}
+		}
+	}
+
+	tests = append(tests, dgdAdmissionTestCase{
+		name: "beta LPX priority conflict aggregates independent replica errors",
+		deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+			setBetaLPXSpecDec(dgd, new(int32(9)))
+			dgd.Spec.Components[0].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{PriorityClassName: new("low")}
+			dgd.Spec.Components[1].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{PriorityClassName: new("high")}
+		}),
+		wantWebhookErrs: []string{
+			`spec.components[0].lpx.scheduling.priorityClassName: Invalid value: "low": must be omitted or match the shared target's priorityClassName`,
+			"spec.components[0].replicas: Invalid value: 9: draft replicas must be between 1 and 8",
+		},
+	})
+
+	// Priority is mutable in authored configuration and remains a future-Request policy.
+	for _, edit := range []struct {
+		name          string
+		before, after *string
+	}{
+		{"add", nil, new("high")}, {"change", new("high"), new("low")}, {"remove", new("high"), nil},
+	} {
+		alphaOld, alpha := alphaLPXDGDForAdmission(nil), alphaLPXDGDForAdmission(nil)
+		betaOld, beta := betaLPXDGDForAdmission(nil), betaLPXDGDForAdmission(nil)
+		alphaOld.Spec.Services["lpx"].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{PriorityClassName: edit.before}
+		alpha.Spec.Services["lpx"].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{PriorityClassName: edit.after}
+		betaOld.Spec.Components[0].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{PriorityClassName: edit.before}
+		beta.Spec.Components[0].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{PriorityClassName: edit.after}
+		tests = append(tests,
+			dgdAdmissionTestCase{name: "alpha LPX priority " + edit.name, oldDeployment: alphaOld, deployment: alpha},
+			dgdAdmissionTestCase{name: "beta LPX priority " + edit.name, oldDeployment: betaOld, deployment: beta})
+	}
+
 	return tests
 }
 

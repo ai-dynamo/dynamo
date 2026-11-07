@@ -4114,7 +4114,7 @@ buildId references the immutable model build.
 </ParamField>
 
 <ParamField path="scheduling" type="SchedulingSpec">
-scheduling configures this component's LPX scheduling attempts. Omission means no deadline.
+scheduling configures this component's LPX scheduling attempts. Omission means no deadline and priority zero.
 See [SchedulingSpec](#schedulingspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4621,6 +4621,11 @@ SchedulingSpec configures LPX scheduling attempts.
 <ParamField path="attemptDeadlineSeconds" type="integer">
 attemptDeadlineSeconds limits how long each LPR may remain pending. Omission means unlimited; the value is not a solver budget.
 **Validation:** Maximum: 9.223372036e+09  Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="priorityClassName" type="string">
+priorityClassName selects the native non-preempting PriorityClass for future LPRs in this workload group. Omission means priority zero. Existing LPRs retain their original class when this setting changes.
+**Validation:** MaxLength: 253  MinLength: 1  Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 

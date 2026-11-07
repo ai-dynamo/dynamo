@@ -371,7 +371,7 @@ func TestResolvePipelineRequestsPreservesImmutableIntent(t *testing.T) {
 			current := desired.requests[0].DeepCopy()
 			current.Annotations[test.annotation] = test.value
 			require.Equal(t, !test.changed, pipelineRequestMatches(current, &desired.requests[0]))
-			requests, missing := resolvePipelineRequests(deployment, map[string]*lpxv1alpha1.LPUPipelineRequest{current.Name: current}, desired.workload, desired.plan)
+			requests, missing := resolvePipelineRequests(deployment, map[string]*lpxv1alpha1.LPUPipelineRequest{current.Name: current}, desired.workload, desired.plan, nil)
 			if !test.changed {
 				require.Empty(t, missing)
 				require.Equal(t, current, requests[current.Name])
@@ -451,7 +451,7 @@ func TestResolvePipelineRequestsCollectsMissingInOrder(t *testing.T) {
 			deployment, dgd, registry := newLPXSpecDecodeTestDGD(t)
 			desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
 			desired.plan.Replicas = 2
-			_, rendered := resolvePipelineRequests(deployment, nil, desired.workload, desired.plan)
+			_, rendered := resolvePipelineRequests(deployment, nil, desired.workload, desired.plan, nil)
 			require.Len(t, rendered, 6)
 			for index, request := range rendered {
 				require.Equal(t, int64(index/3), request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.ReplicaIndex)
@@ -470,7 +470,7 @@ func TestResolvePipelineRequestsCollectsMissingInOrder(t *testing.T) {
 				observed[request.Name] = request
 			}
 			desired.plan.Replicas = tc.replicas
-			requests, missing := resolvePipelineRequests(deployment, observed, desired.workload, desired.plan)
+			requests, missing := resolvePipelineRequests(deployment, observed, desired.workload, desired.plan, nil)
 			require.Len(t, requests, int(tc.replicas)*3)
 			require.Len(t, missing, len(tc.wantMissing))
 			for index, renderedIndex := range tc.wantMissing {
@@ -580,7 +580,7 @@ func TestResolvePipelineRequestsRequestsOnlyRemotePartitions(t *testing.T) {
 			desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
 
 			t.Log("Publish one request per remote workload replica, listing only remote compiler partitions")
-			_, missing := resolvePipelineRequests(deployment, nil, desired.workload, desired.plan)
+			_, missing := resolvePipelineRequests(deployment, nil, desired.workload, desired.plan, nil)
 			partitions := make([][]int64, 0, len(missing))
 			for _, request := range missing {
 				compilerIDs := make([]int64, 0, len(request.Spec.Partitions))

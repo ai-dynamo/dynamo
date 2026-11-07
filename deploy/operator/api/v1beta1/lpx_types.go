@@ -11,7 +11,7 @@ type LPXConfig struct {
 	BuildID string `json:"buildId"`
 
 	// scheduling configures this component's LPX scheduling attempts.
-	// Omission means no deadline.
+	// Omission means no deadline and priority zero.
 	// +optional
 	Scheduling *SchedulingSpec `json:"scheduling,omitempty"`
 
@@ -79,6 +79,15 @@ type SchedulingSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=9223372036
 	AttemptDeadlineSeconds *int64 `json:"attemptDeadlineSeconds,omitempty"`
+
+	// priorityClassName selects the native non-preempting PriorityClass for future
+	// LPRs in this workload group. Omission means priority zero. Existing LPRs
+	// retain their original class when this setting changes.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	PriorityClassName *string `json:"priorityClassName,omitempty"`
 }
 
 // HasLPXComponent returns true if any component uses the LPX integration.

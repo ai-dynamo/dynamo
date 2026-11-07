@@ -11608,7 +11608,7 @@ spec:
                           scheduling:
                             description: |-
                               scheduling configures this component's LPX scheduling attempts.
-                              Omission means no deadline.
+                              Omission means no deadline and priority zero.
                             properties:
                               attemptDeadlineSeconds:
                                 description: |-
@@ -11618,6 +11618,15 @@ spec:
                                 maximum: 9223372036
                                 minimum: 1
                                 type: integer
+                              priorityClassName:
+                                description: |-
+                                  priorityClassName selects the native non-preempting PriorityClass for future
+                                  LPRs in this workload group. Omission means priority zero. Existing LPRs
+                                  retain their original class when this setting changes.
+                                maxLength: 253
+                                minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                                type: string
                             type: object
                         required:
                           - buildId
@@ -21228,7 +21237,7 @@ spec:
                           scheduling:
                             description: |-
                               scheduling configures this component's LPX scheduling attempts.
-                              Omission means no deadline.
+                              Omission means no deadline and priority zero.
                             properties:
                               attemptDeadlineSeconds:
                                 description: |-
@@ -21238,6 +21247,15 @@ spec:
                                 maximum: 9223372036
                                 minimum: 1
                                 type: integer
+                              priorityClassName:
+                                description: |-
+                                  priorityClassName selects the native non-preempting PriorityClass for future
+                                  LPRs in this workload group. Omission means priority zero. Existing LPRs
+                                  retain their original class when this setting changes.
+                                maxLength: 253
+                                minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                                type: string
                             type: object
                         required:
                           - buildId

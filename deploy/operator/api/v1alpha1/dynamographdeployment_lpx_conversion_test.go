@@ -180,15 +180,15 @@ func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 }
 
 func TestDynamoGraphDeploymentLPXComponentSchedulingRoundTrip(t *testing.T) {
-	t.Log("Give target and draft different deadlines and preserve unlimited component settings")
+	t.Log("Give components independent scheduling settings and preserve omission")
 	src := &v1beta1.DynamoGraphDeployment{}
 	for _, component := range []struct {
 		name       string
 		scheduling *v1beta1.SchedulingSpec
 	}{
-		{name: "draft", scheduling: &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](300)}},
+		{name: "draft", scheduling: &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](300), PriorityClassName: new("batch")}},
 		{name: "empty", scheduling: &v1beta1.SchedulingSpec{}},
-		{name: "target", scheduling: &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](900)}},
+		{name: "target", scheduling: &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](900), PriorityClassName: new("interactive")}},
 		{name: "unlimited"},
 	} {
 		src.Spec.Components = append(src.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -205,5 +205,29 @@ func TestDynamoGraphDeploymentLPXComponentSchedulingRoundTrip(t *testing.T) {
 	got := roundTripFromV1beta1(t, src)
 	if diff := cmp.Diff(src.Spec, got.Spec); diff != "" {
 		t.Fatalf("LPX component scheduling round-trip mismatch (-want +got):\n%s", diff)
+	}
+
+	t.Log("Live alpha edits and omission win without preserving native priority in annotations")
+	before := src.DeepCopy()
+	alpha := &DynamoGraphDeployment{}
+	if err := alpha.ConvertFrom(src); err != nil {
+		t.Fatal(err)
+	}
+	if len(alpha.Annotations) != 0 {
+		t.Fatalf("native LPX scheduling created conversion annotations: %v", alpha.Annotations)
+	}
+	alpha.Spec.Services["draft"].LPX = alpha.Spec.Services["draft"].LPX.DeepCopy()
+	alpha.Spec.Services["draft"].LPX.Scheduling.PriorityClassName = nil
+	alpha.Spec.Services["target"].LPX = alpha.Spec.Services["target"].LPX.DeepCopy()
+	alpha.Spec.Services["target"].LPX.Scheduling.PriorityClassName = new("changed")
+	updated := &v1beta1.DynamoGraphDeployment{}
+	if err := alpha.ConvertTo(updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.GetComponentByName("draft").LPX.Scheduling.PriorityClassName != nil || *updated.GetComponentByName("target").LPX.Scheduling.PriorityClassName != "changed" {
+		t.Fatal("live priority edits did not survive native conversion")
+	}
+	if diff := cmp.Diff(before, src); diff != "" {
+		t.Fatalf("conversion or destination edits mutated the source (-want +got):\n%s", diff)
 	}
 }

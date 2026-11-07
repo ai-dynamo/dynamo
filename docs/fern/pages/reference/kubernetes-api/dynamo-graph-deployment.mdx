@@ -16,6 +16,11 @@ admission rejects new or changed LPX components but permits otherwise valid upda
 unchanged, and deletion. Existing LPX DGDs report a disabled status without further workload
 reconciliation; installed CRDs and workloads are preserved.
 
+Configure priority for future LPX pipeline requests with each serving component's
+`lpx.scheduling.priorityClassName`. Existing requests retain their class. The
+[shared component reference](dynamo-component-deployment.mdx#shared-component-spec)
+describes shared-target ownership, deadline retries, and scheduler upgrade prerequisites.
+
 <Info>
   Each entry in `spec.components` is a `DynamoComponentDeploymentSharedSpec` — the same fields documented on the [DCD Reference](dynamo-component-deployment.mdx#shared-component-spec). This page covers the **graph-level** fields; per-component fields live there.
 </Info>

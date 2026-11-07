@@ -1213,7 +1213,7 @@ func TestLPXRollingEngineHandoff(t *testing.T) {
 		request := &beforeRequests.Items[i]
 		observed[request.Name] = request
 	}
-	resolved, missing := resolvePipelineRequests(child, observed, afterSelected.workload, afterSelected.plan)
+	resolved, missing := resolvePipelineRequests(child, observed, afterSelected.workload, afterSelected.plan, nil)
 	require.Equal(t, observed, resolved)
 	require.Empty(t, missing)
 	afterRequests := &lpxv1alpha1.LPUPipelineRequestList{}
@@ -1645,7 +1645,7 @@ func TestLPXExternalScaleInAfterSchedulingFailure(t *testing.T) {
 			dgd.GetComponentByName("lpx").Replicas = nil
 			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 			selected.plan.Replicas = 4
-			_, missing := resolvePipelineRequests(child, nil, selected.workload, selected.plan)
+			_, missing := resolvePipelineRequests(child, nil, selected.workload, selected.plan, nil)
 			objects := lpxMaterializedObjects(t, r, child, dgd, selected)
 			createLPXTestObjects(t, ctx, r.Client, objects...)
 			pcs := findLPXTestPodCliqueSet(t, objects)
@@ -3172,7 +3172,7 @@ func resolveLPXTestWorkload(t *testing.T, registry lpx.ModelRegistry, ctx contex
 	require.NoError(t, err)
 	plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(deployment), dgd.GetComponentByName(workload.ServingComponentName()))
 	require.NoError(t, err)
-	_, missing := resolvePipelineRequests(deployment, nil, workload, plan)
+	_, missing := resolvePipelineRequests(deployment, nil, workload, plan, nil)
 	fixture := &lpxTestWorkload{workload: workload, plan: plan.ForReplica(0)}
 	for _, request := range missing {
 		fixture.requests = append(fixture.requests, *request)

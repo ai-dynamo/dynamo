@@ -39,6 +39,7 @@ import (
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -131,10 +132,27 @@ func (v *sharedValidation) validateContainer(container *corev1.Container, fldPat
 	return allErrs
 }
 
-// validateLPXConfig validates the build reference. config and fldPath must be non-nil.
+// validateLPXConfig validates build and scheduling intent. config and fldPath must be non-nil.
 func (v *sharedValidation) validateLPXConfig(config *nvidiacomv1beta1.LPXConfig, fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
 	if strings.TrimSpace(config.BuildID) == "" {
-		return field.ErrorList{field.Required(fldPath.Child("buildId"), "LPX component requires a buildId")}
+		allErrs = append(allErrs, field.Required(fldPath.Child("buildId"), "LPX component requires a buildId"))
+	}
+
+	// Scheduling is optional and owns its field-level checks.
+	if config.Scheduling != nil {
+		allErrs = append(allErrs, v.validateSchedulingSpec(config.Scheduling, fldPath.Child("scheduling"))...)
+	}
+	return allErrs
+}
+
+// validateSchedulingSpec validates the class reference without resolving it.
+// spec and fldPath must be non-nil; deadline bounds are enforced by the CRD.
+func (v *sharedValidation) validateSchedulingSpec(spec *nvidiacomv1beta1.SchedulingSpec, fldPath *field.Path) field.ErrorList {
+	if spec.PriorityClassName != nil {
+		if errors := utilvalidation.IsDNS1123Subdomain(*spec.PriorityClassName); len(errors) > 0 {
+			return field.ErrorList{field.Invalid(fldPath.Child("priorityClassName"), *spec.PriorityClassName, strings.Join(errors, "; "))}
+		}
 	}
 	return nil
 }

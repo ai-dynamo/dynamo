@@ -321,11 +321,15 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 
 	// LPX cardinality determines the root overrides and shared draft/target contract.
 	lpxComponentCount, independentEngineCount := 0, 0
+	var targetPriority *string
 	for i := range spec.Components {
 		if spec.Components[i].IsLPX() {
 			lpxComponentCount++
 			if dynamolpx.ServesEndpoint(&spec.Components[i]) {
 				independentEngineCount++
+				if config := spec.Components[i].LPX; config != nil && config.Scheduling != nil {
+					targetPriority = config.Scheduling.PriorityClassName
+				}
 			}
 		}
 	}
@@ -380,6 +384,13 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		if lpxComponentCount == 2 && independentEngineCount == 1 && component.IsLPX() {
 			replicas := k8sptr.Deref(component.Replicas, 1)
 			if !dynamolpx.ServesEndpoint(component) {
+				// A shared draft may inherit or repeat the target's creation-time class.
+				if config := component.LPX; config != nil && config.Scheduling != nil {
+					if priority := config.Scheduling.PriorityClassName; priority != nil && !k8sptr.Equal(priority, targetPriority) {
+						allErrs = append(allErrs, field.Invalid(componentPath.Child("lpx", "scheduling", "priorityClassName"), *priority, "must be omitted or match the shared target's priorityClassName"))
+					}
+				}
+
 				if replicas > dynamolpx.MaxSpecDecodeNumDrafts {
 					allErrs = append(allErrs, field.Invalid(componentPath.Child("replicas"), replicas, "draft replicas must be between 1 and 8"))
 				}

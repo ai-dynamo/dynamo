@@ -74,7 +74,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
 <Indent>
   <ParamField path="scheduling" type="SchedulingSpec">
-    Configures this LPX component's scheduling attempts. Components may use different deadlines, including when they share a workload.
+    Configures this LPX component's scheduling attempts and the priority of future pipeline requests. Components may use different deadlines, including when they share a workload.
   </ParamField>
 
   <Indent>
@@ -86,6 +86,18 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
       Deadline handling runs after download checks, compiler-registry resolution, and desired-state validation. An outage or invalid desired configuration can delay failure reporting and cleanup indefinitely, even after the deadline has elapsed. The timer does not bound asynchronous cleanup or finalization.
 
       Expiry records `LPXSchedulingDeadlineExceeded` before cleanup. Cleanup removes complete engine replicas only from a trailing suffix: an expired interior replica blocks deadline cleanup to preserve healthy higher ordinals. Explicit `replicas` authorizes lowering the Grove replica count to the surviving prefix; externally managed capacity remains unchanged. Grove scaling and owner garbage collection handle pod cleanup; the LPX graph controller does not delete pods directly. A later LPX input revision authorizes republication after cleanup. An existing failure remains cleanup authority for cycles that started before it, so retiring those cycles does not consume the retry edit.
+    </ParamField>
+
+    <ParamField path="priorityClassName" type="string">
+      Names a cluster-scoped Kubernetes `scheduling.k8s.io/v1` PriorityClass for newly created LPU pipeline requests. The name must be a nonempty DNS subdomain of at most 253 characters. Omission means priority zero, independent of the cluster's default class. This DGD-only field is available in both `v1alpha1` and `v1beta1`; standalone DCDs do not support LPX.
+
+      Use a user class with `preemptionPolicy: Never`; names beginning with `system-` and classes with omitted or preempting policy are unsupported. Higher numeric priority selects runnable requests first without evicting bound work. Negative values rank below omitted priority zero. Sustained higher-priority demand can starve lower-priority requests; configured scheduling deadlines still apply. A missing or deleting class leaves the request Pending; an unsupported class produces an Unsupported receipt. The scheduler resolves classes; Dynamo does not check their existence or set Pod priority.
+
+      Independent workloads may select different classes. In a shared speculative workload, the target component owns priority for every draft and target request, including an agent-hosted target runtime. A draft may omit the field or repeat the target's class; any other value is rejected. All-local hybrid workloads produce no LPU pipeline requests.
+
+      Adding, changing, or removing this field leaves existing requests' UIDs, classes, specs, status, and scheduling clocks intact and does not roll workload templates. Newly published requests use the current class, so partial publication or later scale-out can leave different historical classes in one workload. A priority edit also advances the LPX input revision: after a scheduling deadline failure, it permits retry once existing cleanup and finalization finish. Healthy survivors retain their original class, and externally managed capacity remains unchanged.
+
+      Upgrade the LPX scheduler, CRD, and permissions before enabling this field. See [LPX workload priority upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#lpx-workload-priority).
     </ParamField>
   </Indent>
 

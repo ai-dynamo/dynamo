@@ -2682,7 +2682,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `buildId` _string_ | buildId references the immutable model build. |  | MinLength: 1 <br />Required: \{\} <br /> |
-| `scheduling` _[SchedulingSpec](#schedulingspec)_ | scheduling configures this component's LPX scheduling attempts.<br />Omission means no deadline. |  | Optional: \{\} <br /> |
+| `scheduling` _[SchedulingSpec](#schedulingspec)_ | scheduling configures this component's LPX scheduling attempts.<br />Omission means no deadline and priority zero. |  | Optional: \{\} <br /> |
 | `experimental` _[LPXExperimentalSpec](#lpxexperimentalspec)_ | experimental groups opt-in LPX options whose API shape may change in<br />breaking ways between v1beta1 releases. |  | Optional: \{\} <br /> |
 
 
@@ -3173,6 +3173,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `attemptDeadlineSeconds` _integer_ | attemptDeadlineSeconds limits how long each LPR may remain pending.<br />Omission means unlimited; the value is not a solver budget. |  | Maximum: 9.223372036e+09 <br />Minimum: 1 <br />Optional: \{\} <br /> |
+| `priorityClassName` _string_ | priorityClassName selects the native non-preempting PriorityClass for future<br />LPRs in this workload group. Omission means priority zero. Existing LPRs<br />retain their original class when this setting changes. |  | MaxLength: 253 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` <br />Optional: \{\} <br /> |
 
 
 #### SearchStrategy

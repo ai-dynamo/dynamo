@@ -54,12 +54,14 @@ func (r *graphReconciler) getPipelineRequests(ctx context.Context, pcs *grovev1a
 // resolvePipelineRequests collects missing or changed intent in replica/model order.
 // Pointer inputs are non-nil; deployment has a validated DGD controller owner.
 // currentRequests contains owned observations indexed by name and may be nil.
+// priorityClassName may be nil to omit the creation-time policy.
 // Inputs are not mutated; owner references are added only on publication.
 func resolvePipelineRequests(
 	deployment *v1alpha1.LPXGraphDeployment,
 	currentRequests map[string]*lpxv1alpha1.LPUPipelineRequest,
 	workload *lpx.Workload,
 	plan *lpx.MaterializationPlan,
+	priorityClassName *string,
 ) (map[string]*lpxv1alpha1.LPUPipelineRequest, []*lpxv1alpha1.LPUPipelineRequest) {
 	// The reconcile boundary already validated the DGD owner; rendering uses that identity.
 	dgdOwner := metav1.GetControllerOf(deployment)
@@ -93,6 +95,9 @@ func resolvePipelineRequests(
 					lpxv1alpha1.CompilerSnapshotDigestAnnotation: projection.CompilerSnapshotDigest(),
 				},
 				Spec: projection.RequestSpec(replicaPlan, replicaPlan.Agents[index].CliqueName),
+			}
+			if priorityClassName != nil {
+				request.Spec.PriorityClassName = new(*priorityClassName)
 			}
 
 			if currentRequest := currentRequests[request.Name]; currentRequest != nil && pipelineRequestMatches(currentRequest, request) {
@@ -165,7 +170,10 @@ func pipelineRequestMatches(observed, desired *lpxv1alpha1.LPUPipelineRequest) b
 			return false
 		}
 	}
-	return apiequality.Semantic.DeepEqual(observed.Spec, desired.Spec)
+	// Priority is captured on creation; input edits preserve existing scheduler work.
+	observedSpec, desiredSpec := observed.Spec, desired.Spec
+	observedSpec.PriorityClassName, desiredSpec.PriorityClassName = nil, nil
+	return apiequality.Semantic.DeepEqual(observedSpec, desiredSpec)
 }
 
 // reconcilePipelineRequests hands each complete Grove engine to LPX after its old requests finalize.

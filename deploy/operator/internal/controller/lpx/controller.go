@@ -267,8 +267,9 @@ func (r *graphReconciler) reconcileWorkloads(
 			plan := plans[groupName]
 			workload := workloads[groupName]
 			pcsg := pcsgs[plan.LPXScalingGroup]
+			component := dgd.GetComponentByName(groupName)
 			// Keep request ordinals aligned with the capacity Grove permits us to manage.
-			replicas, explicit, required, err := resolveWorkloadCapacity(dgd.GetComponentByName(groupName), pcsg, pclqs, plan, scalingBlocked)
+			replicas, explicit, required, err := resolveWorkloadCapacity(component, pcsg, pclqs, plan, scalingBlocked)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
@@ -276,7 +277,12 @@ func (r *graphReconciler) reconcileWorkloads(
 			explicitReplicas[plan.LPXScalingGroup] = explicit
 			scalingRequired = scalingRequired || required
 
-			desired, missing := resolvePipelineRequests(deployment, requests, workload, plan)
+			// The serving component selects one creation-time policy for its group.
+			var priorityClassName *string
+			if component.LPX.Scheduling != nil {
+				priorityClassName = component.LPX.Scheduling.PriorityClassName
+			}
+			desired, missing := resolvePipelineRequests(deployment, requests, workload, plan, priorityClassName)
 
 			maps.Copy(desiredRequests, desired)
 			missingRequests = append(missingRequests, missing...)

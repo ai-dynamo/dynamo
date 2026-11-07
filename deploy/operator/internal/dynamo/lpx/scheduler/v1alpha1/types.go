@@ -624,6 +624,7 @@ type LPUPipelineRequestSpec struct {
 	MaterializationTarget MaterializationTarget      `json:"materializationTarget"`
 	NodeLocal             *NodeLocalRequest          `json:"nodeLocal,omitempty"`
 	Partitions            []PartitionRequest         `json:"partitions"`
+	PriorityClassName     *string                    `json:"priorityClassName,omitempty"`
 	PropSyncConnectors    []PropSyncConnectorRequest `json:"propSyncConnectors"`
 	RemoteDra             *RemoteDraRequest          `json:"remoteDra,omitempty"`
 	RepairPolicy          *RepairPolicy              `json:"repairPolicy,omitempty"`
@@ -646,6 +647,10 @@ func (in *LPUPipelineRequestSpec) DeepCopyInto(out *LPUPipelineRequestSpec) {
 		for i := range in.Partitions {
 			in.Partitions[i].DeepCopyInto(&out.Partitions[i])
 		}
+	}
+	if in.PriorityClassName != nil {
+		value := *in.PriorityClassName
+		out.PriorityClassName = &value
 	}
 	if in.PropSyncConnectors != nil {
 		out.PropSyncConnectors = make([]PropSyncConnectorRequest, len(in.PropSyncConnectors))
