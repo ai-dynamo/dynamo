@@ -270,6 +270,191 @@ async def test_lifecycle_uses_deployment_timeout_after_profiling() -> None:
     manager.wait_for_phase.assert_awaited_once_with("request", "Deployed", 11)
 
 
+DISK_PRESSURE_MESSAGE = "Pod was rejected: The node had condition: [DiskPressure]. "
+
+
+def fake_pod(
+    name: str,
+    phase: str,
+    reason: str | None = None,
+    message: str | None = None,
+    uid: str | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        metadata=SimpleNamespace(name=name, uid=uid or f"uid-{name}"),
+        spec=SimpleNamespace(node_name="node-a"),
+        status=SimpleNamespace(phase=phase, reason=reason, message=message),
+    )
+
+
+def deploying_manager(monkeypatch) -> ManagedDGDR:
+    manager = initialized_manager()
+    manager.config = DGDRTestConfig(
+        namespace="test-namespace", image="test", deploy_timeout=5
+    )
+    manager.create = AsyncMock()
+    manager.wait_for_phase_at_least = AsyncMock(
+        return_value={"status": {"profilingJobName": "profiling-job"}}
+    )
+    monkeypatch.setattr("tests.deploy.dgdr_utils.asyncio.sleep", AsyncMock())
+    return manager
+
+
+def dgdr_status(phase: str) -> dict:
+    return {"status": {"phase": phase, "dgdName": "deployment"}}
+
+
+@pytest.mark.timeout(30)
+async def test_lifecycle_replaces_dgd_pod_evicted_by_disk_pressure(
+    monkeypatch,
+) -> None:
+    manager = deploying_manager(monkeypatch)
+    assert manager.core is not None
+    deleted: list[str] = []
+    replacement_listed = False
+
+    async def list_pods(*args, **kwargs):
+        nonlocal replacement_listed
+        if deleted:
+            replacement_listed = True
+            return SimpleNamespace(items=[fake_pod("frontend-new", "Pending")])
+        return SimpleNamespace(
+            items=[fake_pod("frontend-old", "Failed", "Evicted", DISK_PRESSURE_MESSAGE)]
+        )
+
+    async def delete_pod(name: str, namespace: str):
+        deleted.append(name)
+
+    async def get(name: str):
+        # Grove cannot finish the deployment until the evicted Pod is replaced.
+        return dgdr_status("Deployed" if replacement_listed else "Deploying")
+
+    manager.core.list_namespaced_pod = AsyncMock(side_effect=list_pods)
+    manager.core.delete_namespaced_pod = AsyncMock(side_effect=delete_pod)
+    manager.get = AsyncMock(side_effect=get)
+
+    result, _ = await run_lifecycle(
+        manager,
+        {"metadata": {"name": "request"}, "spec": {}},
+        verify_configmap=False,
+    )
+
+    assert result["status"]["phase"] == "Deployed"
+    assert deleted == ["frontend-old"]
+    assert replacement_listed
+    assert manager.core.list_namespaced_pod.await_count == 2
+    manager.core.list_namespaced_pod.assert_awaited_with(
+        "test-namespace",
+        label_selector="nvidia.com/dynamo-graph-deployment-name=deployment",
+    )
+
+
+@pytest.mark.timeout(30)
+async def test_lifecycle_replaces_recreated_pod_with_same_name(monkeypatch) -> None:
+    manager = deploying_manager(monkeypatch)
+    assert manager.core is not None
+    listings = 0
+
+    async def list_pods(*args, **kwargs):
+        nonlocal listings
+        listings += 1
+        # Each listing returns a new Pod that reuses the evicted Pod's name.
+        return SimpleNamespace(
+            items=[
+                fake_pod(
+                    "worker-0",
+                    "Failed",
+                    "Evicted",
+                    DISK_PRESSURE_MESSAGE,
+                    uid=f"uid-{listings}",
+                )
+            ]
+        )
+
+    manager.core.list_namespaced_pod = AsyncMock(side_effect=list_pods)
+    manager.core.delete_namespaced_pod = AsyncMock()
+    manager.get = AsyncMock(
+        side_effect=[
+            dgdr_status("Deploying"),
+            dgdr_status("Deploying"),
+            dgdr_status("Deployed"),
+        ]
+    )
+
+    await run_lifecycle(
+        manager,
+        {"metadata": {"name": "request"}, "spec": {}},
+        verify_configmap=False,
+    )
+
+    assert manager.core.delete_namespaced_pod.await_count == 2
+
+
+@pytest.mark.timeout(30)
+async def test_lifecycle_keeps_dgd_pods_that_failed_for_other_reasons(
+    monkeypatch,
+) -> None:
+    manager = deploying_manager(monkeypatch)
+    assert manager.core is not None
+    manager.core.list_namespaced_pod = AsyncMock(
+        return_value=SimpleNamespace(
+            items=[fake_pod("decode-crashed", "Failed", None, "exit code 1")]
+        )
+    )
+    manager.core.delete_namespaced_pod = AsyncMock()
+    manager.get = AsyncMock(
+        side_effect=[
+            dgdr_status("Deploying"),
+            dgdr_status("Deploying"),
+            dgdr_status("Deployed"),
+        ]
+    )
+
+    await run_lifecycle(
+        manager,
+        {"metadata": {"name": "request"}, "spec": {}},
+        verify_configmap=False,
+    )
+
+    assert manager.core.list_namespaced_pod.await_count == 2
+    manager.core.delete_namespaced_pod.assert_not_awaited()
+
+
+@pytest.mark.timeout(30)
+async def test_lifecycle_fails_clearly_when_evictions_continue(monkeypatch) -> None:
+    manager = deploying_manager(monkeypatch)
+    assert manager.core is not None
+    listings = 0
+
+    async def list_pods(*args, **kwargs):
+        nonlocal listings
+        listings += 1
+        return SimpleNamespace(
+            items=[
+                fake_pod(
+                    f"{component}-{listings}",
+                    "Failed",
+                    "Evicted",
+                    DISK_PRESSURE_MESSAGE,
+                )
+                for component in ("frontend", "decode", "prefill")
+            ]
+        )
+
+    manager.core.list_namespaced_pod = AsyncMock(side_effect=list_pods)
+    manager.core.delete_namespaced_pod = AsyncMock()
+    manager.get = AsyncMock(return_value=dgdr_status("Deploying"))
+
+    with pytest.raises(AssertionError, match=r"DiskPressure.*frontend-3 on node-a"):
+        await run_lifecycle(
+            manager,
+            {"metadata": {"name": "request"}, "spec": {}},
+            verify_configmap=False,
+        )
+
+    assert manager.core.delete_namespaced_pod.await_count == 6
+
+
 @pytest.mark.timeout(30)
 async def test_wait_for_phase_retries_vcluster_connection_refusals(
     monkeypatch,
