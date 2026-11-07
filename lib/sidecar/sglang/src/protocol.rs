@@ -16,12 +16,27 @@ use crate::proto as pb;
 use crate::proto::finish_reason::Kind as FinishKind;
 
 /// The prefill/decode rendezvous of one request: SGLang's bootstrap address
-/// and room.
+/// and room, and the prefill DP rank that holds the KV when it is named.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Rendezvous {
     pub bootstrap_host: String,
     pub bootstrap_port: i32,
     pub bootstrap_room: i64,
+    pub disagg_prefill_dp_rank: Option<u32>,
+}
+
+/// Where one request runs, as the node's listeners chose it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Target<'a> {
+    /// The bootstrap address of a rendezvous prefill builds itself: this
+    /// worker's host and the dispatched listener's port.
+    pub bootstrap_host: Option<&'a str>,
+    pub bootstrap_port: Option<u16>,
+    /// The DP rank a prefill request runs on when the deployment has
+    /// several; its rendezvous carries it in the port and room.
+    pub prefill_rank: Option<u32>,
+    /// Every DP rank of the deployment, at least one.
+    pub global_dp_size: u32,
 }
 
 /// Lower one request to api.v1's single-item Generate form. Also returns the
@@ -30,8 +45,7 @@ pub(crate) fn build_generate_request(
     request: &PreprocessedRequest,
     request_id: &str,
     mode: DisaggregationMode,
-    bootstrap_host: Option<&str>,
-    bootstrap_port: Option<u16>,
+    target: Target<'_>,
 ) -> Result<(pb::GenerateRequest, Option<Value>), DynamoError> {
     validate_request(request)?;
     let input_ids = request
@@ -116,11 +130,10 @@ pub(crate) fn build_generate_request(
         output_options.prompt_logprobs.map(|_| 0).unwrap_or(-1)
     };
     let routing = request.routing.as_ref();
-    let disaggregated =
-        resolve_disaggregated_params(request, mode, bootstrap_host, bootstrap_port)?;
+    let disaggregated = resolve_disaggregated_params(request, mode, target)?;
 
-    // `routed_dp_rank` is not sent: the engine serves one DP rank, which
-    // `validate_dp_rank` checks.
+    // `routed_dp_rank` is not sent: SGLang's Rust listeners run a request on
+    // their own rank, so the rank chose the listener.
     let generate = pb::GenerateRequest {
         rid: Some(pb::StringOrList {
             value: Some(pb::string_or_list::Value::One(request_id.to_string())),
@@ -148,6 +161,10 @@ pub(crate) fn build_generate_request(
         bootstrap_room: disaggregated
             .as_ref()
             .map(|params| optional_int64_one(params.bootstrap_room)),
+        disagg_prefill_dp_rank: disaggregated
+            .as_ref()
+            .and_then(|params| params.disagg_prefill_dp_rank)
+            .map(i64::from),
         priority: routing.and_then(|routing| routing.priority).map(i64::from),
         require_reasoning: Some(request.require_reasoning),
         lora_path: routing
@@ -183,48 +200,67 @@ fn requested_dp_rank(request: &PreprocessedRequest, mode: DisaggregationMode) ->
     })
 }
 
-/// The engine serves one DP rank, rank 0. Refuse a request pinned to another
-/// rank instead of running it on rank 0, as SGLang refused an out-of-range
-/// `routed_dp_rank`.
+/// The DP rank the router chose, which must be one this worker serves.
+/// Refuse any other before a stream opens instead of running the request on
+/// some listener's rank, as SGLang refused an out-of-range `routed_dp_rank`.
 pub(crate) fn validate_dp_rank(
     request: &PreprocessedRequest,
     mode: DisaggregationMode,
-) -> Result<(), DynamoError> {
+    ranks: std::ops::Range<u32>,
+) -> Result<Option<u32>, DynamoError> {
     match requested_dp_rank(request, mode) {
-        Some(rank) if rank != 0 => Err(client::invalid_arg(format!(
-            "DP rank {rank} was requested, but this SGLang engine serves only DP rank 0; \
-             DP>1 is not supported yet"
+        Some(rank) if !ranks.contains(&rank) => Err(client::invalid_arg(format!(
+            "DP rank {rank} was requested, but this SGLang worker serves DP ranks [{}, {})",
+            ranks.start, ranks.end
         ))),
-        _ => Ok(()),
+        rank => Ok(rank),
     }
 }
 
-/// The prefill handoff in JSON form.
+/// The prefill handoff in JSON form. It names the prefill's DP rank only when
+/// the prefill request named it to SGLang.
 pub(crate) fn disaggregated_params_to_json(rendezvous: &Rendezvous) -> Value {
-    serde_json::json!({
+    let mut handoff = serde_json::json!({
         "bootstrap_host": rendezvous.bootstrap_host,
         "bootstrap_port": rendezvous.bootstrap_port,
         "bootstrap_room": rendezvous.bootstrap_room,
-    })
+    });
+    if let Some(rank) = rendezvous.disagg_prefill_dp_rank {
+        handoff["disagg_prefill_dp_rank"] = Value::from(rank);
+    }
+    handoff
 }
 
 /// The rendezvous a request carries: the router's bootstrap info first, then
 /// the prefill handoff. A prefill request without either gets this worker's
-/// bootstrap address and a fresh room; aggregated requests carry none.
+/// bootstrap address and a fresh room, congruent to its rank modulo the DP
+/// size (SGLang's `follow_bootstrap_room`); aggregated requests carry none.
+/// Prefill names its rank only when the router named it; decode names the
+/// router's prefill rank, or the handoff's. For a single-rank prefill that is
+/// rank 0, which SGLang resolves anyway.
 pub(crate) fn resolve_disaggregated_params(
     request: &PreprocessedRequest,
     mode: DisaggregationMode,
-    bootstrap_host: Option<&str>,
-    bootstrap_port: Option<u16>,
+    target: Target<'_>,
 ) -> Result<Option<Rendezvous>, DynamoError> {
     if mode == DisaggregationMode::Aggregated {
         return Ok(None);
     }
+    let router_rank = request
+        .routing
+        .as_ref()
+        .and_then(|routing| routing.prefill_dp_rank);
+    let named_rank = if mode.is_prefill() {
+        target.prefill_rank.filter(|_| router_rank.is_some())
+    } else {
+        router_rank
+    };
     if let Some(info) = request.bootstrap_info.as_ref() {
         return rendezvous(
             &info.bootstrap_host,
             u64::from(info.bootstrap_port),
             info.bootstrap_room,
+            named_rank,
         )
         .map(Some);
     }
@@ -232,18 +268,32 @@ pub(crate) fn resolve_disaggregated_params(
         return handoff_rendezvous(&prefill.disaggregated_params).map(Some);
     }
     if mode.is_prefill() {
-        let host = bootstrap_host.ok_or_else(|| {
+        let host = target.bootstrap_host.ok_or_else(|| {
             client::invalid_arg("prefill request has no bootstrap host from discovery")
         })?;
-        let port = bootstrap_port.ok_or_else(|| {
+        let port = target.bootstrap_port.ok_or_else(|| {
             client::invalid_arg("prefill request has no bootstrap port from discovery")
         })?;
-        let room = rand::random::<u64>() & (i64::MAX as u64);
-        return rendezvous(host, u64::from(port), room).map(Some);
+        let random = rand::random::<u64>() & (i64::MAX as u64);
+        let room = match target.prefill_rank {
+            Some(rank) => room_for_rank(rank, target.global_dp_size, random),
+            None => random,
+        };
+        return rendezvous(host, u64::from(port), room, named_rank).map(Some);
     }
     Err(client::invalid_arg(
         "decode request has neither bootstrap_info nor prefill_result",
     ))
+}
+
+/// A room congruent to `rank` modulo `size`, from `random` in
+/// `0..=i64::MAX`, that stays in SGLang's signed 64-bit field: the
+/// PrefillRouter's room arithmetic.
+fn room_for_rank(rank: u32, size: u32, random: u64) -> u64 {
+    let max_room = i64::MAX as u64;
+    let (rank, size) = (u64::from(rank), u64::from(size.max(1)));
+    let max_quotient = (max_room - rank) / size;
+    (random % (max_quotient + 1)) * size + rank
 }
 
 fn handoff_rendezvous(value: &Value) -> Result<Rendezvous, DynamoError> {
@@ -259,10 +309,28 @@ fn handoff_rendezvous(value: &Value) -> Result<Rendezvous, DynamoError> {
         .get("bootstrap_room")
         .and_then(Value::as_u64)
         .ok_or_else(|| client::invalid_arg("disaggregated_params.bootstrap_room is missing"))?;
-    rendezvous(host, port, room)
+    let rank = value
+        .get("disagg_prefill_dp_rank")
+        .filter(|rank| !rank.is_null())
+        .map(|rank| {
+            rank.as_u64()
+                .and_then(|rank| u32::try_from(rank).ok())
+                .ok_or_else(|| {
+                    client::invalid_arg(format!(
+                        "disaggregated_params.disagg_prefill_dp_rank must be a DP rank, got {rank}"
+                    ))
+                })
+        })
+        .transpose()?;
+    rendezvous(host, port, room, rank)
 }
 
-fn rendezvous(host: &str, port: u64, room: u64) -> Result<Rendezvous, DynamoError> {
+fn rendezvous(
+    host: &str,
+    port: u64,
+    room: u64,
+    disagg_prefill_dp_rank: Option<u32>,
+) -> Result<Rendezvous, DynamoError> {
     if host.trim().is_empty() {
         return Err(client::invalid_arg("bootstrap_host must not be empty"));
     }
@@ -277,6 +345,7 @@ fn rendezvous(host: &str, port: u64, room: u64) -> Result<Rendezvous, DynamoErro
         bootstrap_host: host.to_string(),
         bootstrap_port,
         bootstrap_room,
+        disagg_prefill_dp_rank,
     })
 }
 

@@ -30,9 +30,11 @@ lib/sidecar/
 │   └── tests.rs                # Broader tests using a local fake gRPC server, including pre-cancelled decode
 ├── sglang/src/
 │   ├── client.rs               # Inline tests: KV sources, status mapping and RPC deadlines
-│   ├── discovery.rs            # Inline tests: typed discovery and the DP>1 refusal
+│   ├── discovery.rs            # Inline tests: typed discovery
 │   ├── engine.rs               # Inline tests: worker metadata, bootstrap and KV sources
+│   ├── listeners.rs            # Inline tests: rank dispatch
 │   ├── native_http.rs          # Inline tests: envelopes, error frames and Abort RPC
+│   ├── node.rs                 # Inline tests: node table and KV union
 │   ├── protocol.rs             # Production conversion and child-module declarations
 │   └── protocol/
 │       ├── request_tests.rs    # Request fields, public refusals, routing and rendezvous
@@ -159,6 +161,13 @@ Each suite exercises a different request path:
   errors become HTTP 400, and failures after a token reaches the client become SSE
   errors without a successful finish. Both paths verify subsequent recovery.
 
+The SGLang fixture is one Rust-server listener. `Fixture::start_node` starts the
+listeners of one node, which share a controller and report one
+`DeploymentInfo.node_listeners` table; each listener has its own Mocker
+scheduler, KV-event publisher, Abort log, request log (`received`), health
+control and optional HTTP peer. A single-listener fixture reports a one-entry
+table.
+
 The SGLang fixture owns its optional HTTP peer, discovery metadata and shutdown.
 The peer imitates SGLang's Rust server: it serves no `/abort_request`, omits
 empty `output_ids`, and its requests are aborted with the `sglang.api.v1` Abort
@@ -188,8 +197,8 @@ clients. That makes peer-loss tests deterministic.
 
 | Suite | Scope | Execution |
 | --- | --- | --- |
-| `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM, SGLang and TensorRT-LLM; native rejection, malformed responses and shutdown during pending SGLang health checks; vLLM engine loss from its health stream | CPU, ordinary pre-merge Cargo tests |
-| `router_sidecar_mocker_integration.rs` | All three backends: registration/error recovery, delayed/interrupted startup, cancellation, SIGTERM, frontend HTTP errors/recovery and real PrefillRouter handoff; all three plus LPX: request migration after engine failure (before or after the first token) and SIGTERM; vLLM/SGLang model alias publication and native-health readiness; SGLang tokenizer/parser discovery and changed-role startup; vLLM withdrawal and process exit on engine loss | CPU, ordinary pre-merge Cargo tests |
+| `sidecar_mocker_integration.rs` | Shared streaming, errors, cancellation, cleanup, active work release, consumer drop, request/logprob fields and peer teardown for vLLM, SGLang and TensorRT-LLM; native rejection, malformed responses and shutdown during pending SGLang health checks; vLLM engine loss from its health stream; SGLang with one sidecar per node: Abort on every listener, matched on the owner, native abort through its own listener, and engine loss naming the lost listener's DP rank | CPU, ordinary pre-merge Cargo tests |
+| `router_sidecar_mocker_integration.rs` | All three backends: registration/error recovery, delayed/interrupted startup, cancellation, SIGTERM, frontend HTTP errors/recovery and real PrefillRouter handoff; all three plus LPX: request migration after engine failure (before or after the first token) and SIGTERM; vLLM/SGLang model alias publication and native-health readiness; SGLang tokenizer/parser discovery and changed-role startup; vLLM withdrawal and process exit on engine loss; SGLang with one sidecar per node: the prefill rank and port through a real PrefillRouter under round-robin over two nodes (with a pinned rank), and withdrawal and process exit when one listener is lost | CPU, ordinary pre-merge Cargo tests |
 | `tests/serve/test_sidecar.py` | vLLM/SGLang: real engine logprobs, structured output, aggregated and disaggregated cancellation/recovery (decode stops early), KV transfer and routing, where the `*_kv_router` configs warm two caches and require cache-based selection, plus a completed transfer to decode when disaggregated; TensorRT-LLM: aggregated/disaggregated chat and cancellation/recovery; all three: request migration after a real engine is killed mid-stream, on the aggregated and disaggregated `*_kv_router` configs | GPU, existing sidecar E2E jobs in post-merge and nightly |
 
 A generic scenario is reusable code, not evidence that every backend runs it.

@@ -6,7 +6,7 @@ use dynamo_backend_common::{
     BackendError, DisaggregationMode, DynamoError, ErrorType, FinishReason, GenerateContext,
     LLMEngine, LLMEngineOutput, PreprocessedRequest,
 };
-use dynamo_llm::protocols::common::preprocessor::PrefillResult;
+use dynamo_llm::protocols::common::preprocessor::{PrefillResult, RoutingHints};
 use dynamo_sidecar_testkit::assert::{failure, terminal};
 use dynamo_sidecar_testkit::bounded;
 use dynamo_sidecar_testkit::control::{
@@ -922,6 +922,87 @@ async fn sglang_abort_rpc_reports_499_and_match_flag() {
     .await;
 }
 
+// A request runs on one listener. The gRPC Abort reaches every listener and
+// matches only on the owner; native /generate aborts through its own
+// listener only.
+#[tokio::test]
+async fn sglang_node_sidecar_aborts_on_the_owning_listener() {
+    bounded("node abort", async {
+        let control = Controller::<sglang_fixture::Adapter>::default();
+        let http_control = Controller::<http::Adapter>::default();
+        let mut node = sglang_fixture::Fixture::start_node(
+            control.clone(),
+            FixtureConfig {
+                speedup_ratio: 0.1,
+                ..Default::default()
+            },
+            sglang_fixture::NodeConfig::listeners(2),
+        )
+        .await;
+        for listener in &mut node {
+            listener.serve_http(http_control.clone()).await;
+        }
+        let engine = start_http_engine(&node[0]).await;
+        let ctx = mock_context();
+        let id = ctx.id().to_string();
+        let handle = control.request(&id, after_token_responses(1, StreamAction::Continue));
+        let mut req = request("mocker-model", vec![11, 22, 33], 10_000);
+        req.routing = Some(RoutingHints {
+            dp_rank: Some(1),
+            ..Default::default()
+        });
+        let mut stream = engine
+            .generate(req, GenerateContext::new(ctx.clone(), None))
+            .await
+            .unwrap();
+        let mut outputs = checkpoint_outputs(&mut stream, &handle).await;
+        engine.abort(ctx).await;
+        node[0].wait_aborts(1).await;
+        node[1].wait_aborts(1).await;
+        assert_eq!(node[0].aborts(), [(id.clone(), false)]);
+        assert_eq!(node[1].aborts(), [(id.clone(), true)]);
+        handle.release();
+        outputs.extend(bounded("aborted stream", stream.collect::<Outputs>()).await);
+        let error = failure(outputs, &handle.tokens(), BackendError::Cancelled);
+        assert!(error.to_string().contains("(code 499)"), "{error}");
+        bounded("aborted RPC released", handle.wait(Event::Dropped)).await;
+
+        // Native /generate: a dropped request is aborted through its
+        // listener's Abort RPC only.
+        let ctx = mock_context();
+        let target =
+            http_control.request(ctx.id(), after_token_responses(1, StreamAction::Continue));
+        let mut req = http_request();
+        req.routing = Some(RoutingHints {
+            dp_rank: Some(1),
+            ..Default::default()
+        });
+        let mut stream = engine
+            .generate(req, GenerateContext::new(ctx.clone(), None))
+            .await
+            .unwrap();
+        http_checkpoint(&mut stream, &target).await;
+        let native_id = target.native_request().unwrap()["rid"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(http::logical_request_id(&native_id), ctx.id());
+        drop(stream);
+        node[1].http().wait_aborted(&native_id).await;
+        bounded("HTTP target released", target.wait(Event::Dropped)).await;
+        assert!(node[1].http().aborted_requests().contains(&native_id));
+        assert_eq!(node[0].aborts(), [(id, false)]);
+        for listener in &node {
+            listener.scheduler_idle().await;
+        }
+        bounded("sidecar cleanup", engine.cleanup()).await.unwrap();
+        for listener in &mut node {
+            listener.shutdown().await;
+        }
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn trtllm_teardown_terminates_handlers_with_clients_alive() {
     let (outputs, tokens) = bounded(
@@ -1076,7 +1157,7 @@ async fn sglang_native_http_unready_degrades_to_grpc() {
 
     bounded("unready native HTTP", async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = u32::from(listener.local_addr().unwrap().port());
+        let port = listener.local_addr().unwrap().port();
         let unready = tokio::spawn(async move {
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
@@ -1094,10 +1175,10 @@ async fn sglang_native_http_unready_degrades_to_grpc() {
         let control = Controller::<sglang_fixture::Adapter>::default();
         let mut fixture =
             sglang_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
+        fixture.set_http_port(port);
         fixture.override_discovery(
             None,
             vec![Box::new(move |info| {
-                info.port = port;
                 let deployment = info.deployment_info.as_mut().unwrap();
                 deployment.nnodes = 2;
                 deployment.dist_init_addr = Some("127.0.0.1:29500".into());
@@ -1593,6 +1674,33 @@ async fn sglang_engine_lost_when_model_info_polls_fail() {
     );
     assert!(error.to_string().contains("SGLang engine lost"), "{error}");
     finish(&mut fixture, &engine).await;
+}
+
+/// The sidecar polls each of the node's listeners: one that stops answering
+/// loses the node, named by its DP rank.
+#[tokio::test]
+async fn sglang_node_engine_lost_names_the_lost_listener() {
+    let mut node = sglang_fixture::Fixture::start_node(
+        Controller::default(),
+        FixtureConfig::default(),
+        sglang_fixture::NodeConfig::listeners(2),
+    )
+    .await;
+    let engine = node[0].engine().await;
+    engine.start(0).await.unwrap();
+    node[1].shutdown().await;
+    let error = bounded("engine lost after listener shutdown", engine.engine_lost()).await;
+    assert_eq!(
+        error.error_type(),
+        dynamo_backend_common::ErrorType::Backend(BackendError::EngineShutdown)
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("SGLang engine lost: listener for DP rank 1 at "),
+        "{error}"
+    );
+    finish(&mut node[0], &engine).await;
 }
 
 // An LPX engine withholds the matched stop token, and the sidecar returns a

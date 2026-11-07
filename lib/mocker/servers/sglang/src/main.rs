@@ -108,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
             max_concurrent_requests: args.max_concurrent_requests,
             bootstrap_host: args.bootstrap_host,
             bootstrap_port: args.bootstrap_port,
+            ..Default::default()
         },
         engine_args,
     )?;
