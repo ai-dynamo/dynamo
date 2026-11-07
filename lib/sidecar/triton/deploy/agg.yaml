@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# EXPERIMENTAL: engine-primary Triton Inference Server with the Dynamo native sidecar
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: triton-sidecar-agg
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: <dynamo-frontend-container-image>
+  - name: worker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        initContainers:
+        - name: sidecar
+          image: <dynamo-triton-sidecar-container-image>
+          command:
+          - dynamo-triton-sidecar
+          args:
+          - --grpc
+          - 127.0.0.1:8001
+          restartPolicy: Always
+        containers:
+        - name: triton
+          command:
+          - tritonserver
+          args:
+          - --allow-grpc=true
+          - --allow-http=true
+          - --allow-metrics=true
+          - --grpc-infer-thread-count=4
+          - --model-repository=/models
+          image: <triton-server-container-image>
+          ports:
+          - containerPort: 8000
+            name: http-inference
+          - containerPort: 8001
+            name: grpc-inference
+          - containerPort: 8002
+            name: http-metrics
+          livenessProbe:
+            httpGet:
+              path: /v2/health/live
+              port: http-inference
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            failureThreshold: 120
+            periodSeconds: 10
+            tcpSocket:
+              port: 8001
+          startupProbe:
+            httpGet:
+              path: /v2/health/live
+              port: http-inference
+            initialDelaySeconds: 15 # Wait briefly before checking the first time
+            periodSeconds: 10       # Poll every 10 seconds
+            failureThreshold: 30    # 30 tries * 10s = allows up to 5 minutes to start
+          resources:
+            limits:
+              cpu: 8
+              memory: 32Gi
+              ephemeral-storage: 16Gi
+              nvidia.com/gpu: 1
+            requests:
+              cpu: 8
+              ephemeral-storage: 16Gi
+              memory: 32Gi
+              nvidia.com/gpu: 1
+          restartPolicy: Always
+  backendFramework: triton

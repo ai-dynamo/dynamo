@@ -131,6 +131,7 @@ areas:
   path_globs:
   - components/src/dynamo/triton/**
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/
+  - lib/sidecar/triton/
 - label: sidecar
   github_team: '@ai-dynamo/dynamo-sidecar-codeowners'
   path_globs: []
@@ -1271,6 +1272,10 @@ shared:
 - glob: lib/sidecar/testkit/
   owners:
   - runtime
+  - sidecar
+- glob: lib/sidecar/triton/
+  owners:
+  - backend-triton
   - sidecar
 - glob: lib/sidecar/trtllm/
   owners:
