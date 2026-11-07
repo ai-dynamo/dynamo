@@ -126,6 +126,7 @@ async fn two_routers_forward_only_while_a_relay_is_live_and_reconnect_recovers()
                 in_flight,
                 reqwest::Client::new(),
                 metrics,
+                1,
             );
             let http = tokio::spawn(serve(listener, frontend, cancel.clone()));
             routers.push((cancel, current, address, url, receiver, http));

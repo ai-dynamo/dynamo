@@ -32,6 +32,30 @@ const NO_RESPONSE: &str = "no_response";
 /// pool's response headers arrived.
 const CANCELLED: &str = "cancelled";
 
+/// Why a request left a pool for another, as `failovers_total` labels it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FailoverReason {
+    /// The pool sent no response: it refused the connection, did not accept
+    /// it in time, or failed before its response headers.
+    NoResponse,
+    /// The pool answered 503.
+    Unavailable,
+    /// The pool answered the overload status (`DYN_HTTP_OVERLOAD_STATUS_CODE`).
+    Overloaded,
+}
+
+impl FailoverReason {
+    const ALL: [Self; 3] = [Self::NoResponse, Self::Unavailable, Self::Overloaded];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::NoResponse => NO_RESPONSE,
+            Self::Unavailable => "unavailable",
+            Self::Overloaded => "overloaded",
+        }
+    }
+}
+
 /// The Global Frontend's metrics, in a registry of their own.
 #[derive(Debug)]
 pub struct Metrics {
@@ -41,6 +65,7 @@ pub struct Metrics {
     tracker: Arc<InFlightTracker>,
     requests: IntCounterVec,
     rejected: IntCounterVec,
+    failovers: IntCounterVec,
     response_errors: IntCounterVec,
     time_to_first_byte: HistogramVec,
     duration: HistogramVec,
@@ -210,6 +235,21 @@ impl Metrics {
                 &["error_type"],
             ),
         );
+        let failovers = register(
+            &registry,
+            IntCounterVec::new(
+                Opts::new(
+                    name("failovers_total"),
+                    "Requests sent on to another pool because the pool before could not \
+                     take them, by why: no_response, unavailable (503) or overloaded (the \
+                     overload status). Counts once per extra pool tried",
+                ),
+                &["reason"],
+            ),
+        );
+        for reason in FailoverReason::ALL {
+            failovers.with_label_values(&[reason.label()]);
+        }
         let response_errors = register(
             &registry,
             IntCounterVec::new(
@@ -274,6 +314,7 @@ impl Metrics {
             tracker,
             requests,
             rejected,
+            failovers,
             response_errors,
             time_to_first_byte,
             duration,
@@ -326,6 +367,11 @@ impl Metrics {
     /// `prometheus_names::frontend_service::error_type`.
     pub(crate) fn rejected(&self, error_type: &str) {
         self.rejected.with_label_values(&[error_type]).inc();
+    }
+
+    /// Counts a request sent on to another pool for `reason`.
+    pub(crate) fn failover(&self, reason: FailoverReason) {
+        self.failovers.with_label_values(&[reason.label()]).inc();
     }
 
     /// Counts a request being sent to `pool` once [`Sending::answered`]
