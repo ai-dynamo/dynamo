@@ -83,6 +83,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	const trtllmBackendFramework = "trtllm"
 
 	longDGDName := "test-graph-" + strings.Repeat("x", 50)
+	tooLongLabelDGDName := "test-graph-" + strings.Repeat("x", 53)
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
 	tooLongComponentName := boundaryComponentName + "x"
 
@@ -2748,6 +2749,25 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Name = longDGDName
 				betaWorkerComponent(dgd).ComponentName = tooLongComponentName
+			}),
+		},
+		// The DGD name is a label value, so it must fit in 63 characters.
+		{
+			name: "DGD name longer than a label value is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = tooLongLabelDGDName
+			}),
+			wantWebhookErrs: []string{"metadata.name: Too long: may not be more than 63 bytes"},
+		},
+		{
+			name:               "unchanged legacy DGD name longer than a label value is ratcheted on update",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = tooLongLabelDGDName
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Name = tooLongLabelDGDName
+				dgd.Labels = map[string]string{"updated": "true"}
 			}),
 		},
 

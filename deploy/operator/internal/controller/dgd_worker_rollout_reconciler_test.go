@@ -30,6 +30,7 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -108,6 +109,7 @@ func createTestDGDReconcilerWithStatus(dgd *nvidiacomv1beta1.DynamoGraphDeployme
 	_ = nvidiacomv1beta1.AddToScheme(scheme)
 	_ = grovev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
+	_ = appsv1.AddToScheme(scheme)
 
 	builder := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -3342,6 +3344,61 @@ func TestListOldWorkerDCDs_ExcludesCurrentHash(t *testing.T) {
 	assert.Equal(t, []string{"test-dgd-worker-hashaaaa", "test-dgd-worker-hashbbbb"}, names)
 }
 
+func TestWorkerHashHelpers_StaleSameHashDCDWithLongName(t *testing.T) {
+	const dgdName = "dsv41-flash-vllm-gb200-disagg-agentic-production-us-east-1"
+	const workerHash = "hash1234"
+	dgd := createTestDGD(dgdName, map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"decode": {ComponentType: consts.ComponentTypeDecode},
+	})
+
+	// An older operator named this DCD without shortening; it shares the hash label.
+	staleName := dgdName + "-decode-" + workerHash
+	canonicalName := dynamo.GetDCDResourceName(dgd, "decode", workerHash)
+	require.NotEqual(t, staleName, canonicalName)
+
+	newDCD := func(name string, ready int32) *nvidiacomv1beta1.DynamoComponentDeployment {
+		return createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
+			Name:      name,
+			Namespace: "default",
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: dgdName,
+				consts.KubeLabelDynamoWorkerHash:          workerHash,
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: consts.ComponentTypeDecode,
+					ServiceName:   "decode",
+					Replicas:      new(int32(2)),
+				},
+			},
+			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+				Service: &nvidiacomv1alpha1.ServiceReplicaStatus{ReadyReplicas: new(ready)},
+			},
+		})
+	}
+	ctx := context.Background()
+
+	staleOnly := createTestReconcilerWithStatus(dgd, withObjects(newDCD(staleName, 0)))
+	observed, err := staleOnly.dcdObservesWorkerHash(ctx, dgd, workerHash)
+	require.NoError(t, err)
+	assert.False(t, observed, "a stale DCD must not stand in for the canonical one")
+
+	r := createTestReconcilerWithStatus(dgd, withObjects(newDCD(staleName, 0), newDCD(canonicalName, 2)))
+	observed, err = r.dcdObservesWorkerHash(ctx, dgd, workerHash)
+	require.NoError(t, err)
+	assert.True(t, observed)
+
+	info, err := r.getWorkerInfoForWorkerHash(ctx, dgd, workerHash)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), info.components["decode"].readyReplicas)
+	assert.Equal(t, int32(2), info.totalReadyWorkers)
+
+	old, err := r.listOldWorkerDCDs(ctx, dgd, workerHash)
+	require.NoError(t, err)
+	require.Len(t, old, 1)
+	assert.Equal(t, staleName, old[0].Name)
+}
+
 func TestScaleOldWorkerDCDs_MultipleOldGenerations(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
@@ -4067,6 +4124,20 @@ func TestOldWorkerPodsTerminated(t *testing.T) {
 		{
 			name: "non-terminal new generation pod does not block",
 			pods: []corev1.Pod{newPod("new", "new-worker", corev1.PodRunning)},
+			want: true,
+		},
+		{
+			name: "replacement selector wins over the shared old hash",
+			pods: []corev1.Pod{{
+				Labels: map[string]string{
+					consts.KubeLabelDynamoSelector:            "replacement-worker",
+					consts.KubeLabelDynamoWorkerHash:          "old-hash",
+					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+					consts.KubeLabelDynamoComponent:           "worker",
+					consts.KubeLabelDynamoComponentType:       consts.ComponentTypeWorker,
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			}},
 			want: true,
 		},
 		{
@@ -5222,4 +5293,116 @@ func TestBuildRollingUpdateContext_GetNewDCDError(t *testing.T) {
 	assert.ErrorIs(t, err, injectedErr, "non-NotFound Get error must be wrapped and propagated")
 	assert.Contains(t, err.Error(), "failed to get new worker DCD",
 		"error must originate from the new-DCD Get path, not some other call")
+}
+
+func TestManagedWorkerRollout_CleansStaleSameHashDCD(t *testing.T) {
+	for _, phase := range []nvidiacomv1beta1.RollingUpdatePhase{
+		nvidiacomv1beta1.RollingUpdatePhaseNone,
+		nvidiacomv1beta1.RollingUpdatePhaseCompleted,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			t.Log("Create an unchanged generation with a ready replacement and a drained stale DCD")
+			dgd := createTestDGD("dsv41-flash-vllm-gb200-disagg-agentic-production-us-east-1",
+				map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					"decode": {ComponentType: consts.ComponentTypeDecode, Replicas: new(int32(1))},
+				})
+			hash := betaDGDWorkersSpecHash(t, dgd)
+			dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: hash}
+			canonical := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
+				Name: dynamo.GetDCDResourceName(dgd, "decode", hash), Namespace: dgd.Namespace,
+				Labels: map[string]string{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name, consts.KubeLabelDynamoWorkerHash: hash},
+				Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						ComponentType: consts.ComponentTypeDecode, ServiceName: "decode", Replicas: new(int32(1)),
+					},
+				},
+				Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+					Service: &nvidiacomv1alpha1.ServiceReplicaStatus{ReadyReplicas: new(int32(1))},
+				},
+			})
+			stale := canonical.DeepCopy()
+			stale.Name = dgd.Name + "-decode-" + hash
+			stale.Spec.Replicas = new(int32(0))
+			stale.Status.Component = &nvidiacomv1beta1.ComponentReplicaStatus{}
+			r := createTestReconcilerWithStatus(dgd, withObjects(canonical, stale))
+			program := &componentProgram{rollout: r}
+			status := dgd.DeepCopy().Status
+			status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{Phase: phase}
+
+			t.Log("Reconcile the migration without changing the desired worker hash")
+			for range 3 {
+				require.NoError(t, program.reconcileManagedWorkerRollout(t.Context(), dgd, &status))
+			}
+			assert.True(t, apierrors.IsNotFound(r.Get(t.Context(), types.NamespacedName{
+				Name: stale.Name, Namespace: stale.Namespace,
+			}, &nvidiacomv1beta1.DynamoComponentDeployment{})))
+			require.NoError(t, r.Get(t.Context(), types.NamespacedName{
+				Name: canonical.Name, Namespace: canonical.Namespace,
+			}, &nvidiacomv1beta1.DynamoComponentDeployment{}))
+		})
+	}
+}
+
+func TestOldWorkerComponentDrained_FailedLongNameDeployment(t *testing.T) {
+	for _, scenario := range []string{"absent", "deployment exists", "old pod running", "replacement pod running", "read fails", "normal name", "old multinode workload"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Log("Create a zero-target stale DCD whose Deployment never reported status")
+			dgd := createTestDGD("dsv41-flash-vllm-gb200-disagg-agentic-production-us-east-1",
+				map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					"decode": {ComponentType: consts.ComponentTypeDecode},
+				})
+			stale := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
+				Name: dgd.Name + "-decode-hash1234", Namespace: dgd.Namespace,
+				Labels: map[string]string{consts.KubeLabelDynamoWorkerHash: "hash1234"},
+				Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						ComponentType: consts.ComponentTypeDecode, ServiceName: "decode", Replicas: new(int32(0)),
+					},
+				},
+			})
+			if scenario == "normal name" {
+				stale.Name = dynamo.GetDCDResourceName(dgd, "decode", "hash1234")
+			}
+			if scenario == "old multinode workload" {
+				stale.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}
+			r := createTestReconcilerWithStatus(dgd)
+			if scenario == "deployment exists" {
+				require.NoError(t, r.Create(t.Context(), &appsv1.Deployment{Name: stale.Name, Namespace: stale.Namespace}))
+			}
+			if scenario == "old pod running" || scenario == "replacement pod running" {
+				selector := stale.Name
+				if scenario == "replacement pod running" {
+					selector = dynamo.GetDCDResourceName(dgd, "decode", "hash1234")
+				}
+				require.NoError(t, r.Create(t.Context(), &corev1.Pod{
+					Name: "worker", Namespace: dgd.Namespace,
+					Labels: map[string]string{
+						consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+						consts.KubeLabelDynamoComponent:           "decode",
+						consts.KubeLabelDynamoComponentType:       consts.ComponentTypeDecode,
+						consts.KubeLabelDynamoWorkerHash:          "hash1234",
+						consts.KubeLabelDynamoSelector:            selector,
+					},
+					Status: corev1.PodStatus{Phase: corev1.PodRunning},
+				}))
+			}
+			if scenario == "read fails" {
+				r = createTestReconcilerWithStatus(dgd, withInterceptor(interceptor.Funcs{
+					Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+						return errors.New("deployment read failed")
+					},
+				}))
+			}
+
+			t.Log("Allow missing status only after the old workload and serving Pods are absent")
+			drained, err := r.oldWorkerComponentDrained(t.Context(), dgd, "decode", []*nvidiacomv1beta1.DynamoComponentDeployment{stale})
+			if scenario == "read fails" {
+				require.ErrorContains(t, err, "deployment read failed")
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, scenario == "absent" || scenario == "replacement pod running", drained)
+		})
+	}
 }

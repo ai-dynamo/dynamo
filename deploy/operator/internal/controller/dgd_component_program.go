@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -273,6 +274,29 @@ func (p *componentProgram) reconcileManagedWorkerRollout(
 			return failWorkloadProgram(reasonRollingUpdateFailed, err)
 		}
 	}
+
+	// Resume the naming migration even when an operator upgrade keeps the worker hash.
+	if !rollingUpdateInProgress && !triggerRollingUpdate {
+		desired, err := desiredWorkerHashes(dgd)
+		if err != nil {
+			return failWorkloadProgram(reasonRollingUpdateFailed, err)
+		}
+		workerHash := activeWorkerHashForDCDGeneration(dgd, desired)
+		oldDCDs, err := p.rollout.listOldWorkerDCDs(ctx, dgd, workerHash)
+		if err != nil {
+			return failWorkloadProgram(reasonRollingUpdateFailed, err)
+		}
+
+		// Restart completed rollout status only for DCDs left under the old name.
+		for i := range oldDCDs {
+			if oldDCDs[i].Labels[consts.KubeLabelDynamoWorkerHash] == workerHash {
+				triggerRollingUpdate = true
+				status.RollingUpdate = nil
+				break
+			}
+		}
+	}
+
 	if rollingUpdateInProgress || triggerRollingUpdate {
 		if err := p.rollout.reconcileRollingUpdate(ctx, dgd, status); err != nil {
 			logger.Error(err, "Failed to reconcile rolling update")
