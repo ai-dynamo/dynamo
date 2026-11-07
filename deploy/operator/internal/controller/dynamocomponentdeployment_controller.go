@@ -737,7 +737,11 @@ func (r *DynamoComponentDeploymentReconciler) deleteLegacyOversizedLeaderWorkerS
 		return nil
 	}
 	log.FromContext(ctx).Info("Deleting LeaderWorkerSet whose name is too long for StatefulSet revision labels", "name", legacyName)
-	return client.IgnoreNotFound(r.Delete(ctx, legacy))
+
+	// Reject deletion if the checked resource's ownership or readiness has changed.
+	return client.IgnoreNotFound(r.Delete(ctx, legacy, client.Preconditions{
+		UID: &legacy.UID, ResourceVersion: &legacy.ResourceVersion,
+	}))
 }
 
 func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) error {
