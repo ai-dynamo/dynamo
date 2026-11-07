@@ -30,7 +30,7 @@ use crate::args::Args;
 use crate::client::{
     self, Client, Discovery, KV_CONFIG_KEY, MediaSupport, NodeMetadata, Pool, WORKER_GROUP_KEY,
 };
-use crate::native_http::{self, NativeHttp};
+use crate::native_http::{self, InputTokenLimits, NativeHttp};
 use crate::proto as pb;
 use crate::protocol::{
     build_generate_request, disaggregated_params_to_json, engine_data_from_meta, extract_logprobs,
@@ -56,6 +56,8 @@ pub struct SglangSidecarEngine {
 struct StartedState {
     pool: Pool,
     native_http: Option<NativeHttp>,
+    /// Checked only on native HTTP requests; default when unresolved.
+    input_token_limits: InputTokenLimits,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
     combined_token_limit: Option<u32>,
     media_support: MediaSupport,
@@ -329,11 +331,14 @@ impl LLMEngine for SglangSidecarEngine {
             }
             None => None,
         };
-        if native_http.is_some() {
+        let input_token_limits = if native_http.is_some() {
             config
                 .runtime_data
                 .insert("sglang_generate".into(), true.into());
-        }
+            resolve_input_token_limits(&discovery.model_path, deadline).await
+        } else {
+            InputTokenLimits::default()
+        };
         let kv_event_sources =
             discover_kv_event_sources(&discovery, &mut config, &self.endpoint, deadline).await?;
         let connection_count = pool.len();
@@ -348,6 +353,7 @@ impl LLMEngine for SglangSidecarEngine {
             .set(StartedState {
                 pool,
                 native_http,
+                input_token_limits,
                 kv_event_sources,
                 combined_token_limit,
                 media_support,
@@ -393,6 +399,7 @@ impl LLMEngine for SglangSidecarEngine {
             self.disaggregation_mode,
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
+            &state.input_token_limits,
         )? {
             let native_http = state.native_http.clone().ok_or_else(|| {
                 client::invalid_arg(
@@ -1001,6 +1008,57 @@ fn sglang_eagle_enabled(server_info: &Value) -> bool {
                 "EAGLE" | "EAGLE3" | "FROZEN_KV_MTP" | "NEXTN"
             )
         })
+}
+
+/// Bounds the `config.json` fetch so a stalled Hub or ModelExpress fetch cannot
+/// consume the startup deadline that later multi-node rendezvous still needs.
+const INPUT_TOKEN_LIMITS_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Read native input-ID bounds from the model's `config.json`. SGLang does not
+/// report `vocab_size`, so use the local model directory or fetch the config
+/// (no weights) like the worker does. Any failure disables the check.
+async fn resolve_input_token_limits(model_path: &str, deadline: Instant) -> InputTokenLimits {
+    use dynamo_llm::local_model::LocalModel;
+    use std::path::PathBuf;
+
+    let local = PathBuf::from(model_path);
+    let model_dir = if local.is_dir() {
+        Ok(local)
+    } else {
+        let fetch_deadline = deadline.min(Instant::now() + INPUT_TOKEN_LIMITS_FETCH_TIMEOUT);
+        tokio::time::timeout_at(fetch_deadline, LocalModel::fetch(model_path, true))
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("model configuration fetch timed out")))
+    };
+    let config = model_dir.and_then(|dir| {
+        let path = dir.join("config.json");
+        let bytes = std::fs::read(&path)
+            .map_err(|error| anyhow::anyhow!("reading {}: {error}", path.display()))?;
+        Ok(serde_json::from_slice::<Value>(&bytes)?)
+    });
+    let limits = match config {
+        Ok(config) => InputTokenLimits::from_model_config(&config),
+        Err(error) => {
+            tracing::warn!(
+                model = %model_path,
+                %error,
+                "Unable to read model configuration; native input token IDs are not checked against the vocabulary"
+            );
+            return InputTokenLimits::default();
+        }
+    };
+    match limits.vocab_size() {
+        Some(vocab_size) => tracing::info!(
+            model = %model_path,
+            vocab_size,
+            "Native input token IDs are checked against the model vocabulary"
+        ),
+        None => tracing::warn!(
+            model = %model_path,
+            "Model configuration has no vocab_size; native input token IDs are not checked against the vocabulary"
+        ),
+    }
+    limits
 }
 
 /// Context length minus the EAGLE draft-token reserve, which SGLang counts
