@@ -154,6 +154,9 @@ pub mod runtime {
         /// System status server port
         pub const DYN_SYSTEM_PORT: &str = "DYN_SYSTEM_PORT";
 
+        /// Optional bearer secret required for engine control requests.
+        pub const DYN_SYSTEM_ENGINE_AUTH_TOKEN: &str = "DYN_SYSTEM_ENGINE_AUTH_TOKEN";
+
         /// Use endpoint health status for system health
         /// ⚠️ DEPRECATED: No longer used
         pub const DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS: &str =
@@ -1182,6 +1185,7 @@ mod tests {
             runtime::system::DYN_SYSTEM_ENABLED,
             runtime::system::DYN_SYSTEM_HOST,
             runtime::system::DYN_SYSTEM_PORT,
+            runtime::system::DYN_SYSTEM_ENGINE_AUTH_TOKEN,
             runtime::system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS,
             runtime::system::DYN_SYSTEM_STARTING_HEALTH_STATUS,
             runtime::system::DYN_SYSTEM_HEALTH_PATH,

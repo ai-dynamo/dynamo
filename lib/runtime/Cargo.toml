@@ -74,6 +74,7 @@ rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+constant_time_eq = "0.4"
 rustls = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }

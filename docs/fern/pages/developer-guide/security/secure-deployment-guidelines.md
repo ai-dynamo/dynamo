@@ -231,6 +231,8 @@ treat it as additional hardening within the boundary, not a replacement for netw
 isolation. See each component's documentation for its specific listeners and
 controls.
 
+Set [`DYN_SYSTEM_ENGINE_AUTH_TOKEN`](../../reference/observability/environment-variables.mdx#system-and-metrics) to require bearer authentication on `/engine/*` and enabled `/v1/loras` routes. This does not protect health, metrics, or metadata; restrict those endpoints through network isolation.
+
 ## Securing Model and Backend Code
 
 Dynamo loads models, tokenizers, chat templates, and (depending on the backend)
