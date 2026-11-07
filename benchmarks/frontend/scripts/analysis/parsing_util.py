@@ -116,13 +116,15 @@ def parse_prometheus_text(path: Path) -> Optional[PrometheusSnapshot]:
     snap.request_plane_roundtrip_ttft_p50 = histogram_quantile(
         "dynamo_request_plane_roundtrip_ttft_seconds", 0.50
     )
-    snap.request_plane_inflight = get_gauge("dynamo_request_plane_inflight") or 0
+    snap.request_plane_inflight = (
+        get_gauge("dynamo_request_plane_inflight_requests") or 0
+    )
 
     # Transport breakdown (backend-side metrics)
     for metric_name, attr_name in [
-        ("dynamo_component_network_transit_seconds", "work_handler_network_transit"),
+        ("dynamo_work_handler_network_transit_seconds", "work_handler_network_transit"),
         (
-            "dynamo_component_time_to_first_response_seconds",
+            "dynamo_work_handler_time_to_first_response_seconds",
             "work_handler_time_to_first_response",
         ),
     ]:
