@@ -7,6 +7,7 @@ areas:
   - components/src/dynamo/common/http/
   - components/src/dynamo/common/protocols/
   - components/src/dynamo/frontend/
+  - components/src/dynamo/profiling/
   - components/src/dynamo/frontend/tests/
   - examples/chat_templates/
   - lib/bindings/python/rust/parsers.rs
