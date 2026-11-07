@@ -17,7 +17,7 @@ if [[ "$role" == frontend ]]; then
         --discovery-backend etcd \
         --http-host 0.0.0.0 --http-port "${HTTP_PORT:-8000}" \
         --router-mode kv --router-kv-events \
-        --kv-cache-block-size 64 "$@"
+        --kv-cache-block-size "${KV_BLOCK_SIZE:-64}" "$@"
 fi
 if [[ "$role" != prefill && "$role" != decode ]]; then
     echo "Unknown role: $role" >&2
@@ -42,7 +42,7 @@ exec python3 -m dynamo.tokenspeed \
     --max-total-tokens "${MAX_TOTAL_TOKENS:-32768}" \
     --gpu-memory-utilization 0.85 --quantization fp8 \
     --moe-backend flashinfer_cutlass \
-    --prefix-granularity 64 \
+    --kv-block-size "${KV_BLOCK_SIZE:-64}" \
     --disaggregation-mode "$role" \
     --disaggregation-transfer-backend mooncake \
     --disaggregation-bootstrap-port "${BOOTSTRAP_PORT:-8998}" \

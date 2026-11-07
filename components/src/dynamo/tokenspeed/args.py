@@ -10,7 +10,7 @@ import dataclasses
 import importlib
 import os
 import sys
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups.runtime_args import (
@@ -36,11 +36,21 @@ class Config(DynamoRuntimeConfig):
     model: str
     served_model_name: Optional[str] = None
     server_args: Any
+    # The TokenSpeed command line as given, which the worker hands to the
+    # headless engine launcher (with the frontend address appended).
+    engine_argv: List[str]
+    # TokenSpeed's KV prefix granularity in tokens. Each model's cache recipe
+    # picks it at runtime and the engine reports it only in its handshake,
+    # which tokenspeed_engine does not surface to Python, so KV-event routing
+    # needs it stated.
+    kv_block_size: Optional[int] = None
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
         self.disaggregation_mode = resolve_disaggregation_mode(self.server_args)
         validate_disagg_compatibility(self.disaggregation_mode, self.server_args)
+        if self.kv_block_size is not None and self.kv_block_size <= 0:
+            raise ValueError("--kv-block-size must be positive")
 
 
 @register_encoder(Config)
@@ -61,6 +71,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
         allow_abbrev=False,
     )
     DynamoRuntimeArgGroup().add_arguments(parser)
+    parser.add_argument(
+        "--kv-block-size",
+        type=int,
+        default=None,
+        help="TokenSpeed's KV prefix granularity in tokens, as the engine logs it "
+        "at startup (prefix_granularity=N). Required for KV-event routing: "
+        "--kv-events-config with enable_kv_cache_events. Must match the engine, "
+        "or the router drops its KV events.",
+    )
 
     server_args_cls = _server_args_cls()
     tokenspeed_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
@@ -79,9 +98,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
     config = Config.from_cli_args(dynamo_args)
 
     server_args = server_args_cls.from_cli_args(tokenspeed_parser.parse_args(remaining))
-    # Dynamo streams token deltas. TokenSpeed's raw-token streaming path needs
-    # stream_output=True to avoid cumulative token ids.
-    server_args.stream_output = True
+    config.engine_argv = list(remaining)
 
     config.model = server_args.model
     config.served_model_name = server_args.served_model_name or server_args.model
