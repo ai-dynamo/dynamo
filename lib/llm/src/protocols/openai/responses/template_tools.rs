@@ -672,6 +672,35 @@ impl ResponseParams {
     }
 }
 
+/// Serialize echoed tools for Responses output. The spec requires
+/// `description` on function tools as `string | null`, but the upstream
+/// serializer skips `None`; insert `null` on top-level and namespace member
+/// function tools. Request-side serialization is unchanged.
+pub(super) fn echoed_tools_json(tools: &[RequestTool]) -> serde_json::Result<serde_json::Value> {
+    fn is_function(tool: &serde_json::Value) -> bool {
+        tool.get("type").and_then(serde_json::Value::as_str) == Some("function")
+    }
+    fn insert_null_description(tool: &mut serde_json::Value) {
+        if let Some(obj) = tool.as_object_mut() {
+            obj.entry("description").or_insert(serde_json::Value::Null);
+        }
+    }
+    let mut value = serde_json::to_value(tools)?;
+    for tool in value.as_array_mut().into_iter().flatten() {
+        if is_function(tool) {
+            insert_null_description(tool);
+        } else if tool.get("type").and_then(serde_json::Value::as_str) == Some("namespace") {
+            let members = tool
+                .get_mut("tools")
+                .and_then(serde_json::Value::as_array_mut);
+            for member in members.into_iter().flatten().filter(|m| is_function(m)) {
+                insert_null_description(member);
+            }
+        }
+    }
+    Ok(value)
+}
+
 /// Normalize new input item kinds at the API boundary, then reuse main's
 /// message converter for media, reasoning, refusal and tool-result semantics.
 pub(super) fn normalize_template_input(item: &InputItem) -> anyhow::Result<InputItem> {
