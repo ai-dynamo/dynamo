@@ -2286,6 +2286,43 @@ class TestLoadQwenGridParams:
         assert params.decode_embedding_dim == expected_decode_embedding_dim
 
 
+def test_unsupported_audio_is_rejected_before_any_media_loader(monkeypatch):
+    processor = _processor(media_limits={"image": 8, "video": 8})
+    monkeypatch.setattr(
+        processor, "_supported_modalities", lambda: frozenset({"image", "video"})
+    )
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {
+            "image_url": [{"Url": "https://example.com/image.png"}],
+            "audio_url": [{"Url": "https://example.com/clip.wav"}],
+        },
+    }
+
+    with pytest.raises(mod.InvalidArgument, match="Model does not support audio input"):
+        processor.validate_multimodal_request(request)
+
+    processor.audio_loader.load_audio_batch.assert_not_awaited()
+    processor.audio_loader.load_audio.assert_not_awaited()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.video_loader.load_video_batch.assert_not_awaited()
+
+
+def test_image_and_video_remain_allowed_when_audio_is_unsupported(monkeypatch):
+    processor = _processor(media_limits={"image": 8, "video": 1})
+    monkeypatch.setattr(
+        processor, "_supported_modalities", lambda: frozenset({"image", "video"})
+    )
+    processor.validate_multimodal_request(
+        {
+            "multi_modal_data": {
+                "image_url": [{"Url": "https://example.com/image.png"}],
+                "video_url": [{"Url": "https://example.com/video.mp4"}],
+            }
+        }
+    )
+
+
 def test_zero_video_limit_rejects_before_any_media_loader():
     processor = _processor(media_limits={"image": 8, "video": 0})
     processor.embedding_loader = SimpleNamespace(load_multimodal_embeddings=AsyncMock())
