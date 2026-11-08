@@ -2049,6 +2049,34 @@ async def test_native_prefill_probe_does_not_forward_coordinates(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("blocks", [[[0]], [[], []]])
+@pytest.mark.parametrize("count", ["128", 1.5, -1, True, False])
+async def test_prefill_rejects_invalid_native_token_counts_before_generation(
+    prefill_probe_handler, blocks, count
+):
+    """Return a client error before malformed counts reach the engine."""
+    handler = prefill_probe_handler
+    handler.engine_client.vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="NixlConnector",
+            get_from_extra_config=lambda key, default: True,
+        ),
+    )
+    request = _make_raw_frontend_request()
+    request["extra_args"] = {
+        "vllm_tito": {
+            "kv_transfer_params": {
+                "remote_block_ids": blocks,
+                "remote_num_tokens": count,
+            },
+        },
+    }
+    with pytest.raises(mod.InvalidArgument, match="remote_num_tokens"):
+        _ = [chunk async for chunk in handler.generate(request, MagicMock())]
+    handler.engine_client.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_prefill_ignores_coordinates_without_native_envelope(
     prefill_probe_handler,
 ):

@@ -83,8 +83,16 @@ class NixlConnectorProtocol(KvConnectorProtocol):
                     "bidirectional_kv_xfer enabled."
                 )
         if incoming is not None:
+            remote_num_tokens = incoming.get("remote_num_tokens")
+            # Invalid counts can fail inside vLLM's scheduling loop.
+            if remote_num_tokens is not None and (
+                type(remote_num_tokens) is not int or remote_num_tokens < 0
+            ):
+                raise ValueError(
+                    "Native remote_num_tokens must be a non-negative integer or null."
+                )
             # Only the native /generate adapter supplies these coordinates.
-            # vLLM owns their schema, TP mapping, expiry and failure policy.
+            # vLLM owns TP mapping, expiry and transfer failure policy.
             params.update(copy.deepcopy(incoming))
             # P must pull a partial decoder prefix and then export its KV to D.
             # do_remote_prefill=True instead requests a full-prompt remote load.

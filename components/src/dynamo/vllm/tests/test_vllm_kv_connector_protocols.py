@@ -155,6 +155,34 @@ def test_nixl_native_decoder_source_requires_bidirectional_config(config):
         )
 
 
+@pytest.mark.parametrize("blocks", [[[0]], [[], []]])
+@pytest.mark.parametrize("count", ["128", "", 1.5, -1, True, False, [], {}])
+def test_nixl_rejects_invalid_native_token_counts(blocks, count):
+    """Reject unsafe scheduler scalars even when cache groups are empty."""
+    with pytest.raises(ValueError, match="remote_num_tokens"):
+        NixlConnectorProtocol(_bidir_config(True)).prefill_request_kv_transfer_params(
+            {"remote_block_ids": blocks, "remote_num_tokens": count}
+        )
+
+
+@pytest.mark.parametrize(
+    "token_params",
+    [
+        {},
+        {"remote_num_tokens": None},
+        {"remote_num_tokens": 0},
+        {"remote_num_tokens": 128},
+    ],
+)
+def test_nixl_preserves_valid_native_token_counts(token_params):
+    """Keep optional and non-negative integer counts unchanged."""
+    params = NixlConnectorProtocol(
+        _bidir_config(True)
+    ).prefill_request_kv_transfer_params({"remote_block_ids": [[0]], **token_params})
+    assert ("remote_num_tokens" in params) == ("remote_num_tokens" in token_params)
+    assert params.get("remote_num_tokens") == token_params.get("remote_num_tokens")
+
+
 def test_native_decoder_source_rejected_for_cache_mediated_connector():
     """Reject decoder coordinates for cache-mediated coordination."""
     protocol = LMCacheMPConnectorProtocol(_config("LMCacheMPConnector"))
