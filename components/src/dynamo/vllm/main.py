@@ -77,6 +77,7 @@ from .capacity import (
     publish_vllm_token_budget,
 )
 from .constants import MX_LOAD_FORMATS
+from .decision_clef import publish_clef_capability
 from .decision_execution import publish_vllm_decision_capability
 from .dp_topology import get_dp_range_for_worker
 from .embedding_worker_processes import (
@@ -929,6 +930,7 @@ async def register_vllm_model(
     vllm_config: VllmConfig,
     worker_type: WorkerType,
     needs: list[list[WorkerType]] | None = None,
+    native_decision: bool = False,
 ) -> None:
     """
     Helper function to register a vLLM model with runtime configuration.
@@ -949,6 +951,7 @@ async def register_vllm_model(
             frontend's model-serving-readiness check.
         needs: Peer worker types required to serve traffic, in DNF form
             (list of alternative AND-sets).
+        native_decision: Clef joint-head initialization and its live canary passed.
     """
     runtime_config = ModelRuntimeConfig()
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
@@ -986,6 +989,9 @@ async def register_vllm_model(
         config,
         native_generate_supported=native_generate_supported,
         needs=needs,
+    )
+    publish_clef_capability(
+        runtime_config, native_decision, model_input, model_type, worker_type, needs
     )
     if model_type != ModelType.Embedding:
         publish_vllm_token_budget(
