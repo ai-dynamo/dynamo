@@ -89,7 +89,21 @@ Dynamo supports [vLLM prompt embeddings](https://docs.vllm.ai/en/stable/features
 
 ### Native Decoder-Prefix Reuse
 
-**Experimental.** For caller-managed decoder-prefix reuse, enable Dynamo's native
+**Experimental.** This feature requires trusted orchestration callers.
+
+> [!WARNING]
+> Native Generate accepts caller-supplied NIXL addresses. vLLM can connect to
+> `remote_host:remote_port` before verifying `remote_engine_id`; scalar validation
+> does not authorize a peer. Keep native APIs disabled on frontends serving
+> untrusted inference clients; leave
+> `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE` and `DYN_SGLANG_ENABLE_GENERATE` unset.
+> Use a separate private frontend or gateway authorization that restricts native
+> routes, including overridden paths, to trusted callers. Listener-wide TLS or
+> mTLS does not provide per-route authorization.
+> Isolate backend request endpoints and the NIXL fabric as described in
+> [Secure Deployment Guidelines](../../../../security/secure-deployment-guidelines.md).
+
+For caller-managed decoder-prefix reuse, enable Dynamo's native
 `POST /inference/v1/generate` endpoint with
 `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE=true`. Use a compatible native
 `NixlConnector` profile and enable `bidirectional_kv_xfer` on both prefill and
