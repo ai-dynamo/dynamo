@@ -52,8 +52,6 @@ spec:
     value: SD
   - name: VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE
     value: '1'
-  - name: DYN_VLLM_APPEND_PREFILL_OUTPUT_TOKENS
-    value: '0'
   - name: NCCL_IB_DISABLE
     value: '1'
   - name: NCCL_CUMEM_ENABLE
