@@ -63,6 +63,7 @@ release on merge.
   that detail in an issue in your own team or DYN, never in DGH, which mirrors
   to public GitHub. The PR references the issue and describes only the
   technical change.
+- **Type.** Label the issue Bug, Feature or Improvement (workspace labels).
 - **Project.** Put the issue in the first of these that fits:
   1. The feature project whose scope matches the change, planned or not.
      Feature projects carry the newest label in the DYNO "Dynamo Roadmap"
