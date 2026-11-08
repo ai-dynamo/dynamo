@@ -13,7 +13,6 @@ import math
 from dataclasses import dataclass
 from importlib import import_module
 from types import SimpleNamespace
-from typing import Any
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.health_check import HEALTH_CHECK_KEY, HealthCheckPayload
@@ -26,7 +25,6 @@ from .decision_execution import _released_runtime
 
 logger = logging.getLogger(__name__)
 CLEF_FLASH_PROFILE = "vllm_clef_flash_joint_decision_v1"
-DECISION_METADATA = "dynamo.internal.decision"
 _SOURCE_BLOBS = (
     (
         "vllm/entrypoints/openai/decisions/strategies.py",
@@ -96,7 +94,6 @@ class _Prepared:
     schema: dict
     orders: tuple[tuple[int, ...], ...]
     cache_salt: str
-    questions: tuple[Any, ...]
 
 
 class ClefDecisionExecutor:
@@ -104,6 +101,7 @@ class ClefDecisionExecutor:
         self.handler, self.native, self.strategy = handler, native, strategy
         self._admission = asyncio.Semaphore(max_concurrency)
         self._preflight = asyncio.Semaphore(max_concurrency)
+        self._unsettled = False
 
     def _question(self, raw, ordinal):
         if (
@@ -239,7 +237,6 @@ class ClefDecisionExecutor:
             schema,
             tuple(tuple(order) for order in orders),
             raw["cache_salt"],
-            questions,
         )
 
     async def _prepare(self, wire):
@@ -256,6 +253,13 @@ class ClefDecisionExecutor:
         return await asyncio.shield(task)
 
     def decode(self, prepared, output):
+        if output.error is not None and isinstance(
+            output.error, import_module("vllm.outputs").RequestError
+        ):
+            cause = output.error.to_exception()
+            if isinstance(cause, self.native.retryable_errors):
+                raise cause
+            raise HttpError(502, "native decision engine request failed") from cause
         if (
             output.error is not None
             or output.finished is not True
@@ -300,7 +304,11 @@ class ClefDecisionExecutor:
 
     async def _execute(self, wire, context):
         async with self._admission:
+            if self._unsettled:
+                raise HttpError(503, "native decision cleanup did not settle")
             prepared = await self._prepare(wire)
+            if self._unsettled:
+                raise HttpError(503, "native decision cleanup did not settle")
             if context.is_stopped() or context.is_killed():
                 raise asyncio.CancelledError
             request_id = f"{context.id()}-head-0"
@@ -352,12 +360,8 @@ class ClefDecisionExecutor:
         except TimeoutError as cause:
             errors = [cause]
         if errors:
-            if (
-                any(
-                    isinstance(cause, self.native.engine_dead_error) for cause in errors
-                )
-                and self.handler.shutdown_event is not None
-            ):
+            self._unsettled = True
+            if self.handler.shutdown_event is not None:
                 self.handler.shutdown_event.set()
             if completed:
                 raise HttpError(
