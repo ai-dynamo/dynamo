@@ -26,10 +26,7 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  labels:
-    app.kubernetes.io/name: kimi-k3-1-pro-vllm-disagg-gb300
-    app.kubernetes.io/part-of: dynamo
-  name: kimi-k3-1-pro-vllm-disagg-gb300
+  name: kimi-k3-1-pro-vllm-gb300-disagg-agentic
 spec:
   backendFramework: vllm
   components:
@@ -44,8 +41,6 @@ spec:
           - "8000"
           - --dyn-chat-processor
           - dynamo
-          - --router-mode
-          - kv
           - --router-kv-events
           - --router-session-affinity-mode
           - hard
@@ -57,6 +52,8 @@ spec:
           - -m
           - dynamo.frontend
           env:
+          - name: DYN_ROUTER_MODE
+            value: kv
           - name: HF_HUB_OFFLINE
             value: "1"
           - name: TRANSFORMERS_OFFLINE
@@ -65,71 +62,58 @@ spec:
             value: "3600"
           - name: DYN_TOKENIZER_CACHE_BYTES
             value: "8589934592"
-          - name: MODEL_PATH
-            value: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
           imagePullPolicy: IfNotPresent
           name: main
           resources:
             requests:
               cpu: "16"
               memory: 128Gi
-          volumeMounts:
-          - mountPath: /shared-model-cache
-            name: shared-model-cache
-            readOnly: true
-        imagePullSecrets:
-        - name: ngc-pull-secret
-        - name: acr-pull-secret
-        nodeSelector:
-          kubernetes.io/arch: arm64
-          nvidia.com/gpu.product: NVIDIA-GB300
-        tolerations:
-        - effect: NoSchedule
-          key: nvidia.com/gpu
-          operator: Exists
-        volumes:
-        - name: shared-model-cache
-          persistentVolumeClaim:
-            claimName: shared-model-cache
-            readOnly: true
     replicas: 1
-    runtimeVersionOverride: 1.7.0
     type: frontend
   - multinode:
       nodeCount: 2
-    name: prefill
+    name: PrefillWorker
     podTemplate:
       spec:
         containers:
         - args:
-          - |
-            set -euo pipefail
-            ulimit -l unlimited
-            ulimit -n 1048576
-
-            exec python3 -m dynamo.vllm \
-              --reasoning-parser kimi_k3 \
-              --model "${MODEL_PATH}" \
-              --served-model-name moonshotai/Kimi-K3.1-Pro \
-              --tensor-parallel-size 8 \
-              --distributed-executor-backend mp \
-              --attention-backend FLASHMLA_SPARSE \
-              --trust-remote-code \
-              --language-model-only \
-              --enable-logging-iteration-details \
-              --gpu-memory-utilization 0.92 \
-              --load-format fastsafetensors \
-              --no-enable-flashinfer-autotune \
-              --disaggregation-mode prefill \
-              --dyn-reasoning-parser kimi_k3 \
-              --dyn-tool-call-parser kimi_k3 \
-              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' \
-              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+          - --reasoning-parser
+          - kimi_k3
+          - --model
+          - $(MODEL_NAME)
+          - --served-model-name
+          - moonshotai/Kimi-K3.1-Pro
+          - --tensor-parallel-size
+          - "8"
+          - --distributed-executor-backend
+          - mp
+          - --attention-backend
+          - FLASHMLA_SPARSE
+          - --trust-remote-code
+          - --language-model-only
+          - --gpu-memory-utilization
+          - "0.92"
+          - --load-format
+          - fastsafetensors
+          - --no-enable-flashinfer-autotune
+          - --disaggregation-mode
+          - prefill
+          - --dyn-reasoning-parser
+          - kimi_k3
+          - --dyn-tool-call-parser
+          - kimi_k3
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
           command:
-          - /bin/bash
-          - -lc
+          - python3
+          - -m
+          - dynamo.vllm
           env:
+          - name: HF_HOME
+            value: /shared-model-cache
           - name: HF_HUB_OFFLINE
             value: "1"
           - name: TRANSFORMERS_OFFLINE
@@ -162,9 +146,9 @@ spec:
             value: "1"
           - name: NCCL_P2P_LEVEL
             value: NVL
-          - name: MODEL_PATH
-            value: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
+          - name: MODEL_NAME
+            value: moonshotai/Kimi-K3.1-Pro
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -173,8 +157,10 @@ spec:
             limits:
               nvidia.com/gpu: "4"
             requests:
+              # Above the default; matches the validated benchmark configuration.
               cpu: "72"
               ephemeral-storage: 64Gi
+              # Above the default; matches the validated benchmark configuration.
               memory: 512Gi
               nvidia.com/gpu: "4"
           securityContext:
@@ -189,66 +175,64 @@ spec:
           volumeMounts:
           - mountPath: /shared-model-cache
             name: shared-model-cache
-            readOnly: true
-        imagePullSecrets:
-        - name: ngc-pull-secret
-        - name: acr-pull-secret
-        nodeSelector:
-          kubernetes.io/arch: arm64
-          nvidia.com/gpu.product: NVIDIA-GB300
         resourceClaims:
         - name: compute-domain-channel
-          resourceClaimTemplateName: kimi-k3-1-pro-vllm-disagg-gb300-compute-domain-channel
+          resourceClaimTemplateName: kimi-k3-1-pro-vllm-gb300-disagg-agentic-compute-domain-channel
         terminationGracePeriodSeconds: 60
-        tolerations:
-        - effect: NoSchedule
-          key: nvidia.com/gpu
-          operator: Exists
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-            readOnly: true
     replicas: 2
-    runtimeVersionOverride: 1.7.0
     sharedMemorySize: 64Gi
     type: prefill
   - multinode:
       nodeCount: 2
-    name: decode
+    name: DecodeWorker
     podTemplate:
       spec:
         containers:
         - args:
-          - |
-            set -euo pipefail
-            ulimit -l unlimited
-            ulimit -n 1048576
-
-            exec python3 -m dynamo.vllm \
-              --reasoning-parser kimi_k3 \
-              --model "${MODEL_PATH}" \
-              --served-model-name moonshotai/Kimi-K3.1-Pro \
-              --tensor-parallel-size 8 \
-              --distributed-executor-backend mp \
-              --attention-backend FLASHMLA_SPARSE \
-              --trust-remote-code \
-              --language-model-only \
-              --enable-logging-iteration-details \
-              --additional-config '{"decode_backend":"latency_specialized"}' \
-              --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":1024,"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,32,48,64,96,128,192,256,512,1024]}' \
-              --gpu-memory-utilization 0.92 \
-              --load-format fastsafetensors \
-              --no-enable-flashinfer-autotune \
-              --disaggregation-mode decode \
-              --dyn-reasoning-parser kimi_k3 \
-              --dyn-tool-call-parser kimi_k3 \
-              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' \
-              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+          - --reasoning-parser
+          - kimi_k3
+          - --model
+          - $(MODEL_NAME)
+          - --served-model-name
+          - moonshotai/Kimi-K3.1-Pro
+          - --tensor-parallel-size
+          - "8"
+          - --distributed-executor-backend
+          - mp
+          - --attention-backend
+          - FLASHMLA_SPARSE
+          - --trust-remote-code
+          - --language-model-only
+          - --additional-config
+          - '{"decode_backend":"latency_specialized"}'
+          - --compilation-config
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":1024,"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,32,48,64,96,128,192,256,512,1024]}'
+          - --gpu-memory-utilization
+          - "0.92"
+          - --load-format
+          - fastsafetensors
+          - --no-enable-flashinfer-autotune
+          - --disaggregation-mode
+          - decode
+          - --dyn-reasoning-parser
+          - kimi_k3
+          - --dyn-tool-call-parser
+          - kimi_k3
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
           command:
-          - /bin/bash
-          - -lc
+          - python3
+          - -m
+          - dynamo.vllm
           env:
+          - name: HF_HOME
+            value: /shared-model-cache
           - name: HF_HUB_OFFLINE
             value: "1"
           - name: TRANSFORMERS_OFFLINE
@@ -281,9 +265,9 @@ spec:
             value: "1"
           - name: NCCL_P2P_LEVEL
             value: NVL
-          - name: MODEL_PATH
-            value: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1
+          - name: MODEL_NAME
+            value: moonshotai/Kimi-K3.1-Pro
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-kimi-k3.1-pro-dev.1@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -292,8 +276,10 @@ spec:
             limits:
               nvidia.com/gpu: "4"
             requests:
+              # Above the default; matches the validated benchmark configuration.
               cpu: "72"
               ephemeral-storage: 64Gi
+              # Above the default; matches the validated benchmark configuration.
               memory: 512Gi
               nvidia.com/gpu: "4"
           securityContext:
@@ -308,51 +294,25 @@ spec:
           volumeMounts:
           - mountPath: /shared-model-cache
             name: shared-model-cache
-            readOnly: true
-        imagePullSecrets:
-        - name: ngc-pull-secret
-        - name: acr-pull-secret
-        nodeSelector:
-          kubernetes.io/arch: arm64
-          nvidia.com/gpu.product: NVIDIA-GB300
         resourceClaims:
         - name: compute-domain-channel
-          resourceClaimTemplateName: kimi-k3-1-pro-vllm-disagg-gb300-compute-domain-channel
+          resourceClaimTemplateName: kimi-k3-1-pro-vllm-gb300-disagg-agentic-compute-domain-channel
         terminationGracePeriodSeconds: 60
-        tolerations:
-        - effect: NoSchedule
-          key: nvidia.com/gpu
-          operator: Exists
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-            readOnly: true
     replicas: 1
-    runtimeVersionOverride: 1.7.0
     sharedMemorySize: 64Gi
     type: decode
 ---
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:
-  name: kimi-k3-1-pro-vllm-disagg-gb300-compute-domain
+  name: kimi-k3-1-pro-vllm-gb300-disagg-agentic-compute-domain
 spec:
   channel:
     allocationMode: Single
     resourceClaimTemplate:
-      name: kimi-k3-1-pro-vllm-disagg-gb300-compute-domain-channel
+      name: kimi-k3-1-pro-vllm-gb300-disagg-agentic-compute-domain-channel
   numNodes: 0

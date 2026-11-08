@@ -20,6 +20,13 @@ pub mod dc_ckf_shared;
 #[cfg(any(
     feature = "active-sequences",
     feature = "approximate-lru",
+    feature = "mooncake",
+    feature = "router-test-support"
+))]
+pub mod fixed_lane;
+#[cfg(any(
+    feature = "active-sequences",
+    feature = "approximate-lru",
     feature = "dc-ckf-relay",
     feature = "mooncake",
     feature = "router-test-support"
