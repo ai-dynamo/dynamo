@@ -188,7 +188,7 @@ func TestApplyLocalPartitionIDs(t *testing.T) {
 
 			t.Log("Publish the resolved local partitions into the Cyborg container")
 			container := &corev1.Container{Env: test.env, EnvFrom: test.envFrom}
-			applyLocalPartitionIDs(container, &ModelProjection{localPartitionIDs: test.localIDs})
+			applyLocalPartitionIDs(container, &ModelProjection{localPartitionIDs: test.localIDs}, nil)
 			require.Equal(t, test.wantEnv, container.Env)
 		})
 	}
@@ -238,7 +238,7 @@ func TestRenderHybridLocalPartitions(t *testing.T) {
 
 			t.Log("Render the hybrid workload")
 			rendered, err := renderSelectedForTest(renderTestPCS(true), projections, RenderInput{
-				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
+				Stages: map[string]PodTemplate{testRenderComponentName: {Template: corev1.PodTemplateSpec{Spec: renderTestPodSpec()}}},
 			})
 			require.NoError(t, err)
 

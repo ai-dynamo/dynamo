@@ -23,6 +23,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -206,15 +207,29 @@ func supportsPodDiscovery(dgd *v1beta1.DynamoGraphDeployment, defaultBackend con
 			}
 			if runtime != nil {
 				hasBackend, hasMode := false, false
-				for _, item := range runtime.Env {
+
+				// New origins inspect effective definitions; old origins retain their original reader.
+				ordered := compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations)
+				environment := runtime.Env
+				if ordered {
+					environment = slices.Clone(environment)
+					slices.Reverse(environment)
+				}
+				for _, item := range environment {
 					switch item.Name {
 					case commonconsts.DynamoDiscoveryBackendEnvVar:
+						if ordered && hasBackend {
+							continue
+						}
 						hasBackend = true
 						if item.ValueFrom != nil {
 							return false, nil
 						}
 						discovery.Backend = configv1alpha1.DiscoveryBackend(item.Value)
 					case "DYN_KUBE_DISCOVERY_MODE":
+						if ordered && hasMode {
+							continue
+						}
 						hasMode = true
 						if item.ValueFrom != nil {
 							return false, nil

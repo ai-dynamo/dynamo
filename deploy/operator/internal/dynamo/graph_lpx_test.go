@@ -111,10 +111,11 @@ func TestRenderSelectedLPXRolePreservesTemplate(t *testing.T) {
 			}
 
 			t.Log("Render the role before runtime-specific lowering")
-			template, err := renderSelectedLPXRole(component, source, nil,
+			template, environment, err := renderSelectedLPXRole(component, source, nil,
 				&configv1alpha1.OperatorConfiguration{}, &mockSecretsRetriever{}, DiscoveryContext{},
 				&podTemplateRuntimeDefaults{ComponentDefaults: &BaseComponentDefaults{}, servingHash: "serving"})
 			require.NoError(t, err)
+			require.NoError(t, environment.Apply(&template.Spec))
 
 			t.Log("Retain authored security and use the ordinary shared memory default unless resized or disabled")
 			if test.sharedMemorySize == nil {
@@ -136,6 +137,34 @@ func TestRenderSelectedLPXRolePreservesTemplate(t *testing.T) {
 			require.Equal(t, container.ReadinessProbe, main.ReadinessProbe)
 		})
 	}
+}
+
+func TestLPXRoleDefersEnvironmentComposition(t *testing.T) {
+	t.Log("Keep graph and role sources separate until LPX supplies authoritative model paths")
+	source := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
+		Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
+		Spec:        v1beta1.DynamoGraphDeploymentSpec{Env: []corev1.EnvVar{{Name: "MODEL", Value: "$(LPX_MODEL_PATH)/model"}}},
+	}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "engine", ComponentType: v1beta1.ComponentTypeLPX,
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "lpx:test",
+			Env: []corev1.EnvVar{{Name: "LPX_MODEL_PATH", Value: "$(MODEL)"}},
+		}}}},
+	}
+	template, environment, err := renderSelectedLPXRole(component, source, nil,
+		&configv1alpha1.OperatorConfiguration{}, &mockSecretsRetriever{}, DiscoveryContext{},
+		&podTemplateRuntimeDefaults{ComponentDefaults: &BaseComponentDefaults{}, servingHash: "serving"})
+	require.NoError(t, err)
+
+	t.Log("The final LPX binding replaces the authored cycle without inventing local order")
+	environment.Bind(&template.Spec.Containers[0], "operator.lpx.modelPaths", []corev1.EnvVar{{Name: "LPX_MODEL_PATH", Value: "/models"}})
+	require.NoError(t, environment.Apply(&template.Spec))
+	var relevant []string
+	for _, env := range template.Spec.Containers[0].Env {
+		if env.Name == "LPX_MODEL_PATH" || env.Name == "MODEL" {
+			relevant = append(relevant, env.Name)
+		}
+	}
+	require.Equal(t, []string{"LPX_MODEL_PATH", "MODEL"}, relevant)
 }
 
 func TestLPXPCSNameUsesStableMaterializationIdentity(t *testing.T) {

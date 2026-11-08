@@ -140,6 +140,10 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 			dgd,
 			effective,
 		)
+		environmentOptions := dynamo.GenerateBasePodSpecOptions{GeneralEnvironment: dgd.Spec.Env}
+		if podAnnotations[commonconsts.KubeAnnotationTopologyLabelKey] != "" || podAnnotations[commonconsts.KubeAnnotationTopologyClusterTopologyName] != "" {
+			environmentOptions.KVTransferPolicy = dynamo.KVTransferPolicyEnvironment(dgd.Spec.Experimental.KvTransferPolicy)
+		}
 		podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dgd.Name
 		podLabels[commonconsts.KubeLabelDynamoComponent] = componentName
 		podLabels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
@@ -175,6 +179,7 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 			podLabels,
 			checkpointInfo,
 			containerGPUs,
+			environmentOptions,
 		)
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "failed to generate %s pod template", role)
@@ -200,6 +205,7 @@ func (r *dcdWorkloadRenderer) generateComponentRolePodTemplateSpec(
 	labels map[string]string,
 	checkpointInfo *checkpoint.CheckpointInfo,
 	containerGPUs dynamo.ContainerGPUCount,
+	environmentOptions dynamo.GenerateBasePodSpecOptions,
 ) (*corev1.PodTemplateSpec, error) {
 	podTemplate, err := r.generateComponentPodTemplateSpec(
 		ctx,
@@ -216,6 +222,7 @@ func (r *dcdWorkloadRenderer) generateComponentRolePodTemplateSpec(
 		role,
 		checkpointInfo,
 		containerGPUs,
+		environmentOptions,
 	)
 	if err != nil {
 		return nil, err
@@ -366,6 +373,8 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		role,
 		checkpointInfo,
 		containerGPUs,
+		dynamo.GenerateBasePodSpecOptions{GeneralEnvironment: dcd.Spec.Env,
+			KVTransferPolicy: dynamo.DCDKVTransferPolicyEnvironment(dcd, component)},
 	)
 }
 
@@ -384,6 +393,7 @@ func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(
 	role dynamo.Role,
 	checkpointInfo *checkpoint.CheckpointInfo,
 	containerGPUs dynamo.ContainerGPUCount,
+	environmentOptions dynamo.GenerateBasePodSpecOptions,
 ) (*corev1.PodTemplateSpec, error) {
 	component = component.DeepCopy()
 	if componentType != "" {
@@ -419,6 +429,7 @@ func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(
 		componentName,
 		nil,
 		containerGPUs,
+		environmentOptions,
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate base pod spec")

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	deploymentcapnpv1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/deployment/v1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -102,21 +103,14 @@ func checkpointSnapshotPath(checkpoint *Checkpoint, modelStoragePath string) str
 	return filepath.Join(modelStoragePath, repository, "snapshots", checkpoint.Revision)
 }
 
-func applyCyborgWeightsPath(container *corev1.Container, projection *ModelProjection, modelStoragePath string) {
+func applyCyborgWeightsPath(container *corev1.Container, projection *ModelProjection, modelStoragePath string, environment semanticenv.ContainerLayers) {
 	if projection.checkpoint == nil {
 		return
 	}
 
 	// Kubernetes expands environment references in order; publish the checkpoint before authored bindings.
-	env := make([]corev1.EnvVar, 0, len(container.Env)+1)
-	env = append(env, corev1.EnvVar{
+	environment.Prepend(container, "operator.lpx.weights", []corev1.EnvVar{{
 		Name:  cyborgWeightsPathEnv,
 		Value: checkpointSnapshotPath(projection.checkpoint, modelStoragePath),
-	})
-	for _, variable := range container.Env {
-		if variable.Name != cyborgWeightsPathEnv {
-			env = append(env, variable)
-		}
-	}
-	container.Env = env
+	}})
 }

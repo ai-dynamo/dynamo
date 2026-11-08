@@ -10,6 +10,7 @@ import (
 	"math"
 	"path/filepath"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -32,7 +33,7 @@ func (w *Workload) ValidateCyborgReplicas(replicas int32) error {
 }
 
 // applyCyborgManifestPath projects an authoritative manifest location into one Cyborg container.
-func applyCyborgManifestPath(container *corev1.Container, projection *ModelProjection, modelStoragePath string) error {
+func applyCyborgManifestPath(container *corev1.Container, projection *ModelProjection, modelStoragePath string, environment semanticenv.ContainerLayers) error {
 	buildRoot, err := buildRuntimePath(projection.configuredBuild.path, projection.runtimeBuildRef, modelStoragePath)
 	if err != nil {
 		return fmt.Errorf("resolve GBuild manifest path: %w", err)
@@ -44,17 +45,10 @@ func applyCyborgManifestPath(container *corev1.Container, projection *ModelProje
 	}
 
 	// Kubernetes expands environment references in order; publish the manifest before authored bindings.
-	env := make([]corev1.EnvVar, 0, len(container.Env)+1)
-	env = append(env, corev1.EnvVar{
+	environment.Prepend(container, "operator.lpx.manifest", []corev1.EnvVar{{
 		Name:  gbuildManifestPathEnv,
 		Value: filepath.Join(buildRoot, manifestPath),
-	})
-	for _, variable := range container.Env {
-		if variable.Name != gbuildManifestPathEnv {
-			env = append(env, variable)
-		}
-	}
-	container.Env = env
+	}})
 	return nil
 }
 

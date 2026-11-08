@@ -45,6 +45,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -478,6 +479,7 @@ func normalizeDGDComponent(
 		normalized,
 		componentName,
 		normalized.ComponentType == commonconsts.ComponentTypeFrontend,
+		parentDGD.Spec.Env,
 	); err != nil {
 		return nil, err
 	}
@@ -501,8 +503,19 @@ func generateSingleDCDFromNormalized(
 	deployment.Spec.DynamoComponentDeploymentSharedSpec = *component.DeepCopy()
 	deployment.Name = GetDCDResourceName(parentDGD, componentName, rollingUpdateCtx.NewWorkerHash)
 	deployment.Spec.BackendFramework = backendFramework
+	if compatibility.OrderedEnvironmentVariables.Enabled(parentDGD.Annotations) {
+		for _, env := range parentDGD.Spec.Env {
+			deployment.Spec.Env = append(deployment.Spec.Env, *env.DeepCopy())
+		}
+	}
 	deployment.Namespace = parentDGD.Namespace
 	component = &deployment.Spec.DynamoComponentDeploymentSharedSpec
+
+	// Persist the policy snapshot only at the child API boundary; in-memory
+	// normalized components retain authored environment provenance.
+	if compatibility.OrderedEnvironmentVariables.Enabled(parentDGD.Annotations) && shouldApplyKvTransferPolicyToWorkerComponent(component, parentDGD) {
+		compileWorkerKVTransferPolicyEnvironment(component, parentDGD.Spec.Experimental.KvTransferPolicy, parentDGD.Annotations)
+	}
 
 	if err := applyDGDComponentAlphaCompatibilityToDCD(parentDGD, componentName, deployment); err != nil {
 		return nil, err
@@ -622,6 +635,7 @@ func applyDynDeploymentConfig(dcd *v1beta1.DynamoComponentDeployment) error {
 		&dcd.Spec.DynamoComponentDeploymentSharedSpec,
 		GetDCDComponentName(dcd),
 		dcd.IsFrontendComponent(),
+		dcd.Spec.Env,
 	)
 }
 
@@ -629,6 +643,7 @@ func applyDynDeploymentConfigToComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	componentName string,
 	isFrontend bool,
+	generalEnvironment []corev1.EnvVar,
 ) error {
 	var configuredWorkers *int32
 	for templateIndex, podTemplate := range ComponentPodTemplates(component) {
@@ -637,6 +652,11 @@ func applyDynDeploymentConfigToComponent(
 			continue
 		}
 		rawConfig := getDynamoDeploymentConfig(main)
+		if compatibility.OrderedEnvironmentVariables.Enabled(podTemplate.Annotations) {
+			if config := findEnvVar(slices.Concat(generalEnvironment, main.Env), commonconsts.DynamoDeploymentConfigEnvVar); config != nil {
+				rawConfig = []byte(config.Value)
+			}
+		}
 		if rawConfig == nil {
 			continue
 		}
@@ -645,7 +665,7 @@ func applyDynDeploymentConfigToComponent(
 			if err != nil {
 				return err
 			}
-			setDynamoDeploymentConfig(main, updatedConfig)
+			setDynamoDeploymentConfig(main, updatedConfig, podTemplate.Annotations)
 			rawConfig = updatedConfig
 		}
 		config, err := ParseDynDeploymentConfig(rawConfig)
@@ -696,7 +716,19 @@ func getDynamoDeploymentConfig(container *corev1.Container) []byte {
 	return nil
 }
 
-func setDynamoDeploymentConfig(container *corev1.Container, config []byte) {
+func setDynamoDeploymentConfig(container *corev1.Container, config []byte, annotations map[string]string) {
+	// Semantic origins rewrite the same last definition selected by the reader.
+	if compatibility.OrderedEnvironmentVariables.Enabled(annotations) {
+		binding := corev1.EnvVar{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: string(config)}
+		if current := findEnvVar(container.Env, binding.Name); current != nil {
+			*current = binding
+		} else {
+			container.Env = append(container.Env, binding)
+		}
+		return
+	}
+
+	// Preserve the legacy first-match update, including no append when absent.
 	for i := range container.Env {
 		if container.Env[i].Name == commonconsts.DynamoDeploymentConfigEnvVar {
 			container.Env[i].Value = string(config)
@@ -766,7 +798,18 @@ func applyDynDeploymentResources(container *corev1.Container, resources *Resourc
 	return nil
 }
 
-func MergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
+// MergeEnvsForOrigin stages environment values for renderer/backend readers.
+// Semantic callers retain the original layers and finalize with semanticenv;
+// staging must not select overrides or invent intermediate ordering constraints.
+// Legacy origins retain their sorted and de-duplicated rendering.
+func MergeEnvsForOrigin(annotations map[string]string, system, user []corev1.EnvVar) []corev1.EnvVar {
+	if compatibility.OrderedEnvironmentVariables.Enabled(annotations) {
+		return slices.Concat(system, user)
+	}
+	return mergeEnvsLegacy(system, user)
+}
+
+func mergeEnvsLegacy(common, specific []corev1.EnvVar) []corev1.EnvVar {
 	envMap := make(map[string]corev1.EnvVar)
 
 	// Add all common environment variables.
@@ -1505,8 +1548,9 @@ const (
 	roleLaunchOwnedByPodTemplate
 )
 
-// Backend interface for modular backend logic
-// Each backend (SGLang, VLLM, etc.) implements this interface.
+// Backend applies framework-specific container and pod mutations. UpdateContainer
+// may inspect existing environment variables but must append any new variables
+// without reordering or removing existing entries.
 type Backend interface {
 	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs ContainerGPUCount) error
 	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer)
@@ -1538,6 +1582,7 @@ func BackendFactory(
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	parentGraphDeploymentName string,
 	roleLaunchOwnership roleLaunchOwnership,
+	environment *podEnvironment,
 ) Backend {
 	switch backendFramework {
 	case BackendFrameworkSGLang:
@@ -1546,11 +1591,13 @@ func BackendFactory(
 		return &VLLMBackend{
 			ParentGraphDeploymentName: parentGraphDeploymentName,
 			roleLaunchOwnership:       roleLaunchOwnership,
+			environment:               environment,
 		}
 	case BackendFrameworkTRTLLM:
 		return &TRTLLMBackend{
 			MpiRunSecretName:    operatorConfig.MPI.SSHSecretName,
 			roleLaunchOwnership: roleLaunchOwnership,
+			environment:         environment,
 		}
 	case BackendFrameworkNoop:
 		return &NoopBackend{}
@@ -1583,9 +1630,15 @@ func usesMultinodeTopologyAliases(annotations map[string]string) bool {
 	return compatibility.MultinodeTopologyAliases.Enabled(annotations)
 }
 
-// addMultinodeTopologyEnvVars injects backend-independent aliases for the
-// current pod's rank and leader address into newly created multinode DGDs.
-func addMultinodeTopologyEnvVars(
+func multinodeTopologyEnvironment(serviceName string, deployer MultinodeDeployer) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: commonconsts.DynamoLeaderAddressEnvVar, Value: deployer.GetLeaderHostname(serviceName)},
+		{Name: commonconsts.DynamoRankEnvVar, Value: deployer.GetPodRank()},
+	}
+}
+
+// addLegacyMultinodeTopologyEnvVars preserves the pre-semantic alias rendering.
+func addLegacyMultinodeTopologyEnvVars(
 	container *corev1.Container,
 	numberOfNodes int32,
 	serviceName string,
@@ -1598,11 +1651,7 @@ func addMultinodeTopologyEnvVars(
 
 	// The aliases are operator-owned so their topology-derived values override
 	// any same-named entries supplied by the component pod template.
-	topologyEnvVars := []corev1.EnvVar{
-		{Name: commonconsts.DynamoLeaderAddressEnvVar, Value: multinodeDeployer.GetLeaderHostname(serviceName)},
-		{Name: commonconsts.DynamoRankEnvVar, Value: multinodeDeployer.GetPodRank()},
-	}
-	container.Env = MergeEnvs(container.Env, topologyEnvVars)
+	container.Env = mergeEnvsLegacy(container.Env, multinodeTopologyEnvironment(serviceName, multinodeDeployer))
 }
 
 // applyDefaultSecurityContext sets secure defaults for pod security context.
@@ -1629,11 +1678,20 @@ func applyDefaultSecurityContext(podSpec *corev1.PodSpec) {
 	}
 }
 
-// GenerateBasePodSpec creates a basic PodSpec with common logic shared between controller and grove
-// Includes standard environment variables (DYNAMO_PORT, NATS_SERVER, ETCD_ENDPOINTS)
-// Deployment-specific environment merging should be handled by the caller
+// GenerateBasePodSpecOptions supplies graph defaults and their policy ownership.
+type GenerateBasePodSpecOptions struct {
+	GeneralEnvironment []corev1.EnvVar
+
+	// KVTransferPolicy contains the compiled runtime bindings, if a graph policy
+	// owns them. The renderer removes authored policy inputs before registering
+	// this source; nil leaves standalone topology configuration user-owned.
+	KVTransferPolicy []corev1.EnvVar
+}
+
+// GenerateBasePodSpec creates a basic PodSpec with common logic shared between controller and grove.
+// Includes standard environment variables (DYNAMO_PORT, NATS_SERVER, ETCD_ENDPOINTS).
 // containerGPUs lazily resolves the main container's scalar or DRA-backed GPU count.
-// component and operatorConfig must be non-nil.
+// component and operatorConfig must be non-nil. At most one options value is accepted.
 func GenerateBasePodSpec(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	backendFramework BackendFramework,
@@ -1647,13 +1705,30 @@ func GenerateBasePodSpec(
 	serviceName string,
 	deployerOverride MultinodeDeployer, // Optional: overrides factory-created deployer when non-nil
 	containerGPUs ContainerGPUCount,
+	options ...GenerateBasePodSpecOptions,
 ) (*corev1.PodSpec, error) {
+	// Keep optional rendering inputs together without changing existing callers.
+	if len(options) > 1 {
+		return nil, fmt.Errorf("expected at most one base pod spec options value")
+	}
+	var opts GenerateBasePodSpecOptions
+	if len(options) == 1 {
+		opts = options[0]
+	}
+	generalEnvironment := opts.GeneralEnvironment
+
 	// Validate the complete component before selecting its authored role template.
 	component, roleLaunchOwnership, nativeSidecar, err := lowerComponentForRole(component, role)
 	if err != nil {
 		return nil, err
 	}
-	return generateBasePodSpec(
+	environment := newPodEnvironment(GetPodTemplateAnnotations(component), generalEnvironment)
+	environment.ownKVTransferPolicy(component, nativeSidecar, opts.KVTransferPolicy)
+	if environment == nil && len(generalEnvironment) > 0 {
+		component = component.DeepCopy()
+		applyLegacyGeneralEnvironment(component, generalEnvironment)
+	}
+	pod, err := generateBasePodSpec(
 		component,
 		backendFramework,
 		secretsRetriever,
@@ -1668,7 +1743,15 @@ func GenerateBasePodSpec(
 		roleLaunchOwnership,
 		nativeSidecar,
 		containerGPUs,
+		environment,
 	)
+	if err != nil {
+		return nil, err
+	}
+	if err := environment.apply(pod); err != nil {
+		return nil, err
+	}
+	return pod, nil
 }
 
 // generateBasePodSpecWithDefaults requires non-nil component and operatorConfig.
@@ -1686,12 +1769,14 @@ func generateBasePodSpecWithDefaults(
 	deployerOverride MultinodeDeployer,
 	componentDefaults ComponentDefaults,
 	containerGPUs ContainerGPUCount,
-) (*corev1.PodSpec, error) {
+	generalEnvironment ...corev1.EnvVar,
+) (*corev1.PodSpec, semanticenv.ContainerLayers, error) {
 	// Stored objects must satisfy admission invariants before defaults are applied.
 	if errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec")); len(errs) > 0 {
-		return nil, errs.ToAggregate()
+		return nil, nil, errs.ToAggregate()
 	}
-	return generateBasePodSpecWithDefaultsAndOwnership(
+	environment := newPodEnvironment(GetPodTemplateAnnotations(component), generalEnvironment)
+	pod, err := generateBasePodSpecWithDefaultsAndOwnership(
 		component,
 		backendFramework,
 		secretsRetriever,
@@ -1707,7 +1792,12 @@ func generateBasePodSpecWithDefaults(
 		roleLaunchOwnedByOperator,
 		GetComponentDynamoSidecar(component) != nil,
 		containerGPUs,
+		environment,
 	)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pod, environment.capture(pod), nil
 }
 
 func generateBasePodSpec(
@@ -1725,6 +1815,7 @@ func generateBasePodSpec(
 	roleLaunchOwnership roleLaunchOwnership,
 	nativeSidecar bool,
 	containerGPUs ContainerGPUCount,
+	environment *podEnvironment,
 ) (*corev1.PodSpec, error) {
 	return generateBasePodSpecWithDefaultsAndOwnership(
 		component,
@@ -1742,6 +1833,7 @@ func generateBasePodSpec(
 		roleLaunchOwnership,
 		nativeSidecar,
 		containerGPUs,
+		environment,
 	)
 }
 
@@ -1764,6 +1856,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	roleLaunchOwnership roleLaunchOwnership,
 	nativeSidecar bool,
 	containerGPUs ContainerGPUCount,
+	environment *podEnvironment,
 ) (*corev1.PodSpec, error) {
 	// Use the selected runtime sidecar's image, or main in combined-runtime mode.
 	// A compute-only role's engine image does not describe a Dynamo version.
@@ -1790,7 +1883,15 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		}
 	}
 
+	baseEnvironment := container.Env
+	templateSource := "podTemplate"
+	if roleLaunchOwnership == roleLaunchOwnedByPodTemplate && (role == RoleLeader || role == RoleWorker) {
+		templateSource = "roles[name=" + string(role) + "].podTemplate"
+	}
+	var authoredEnvironment []corev1.EnvVar
 	if main := GetMainContainer(component); main != nil {
+		authoredEnvironment = main.Env
+
 		// Copy the authored container before merging fields and environment variables.
 		main = main.DeepCopy()
 
@@ -1804,7 +1905,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		if err := mergo.Merge(&container, *main, mergo.WithOverride); err != nil {
 			return nil, fmt.Errorf("failed to merge podTemplate main container: %w", err)
 		}
-		container.Env = MergeEnvs(baseEnv, main.Env)
+		container.Env = MergeEnvsForOrigin(annotations, baseEnv, main.Env)
 
 		// An explicitly empty port list clears generated ports as well.
 		if main.Ports != nil {
@@ -1822,6 +1923,10 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 			container.StartupProbe = main.StartupProbe
 		}
 	}
+	if environment != nil {
+		environment.register(container.Name, templateSource+".spec.containers[name=main].env", baseEnvironment, environment.general, authoredEnvironment)
+		container.Env = environment.staged(container.Name)
+	}
 
 	if err := applyCompilationCache(&container, component, backendFramework); err != nil {
 		return nil, err
@@ -1831,7 +1936,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	}
 
 	// Preserve legacy environment rendering before backend-specific additions.
-	container.Env = MergeEnvs(nil, container.Env)
+	container.Env = MergeEnvsForOrigin(annotations, nil, container.Env)
 	frontendSidecarMounts := append([]corev1.VolumeMount(nil), container.VolumeMounts...)
 
 	// Apply backend-specific container modifications
@@ -1844,9 +1949,14 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	}
 
 	// Main receives topology bindings in both combined-runtime and native-sidecar modes.
-	addMultinodeTopologyEnvVars(&container, numberOfNodes, serviceName, multinodeDeployer, annotations)
+	if environment == nil {
+		addLegacyMultinodeTopologyEnvVars(&container, numberOfNodes, serviceName, multinodeDeployer, annotations)
+	} else if numberOfNodes > 1 && usesMultinodeTopologyAliases(annotations) {
+		bindings := multinodeTopologyEnvironment(serviceName, multinodeDeployer)
+		environment.bind(&container, "operator.multinode", bindings)
+	}
 
-	backend := BackendFactory(backendFramework, operatorConfig, parentGraphDeploymentName, roleLaunchOwnership)
+	backend := BackendFactory(backendFramework, operatorConfig, parentGraphDeploymentName, roleLaunchOwnership, environment)
 	if backend == nil {
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
@@ -1860,7 +1970,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 
 	// Cache env remains a backend addition in both worker modes, preserving legacy ordering.
 	if backendFramework == BackendFrameworkVLLM && component.CompilationCache != nil {
-		container.Env = append(container.Env, corev1.EnvVar{Name: "VLLM_CACHE_ROOT", Value: component.CompilationCache.MountPath})
+		environment.appendDefaults(&container, []corev1.EnvVar{{Name: "VLLM_CACHE_ROOT", Value: component.CompilationCache.MountPath}})
 	}
 
 	// get base podspec from component
@@ -1914,14 +2024,24 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 
 	// A declared sidecar receives Dynamo defaults and the same topology bindings as main.
 	if runtime := findRuntimeInitContainer(&podSpec); runtime != nil {
+		var authored []corev1.EnvVar
+		if environment != nil {
+			authored = runtime.Env
+			base := dynamoSidecarBaseContainer(componentContext)
+			environment.register(runtime.Name, templateSource+".spec.initContainers[name=runtime].env", base.Env, environment.general, authored)
+		}
 		if err := mergeDynamoSidecarDefaults(runtime, componentContext); err != nil {
 			return nil, err
 		}
-		addMultinodeTopologyEnvVars(runtime, numberOfNodes, serviceName, multinodeDeployer, annotations)
+		if environment == nil {
+			addLegacyMultinodeTopologyEnvVars(runtime, numberOfNodes, serviceName, multinodeDeployer, annotations)
+		} else if numberOfNodes > 1 && usesMultinodeTopologyAliases(annotations) {
+			environment.bind(runtime, "operator.multinode", multinodeTopologyEnvironment(serviceName, multinodeDeployer))
+		}
 	}
 
 	if component.FrontendSidecar != nil {
-		if err := mergeFrontendSidecarDefaults(&podSpec, *component.FrontendSidecar, componentContext, frontendSidecarMounts); err != nil {
+		if err := mergeFrontendSidecarDefaults(&podSpec, *component.FrontendSidecar, componentContext, frontendSidecarMounts, environment); err != nil {
 			return nil, err
 		}
 	}
@@ -1961,7 +2081,13 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
 		}
 		// Snapshot workers use GMS V1; snapshot-less workers retain GMS V0.
-		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0], snapshotEnabled)
+		if environment == nil {
+			gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0], snapshotEnabled)
+		} else {
+			environment.capture(&podSpec)
+			gms.EnsureServerSidecarResources(&podSpec, &podSpec.Containers[0], snapshotEnabled)
+			environment.bind(&podSpec.Containers[0], "operator.gpuMemoryService", gms.ClientEnvironment(snapshotEnabled))
+		}
 		for _, name := range gmsSpec.ExtraClientContainers {
 			var container *corev1.Container
 			for i := range podSpec.Containers {
@@ -1973,9 +2099,14 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 			if container == nil {
 				return nil, fmt.Errorf("gpuMemoryService extra client container %q disappeared while rendering the pod", name)
 			}
-			gms.EnsureClient(&podSpec, container)
-			if snapshotEnabled {
-				gms.EnableV1(container)
+			if environment == nil {
+				gms.EnsureClient(&podSpec, container)
+				if snapshotEnabled {
+					gms.EnableV1(container)
+				}
+			} else {
+				gms.EnsureClientResources(&podSpec, container)
+				environment.bind(container, "operator.gpuMemoryService", gms.ClientEnvironment(snapshotEnabled))
 			}
 		}
 	}
@@ -1985,9 +2116,9 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	if IsIntraPodFailoverEnabled(component) {
 		var err error
 		if snapshotEnabled {
-			err = buildSnapshotFailoverPod(&podSpec, numberOfNodes, backendFramework)
+			err = buildSnapshotFailoverPod(&podSpec, numberOfNodes, backendFramework, environment)
 		} else {
-			err = buildColdStartFailoverPod(&podSpec, numberOfNodes, backendFramework)
+			err = buildColdStartFailoverPod(&podSpec, numberOfNodes, backendFramework, environment)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to build failover pod: %w", err)
@@ -2009,7 +2140,7 @@ func validateContainerVolumeMounts(volumeMounts []corev1.VolumeMount) error {
 	return nil
 }
 
-func mergeContainerByName(base *corev1.Container, override *corev1.Container) error {
+func mergeContainerByName(base *corev1.Container, override *corev1.Container, annotations map[string]string) error {
 	if override == nil {
 		return nil
 	}
@@ -2019,7 +2150,7 @@ func mergeContainerByName(base *corev1.Container, override *corev1.Container) er
 	if err := mergo.Merge(base, *user, mergo.WithOverride); err != nil {
 		return err
 	}
-	base.Env = MergeEnvs(baseEnv, user.Env)
+	base.Env = MergeEnvsForOrigin(annotations, baseEnv, user.Env)
 	if user.LivenessProbe != nil {
 		base.LivenessProbe = user.LivenessProbe.DeepCopy()
 	}
@@ -2156,7 +2287,7 @@ func appendMissingPVCVolumesForMounts(volumes []corev1.Volume, mounts []corev1.V
 	return ordered
 }
 
-func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, parentContext ComponentContext, parentMounts []corev1.VolumeMount) error {
+func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, parentContext ComponentContext, parentMounts []corev1.VolumeMount, environment *podEnvironment) error {
 	for i := range podSpec.Containers {
 		if podSpec.Containers[i].Name != sidecarName {
 			continue
@@ -2190,6 +2321,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		base.Name = sidecarName
 		baseEnv := base.Env
 		user := podSpec.Containers[i].DeepCopy()
+		environment.register(sidecarName, "podTemplate.spec.containers[name="+sidecarName+"].env", baseEnv, nil, user.Env)
 		// An authored command owns the argv; mergo would keep default args under it.
 		if len(user.Command) > 0 {
 			base.Args = nil
@@ -2197,7 +2329,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		if err := mergo.Merge(&base, *user, mergo.WithOverride); err != nil {
 			return fmt.Errorf("failed to merge frontend sidecar %q: %w", sidecarName, err)
 		}
-		base.Env = MergeEnvs(baseEnv, user.Env)
+		base.Env = MergeEnvsForOrigin(parentContext.Annotations, baseEnv, user.Env)
 
 		// Replace complete probes so handlers cannot merge with the defaults.
 		if user.LivenessProbe != nil {
@@ -2301,17 +2433,54 @@ func GeneratePodSpecForComponent(
 	serviceName string,
 	deployerOverride MultinodeDeployer,
 	containerGPUs ContainerGPUCount,
+	additionalEnvironment ...map[string]semanticenv.Layer,
 ) (*corev1.PodSpec, error) {
-	// Validate the complete component before selecting its authored role template.
-	component, ownership, nativeSidecar, err := lowerComponentForRole(component, role)
+	pod, layers, err := GeneratePodSpecForComponentStaged(component, backendFramework, secretsRetriever, dynamoDeployment,
+		role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, deployerOverride, containerGPUs, additionalEnvironment...)
 	if err != nil {
 		return nil, err
 	}
-	return generatePodSpecForComponent(
+	if err := layers.Apply(pod); err != nil {
+		return nil, err
+	}
+	return pod, nil
+}
+
+// GeneratePodSpecForComponentStaged retains source layers for providers that
+// still add bindings or omit containers. The caller must finalize with Apply
+// after those transformations. Nil layers preserve the complete legacy path.
+func GeneratePodSpecForComponentStaged(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	backendFramework BackendFramework,
+	secretsRetriever SecretsRetriever,
+	dynamoDeployment *v1beta1.DynamoGraphDeployment,
+	role Role,
+	numberOfNodes int32,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
+	serviceName string,
+	deployerOverride MultinodeDeployer,
+	containerGPUs ContainerGPUCount,
+	additionalEnvironment ...map[string]semanticenv.Layer,
+) (*corev1.PodSpec, semanticenv.ContainerLayers, error) {
+	// Validate the complete component before selecting its authored role template.
+	component, ownership, nativeSidecar, err := lowerComponentForRole(component, role)
+	if err != nil {
+		return nil, nil, err
+	}
+	environment := newPodEnvironment(dynamoDeployment.Annotations, dynamoDeployment.Spec.Env)
+	if environment != nil {
+		environment.overrides = additionalEnvironment
+	}
+	pod, err := generatePodSpecForComponent(
 		component, backendFramework, secretsRetriever, dynamoDeployment,
 		role, numberOfNodes, operatorConfig, multinodeDeploymentType,
-		serviceName, deployerOverride, ownership, nativeSidecar, nil, containerGPUs,
+		serviceName, deployerOverride, ownership, nativeSidecar, nil, containerGPUs, environment,
 	)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pod, environment.capture(pod), nil
 }
 
 func generatePodSpecForComponent(
@@ -2329,6 +2498,7 @@ func generatePodSpecForComponent(
 	nativeSidecar bool,
 	groveClusterTopologyDomains []v1beta1.TopologyDomain,
 	containerGPUs ContainerGPUCount,
+	environment *podEnvironment,
 ) (*corev1.PodSpec, error) {
 	if component == nil {
 		return nil, fmt.Errorf("component is nil")
@@ -2337,12 +2507,15 @@ func generatePodSpecForComponent(
 		return nil, fmt.Errorf("dynamoDeployment is nil")
 	}
 	component = component.DeepCopy()
+	if shouldApplyKvTransferPolicyToWorkerComponent(component, dynamoDeployment) {
+		environment.ownKVTransferPolicy(component, nativeSidecar, KVTransferPolicyEnvironment(dynamoDeployment.Spec.Experimental.KvTransferPolicy))
+	}
 	applyDGDTemplateDefaults(component, dynamoDeployment, groveClusterTopologyDomains, nativeSidecar)
 	if operatorConfig == nil {
 		operatorConfig = &configv1alpha1.OperatorConfiguration{}
 	}
 
-	podSpec, err := generateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, deployerOverride, roleLaunchOwnership, nativeSidecar, containerGPUs)
+	podSpec, err := generateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, deployerOverride, roleLaunchOwnership, nativeSidecar, containerGPUs, environment)
 	if err != nil {
 		return nil, err
 	}
@@ -2378,6 +2551,21 @@ func ResolveContainerGPUs(
 	return int64(gpuCount), nil
 }
 
+// applyLegacyGeneralEnvironment retains the legacy graph-to-container flattening.
+// component must not be nil. Semantic origins keep these layers separate.
+func applyLegacyGeneralEnvironment(component *v1beta1.DynamoComponentDeploymentSharedSpec, general []corev1.EnvVar) {
+	for _, podTemplate := range EnsureComponentPodTemplates(component) {
+		main := ensureMainContainer(podTemplate)
+		main.Env = mergeEnvsLegacy(general, main.Env)
+		for i := range podTemplate.Spec.InitContainers {
+			runtime := &podTemplate.Spec.InitContainers[i]
+			if runtime.Name == commonconsts.RuntimeContainerName {
+				runtime.Env = mergeEnvsLegacy(general, runtime.Env)
+			}
+		}
+	}
+}
+
 func applyDGDTemplateDefaults(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
@@ -2387,19 +2575,8 @@ func applyDGDTemplateDefaults(
 	if component == nil || dynamoDeployment == nil {
 		return
 	}
-	if len(dynamoDeployment.Spec.Env) > 0 {
-		for _, podTemplate := range EnsureComponentPodTemplates(component) {
-			main := ensureMainContainer(podTemplate)
-			main.Env = MergeEnvs(dynamoDeployment.Spec.Env, main.Env)
-
-			// When configured, apply global env to the Dynamo sidecar as well as main.
-			for i := range podTemplate.Spec.InitContainers {
-				runtime := &podTemplate.Spec.InitContainers[i]
-				if runtime.Name == commonconsts.RuntimeContainerName {
-					runtime.Env = MergeEnvs(dynamoDeployment.Spec.Env, runtime.Env)
-				}
-			}
-		}
+	if len(dynamoDeployment.Spec.Env) > 0 && !compatibility.OrderedEnvironmentVariables.Enabled(dynamoDeployment.Annotations) {
+		applyLegacyGeneralEnvironment(component, dynamoDeployment.Spec.Env)
 	}
 
 	// Bake KV transfer policy env vars and topology projection into worker pod
@@ -2407,15 +2584,16 @@ func applyDGDTemplateDefaults(
 	// lacks the parent DGD). Workers publish these in their MDC so the router
 	// reads policy per-worker.
 	if shouldApplyKvTransferPolicyToWorkerComponent(component, dynamoDeployment) {
-		applyKvTransferPolicyToWorkerComponent(component, dynamoDeployment.Spec.Experimental.KvTransferPolicy, groveClusterTopologyDomains, sidecarMode)
+		applyKvTransferPolicyToWorkerComponent(component, dynamoDeployment.Spec.Experimental.KvTransferPolicy, groveClusterTopologyDomains, sidecarMode, dynamoDeployment.Annotations)
 	}
 
 	propagateDGDSpecMetadata(dynamoDeployment, component)
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
 }
 
-// EffectiveDGDComponentTemplates applies the same defaults used when rendering
-// DGD component Pods. It leaves the stored DGD unchanged.
+// EffectiveDGDComponentTemplates applies graph defaults for input consumers and
+// leaves the stored DGD unchanged. Semantic environments are staged, not rendered:
+// final operator bindings are only available in the Pod rendering entrypoints.
 func EffectiveDGDComponentTemplates(dgd *v1beta1.DynamoGraphDeployment, component *v1beta1.DynamoComponentDeploymentSharedSpec) ([]*corev1.PodTemplateSpec, error) {
 	var alpha v1alpha1.DynamoGraphDeployment
 	if err := alpha.ConvertFrom(dgd); err != nil {
@@ -2423,6 +2601,23 @@ func EffectiveDGDComponentTemplates(dgd *v1beta1.DynamoGraphDeployment, componen
 	}
 	effective := component.DeepCopy()
 	applyDGDTemplateDefaults(effective, dgd, nil, GetComponentDynamoSidecar(effective) != nil)
+	if compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations) {
+		for _, template := range ComponentPodTemplates(effective) {
+			for _, group := range []struct {
+				name       string
+				containers []corev1.Container
+			}{{commonconsts.MainContainerName, template.Spec.Containers}, {commonconsts.RuntimeContainerName, template.Spec.InitContainers}} {
+				for i := range group.containers {
+					container := &group.containers[i]
+					if container.Name != group.name {
+						continue
+					}
+					// A final owned binding may replace an apparent cycle in these inputs.
+					container.Env = slices.Concat(dgd.Spec.Env, container.Env)
+				}
+			}
+		}
+	}
 	return ComponentPodTemplates(effective), nil
 }
 
@@ -2444,6 +2639,7 @@ func applyKvTransferPolicyToWorkerComponent(
 	kvt *v1beta1.KvTransferPolicy,
 	groveClusterTopologyDomains []v1beta1.TopologyDomain,
 	sidecarMode bool,
+	annotations map[string]string,
 ) {
 	if component == nil || kvt == nil {
 		return
@@ -2457,9 +2653,26 @@ func applyKvTransferPolicyToWorkerComponent(
 		if sidecarMode && runtime.Name != commonconsts.RuntimeContainerName {
 			continue
 		}
-		runtime.Env = MergeEnvs(removeWorkerKvTransferPolicyEnvVars(runtime.Env), workerKvTransferPolicyEnvVars(kvt))
+		if !compatibility.OrderedEnvironmentVariables.Enabled(annotations) {
+			runtime.Env = mergeEnvsLegacy(KVTransferPolicyEnvironment(kvt), removeWorkerKvTransferPolicyEnvVars(runtime.Env))
+		}
 		runtime.VolumeMounts = appendTopologyLabelVolumeMount(runtime.VolumeMounts, TopologyLabelVolumeMount())
 		podTemplate.Spec.Volumes = appendTopologyLabelVolume(podTemplate.Spec.Volumes, TopologyLabelVolume(kvt, groveClusterTopologyDomains))
+	}
+}
+
+// compileWorkerKVTransferPolicyEnvironment snapshots graph-owned runtime values
+// into persisted child templates without changing in-memory normalized sources.
+func compileWorkerKVTransferPolicyEnvironment(component *v1beta1.DynamoComponentDeploymentSharedSpec, policy *v1beta1.KvTransferPolicy, annotations map[string]string) {
+	native := GetComponentDynamoSidecar(component) != nil
+	for _, template := range ComponentPodTemplates(component) {
+		runtime := findRuntimeInitContainer(&template.Spec)
+		if runtime == nil && !native {
+			runtime = ensureMainContainer(template)
+		}
+		if runtime != nil {
+			runtime.Env = MergeEnvsForOrigin(annotations, KVTransferPolicyEnvironment(policy), removeWorkerKvTransferPolicyEnvVars(runtime.Env))
+		}
 	}
 }
 
@@ -2503,7 +2716,9 @@ func ApplyDGDComponentTopologyAnnotations(
 	return result
 }
 
-func workerKvTransferPolicyEnvVars(kvt *v1beta1.KvTransferPolicy) []corev1.EnvVar {
+// KVTransferPolicyEnvironment returns the runtime bindings compiled from a graph
+// policy. kvt must not be nil; optional settings remain absent when unset.
+func KVTransferPolicyEnvironment(kvt *v1beta1.KvTransferPolicy) []corev1.EnvVar {
 	enforcement := string(kvt.Enforcement)
 	if enforcement == "" {
 		enforcement = string(v1beta1.KvTransferEnforcementRequired)
@@ -2529,7 +2744,7 @@ func removeWorkerKvTransferPolicyEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
 	}
 	filtered := make([]corev1.EnvVar, 0, len(envs))
 	for _, env := range envs {
-		if isWorkerKvTransferPolicyEnvVar(env.Name) {
+		if slices.Contains(workerKvTransferPolicyEnvNames, env.Name) {
 			continue
 		}
 		filtered = append(filtered, env)
@@ -2537,17 +2752,12 @@ func removeWorkerKvTransferPolicyEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
 	return filtered
 }
 
-func isWorkerKvTransferPolicyEnvVar(name string) bool {
-	switch name {
-	case commonconsts.EnvKvTransferDomain,
-		commonconsts.EnvKvTransferEnforcement,
-		commonconsts.EnvKvTransferPreferredWeight,
-		commonconsts.EnvTopologyEnabled,
-		commonconsts.EnvTopologyMountPath:
-		return true
-	default:
-		return false
-	}
+var workerKvTransferPolicyEnvNames = []string{
+	commonconsts.EnvKvTransferDomain,
+	commonconsts.EnvKvTransferEnforcement,
+	commonconsts.EnvKvTransferPreferredWeight,
+	commonconsts.EnvTopologyEnabled,
+	commonconsts.EnvTopologyMountPath,
 }
 
 func appendTopologyLabelVolumeMount(mounts []corev1.VolumeMount, mount corev1.VolumeMount) []corev1.VolumeMount {
@@ -3175,6 +3385,7 @@ func generatePodSpecForRole(
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
 	isInterPodGMS := component.IsInterPodGMSEnabled()
+	environment := newPodEnvironment(dynamoDeployment.Annotations, dynamoDeployment.Spec.Env)
 
 	if r.Role == RoleGMS {
 		// GMS weight server: generate a base engine spec then transform it
@@ -3182,7 +3393,7 @@ func generatePodSpecForRole(
 			component, backendFramework, secretsRetriever, dynamoDeployment,
 			RoleMain, 1, operatorConfig,
 			commonconsts.MultinodeDeploymentTypeGrove, serviceName, nil,
-			roleLaunchOwnership, nativeSidecar, groveClusterTopologyDomains, containerGPUs,
+			roleLaunchOwnership, nativeSidecar, groveClusterTopologyDomains, containerGPUs, environment,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate base podSpec for GMS: %w", err)
@@ -3191,7 +3402,11 @@ func generatePodSpecForRole(
 		if err != nil {
 			return nil, fmt.Errorf("failed to get GPU count for GMS weight server: %w", err)
 		}
-		return gmsWeightServerPodSpec(basePodSpec, r.Rank, int(gpuCount)), nil
+		gmsPodSpec := gmsWeightServerPodSpec(basePodSpec, r.Rank, int(gpuCount), environment)
+		if err := environment.apply(gmsPodSpec); err != nil {
+			return nil, err
+		}
+		return gmsPodSpec, nil
 	}
 
 	// Engine pod (or non-GMS pod): optionally use a rank-aware deployer for multinode inter-pod GMS
@@ -3204,14 +3419,17 @@ func generatePodSpecForRole(
 		component, backendFramework, secretsRetriever, dynamoDeployment,
 		r.Role, numberOfNodes, operatorConfig,
 		commonconsts.MultinodeDeploymentTypeGrove, serviceName, deployer,
-		roleLaunchOwnership, nativeSidecar, groveClusterTopologyDomains, containerGPUs,
+		roleLaunchOwnership, nativeSidecar, groveClusterTopologyDomains, containerGPUs, environment,
 	)
 	if err != nil {
 		return nil, err
 	}
 
 	if isInterPodGMS {
-		augmentEngineForGMS(podSpec, r.Rank, component.IsInterPodFailoverEnabled())
+		augmentEngineForGMS(podSpec, r.Rank, component.IsInterPodFailoverEnabled(), environment)
+	}
+	if err := environment.apply(podSpec); err != nil {
+		return nil, err
 	}
 
 	return podSpec, nil
@@ -3542,6 +3760,11 @@ func GenerateBasePodSpecForController(
 
 	// Generate base PodSpec with standard env vars using merged component envs
 	componentName := GetDCDComponentName(dynComponent)
+	environment := newPodEnvironment(GetPodTemplateAnnotations(componentSpec), dynComponent.Spec.Env)
+	environment.ownKVTransferPolicy(componentSpec, nativeSidecar, DCDKVTransferPolicyEnvironment(dynComponent, componentSpec))
+	if environment == nil && len(dynComponent.Spec.Env) > 0 {
+		applyLegacyGeneralEnvironment(componentSpec, dynComponent.Spec.Env)
+	}
 	podSpec, err := generateBasePodSpec(
 		componentSpec,
 		backendFramework,
@@ -3557,8 +3780,12 @@ func GenerateBasePodSpecForController(
 		roleLaunchOwnership,
 		nativeSidecar,
 		containerGPUs,
+		environment,
 	)
 	if err != nil {
+		return nil, err
+	}
+	if err := environment.apply(podSpec); err != nil {
 		return nil, err
 	}
 

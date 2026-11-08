@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/semanticenv"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -86,7 +87,7 @@ func selectRemotePartitions(
 // and sets it when the projection has local partitions. Without local partitions,
 // it sets an empty value only when envFrom sources could otherwise supply one;
 // Cyborg treats an empty value as no selection.
-func applyLocalPartitionIDs(container *corev1.Container, projection *ModelProjection) {
+func applyLocalPartitionIDs(container *corev1.Container, projection *ModelProjection, environment semanticenv.ContainerLayers) {
 	ids := make([]string, len(projection.localPartitionIDs))
 	for index, id := range projection.localPartitionIDs {
 		ids[index] = strconv.Itoa(id)
@@ -94,14 +95,9 @@ func applyLocalPartitionIDs(container *corev1.Container, projection *ModelProjec
 	publish := len(ids) > 0 || len(container.EnvFrom) > 0
 
 	// Kubernetes expands environment references in order; publish the selection before authored bindings.
-	env := make([]corev1.EnvVar, 0, len(container.Env)+1)
 	if publish {
-		env = append(env, corev1.EnvVar{Name: localPartitionIDsEnv, Value: strings.Join(ids, ",")})
+		environment.Prepend(container, "operator.lpx.partitions", []corev1.EnvVar{{Name: localPartitionIDsEnv, Value: strings.Join(ids, ",")}})
+	} else {
+		environment.Omit(container, localPartitionIDsEnv)
 	}
-	for _, variable := range container.Env {
-		if variable.Name != localPartitionIDsEnv {
-			env = append(env, variable)
-		}
-	}
-	container.Env = env
 }

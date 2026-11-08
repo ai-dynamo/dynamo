@@ -45,6 +45,11 @@ spec:
 - `type: worker` runs the inference engine (vLLM, SGLang, or TensorRT-LLM).
 - Per-component fields you will use most: `replicas`, `multinode`, `sharedMemorySize`, and `podTemplate` — a standard Kubernetes [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core). The operator injects its defaults into the container named `main` inside `podTemplate.spec.containers`, where you set the `image`, the `command`/`args` that launch the engine, `resources` (CPU/memory/GPU), `envFrom`, `env`, and `volumeMounts`.
 
+> [!NOTE]
+> Environment variable order affects references and overrides. Review the
+> [environment variable order](#environment-variable-order) before setting DGD-level or component
+> environment variables.
+
 For every backend, a component's `name` is its stable identifier within the DGD. The operator
 uses that name to derive Kubernetes resource names and sets it on the
 `nvidia.com/dynamo-component` label. Keep the name consistent anywhere commands, selectors, scaling
@@ -530,6 +535,70 @@ For a stable external address instead of `port-forward`, see [Expose the Fronten
 ## Put it all together: Qwen3-32B
 
 The following spec assembles the steps above into one aggregated Qwen3-32B deployment, adapted from the [agg-round-robin recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/agg-round-robin/deploy.yaml). It reflects the backend you selected earlier. Comments mark the values you substitute for your model, hardware, and scale:
+
+### Environment variable order
+
+For DGDs with operator origin 1.8.0 or later, environment precedence is operator defaults,
+DGD `spec.env`, then the selected component or role PodTemplate's container `env`.
+A more-specific definition replaces the entire general definition, including `valueFrom`;
+cross-layer overrides do not produce duplicate names. Operator-owned topology, GMS, and
+per-engine failover bindings retain their generated values.
+
+For snapshot-less intra-pod vLLM failover, the operator assigns
+`VLLM_NIXL_SIDE_CHANNEL_PORT=5600+engineID` and `DYN_VLLM_KV_EVENT_PORT=20080+engineID`,
+where `engineID` is 0 or 1. Do not override these variables. The operator retains its
+per-engine assignments so the engines use distinct ports within the Pod.
+
+The operator preserves the relative order of surviving entries within each input list. It
+topologically orders references between layers, so a DGD-level variable can reference a
+component-specific override. Independent entries retain their original general-to-specific
+input order; names are never sorted alphabetically. Cycles or conflicting ordering constraints
+fail rendering with the variables and source paths in the error.
+
+```yaml
+spec:
+  env:
+    - name: BASE
+      value: /models
+    - name: MODEL
+      value: "$(BASE)/qwen"
+  components:
+    - name: worker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - name: STORAGE
+                  value: /fast
+                - name: BASE
+                  value: "$(STORAGE)/models"
+```
+
+These entries render as `STORAGE`, `BASE`, then `MODEL`. Kubernetes expands `MODEL` to
+`/fast/models/qwen`. Graph-generated DCDs retain the general list in their separate `spec.env`
+until the final renderer adds operator defaults.
+
+Within a single list, Kubernetes' sequential semantics still apply: forward references are not
+reordered and remain literal unless an external value is available. `$$(NAME)` is escaped, and
+shell syntax such as `$NAME` is not a Kubernetes reference. ConfigMap/Secret values, `envFrom`,
+and provider-injected variables remain runtime inputs; the operator does not fetch or expand them
+for ordering. Existing same-list duplicate-name validation is unchanged.
+
+In `v1alpha1`, `service.envs` and `extraPodSpec.mainContainer.env` are combined during API
+conversion. When both lists define the same name, the extra container value replaces the
+service value at its original position. Conversion also de-duplicates entries within
+`extraPodSpec.mainContainer.env`, even when `service.envs` is empty. Only `service.envs`
+retains same-list repeated names through conversion. Keep variables whose expansion depends
+on list order together in `service.envs`, and avoid redefining those names in the extra
+container list. For direct ordered PodTemplate configuration, use `v1beta1` with
+`podTemplate.spec.containers[*].env`.
+
+DGDs created by an operator older than 1.8.0, or without the
+`nvidia.com/dynamo-operator-origin-version` annotation, retain the legacy sorted and de-duplicated
+output after an operator upgrade. See the
+[Dynamo Platform v1.8.0 upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#environment-variable-order-in-newly-created-dgds)
+for migration guidance.
 
 <Tabs>
 <Tab title="vLLM" language="vllm">
