@@ -504,7 +504,11 @@ func generateSingleDCDFromNormalized(
 	deployment.Name = GetDCDResourceName(parentDGD, componentName, rollingUpdateCtx.NewWorkerHash)
 	deployment.Spec.BackendFramework = backendFramework
 	if compatibility.OrderedEnvironmentVariables.Enabled(parentDGD.Annotations) {
-		for _, env := range parentDGD.Spec.Env {
+		general, err := rewriteFrontendGeneralEnvironment(component, componentName, parentDGD.Spec.Env)
+		if err != nil {
+			return nil, err
+		}
+		for _, env := range general {
 			deployment.Spec.Env = append(deployment.Spec.Env, *env.DeepCopy())
 		}
 	}
@@ -717,13 +721,11 @@ func getDynamoDeploymentConfig(container *corev1.Container) []byte {
 }
 
 func setDynamoDeploymentConfig(container *corev1.Container, config []byte, annotations map[string]string) {
-	// Semantic origins rewrite the same last definition selected by the reader.
+	// Rewrite an authored binding in place; graph bindings stay in their general source.
 	if compatibility.OrderedEnvironmentVariables.Enabled(annotations) {
 		binding := corev1.EnvVar{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: string(config)}
 		if current := findEnvVar(container.Env, binding.Name); current != nil {
 			*current = binding
-		} else {
-			container.Env = append(container.Env, binding)
 		}
 		return
 	}
@@ -1769,13 +1771,17 @@ func generateBasePodSpecWithDefaults(
 	deployerOverride MultinodeDeployer,
 	componentDefaults ComponentDefaults,
 	containerGPUs ContainerGPUCount,
-	generalEnvironment ...corev1.EnvVar,
+	options GenerateBasePodSpecOptions,
 ) (*corev1.PodSpec, semanticenv.ContainerLayers, error) {
 	// Stored objects must satisfy admission invariants before defaults are applied.
 	if errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec")); len(errs) > 0 {
 		return nil, nil, errs.ToAggregate()
 	}
-	environment := newPodEnvironment(GetPodTemplateAnnotations(component), generalEnvironment)
+
+	// Selected LPX GPU roles own the same graph policy as ordinary worker runtimes.
+	nativeSidecar := GetComponentDynamoSidecar(component) != nil
+	environment := newPodEnvironment(GetPodTemplateAnnotations(component), options.GeneralEnvironment)
+	environment.ownKVTransferPolicy(component, nativeSidecar, options.KVTransferPolicy)
 	pod, err := generateBasePodSpecWithDefaultsAndOwnership(
 		component,
 		backendFramework,
@@ -1790,7 +1796,7 @@ func generateBasePodSpecWithDefaults(
 		deployerOverride,
 		componentDefaults,
 		roleLaunchOwnedByOperator,
-		GetComponentDynamoSidecar(component) != nil,
+		nativeSidecar,
 		containerGPUs,
 		environment,
 	)
@@ -1924,6 +1930,11 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		}
 	}
 	if environment != nil {
+		// Rewrite graph-derived frontend values without changing their source layer.
+		environment.general, err = rewriteFrontendGeneralEnvironment(component, serviceName, environment.general)
+		if err != nil {
+			return nil, err
+		}
 		environment.register(container.Name, templateSource+".spec.containers[name=main].env", baseEnvironment, environment.general, authoredEnvironment)
 		container.Env = environment.staged(container.Name)
 	}

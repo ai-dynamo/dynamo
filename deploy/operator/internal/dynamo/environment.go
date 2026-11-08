@@ -6,6 +6,7 @@
 package dynamo
 
 import (
+	"fmt"
 	"slices"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -30,6 +31,44 @@ func newPodEnvironment(annotations map[string]string, general []corev1.EnvVar) *
 		return nil
 	}
 	return &podEnvironment{general: general, containers: make(semanticenv.ContainerLayers)}
+}
+
+// rewriteFrontendGeneralEnvironment updates an active graph-level deployment
+// config without moving it to another source or mutating general. component
+// must not be nil; nil general means there are no graph-level bindings.
+func rewriteFrontendGeneralEnvironment(component *v1beta1.DynamoComponentDeploymentSharedSpec, componentName string, general []corev1.EnvVar) ([]corev1.EnvVar, error) {
+	if component.ComponentType != v1beta1.ComponentTypeFrontend {
+		return general, nil
+	}
+
+	// A fully shadowed graph config is not a frontend input, including invalid values.
+	templates := ComponentPodTemplates(component)
+	active := len(templates) == 0
+	for _, template := range templates {
+		main := GetMainContainer(&v1beta1.DynamoComponentDeploymentSharedSpec{PodTemplate: template})
+		if main == nil || findEnvVar(main.Env, commonconsts.DynamoDeploymentConfigEnvVar) == nil {
+			active = true
+			break
+		}
+	}
+	if !active {
+		return general, nil
+	}
+
+	// Preserve the selected binding's list position, including same-list duplicates.
+	for i := len(general) - 1; i >= 0; i-- {
+		if general[i].Name != commonconsts.DynamoDeploymentConfigEnvVar {
+			continue
+		}
+		config, err := updateDynDeploymentConfigBytes([]byte(general[i].Value), componentName, commonconsts.DynamoServicePort)
+		if err != nil {
+			return nil, fmt.Errorf("rewrite frontend deployment config in spec.env[%d]: %w", i, err)
+		}
+		result := slices.Clone(general)
+		result[i] = corev1.EnvVar{Name: general[i].Name, Value: string(config)}
+		return result, nil
+	}
+	return general, nil
 }
 
 func (p *podEnvironment) register(name, source string, defaults, general, authored []corev1.EnvVar) {
