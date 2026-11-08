@@ -174,7 +174,7 @@ NAMED_POLICY_SCOPE_SPECS: tuple[NamedPolicyScopeSpec, ...] = (
 
 NAMED_POLICY_SCOPE_DIGESTS: dict[str, str] = {
     "ext_proc_bin_main": (
-        "00907d269c362a5389b8108d4df466181db0f6af21e0994be44870aa4a3e91c3"
+        "1b6a43fd60f1ef7fef2a1e4c725770c27b3db7aca495479f38705a2f1bc7a4e1"
     ),
     "runner_run": ("3e1ea187f2608c5aa171320b381ccce5f92cb1356662aaaad8b0f3b43457fe20"),
     "router_plugin_registry_fallback": (

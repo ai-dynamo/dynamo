@@ -147,7 +147,8 @@ jobs:
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_only_test_markers: ${{ inputs.cpu_parallel_test_markers != '' && format('({0}) and not runtime_epp', inputs.cpu_parallel_test_markers) || '' }}
-      cpu_only_test_timeout_minutes: 30
+      # TODO(DYN-5487): move planner/replay tests (e.g. test_unified_cli_dynamo recommend round-trips) out of this lane, then restore 30.
+      cpu_only_test_timeout_minutes: 45
       cpu_parallel_mode: 'none'
       run_gpu_tests: false
       source_ref: ${{ inputs.source_ref }}

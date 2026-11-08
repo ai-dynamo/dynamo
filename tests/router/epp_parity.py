@@ -5,8 +5,8 @@
 
 This module launches the standard ``/epp`` binary (not standalone / MockPicker)
 against a TEST-ONLY loopback Kubernetes API. The fixture persists metadata the
-runtime actually PATCHes and never invents token results, model cards, or
-router state.
+runtime actually creates or replaces as full snapshots and never invents token
+results, model cards, or router state.
 
 Standard ``/epp`` hardcodes gRPC 9002 and health 9003. These helpers are not
 host-network portable concurrent coverage: they require a dedicated network
@@ -391,6 +391,9 @@ class LoopbackKubeAPI:
             def do_PATCH(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
                 api._handle(self, "PATCH")
 
+            def do_PUT(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+                api._handle(self, "PUT")
+
             def do_DELETE(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
                 api._handle(self, "DELETE")
 
@@ -691,13 +694,17 @@ class LoopbackKubeAPI:
             self._write_json(handler, 200, pod)
             return True
         if path == dwm_prefix:
-            if method != "GET":
-                return False
-            if _is_watch(query):
-                self._watch(handler, "DynamoWorkerMetadata", query)
+            if method == "GET":
+                if _is_watch(query):
+                    self._watch(handler, "DynamoWorkerMetadata", query)
+                    return True
+                self._write_json(
+                    handler, 200, self._list_metadata(query, handler.headers)
+                )
                 return True
-            self._write_json(handler, 200, self._list_metadata(query, handler.headers))
-            return True
+            if method == "POST":
+                return self._create_dwm(handler, method, path, body)
+            return False
         if path.startswith(dwm_prefix + "/"):
             name = path[len(dwm_prefix) + 1 :]
             if "/" in name or not name:
@@ -718,6 +725,8 @@ class LoopbackKubeAPI:
                     handler, 200, {"kind": "Status", "status": "Success", "code": 200}
                 )
                 return True
+            if method == "PUT":
+                return self._replace_dwm(handler, method, path, name, body)
             if method == "PATCH":
                 try:
                     payload = json.loads(body.decode("utf-8") or "{}")
@@ -741,6 +750,148 @@ class LoopbackKubeAPI:
                 self._write_json(handler, 200, stored)
                 return True
         return False
+
+    def _parse_dwm_write_payload(
+        self, body: bytes, *, expected_name: str | None = None
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Validate create/replace DWM JSON. Returns (payload, None) or (None, reason)."""
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None, "body is not JSON"
+        if not isinstance(payload, dict):
+            return None, "body is not a JSON object"
+        api_version = payload.get("apiVersion")
+        if api_version != "nvidia.com/v1alpha1":
+            return (
+                None,
+                f"apiVersion must be 'nvidia.com/v1alpha1', got {api_version!r}",
+            )
+        kind = payload.get("kind")
+        if kind != "DynamoWorkerMetadata":
+            return None, f"kind must be 'DynamoWorkerMetadata', got {kind!r}"
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            return None, "metadata must be an object"
+        name = metadata.get("name")
+        if not isinstance(name, str) or not name or "/" in name:
+            return (
+                None,
+                "metadata.name must be a nonempty string without '/'",
+            )
+        if expected_name is not None and name != expected_name:
+            return (
+                None,
+                f"metadata.name {name!r} does not match URL name {expected_name!r}",
+            )
+        namespace = metadata.get("namespace")
+        if namespace is not None and namespace != self.namespace:
+            return (
+                None,
+                f"metadata.namespace {namespace!r} is not fixture namespace "
+                f"{self.namespace!r}",
+            )
+        return payload, None
+
+    def _create_dwm(
+        self,
+        handler: BaseHTTPRequestHandler,
+        method: str,
+        path: str,
+        body: bytes,
+    ) -> bool:
+        """POST collection create for DynamoWorkerMetadata in this namespace only."""
+        payload, error = self._parse_dwm_write_payload(body)
+        if error is not None:
+            self._record_failure(method, path, error)
+            self._write_status(handler, 400, {"message": error, "code": 400})
+            return True
+        assert payload is not None
+        name = payload["metadata"]["name"]
+        with self._cv:
+            if name in self._metadata:
+                exists = True
+                stored = None
+            else:
+                exists = False
+                stored = self._store_metadata(payload, "ADDED")
+        if exists:
+            self._write_status(
+                handler, 409, _already_exists("dynamoworkermetadatas", name)
+            )
+            return True
+        assert stored is not None
+        self._write_json(handler, 201, stored)
+        return True
+
+    def _replace_dwm(
+        self,
+        handler: BaseHTTPRequestHandler,
+        method: str,
+        path: str,
+        name: str,
+        body: bytes,
+    ) -> bool:
+        """PUT named replace for DynamoWorkerMetadata; requires matching resourceVersion."""
+        payload, error = self._parse_dwm_write_payload(body, expected_name=name)
+        if error is not None:
+            self._record_failure(method, path, error)
+            self._write_status(handler, 400, {"message": error, "code": 400})
+            return True
+        assert payload is not None
+        with self._cv:
+            existing = self._metadata.get(name)
+            if existing is None:
+                missing = True
+                conflict_message = None
+                uid_error = None
+                stored = None
+            else:
+                missing = False
+                request_rv = payload.get("metadata", {}).get("resourceVersion")
+                current_rv = existing.get("metadata", {}).get("resourceVersion")
+                if not isinstance(request_rv, str) or request_rv != current_rv:
+                    conflict_message = (
+                        f"Operation cannot be fulfilled on dynamoworkermetadatas "
+                        f"{name!r}: the object has been modified; please apply "
+                        f"your changes to the latest version and try again"
+                    )
+                    uid_error = None
+                    stored = None
+                else:
+                    conflict_message = None
+                    existing_uid = existing.get("metadata", {}).get("uid")
+                    request_uid = payload.get("metadata", {}).get("uid")
+                    if (
+                        request_uid is not None
+                        and existing_uid is not None
+                        and request_uid != existing_uid
+                    ):
+                        uid_error = (
+                            f"metadata.uid {request_uid!r} does not match "
+                            f"existing uid {existing_uid!r}"
+                        )
+                        stored = None
+                    else:
+                        uid_error = None
+                        if request_uid is None and existing_uid is not None:
+                            payload["metadata"]["uid"] = existing_uid
+                        stored = self._store_metadata(payload, "MODIFIED")
+        if missing:
+            self._write_status(
+                handler, 404, _not_found("dynamoworkermetadatas", name)
+            )
+            return True
+        if conflict_message is not None:
+            self._write_status(handler, 409, _conflict(conflict_message))
+            return True
+        if uid_error is not None:
+            self._record_failure(method, path, uid_error)
+            self._write_status(handler, 400, {"message": uid_error, "code": 400})
+            return True
+        assert stored is not None
+        self._write_json(handler, 200, stored)
+        return True
 
     def _list_pods(
         self, query: dict[str, list[str]], headers: Mapping[str, str]
@@ -1028,6 +1179,28 @@ def _not_found(resource: str, name: str) -> dict[str, Any]:
         "reason": "NotFound",
         "code": 404,
         "message": f"{resource} {name!r} not found",
+    }
+
+
+def _already_exists(resource: str, name: str) -> dict[str, Any]:
+    return {
+        "kind": "Status",
+        "apiVersion": "v1",
+        "status": "Failure",
+        "reason": "AlreadyExists",
+        "code": 409,
+        "message": f"{resource} {name!r} already exists",
+    }
+
+
+def _conflict(message: str) -> dict[str, Any]:
+    return {
+        "kind": "Status",
+        "apiVersion": "v1",
+        "status": "Failure",
+        "reason": "Conflict",
+        "code": 409,
+        "message": message,
     }
 
 
