@@ -3,6 +3,7 @@
 
 pub(crate) mod image_edits;
 mod model;
+pub(crate) mod native_head;
 pub(crate) mod readiness;
 pub use model::Model;
 pub(crate) use model::{

@@ -21,6 +21,8 @@ use tokio::sync::{Notify, Semaphore};
 
 #[path = "tests/backend_failure.rs"]
 mod backend_failure;
+#[path = "tests/head.rs"]
+mod head;
 #[path = "tests/native_abort.rs"]
 mod native_abort;
 #[path = "tests/preflight.rs"]
