@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 import sys
+import textwrap
 import tomllib
 from importlib import metadata
 from pathlib import Path
@@ -44,10 +47,15 @@ def _root_configs() -> tuple[dict, dict]:
     return pyproject, cargo
 
 
-def _python_requirement(pyproject: dict) -> Requirement:
+def _python_requirement(pyproject: dict, *, extra: str | None = None) -> Requirement:
+    requirements = (
+        pyproject["project"]["dependencies"]
+        if extra is None
+        else pyproject["project"]["optional-dependencies"][extra]
+    )
     matches = [
         Requirement(requirement)
-        for requirement in pyproject["project"]["dependencies"]
+        for requirement in requirements
         if canonicalize_name(Requirement(requirement).name) == "aisimulate"
     ]
     assert len(matches) == 1, "ai-dynamo must declare one AISimulate dependency"
@@ -94,7 +102,7 @@ def _locked_cargo_version(path: Path) -> Version:
 
 def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
     pyproject, cargo = _root_configs()
-    python_requirement = _python_requirement(pyproject)
+    python_requirement = _python_requirement(pyproject, extra="ais")
     python_version = _exact_version(python_requirement)
     container_requirement = _requirements_file_aisimulate_requirement(
         AISIMULATE_REQUIREMENTS
@@ -141,7 +149,7 @@ def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
 
 def test_container_stages_the_published_aisimulate_wheel() -> None:
     pyproject, _ = _root_configs()
-    python_version = _exact_version(_python_requirement(pyproject))
+    python_version = _exact_version(_python_requirement(pyproject, extra="ais"))
     container_version = _exact_version(
         _requirements_file_aisimulate_requirement(AISIMULATE_REQUIREMENTS)
     )
@@ -163,6 +171,10 @@ def test_container_stages_the_published_aisimulate_wheel() -> None:
     assert "COPY aisimulate" not in wheel_builder
     assert "/opt/dynamo/aisimulate" not in wheel_builder
     assert not (ROOT / "aisimulate").exists()
+    planner_template = (ROOT / "container/templates/planner.Dockerfile").read_text(
+        encoding="utf-8"
+    )
+    assert "/opt/dynamo/wheelhouse/aisimulate*.whl" in planner_template
 
 
 def test_planner_ci_image_collects_unified_cli_e2e_tests() -> None:
@@ -175,13 +187,26 @@ def test_planner_ci_image_collects_unified_cli_e2e_tests() -> None:
     assert "components/src/dynamo/replay/tests/test_main.py" not in planner_template
 
 
-def test_installed_aisimulate_matches_the_declared_release() -> None:
+@pytest.fixture
+def installed_aisimulate() -> metadata.Distribution:
+    """Set DYNAMO_TEST_REQUIRE_AIS_RUNTIME=1 for a required opt-in installation."""
+    try:
+        return metadata.distribution("aisimulate")
+    except metadata.PackageNotFoundError:
+        if os.environ.get("DYNAMO_TEST_REQUIRE_AIS_RUNTIME") == "1":
+            pytest.fail("The requested ai-dynamo[ais] test environment lacks AISimulate")
+        pytest.skip("AIS installation check requires the ai-dynamo[ais] environment")
+
+
+def test_installed_aisimulate_matches_the_declared_release(
+    installed_aisimulate: metadata.Distribution,
+) -> None:
     if sys.version_info < (3, 11) or sys.version_info >= (3, 14):
         pytest.skip("AISimulate supports Python 3.11 through 3.13")
     pyproject, _ = _root_configs()
-    expected = _exact_version(_python_requirement(pyproject))
+    expected = _exact_version(_python_requirement(pyproject, extra="ais"))
 
-    assert Version(metadata.version("aisimulate")) == expected
+    assert Version(installed_aisimulate.version) == expected
 
 
 def test_ai_dynamo_registers_only_its_aisimulate_providers() -> None:
@@ -201,3 +226,100 @@ def test_ai_dynamo_registers_only_its_aisimulate_providers() -> None:
         "dynamo.planner": "dynamo.planner.simulation:create_provider",
         "dynamo.router": "dynamo.router.simulation:create_provider",
     }
+
+
+def test_base_ai_dynamo_metadata_does_not_activate_offline_ais() -> None:
+    """Check the installed wheel metadata, not only the source declaration."""
+    requirements = [
+        Requirement(raw)
+        for raw in metadata.requires("ai-dynamo") or []
+        if canonicalize_name(Requirement(raw).name) == "aisimulate"
+    ]
+    assert len(requirements) == 1, "one optional AIS requirement must remain published"
+    requirement = requirements[0]
+    assert requirement.marker is not None
+    pyproject, _ = _root_configs()
+    assert not any(
+        canonicalize_name(Requirement(raw).name) == "aisimulate"
+        for raw in pyproject["project"]["dependencies"]
+    )
+    assert _exact_version(requirement) == _exact_version(
+        _python_requirement(pyproject, extra="ais")
+    )
+    environment = default_environment()
+    for python_version in ("3.10", "3.11", "3.12", "3.13", "3.14"):
+        environment.update(python_version=python_version, extra="")
+        assert not requirement.marker.evaluate(environment)
+        environment["extra"] = "ais"
+        assert requirement.marker.evaluate(environment) is (
+            python_version in {"3.11", "3.12", "3.13"}
+        )
+
+
+@pytest.mark.parametrize(
+    ("action", "expected_output"),
+    [
+        (
+            "sys.argv = ['dynamo.frontend', '--help']\n"
+            "runpy.run_module('dynamo.frontend', run_name='__main__')\n",
+            "--http-port",
+        ),
+        (
+            "from dynamo.frontend.frontend_args import FrontendConfig, build_frontend_parser\n"
+            "parser, _ = build_frontend_parser({})\n"
+            "config = FrontendConfig.from_cli_args(parser.parse_args([]))\n"
+            "config.validate()\n"
+            "assert config.router_prefill_load_model != 'ais'\n"
+            "print('Base frontend configuration validates without AIS')\n",
+            "Base frontend configuration validates without AIS",
+        ),
+        (
+            "from dynamo.frontend.frontend_args import FrontendConfig, build_frontend_parser\n"
+            "parser, _ = build_frontend_parser({})\n"
+            "args = parser.parse_args([\n"
+            "    '--router-mode', 'kv', '--router-prefill-load-model', 'ais',\n"
+            "    '--dyn-chat-processor', 'dynamo', '--router-track-prefill-tokens',\n"
+            "    '--ais-model-path', 'fixture-model', '--ais-system', 'fixture-system',\n"
+            "    '--ais-backend', 'trtllm',\n"
+            "])\n"
+            "config = FrontendConfig.from_cli_args(args)\n"
+            "try:\n"
+            "    config.validate()\n"
+            "except ModuleNotFoundError as error:\n"
+            "    assert error.name == 'aisimulate_core'\n"
+            "    print('Explicit AIS mode requires the AIS runtime')\n"
+            "else:\n"
+            "    raise AssertionError('Explicit AIS mode silently lost its runtime')\n",
+            "Explicit AIS mode requires the AIS runtime",
+        ),
+    ],
+    ids=["frontend-help", "frontend-config", "requested-ais"],
+)
+@pytest.mark.timeout(30)
+def test_optional_ais_boundaries(action: str, expected_output: str) -> None:
+    script = textwrap.dedent(
+        """
+        import importlib.abc
+        import runpy
+        import sys
+
+        blocked = {'aisimulate', 'aisimulate_core'}
+        assert not any(name.split('.')[0] in blocked for name in sys.modules)
+
+        class WithoutAIS(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in blocked:
+                    raise ModuleNotFoundError('Optional AIS runtime is unavailable', name=fullname)
+
+        sys.meta_path.insert(0, WithoutAIS())
+        """
+    ) + action
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert expected_output in result.stdout
