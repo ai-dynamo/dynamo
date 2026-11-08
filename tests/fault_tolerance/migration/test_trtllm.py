@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 import requests
-from transformers import AutoTokenizer
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.gpu_args import build_trtllm_override_args
@@ -231,16 +230,18 @@ KV_TRANSFER_MIGRATION_PARAMETERS = pytest.mark.parametrize(
 def assert_migrated_output_matches_replay(
     frontend: DynamoFrontendProcess,
     migrated_response: MigrationResponse,
+    migrated_output: str,
     frontend_log_offset: int,
 ) -> None:
-    """Require the post-fault output to equal a fault-free replay of the retry.
+    """Require the streamed output to equal a fault-free replay of the retry.
 
     A migration retry is a new request whose prompt is the original prompt plus
     the tokens already delivered. TensorRT-LLM recomputes those tokens in one
     context pass, and greedy decoding after that recompute is not guaranteed to
     match the uninterrupted decode (DYN-5499). The reference therefore sends the
     same replay prompt, without a fault, through the same frontend and the
-    surviving workers.
+    surviving workers, and the frontend's streamed text must match it across the
+    fault boundary.
     """
     prompt_ids = migrated_response.prompt_token_ids
     migrated_ids = migrated_response.completion_token_ids
@@ -259,7 +260,7 @@ def assert_migrated_output_matches_replay(
 
     # The token-ID prompt must be the prompt the chat or completion request
     # used, or the replay reference below would test a different request.
-    _, self_check_ids = token_prompt_completion(
+    self_check_text, self_check_ids = token_prompt_completion(
         frontend.frontend_port, prompt_ids, tokens_before_fault
     )
     assert self_check_ids == migrated_ids[:tokens_before_fault], (
@@ -269,30 +270,25 @@ def assert_migrated_output_matches_replay(
 
     replay_prompt_ids = prompt_ids + migrated_ids[:tokens_before_fault]
     remaining_tokens = KV_TRANSFER_MAX_TOKENS - tokens_before_fault
-    replay_references = [
+    replay_texts = [
         token_prompt_completion(
             frontend.frontend_port, replay_prompt_ids, remaining_tokens
-        )[1]
+        )[0]
         for _ in range(KV_TRANSFER_REPLAY_REFERENCE_REQUESTS)
     ]
-    reference_ids = os.path.commonprefix(replay_references)
-
-    tokenizer = AutoTokenizer.from_pretrained(FAULT_TOLERANCE_MODEL_NAME)
-    reference_text = tokenizer.decode(reference_ids)
+    reference_text = os.path.commonprefix(replay_texts)
     assert len(reference_text) >= 32, (
         "Fault-free replay reference must cover at least 32 characters after "
         "the fault boundary"
     )
     logger.info(
-        "Comparing %s post-fault tokens with a %s-token replay reference "
-        "(tokens_completed=%s)",
-        len(migrated_ids) - tokens_before_fault,
-        len(reference_ids),
+        "Comparing streamed output with %s pre-fault characters and a "
+        "%s-character replay reference (tokens_completed=%s)",
+        len(self_check_text),
+        len(reference_text),
         tokens_before_fault,
     )
-    assert_output_prefix(
-        tokenizer.decode(migrated_ids[tokens_before_fault:]), reference_text
-    )
+    assert_output_prefix(migrated_output, self_check_text + reference_text)
 
 
 def read_trtllm_kv_transfer_metrics(worker_system_port: int) -> tuple[float, float]:
@@ -735,7 +731,7 @@ def test_request_migration_trtllm_kv_transfer(
             )
             assert migrated_output is not None
             assert_migrated_output_matches_replay(
-                frontend, migrated_response, frontend_log_offset
+                frontend, migrated_response, migrated_output, frontend_log_offset
             )
 
 

@@ -242,6 +242,7 @@ def wait_for_worker_request_id(
 
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+# No metric exposes the fault point, so read it from the frontend's retry log.
 _MIGRATION_RETRY_TOKENS_RE = re.compile(
     r"migration retry scheduled.*?migration\.tokens_completed=(?P<tokens>\d+)"
 )
