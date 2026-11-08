@@ -198,15 +198,26 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps $(grep -E '^nvtx==' /tmp/requirements.common.txt)
 
-# The upstream SGLang base ships a uv binary outside any Python distribution, so
-# requirements.sglang.txt cannot refresh it. Replace it with the pinned uv
-# wherever the base put it: the cuda base installs it to /usr/local/bin, the xpu
-# base to /root/.local/bin.
+{% if device == "xpu" %}
+# The upstream SGLang XPU base installs uv to /root/.local/bin, outside any Python
+# distribution, so requirements.sglang.txt cannot refresh it. Replace every uv on
+# PATH with the pinned release.
+{%- else %}
+# The upstream SGLang base copies a uv binary into /usr/local/bin, outside any
+# Python distribution, so requirements.sglang.txt cannot refresh it. Replace it
+# with the release carrying the current fix line where the base ships one.
+{%- endif %}
 # Nothing on the runtime path runs uv.
 RUN --mount=type=bind,from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }},source=/,target=/tmp/uv-image \
+{%- if device == "xpu" %}
     for u in $(which -a uv uvx); do \
         install -m 0755 "/tmp/uv-image/$(basename "$u")" "$u"; \
     done && \
+{%- else %}
+    if [ -e /usr/local/bin/uv ]; then \
+        install -m 0755 /tmp/uv-image/uv /tmp/uv-image/uvx /usr/local/bin/; \
+    fi && \
+{%- endif %}
     for u in $(which -a uv uvx); do \
         "$u" --version | grep -q '^uvx\{0,1\} {{ context.dynamo.uv_version | replace(".", "\\.") }} ' || { echo "unexpected uv at $u" >&2; exit 1; }; \
     done
@@ -419,10 +430,11 @@ RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/
    symlink needs no mkdir. #}
 RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
+{%- if device == "xpu" %}
     ln -sf /workspace /sgl-workspace/dynamo
-
-{% if device != "xpu" %}
-RUN NSYS_BIN=$(find /opt/nvidia/nsight-compute -maxdepth 6 -type f -name nsys -executable 2>/dev/null | head -n1) && \
+{%- else %}
+    ln -s /workspace /sgl-workspace/dynamo && \
+    NSYS_BIN=$(find /opt/nvidia/nsight-compute -maxdepth 6 -type f -name nsys -executable 2>/dev/null | head -n1) && \
     if [ -n "$NSYS_BIN" ]; then ln -sf "$NSYS_BIN" /usr/local/bin/nsys; \
     else echo "WARNING: no bundled nsys found under /opt/nvidia/nsight-compute"; fi
 {% endif %}
@@ -495,7 +507,7 @@ CMD []
 #######################################
 
 FROM pre_runtime AS runtime
-{% if device == "cuda" %}
+{%- if device == "cuda" %}
 # NVDEC (PyNvVideoCodec, added in requirements.sglang.txt) needs the driver
 # "video" capability at runtime so libnvcuvid is exposed; without it
 # PyNvVideoCodec cannot import. Ensure the K8s pod/runtimeClass does not drop it.

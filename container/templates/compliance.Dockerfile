@@ -53,11 +53,13 @@
 # gate, and exposes /legal/ + /sboms/ for the next two stages to fan out.
 #
 # Per-framework variations:
-#   - sglang CUDA uses `--site-packages "$(... sysconfig ...)"` because the
+#   - sglang uses `--site-packages "$(... sysconfig ...)"` because the
 #     upstream image installs into system Python via
-#     `pip install --break-system-packages`, not a venv. sglang XPU is
-#     excluded: its lmsysorg/sglang:*-xpu base installs into /opt/venv, so it
-#     takes the VIRTUAL_ENV branch like vllm xpu/cpu.
+#     `pip install --break-system-packages`, not a venv.
+{%- if framework == "sglang" and device == "xpu" %}
+#     sglang XPU is excluded: its lmsysorg/sglang:*-xpu base installs into
+#     /opt/venv, so it takes the VIRTUAL_ENV branch like vllm xpu/cpu.
+{%- endif %}
 #   - native always runs (image filter "{framework}-{target}[-efa]"), attributing
 #     the from-source binaries the python/rust/dpkg scanners miss (ffmpeg, libvpx,
 #     UCX, NIXL, gdrcopy, libfabric, etcd, nats-server) per native_packages.yaml's

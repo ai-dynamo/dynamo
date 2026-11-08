@@ -320,7 +320,8 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:/usr/local/cargo/bin:$PATH
 {% else %}
-# CPU/XPU vLLM and XPU SGLang: use the runtime's upstream /opt/venv
+{# CPU/XPU vLLM and XPU SGLang share this: both use the runtime's upstream /opt/venv. #}
+# CPU/XPU vLLM: Use runtime's /opt/venv
 ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     DYNAMO_HOME=${WORKSPACE_DIR} \
     RUSTUP_HOME=/home/dynamo/.rustup \

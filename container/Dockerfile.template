@@ -31,6 +31,7 @@
 
 # --- SGLang Stages
 {% if framework == "sglang" %}
+    # SGLang builds directly from its upstream runtime image.
     {% include "templates/sglang_runtime.Dockerfile" %}
 {% else %}
 # --- No SGLANG stages included
