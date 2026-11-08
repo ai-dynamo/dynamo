@@ -2591,11 +2591,17 @@ request_classifier:
             card,
             group_key: key.clone(),
         };
+        let (_qualification, decision_fleet) =
+            crate::discovery::test_support::fleet(desired.card.decision_qualification(), vec![1]);
         let spec = GroupSpec {
             key,
             mdc_checksum: desired.mdc_checksum.clone(),
             fingerprint: desired.mdc_checksum.clone(),
             generation: 1,
+            decision_kinds: crate::model_card::decision_profile::DecisionKinds::advertised(
+                &desired.card,
+            ),
+            decision_fleet,
             representative: desired.clone(),
             video_contract: desired.video_contract.clone(),
         };
@@ -2686,11 +2692,19 @@ request_classifier:
                 card,
                 group_key: key.clone(),
             };
+            let (_qualification, decision_fleet) = crate::discovery::test_support::fleet(
+                desired.card.decision_qualification(),
+                vec![1],
+            );
             let spec = GroupSpec {
                 key,
                 mdc_checksum: desired.mdc_checksum.clone(),
                 fingerprint: desired.mdc_checksum.clone(),
                 generation: 1,
+                decision_kinds: crate::model_card::decision_profile::DecisionKinds::advertised(
+                    &desired.card,
+                ),
+                decision_fleet,
                 representative: desired.clone(),
                 video_contract: desired.video_contract.clone(),
             };
@@ -3595,11 +3609,19 @@ request_classifier:
                 .normalize(discovery, &NamespaceFilter::Global)
                 .unwrap()
                 .unwrap();
+            let (_qualification, decision_fleet) = crate::discovery::test_support::fleet(
+                desired.card.decision_qualification(),
+                vec![worker_id],
+            );
             let spec = GroupSpec {
                 key: desired.group_key.clone(),
                 mdc_checksum: desired.mdc_checksum.clone(),
                 fingerprint: desired.mdc_checksum.clone(),
                 generation: index + 1,
+                decision_kinds: crate::model_card::decision_profile::DecisionKinds::advertised(
+                    &desired.card,
+                ),
+                decision_fleet,
                 video_contract: desired.video_contract.clone(),
                 representative: desired.clone(),
             };
