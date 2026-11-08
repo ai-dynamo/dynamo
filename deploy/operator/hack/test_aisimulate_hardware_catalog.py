@@ -43,9 +43,9 @@ def _pinned_version() -> Version:
         for dependency in dependencies
         if canonicalize_name(Requirement(dependency).name) == "aisimulate"
     ]
-    assert len(requirements) == 1, (
-        "pyproject.toml's ais extra must contain one AISimulate pin"
-    )
+    assert (
+        len(requirements) == 1
+    ), "pyproject.toml's ais extra must contain one AISimulate pin"
 
     requirement = requirements[0]
     specifiers = list(requirement.specifier)

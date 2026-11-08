@@ -287,7 +287,15 @@ def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) ->
     )
 
 
-def pip_check(venv_python: Path) -> None:
+def pip_check(venv_python: Path, *, pillow_override: Path | None = None) -> None:
+    if pillow_override is not None:
+        declarations = [
+            line.split("#", 1)[0].strip()
+            for line in pillow_override.read_text().splitlines()
+            if line.split("#", 1)[0].strip()
+        ]
+        if declarations != ["pillow>=13.0.0,<14"]:
+            raise AssertionError("Expected the repository's bounded Pillow override")
     command = [str(venv_python), "-m", "pip", "check"]
     print("+", " ".join(command), flush=True)
     proc = subprocess.run(
@@ -308,6 +316,125 @@ def pip_check(venv_python: Path) -> None:
         for line in proc.stdout.splitlines()
         if "which is not installed." in line or "but you have" in line
     ]
+    if pillow_override is not None:
+        from packaging.requirements import Requirement
+        from packaging.tags import Tag, parse_tag
+        from packaging.version import Version
+
+        platform_warning = re.compile(
+            r"(nvidia-[a-z0-9_.-]+) ([^ ]+) is not supported on this platform",
+            re.IGNORECASE,
+        )
+        warnings = [
+            match
+            for line in proc.stdout.splitlines()
+            if (match := platform_warning.fullmatch(line.strip())) is not None
+        ]
+        probe = textwrap.dedent(
+            """
+            import importlib.metadata as metadata
+            import json
+            import platform
+            import sys
+
+            from packaging.tags import sys_tags
+
+            try:
+                aiperf = metadata.distribution("aiperf")
+            except metadata.PackageNotFoundError:
+                aiperf = None
+            print(json.dumps({
+                "aiperf": aiperf.version if aiperf is not None else None,
+                "pillow": metadata.version("pillow"),
+                "requires": aiperf.requires if aiperf is not None else [],
+                "platform": platform.machine(),
+                "system": platform.system(),
+                "supported_tags": [str(tag) for tag in sys_tags()],
+                "platform_wheels": {
+                    name: {"version": metadata.version(name),
+                           "wheel": metadata.distribution(name).read_text("WHEEL")}
+                    for name in sys.argv[1:]
+                },
+            }))
+            """
+        )
+        installed = json.loads(
+            subprocess.check_output(
+                [str(venv_python), "-c", probe, *[match[1] for match in warnings]],
+                text=True,
+            )
+        )
+        override = Requirement(declarations[0])
+        if Version(installed["pillow"]) not in override.specifier:
+            raise AssertionError("Installed Pillow violates the declared override")
+
+        if proc.returncode:
+            recognized = {line.strip() for line in conflicts}
+            for match in warnings:
+                distribution = installed["platform_wheels"][match[1]]
+                tags = Parser().parsestr(distribution["wheel"] or "").get_all("Tag", [])
+                wheel_tags = {tag for raw_tag in tags for tag in parse_tag(raw_tag)}
+                if (
+                    installed["system"] != "Linux"
+                    or installed["platform"] not in {"aarch64", "arm64"}
+                    or distribution["version"] != match[2]
+                    or not wheel_tags
+                    or not all(tag.platform.endswith("_sbsa") for tag in wheel_tags)
+                ):
+                    raise AssertionError("Unqualified NVIDIA platform warning")
+                # Only the SBSA architecture alias may differ. Python, ABI and
+                # Linux/glibc compatibility must match this target interpreter.
+                normalized_tags = {
+                    str(
+                        Tag(
+                            tag.interpreter,
+                            tag.abi,
+                            tag.platform.removesuffix("_sbsa") + "_aarch64",
+                        )
+                    )
+                    for tag in wheel_tags
+                }
+                supported = normalized_tags.intersection(installed["supported_tags"])
+                if not supported:
+                    raise AssertionError(
+                        "NVIDIA SBSA alias does not match supported tags"
+                    )
+                print(
+                    f"Verified NVIDIA ARM platform-tag exception: {match[0]}; "
+                    f"platform={installed['system']}/{installed['platform']}; "
+                    f"WHEEL tags={tags}; supported normalized tags={sorted(supported)}",
+                    flush=True,
+                )
+                recognized.add(match[0])
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            if not lines or any(line not in recognized for line in lines):
+                raise AssertionError("Unrecognized nonzero pip check diagnostic")
+
+        # Only this documented production override may replace a declared edge.
+        # All other missing/version conflicts still fail, including shared AIS deps.
+        edge = re.compile(
+            r"aiperf 0\.13\.0 has requirement pillow~=12\.3\.0, "
+            r"but you have pillow ([^ ]+)\.",
+            re.IGNORECASE,
+        )
+        selected = [line for line in conflicts if edge.fullmatch(line.strip())]
+        if selected:
+            requirements = [Requirement(raw) for raw in installed["requires"]]
+            actual_edge = any(
+                canonical_name(requirement.name) == "pillow"
+                and str(requirement.specifier) == "~=12.3.0"
+                and requirement.marker is None
+                for requirement in requirements
+            )
+            for line in selected:
+                match = edge.fullmatch(line.strip())
+                if (
+                    installed["aiperf"] == "0.13.0"
+                    and actual_edge
+                    and match[1] == installed["pillow"]
+                ):
+                    print(f"Applied declared {pillow_override}: {line}", flush=True)
+                    conflicts.remove(line)
     if conflicts:
         details = "\n".join(f"  {line}" for line in conflicts)
         raise AssertionError(f"pip check found dependency conflicts:\n{details}")
