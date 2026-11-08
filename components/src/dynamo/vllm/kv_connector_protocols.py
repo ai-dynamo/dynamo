@@ -24,6 +24,7 @@ from typing import Any, Dict, Optional, Tuple, Type
 
 
 def _has_remote_blocks(incoming: Optional[Mapping[str, Any]]) -> bool:
+    """Require an object and detect nonempty native cache groups."""
     if incoming is None:
         return False
     if not isinstance(incoming, Mapping):
@@ -62,6 +63,7 @@ class NixlConnectorProtocol(KvConnectorProtocol):
     def prefill_request_kv_transfer_params(
         self, incoming: Optional[Mapping[str, Any]] = None
     ) -> Dict[str, Any]:
+        """Preserve decoder coordinates for partial pull and the next handoff."""
         params = {
             "do_remote_decode": True,
             "do_remote_prefill": False,
@@ -125,6 +127,7 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
     def prefill_request_kv_transfer_params(
         self, incoming: Optional[Mapping[str, Any]] = None
     ) -> Dict[str, Any]:
+        """Create push coordinates, rejecting decoder-source reuse."""
         if _has_remote_blocks(incoming):
             raise ValueError("Native decoder KV reuse requires NixlConnector.")
         return {
@@ -158,6 +161,7 @@ class LMCacheMPConnectorProtocol(KvConnectorProtocol):
     def prefill_request_kv_transfer_params(
         self, incoming: Optional[Mapping[str, Any]] = None
     ) -> Dict[str, Any]:
+        """Keep cache-mediated handoff empty; reject decoder-source reuse."""
         if _has_remote_blocks(incoming):
             raise ValueError("Native decoder KV reuse requires NixlConnector.")
         return {}

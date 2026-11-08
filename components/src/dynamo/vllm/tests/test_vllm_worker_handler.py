@@ -1975,6 +1975,7 @@ async def test_prefill_non_probe_keeps_protocol_handoff(
 async def test_native_prefill_decoder_reuse_reaches_engine_and_keeps_handoff(
     prefill_probe_handler, enabled
 ):
+    """Forward opted-in decoder coordinates and preserve the next handoff."""
     handler = prefill_probe_handler
     handler.engine_client.vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
@@ -2035,6 +2036,7 @@ async def test_native_prefill_decoder_reuse_reaches_engine_and_keeps_handoff(
 async def test_native_prefill_probe_does_not_forward_coordinates(
     prefill_probe_handler,
 ):
+    """Keep probes independent of caller-supplied decoder coordinates."""
     request = _make_raw_frontend_request()
     request[HEALTH_CHECK_KEY] = True
     request["extra_args"] = {"vllm_tito": "must not be adapted"}
@@ -2050,6 +2052,7 @@ async def test_native_prefill_probe_does_not_forward_coordinates(
 async def test_prefill_ignores_coordinates_without_native_envelope(
     prefill_probe_handler,
 ):
+    """Ignore coordinates outside the authoritative native envelope."""
     request = _make_raw_frontend_request()
     incoming = {"remote_block_ids": [[0]], "remote_num_tokens": 128}
     request["extra_args"] = {
@@ -2081,6 +2084,7 @@ async def test_prefill_ignores_coordinates_without_native_envelope(
 async def test_prefill_rejects_malformed_native_coordinates_before_generation(
     prefill_probe_handler, envelope
 ):
+    """Reject malformed native coordinates before calling the engine."""
     request = _make_raw_frontend_request()
     request["extra_args"] = {"vllm_tito": envelope}
     with pytest.raises(mod.InvalidArgument, match="must be an object"):

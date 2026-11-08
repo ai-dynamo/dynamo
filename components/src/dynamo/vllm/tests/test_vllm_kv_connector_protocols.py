@@ -92,6 +92,7 @@ def test_nixl_prefill_request_shape():
 
 
 def _bidir_config(enabled):
+    """Build a NIXL config with an explicit bidirectional-transfer flag."""
     config = _config("NixlConnector")
     config.kv_transfer_config.get_from_extra_config = (
         lambda key, default: enabled if key == "bidirectional_kv_xfer" else default
@@ -100,6 +101,7 @@ def _bidir_config(enabled):
 
 
 def test_nixl_prefill_preserves_native_decoder_coordinates_without_mutation():
+    """Preserve opaque coordinates without aliasing nested caller data."""
     incoming = {
         "do_remote_decode": False,
         "do_remote_prefill": True,
@@ -135,6 +137,7 @@ def test_nixl_prefill_preserves_native_decoder_coordinates_without_mutation():
     ],
 )
 def test_nixl_native_cold_request_does_not_require_bidirectional_config(incoming):
+    """Allow cold requests without bidirectional transfer."""
     params = NixlConnectorProtocol(
         _bidir_config(False)
     ).prefill_request_kv_transfer_params(incoming)
@@ -145,6 +148,7 @@ def test_nixl_native_cold_request_does_not_require_bidirectional_config(incoming
 
 @pytest.mark.parametrize("config", [_bidir_config(False), _config(None)])
 def test_nixl_native_decoder_source_requires_bidirectional_config(config):
+    """Require explicit bidirectional opt-in for retained decoder blocks."""
     with pytest.raises(ValueError, match="bidirectional_kv_xfer"):
         NixlConnectorProtocol(config).prefill_request_kv_transfer_params(
             {"remote_block_ids": [[0]], "remote_num_tokens": 64}
@@ -152,6 +156,7 @@ def test_nixl_native_decoder_source_requires_bidirectional_config(config):
 
 
 def test_native_decoder_source_rejected_for_cache_mediated_connector():
+    """Reject decoder coordinates for cache-mediated coordination."""
     protocol = LMCacheMPConnectorProtocol(_config("LMCacheMPConnector"))
     with pytest.raises(ValueError, match="requires NixlConnector"):
         protocol.prefill_request_kv_transfer_params({"remote_block_ids": [[0]]})
@@ -159,6 +164,7 @@ def test_native_decoder_source_rejected_for_cache_mediated_connector():
 
 
 def test_native_decoder_source_rejected_for_mooncake_connector(fake_mooncake):
+    """Reject decoder coordinates for Mooncake push coordination."""
     protocol = MooncakeConnectorProtocol(_config("MooncakeConnector"))
     with pytest.raises(ValueError, match="requires NixlConnector"):
         protocol.prefill_request_kv_transfer_params({"remote_block_ids": [[0]]})
