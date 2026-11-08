@@ -27,7 +27,6 @@ from argparse import Namespace
 from typing import TYPE_CHECKING, Any, Optional
 
 import uvloop
-from packaging.version import Version
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
@@ -52,6 +51,7 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
+SESSION_AFFINITY_MAX_ENTRIES_ENV = "DYN_ROUTER_SESSION_AFFINITY_MAX_ENTRIES"
 FRONTEND_ROUTE_ENTRYPOINT_GROUP = "dynamo.frontend.routes"
 
 # The frontend's TCP listener can exhaust the default soft RLIMIT_NOFILE (1024 on
@@ -317,10 +317,13 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
 
-            if Version(importlib.metadata.version("vllm")).release >= (0, 29):
+            try:
+                from vllm.entrypoints.common.cli_args import FrontendArgs
+            except ModuleNotFoundError as exc:
+                if exc.name != "vllm.entrypoints.common.cli_args":
+                    raise
+                # vLLM 0.32 (CPU and XPU images); remove once they ship 0.33.
                 from vllm.entrypoints.launchers.cli_args import FrontendArgs
-            else:
-                from vllm.entrypoints.openai.cli_args import FrontendArgs
         except ModuleNotFoundError:
             logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
             sys.exit(1)
@@ -437,6 +440,9 @@ async def async_main():
         loop.add_signal_handler(sig, signal_handler)
 
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
+    os.environ[SESSION_AFFINITY_MAX_ENTRIES_ENV] = str(
+        config.session_affinity_max_entries
+    )
     # Shared with the backends so a worker's advertised config is built from the
     # same flags and semantics. --router-mode always has a default here, so this
     # never returns None.

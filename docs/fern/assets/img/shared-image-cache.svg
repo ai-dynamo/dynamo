@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="892" height="423" viewBox="22 32 892 423" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Download an image once, reuse it on every worker</title>
+  <desc id="desc">A request for an image the shared cache already holds is a hit. For a new image, the cache misses, downloads it once from the image origin, stores it, and serves it to the workers.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-blue-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
+  <rect x="22" y="32" width="892" height="423" fill="#FFFFFF"/>
+  <text x="36" y="66" font-size="22.0" font-weight="700" fill="#1A1A1A">Download an image once, reuse it on every worker</text>
+  <rect x="36" y="100" width="120" height="96" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="79.0" y="121.56" width="34" height="26" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><circle cx="88.0" cy="129.56" r="3" fill="#76B900"/><polygon points="83.0,143.56 93.0,134.56 99.0,139.56 105.0,133.56 109.0,143.56" fill="#76B900"/>
+  <text x="96.0" y="180" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">seen before</text>
+  <rect x="36" y="286" width="120" height="96" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="79.0" y="307.56" width="34" height="26" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><circle cx="88.0" cy="315.56" r="3" fill="#76B900"/><polygon points="83.0,329.56 93.0,320.56 99.0,325.56 105.0,319.56 109.0,329.56" fill="#76B900"/>
+  <text x="96.0" y="366" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">new</text>
+  <line x1="158" y1="148" x2="298" y2="222" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <text x="228" y="168" font-size="15" font-weight="700" fill="#3F6600" text-anchor="middle">hit</text>
+  <line x1="158" y1="334" x2="298" y2="292" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <text x="220" y="332" font-size="15" font-weight="700" fill="#3F6600" text-anchor="middle">miss</text>
+  <rect x="300" y="150" width="210" height="200" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <path d="M392.0,201.0 v18 a13,5 0 0 0 26,0 v-18" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><ellipse cx="405.0" cy="201.0" rx="13" ry="5" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><path d="M392.0,210.0 a13,5 0 0 0 26,0" fill="none" stroke="#76B900" stroke-width="1.6"/>
+  <text x="405.0" y="320" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">Shared cache</text>
+  <text x="405.0" y="338" font-size="14" font-weight="400" fill="#5A6572" text-anchor="middle">Redis or Dragonfly</text>
+  <line x1="512" y1="200" x2="698" y2="148" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <rect x="700" y="100" width="200" height="96" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="788.0" y="122.56" width="24" height="24" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><rect x="794.0" y="128.56" width="12.0" height="12.0" fill="#76B900"/><line x1="795.2" y1="117.6" x2="795.2" y2="122.6" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="795.2" y1="146.6" x2="795.2" y2="151.6" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="783.0" y1="129.8" x2="788.0" y2="129.8" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="812.0" y1="129.8" x2="817.0" y2="129.8" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="804.8" y1="117.6" x2="804.8" y2="122.6" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="804.8" y1="146.6" x2="804.8" y2="151.6" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="783.0" y1="139.4" x2="788.0" y2="139.4" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="812.0" y1="139.4" x2="817.0" y2="139.4" stroke="#76B900" stroke-width="2" stroke-linecap="round"/>
+  <text x="800.0" y="180" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">Worker</text>
+  <line x1="512" y1="300" x2="698" y2="336" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <text x="610" y="336" font-size="15" font-weight="700" fill="#374151" text-anchor="middle">download once</text>
+  <rect x="700" y="290" width="200" height="96" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <circle cx="800.0" cy="324.6" r="13" fill="none" stroke="#76B900" stroke-width="2"/><ellipse cx="800.0" cy="324.56" rx="5.5" ry="13" fill="none" stroke="#76B900" stroke-width="1.5"/><line x1="787.0" y1="324.6" x2="813.0" y2="324.6" stroke="#76B900" stroke-width="1.5" stroke-linecap="round"/>
+  <text x="800.0" y="370" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">Image origin</text>
+  <path d="M800,388 C800,444 405,444 405,352" fill="none" stroke="#9CA3AF" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arrow-gray)"/>
+  <text x="600" y="438" font-size="15" font-weight="700" fill="#4B5563" text-anchor="middle">store</text>
+</svg>
