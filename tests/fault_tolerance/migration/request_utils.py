@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 import pytest
 from openai import OpenAI
+from pydantic import BaseModel
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 
@@ -35,9 +36,9 @@ class MigrationResponse:
     prompt_token_ids: list[int] | None = None
     completion_token_ids: list[int] = field(default_factory=list)
 
-    def record_nvext(self, payload) -> None:
+    def record_nvext(self, payload: BaseModel) -> None:
         """Accumulate token IDs from one OpenAI response object or chunk."""
-        nvext = (getattr(payload, "model_extra", None) or {}).get("nvext") or {}
+        nvext = (payload.model_extra or {}).get("nvext") or {}
         if nvext.get("prompt_token_ids") is not None:
             self.prompt_token_ids = list(nvext["prompt_token_ids"])
         self.completion_token_ids.extend(nvext.get("completion_token_ids") or [])

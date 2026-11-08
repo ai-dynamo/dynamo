@@ -238,8 +238,8 @@ def assert_migrated_output_matches_replay(
     A migration retry is a new request whose prompt is the original prompt plus
     the tokens already delivered. TensorRT-LLM recomputes those tokens in one
     context pass, and greedy decoding after that recompute is not guaranteed to
-    match the uninterrupted decode (DYN-5499). The reference therefore sends the
-    same replay prompt, without a fault, through the same frontend and the
+    match the uninterrupted decode. The reference therefore sends the same
+    replay prompt, without a fault, through the same frontend and the
     surviving workers, and the frontend's streamed text must match it across the
     fault boundary.
     """
