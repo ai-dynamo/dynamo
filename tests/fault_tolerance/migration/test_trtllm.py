@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 import requests
+from transformers import AutoTokenizer
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.gpu_args import build_trtllm_override_args
@@ -20,15 +21,18 @@ from tests.utils.prometheus import sum_metric_samples
 
 # Customized utils for migration tests
 from .request_utils import (
+    MigrationResponse,
     OutputContinuityError,
     assert_output_prefix,
     request_to_completion,
+    token_prompt_completion,
 )
 from .utils import (
     DynamoFrontendProcess,
     managed_processes_concurrently,
     run_migration_test,
     wait_for_endpoint_instances,
+    wait_for_migration_tokens_completed,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,6 +49,7 @@ KV_TRANSFER_MAX_TOKENS = 1536
 KV_TRANSFER_BASELINE_MAX_TOKENS = 256
 KV_TRANSFER_BASELINE_REQUESTS = 3
 KV_TRANSFER_PROMPT_REPETITIONS = 128
+KV_TRANSFER_REPLAY_REFERENCE_REQUESTS = 2
 
 # Keep one active worker-failure case for every migration-policy outcome while
 # varying API, response, and request plane.
@@ -230,6 +235,73 @@ KV_TRANSFER_MIGRATION_PARAMETERS = pytest.mark.parametrize(
     KV_TRANSFER_CASES,
     indirect=["request_plane"],
 )
+
+
+def assert_migrated_output_matches_replay(
+    frontend: DynamoFrontendProcess,
+    migrated_response: MigrationResponse,
+    frontend_log_offset: int,
+) -> None:
+    """Require the post-fault output to equal a fault-free replay of the retry.
+
+    A migration retry is a new request whose prompt is the original prompt plus
+    the tokens already delivered. TensorRT-LLM recomputes those tokens in one
+    context pass, and greedy decoding after that recompute is not guaranteed to
+    match the uninterrupted decode (DYN-5499). The reference therefore sends the
+    same replay prompt, without a fault, through the same frontend and the
+    surviving workers.
+    """
+    prompt_ids = migrated_response.prompt_token_ids
+    migrated_ids = migrated_response.completion_token_ids
+    assert prompt_ids, "Frontend did not return prompt_token_ids for the request"
+    assert len(migrated_ids) == KV_TRANSFER_MAX_TOKENS, (
+        "Migrated request returned the wrong number of completion token IDs: "
+        f"expected={KV_TRANSFER_MAX_TOKENS}, actual={len(migrated_ids)}"
+    )
+    tokens_before_fault = wait_for_migration_tokens_completed(
+        frontend, log_offset=frontend_log_offset
+    )
+    assert 0 < tokens_before_fault < len(migrated_ids), (
+        "Migration fault boundary is outside the completion: "
+        f"tokens_completed={tokens_before_fault}"
+    )
+
+    # The token-ID prompt must be the prompt the chat or completion request
+    # used, or the replay reference below would test a different request.
+    _, self_check_ids = token_prompt_completion(
+        frontend.frontend_port, prompt_ids, tokens_before_fault
+    )
+    assert self_check_ids == migrated_ids[:tokens_before_fault], (
+        "Token-ID prompt did not reproduce the tokens emitted before the fault: "
+        f"expected={migrated_ids[:tokens_before_fault]}, actual={self_check_ids}"
+    )
+
+    replay_prompt_ids = prompt_ids + migrated_ids[:tokens_before_fault]
+    remaining_tokens = KV_TRANSFER_MAX_TOKENS - tokens_before_fault
+    replay_references = [
+        token_prompt_completion(
+            frontend.frontend_port, replay_prompt_ids, remaining_tokens
+        )[1]
+        for _ in range(KV_TRANSFER_REPLAY_REFERENCE_REQUESTS)
+    ]
+    reference_ids = os.path.commonprefix(replay_references)
+
+    tokenizer = AutoTokenizer.from_pretrained(FAULT_TOLERANCE_MODEL_NAME)
+    reference_text = tokenizer.decode(reference_ids)
+    assert len(reference_text) >= 32, (
+        "Fault-free replay reference must cover at least 32 characters after "
+        "the fault boundary"
+    )
+    logger.info(
+        "Comparing %s post-fault tokens with a %s-token replay reference "
+        "(tokens_completed=%s)",
+        len(migrated_ids) - tokens_before_fault,
+        len(reference_ids),
+        tokens_before_fault,
+    )
+    assert_output_prefix(
+        tokenizer.decode(migrated_ids[tokens_before_fault:]), reference_text
+    )
 
 
 def read_trtllm_kv_transfer_metrics(worker_system_port: int) -> tuple[float, float]:
@@ -624,7 +696,7 @@ def test_request_migration_trtllm_kv_transfer(
 
             # GPU model output can diverge despite fixed sampling parameters.
             # Characterize the stable prefix across both round-robin decode
-            # workers, then require migration to preserve it past the fault.
+            # workers; the output emitted before the fault must follow it.
             baseline_outputs = [
                 request_to_completion(
                     frontend.frontend_port,
@@ -644,6 +716,8 @@ def test_request_migration_trtllm_kv_transfer(
                 for worker in (decode1, decode2)
             }
 
+            frontend_log_offset = os.path.getsize(frontend.log_path)
+            migrated_response = MigrationResponse(collect_token_ids=True)
             replacement_worker, migrated_output = run_migration_test(
                 frontend,
                 decode1,
@@ -662,13 +736,16 @@ def test_request_migration_trtllm_kv_transfer(
                 verify_replacement_worker=True,
                 force_max_output_tokens=True,
                 expected_output_prefix=stable_output_prefix,
+                response=migrated_response,
             )
             wait_for_trtllm_kv_transfer_success(
                 replacement_worker.system_port,
                 *transfer_baselines[replacement_worker.system_port],
             )
             assert migrated_output is not None
-            assert_output_prefix(migrated_output, stable_output_prefix)
+            assert_migrated_output_matches_replay(
+                frontend, migrated_response, frontend_log_offset
+            )
 
 
 @pytest.mark.timeout(350)  # 3x average
