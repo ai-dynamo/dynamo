@@ -544,6 +544,11 @@ A more-specific definition replaces the entire general definition, including `va
 cross-layer overrides do not produce duplicate names. Operator-owned topology, GMS, and
 per-engine failover bindings retain their generated values.
 
+For snapshot-less intra-pod vLLM failover, the operator assigns
+`VLLM_NIXL_SIDE_CHANNEL_PORT=5600+engineID` and `DYN_VLLM_KV_EVENT_PORT=20080+engineID`,
+where `engineID` is 0 or 1. Do not override these variables. The operator retains its
+per-engine assignments so the engines use distinct ports within the Pod.
+
 The operator preserves the relative order of surviving entries within each input list. It
 topologically orders references between layers, so a DGD-level variable can reference a
 component-specific override. Independent entries retain their original general-to-specific
@@ -582,8 +587,12 @@ for ordering. Existing same-list duplicate-name validation is unchanged.
 
 In `v1alpha1`, `service.envs` and `extraPodSpec.mainContainer.env` are combined during API
 conversion. When both lists define the same name, the extra container value replaces the
-service value at its original position. Put variables that need ordered expansion or duplicate
-names in one of these lists, or use `v1beta1` with `podTemplate.spec.containers[*].env`.
+service value at its original position. Conversion also de-duplicates entries within
+`extraPodSpec.mainContainer.env`, even when `service.envs` is empty. Only `service.envs`
+retains same-list repeated names through conversion. Keep variables whose expansion depends
+on list order together in `service.envs`, and avoid redefining those names in the extra
+container list. For direct ordered PodTemplate configuration, use `v1beta1` with
+`podTemplate.spec.containers[*].env`.
 
 DGDs created by an operator older than 1.8.0, or without the
 `nvidia.com/dynamo-operator-origin-version` annotation, retain the legacy sorted and de-duplicated
