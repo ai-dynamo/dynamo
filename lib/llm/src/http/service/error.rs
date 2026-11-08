@@ -38,7 +38,7 @@ pub struct HttpError {
     pub message: String,
 }
 
-/// Frontend-owned HTTP disposition derived only from semantic error class.
+/// Frontend-owned HTTP disposition derived from semantic error identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClientErrorAction {
     NoDelivery,
@@ -48,7 +48,7 @@ pub(crate) enum ClientErrorAction {
     },
 }
 
-/// Total class-to-HTTP policy. Backends never select these status codes.
+/// Default frontend class-to-HTTP policy, refined by validated reasons in `http_action_for_error`.
 pub(crate) fn http_action_for_class(class: dynamo_runtime::error::ErrorClass) -> ClientErrorAction {
     use dynamo_runtime::error::ErrorClass;
 
@@ -95,6 +95,14 @@ pub(crate) fn http_action_for_class(class: dynamo_runtime::error::ErrorClass) ->
 }
 
 pub(crate) fn http_action_for_error(error: &DynamoError) -> ClientErrorAction {
+    if error.class() == dynamo_runtime::error::ErrorClass::InvalidRequest
+        && error.reason().as_str() == dynamo_runtime::error::ErrorReason::UNPROCESSABLE_ENTITY
+    {
+        return ClientErrorAction::Respond {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            public_message: "Unprocessable Entity",
+        };
+    }
     http_action_for_class(error.class())
 }
 
@@ -245,8 +253,8 @@ impl SanitizedError {
 
 /// Whether a worker-asserted 5xx keeps its own status on the wire.
 ///
-/// Only 503 and the configured overload code (`DYN_HTTP_OVERLOAD_STATUS_CODE`,
-/// 529 by default) do. Dynamo already generates and documents both, so
+/// Preserve 503, 504 and the configured overload code (`DYN_HTTP_OVERLOAD_STATUS_CODE`,
+/// 529 by default). Dynamo already generates and documents these, so
 /// forwarding them tells a client nothing it could not already receive; any
 /// other 5xx becomes a 500. Reading the overload code from the env rather than
 /// hard-coding 529 keeps one overload status whether the signal came from the
@@ -256,7 +264,10 @@ impl SanitizedError {
 /// against another replica is
 /// <https://github.com/ai-dynamo/dynamo/issues/12383>.
 fn keeps_retry_semantics(status: StatusCode) -> bool {
-    status == StatusCode::SERVICE_UNAVAILABLE || status == overload_status_code()
+    matches!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT
+    ) || status == overload_status_code()
 }
 
 /// What to do with a status a backend worker asserted for itself.
@@ -408,7 +419,11 @@ mod tests {
 
     #[test]
     fn triage_keeps_only_retry_bearing_5xx_on_the_status_line() {
-        for status in [StatusCode::SERVICE_UNAVAILABLE, overload_status_code()] {
+        for status in [
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+            overload_status_code(),
+        ] {
             assert_eq!(
                 BackendStatusAction::triage(status),
                 BackendStatusAction::Sanitize(SanitizedError::PreserveServerError(status)),
@@ -419,7 +434,7 @@ mod tests {
 
     #[test]
     fn triage_coerces_other_5xx_and_reports_the_asserted_status() {
-        for code in [500u16, 501, 502, 504, 507, 599] {
+        for code in [500u16, 501, 502, 507, 599] {
             let status = StatusCode::from_u16(code).unwrap();
             assert_eq!(
                 BackendStatusAction::triage(status),

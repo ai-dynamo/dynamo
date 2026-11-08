@@ -75,6 +75,7 @@ pub(crate) fn check_candidate_policy(
             return Err(dynamo_runtime::error::DynamoError::builder()
                 .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
                 .message("invalid_lora_model_id")
+                .public_message("invalid_lora_model_id")
                 .build()
                 .into());
         }
@@ -501,7 +502,14 @@ mod tests {
                 requirements.accounting_attribution,
                 AccountingAttribution::Exclude
             );
-            assert!(check_candidate_policy(&request, true).is_err());
+            let error = check_candidate_policy(&request, true).unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<dynamo_runtime::error::DynamoError>()
+                    .unwrap()
+                    .public_message(),
+                Some("invalid_lora_model_id")
+            );
             assert!(check_stage(&request, ExecutionStage::Prefill).is_err());
             assert!(check_stage(&request, ExecutionStage::Encoder).is_err());
         }

@@ -259,6 +259,45 @@ impl Model {
         self.worker_sets.load().values().cloned().collect()
     }
 
+    /// A committed generation base, independent of live worker capabilities.
+    pub(crate) fn has_generation_base_deployment(&self) -> bool {
+        self.worker_sets.load().values().any(|worker_set| {
+            let card = worker_set.card();
+            card.lora.is_none()
+                && (card.model_type.supports_chat()
+                    || card.model_type.supports_completions()
+                    || worker_set.has_chat_engine()
+                    || worker_set.has_completions_engine())
+        })
+    }
+
+    pub(crate) fn has_runtime_lora_base_surface(
+        &self,
+        supports_surface: fn(&WorkerSet) -> bool,
+    ) -> bool {
+        self.worker_sets.load().values().any(|worker_set| {
+            let card = worker_set.card();
+            supports_surface(worker_set)
+                && card.lora.is_none()
+                && card.requires_preprocessing()
+                && matches!(
+                    card.worker_type,
+                    None | Some(crate::worker_type::WorkerType::Aggregated)
+                )
+        })
+    }
+
+    /// Live capability is separate from the committed base/surface contract.
+    pub(crate) fn has_runtime_lora_base_deployment(
+        &self,
+        supports_surface: fn(&WorkerSet) -> bool,
+    ) -> bool {
+        self.worker_sets
+            .load()
+            .values()
+            .any(|worker_set| supports_surface(worker_set) && worker_set.supports_runtime_lora())
+    }
+
     /// Build an immutable membership snapshot for request-plane publication.
     ///
     /// WorkerSets themselves are shared because their engines and routing lifecycle are
@@ -846,14 +885,35 @@ impl Model {
     pub fn get_chat_engine_with_parsing(
         &self,
     ) -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
-        self.select_worker_set_with(|ws| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
-            .ok_or_else(|| self.engine_error(self.has_chat_engine()))
+        self.get_chat_engine_with_parsing_where(|_| true)
+    }
+
+    pub(crate) fn get_chat_engine_with_parsing_where(
+        &self,
+        predicate: impl Fn(&WorkerSet) -> bool,
+    ) -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
+        self.select_worker_set_with(|ws| {
+            predicate(ws)
+                .then(|| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
+                .flatten()
+        })
+        .ok_or_else(|| self.engine_error(self.has_chat_engine()))
     }
 
     pub fn get_completions_engine_with_parsing(
         &self,
     ) -> Result<(OpenAICompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
+        self.get_completions_engine_with_parsing_where(|_| true)
+    }
+
+    pub(crate) fn get_completions_engine_with_parsing_where(
+        &self,
+        predicate: impl Fn(&WorkerSet) -> bool,
+    ) -> Result<(OpenAICompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
         self.select_worker_set_with(|ws| {
+            if !predicate(ws) {
+                return None;
+            }
             ws.completions_engine
                 .clone()
                 .map(|e| (e, ws.parsing_options()))
@@ -1104,6 +1164,96 @@ mod tests {
         assert!(model.select_image_edit_engine(2).unwrap().is_none());
         model.remove_worker_set("legacy");
         assert!(model.select_image_edit_engine(1).is_err());
+    }
+
+    struct StubServingEngine<Req, Resp>(std::marker::PhantomData<fn() -> (Req, Resp)>);
+
+    impl<Req, Resp> StubServingEngine<Req, Resp> {
+        fn new() -> Arc<Self> {
+            Arc::new(Self(std::marker::PhantomData))
+        }
+    }
+
+    #[async_trait]
+    impl<Req: dynamo_runtime::engine::Data, Resp: dynamo_runtime::engine::Data>
+        AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error>
+        for StubServingEngine<Req, Resp>
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<Req>,
+        ) -> Result<ManyOut<Annotated<Resp>>, Error> {
+            unimplemented!("selection test only")
+        }
+    }
+
+    #[test]
+    fn runtime_lora_engine_selection_excludes_incapable_namespaces() {
+        let model = Model::new("base".to_string());
+        let mut old_card = ModelDeploymentCard::default();
+        old_card.model_input = crate::model_type::ModelInput::Tokens;
+        let mut old = WorkerSet::new("old".to_string(), "old".to_string(), old_card);
+        old.chat_engine = Some(StubServingEngine::new());
+        old.completions_engine = Some(StubServingEngine::new());
+        model.add_worker_set("old".to_string(), Arc::new(old));
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.model_input = crate::model_type::ModelInput::Tokens;
+        card.runtime_config
+            .taints
+            .insert("dynamo.runtime-lora/v2".to_string());
+        card.runtime_config
+            .set_engine_specific("supports_runtime_lora_resolution", true)
+            .unwrap();
+        card.runtime_config
+            .set_engine_specific("runtime_lora_protocol_versions", vec![2_u32])
+            .unwrap();
+        card.runtime_config
+            .set_engine_specific("runtime_lora_schemes", vec!["custom"])
+            .unwrap();
+        let mut disaggregated = card.clone();
+        disaggregated.worker_type = Some(crate::worker_type::WorkerType::Decode);
+        assert!(
+            !WorkerSet::new("disagg".to_string(), "disagg".to_string(), disaggregated)
+                .supports_runtime_lora()
+        );
+        let expected: OpenAIChatCompletionsStreamingEngine = StubServingEngine::new();
+        let expected_completions: OpenAICompletionsStreamingEngine = StubServingEngine::new();
+        let mut custom = WorkerSet::new("custom".into(), "custom".into(), card.clone());
+        custom.chat_engine = Some(StubServingEngine::new());
+        custom.uses_custom_chat_processor = true;
+        let mut capable = WorkerSet::new("new".to_string(), "new".to_string(), card);
+        let (_instances, instance_rx) = watch::channel(vec![1]);
+        let (_configs, config_rx) = watch::channel(std::collections::HashMap::from([(
+            1,
+            capable.card().runtime_config.clone(),
+        )]));
+        custom.set_instance_watcher(instance_rx.clone());
+        custom.set_runtime_config_watcher(config_rx.clone());
+        model.add_worker_set("custom".into(), Arc::new(custom));
+        capable.set_instance_watcher(instance_rx);
+        capable.set_runtime_config_watcher(config_rx);
+        capable.chat_engine = Some(expected.clone());
+        capable.completions_engine = Some(expected_completions.clone());
+        model.add_worker_set("new".to_string(), Arc::new(capable));
+
+        for _ in 0..100 {
+            let (selected, _) = model
+                .get_chat_engine_with_parsing_where(WorkerSet::supports_runtime_lora_chat)
+                .unwrap();
+            assert!(Arc::ptr_eq(&selected, &expected));
+            let (selected, _) = model
+                .get_completions_engine_with_parsing_where(WorkerSet::supports_runtime_lora)
+                .unwrap();
+            assert!(Arc::ptr_eq(&selected, &expected_completions));
+        }
+        model.remove_worker_set("new");
+        assert!(model.get_chat_engine_with_parsing().is_ok());
+        assert!(model.get_completions_engine_with_parsing().is_ok());
+        assert!(matches!(
+            model.get_chat_engine_with_parsing_where(WorkerSet::supports_runtime_lora_chat),
+            Err(ModelManagerError::ModelUnavailable(_))
+        ));
     }
 
     #[async_trait]
