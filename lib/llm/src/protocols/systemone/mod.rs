@@ -4,6 +4,7 @@
 //! Native SGLang transport used by the reusable decision API core.
 
 mod native;
+pub mod vllm;
 
 pub use native::{build_native_score_request, parse_candidate_scores};
 
