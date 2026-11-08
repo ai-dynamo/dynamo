@@ -878,9 +878,7 @@ class LoopbackKubeAPI:
                             payload["metadata"]["uid"] = existing_uid
                         stored = self._store_metadata(payload, "MODIFIED")
         if missing:
-            self._write_status(
-                handler, 404, _not_found("dynamoworkermetadatas", name)
-            )
+            self._write_status(handler, 404, _not_found("dynamoworkermetadatas", name))
             return True
         if conflict_message is not None:
             self._write_status(handler, 409, _conflict(conflict_message))

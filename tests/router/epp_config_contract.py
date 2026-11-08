@@ -5884,8 +5884,9 @@ def assert_input_startup_capability_source_contracts() -> None:
             f"{find_args[11:14]!r} != None,None,None"
         )
 
+    epp_text = _cached_stripped_file(RUST_EPP, file_text)
     token_struct = _unique_scoped_rust_body(
-        _cached_stripped_file(RUST_EPP, file_text),
+        epp_text,
         re.compile(r"struct\s+TokenizeResult\s*\{"),
         "EPP TokenizeResult",
     )
@@ -5899,10 +5900,43 @@ def assert_input_startup_capability_source_contracts() -> None:
         "strict_priority",
         "routing_constraints",
         "tokens_safe_to_inject",
+        "timings",
     )
     if token_fields != wanted_token_fields:
         raise AssertionError(
             f"TokenizeResult fields {token_fields!r} != {wanted_token_fields!r}"
+        )
+    timings_type = re.search(r"(?m)^\s*timings\s*:\s*([^,\n]+)", token_struct)
+    carrier = (
+        None
+        if timings_type is None
+        else re.sub(r"\s+", "", timings_type.group(1))
+    )
+    if carrier != "TokenizeTimings":
+        raise AssertionError(
+            f"TokenizeResult timings carrier {carrier!r} != 'TokenizeTimings'"
+        )
+    timing_struct = _unique_scoped_rust_body(
+        epp_text,
+        re.compile(r"struct\s+TokenizeTimings\s*\{"),
+        "EPP TokenizeTimings",
+    )
+    timing_fields = tuple(
+        (name, re.sub(r"\s+", "", typ))
+        for name, typ in re.findall(
+            r"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^,\n]+)",
+            timing_struct,
+        )
+    )
+    wanted_timing_fields = (
+        ("parse", "Duration"),
+        ("blocking_wait", "Option<Duration>"),
+        ("template", "Option<Duration>"),
+        ("tokenize", "Option<Duration>"),
+    )
+    if timing_fields != wanted_timing_fields:
+        raise AssertionError(
+            f"TokenizeTimings fields {timing_fields!r} != {wanted_timing_fields!r}"
         )
     if "DYN_SERVE_INDEXER" in from_discovery or "DYN_ROUTER_MODE" in from_discovery:
         raise AssertionError("stock EPP from_discovery gained FE serve/mode env reads")
