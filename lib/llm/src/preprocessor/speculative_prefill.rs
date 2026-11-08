@@ -450,13 +450,16 @@ mod tests {
         ChatCompletionRequestUserMessageContent, ChatCompletionStreamResponseDelta,
         CreateChatCompletionRequest, CreateChatCompletionStreamResponse, FinishReason,
     };
-    use dynamo_renderer::PromptFormatter;
+    use dynamo_renderer::deepseek::v41::DeepSeekV41Formatter;
+    use dynamo_renderer::{ChatTemplate, ContextMixins, PromptFormatter};
     use dynamo_runtime::pipeline::ResponseStream;
+    use serde_json::json;
     use tokio::time::Instant;
 
     use crate::model_card::ModelDeploymentCard;
     use crate::preprocessor::prompt::prompt_formatter_from_mdc;
     use crate::protocols::common::extensions::{AgentHints, NvExt};
+    use crate::protocols::openai::responses::NvCreateResponse;
 
     use super::*;
 
@@ -749,11 +752,7 @@ mod tests {
         tasks
     }
 
-    #[tokio::test]
-    async fn warmup_tokens_preserve_deepseek_rendering_settings() {
-        use dynamo_renderer::deepseek::v41::DeepSeekV41Formatter;
-        use serde_json::json;
-
+    fn byte_fallback_tokenizer() -> Arc<dyn Tokenizer> {
         let vocab: serde_json::Map<_, _> = (0..256)
             .map(|byte| (format!("<0x{byte:02X}>"), json!(byte)))
             .collect();
@@ -764,8 +763,12 @@ mod tests {
             "model": {"type": "BPE", "vocab": vocab, "merges": [], "byte_fallback": true}
         }))
         .unwrap();
-        let tokenizer: Arc<dyn Tokenizer> =
-            Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf));
+        Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf))
+    }
+
+    #[tokio::test]
+    async fn warmup_tokens_preserve_deepseek_rendering_settings() {
+        let tokenizer = byte_fallback_tokenizer();
         let formatter: Arc<dyn OAIPromptFormatter> = Arc::new(DeepSeekV41Formatter);
         let tool = json!({"type":"function", "function":{
             "name":"lookup", "parameters":{"type":"object", "properties":{}}
@@ -830,6 +833,82 @@ mod tests {
                 "settings: {settings}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn warmup_tokens_preserve_native_template_tools() {
+        let response: NvCreateResponse = serde_json::from_value(json!({
+            "model": "mock-llama", "input": "how tall is everest?",
+            "tools": [{"type": "namespace", "name": "fs", "description": "Files",
+                "tools": [{"type": "function", "name": "read", "description": "Read files",
+                    "defer_loading": true,
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}},
+                        "required": ["path"]}}]}],
+            "chat_template_args": {"current_date": "2000-01-01",
+                "deferred_render_mode": "tool_name_only"},
+            "nvext": {"agent_hints": {"speculative_prefill": true}}
+        }))
+        .unwrap();
+        let mut request: NvCreateChatCompletionRequest = response.try_into().unwrap();
+        let config: ChatTemplate = serde_json::from_value(json!({
+            "chat_template": include_str!("../../tests/data/muse_spark_open_deferred_tools.jinja")
+        }))
+        .unwrap();
+        let PromptFormatter::OAI(formatter) =
+            PromptFormatter::from_parts(config, ContextMixins::new(&[]), true).unwrap();
+        assert!(formatter.supports_native_tools(&request));
+        request.normalize_responses_tools(true).unwrap();
+        let tokenizer = byte_fallback_tokenizer();
+
+        let mut completed = request.clone();
+        completed
+            .inner
+            .messages
+            .push(ChatCompletionRequestMessage::Assistant(
+                ChatCompletionRequestAssistantMessage {
+                    content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+                        "everest is 8849 m tall.".into(),
+                    )),
+                    ..Default::default()
+                },
+            ));
+        completed.common.add_generation_prompt = Some(false);
+        let rendered = formatter.render(&completed).unwrap();
+        assert!(rendered.contains("Current date: 2000-01-01."));
+        assert!(rendered.contains("\"name\": \"fs.read\""));
+        assert!(rendered.contains("\"defer_loading\": true"));
+        assert!(!rendered.contains("\"parameters\""));
+        let expected = tokenizer.encode(&rendered).unwrap();
+
+        let mut flat_only = SpeculativePrefillRequest::from_request(&completed);
+        flat_only.template_tools = None;
+        let flat_tokens = tokenizer
+            .encode(&formatter.render(&flat_only).unwrap())
+            .unwrap();
+        assert_ne!(flat_tokens.token_ids(), expected.token_ids());
+
+        let backend = Arc::new(WindDownBackend::default());
+        let engine: Arc<BackendEngine> = backend.clone();
+        let tasks = test_tasks(None);
+        let tracker = tasks.tracker.clone();
+        let wrapped = maybe_wrap_stream(
+            upstream(),
+            &request,
+            "req-native-template-tools",
+            &engine,
+            &formatter,
+            &tokenizer,
+            &tasks,
+        );
+        let items: Vec<_> = wrapped.collect().await;
+        assert_eq!(text_of(&items), "everest is 8849 m tall.");
+        wait_for_dispatch(&backend.dispatched).await;
+        let actual = backend.token_ids.lock().clone();
+        drop(tasks);
+        tokio::time::timeout(Duration::from_secs(5), tracker.wait())
+            .await
+            .unwrap();
+        assert_eq!(actual.as_slice(), expected.token_ids());
     }
 
     async fn wait_for_tracked_tasks(tracker: &TaskTracker, expected: usize) {
