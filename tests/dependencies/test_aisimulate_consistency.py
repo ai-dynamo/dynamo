@@ -245,6 +245,21 @@ def test_ci_requires_ais_in_its_owning_lanes() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "relative", ["container", "container/deps", "container/templates"]
+)
+def test_ci_metadata_directories_are_readable_and_traversable(relative: str) -> None:
+    directory = ROOT / relative
+    assert directory.is_dir()
+    # The mode check also catches the regression when a privileged test process
+    # could bypass it. os.access verifies the actual CI runner's access too.
+    assert directory.stat().st_mode & 0o555 == 0o555, directory
+    assert os.access(directory, os.R_OK | os.X_OK), directory
+    for name in directory.iterdir():
+        if name.is_file():
+            assert os.access(name, os.R_OK), name
+
+
 @pytest.fixture
 def installed_aisimulate() -> metadata.Distribution:
     """Set DYNAMO_TEST_REQUIRE_AIS_RUNTIME=1 for a required opt-in installation."""

@@ -95,6 +95,13 @@ COPY --chmod=755 --chown=dynamo:0 .github/workflows/shared-build-image.yml /work
 COPY --chmod=664 --chown=dynamo:0 container/deps/overrides.planner.txt /workspace/container/deps/overrides.planner.txt
 # Dependency contract tests inspect both templates in every component test image.
 COPY --chmod=664 --chown=dynamo:0 container/templates/planner.Dockerfile /workspace/container/templates/planner.Dockerfile
+# COPY's file mode can also reach newly created parent directories. The test
+# runner uses uid 1001, so give these exact metadata directories traversal
+# without changing the 664 files or the workspace write policy below.
+RUN python3 -c 'import os; \
+    os.chmod("/workspace/container", 0o755); \
+    os.chmod("/workspace/container/deps", 0o755); \
+    os.chmod("/workspace/container/templates", 0o755)'
 COPY --chmod=664 --chown=dynamo:0 tests/__init__.py /workspace/tests/__init__.py
 COPY --chmod=664 --chown=dynamo:0 tests/marker_categories.py /workspace/tests/marker_categories.py
 # Version-stamping and shell regression tests execute these workflow helpers.
