@@ -503,6 +503,17 @@ impl ModelWatcher {
             admitted_ids,
         });
         worker_set.set_instance_watcher(instance_watcher);
+        if crate::lora::runtime::RuntimeLoraConfig::from_env()?.enabled
+            && card.lora.is_none()
+            && card.requires_preprocessing()
+            && matches!(card.worker_type, None | Some(WorkerType::Aggregated))
+        {
+            worker_set.set_runtime_config_watcher(
+                self.manager
+                    .get_or_create_runtime_config_watcher(&endpoint)
+                    .await?,
+            );
+        }
 
         // A surface-less Encode worker is reached only through EncoderRouter.
         // Register it for serving readiness, publish its endpoint to any
@@ -764,6 +775,7 @@ impl ModelWatcher {
                     anyhow::anyhow!("chat pipeline requires preprocessed routing")
                 })?;
                 let chat_engine = if let Some(ref factory) = self.chat_engine_factory {
+                    worker_set.uses_custom_chat_processor = true;
                     let routed_engine = routing
                         .build_preprocessed_pipeline(
                             card,
