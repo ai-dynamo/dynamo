@@ -15,7 +15,7 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
 
 ## Decision APIs
 
-**Experimental.** `--enable-systemone-api` (environment variable `DYN_ENABLE_SYSTEMONE_API`, default `false`) enables both OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. The qualified backend is an aggregated, single-rank SGLang CUDA worker using the serialized scoring profile. See [Start a Decision Worker](../../cli/model-deployment/introduction.mdx#decision-api-workers) for launch commands and smoke requests.
+**Experimental.** `--enable-systemone-api` (environment variable `DYN_ENABLE_SYSTEMONE_API`, default `false`) enables both OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. Execution profiles include serialized SGLang scoring, serialized vLLM 0.33.0 causal scoring, and the vLLM 0.33.0 Clef Flash joint head. Existing public contracts do not change between backends. See [Start a Decision Worker](../../cli/model-deployment/introduction.mdx#decision-api-workers) for exact runtime restrictions, launch commands and SDK checks.
 
 | Environment variable | Default | Maximum | Meaning |
 | --- | --- | --- | --- |
@@ -29,7 +29,7 @@ Decision capacity rejections carry `Retry-After: 1` and the `rate_limit_exceeded
 
 Raising the input-token limit does not raise every execution limit. Model context capacity, input bytes, tokenization work, and the fixed **16 MiB cumulative encoded-text budget** remain independent. Each question charges its rendered prompt bytes once for initial encoding, once for round-trip validation, and once per candidate label. For 26 labels, this budget permits approximately `16 MiB / 28` rendered bytes summed across questions, regardless of the configured token limit. Higher-byte-per-token text reaches this budget sooner. Rejections identify the encoded-text budget; they use HTTP 422 for Jev and HTTP 400 for OpenAI.
 
-The protocol ceiling of 255 candidates is not a guarantee that every tokenizer supports that many choices. Scoring requires distinct single-token labels at the answer position; the effective limit depends on the tokenizer and rendered prompt. Reduce the candidate count or select another model if label validation fails. Request shape and context checks run before scoring inference.
+The protocol ceiling of 255 candidates is not a guarantee that every tokenizer supports that many choices. Causal scoring requires distinct single-token labels at the answer position; the effective limit depends on the tokenizer and rendered prompt. The initial vLLM profiles cap each question at 26 candidates. Clef uses its own trained schema encoding, requires temperature 1, and does not provide vocabulary label mass. Reduce the candidate count or select another model if label validation fails. Request shape and context checks run before scoring inference.
 
 Question branches in one request share a cache namespace and are pinned to the first branch's worker. Separate API calls receive different random cache namespaces, so repeated inputs do not reuse another request's cached prefixes. Trusted tenant-scoped cross-request reuse is not supported by this profile.
 

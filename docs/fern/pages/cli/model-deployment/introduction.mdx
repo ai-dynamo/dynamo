@@ -174,7 +174,7 @@ docker exec -it <container_id> bash
 
 ## Decision API Workers
 
-**Experimental.** To serve OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`, use a dedicated aggregated SGLang CUDA worker on version 0.5.19, 0.5.22, or 0.5.23. Other backends and execution modes require separate qualification. These routes are disabled by default.
+**Experimental.** Serve OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone` with a dedicated aggregated SGLang or vLLM worker. These routes are disabled by default. SGLang supports versions 0.5.19, 0.5.22, and 0.5.23; the vLLM profiles below require released 0.33.0, not a development or release-candidate build. Other execution modes require separate qualification.
 
 With the installation and etcd/NATS prerequisites above in place, start the frontend in one terminal:
 
@@ -199,6 +199,39 @@ Do not enable speculative decoding, attention data parallelism, pipeline paralle
 <Warning>
 The entire worker is serialized, including ordinary chat and completion requests. Keep decision workers separate from throughput-oriented chat deployments. This small-model configuration verifies integration; it does not qualify larger checkpoints or establish task accuracy.
 </Warning>
+
+### vLLM Workers
+
+With the same frontend and etcd/NATS services, run one of these workers instead of SGLang. The causal profile uses one generated scoring token per question and raw vocabulary log probabilities:
+
+```bash
+DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE=1 python -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --revision c1899de289a04d12100db370d81485cdf75e47ca \
+  --tensor-parallel-size 1 --max-num-seqs 1 \
+  --max-model-len 2048 --max-num-batched-tokens 2048 \
+  --language-model-only --logprobs-mode raw_logprobs \
+  --generation-config vllm --no-enable-prefix-caching --enforce-eager
+```
+
+For Gemma's text-only causal path, replace the model with `google/gemma-4-E2B-it` and the revision with `3e22461f65e89153144f8adb70e3b8c2cc9845a7`. Accept its model-access conditions before downloading. Neither model name nor an accepted architecture establishes qualification of other checkpoints.
+
+Clef Flash uses its trained joint-schema head through the existing classification worker. It evaluates all questions in one pooling call, without generated tokens:
+
+```bash
+python -m dynamo.vllm \
+  --model Cloudflare/clef-flash \
+  --revision f0b7d3cd65296abfe459e6c228b618f5d8b26d2f \
+  --classify-worker --runner pooling --pooler-config '{"task":"token_classify"}' \
+  --tensor-parallel-size 1 --max-num-seqs 4 \
+  --max-model-len 2048 --max-num-batched-tokens 2048 \
+  --language-model-only --no-enable-prefix-caching \
+  --no-enable-chunked-prefill --no-async-scheduling --enforce-eager
+```
+
+Both vLLM profiles reject LoRA, speculative decoding, data-parallel replicas, disaggregation, and unsupported runtime/source configurations. Clef also requires synchronous scheduling, disabled prefix caching and disabled chunked prefill. It preserves the pinned upstream strategy's state truncation and schema encoding; its startup canary must succeed before advertising decision support. Do not send chat-template controls to Clef or use its decision worker for ordinary classification requests. Images and other native-head or diffusion models are outside these profiles.
+
+### Verify the APIs
 
 Verify the OpenAI contract:
 
@@ -235,7 +268,22 @@ curl --fail-with-body http://localhost:8000/v1/systemone \
   }'
 ```
 
-Successful responses contain `model`, `answers`, and `usage`, with zero generated output tokens. OpenAI answers are an ordered array; Jev answers are keyed by question name. Neither route accepts an `nvext` selector or the SGLang-native Decisions wire schema. A local model's predictions and confidence are not guaranteed to match a hosted provider.
+Successful responses contain `model`, `answers`, and `usage`. SGLang and Clef report zero generated output tokens; causal vLLM reports one per question. For Gemma or Clef, use the worker's registered model name in each request; omit `chat_template_kwargs` for Clef. OpenAI answers are an ordered array; Jev answers are keyed by question name. Neither route accepts an `nvext` selector or the SGLang-native Decisions wire schema. A local model's predictions and confidence are not guaranteed to match a hosted provider.
+
+### Official SDK Checks
+
+Install `openai==3.26.0`, `typesafe-sdk==0.7.2`, and the repository's test dependencies in an isolated client environment. From the repository root, run the existing external conformance tests against the running deployment:
+
+```bash
+export DYNAMO_DECISION_TEST_URL=http://localhost:8000
+export DYNAMO_DECISION_TEST_MODEL=Qwen/Qwen3-0.6B
+export DYNAMO_DECISION_TEST_PROFILE=vllm_causal
+export DYNAMO_DECISION_REQUIRE_SDKS=1
+python -m pytest tests/serve/test_decisions_external.py \
+  -k 'not native_sglang' -v
+```
+
+Use profile `sglang_serial` for SGLang or `clef_flash` with model `Cloudflare/clef-flash`. The profile controls fixture expectations only; it is not sent as an API selector. OpenAI's client base URL ends in `/v1`; TypeSafe's client base URL is the server origin, without `/v1`. These tests cover both wire shapes, official-client parsing, request IDs and rejection behavior. Passing them does not establish model quality, native numerical parity or physical GPU cancellation settlement; qualify those separately.
 
 For request limits and cache-sharing boundaries, see [Decision API Configuration](../../reference/components/frontend-configuration.mdx#decision-apis).
 
