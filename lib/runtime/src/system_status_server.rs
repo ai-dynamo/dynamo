@@ -958,7 +958,9 @@ mod tests {
             let last = Arc::new(tokio::sync::Mutex::new(LastScrape::default()));
             let scrape = |last: &Arc<tokio::sync::Mutex<LastScrape>>| {
                 let (last, registry) = (last.clone(), registry.clone());
-                tokio::spawn(async move { render_scrape_at(last, registry, Instant::now()).await })
+                // Sample arrival here: the task's first poll can land after the next render starts.
+                let requested_at = Instant::now();
+                tokio::spawn(async move { render_scrape_at(last, registry, requested_at).await })
             };
 
             // First scrape starts a render, then its request is cancelled.
@@ -981,8 +983,16 @@ mod tests {
             release.send(()).unwrap();
             started.recv().await.expect("second render started");
             release.send(()).unwrap();
-            let second = second.await.expect("task").expect("render");
-            let third = third.await.expect("task").expect("render");
+            let second = tokio::time::timeout(Duration::from_secs(5), second)
+                .await
+                .expect("second scrape finished")
+                .expect("task")
+                .expect("render");
+            let third = tokio::time::timeout(Duration::from_secs(5), third)
+                .await
+                .expect("third scrape finished")
+                .expect("task")
+                .expect("render");
             assert_eq!(second, third);
             assert!(
                 std::str::from_utf8(&second)
