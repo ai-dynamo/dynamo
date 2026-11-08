@@ -715,6 +715,8 @@ mod tests {
             });
             let entered = entering.recv_timeout(PROGRESS);
             let pending = observer.try_is_complete();
+            // Sample before release; assert only after the worker has safely drained.
+            let completed_before_release = completed.load(Ordering::Acquire);
             gate.release();
             let pending = native(pending);
             join_finished(&finishing, worker);
@@ -723,6 +725,10 @@ mod tests {
                 "caller-owned cancellation/error destructor was not entered"
             );
             assert!(!pending);
+            assert!(
+                !completed_before_release,
+                "caller-owned destructor reported fence completion while copy was pending"
+            );
             assert!(
                 completed.load(Ordering::Acquire),
                 "cancelled/error path did not complete its fence"
