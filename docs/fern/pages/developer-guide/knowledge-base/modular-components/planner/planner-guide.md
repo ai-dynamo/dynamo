@@ -332,7 +332,7 @@ spec:
 > only in offline simulation: `aisimulate predict --stack dynamo` and
 > `dynamo.replay.run_trace_replay`, and a live Planner rejects it at startup. With `dgdr`, a live
 > Planner on Kubernetes retunes three KV router knobs, and with scaling its own Planner fields,
-> through DGDR v1beta2 Requests; it is for development clusters only. See
+> through DGDR v1beta2 Requests; it is not feature complete. See
 > [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
 
 Retune lets the Planner tune its own runtime parameters from the traffic it served. Every

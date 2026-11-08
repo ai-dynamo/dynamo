@@ -6,10 +6,10 @@ subtitle: Let the Planner tune the KV router and its own scaling parameters on a
 ---
 
 > [!CAUTION]
-> **Experimental, development clusters only.** Live retune builds on DGDR v1beta2, which the
-> operator serves only with the experimental `dgdrV1Beta2.enabled` Helm value, and it writes
-> router parameters through the frontend admin API, which has no authentication. Do not enable it
-> on a cluster that serves production traffic.
+> **Experimental.** Live retune is not feature complete. It is disabled by default and requires
+> the separate `dgdrV1Beta2.plannerLiveRetune` Helm opt-in plus Planner configuration. It uses
+> the Experimental DGDR v1beta2 API, which is available without an API feature gate, and writes
+> router parameters through the frontend admin API, which has no authentication.
 
 Live retune is the Kubernetes form of [Periodic Retune](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md#periodic-retune-experimental).
 Every `retune.interval_seconds`, the Planner cuts the window of request traces that just ended,
@@ -84,9 +84,9 @@ This applies to all DGDR trace Runs, not only those the Planner creates.
 
 ## Prerequisites
 
-- **Operator with DGDR v1beta2 traces.** Install the platform chart with
-  `dynamo-operator.dgdrV1Beta2.enabled=true` and an operator that accepts `spec.workload.trace`.
-  Also set `dynamo-operator.dgdrV1Beta2.plannerLiveRetune=true` to grant the Planner
+- **Operator with DGDR v1beta2 traces.** Install a platform chart that serves the Experimental
+  DGDR v1beta2 API by default and accepts `spec.workload.trace`.
+  Set `dynamo-operator.dgdrV1Beta2.plannerLiveRetune=true` to grant the Planner
   ServiceAccount the access it needs (see [RBAC](#rbac)).
   In a cluster-wide install, the operator must also hold the DGDR v1beta2 Run and Candidate
   permissions of [ai-dynamo/dynamo#17308](https://github.com/ai-dynamo/dynamo/pull/17308); see
@@ -452,10 +452,10 @@ without `ports` admits every port, so list the frontend's other ports in it.
 
 ### RBAC
 
-With `dynamo-operator.dgdrV1Beta2.enabled=true` and
-`dynamo-operator.dgdrV1Beta2.plannerLiveRetune=true`, the platform chart adds these rules to the
-Planner Role (namespace-restricted installs) and ClusterRole (cluster-wide installs). Both values
-default to `false`; `dgdrV1Beta2.enabled` alone grants the Planner nothing new.
+With `dynamo-operator.dgdrV1Beta2.plannerLiveRetune=true`, the platform chart adds these rules
+to the Planner Role (namespace-restricted installs) and ClusterRole (cluster-wide installs).
+This opt-in defaults to `false`. The default availability of the DGDR v1beta2 API grants the
+Planner no additional permissions.
 
 | API group | Resources | Verbs |
 |---|---|---|
