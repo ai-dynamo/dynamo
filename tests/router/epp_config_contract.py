@@ -5908,9 +5908,7 @@ def assert_input_startup_capability_source_contracts() -> None:
         )
     timings_type = re.search(r"(?m)^\s*timings\s*:\s*([^,\n]+)", token_struct)
     carrier = (
-        None
-        if timings_type is None
-        else re.sub(r"\s+", "", timings_type.group(1))
+        None if timings_type is None else re.sub(r"\s+", "", timings_type.group(1))
     )
     if carrier != "TokenizeTimings":
         raise AssertionError(
