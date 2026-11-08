@@ -22,7 +22,6 @@ from tests.utils.prometheus import sum_metric_samples
 # Customized utils for migration tests
 from .request_utils import (
     MigrationResponse,
-    OutputContinuityError,
     assert_output_prefix,
     request_to_completion,
     token_prompt_completion,
@@ -173,14 +172,6 @@ KV_TRANSFER_CASES = [
         "completion",
         True,
         "tcp",
-        marks=pytest.mark.xfail(
-            reason=(
-                "Known TensorRT-LLM 1.3.0rc25 KV-migration output-continuity "
-                "failure; tracked in https://github.com/ai-dynamo/dynamo/pull/14609"
-            ),
-            raises=OutputContinuityError,
-            strict=True,
-        ),
         id="worker-failure-completion-stream-tcp",
     ),
 ]
