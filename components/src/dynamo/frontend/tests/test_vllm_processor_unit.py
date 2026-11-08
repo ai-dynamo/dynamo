@@ -25,7 +25,7 @@ from _tool_guidance_parity import (
 )
 from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
-from vllm.tool_parsers import ToolParser
+from vllm.tool_parsers import ToolParser, ToolParserManager
 
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.frontend import prepost as prepost_module
@@ -3234,7 +3234,6 @@ _GLM_TWO_CALLS = (
 
 def _assert_two_glm_calls_streamed(tokenizer, steps):
     from vllm.reasoning import ReasoningParserManager
-    from vllm.tool_parsers import ToolParserManager
 
     request, _, _, _, _ = _prepare_request(
         json.loads(json.dumps(TOOL_REQUEST)),
@@ -3317,6 +3316,70 @@ def test_tool_call_opener_split_at_reasoning_end(tokenizer):
         tokenizer,
         [(_GLM_TWO_CALLS[:split], []), (_GLM_TWO_CALLS[split:], [])],
     )
+
+
+@pytest.mark.parametrize(
+    ("suffix_chunks", "expected_content", "expected_finish"),
+    [
+        (
+            [
+                "_ca",
+                'll>{"name":"get_weather","arguments":{"city":"Paris"}}</tool_call>',
+            ],
+            "I can help. ",
+            "tool_calls",
+        ),
+        (["box"], "I can help. <toolbox", "stop"),
+        ([""], "I can help. <tool", "stop"),
+    ],
+    ids=["split-tool-opener", "literal-prefix", "end-of-stream"],
+)
+def test_hermes_split_tool_opener_at_reasoning_end(
+    tokenizer, suffix_chunks, expected_content, expected_finish
+):
+    request, _, _, _, _ = _prepare_request(
+        {**TOOL_REQUEST, "tool_choice": "auto"},
+        tokenizer=tokenizer,
+        tool_parser_class=None,
+    )
+    post = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=request,
+        sampling_params=SamplingParams(),
+        prompt_token_ids=[],
+        tool_parser=ToolParserManager.get_tool_parser("hermes")(
+            tokenizer, tools=request.tools
+        ),
+        reasoning_parser_class=_AccountingReasoningParser,
+        chat_template_kwargs={},
+    )
+    post.reasoning_parser.is_reasoning_end_streaming = Mock(return_value=True)
+
+    chunks = ["Think</think>I can help. <tool", *suffix_chunks]
+    choices = []
+    for index, text in enumerate(chunks):
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=tokenizer.encode(text, add_special_tokens=False),
+                finish_reason="stop" if index == len(chunks) - 1 else None,
+                logprobs=None,
+            )
+        )
+        if choice is not None:
+            choices.append(choice)
+
+    assert choices[0]["delta"]["content"] == "I can help. "
+    assert "".join(c["delta"].get("content", "") for c in choices) == expected_content
+    assert choices[-1]["finish_reason"] == expected_finish
+    calls = [call for c in choices for call in c["delta"].get("tool_calls", [])]
+    if expected_finish == "tool_calls":
+        assert len(calls) == 1
+        assert calls[0]["function"]["name"] == "get_weather"
+        assert json.loads(calls[0]["function"]["arguments"]) == {"city": "Paris"}
+    else:
+        assert calls == []
 
 
 class TestControlMarkerStrip:
