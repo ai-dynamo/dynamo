@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import sys
 import textwrap
@@ -185,6 +186,63 @@ def test_planner_ci_image_collects_unified_cli_e2e_tests() -> None:
 
     assert "components/src/dynamo/replay/tests/e2e" in planner_template
     assert "components/src/dynamo/replay/tests/test_main.py" not in planner_template
+
+
+@pytest.mark.parametrize(
+    "required,wheel_present,success",
+    [("0", True, True), ("1", True, True), ("true", True, False), ("1", False, True)],
+)
+def test_ci_ais_install_arguments_are_explicit(
+    tmp_path: Path, required: str, wheel_present: bool, success: bool
+) -> None:
+    dockerfile = (ROOT / "container/Dockerfile.test").read_text(encoding="utf-8")
+    start = dockerfile.index('    case "$DYNAMO_TEST_REQUIRE_AIS_RUNTIME"')
+    end = dockerfile.index("    check_python=python3", start)
+    # Exercise the actual Docker RUN argument construction without pip, a
+    # package import, or a network request. Invalid modes fail; the final
+    # Planner image has no wheelhouse but must still require its exact AIS pin.
+    script = dockerfile[start:end].replace("\\\n", "")
+    script = script.replace("/opt/dynamo/wheelhouse", shlex.quote(str(tmp_path)))
+    script += "printf '%s\\n' \"$@\""
+    wheel = tmp_path / "ai_dynamo-1.7.0-py3-none-any.whl"
+    if wheel_present:
+        wheel.write_bytes(b"argument-construction fixture; never installed")
+    result = subprocess.run(
+        ["bash", "-eu", "-c", script],
+        env={**os.environ, "DYNAMO_TEST_REQUIRE_AIS_RUNTIME": required},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert (result.returncode == 0) is success, result.stderr
+    if success:
+        arguments = result.stdout.splitlines()
+        assert arguments[:2] == ["--requirement", "/tmp/requirements.test.txt"]
+        if required == "1":
+            assert "/tmp/requirements.aisimulate.txt" in arguments
+            assert (str(wheel) + "[ais]" in arguments) is wheel_present
+        else:
+            assert not any(
+                "aisimulate" in value or "[ais]" in value for value in arguments
+            )
+
+
+def test_ci_requires_ais_in_its_owning_lanes() -> None:
+    dockerfile = (ROOT / "container/Dockerfile.test").read_text(encoding="utf-8")
+    workflow = (ROOT / ".github/workflows/shared-build-image.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "ARG DYNAMO_TEST_REQUIRE_AIS_RUNTIME=0" in dockerfile
+    planner_stage = dockerfile.split("FROM test_distroless AS test_planner\n", 1)[1]
+    assert 'RUN test "$DYNAMO_TEST_REQUIRE_AIS_RUNTIME" = 1' in planner_stage
+    assert (
+        "TEST_REQUIRE_AIS_RUNTIME: ${{ inputs.framework == 'dynamo' && "
+        "(inputs.target == 'runtime' || inputs.target == 'planner') && '1' || '0' }}"
+    ) in workflow
+    assert (
+        '--build-arg DYNAMO_TEST_REQUIRE_AIS_RUNTIME="${TEST_REQUIRE_AIS_RUNTIME}"'
+        in workflow
+    )
 
 
 @pytest.fixture

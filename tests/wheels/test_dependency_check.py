@@ -147,19 +147,19 @@ def test_policy_requires_real_nvidia_arm_tag_evidence_for_platform_warnings(
     if damage == "unknown-diagnostic":
         result.stdout = "pip dependency checking failed unexpectedly"
     elif damage == "wrong-tag":
-        installed["platform_wheels"]["nvidia-cusparselt-cu13"]["wheel"] = (
-            "Wheel-Version: 1.0\nTag: py3-none-manylinux_2_28_aarch64\n"
-        )
+        installed["platform_wheels"]["nvidia-cusparselt-cu13"][
+            "wheel"
+        ] = "Wheel-Version: 1.0\nTag: py3-none-manylinux_2_28_aarch64\n"
     elif damage == "wrong-architecture":
         installed["platform"] = "x86_64"
     elif damage == "wrong-python":
-        installed["platform_wheels"]["nvidia-cusparselt-cu13"]["wheel"] = (
-            "Wheel-Version: 1.0\nTag: cp314-cp314-manylinux_2_28_sbsa\n"
-        )
+        installed["platform_wheels"]["nvidia-cusparselt-cu13"][
+            "wheel"
+        ] = "Wheel-Version: 1.0\nTag: cp314-cp314-manylinux_2_28_sbsa\n"
     elif damage == "wrong-glibc":
-        installed["platform_wheels"]["nvidia-cusparselt-cu13"]["wheel"] = (
-            "Wheel-Version: 1.0\nTag: py3-none-manylinux_2_99_sbsa\n"
-        )
+        installed["platform_wheels"]["nvidia-cusparselt-cu13"][
+            "wheel"
+        ] = "Wheel-Version: 1.0\nTag: py3-none-manylinux_2_99_sbsa\n"
     elif damage == "wrong-version":
         installed["platform_wheels"]["nvidia-cusparselt-cu13"]["version"] = "0.8.0"
     elif damage == "missing-tag":

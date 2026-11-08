@@ -630,6 +630,9 @@ jobs:
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           TEST_EXTRA_TAGS: ${{ inputs.test_extra_tags }}
+          # AIS has incompatible ranges with some serving frameworks; its required
+          # suites belong to the generic Dynamo and Planner environments.
+          TEST_REQUIRE_AIS_RUNTIME: ${{ inputs.framework == 'dynamo' && (inputs.target == 'runtime' || inputs.target == 'planner') && '1' || '0' }}
           # Routed through env (not inlined via ${{ }}) so a value containing
           # shell metacharacters can't be interpreted as script rather than data.
           IMAGE_URI: ${{ steps.calculate-target-tag.outputs.image_uri }}
@@ -684,6 +687,7 @@ jobs:
             --target ${TEST_TARGET} \
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE="${IMAGE_URI}" \
+            --build-arg DYNAMO_TEST_REQUIRE_AIS_RUNTIME="${TEST_REQUIRE_AIS_RUNTIME}" \
             "${TEST_TAG_ARGS[@]}" .
       - name: Show summary
         shell: bash

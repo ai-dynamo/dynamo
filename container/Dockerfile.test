@@ -38,9 +38,13 @@ COPY --from=ghcr.io/astral-sh/uv:0.13.5 --chmod=755 /uv /opt/dynamo/test-tools/u
 # download is a few seconds against a ~660MB cache, so UV_NO_CACHE keeps it out
 # of the layer rather than trading that for the version hazard.
 USER root
-# These lanes collect Planner, replay and Mocker tests that require AIS. The base
-# runtime stays optional; explicitly install the version matched to ai-dynamo[ais].
-ENV DYNAMO_TEST_REQUIRE_AIS_RUNTIME=1
+# The generic Dynamo and Planner CI lanes own the AIS-dependent suites.
+# Serving-framework test images retain the ordinary optional-dependency contract.
+ARG DYNAMO_TEST_REQUIRE_AIS_RUNTIME=0
+ENV DYNAMO_TEST_REQUIRE_AIS_RUNTIME=${DYNAMO_TEST_REQUIRE_AIS_RUNTIME}
+# Check the complete newly resolved AIS environment in its owning lanes.
+# Backend test layers retain their existing dependency policy; this change
+# does not claim their inherited framework graphs pass a full pip check.
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
     --mount=type=bind,source=./container/deps/requirements.aisimulate.txt,target=/tmp/requirements.aisimulate.txt \
     --mount=type=bind,source=./tests/wheels/smoke_install.py,target=/tmp/smoke_install.py \
@@ -52,29 +56,30 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
     export NETRC=/run/secrets/pypi-netrc \
         UV_NO_CACHE=1 UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     export PIP_CACHE_DIR=/root/.cache/pip && \
-    set -- && \
-    for wheel in /opt/dynamo/wheelhouse/ai_dynamo*any.whl; do \
-        if [ -f "$wheel" ]; then set -- "$@" "${wheel}[ais]"; fi; \
-    done && \
+    case "$DYNAMO_TEST_REQUIRE_AIS_RUNTIME" in 0|1) ;; *) exit 1 ;; esac && \
+    set -- --requirement /tmp/requirements.test.txt && \
+    if [ "$DYNAMO_TEST_REQUIRE_AIS_RUNTIME" = 1 ]; then \
+        set -- "$@" --find-links https://pypi.nvidia.com/aisimulate/ \
+            --only-binary=aisimulate --requirement /tmp/requirements.aisimulate.txt && \
+        for wheel in /opt/dynamo/wheelhouse/ai_dynamo*any.whl; do \
+            if [ -f "$wheel" ]; then set -- "$@" "${wheel}[ais]"; fi; \
+        done; \
+    fi && \
     check_python=python3 && \
     if [ -n "$VIRTUAL_ENV" ]; then \
         check_python="$VIRTUAL_ENV/bin/python" && \
         /opt/dynamo/test-tools/uv pip install --python "$check_python" \
             --overrides /tmp/overrides.planner.txt \
-            --find-links https://pypi.nvidia.com/aisimulate/ \
-            --only-binary=aisimulate \
-            --requirement /tmp/requirements.aisimulate.txt \
-            --requirement /tmp/requirements.test.txt "$@"; \
+            "$@"; \
     else \
         /opt/dynamo/test-tools/uv pip install --python "$check_python" \
             --system --break-system-packages \
             --overrides /tmp/overrides.planner.txt \
-            --find-links https://pypi.nvidia.com/aisimulate/ \
-            --only-binary=aisimulate \
-            --requirement /tmp/requirements.aisimulate.txt \
-            --requirement /tmp/requirements.test.txt "$@"; \
+            "$@"; \
     fi && \
-    "$check_python" -c 'import runpy, sys; from pathlib import Path; runpy.run_path("/tmp/smoke_install.py")["pip_check"](Path(sys.executable), pillow_override=Path("/tmp/overrides.planner.txt"))'
+    if [ "$DYNAMO_TEST_REQUIRE_AIS_RUNTIME" = 1 ]; then \
+        "$check_python" -c 'import runpy, sys; from pathlib import Path; runpy.run_path("/tmp/smoke_install.py")["pip_check"](Path(sys.executable), pillow_override=Path("/tmp/overrides.planner.txt"))'; \
+    fi
 
 # Datadog's CI action shells out to `pip`. Images that run from a virtualenv
 # keep pip inside it rather than on PATH, so expose it. A PATH entry that does
@@ -83,6 +88,9 @@ ENV PATH="/opt/dynamo/venv/bin:${PATH}"
 
 # Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
+# Stage the source contract for explicit AIS lane ownership.
+COPY --chmod=755 --chown=dynamo:0 container/Dockerfile.test /workspace/container/Dockerfile.test
+COPY --chmod=755 --chown=dynamo:0 .github/workflows/shared-build-image.yml /workspace/.github/workflows/shared-build-image.yml
 # Focused dependency tests read the same declared override used during installation.
 COPY --chmod=664 --chown=dynamo:0 container/deps/overrides.planner.txt /workspace/container/deps/overrides.planner.txt
 # Dependency contract tests inspect both templates in every component test image.
@@ -147,6 +155,9 @@ RUN find /workspace -type d -exec chmod o+w {} +
 USER dynamo
 
 FROM test_distroless AS test_planner
+
+# A required AIS lane must never silently inherit the optional default.
+RUN test "$DYNAMO_TEST_REQUIRE_AIS_RUNTIME" = 1
 
 # Keep Planner-only tests out of the production image. The Planner runtime
 # installs the AISimulate wheel, so its test image can execute the optional
