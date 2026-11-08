@@ -42,8 +42,9 @@
 container/Dockerfile*
 container/**/*.Dockerfile
 # The AISimulate dependency contract test reads this template from runtime test
-# images; keep every other generated/template Dockerfile excluded.
+# images; keep unrelated generated/template Dockerfiles excluded.
 !container/templates/wheel_builder.Dockerfile
+!container/templates/planner.Dockerfile
 container/render.py
 container/context.yaml
 # container/compliance/ is now COPY'd into each image's `licenses` Dockerfile

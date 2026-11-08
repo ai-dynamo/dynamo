@@ -33,12 +33,13 @@ def generated_files(root: Path) -> dict[Path, str]:
     project = tomllib.loads((root / "pyproject.toml").read_text())
     python_pins = [
         dependency.split(";", 1)[0].strip()
-        for dependency in project["project"]["dependencies"]
+        for dependency in project["project"]["optional-dependencies"]["ais"]
         if re.match(r"^aisimulate\b", dependency)
     ]
     if python_pins != [f"aisimulate=={pinned}"]:
         raise ValueError(
-            "pyproject.toml and requirements.aisimulate.txt must pin the same AISimulate version"
+            "pyproject.toml's ais extra and requirements.aisimulate.txt "
+            "must pin the same AISimulate version"
         )
     installed = importlib.metadata.version("aisimulate")
     if installed != pinned:

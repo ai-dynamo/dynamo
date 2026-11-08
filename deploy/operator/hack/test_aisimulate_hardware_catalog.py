@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import tomllib
 from importlib import metadata
@@ -15,6 +16,8 @@ import yaml
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import Version
+
+from deploy.operator.hack.generate_aisimulate_schema import generated_files
 
 pytestmark = [
     pytest.mark.unit,
@@ -34,13 +37,15 @@ PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 
 def _pinned_version() -> Version:
     with PYPROJECT_PATH.open("rb") as stream:
-        dependencies = tomllib.load(stream)["project"]["dependencies"]
+        dependencies = tomllib.load(stream)["project"]["optional-dependencies"]["ais"]
     requirements = [
         Requirement(dependency)
         for dependency in dependencies
         if canonicalize_name(Requirement(dependency).name) == "aisimulate"
     ]
-    assert len(requirements) == 1, "pyproject.toml must contain one AISimulate pin"
+    assert len(requirements) == 1, (
+        "pyproject.toml's ais extra must contain one AISimulate pin"
+    )
 
     requirement = requirements[0]
     specifiers = list(requirement.specifier)
@@ -91,3 +96,45 @@ def test_dgdr_hardware_catalog_matches_pinned_aisimulate() -> None:
     expected = _packaged_hardware_skus()
     assert _operator_hardware_skus() == expected
     assert _documented_hardware_skus() == expected
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [[], ["aisimulate==1.2.3", "aisimulate==1.2.3"], ["aisimulate>=1.2.3"]],
+    ids=["missing", "duplicate", "unbounded"],
+)
+def test_hardware_catalog_requires_one_exact_ais_extra_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declarations: list[str]
+) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        "[project]\ndependencies = []\n[project.optional-dependencies]\n"
+        f"ais = {json.dumps(declarations)}\n"
+    )
+    monkeypatch.setattr(f"{__name__}.PYPROJECT_PATH", pyproject)
+    with pytest.raises(AssertionError):
+        _pinned_version()
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        [],
+        ["aisimulate==1.2.3", "aisimulate==1.2.3"],
+        ["aisimulate>=1.2.3"],
+        ["aisimulate==1.2.4"],
+    ],
+    ids=["missing", "duplicate", "unbounded", "container-mismatch"],
+)
+def test_schema_export_rejects_invalid_ais_extra_before_runtime_import(
+    tmp_path: Path, declarations: list[str]
+) -> None:
+    requirements = tmp_path / "container/deps/requirements.aisimulate.txt"
+    requirements.parent.mkdir(parents=True)
+    requirements.write_text("aisimulate==1.2.3\n")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\ndependencies = []\n[project.optional-dependencies]\n"
+        f"ais = {json.dumps(declarations)}\n"
+    )
+    with pytest.raises(ValueError, match="ais extra.*must pin the same"):
+        generated_files(tmp_path)

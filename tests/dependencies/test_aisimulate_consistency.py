@@ -276,8 +276,10 @@ def test_base_ai_dynamo_metadata_does_not_activate_offline_ais() -> None:
             "Base frontend configuration validates without AIS",
         ),
         (
-            "from dynamo.frontend.frontend_args import FrontendConfig, build_frontend_parser\n"
-            "parser, _ = build_frontend_parser({})\n"
+            "import argparse\n"
+            "from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig\n"
+            "parser = argparse.ArgumentParser()\n"
+            "FrontendArgGroup().add_arguments(parser)\n"
             "args = parser.parse_args([\n"
             "    '--router-mode', 'kv', '--router-prefill-load-model', 'ais',\n"
             "    '--dyn-chat-processor', 'dynamo', '--router-track-prefill-tokens',\n"

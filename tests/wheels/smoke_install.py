@@ -384,6 +384,12 @@ from dynamo._core import __version__
 assert runtime
 assert __version__[0].isdigit()
 assert metadata.version("ai-dynamo") == metadata.version("ai-dynamo-runtime")
+try:
+    metadata.distribution("aisimulate")
+except metadata.PackageNotFoundError:
+    pass
+else:
+    raise AssertionError("Base ai-dynamo unexpectedly installed its optional AIS extra")
 """
     run([str(venv_python), "-c", code])
 
@@ -471,12 +477,12 @@ def install_mocker_support(wheelhouse: Path, python_spec: str) -> None:
 
     venv_python = create_venv(python_spec)
     try:
-        # AISimulate is a direct ai-dynamo dependency on supported Python versions
-        # and provides the canonical estimator used by Mocker.
+        # Mocker uses the optional AIS estimator; opt in through the local wheel
+        # so the smoke test also checks its published extra metadata.
         pip_install(
             venv_python,
             wheelhouse,
-            [str(runtime), str(ai_dynamo)],
+            [str(runtime), f"{ai_dynamo}[ais]"],
         )
         pip_check(venv_python)
         assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)

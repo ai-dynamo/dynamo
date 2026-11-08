@@ -36,7 +36,11 @@ COPY --from=helm_binary --chmod=755 /out/helm /usr/local/bin/helm
 # download is a few seconds against a ~660MB cache, so UV_NO_CACHE keeps it out
 # of the layer rather than trading that for the version hazard.
 USER root
+# These lanes collect Planner, replay and Mocker tests that require AIS. The base
+# runtime stays optional; explicitly install the version matched to ai-dynamo[ais].
+ENV DYNAMO_TEST_REQUIRE_AIS_RUNTIME=1
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    --mount=type=bind,source=./container/deps/requirements.aisimulate.txt,target=/tmp/requirements.aisimulate.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     --mount=type=secret,id=pip-index-url,env=PIP_INDEX_URL \
     --mount=type=secret,id=uv-default-index,env=UV_DEFAULT_INDEX \
@@ -44,12 +48,24 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
     export NETRC=/run/secrets/pypi-netrc \
         UV_NO_CACHE=1 UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     export PIP_CACHE_DIR=/root/.cache/pip && \
+    set -- && \
+    for wheel in /opt/dynamo/wheelhouse/ai_dynamo*any.whl; do \
+        if [ -f "$wheel" ]; then set -- "$@" "${wheel}[ais]"; fi; \
+    done && \
     if [ -n "$VIRTUAL_ENV" ]; then \
         uv pip install \
-            --requirement /tmp/requirements.test.txt; \
+            --find-links https://pypi.nvidia.com/aisimulate/ \
+            --only-binary=aisimulate \
+            --requirement /tmp/requirements.aisimulate.txt \
+            --requirement /tmp/requirements.test.txt "$@" && \
+        uv pip check; \
     else \
         pip install --break-system-packages \
-            --requirement /tmp/requirements.test.txt; \
+            --find-links https://pypi.nvidia.com/aisimulate/ \
+            --only-binary=aisimulate \
+            --requirement /tmp/requirements.aisimulate.txt \
+            --requirement /tmp/requirements.test.txt "$@" && \
+        pip check; \
     fi
 
 # Datadog's CI action shells out to `pip`. Images that run from a virtualenv
@@ -59,6 +75,8 @@ ENV PATH="/opt/dynamo/venv/bin:${PATH}"
 
 # Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
+# Dependency contract tests inspect both templates in every component test image.
+COPY --chmod=664 --chown=dynamo:0 container/templates/planner.Dockerfile /workspace/container/templates/planner.Dockerfile
 COPY --chmod=664 --chown=dynamo:0 tests/__init__.py /workspace/tests/__init__.py
 COPY --chmod=664 --chown=dynamo:0 tests/marker_categories.py /workspace/tests/marker_categories.py
 # Version-stamping and shell regression tests execute these workflow helpers.
