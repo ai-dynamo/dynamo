@@ -125,6 +125,9 @@ impl Selector {
                     .context("invalid session affinity TTL")?,
             );
         }
+        if let Some(max_entries) = cfg.session_affinity_max_entries {
+            builder = builder.session_affinity_max_entries(max_entries);
+        }
         let service = Arc::new(
             builder
                 .build()
@@ -258,7 +261,10 @@ impl Drop for Selector {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_ID_BYTES;
+    use dynamo_kv_router::RoutingPartitionId;
+    use dynamo_kv_router::services::selection::affinity::{
+        MAX_SESSION_AFFINITY_ID_BYTES, SessionAffinityConfig,
+    };
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -353,6 +359,7 @@ models:
             max_num_batched_tokens: Some(8192),
             max_inflight_requests: 1024,
             session_affinity_ttl_secs: None,
+            session_affinity_max_entries: None,
         }
     }
 
@@ -441,6 +448,47 @@ models:
             selector.select_and_reserve(request).await,
             Err(SelectionError::BadRequest(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn configured_session_affinity_capacity_limits_pinned_sessions() {
+        let ttl = std::time::Duration::from_secs(60);
+        let mut cfg = test_config();
+        cfg.session_affinity_ttl_secs = Some(ttl.as_secs_f64());
+        cfg.session_affinity_max_entries = std::num::NonZeroUsize::new(1);
+        let selector = Selector::new(&cfg, RouterPluginRegistry::default())
+            .await
+            .expect("selector should build");
+        register(&selector, vec![schedulable_registration(1)]).await;
+
+        for session_id in ["a", "b"] {
+            let mut request = select_request(&format!("res-session-{session_id}"));
+            request.session_id = Some(session_id.to_string());
+            // A full table routes the request unpinned rather than failing it.
+            selector
+                .select_and_reserve(request)
+                .await
+                .expect("selection succeeds with or without a pin");
+        }
+
+        let table = selector
+            .service
+            .core()
+            .partition(&RoutingPartitionId::new(
+                "test-model",
+                DEFAULT_ROUTING_GROUP,
+            ))
+            .expect("selection created the partition")
+            .session_affinity(SessionAffinityConfig::new(ttl))
+            .expect("partition has the affinity table");
+        assert!(
+            table.query_target("a", None).unwrap().is_some(),
+            "the first session fits under the limit and is pinned"
+        );
+        assert!(
+            table.query_target("b", None).unwrap().is_none(),
+            "a second session must exceed a limit of 1 and stay unpinned"
+        );
     }
 
     #[tokio::test]

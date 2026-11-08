@@ -153,6 +153,7 @@ mod tests {
             max_num_batched_tokens: Some(8192),
             max_inflight_requests: 1024,
             session_affinity_ttl_secs: None,
+            session_affinity_max_entries: None,
         }
     }
 
