@@ -8,6 +8,7 @@ package dynamo
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -220,7 +221,7 @@ func TestEnvironmentGraphDeploymentConfigReaders(t *testing.T) {
 				require.EqualValues(t, 3, *child.Spec.Replicas)
 				require.Equal(t, "2", child.Spec.PodTemplate.Spec.Containers[0].Resources.Requests.Cpu().String())
 			} else {
-				config := findEnvVar(child.Spec.PodTemplate.Spec.Containers[0].Env, commonconsts.DynamoDeploymentConfigEnvVar)
+				config := findEnvVar(slices.Concat(child.Spec.Env, child.Spec.PodTemplate.Spec.Containers[0].Env), commonconsts.DynamoDeploymentConfigEnvVar)
 				require.NotNil(t, config)
 				var parsed map[string]map[string]any
 				require.NoError(t, json.Unmarshal([]byte(config.Value), &parsed))
@@ -258,6 +259,135 @@ func TestEnvironmentDeploymentConfigDuplicateDefinitions(t *testing.T) {
 			require.NoError(t, json.Unmarshal([]byte(env[updated].Value), &config))
 			require.Equal(t, commonconsts.DynamoServicePort, config["frontend"]["port"])
 			require.Equal(t, alpha.Spec.Services["frontend"].Envs[untouched], env[untouched])
+		})
+	}
+}
+
+func TestFrontendDeploymentConfigKeepsGeneralSource(t *testing.T) {
+	for _, chained := range []bool{false, true} {
+		t.Run(fmt.Sprintf("chained=%t", chained), func(t *testing.T) {
+			t.Log("An authored frontend value depends on graph-sourced deployment configuration")
+			general := []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: `{"frontend":{"port":1234}}`}}
+			authored := []corev1.EnvVar{{Name: "CFG", Value: "$(DYN_DEPLOYMENT_CONFIG)"}}
+			want := []string{commonconsts.DynamoDeploymentConfigEnvVar, "CFG"}
+			if chained {
+				general = append(general, corev1.EnvVar{Name: "DERIVED", Value: "$(DYN_DEPLOYMENT_CONFIG)"})
+				authored = []corev1.EnvVar{{Name: "FRONTEND_VAR", Value: "$(DERIVED)"}}
+				want = []string{commonconsts.DynamoDeploymentConfigEnvVar, "DERIVED", "FRONTEND_VAR"}
+			}
+			component := v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend:1.7.0", Env: authored}}}},
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
+				Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
+				Spec:        v1beta1.DynamoGraphDeploymentSpec{Env: general, Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
+			}
+			original := dgd.DeepCopy()
+
+			t.Log("Normalize without promoting the rewritten general binding into the authored list")
+			normalized, err := NormalizeDynamoGraphDeploymentComponents(dgd, nil, nil, RollingUpdateContext{})
+			require.NoError(t, err)
+			require.Equal(t, authored, normalized["frontend"].PodTemplate.Spec.Containers[0].Env)
+			children, err := GenerateDynamoComponentsDeploymentsFromNormalized(dgd, normalized, RollingUpdateContext{})
+			require.NoError(t, err)
+			child := children["frontend"]
+			child.OwnerReferences = []metav1.OwnerReference{{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment", Name: dgd.Name, Controller: new(true)}}
+			require.Equal(t, authored, child.Spec.PodTemplate.Spec.Containers[0].Env)
+			require.Len(t, child.Spec.Env, len(general))
+			require.JSONEq(t, `{"frontend":{"port":8000}}`, child.Spec.Env[0].Value)
+			require.Equal(t, general[1:], child.Spec.Env[1:])
+
+			t.Log("Direct Grove, normalized DS and stored DCD rendering keep the same valid dependency order")
+			config := &configv1alpha1.OperatorConfiguration{}
+			grove, err := GeneratePodSpecForComponent(&component, BackendFrameworkNoop, nil, dgd, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeGrove, "frontend", nil, staticContainerGPUCount(0))
+			require.NoError(t, err)
+			ds, err := GenerateBasePodSpec(normalized["frontend"], BackendFrameworkNoop, nil, dgd.Name, dgd.Namespace, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeLWS, "frontend", nil, staticContainerGPUCount(0), GenerateBasePodSpecOptions{GeneralEnvironment: dgd.Spec.Env})
+			require.NoError(t, err)
+			stored, err := GenerateBasePodSpecForController(child, nil, config, RoleMain, commonconsts.MultinodeDeploymentTypeLWS, staticContainerGPUCount(0), GenerateBasePodSpecForControllerOptions{})
+			require.NoError(t, err)
+			for _, pod := range []*corev1.PodSpec{grove, ds, stored} {
+				var names []string
+				for _, binding := range pod.Containers[0].Env {
+					if slices.Contains(want, binding.Name) {
+						names = append(names, binding.Name)
+					}
+				}
+				require.Equal(t, want, names)
+				require.JSONEq(t, `{"frontend":{"port":8000}}`, findEnvVar(pod.Containers[0].Env, commonconsts.DynamoDeploymentConfigEnvVar).Value)
+			}
+			require.Equal(t, original, dgd)
+		})
+	}
+}
+
+func TestFrontendDeploymentConfigIgnoresShadowedGeneralSource(t *testing.T) {
+	t.Log("A valid authored config shadows an unreadable graph-level binding")
+	authored := []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: `{"frontend":{"port":1234}}`}}
+	component := v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend,
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend:1.7.0", Env: authored}}}},
+	}
+	general := []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{Name: "config", Key: "value"}}}}
+	dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
+		Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
+		Spec:        v1beta1.DynamoGraphDeploymentSpec{Env: general, Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component}},
+	}
+	original := dgd.DeepCopy()
+
+	t.Log("Do not parse or rewrite the shadowed source when snapshotting a child")
+	children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+	require.NoError(t, err)
+	child := children["frontend"]
+	require.Equal(t, general, child.Spec.Env)
+	require.JSONEq(t, `{"frontend":{"port":8000}}`, child.Spec.PodTemplate.Spec.Containers[0].Env[0].Value)
+	require.Equal(t, original, dgd)
+}
+
+func TestFrontendDeploymentConfigPreservesSourceDiagnostics(t *testing.T) {
+	t.Log("Rewriting the first general value does not renumber a later genuine dependency cycle")
+	component := v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend,
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend:1.7.0", Env: []corev1.EnvVar{{Name: "B", Value: "$(A)"}}}}}},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
+		Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.8.0"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component},
+			Env: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: `{"frontend":{"port":1234}}`}, {Name: "A", Value: "$(B)"}},
+		},
+	}
+	config := &configv1alpha1.OperatorConfiguration{}
+	_, err := GeneratePodSpecForComponent(&component, BackendFrameworkNoop, nil, dgd, RoleMain, 1, config, commonconsts.MultinodeDeploymentTypeGrove, "frontend", nil, staticContainerGPUCount(0))
+	require.ErrorContains(t, err, "spec.env[1]")
+	require.ErrorContains(t, err, "podTemplate.spec.containers[name=main].env[0]")
+
+	t.Log("Persisting the projected general source preserves the same diagnostic indexes")
+	children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+	require.NoError(t, err)
+	_, err = GenerateBasePodSpecForController(children["frontend"], nil, config, RoleMain, commonconsts.MultinodeDeploymentTypeLWS, staticContainerGPUCount(0), GenerateBasePodSpecForControllerOptions{})
+	require.ErrorContains(t, err, "spec.env[1]")
+	require.ErrorContains(t, err, "podTemplate.spec.containers[name=main].env[0]")
+}
+
+func TestFrontendDeploymentConfigKeepsLegacyOutput(t *testing.T) {
+	for _, origin := range []string{"1.7.0", ""} {
+		t.Run("origin="+origin, func(t *testing.T) {
+			t.Log("Legacy normalization still flattens, sorts and rewrites into the main source")
+			component := v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend:1.7.0", Env: []corev1.EnvVar{{Name: "CFG", Value: "$(DYN_DEPLOYMENT_CONFIG)"}}}}}},
+			}
+			dgd := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
+				Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{component},
+					Env: []corev1.EnvVar{{Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: `{"frontend":{"port":1234}}`}},
+				},
+			}
+			if origin != "" {
+				dgd.Annotations = map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin}
+			}
+			original := dgd.DeepCopy()
+			children, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+			require.NoError(t, err)
+			child := children["frontend"]
+			require.Empty(t, child.Spec.Env)
+			require.Equal(t, []corev1.EnvVar{{Name: "CFG", Value: "$(DYN_DEPLOYMENT_CONFIG)"}, {Name: commonconsts.DynamoDeploymentConfigEnvVar, Value: `{"frontend":{"port":8000}}`}}, child.Spec.PodTemplate.Spec.Containers[0].Env)
+			require.Equal(t, original, dgd)
 		})
 	}
 }

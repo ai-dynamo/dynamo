@@ -402,6 +402,12 @@ func renderSelectedLPXRole(
 		ensurePodTemplate(component).Labels[commonconsts.KubeLabelDynamoWorkerHash] = defaults.servingHash
 	}
 	applyDGDTemplateDefaults(component, dgd, nil, false)
+
+	// Only the selected hybrid GPU role publishes graph-owned KV-transfer settings.
+	options := GenerateBasePodSpecOptions{GeneralEnvironment: dgd.Spec.Env}
+	if shouldApplyKvTransferPolicyToWorkerComponent(component, dgd) {
+		options.KVTransferPolicy = KVTransferPolicyEnvironment(dgd.Spec.Experimental.KvTransferPolicy)
+	}
 	basePodSpec, environment, err := generateBasePodSpecWithDefaults(
 		component,
 		BackendFrameworkNoop,
@@ -416,7 +422,7 @@ func renderSelectedLPXRole(
 		nil,
 		defaults,
 		func() (int64, error) { return 0, nil },
-		dgd.Spec.Env...,
+		options,
 	)
 	if err != nil {
 		return nil, nil, err

@@ -32,6 +32,7 @@ import (
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -140,7 +141,12 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 			dgd,
 			effective,
 		)
-		environmentOptions := dynamo.GenerateBasePodSpecOptions{GeneralEnvironment: dgd.Spec.Env}
+
+		// Legacy normalization already merged graph env and removed absent policy settings.
+		environmentOptions := dynamo.GenerateBasePodSpecOptions{}
+		if compatibility.OrderedEnvironmentVariables.Enabled(dgd.Annotations) {
+			environmentOptions.GeneralEnvironment = dgd.Spec.Env
+		}
 		if podAnnotations[commonconsts.KubeAnnotationTopologyLabelKey] != "" || podAnnotations[commonconsts.KubeAnnotationTopologyClusterTopologyName] != "" {
 			environmentOptions.KVTransferPolicy = dynamo.KVTransferPolicyEnvironment(dgd.Spec.Experimental.KvTransferPolicy)
 		}

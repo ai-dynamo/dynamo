@@ -4,6 +4,7 @@
 package dynamo
 
 import (
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -165,6 +166,66 @@ func TestLPXRoleDefersEnvironmentComposition(t *testing.T) {
 		}
 	}
 	require.Equal(t, []string{"LPX_MODEL_PATH", "MODEL"}, relevant)
+}
+
+func TestLPXSelectedRoleKVTransferPolicy(t *testing.T) {
+	for _, origin := range []string{"1.8.0", "1.7.0", ""} {
+		for _, roleType := range []v1beta1.ComponentType{v1beta1.ComponentTypeDecode, v1beta1.ComponentTypeLPX} {
+			for _, sidecar := range []bool{false, true} {
+				t.Run(fmt.Sprintf("origin=%s/type=%s/sidecar=%t", origin, roleType, sidecar), func(t *testing.T) {
+					t.Log("Select the hybrid GPU or LPU-only serving template from its LPX component")
+					template := &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "main", Image: "engine:1.7.0", Command: []string{"custom-runtime"},
+					}}}}
+					if sidecar {
+						restart := corev1.ContainerRestartPolicyAlways
+						template.Spec.InitContainers = []corev1.Container{{Name: "runtime", Image: "runtime:1.7.0", RestartPolicy: &restart}}
+					}
+					source := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "ns",
+						Spec: v1beta1.DynamoGraphDeploymentSpec{
+							Env: []corev1.EnvVar{{Name: commonconsts.EnvKvTransferDomain, Value: "authored"}, {Name: commonconsts.EnvKvTransferPreferredWeight, Value: "0.75"}},
+							Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{KvTransferPolicy: &v1beta1.KvTransferPolicy{
+								LabelKey: "topology.kubernetes.io/zone", Domain: "zone", Enforcement: v1beta1.KvTransferEnforcementRequired,
+							}},
+						},
+					}
+					if origin != "" {
+						source.Annotations = map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin}
+					}
+					component := &v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "lpu", ComponentType: v1beta1.ComponentTypeLPX,
+						Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: template}},
+					}
+					role := lpxRoleComponent(component, template, source, "")
+					role.ComponentType = roleType
+
+					t.Log("Render through the selected-role production path and finalize the retained layers")
+					pod, environment, err := renderSelectedLPXRole(role, source, nil,
+						&configv1alpha1.OperatorConfiguration{}, nil, DiscoveryContext{},
+						&podTemplateRuntimeDefaults{ComponentDefaults: &BaseComponentDefaults{}, servingHash: "serving"})
+					require.NoError(t, err)
+					require.NoError(t, environment.Apply(&pod.Spec))
+
+					t.Log("Only the hybrid GPU runtime publishes the graph policy, not its engine or LPU roles")
+					runtime := &pod.Spec.Containers[0]
+					if sidecar {
+						runtime = &pod.Spec.InitContainers[0]
+						require.Contains(t, pod.Spec.Containers[0].Env, corev1.EnvVar{Name: commonconsts.EnvKvTransferDomain, Value: "authored"})
+					}
+					if roleType == v1beta1.ComponentTypeDecode {
+						require.Contains(t, runtime.Env, corev1.EnvVar{Name: commonconsts.EnvKvTransferDomain, Value: "zone"})
+						require.Contains(t, runtime.Env, corev1.EnvVar{Name: commonconsts.EnvKvTransferEnforcement, Value: "required"})
+						require.Contains(t, runtime.Env, corev1.EnvVar{Name: commonconsts.EnvTopologyEnabled, Value: "true"})
+						for _, variable := range runtime.Env {
+							require.NotEqual(t, commonconsts.EnvKvTransferPreferredWeight, variable.Name)
+						}
+					} else {
+						require.Contains(t, runtime.Env, corev1.EnvVar{Name: commonconsts.EnvKvTransferDomain, Value: "authored"})
+						require.Contains(t, runtime.Env, corev1.EnvVar{Name: commonconsts.EnvKvTransferPreferredWeight, Value: "0.75"})
+					}
+				})
+			}
+		}
+	}
 }
 
 func TestLPXPCSNameUsesStableMaterializationIdentity(t *testing.T) {
