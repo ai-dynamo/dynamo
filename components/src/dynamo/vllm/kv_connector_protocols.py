@@ -17,6 +17,7 @@ entry.
 from __future__ import annotations
 
 import copy
+import math
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
@@ -24,12 +25,56 @@ from typing import Any, Dict, Optional, Tuple, Type
 
 
 def _has_remote_blocks(incoming: Optional[Mapping[str, Any]]) -> bool:
-    """Require an object and detect nonempty native cache groups."""
+    """Validate native block groups and detect retained decoder blocks."""
     if incoming is None:
         return False
     if not isinstance(incoming, Mapping):
         raise TypeError("Native kv_transfer_params must be an object.")
-    return any(incoming.get("remote_block_ids") or ())
+    block_groups = incoming.get("remote_block_ids")
+    if block_groups is None:
+        return False
+    if not isinstance(block_groups, (list, tuple)):
+        raise TypeError("Native remote_block_ids must contain block-ID groups.")
+    for group in block_groups:
+        if not isinstance(group, (list, tuple)):
+            raise TypeError("Native remote_block_ids groups must be lists or tuples.")
+        if any(type(block_id) is not int or block_id < 0 for block_id in group):
+            raise ValueError(
+                "Native remote_block_ids must contain non-negative integer IDs."
+            )
+    return any(block_groups)
+
+
+def _validate_native_nixl_scalars(incoming: Mapping[str, Any]) -> None:
+    """Reject wire values that can disrupt NIXL scheduling or receives."""
+    if "_remote_blocks_processed" in incoming:
+        raise ValueError("Native _remote_blocks_processed is reserved for vLLM.")
+    remote_num_tokens = incoming.get("remote_num_tokens")
+    if remote_num_tokens is not None and (
+        type(remote_num_tokens) is not int or remote_num_tokens < 0
+    ):
+        raise ValueError(
+            "Native remote_num_tokens must be a non-negative integer or null."
+        )
+    engine_id = incoming.get("remote_engine_id")
+    if engine_id is not None and not isinstance(engine_id, str):
+        raise ValueError("Native remote_engine_id must be a string or null.")
+    generation = incoming.get("remote_registration_generation", 0)
+    if type(generation) is not int or generation < 0:
+        raise ValueError(
+            "Native remote_registration_generation must be a non-negative integer."
+        )
+    expiry = incoming.get("remote_blocks_expiry_time")
+    try:
+        valid_expiry = expiry is None or (
+            (type(expiry) is int or type(expiry) is float) and math.isfinite(expiry)
+        )
+    except OverflowError:
+        valid_expiry = False
+    if not valid_expiry:
+        raise ValueError(
+            "Native remote_blocks_expiry_time must be a finite number or null."
+        )
 
 
 class KvConnectorProtocol(ABC):
@@ -83,14 +128,7 @@ class NixlConnectorProtocol(KvConnectorProtocol):
                     "bidirectional_kv_xfer enabled."
                 )
         if incoming is not None:
-            remote_num_tokens = incoming.get("remote_num_tokens")
-            # Invalid counts can fail inside vLLM's scheduling loop.
-            if remote_num_tokens is not None and (
-                type(remote_num_tokens) is not int or remote_num_tokens < 0
-            ):
-                raise ValueError(
-                    "Native remote_num_tokens must be a non-negative integer or null."
-                )
+            _validate_native_nixl_scalars(incoming)
             # Only the native /generate adapter supplies these coordinates.
             # vLLM owns TP mapping, expiry and transfer failure policy.
             params.update(copy.deepcopy(incoming))

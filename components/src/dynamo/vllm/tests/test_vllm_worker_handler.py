@@ -2077,6 +2077,78 @@ async def test_prefill_rejects_invalid_native_token_counts_before_generation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "blocks",
+    ["blocks", {"group": [0]}, 1, True, [0], [None], ["bad"], [{}], [[-1]]],
+)
+async def test_prefill_rejects_malformed_native_block_ids_before_generation(
+    prefill_probe_handler, blocks
+):
+    """Reject malformed groups before they reach the engine."""
+    handler = prefill_probe_handler
+    handler.engine_client.vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="NixlConnector",
+            get_from_extra_config=lambda key, default: True,
+        ),
+    )
+    request = _make_raw_frontend_request()
+    request["extra_args"] = {
+        "vllm_tito": {
+            "kv_transfer_params": {
+                "remote_block_ids": blocks,
+                "remote_num_tokens": 128,
+            },
+        },
+    }
+    with pytest.raises(mod.InvalidArgument, match="remote_block_ids"):
+        _ = [chunk async for chunk in handler.generate(request, MagicMock())]
+    handler.engine_client.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("remote_engine_id", []),
+        ("remote_engine_id", {}),
+        ("remote_registration_generation", None),
+        ("remote_registration_generation", "1"),
+        ("remote_registration_generation", True),
+        ("remote_blocks_expiry_time", "123"),
+        ("remote_blocks_expiry_time", True),
+        ("remote_blocks_expiry_time", float("nan")),
+        ("remote_blocks_expiry_time", 10**400),
+        ("_remote_blocks_processed", True),
+    ],
+)
+async def test_prefill_rejects_invalid_native_receive_metadata_before_generation(
+    prefill_probe_handler, field, value
+):
+    """Translate receive-metadata errors before invoking the engine."""
+    handler = prefill_probe_handler
+    handler.engine_client.vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="NixlConnector",
+            get_from_extra_config=lambda key, default: True,
+        ),
+    )
+    request = _make_raw_frontend_request()
+    request["extra_args"] = {
+        "vllm_tito": {
+            "kv_transfer_params": {
+                "remote_block_ids": [[0]],
+                "remote_num_tokens": 128,
+                field: value,
+            },
+        },
+    }
+    with pytest.raises(mod.InvalidArgument, match=field):
+        _ = [chunk async for chunk in handler.generate(request, MagicMock())]
+    handler.engine_client.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_prefill_ignores_coordinates_without_native_envelope(
     prefill_probe_handler,
 ):

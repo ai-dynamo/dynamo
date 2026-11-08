@@ -183,6 +183,130 @@ def test_nixl_preserves_valid_native_token_counts(token_params):
     assert params.get("remote_num_tokens") == token_params.get("remote_num_tokens")
 
 
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        "blocks",
+        "",
+        b"blocks",
+        {"group": [0]},
+        {},
+        1,
+        1.5,
+        True,
+        False,
+        [0],
+        [None],
+        ["bad"],
+        [{}],
+        [[-1]],
+        [[True]],
+        [[1.5]],
+        [["0"]],
+    ],
+)
+def test_nixl_rejects_malformed_native_block_ids(blocks):
+    """Reject malformed groups and IDs with a field-specific error."""
+    with pytest.raises((TypeError, ValueError), match="remote_block_ids"):
+        NixlConnectorProtocol(_bidir_config(True)).prefill_request_kv_transfer_params(
+            {"remote_block_ids": blocks, "remote_num_tokens": 128}
+        )
+
+
+@pytest.mark.parametrize(
+    "blocks,has_blocks",
+    [
+        (None, False),
+        ([], False),
+        ((), False),
+        ([[], []], False),
+        (((), []), False),
+        ([[0]], True),
+        (([0], ()), True),
+        (((0,), [1, 2]), True),
+    ],
+)
+def test_nixl_preserves_supported_native_block_groups(blocks, has_blocks):
+    """Preserve group forms and require opt-in only for actual blocks."""
+    incoming = {"remote_block_ids": blocks}
+    protocol = NixlConnectorProtocol(_bidir_config(has_blocks))
+    params = protocol.prefill_request_kv_transfer_params(incoming)
+    assert params["remote_block_ids"] == blocks
+    if has_blocks:
+        disabled = NixlConnectorProtocol(_bidir_config(False))
+        with pytest.raises(ValueError, match="bidirectional_kv_xfer"):
+            disabled.prefill_request_kv_transfer_params(incoming)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("remote_engine_id", []),
+        ("remote_engine_id", {}),
+        ("remote_engine_id", 1),
+        ("remote_engine_id", True),
+        ("remote_registration_generation", None),
+        ("remote_registration_generation", "1"),
+        ("remote_registration_generation", []),
+        ("remote_registration_generation", -1),
+        ("remote_registration_generation", True),
+        ("remote_registration_generation", 1.5),
+        ("remote_blocks_expiry_time", "123"),
+        ("remote_blocks_expiry_time", {}),
+        ("remote_blocks_expiry_time", True),
+        ("remote_blocks_expiry_time", float("nan")),
+        ("remote_blocks_expiry_time", float("inf")),
+        ("remote_blocks_expiry_time", 10**400),
+    ],
+)
+def test_nixl_rejects_invalid_native_receive_scalars(field, value):
+    """Reject invalid worker metadata before it reaches receive hooks."""
+    protocol = NixlConnectorProtocol(_bidir_config(True))
+    with pytest.raises(ValueError, match=field):
+        protocol.prefill_request_kv_transfer_params(
+            {"remote_block_ids": [[0]], field: value}
+        )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"remote_engine_id": None},
+        {"remote_engine_id": "peer"},
+        {"remote_registration_generation": 0},
+        {"remote_registration_generation": 3},
+        {"remote_blocks_expiry_time": None},
+        {"remote_blocks_expiry_time": -1.0},
+        {"remote_blocks_expiry_time": 123},
+        {"remote_blocks_expiry_time": 123.5},
+    ],
+)
+def test_nixl_preserves_valid_native_receive_scalars(metadata):
+    """Preserve optional fields and leave expiry decisions to vLLM."""
+    protocol = NixlConnectorProtocol(_bidir_config(True))
+    params = protocol.prefill_request_kv_transfer_params(
+        {"remote_block_ids": [[0]], **metadata}
+    )
+    for field in (
+        "remote_registration_generation",
+        "remote_blocks_expiry_time",
+    ):
+        assert (field in params) == (field in metadata)
+    for field, value in metadata.items():
+        assert params[field] == value
+
+
+@pytest.mark.parametrize("value", [True, False, None])
+def test_nixl_rejects_caller_supplied_receive_marker(value):
+    """Prevent callers from suppressing vLLM's receive registration."""
+    protocol = NixlConnectorProtocol(_bidir_config(True))
+    with pytest.raises(ValueError, match="_remote_blocks_processed"):
+        protocol.prefill_request_kv_transfer_params(
+            {"remote_block_ids": [[0]], "_remote_blocks_processed": value}
+        )
+
+
 def test_native_decoder_source_rejected_for_cache_mediated_connector():
     """Reject decoder coordinates for cache-mediated coordination."""
     protocol = LMCacheMPConnectorProtocol(_config("LMCacheMPConnector"))
