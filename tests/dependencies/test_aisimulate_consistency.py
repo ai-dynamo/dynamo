@@ -194,7 +194,9 @@ def installed_aisimulate() -> metadata.Distribution:
         return metadata.distribution("aisimulate")
     except metadata.PackageNotFoundError:
         if os.environ.get("DYNAMO_TEST_REQUIRE_AIS_RUNTIME") == "1":
-            pytest.fail("The requested ai-dynamo[ais] test environment lacks AISimulate")
+            pytest.fail(
+                "The requested ai-dynamo[ais] test environment lacks AISimulate"
+            )
         pytest.skip("AIS installation check requires the ai-dynamo[ais] environment")
 
 
@@ -297,8 +299,9 @@ def test_base_ai_dynamo_metadata_does_not_activate_offline_ais() -> None:
 )
 @pytest.mark.timeout(30)
 def test_optional_ais_boundaries(action: str, expected_output: str) -> None:
-    script = textwrap.dedent(
-        """
+    script = (
+        textwrap.dedent(
+            """
         import importlib.abc
         import runpy
         import sys
@@ -313,7 +316,9 @@ def test_optional_ais_boundaries(action: str, expected_output: str) -> None:
 
         sys.meta_path.insert(0, WithoutAIS())
         """
-    ) + action
+        )
+        + action
+    )
     result = subprocess.run(
         [sys.executable, "-c", script],
         cwd=ROOT,

@@ -135,6 +135,9 @@ the Gateway API setup, supported features, and configuration.
 
 ## Quick Start
 
+For wheel installations, AIS-based planning, profiling, replay, and router load models
+require the [optional AIS extra](docs/fern/pages/cli/installation/install-dynamo.mdx#optional-ais-features).
+
 > This repo ships agent skills: if you work with an AI coding agent (Claude Code, Codex,
 > Cursor), clone the repo and ask it to deploy, troubleshoot, benchmark, or optimize a Dynamo
 > deployment. The skills activate automatically; no setup required.
