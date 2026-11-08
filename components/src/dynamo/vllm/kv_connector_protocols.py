@@ -46,9 +46,10 @@ def _has_remote_blocks(incoming: Optional[Mapping[str, Any]]) -> bool:
 
 
 def _validate_native_nixl_scalars(incoming: Mapping[str, Any]) -> None:
-    """Reject wire values that can disrupt NIXL scheduling or receives."""
-    if "_remote_blocks_processed" in incoming:
-        raise ValueError("Native _remote_blocks_processed is reserved for vLLM.")
+    """Validate supplied native NIXL coordinate scalars."""
+    for field in ("_remote_blocks_processed", "_p_side_truncated"):
+        if field in incoming:
+            raise ValueError(f"Native {field} is reserved for vLLM.")
     remote_num_tokens = incoming.get("remote_num_tokens")
     if remote_num_tokens is not None and (
         type(remote_num_tokens) is not int or remote_num_tokens < 0
@@ -56,9 +57,22 @@ def _validate_native_nixl_scalars(incoming: Mapping[str, Any]) -> None:
         raise ValueError(
             "Native remote_num_tokens must be a non-negative integer or null."
         )
-    engine_id = incoming.get("remote_engine_id")
-    if engine_id is not None and not isinstance(engine_id, str):
-        raise ValueError("Native remote_engine_id must be a string or null.")
+    for field in ("remote_engine_id", "remote_request_id"):
+        value = incoming.get(field)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"Native {field} must be a string or null.")
+    host = incoming.get("remote_host")
+    if host is not None and (not isinstance(host, str) or not host):
+        raise ValueError("Native remote_host must be a non-empty string or null.")
+    port = incoming.get("remote_port")
+    if port is not None and (type(port) is not int or not 1 <= port <= 65535):
+        raise ValueError(
+            "Native remote_port must be an integer from 1 to 65535 or null."
+        )
+    for field in ("tp_size", "dcp_size", "pp_size"):
+        value = incoming.get(field, 1)
+        if type(value) is not int or value <= 0:
+            raise ValueError(f"Native {field} must be a positive integer.")
     generation = incoming.get("remote_registration_generation", 0)
     if type(generation) is not int or generation < 0:
         raise ValueError(

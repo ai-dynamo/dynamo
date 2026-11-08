@@ -2149,6 +2149,46 @@ async def test_prefill_rejects_invalid_native_receive_metadata_before_generation
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("remote_host", ""),
+        ("remote_host", []),
+        ("remote_host", 1),
+        ("remote_port", "123"),
+        ("remote_port", True),
+        ("remote_port", 0),
+        ("remote_port", 65536),
+        ("remote_request_id", {}),
+        ("tp_size", 0),
+        ("dcp_size", "2"),
+        ("pp_size", None),
+        ("_p_side_truncated", True),
+    ],
+)
+async def test_prefill_rejects_invalid_native_handshake_metadata_before_generation(
+    prefill_probe_handler, field, value
+):
+    """Report malformed handshake metadata before invoking the engine."""
+    handler = prefill_probe_handler
+    handler.engine_client.vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="NixlConnector",
+            get_from_extra_config=lambda key, default: True,
+        ),
+    )
+    request = _make_raw_frontend_request()
+    request["extra_args"] = {
+        "vllm_tito": {
+            "kv_transfer_params": {"remote_block_ids": [[0]], field: value},
+        },
+    }
+    with pytest.raises(mod.InvalidArgument, match=field):
+        _ = [chunk async for chunk in handler.generate(request, MagicMock())]
+    handler.engine_client.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_prefill_ignores_coordinates_without_native_envelope(
     prefill_probe_handler,
 ):

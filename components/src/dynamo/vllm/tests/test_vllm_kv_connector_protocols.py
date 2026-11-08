@@ -269,6 +269,102 @@ def test_nixl_rejects_invalid_native_receive_scalars(field, value):
 
 
 @pytest.mark.parametrize(
+    "field,value",
+    [
+        ("remote_host", ""),
+        ("remote_host", []),
+        ("remote_host", {}),
+        ("remote_host", 1),
+        ("remote_host", True),
+        ("remote_request_id", []),
+        ("remote_request_id", {}),
+        ("remote_request_id", 1),
+        ("remote_request_id", True),
+        ("remote_port", 0),
+        ("remote_port", -1),
+        ("remote_port", 65536),
+        ("remote_port", "123"),
+        ("remote_port", 1.5),
+        ("remote_port", True),
+        ("remote_port", False),
+        ("remote_port", []),
+        ("remote_port", {}),
+    ]
+    + [
+        (field, value)
+        for field in ("tp_size", "dcp_size", "pp_size")
+        for value in (0, -1, "2", 1.5, True, None)
+    ],
+)
+def test_nixl_rejects_invalid_native_endpoint_and_topology_scalars(field, value):
+    """Reject malformed handshake and notification values at ingress."""
+    with pytest.raises(ValueError, match=field):
+        NixlConnectorProtocol(_bidir_config(True)).prefill_request_kv_transfer_params(
+            {"remote_block_ids": [[0]], field: value}
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("remote_host", ""),
+        ("remote_port", "123"),
+        ("tp_size", None),
+        ("_p_side_truncated", True),
+    ],
+)
+def test_nixl_rejects_invalid_cold_native_handshake_scalars(field, value):
+    """Validate supplied metadata even without retained decoder blocks."""
+    with pytest.raises(ValueError, match=field):
+        NixlConnectorProtocol(_bidir_config(False)).prefill_request_kv_transfer_params(
+            {"remote_block_ids": [[], []], field: value}
+        )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {
+            "remote_host": None,
+            "remote_port": None,
+            "remote_request_id": None,
+            "remote_block_size": None,
+        },
+        {"remote_host": "::1"},
+        {"remote_host": "peer.example"},
+        {"remote_port": 1},
+        {"remote_port": 65535},
+        {"remote_request_id": "previous-turn"},
+        {"tp_size": 1, "dcp_size": 2, "pp_size": 8},
+        {"tp_size": 3, "dcp_size": 5, "pp_size": 7, "remote_block_size": 17},
+        {"remote_block_size": 1},
+        {"remote_block_size": 128},
+    ],
+)
+@pytest.mark.parametrize("blocks", [[[0]], [[], []]])
+def test_nixl_preserves_partial_native_endpoint_and_topology_scalars(metadata, blocks):
+    """Preserve partial coordinates without imposing topology or DNS policy."""
+    incoming = {"remote_block_ids": blocks, **metadata}
+    params = NixlConnectorProtocol(
+        _bidir_config(True)
+    ).prefill_request_kv_transfer_params(incoming)
+    for field, value in incoming.items():
+        assert params[field] == value
+    for field in ("tp_size", "dcp_size", "pp_size", "remote_block_size"):
+        assert (field in params) == (field in incoming)
+
+
+@pytest.mark.parametrize("value", [True, False, None])
+def test_nixl_rejects_caller_supplied_truncation_marker(value):
+    """Keep scheduler-owned backoff state out of native coordinates."""
+    with pytest.raises(ValueError, match="_p_side_truncated"):
+        NixlConnectorProtocol(_bidir_config(True)).prefill_request_kv_transfer_params(
+            {"remote_block_ids": [[0]], "_p_side_truncated": value}
+        )
+
+
+@pytest.mark.parametrize(
     "metadata",
     [
         {},
