@@ -34,6 +34,20 @@ Dynamo serves [vLLM](https://github.com/vllm-project/vllm),
 [ModelExpress](https://github.com/ai-dynamo/modelexpress) (GPU-to-GPU weight streaming), and
 [Grove](https://github.com/ai-dynamo/grove) (Kubernetes gang scheduling).
 
+## Start From an Issue
+
+Before you edit files for a new piece of work, find or create its issue.
+
+- **NVIDIA engineers:** file it in Linear, in your team: DYN, DIS, DEP, LLM or OPS. Put its ID
+  in the branch name (`user/dyn-1234-short-description`), and reference it in the pull request
+  by that ID (`Closes DYN-1234`, `Part of DYN-1234`), not by a GitHub issue number. Only a
+  Linear ID adds the issue to the Linear release on merge. DGH mirrors to public GitHub, so
+  customer names and internal detail stay out of it.
+- **Community contributors:** create or claim a GitHub issue on `ai-dynamo/dynamo`.
+
+The `dynamo-issue-first` skill covers sorting the issue and referencing it from the pull
+request.
+
 ## Skills
 
 Skills live canonically in `.agents/skills/`; `skills/` and `.claude/skills/` are symlinks
