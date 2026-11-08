@@ -954,7 +954,7 @@ impl Model {
         self.select_worker_set_with_worker_count(extract, WorkerSet::worker_count)
     }
 
-    fn select_worker_set_with_worker_count<T, F, C>(
+    pub(super) fn select_worker_set_with_worker_count<T, F, C>(
         &self,
         extract: F,
         count_workers: C,

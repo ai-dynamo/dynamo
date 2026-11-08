@@ -1588,6 +1588,24 @@ impl ModelManager {
             .get_generate_engine_for_capability_with_routing(capability)
     }
 
+    /// Resolve native assets and aliases from one catalog snapshot.
+    pub(crate) fn get_native_head_selection(
+        &self,
+        requested_model: &str,
+    ) -> Result<super::native_head::NativeHeadSelection, SystemOneSelectionError> {
+        let catalog = self.catalog.load();
+        let name = catalog
+            .aliases
+            .get(requested_model)
+            .map(String::as_str)
+            .unwrap_or(requested_model);
+        catalog
+            .models
+            .get(name)
+            .ok_or(SystemOneSelectionError::NotFound)?
+            .get_native_head_selection()
+    }
+
     /// Resolve an alias and select all System One execution inputs from one catalog snapshot.
     pub(crate) fn get_systemone_execution_selection(
         &self,

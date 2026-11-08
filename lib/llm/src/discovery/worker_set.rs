@@ -230,6 +230,7 @@ pub struct WorkerSet {
     pub(crate) tensor_engine: Option<TensorStreamingEngine>,
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
     pub(crate) generate_engine: Option<GenerateStreamingEngine>,
+    pub(crate) native_head_engine: Option<crate::protocols::systemone::head::HeadEngine>,
 
     /// Cached tokenizer and prompt formatter for the System One API.
     pub(crate) systemone_preprocessor: Option<Arc<OpenAIPreprocessor>>,
@@ -283,6 +284,7 @@ impl WorkerSet {
             tensor_engine: None,
             realtime_engine: None,
             generate_engine: None,
+            native_head_engine: None,
             systemone_preprocessor: None,
             load_context: None,
             load_thresholds: None,
@@ -417,6 +419,7 @@ impl WorkerSet {
             || self.has_transcriptions_engine()
             || self.has_realtime_engine()
             || self.has_generate_engine()
+            || self.native_head_engine.is_some()
     }
 
     /// Whether this set tracks an Encode worker. Encode WorkerSets carry
@@ -572,6 +575,7 @@ impl WorkerSet {
         retain_for_requests!(tensor_engine);
         retain_for_requests!(realtime_engine);
         retain_for_requests!(generate_engine);
+        retain_for_requests!(native_head_engine);
         self.allocator_trim_wrapped = true;
     }
 
@@ -611,6 +615,7 @@ impl WorkerSet {
             // inject the adapter identity. Fail closed instead of serving the base weights.
             realtime_engine: None,
             generate_engine,
+            native_head_engine: None,
             systemone_preprocessor: None,
             load_context: self.load_context.clone(),
             load_thresholds: self.load_thresholds.clone(),

@@ -1240,6 +1240,28 @@ impl ModelDeploymentCard {
         self.systemone_backend().is_some()
     }
 
+    pub(crate) fn is_native_head_eligible(&self) -> bool {
+        self.runtime_config
+            .supports_runtime_capability(crate::protocols::systemone::head::CLEF_FLASH_PROFILE)
+            && self.model_input == crate::model_type::ModelInput::Text
+            && self.model_type.supports_classify()
+            && self.model_type.supports_pooling()
+            && self.worker_type == Some(crate::worker_type::WorkerType::Aggregated)
+            && self.runtime_config.data_parallel_size == 1
+            && self.needs.is_empty()
+            && self.lora.is_none()
+            && !self
+                .runtime_config
+                .runtime_data
+                .contains_key(SPEC_DECODE_RUNTIME_KEY)
+            && self
+                .runtime_config
+                .runtime_data
+                .get("vllm_native_decision_max_candidates")
+                .and_then(serde_json::Value::as_u64)
+                == Some(26)
+    }
+
     pub(crate) fn systemone_backend(&self) -> Option<crate::protocols::systemone::ScoringBackend> {
         use crate::local_model::runtime_config::{
             VLLM_CAUSAL_DECISION_V1, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
@@ -1413,6 +1435,10 @@ impl ModelDeploymentCard {
                         crate::protocols::systemone::ScoringBackend::Sglang => bytes_to_hash.extend_from_slice(b"\0sglang_systemone_serial_v1\0true"),
                         crate::protocols::systemone::ScoringBackend::Vllm => bytes_to_hash.extend_from_slice(b"\0vllm_causal_decision_v1\0true"),
                     }
+                }
+
+                if self.is_native_head_eligible() {
+                    bytes_to_hash.extend_from_slice(b"\0vllm_clef_flash_joint_decision_v1\0true");
                 }
 
                 // The Qwen video contract is resolved per cohort, not per card.

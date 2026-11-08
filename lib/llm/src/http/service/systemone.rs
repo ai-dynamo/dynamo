@@ -53,6 +53,8 @@ mod response;
 pub(super) use response::attach_request_ids;
 use response::{decision_error, error};
 
+#[path = "systemone/head.rs"]
+mod head;
 #[path = "systemone/http.rs"]
 mod http;
 pub use http::router;
@@ -235,6 +237,19 @@ async fn handle_request(
         );
     }
 
+    match state.manager().get_native_head_selection(&request.model) {
+        Ok(selection) => {
+            return head::handle(state, request_id, request, selection, deadline).await;
+        }
+        Err(SystemOneSelectionError::Unavailable) => {
+            return error(
+                dialect,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "native decision model has no available worker",
+            );
+        }
+        Err(SystemOneSelectionError::NotFound | SystemOneSelectionError::Unsupported) => {}
+    }
     let selection = match state
         .manager()
         .get_systemone_execution_selection(&request.model)

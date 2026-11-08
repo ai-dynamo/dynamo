@@ -500,7 +500,7 @@ impl ModelWatcher {
             group: spec.key.id(),
             generation: spec.generation,
             card: Arc::new(card.clone()),
-            admitted_ids,
+            admitted_ids: admitted_ids.clone(),
         });
         worker_set.set_instance_watcher(instance_watcher);
 
@@ -917,6 +917,24 @@ impl ModelWatcher {
                 )
                 .await?;
                 worker_set.classify_engine = Some(Arc::new(push_router));
+                if self.systemone_enabled && card.is_native_head_eligible() {
+                    use crate::protocols::systemone::head::{HeadRequest, HeadResponse};
+                    let mut options = crate::kv_router::plugins::push_router_options();
+                    options.dispatch = Some(
+                        super::native_head::HeadDispatch::for_client(
+                            &client,
+                            admitted_ids.clone(),
+                            cancellation.clone(),
+                        )
+                        .await?,
+                    );
+                    let mode = if router_config.router_mode == RouterMode::KV {
+                        RouterMode::RoundRobin
+                    } else {
+                        router_config.router_mode
+                    };
+                    worker_set.native_head_engine = Some(Arc::new(PushRouter::<HeadRequest, Annotated<HeadResponse>>::from_client_with_options(client.clone(), mode, options).await?));
+                }
             }
 
             if card.model_type.supports_pooling() {
