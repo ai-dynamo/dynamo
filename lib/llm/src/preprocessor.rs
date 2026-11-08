@@ -1831,6 +1831,9 @@ fn template_content_part(part: MultimodalContentPart<'_>) -> Result<serde_json::
 /// Project before serialization so bulk custom payloads are never copied into
 /// templates or auxiliary messages. Keep each role's established metadata.
 fn template_messages(request: &impl OAIChatLikeRequest) -> Result<serde_json::Value> {
+    if !has_custom_content(request) {
+        return Ok(serde_json::to_value(request.messages())?);
+    }
     let Some(messages) = request.typed_messages() else {
         return Ok(serde_json::to_value(request.messages())?);
     };
@@ -17037,6 +17040,46 @@ responses_tools: None,
         assert_eq!(
             apply_continue_final_message(rendered).unwrap().as_str(),
             "helloprefix"
+        );
+    }
+
+    #[test]
+    fn muse_named_tool_preserves_responses_history_phases() {
+        let mut preprocessor = mock_llama_preprocessor();
+        let preprocessor = Arc::get_mut(&mut preprocessor).unwrap();
+        preprocessor.tool_call_parser = Some("muse_spark".into());
+        preprocessor.formatter = test_prompt_formatter(include_str!(
+            "../tests/data/muse_spark_open_deferred_tools.jinja"
+        ));
+        let response: crate::protocols::openai::responses::NvCreateResponse =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "input": [
+                    {"role": "assistant", "phase": "commentary", "content": "Checking."},
+                    {"role": "assistant", "phase": "final_answer", "content": "Done."},
+                    {"role": "user", "content": "Continue."}
+                ],
+                "tools": [{"type": "function", "name": "lookup", "parameters": {
+                    "type": "object", "properties": {}
+                }}],
+                "tool_choice": {"type": "function", "name": "lookup"}
+            }))
+            .unwrap();
+        let mut request: NvCreateChatCompletionRequest = response.try_into().unwrap();
+        request.normalize_responses_history_phases(true);
+        request
+            .normalize_responses_tools(preprocessor.formatter.supports_native_tools(&request))
+            .unwrap();
+
+        let rendered = preprocessor.apply_template(&request).unwrap().unwrap();
+        let prompt = rendered.as_str();
+        assert!(
+            prompt.contains("assistant to=commentary<|message|>Checking.<|eom|>"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("assistant to=user<|message|>Done.<|eot|>"),
+            "{prompt}"
         );
     }
 

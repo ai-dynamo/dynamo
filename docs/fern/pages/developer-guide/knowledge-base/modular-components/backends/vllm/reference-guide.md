@@ -92,6 +92,8 @@ Dynamo supports [vLLM prompt embeddings](https://docs.vllm.ai/en/stable/features
 **Experimental, unreleased.** Aggregated Python vLLM token workers started with
 `--enable-multimodal` accept explicit custom parts in user and tool messages:
 
+Custom content requires the Rust frontend preprocessing path (`--dyn-chat-processor dynamo`, the default). The Python frontend processor (`--dyn-chat-processor vllm`) and worker-side tokenization (`--use-vllm-tokenizer`) are unsupported. Keep tokenization in the Rust frontend when sending custom content.
+
 The example combines projected chemistry soft tokens with a standard image URL.
 The model must support both the registered chemistry modality and image inputs.
 The payload names and encoding inside `fields` are application-defined:
