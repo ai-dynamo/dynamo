@@ -944,7 +944,7 @@ def _component_env(dgd: Mapping[str, Any], spec: Mapping[str, Any]) -> _Env:
         for name in omitted:
             entries.pop(name, None)
             operator_inert.discard(name)
-        owned = []
+        owned: list[Mapping[str, Any]] = []
         for name, value in bindings.items():
             entry = {"name": name} if value is None else {"name": name, "value": value}
             owned.append(entry)
