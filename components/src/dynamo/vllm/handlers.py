@@ -4566,11 +4566,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # One protocol instance per request; carries per-request state
         # (e.g. Mooncake's transfer_id) into the response loop.
         kv_protocol = make_kv_connector_protocol(self.engine_client.vllm_config)
-        params = (
-            kv_protocol.prefill_request_kv_transfer_params(incoming_kv_transfer_params)
-            if incoming_kv_transfer_params is not None
-            else kv_protocol.prefill_request_kv_transfer_params()
-        )
+        if incoming_kv_transfer_params is not None:
+            try:
+                params = kv_protocol.prefill_request_kv_transfer_params(
+                    incoming_kv_transfer_params
+                )
+            except (TypeError, ValueError) as exc:
+                raise InvalidArgument(str(exc)) from exc
+        else:
+            params = kv_protocol.prefill_request_kv_transfer_params()
         _update_kv_transfer_params(sampling_params, params)
         return kv_protocol
 
@@ -4637,7 +4641,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             enable_rl=self.config.enable_rl,
         )
 
-        native_envelope = None
         incoming_kv_transfer_params = None
         extra_args = request.get("extra_args")
         if (
@@ -4652,14 +4655,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             # remains reserved, and probes never consume retained coordinates.
             incoming_kv_transfer_params = native_envelope.get("kv_transfer_params")
 
-        try:
-            kv_protocol = self._prefill_kv_protocol(
-                is_local_probe, sampling_params, incoming_kv_transfer_params
-            )
-        except (TypeError, ValueError) as exc:
-            if native_envelope is None:
-                raise
-            raise InvalidArgument(str(exc)) from exc
+        kv_protocol = self._prefill_kv_protocol(
+            is_local_probe, sampling_params, incoming_kv_transfer_params
+        )
 
         # Extract LoRA request if present
         model_name = request.get("model")

@@ -2177,6 +2177,49 @@ async def test_prefill_ignores_coordinates_without_native_envelope(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("envelope", ["absent", "empty", "coordinates"])
+@pytest.mark.parametrize(
+    "connector,extra,message",
+    [
+        ("UnknownConnector", {}, "Unsupported kv_connector"),
+        ("MultiConnector", {"connectors": "invalid"}, "to be a list"),
+        (
+            "MultiConnector",
+            {
+                "connectors": [
+                    {"kv_connector": "NixlConnector"},
+                    {"kv_connector": "NeuronNixlConnector"},
+                ]
+            },
+            "multiple PD-capable sub-connectors",
+        ),
+    ],
+)
+async def test_prefill_preserves_connector_configuration_errors(
+    prefill_probe_handler, envelope, connector, extra, message
+):
+    """Keep deployment errors distinct from malformed native coordinates."""
+    handler = prefill_probe_handler
+    handler.engine_client.vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector=connector, kv_connector_extra_config=extra
+        ),
+    )
+    request = _make_raw_frontend_request()
+    if envelope != "absent":
+        native = {}
+        if envelope == "coordinates":
+            native["kv_transfer_params"] = {
+                "remote_block_ids": [[0]],
+                "remote_num_tokens": 128,
+            }
+        request["extra_args"] = {"vllm_tito": native}
+    with pytest.raises(ValueError, match=message):
+        _ = [chunk async for chunk in handler.generate(request, MagicMock())]
+    handler.engine_client.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "envelope",
     ["invalid", {"kv_transfer_params": []}, {"kv_transfer_params": "invalid"}],
