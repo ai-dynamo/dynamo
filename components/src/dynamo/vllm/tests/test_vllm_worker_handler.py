@@ -3032,17 +3032,17 @@ class TestEmbeddingWorkerHandlerCancellation:
         ]
 
     @pytest.mark.parametrize(
-        ("truncate_prompt_tokens", "error_type", "match"),
+        ("truncate_prompt_tokens", "match"),
         [
-            ("2048", mod.InvalidArgument, "Invalid 'truncate_prompt_tokens' type"),
-            (True, mod.InvalidArgument, "Invalid 'truncate_prompt_tokens' type"),
-            (-2, mod.InvalidArgument, "truncate_prompt_tokens must be >= -1"),
+            ("2048", "Invalid 'truncate_prompt_tokens' type"),
+            (True, "Invalid 'truncate_prompt_tokens' type"),
+            (-2, "truncate_prompt_tokens must be >= -1"),
         ],
     )
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
     async def test_truncate_prompt_tokens_rejects_invalid_values(
-        self, truncate_prompt_tokens, error_type, match
+        self, truncate_prompt_tokens, match
     ):
         """Invalid truncation values fail before the request reaches vLLM."""
         handler = self._make_embedding_handler()
@@ -3053,7 +3053,7 @@ class TestEmbeddingWorkerHandlerCancellation:
             "model": "test-model",
             "truncate_prompt_tokens": truncate_prompt_tokens,
         }
-        with pytest.raises(error_type, match=match):
+        with pytest.raises(mod.InvalidArgument, match=match):
             async for _ in handler.generate(request, context):
                 pass
 

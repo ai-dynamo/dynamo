@@ -967,7 +967,7 @@ def test_mark_forwarded_mm_hashes_for_routing(hashes, expected):
 
 
 def test_mark_forwarded_mm_hashes_rejects_noncanonical_hash():
-    with pytest.raises(mod.InvalidArgument, match="must start with 16 hex characters"):
+    with pytest.raises(ValueError, match="must start with 16 hex characters"):
         mod.mark_forwarded_mm_hashes_for_routing(["opaque-key"])
 
 

@@ -3292,7 +3292,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         Raises:
             InvalidArgument: If the payload is not valid base64 or the loader
                 rejects it as a client input fault.
-            ValueError: If the input is not a string (internal contract).
+            ValueError: If the input is not a string (internal contract)
             RuntimeError: If ModelConfig is unavailable.
         """
         from vllm.exceptions import VLLMClientError
@@ -3316,14 +3316,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # the bindings return a retryable 5xx instead of a client 400.
             raise
         except VLLMClientError as e:
-            raise InvalidArgument(
-                f"Invalid prompt_embeds: {e}"
-            ) from e
+            raise InvalidArgument(f"Invalid prompt_embeds: {e}") from e
         except binascii.Error as e:
             raise InvalidArgument("prompt_embeds is not valid base64") from e
-        except Exception:
-            logger.error("Failed to decode prompt_embeds", exc_info=True)
-            raise
+        except Exception as e:
+            raise ValueError(f"Failed to decode prompt_embeds: {e}") from e
 
     def _create_prompt_from_embeddings(
         self, prompt_embeds_base64: str
