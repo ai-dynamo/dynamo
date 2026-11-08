@@ -37,7 +37,10 @@ use crate::{
             llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest, timing::RequestTracker,
         },
         response_merge::PREFILL_OUTPUT_ANNOTATION,
-        systemone::{build_native_score_request, parse_candidate_scores},
+        systemone::{
+            ScoringBackend, build_native_score_request, parse_candidate_scores,
+            vllm::{VllmScoreCollector, causal_scoring_request},
+        },
     },
 };
 
@@ -81,6 +84,7 @@ struct PreparedBranch {
 }
 
 struct StartedBranch {
+    backend: ScoringBackend,
     prepared: PreparedBranch,
     tracker: Arc<RequestTracker>,
     stream: ManyOut<Annotated<LLMEngineOutput>>,
@@ -91,6 +95,7 @@ struct BranchResult {
     index: usize,
     answer: QuestionOutcome,
     input_tokens: usize,
+    output_tokens: usize,
     cached_tokens: Option<usize>,
     placement: Placement,
 }
@@ -124,7 +129,7 @@ impl DispatchError {
     fn unavailable(detail: impl Into<String>) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
-            public_message: "SGLang scoring worker is unavailable",
+            public_message: "scoring worker is unavailable",
             detail: detail.into(),
             retry_after: false,
             is_capacity_exhausted: false,
@@ -134,7 +139,7 @@ impl DispatchError {
     fn malformed(detail: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            public_message: "malformed SGLang scoring response",
+            public_message: "malformed scoring response",
             detail: detail.into(),
             retry_after: false,
             is_capacity_exhausted: false,
@@ -242,14 +247,14 @@ async fn handle_request(
             return error(
                 dialect,
                 StatusCode::SERVICE_UNAVAILABLE,
-                "model has no eligible aggregate SGLang worker",
+                "model has no eligible scoring worker",
             );
         }
         Err(SystemOneSelectionError::Unsupported) => {
             return error(
                 dialect,
                 StatusCode::BAD_REQUEST,
-                "model does not support aggregate SGLang scoring",
+                "model does not support decision scoring",
             );
         }
     };
@@ -457,14 +462,21 @@ fn prepare_branches(
                 .map_err(|message| (StatusCode::UNPROCESSABLE_ENTITY, message))?;
         remaining_tokenization_work -= prompt_ids.len() * (rendered.labels.len() + 2);
         remaining_encoding_bytes -= encoding_bytes;
-        let native =
-            build_native_score_request(&prompt_ids, &label_ids, "validation").map_err(|cause| {
-                tracing::error!(error = %cause, "failed to build System One native request");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal server error".to_string(),
-                )
-            })?;
+        let native = match selection.backend() {
+            ScoringBackend::Sglang => {
+                build_native_score_request(&prompt_ids, &label_ids, "validation")
+            }
+            ScoringBackend::Vllm => {
+                causal_scoring_request(prompt_ids.clone(), &label_ids, "validation")
+            }
+        }
+        .map_err(|cause| {
+            tracing::error!(error = %cause, "failed to build System One native request");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error".to_string(),
+            )
+        })?;
         branches.push(PreparedBranch {
             index,
             temperature: request.temperature,
@@ -517,6 +529,11 @@ async fn dispatch(
     results.push(first_result);
 
     let fanout_started = Instant::now();
+    let siblings_limit = if selection.backend() == ScoringBackend::Vllm {
+        1
+    } else {
+        MAX_CONCURRENT_SIBLINGS
+    };
     let mut siblings = stream::iter(branches.into_iter().map(|branch| {
         run_branch(
             selection.clone(),
@@ -528,7 +545,7 @@ async fn dispatch(
             metrics.clone(),
         )
     }))
-    .buffer_unordered(MAX_CONCURRENT_SIBLINGS);
+    .buffer_unordered(siblings_limit);
     let mut failure = None;
     while let Some(result) = siblings.next().await {
         if failure.is_some() {
@@ -568,6 +585,7 @@ async fn dispatch(
     };
     for result in results {
         usage.input_tokens += result.input_tokens as u64;
+        usage.output_tokens += result.output_tokens as u64;
         usage.cached_tokens = usage
             .cached_tokens
             .zip(result.cached_tokens)
@@ -636,6 +654,7 @@ async fn run_branch(
         request: mut preprocessed,
         exchange,
     } = bind_native(
+        selection.backend(),
         &selection.canonical_model,
         selection.card.kv_cache_block_size,
         &native,
@@ -645,7 +664,7 @@ async fn run_branch(
     preprocessed
         .routing
         .get_or_insert_default()
-        .expected_output_tokens = Some(0);
+        .expected_output_tokens = Some(selection.backend().output_tokens() as u32);
     let tracker = Arc::new(RequestTracker::new());
     tracker.record_isl(prepared.prompt_ids.len(), None);
     if let Some(placement) = pinned {
@@ -672,6 +691,7 @@ async fn run_branch(
     }
     let result = finish_branch(
         StartedBranch {
+            backend: selection.backend(),
             prepared,
             tracker,
             stream,
@@ -688,14 +708,15 @@ async fn run_branch(
     Ok(result)
 }
 
-/// Build a scoring branch through SGLang's native `/generate` format.
+/// Bind the backend's native request to the existing Generate transport.
 fn bind_native(
+    backend: ScoringBackend,
     model: &str,
     kv_cache_block_size: u32,
     native: &serde_json::Value,
     request_id: &str,
 ) -> anyhow::Result<Bound> {
-    let format = crate::generate_format::named("sglang")?;
+    let format = crate::generate_format::named(backend.format())?;
     let body = serde_json::to_vec(native)?;
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
@@ -773,6 +794,7 @@ async fn read_branch(
     parent_context: Arc<dyn AsyncEngineContext>,
 ) -> Result<BranchResult, DispatchError> {
     let StartedBranch {
+        backend,
         prepared,
         tracker,
         mut stream,
@@ -780,6 +802,14 @@ async fn read_branch(
     } = started;
     let mut terminal = None;
     let mut frames = Vec::new();
+    let mut vllm = if backend == ScoringBackend::Vllm {
+        Some(
+            VllmScoreCollector::new(prepared.label_ids.clone(), prepared.prompt_ids.len())
+                .map_err(|cause| DispatchError::malformed(cause.to_string()))?,
+        )
+    } else {
+        None
+    };
     loop {
         let delta = run_until_killed(parent_context.as_ref(), stream.next())
             .await
@@ -787,19 +817,25 @@ async fn read_branch(
         let Some(delta) = delta else { break };
         let prefill = delta.event.as_deref() == Some(PREFILL_OUTPUT_ANNOTATION);
         if let Some(output) = delta.into_data().map_err(stream_error)? {
-            exchange
-                .chunk(output, prefill, &mut |frame| frames.push(frame.clone()))
-                .map_err(stream_error)?;
+            if let Some(collector) = vllm.as_mut() {
+                collector
+                    .observe(&output)
+                    .map_err(|cause| DispatchError::malformed(cause.to_string()))?;
+            } else {
+                exchange
+                    .chunk(output, prefill, &mut |frame| frames.push(frame.clone()))
+                    .map_err(stream_error)?;
+            }
         }
         for frame in frames.drain(..) {
             accept_frame(frame, &mut terminal)?;
         }
     }
-    if let Some(frame) = exchange.finish().map_err(stream_error)? {
+    if vllm.is_none()
+        && let Some(frame) = exchange.finish().map_err(stream_error)?
+    {
         accept_frame(frame, &mut terminal)?;
     }
-    let terminal = terminal
-        .ok_or_else(|| DispatchError::malformed("missing terminal SGLang scoring frame"))?;
     let placement = tracker
         .get_worker_info()
         .and_then(|worker| {
@@ -819,18 +855,30 @@ async fn read_branch(
         .ok_or_else(|| {
             DispatchError::unavailable("Dynamo did not report an unambiguous scoring worker rank")
         })?;
-    let scores = parse_candidate_scores(&terminal, &prepared.label_ids)
-        .map_err(|cause| DispatchError::malformed(cause.to_string()))?;
+    let (scores, cached_tokens) = if let Some(collector) = vllm {
+        let result = collector
+            .finish()
+            .map_err(|cause| DispatchError::malformed(cause.to_string()))?;
+        (result.scores, Some(result.cached_tokens))
+    } else {
+        let terminal = terminal
+            .ok_or_else(|| DispatchError::malformed("missing terminal SGLang scoring frame"))?;
+        (
+            parse_candidate_scores(&terminal, &prepared.label_ids)
+                .map_err(|cause| DispatchError::malformed(cause.to_string()))?,
+            measured_cached_tokens(&terminal, prepared.prompt_ids.len())?,
+        )
+    };
     let answer = QuestionOutcome::Answer(
         reduce_vocab_logprobs(&scores, prepared.temperature)
             .map_err(|cause| DispatchError::malformed(cause.to_string()))?,
     );
     let input_tokens = prepared.prompt_ids.len();
-    let cached_tokens = measured_cached_tokens(&terminal, input_tokens)?;
     Ok(BranchResult {
         index: prepared.index,
         answer,
         input_tokens,
+        output_tokens: backend.output_tokens(),
         cached_tokens,
         placement,
     })
