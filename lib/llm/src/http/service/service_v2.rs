@@ -4445,6 +4445,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn systemone_does_not_bypass_disabled_public_generate_route() {
+        crate::generate_format::test_formats::install();
         let mut api = FrontendApiConfig::default();
         api.set_systemone_enabled(true);
         let service = HttpService::builder()

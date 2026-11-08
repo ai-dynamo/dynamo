@@ -373,10 +373,9 @@ pub(crate) mod test_formats {
         }
     }
 
-    /// Mounts a route; readiness tests never dispatch through it.
-    struct Readiness;
+    struct Vllm;
 
-    impl GenerateFormat for Readiness {
+    impl GenerateFormat for Vllm {
         fn name(&self) -> &str {
             "vllm"
         }
@@ -385,8 +384,50 @@ pub(crate) mod test_formats {
             VLLM_INFERENCE_V1_GENERATE_CAPABILITY
         }
 
-        fn open(&self, _: ClientRequest<'_>) -> Result<Opened, ClientError> {
-            unreachable!("route readiness must not parse inference requests")
+        fn open(&self, request: ClientRequest<'_>) -> Result<Opened, ClientError> {
+            let mut body: serde_json::Map<String, Value> = request.json()?;
+            let token_ids: Vec<u32> =
+                serde_json::from_value(body.remove("token_ids").unwrap_or_default())
+                    .map_err(|error| ClientError::new(error.to_string()))?;
+            let request_id = request.default_request_id.to_string();
+            body.insert("request_id".into(), request_id.clone().into());
+            let cache_namespace = body
+                .get("cache_salt")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let max_tokens = body["sampling_params"]["max_tokens"]
+                .as_u64()
+                .map(|tokens| tokens as u32);
+            Ok(Opened {
+                request_id,
+                stream: false,
+                model: None,
+                input_tokens: token_ids.len(),
+                validation: Ok(()),
+                bind: Box::new(move |worker| {
+                    let request = PreprocessedRequest::builder()
+                        .model(worker.model.to_string())
+                        .token_ids(token_ids)
+                        .stop_conditions(StopConditions {
+                            max_tokens,
+                            ..Default::default()
+                        })
+                        .sampling_options(SamplingOptions::default())
+                        .output_options(OutputOptions::default())
+                        .routing(Some(RoutingHints {
+                            cache_namespace,
+                            ..Default::default()
+                        }))
+                        .extra_args(Some(json!({ "vllm_tito": body })))
+                        .annotations(vec![])
+                        .build()
+                        .map_err(|error| ClientError::new(error.to_string()))?;
+                    Ok(Bound {
+                        request,
+                        exchange: Box::new(PassthroughExchange),
+                    })
+                }),
+            })
         }
     }
 
@@ -395,7 +436,7 @@ pub(crate) mod test_formats {
         INSTALL.call_once(|| {
             let mut registry = Registry::default();
             registry.register(Arc::new(Passthrough)).unwrap();
-            registry.register(Arc::new(Readiness)).unwrap();
+            registry.register(Arc::new(Vllm)).unwrap();
             assert!(super::install(registry));
         });
     }

@@ -69,7 +69,7 @@ async fn unknown_native_abort_is_unavailable_not_client_error_or_cancellation() 
                 .is_none()
         );
         let body = response_body(response).await;
-        assert_eq!(body["detail"], "SGLang scoring worker is unavailable");
+        assert_eq!(body["detail"], "scoring worker is unavailable");
         assert!(body.get("answers").is_none());
         assert!(!body.to_string().contains("private worker detail"));
         assert!(parent.is_killed());

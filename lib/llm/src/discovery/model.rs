@@ -94,9 +94,10 @@ pub(crate) struct GenerateEngineSelection {
     pub(crate) tower_connector_lora_enabled: bool,
 }
 
-/// Aggregate SGLang engine and model assets selected from one WorkerSet snapshot.
+/// Scoring engine and model assets selected from one WorkerSet snapshot.
 #[derive(Clone)]
 pub(crate) struct SystemOneExecutionSelection {
+    pub(crate) backend: crate::protocols::systemone::ScoringBackend,
     pub(crate) canonical_model: String,
     pub(crate) engine: GenerateStreamingEngine,
     pub(crate) card: ModelDeploymentCard,
@@ -106,6 +107,10 @@ pub(crate) struct SystemOneExecutionSelection {
 }
 
 impl SystemOneExecutionSelection {
+    pub(crate) fn backend(&self) -> crate::protocols::systemone::ScoringBackend {
+        self.backend
+    }
+
     pub(crate) fn validate_dispatch(
         &self,
         pinned_worker: Option<u64>,
@@ -137,7 +142,11 @@ impl SystemOneExecutionSelection {
         // Tokenizer-specific candidate limits are checked during preflight.
         dynamo_decisions::Capabilities {
             max_questions: SYSTEMONE_MAX_QUESTIONS,
-            max_candidates: SYSTEMONE_MAX_CANDIDATES,
+            max_candidates: if self.backend() == crate::protocols::systemone::ScoringBackend::Vllm {
+                26
+            } else {
+                SYSTEMONE_MAX_CANDIDATES
+            },
             supports_predicate: true,
             supports_choice: true,
             supports_score: true,
@@ -828,10 +837,9 @@ impl Model {
         worker_set: &WorkerSet,
     ) -> Option<SystemOneExecutionSelection> {
         let card = worker_set.card();
-        if !card.is_systemone_serial_eligible() {
-            return None;
-        }
+        let backend = card.systemone_backend()?;
         Some(SystemOneExecutionSelection {
+            backend,
             canonical_model: self.name.clone(),
             engine: worker_set.generate_engine.clone()?,
             card: card.clone(),
@@ -1421,6 +1429,22 @@ mod tests {
         ));
         assert_eq!(selection_b.card.kv_cache_block_size, 32);
         assert_eq!(selection_a.card.kv_cache_block_size, 16);
+    }
+
+    #[test]
+    fn incomplete_vllm_flag_cannot_change_a_selected_sglang_backend() {
+        let model = Model::new("scoring-model".into());
+        let (workers, _tx) = systemone_worker_set("ns", |card| {
+            card.runtime_config
+                .runtime_data
+                .insert("vllm_causal_decision_v1".into(), true.into());
+        });
+        model.add_worker_set("ns".into(), workers);
+        let selected = model.get_systemone_execution_selection().unwrap();
+        assert_eq!(
+            selected.backend(),
+            crate::protocols::systemone::ScoringBackend::Sglang
+        );
     }
 
     #[test]
