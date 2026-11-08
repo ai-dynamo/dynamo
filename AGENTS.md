@@ -43,9 +43,9 @@ Before you edit files for a new piece of work, find or create its issue.
   by that ID (`Closes DYN-1234`, `Part of DYN-1234`), not by a GitHub issue number. Only a
   Linear ID adds the issue to the Linear release on merge. Exception: for a QA bug (a `qa:*`
   label) or a release-branch PR, keep the ID out of the branch name and title and reference it
-  only in the description with `Part of DYN-1234` or `Refs DYN-1234`, because a branch key or `Closes` closes the issue and
-  its synced NVBug before QA verifies the fix. DGH mirrors to public GitHub, so customer names
-  and internal detail stay out of it.
+  only in the description with `Part of DYN-1234` or `Refs DYN-1234`, because a branch key or
+  `Closes` closes the issue and its synced NVBug before QA verifies the fix. DGH mirrors to
+  public GitHub, so customer names and internal detail stay out of it.
 - **Community contributors:** create or claim a GitHub issue on `ai-dynamo/dynamo`.
 
 The `dynamo-issue-first` skill covers sorting the issue and referencing it from the pull
