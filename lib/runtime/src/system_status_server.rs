@@ -965,7 +965,10 @@ mod tests {
 
             // First scrape starts a render, then its request is cancelled.
             let first = scrape(&last);
-            started.recv().await.expect("first render started");
+            tokio::time::timeout(Duration::from_secs(5), started.recv())
+                .await
+                .expect("first render started")
+                .expect("started");
             first.abort();
             let _ = first.await;
 
@@ -981,7 +984,10 @@ mod tests {
             // Releasing the cancelled render lets the second scrape render; the
             // third arrived before that render started and shares it.
             release.send(()).unwrap();
-            started.recv().await.expect("second render started");
+            tokio::time::timeout(Duration::from_secs(5), started.recv())
+                .await
+                .expect("second render started")
+                .expect("started");
             release.send(()).unwrap();
             let second = tokio::time::timeout(Duration::from_secs(5), second)
                 .await
