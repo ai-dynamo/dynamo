@@ -34,6 +34,28 @@ fn token_resources() -> TokenResources {
 }
 
 #[tokio::test]
+async fn native_routers_initialize_with_host_routing_selectors() {
+    let (_runtime, load) = super::super::test_support::routing_load_for_test().await;
+    for mode in [
+        RouterMode::RoundRobin,
+        RouterMode::Random,
+        RouterMode::LeastLoaded,
+    ] {
+        let resources = DecisionResources::for_worker(
+            ModelDeploymentCard::with_name_only("native-selector-test"),
+            None,
+            Some(load.clone()),
+            mode,
+            Arc::new(AllocatorTrimOnDrop::new()),
+        );
+        resources.native_router(&resources.head).await.unwrap();
+        resources.native_router(&resources.read).await.unwrap();
+        assert!(resources.head.get().is_some(), "head router: {mode:?}");
+        assert!(resources.read.get().is_some(), "read router: {mode:?}");
+    }
+}
+
+#[tokio::test]
 async fn eager_lazy_and_retry_preparation_share_builder_and_load_cancellation() {
     use crate::discovery::LoadThresholdHandle;
     use crate::kv_router::RouterLoadSource;

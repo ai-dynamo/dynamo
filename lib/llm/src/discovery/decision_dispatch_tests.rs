@@ -26,7 +26,7 @@ pub(crate) async fn assert_native_dispatch(client: &Client, context: &DecisionCo
     let calls = Arc::new(AtomicUsize::new(0));
     let router = PushRouter::<DecisionReadRequest, Annotated<DecisionReadResponse>>::from_client_with_options(
         client.clone(), RouterMode::RoundRobin,
-        PushRouterOptions { dispatch: Some(crate::discovery::DecisionDispatch::with_dispatch(Arc::new(RecordingTransport(calls.clone())), crate::discovery::GuardPolicy::Required)), ..Default::default() },
+        PushRouterOptions { dispatch: Some(crate::discovery::DecisionDispatch::with_dispatch(Arc::new(RecordingTransport(calls.clone())), crate::discovery::GuardPolicy::Required)), ..crate::kv_router::plugins::push_router_options() },
     ).await.unwrap();
     let mut request = Context::new(DecisionReadRequest {
         decision_read: crate::protocols::decision_native::NativeDecisionRequestV1 {

@@ -132,7 +132,7 @@ async fn retired_ordinary_pipeline_can_resolve_transport_for_migration() {
             PushRouterOptions {
                 dispatch: Some(transport.clone()),
                 fault_detection: false,
-                ..Default::default()
+                ..crate::kv_router::plugins::push_router_options()
             },
         )
         .await

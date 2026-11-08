@@ -447,7 +447,7 @@ impl DecisionResources {
                     dispatch: Some(
                         DecisionDispatch::for_client(client, super::GuardPolicy::Required).await?,
                     ),
-                    ..PushRouterOptions::default()
+                    ..crate::kv_router::plugins::push_router_options()
                 },
             )
             .await?;
