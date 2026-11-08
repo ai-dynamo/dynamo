@@ -159,6 +159,7 @@ ENV_TRACE_PATH = "DYN_REQUEST_TRACE_FILE_PATH"
 # lib/truthy is_truthy; lib/llm/src/request_trace/config.rs parse_file_format.
 _TRUTHY = frozenset({"1", "true", "on", "yes"})
 _GZ_FORMATS = frozenset({"jsonl_gz", "jsonl.gz"})
+_POD_NAME_VALUE = "\x00fieldRef:metadata.name\x00"
 
 ENV_WORKER_SELECTION_POLICY = "DYN_ROUTER_WORKER_SELECTION_POLICY"
 ENV_LOAD_AWARE = "DYN_ROUTER_LOAD_AWARE"
@@ -519,6 +520,8 @@ class _Env:
     ``opaque`` the names it cannot (``valueFrom``, or a reference to
     unreadable env), and ``inert`` those of them whose value can never be or
     create an option.
+    ``replay`` retains the composed order for semantic origins so P10 can
+    verify runtime source identity at the point the trace path is expanded.
     """
 
     entries: Mapping[str, Mapping[str, Any]]
@@ -526,6 +529,7 @@ class _Env:
     opaque: frozenset[str]
     inert: frozenset[str]
     env_from: tuple[Mapping[str, Any], ...]
+    replay: Optional[tuple[Mapping[str, Any], ...]]
 
     @property
     def env_from_prefixes(self) -> tuple[str, ...]:
@@ -1010,6 +1014,7 @@ def _component_env(dgd: Mapping[str, Any], spec: Mapping[str, Any]) -> _Env:
         opaque=frozenset(opaque),
         inert=frozenset(inert),
         env_from=env_from,
+        replay=tuple(replay) if ordered else None,
     )
 
 
@@ -2170,6 +2175,36 @@ def _planner_replica_errors(
     ]
 
 
+def _trace_environment(
+    replay: Sequence[Mapping[str, Any]], env_from_prefixes: Sequence[str]
+) -> dict[str, str]:
+    """Replay trace values with distinct identities for runtime sources."""
+
+    values: dict[str, str] = {}
+    for entry in replay:
+        name = str(entry["name"])
+        source = entry.get("valueFrom")
+        if source is not None:
+            field_ref = source.get("fieldRef") if isinstance(source, Mapping) else None
+            if (
+                isinstance(field_ref, Mapping)
+                and field_ref.get("fieldPath") == "metadata.name"
+            ):
+                value = _POD_NAME_VALUE
+            else:
+                marker = _INERT if _inert_source(source) else _OPAQUE
+                value = f"{marker}{name}\x00"
+        else:
+            value = _expand(
+                str(entry.get("value") or ""),
+                values,
+                (),
+                env_from_prefixes=env_from_prefixes,
+            )
+        values[name] = value
+    return values
+
+
 def _trace_recipe_errors(
     analysis: _Analysis,
     *,
@@ -2182,6 +2217,11 @@ def _trace_recipe_errors(
 
     assert analysis.spec is not None and analysis.env is not None
     entries = analysis.env.entries
+    replayed = (
+        _trace_environment(analysis.env.replay, analysis.env.env_from_prefixes)
+        if analysis.env.replay is not None
+        else None
+    )
     errors: list[str] = []
 
     def literal(name: str) -> Optional[str]:
@@ -2191,6 +2231,8 @@ def _trace_recipe_errors(
         if entry.get("valueFrom") is not None:
             errors.append(f"P10: frontend env {name} must be a literal value")
             return None
+        if replayed is not None:
+            return replayed.get(name)
         return str(entry.get("value") or "")
 
     trace = literal(ENV_TRACE)
@@ -2230,22 +2272,38 @@ def _trace_recipe_errors(
     if path is None:
         errors.append(f"P10: the frontend must set {ENV_TRACE_PATH}")
     elif mounts:
+        dgd_dirs = (
+            (dgd_name,)
+            if replayed is not None
+            else (f"$({ENV_PARENT_DGD_NAME})", dgd_name)
+        )
+        pod_name_value = (
+            _POD_NAME_VALUE if replayed is not None else f"$({ENV_POD_NAME})"
+        )
         prefixes = [
-            _join_dir(mount, segments_dir, dgd_dir, f"$({ENV_POD_NAME})")
+            _join_dir(mount, segments_dir, dgd_dir, pod_name_value)
             for mount in mounts
-            for dgd_dir in (f"$({ENV_PARENT_DGD_NAME})", dgd_name)
+            for dgd_dir in dgd_dirs
         ]
         # Directly in the pod's directory: the reconciler prunes only the
         # segments at its top level.
         if not any(
-            path.startswith(prefix)
+            (replayed is None or _OPAQUE not in path)
+            and path.startswith(prefix)
             and len(path) > len(prefix)
             and "/" not in path[len(prefix) :]
             for prefix in prefixes
         ):
+            display_path = str((entries.get(ENV_TRACE_PATH) or {}).get("value") or "")
+            display_prefix = (
+                _join_dir(mounts[0], segments_dir, dgd_name, f"$({ENV_POD_NAME})")
+                if replayed is not None
+                else prefixes[0]
+            )
+            expansion = " after env expansion" if replayed is not None else ""
             errors.append(
-                f"P10: {ENV_TRACE_PATH}={path!r} must be a file prefix directly "
-                f"under {prefixes[0]!r} (no further '/')"
+                f"P10: {ENV_TRACE_PATH}={display_path!r} must be a file prefix directly "
+                f"under {display_prefix!r}{expansion} (no further '/')"
             )
     return errors
 

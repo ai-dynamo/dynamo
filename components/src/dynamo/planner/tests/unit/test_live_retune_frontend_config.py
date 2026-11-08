@@ -2674,7 +2674,8 @@ def test_p10_trace_recipe(env, frontend_kwargs, match):
         assert not report.spec_ok
 
 
-def test_p10_custom_segments_dir_and_graph_env():
+@pytest.mark.parametrize("origin", ["1.8.0", "1.7.99"])
+def test_p10_custom_segments_dir_and_graph_env(origin):
     path = "/trace/rt/segs/$(DYN_PARENT_DGD_K8S_NAME)/$(DYN_POD_NAME)/req"
     deployment = dgd(
         frontend(env=trace_env(DYN_REQUEST_TRACE_FILE_PATH=None)),
@@ -2682,8 +2683,70 @@ def test_p10_custom_segments_dir_and_graph_env():
         planner(),
         env=[{"name": "DYN_REQUEST_TRACE_FILE_PATH", "value": path}],
     )
+    deployment["metadata"]["annotations"] = {
+        "nvidia.com/dynamo-operator-origin-version": origin
+    }
     report = evaluate(deployment, config=planner_config(segments_dir="rt/segs"))
     assert report.spec_ok, report.reasons
+
+
+@pytest.mark.parametrize("origin", ["1.8.0", "1.7.99"])
+@pytest.mark.parametrize(
+    ("case", "valid"),
+    [
+        ("correct", True),
+        ("forward", False),
+        ("literal", False),
+        ("uid-alias", False),
+        ("name-alias", True),
+        ("opaque-filename", False),
+        ("graph-shadow", False),
+        ("last-trace", True),
+    ],
+)
+def test_p10_trace_path_uses_expansion_time_sources(origin, case, valid):
+    pod_name, *rest = trace_env()
+    path = next(entry for entry in rest if entry["name"] == fc.ENV_TRACE_PATH)
+    rest = [entry for entry in rest if entry["name"] != fc.ENV_TRACE_PATH]
+    before = []
+    after = [pod_name]
+    if case == "correct":
+        before, after = [pod_name], []
+    elif case in {"literal", "uid-alias", "name-alias"}:
+        value = {
+            "literal": "fixed-pod",
+            "uid-alias": "$(POD_UID)",
+            "name-alias": "$(POD_NAME)",
+        }[case]
+        before = [{"name": fc.ENV_POD_NAME, "value": value}]
+    elif case == "opaque-filename":
+        before = [
+            pod_name,
+            {
+                "name": "TRACE_SUFFIX",
+                "valueFrom": {"configMapKeyRef": {"name": "trace", "key": "suffix"}},
+            },
+        ]
+        after = []
+        path["value"] += "$(TRACE_SUFFIX)"
+    if case == "last-trace":
+        after = [pod_name, copy.deepcopy(path)]
+    deployment = dgd(
+        frontend(env=[*before, *rest, path, *after]),
+        worker(),
+        planner(),
+        env=[copy.deepcopy(pod_name)] if case == "graph-shadow" else None,
+    )
+    deployment["metadata"]["annotations"] = {
+        "nvidia.com/dynamo-operator-origin-version": origin
+    }
+    report = evaluate(deployment)
+    assert report.p4_ok, report.reasons
+    errors = reasons_matching(report, "P10:")
+    if valid or origin != "1.8.0":
+        assert errors == [], errors
+    else:
+        assert any("after env expansion" in error for error in errors), errors
 
 
 def test_p10_extra_sinks_warn():
@@ -2727,6 +2790,19 @@ def test_malformed_dgd_never_raises():
     ):
         report = evaluate(deployment)
         assert not report.spec_ok
+
+
+@pytest.mark.parametrize("origin", ["1.8.0", "1.7.99"])
+@pytest.mark.parametrize("source", ["invalid", {"fieldRef": "invalid"}])
+def test_malformed_unrelated_env_source_never_raises(origin, source):
+    deployment = with_frontend(
+        env=[*trace_env(), {"name": "LOG_LEVEL", "valueFrom": source}]
+    )
+    deployment["metadata"]["annotations"] = {
+        "nvidia.com/dynamo-operator-origin-version": origin
+    }
+    report = evaluate(deployment)
+    assert report.spec_ok, report.reasons
 
 
 def test_unexpected_parser_failure_fails_closed(monkeypatch, caplog):
