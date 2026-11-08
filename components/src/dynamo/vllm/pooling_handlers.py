@@ -22,8 +22,11 @@ from vllm.config import ModelConfig
 from vllm.inputs import TextPrompt, TokensPrompt
 
 from dynamo._core import Context
+from dynamo.health_check import HEALTH_CHECK_KEY
+from dynamo.llm.exceptions import HttpError, InvalidArgument
 
 from .args import Config
+from .decision_clef import ClefDecisionExecutor
 from .handlers import EmbeddingWorkerHandler
 
 logger = logging.getLogger(__name__)
@@ -60,6 +63,7 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
             shutdown_event=shutdown_event,
         )
         self.model_config = model_config
+        self.decision_clef: ClefDecisionExecutor | None = None
         self._default_pooling_task: str | None = None
         logger.info("Classify worker handler initialized")
 
@@ -188,10 +192,35 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         self, request: dict, context: Context
     ) -> AsyncIterator[dict[str, Any]]:
         """Handle one internal classify or pooling wire request."""
+        if (
+            request.get("native_pooling_health") is True
+            and request.get(HEALTH_CHECK_KEY) is True
+        ):
+            if (
+                set(request) != {"native_pooling_health", "model", HEALTH_CHECK_KEY}
+                or self.decision_clef is None
+            ):
+                raise HttpError(503, "native pooling health is unavailable")
+            yield await self.decision_clef.health(context)
+            return
+        if "decision_head" in request:
+            if context.metadata.get("dynamo.internal.decision") != "head":
+                raise InvalidArgument(
+                    "native decisions require the private decision transport"
+                )
+            if self.decision_clef is None:
+                raise HttpError(503, "native decisions are unavailable on this worker")
+            yield await self.decision_clef.execute(request, context)
+            return
         if "encoding_format" in request:
             async for response in self._generate_pooling(request, context):
                 yield response
             return
+
+        if self.decision_clef is not None:
+            raise InvalidArgument(
+                "Clef classification requires a decision schema; use the decision APIs"
+            )
 
         model_name = request.get("model") or self.config.served_model_name or ""
         input_field = request.get("input")
