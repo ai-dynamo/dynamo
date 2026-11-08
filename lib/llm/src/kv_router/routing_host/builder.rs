@@ -255,50 +255,6 @@ impl PolicyInputs {
     }
 }
 
-#[cfg(test)]
-mod policy_input_tests {
-    use super::*;
-    use crate::lora::{LoraRoutingTable, LoraStateTracker};
-
-    #[test]
-    fn candidate_policy_requires_supported_hosted_mode() {
-        for mode in [
-            RouterMode::Direct,
-            RouterMode::LeastLoaded,
-            RouterMode::DeviceAwareWeighted,
-        ] {
-            let policy = LegacyLoraPolicy::kv(Arc::new(LoraFilter::new(
-                LoraRoutingTable::new(),
-                LoraStateTracker::new(),
-            )));
-            let Err(error) = PolicyInputs::check(mode, None, None, false, None, Some(policy))
-            else {
-                panic!("{mode:?} should reject candidate policies");
-            };
-            assert!(
-                error
-                    .to_string()
-                    .contains("candidate policy is unsupported"),
-                "{mode:?}: {error}"
-            );
-        }
-        for mode in [RouterMode::RoundRobin, RouterMode::Random] {
-            let policy = LegacyLoraPolicy::kv(Arc::new(LoraFilter::new(
-                LoraRoutingTable::new(),
-                LoraStateTracker::new(),
-            )));
-            let Err(error) = PolicyInputs::check(mode, None, None, false, None, Some(policy))
-            else {
-                panic!("{mode:?} requires a load context");
-            };
-            assert!(
-                error.to_string().contains("requires a RoutingLoadContext"),
-                "{mode:?}: {error}"
-            );
-        }
-    }
-}
-
 /// Resolve a routing mode to its policy by type name in the linked plugin registry, the same way
 /// a policy file names a type, and take out its picker.
 pub(crate) fn hosted_picker(mode: RouterMode) -> anyhow::Result<HostedWorkerPicker> {
@@ -381,6 +337,50 @@ fn assemble(
                 candidate_policy,
                 routing_context: Some(load_context),
             })
+        }
+    }
+}
+
+#[cfg(test)]
+mod policy_input_tests {
+    use super::*;
+    use crate::lora::{LoraRoutingTable, LoraStateTracker};
+
+    #[test]
+    fn candidate_policy_requires_supported_hosted_mode() {
+        for mode in [
+            RouterMode::Direct,
+            RouterMode::LeastLoaded,
+            RouterMode::DeviceAwareWeighted,
+        ] {
+            let policy = LegacyLoraPolicy::kv(Arc::new(LoraFilter::new(
+                LoraRoutingTable::new(),
+                LoraStateTracker::new(),
+            )));
+            let Err(error) = PolicyInputs::check(mode, None, None, false, None, Some(policy))
+            else {
+                panic!("{mode:?} should reject candidate policies");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("candidate policy is unsupported"),
+                "{mode:?}: {error}"
+            );
+        }
+        for mode in [RouterMode::RoundRobin, RouterMode::Random] {
+            let policy = LegacyLoraPolicy::kv(Arc::new(LoraFilter::new(
+                LoraRoutingTable::new(),
+                LoraStateTracker::new(),
+            )));
+            let Err(error) = PolicyInputs::check(mode, None, None, false, None, Some(policy))
+            else {
+                panic!("{mode:?} requires a load context");
+            };
+            assert!(
+                error.to_string().contains("requires a RoutingLoadContext"),
+                "{mode:?}: {error}"
+            );
         }
     }
 }
