@@ -71,7 +71,8 @@ COPY --chmod=755 --chown=dynamo:0 \
 # Required: blocks dynamo.vllm/sglang from shadowing the installed packages.
 COPY --chmod=664 --chown=dynamo:0 conftest.py /workspace/conftest.py
 # Common Python tests and Go rendering consume the same environment contract.
-COPY --chmod=664 --chown=dynamo:0 deploy/operator/internal/dynamo/testdata/operator_environment.json /workspace/deploy/operator/internal/dynamo/testdata/operator_environment.json
+# COPY-created parent directories must be traversable by non-root test users.
+COPY --chmod=755 --chown=dynamo:0 deploy/operator/internal/dynamo/testdata/operator_environment.json /workspace/deploy/operator/internal/dynamo/testdata/operator_environment.json
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 COPY --chmod=775 --chown=dynamo:0 lib/gpu_memory_service/tests/ /workspace/lib/gpu_memory_service/tests/
 
