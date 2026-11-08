@@ -186,10 +186,8 @@ async def test_joint_execution_preserves_order_typed_options_and_accounting(
         2,
     ]
     assert call["trace_headers"] == {"traceparent": "test-trace"}
-    prepared = executor.prepare(wire)
-    assert (
-        prepared.questions[0].options[0].name != prepared.questions[0].options[1].name
-    )
+    choice = executor._question(wire["decision_head"]["questions"][0], 0)
+    assert choice.options[0].name != choice.options[1].name
 
 
 @pytest.mark.parametrize(
@@ -576,6 +574,11 @@ async def test_invalid_output_closes_iterator_and_preserves_primary_error(
         await executor.execute(wire, Context())
     assert closed.is_set()
     executor.handler.engine_client.abort.assert_awaited_once()
+    assert executor.handler.shutdown_event.is_set()
+    calls = executor.handler.engine_client.encode.call_count
+    with pytest.raises(HttpError, match="cleanup did not settle"):
+        await executor.execute(wire, Context())
+    assert executor.handler.engine_client.encode.call_count == calls
 
 
 @pytest.mark.asyncio
@@ -594,3 +597,40 @@ async def test_iterator_close_failure_does_not_hide_an_engine_error(executor, wi
     with pytest.raises(HttpError, match="temporarily unavailable") as raised:
         await executor.execute(wire, Context())
     assert isinstance(raised.value.__cause__, ConnectionError)
+
+
+@pytest.mark.asyncio
+async def test_yielded_retryable_error_retains_service_unavailable(executor, wire):
+    from vllm.exceptions import RetryableRequestError
+    from vllm.outputs import RequestError
+
+    executor.native.retryable_errors = (RetryableRequestError,)
+
+    async def failed(**kwargs):
+        yield SimpleNamespace(
+            error=RequestError("capacity", "retry later", retryable=True)
+        )
+
+    executor.handler.engine_client.encode.side_effect = failed
+    with pytest.raises(HttpError, match="temporarily unavailable") as raised:
+        await executor.execute(wire, Context())
+    assert isinstance(raised.value.__cause__, RetryableRequestError)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_timeout_stops_further_admission(executor, wire, monkeypatch):
+    original_wait_for = asyncio.wait_for
+
+    async def bounded(awaitable, *, timeout):
+        return await original_wait_for(awaitable, timeout=0.01)
+
+    async def stalled_abort(*args):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(clef.asyncio, "wait_for", bounded)
+    executor.handler.engine_client.abort.side_effect = stalled_abort
+    await executor._settle(None, "cancelled-request", False)
+    assert executor.handler.shutdown_event.is_set()
+    with pytest.raises(HttpError, match="cleanup did not settle"):
+        await executor.execute(wire, Context())
+    executor.handler.engine_client.encode.assert_not_called()
