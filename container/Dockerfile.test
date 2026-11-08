@@ -170,6 +170,15 @@ RUN test "$DYNAMO_TEST_REQUIRE_AIS_RUNTIME" = 1
 # installs the AISimulate wheel, so its test image can execute the optional
 # Dynamo replay and Sweeper integration contracts.
 USER root
+# Run the complete AIS packaging contract in this required AIS-enabled lane.
+# Its readers compare the unchanged Python/container/Rust release declarations.
+COPY --chmod=664 --chown=dynamo:0 tests/dependencies/test_aisimulate_consistency.py /workspace/tests/dependencies/test_aisimulate_consistency.py
+COPY --chmod=664 --chown=dynamo:0 tests/wheels/smoke_install.py /workspace/tests/wheels/smoke_install.py
+COPY --chmod=664 --chown=dynamo:0 Cargo.toml Cargo.lock /workspace/
+COPY --chmod=664 --chown=dynamo:0 lib/bindings/python/Cargo.toml lib/bindings/python/Cargo.lock /workspace/lib/bindings/python/
+COPY --chmod=664 --chown=dynamo:0 lib/bindings/kvbm/Cargo.lock /workspace/lib/bindings/kvbm/Cargo.lock
+COPY --chmod=664 --chown=dynamo:0 container/deps/requirements.aisimulate.txt /workspace/container/deps/requirements.aisimulate.txt
+COPY --chmod=664 --chown=dynamo:0 container/templates/wheel_builder.Dockerfile /workspace/container/templates/wheel_builder.Dockerfile
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/aisimulate/tests/ /workspace/components/src/dynamo/aisimulate/tests/
 COPY --chmod=775 --chown=dynamo:0 lib/bindings/python/tests/replay/ /workspace/lib/bindings/python/tests/replay/
 COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/mocker/config.py /workspace/components/src/dynamo/mocker/config.py
