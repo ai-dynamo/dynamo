@@ -26,6 +26,7 @@ use crate::{
     session_affinity::{SessionAffinityMode, create_affinity_coordinator},
     types::{
         Annotated,
+        openai::generate::GenerateStreamingEngine,
         openai::{
             chat_completions::{
                 NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -33,7 +34,6 @@ use crate::{
             },
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         },
-        openai::generate::GenerateStreamingEngine,
     },
 };
 
