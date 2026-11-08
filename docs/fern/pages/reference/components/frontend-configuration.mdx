@@ -19,6 +19,14 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
 
 For a qualified vLLM 0.33.0 causal worker, enable `--systemone-serial` or set `DYN_VLLM_SYSTEMONE_SERIAL=true`, together with `--max-num-seqs=1` and `--logprobs-mode=raw_logprobs`. The worker opt-in defaults to `false`; `--no-systemone-serial` overrides an enabled environment setting. It does not change engine scheduling settings, and incompatible profiles fail worker startup. Without the opt-in, ordinary vLLM workers do not advertise decision capability or change model-discovery checksums for decision support. The frontend flag remains independently required to expose the APIs.
 
+For reproducible vLLM validation, pin both `--revision` and `--tokenizer-revision` to the same checkpoint revision below. Gemma uses the text-only `--language-model-only` profile; its inclusion does not establish image support. These pins identify reference artifacts, not qualification of every deployment configuration.
+
+| Model | `--revision` and `--tokenizer-revision` |
+| --- | --- |
+| `Qwen/Qwen3-0.6B` | `c1899de289a04d12100db370d81485cdf75e47ca` |
+| `google/gemma-4-E2B-it` | `3e22461f65e89153144f8adb70e3b8c2cc9845a7` |
+| `Cloudflare/clef-flash` | `f0b7d3cd65296abfe459e6c228b618f5d8b26d2f` |
+
 | Environment variable | Default | Maximum | Meaning |
 | --- | --- | --- | --- |
 | `DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES` | 256 | 4,096 | Concurrent admitted question branches across requests |
