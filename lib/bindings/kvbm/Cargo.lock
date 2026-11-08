@@ -2354,6 +2354,7 @@ dependencies = [
  "dashmap",
  "dynamo-router-protocol",
  "dynamo-runtime",
+ "dynamo-scheduler",
  "dynamo-slot-tracker",
  "dynamo-worker-selection",
  "futures",

@@ -17,6 +17,7 @@ testing = []
 [dependencies]
 dynamo-router-protocol = { workspace = true }
 dynamo-runtime = { workspace = true }
+dynamo-scheduler = { workspace = true }
 dynamo-slot-tracker = { workspace = true }
 dynamo-worker-selection = { workspace = true }
 anyhow = { workspace = true }
