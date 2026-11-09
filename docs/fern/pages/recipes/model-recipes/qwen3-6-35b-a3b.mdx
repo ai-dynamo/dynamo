@@ -11,6 +11,12 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 These aggregated recipes serve the agentic workload with `nvidia/Qwen3.6-35B-A3B-NVFP4` on B200 or GB200 and `Qwen/Qwen3.6-35B-A3B-FP8` on H200.
 
+<Warning>
+The B200 and GB200 recipes are experimental. Serving with the pinned `1.6.0` images
+has not been validated on either target. Their throughput and GPQA results are not
+available for this configuration. The H200 recipe and its measurements are unchanged.
+</Warning>
+
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
 <div className="dynamo-target-picker-row">
@@ -272,10 +278,10 @@ inter-token latency or output throughput per user.
 ## Expected Performance
 
 <Note>
-The B200 and GB200 rows were measured on the `1.4.0` images with
-`--moe-runner-backend flashinfer_cutlass`. The recipes now use the `1.6.0` images with
-`flashinfer_cutedsl` and `--moe-a2a-backend none`, and these two rows have not been
-measured again with that configuration.
+The earlier B200 and GB200 measurements used the `1.4.0` images with
+`--moe-runner-backend flashinfer_cutlass`. They do not describe the current `1.6.0`
+recipes with `flashinfer_cutedsl` and `--moe-a2a-backend none`, so the table marks
+those results as not measured.
 </Note>
 
 Measured with 64K input tokens, 400 output tokens, and 90% KV reuse at concurrency 32
@@ -289,8 +295,8 @@ is a separate pass and is not included in these figures:
 <tr><th>Recipe</th><th>Model</th><th>GPU</th><th>Passed</th><th>Failed</th><th>OUTPUT TOK/S/GPU</th><th>Average tok/s/user</th><th>P50 tok/s/user</th><th>P50 ITL</th><th>P50 TTFT</th></tr>
 </thead>
 <tbody>
-<tr data-gpu="b200"><td><code>sglang/agg-b200-mtp/deploy.yaml</code></td><td>NVFP4</td><td>B200</td><td>3,410</td><td>131</td><td>2,988.50</td><td>115.81</td><td>111.98</td><td>8.93 ms</td><td>286.90 ms</td></tr>
-<tr data-gpu="gb200"><td><code>sglang/agg-gb200-mtp/deploy.yaml</code></td><td>NVFP4</td><td>GB200</td><td>3,410</td><td>131</td><td>3,035.98</td><td>114.03</td><td>111.47</td><td>8.97 ms</td><td>156.07 ms</td></tr>
+<tr data-gpu="b200"><td><code>sglang/agg-b200-mtp/deploy.yaml</code></td><td>NVFP4</td><td>B200</td><td>Not measured</td><td>Not measured</td><td>Not measured</td><td>Not measured</td><td>Not measured</td><td>Not measured</td><td>Not measured</td></tr>
+<tr data-gpu="gb200"><td><code>sglang/agg-gb200-mtp/deploy.yaml</code></td><td>NVFP4</td><td>GB200</td><td>Not measured</td><td>Not measured</td><td>Not measured</td><td>Not measured</td><td>Not measured</td><td>Not measured</td><td>Not measured</td></tr>
 <tr data-gpu="h200"><td><code>sglang/agg-h200-mtp/deploy.yaml</code></td><td>FP8</td><td>H200</td><td>3,410</td><td>131</td><td>1,332.03</td><td>61.90</td><td>57.75</td><td>17.32 ms</td><td>360.31 ms</td></tr>
 </tbody>
 </table>
@@ -301,8 +307,8 @@ is a separate pass and is not included in these figures:
 GPQA Diamond (`gpqa_diamond_aa_v3`) via NVIDIA Eval Factory
 
 <Note>
-The B200 and GB200 GPQA results come from the same earlier `1.4.0` and
-`flashinfer_cutlass` configuration and have not been measured again.
+The earlier B200 and GB200 GPQA results used the `1.4.0` images with
+`flashinfer_cutlass`. GPQA has not been measured for the current configuration.
 </Note>
 
 <div className="dynamo-target-table">
@@ -311,8 +317,8 @@ The B200 and GB200 GPQA results come from the same earlier `1.4.0` and
 <tr><th>Recipe</th><th>Model</th><th>GPU</th><th>GPQA Diamond</th><th>Baseline</th></tr>
 </thead>
 <tbody>
-<tr data-gpu="b200"><td><code>sglang/agg-b200-mtp/deploy.yaml</code></td><td>NVFP4</td><td>B200</td><td>79.23%</td><td>79.10%</td></tr>
-<tr data-gpu="gb200"><td><code>sglang/agg-gb200-mtp/deploy.yaml</code></td><td>NVFP4</td><td>GB200</td><td>79.23%</td><td>79.48%</td></tr>
+<tr data-gpu="b200"><td><code>sglang/agg-b200-mtp/deploy.yaml</code></td><td>NVFP4</td><td>B200</td><td>Not measured</td><td>Not measured</td></tr>
+<tr data-gpu="gb200"><td><code>sglang/agg-gb200-mtp/deploy.yaml</code></td><td>NVFP4</td><td>GB200</td><td>Not measured</td><td>Not measured</td></tr>
 <tr data-gpu="h200"><td><code>sglang/agg-h200-mtp/deploy.yaml</code></td><td>FP8</td><td>H200</td><td>81.44%</td><td>80.24%</td></tr>
 </tbody>
 </table>
