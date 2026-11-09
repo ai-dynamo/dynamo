@@ -29,6 +29,9 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 
+from tensorrt_llm import SamplingParams
+from tensorrt_llm.inputs.registry import create_input_processor_with_hash
+
 import dynamo.common.http as dynamo_http
 from dynamo.common.http import HttpConfigurationError, HttpStatusError, HttpTimeoutError
 from dynamo.common.http.aiohttp_client import AiohttpClient
@@ -529,9 +532,6 @@ async def test_image_and_video_request_after_single_modality_requests_passes_trt
     TRT-LLM's hashing as supported; after that a failure in it is raised and
     stops the engine. Image + video requests, in either order, must then hash
     with every item at its own tokens."""
-    from tensorrt_llm import SamplingParams
-    from tensorrt_llm.inputs.registry import create_input_processor_with_hash
-
     processor, _ = _image_video_processor("np")
     _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
     input_processor = _ExpandingInputProcessor()
