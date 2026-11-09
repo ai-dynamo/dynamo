@@ -1064,15 +1064,8 @@ class StreamingPostProcessor:
         self._reasoning_parser_streaming_started = False
         self._tool_parser_streaming_started = False
 
-        # Gemma 4 with thinking disabled: after a tool response the chat template
-        # does not prefill the empty thought channel, so the model may write
-        # `<|channel>thought\n<channel|>` itself. With no parser active here the
-        # special tokens are dropped (by the detokenizer or _build_choice) but the
-        # plain `thought\n` label would reach content. Mirror the Rust legacy
-        # route (disabled_reasoning_start in lib/llm/src/preprocessor.rs) and
-        # remove only a leading *empty* channel. The bare label is removed only
-        # when the generated ids are exactly that empty channel, so an answer
-        # that merely starts with "thought\n" passes through unchanged.
+        # Gemma 4 with thinking off may write an empty thought channel itself; strip
+        # only that leading channel, like disabled_reasoning_start in preprocessor.rs.
         self._empty_thought_pending = (
             gemma4_parser_pair
             and self._fast_plain_text
