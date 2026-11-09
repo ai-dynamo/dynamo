@@ -115,22 +115,37 @@ fn strict_provider() -> HintPolicyProvider {
 
 // ---- YAML -------------------------------------------------------------------------------------
 
+/// The `hints` a role's `worker_selection` entry lists, parsed as the router policy file is.
+fn hints(yaml: &str, role: WorkerType) -> Option<Vec<HintPolicyEntry>> {
+    RouterPolicyConfig::from_yaml(yaml)
+        .unwrap()
+        .worker_selection()
+        .unwrap()
+        .hints(role)
+        .map(<[HintPolicyEntry]>::to_vec)
+}
+
 #[test]
-fn config_keeps_role_order_and_distinguishes_unlisted_from_empty() {
-    let config = RouterPolicyConfig::from_yaml(
-        r#"
-hint_policies:
+fn hints_keep_list_order_and_distinguish_omitted_from_empty() {
+    let yaml = r#"
+worker_selection:
   aggregated:
-    - type: compaction_cleanup
-      parameters:
-        enabled: true
-    - type: tool_priority
-  prefill: []
-"#,
-    )
-    .unwrap();
-    let hints = config.hint_policies().unwrap();
-    let aggregated = hints.role(WorkerType::Aggregated).unwrap();
+    type: dynamo-default-cost-fn
+    parameters:
+      router_temperature: 0.5
+    hints:
+      - type: compaction_cleanup
+        parameters:
+          enabled: true
+      - type: tool_priority
+  prefill:
+    type: dynamo-default-cost-fn
+    hints: []
+  decode:
+    type: dynamo-default-cost-fn
+  encode: dynamo-default-cost-fn
+"#;
+    let aggregated = hints(yaml, WorkerType::Aggregated).unwrap();
     let names: Vec<_> = aggregated.iter().map(HintPolicyEntry::name).collect();
     assert_eq!(names, ["compaction_cleanup", "tool_priority"]);
     assert_eq!(aggregated[0].policy_type(), "compaction_cleanup");
@@ -138,91 +153,120 @@ hint_policies:
         aggregated[0].parameters()["enabled"],
         serde_yaml::Value::Bool(true)
     );
-    // An empty list is a choice; an unlisted role takes the defaults.
-    assert_eq!(hints.role(WorkerType::Prefill), Some(&[][..]));
-    assert_eq!(hints.role(WorkerType::Decode), None);
+    assert_eq!(
+        aggregated[1].parameters(),
+        &serde_yaml::Value::Mapping(Default::default())
+    );
+    // An empty list is a choice; an entry without `hints`, or a bare entry, takes the defaults.
+    assert_eq!(hints(yaml, WorkerType::Prefill), Some(Vec::new()));
+    assert_eq!(hints(yaml, WorkerType::Decode), None);
+    assert_eq!(hints(yaml, WorkerType::Encode), None);
 }
 
 #[test]
 fn a_role_lists_one_type_twice_only_with_distinct_names() {
-    let config = RouterPolicyConfig::from_yaml(
+    let decode = hints(
         r#"
-hint_policies:
+worker_selection:
   decode:
-    - type: harness_prefetch
-      name: short
-    - type: harness_prefetch
-      name: long
+    type: dynamo-default-cost-fn
+    hints:
+      - type: harness_prefetch
+        name: short
+      - type: harness_prefetch
+        name: long
 "#,
+        WorkerType::Decode,
     )
     .unwrap();
-    let names: Vec<_> = config
-        .hint_policies()
-        .unwrap()
-        .role(WorkerType::Decode)
-        .unwrap()
-        .iter()
-        .map(HintPolicyEntry::name)
-        .collect();
+    let names: Vec<_> = decode.iter().map(HintPolicyEntry::name).collect();
     assert_eq!(names, ["short", "long"]);
 }
 
 #[test]
-fn config_rejects_invalid_hint_policies() {
+fn config_rejects_invalid_hints() {
+    let entry = |hints: &str| {
+        format!(
+            "worker_selection:\n  prefill:\n    type: dynamo-default-cost-fn\n    hints:\n{hints}"
+        )
+    };
     for (yaml, expected) in [
         (
-            "hint_policies:\n  aggregated:\n    - type: x\n    - type: x\n",
-            "distinct name",
+            entry("      - type: kv_fetch\n      - type: kv_fetch\n"),
+            r#"worker_selection.prefill.hints lists "kv_fetch" more than once; give each entry of the same type a distinct name"#,
         ),
         (
-            "hint_policies:\n  aggregated:\n    - type: x\n      parameters: [1]\n",
-            "must be a YAML mapping",
+            entry("      - type: kv_fetch\n        parameters: [1]\n"),
+            r#"worker_selection.prefill.hints entry "kv_fetch" parameters must be a YAML mapping"#,
+        ),
+        (entry("      - type: 'bad type'\n"), "must match"),
+        (entry("      - name: x\n"), "missing field `type`"),
+        // No bare names.
+        (
+            entry("      - kv_fetch\n"),
+            r#"worker_selection.prefill: invalid type: string "kv_fetch""#,
         ),
         (
-            "hint_policies:\n  aggregated:\n    - type: 'bad type'\n",
-            "must match",
+            entry("      - type: kv_fetch\n        hints: []\n"),
+            "unknown field `hints`",
         ),
+        // The deprecated `instances` form takes no hints.
         (
-            "hint_policies:\n  aggregated:\n    - name: x\n",
-            "missing field",
-        ),
-        (
-            "hint_policies:\n  aggregated:\n    - type: x\n      instances: []\n",
-            "unknown field",
-        ),
-        ("hint_policies:\n  unknown_role: []\n", "unknown field"),
-        (
-            "hint_policies:\n  instances:\n    - name: x\n      type: x\n",
-            "unknown field",
+            "worker_selection:\n  prefill: legacy\n  instances:\n    - name: legacy\n      type: dynamo-default-cost-fn\n      hints: []\n".to_string(),
+            "unknown field `hints`",
         ),
     ] {
-        let error = RouterPolicyConfig::from_yaml(yaml).unwrap_err().to_string();
+        let error = RouterPolicyConfig::from_yaml(&yaml)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains(expected), "{yaml}: {error}");
     }
 }
 
 // ---- Registry ---------------------------------------------------------------------------------
 
-#[test]
-fn unlisted_roles_run_the_defaults_and_listed_roles_replace_them() {
-    let mut registry = RouterPluginRegistry::default()
-        .with_default_hint_policies([(
-            "fallback".to_string(),
-            HintPolicyConstructor::shared(Recorder::new("fallback")),
-        )])
-        .unwrap();
+const ANY_ON: [(HintHost, HintDefault); 1] = [(HintHost::AnyWorkerSelection, HintDefault::On)];
+const ANY_OFF: [(HintHost, HintDefault); 1] = [(HintHost::AnyWorkerSelection, HintDefault::Off)];
+
+/// Register a [`Recorder`] named `name` with `hosts`.
+fn register(
+    registry: &mut RouterPluginRegistry,
+    name: &'static str,
+    hosts: impl IntoIterator<Item = (HintHost, HintDefault)>,
+) {
     registry
-        .register_hint_policy("record", recorder_provider(Recorder::new("record")))
+        .register_hint_policy(name, recorder_provider(Recorder::new(name)), hosts)
         .unwrap();
-    let (config, _file) =
-        config_with("hint_policies:\n  aggregated:\n    - type: record\n  prefill: []\n");
+}
+
+#[test]
+fn roles_without_hints_run_the_defaults_and_listed_hints_replace_them() {
+    let mut registry = RouterPluginRegistry::default();
+    register(&mut registry, "fallback", ANY_ON);
+    register(&mut registry, "record", ANY_OFF);
+    let (config, _file) = config_with(
+        r#"
+worker_selection:
+  aggregated:
+    type: alpha
+    hints:
+      - type: record
+  prefill:
+    type: alpha
+    hints: []
+  decode: alpha
+"#,
+    );
     let factory = registry.resolve_hint_policies(&config).unwrap();
     assert_eq!(factory.names(WorkerType::Aggregated), ["record"]);
     assert!(!factory.uses_defaults(WorkerType::Aggregated));
     assert!(factory.names(WorkerType::Prefill).is_empty());
     assert!(!factory.uses_defaults(WorkerType::Prefill));
-    assert_eq!(factory.names(WorkerType::Decode), ["fallback"]);
-    assert!(factory.uses_defaults(WorkerType::Decode));
+    // A bare entry and an unlisted role run the hints that are on by default.
+    for role in [WorkerType::Decode, WorkerType::Encode] {
+        assert_eq!(factory.names(role), ["fallback"]);
+        assert!(factory.uses_defaults(role));
+    }
 
     let partition = RoutingPartitionId::new("model", "default");
     let instances = factory.instances(&config, WorkerType::Decode, partition.as_ref());
@@ -231,33 +275,235 @@ fn unlisted_roles_run_the_defaults_and_listed_roles_replace_them() {
 }
 
 #[test]
-fn registry_rejects_empty_and_duplicate_names() {
+fn defaults_run_in_registration_order_and_a_named_host_overrides_any() {
     let mut registry = RouterPluginRegistry::default();
+    register(&mut registry, "first", ANY_ON);
+    register(
+        &mut registry,
+        "kvcr_only",
+        [
+            (HintHost::AnyWorkerSelection, HintDefault::Off),
+            (HintHost::worker_selection("kvcr"), HintDefault::On),
+        ],
+    );
+    register(
+        &mut registry,
+        "not_under_kvcr",
+        [
+            (HintHost::worker_selection("kvcr"), HintDefault::Off),
+            (HintHost::AnyWorkerSelection, HintDefault::On),
+        ],
+    );
+    register(
+        &mut registry,
+        "builtin_only",
+        [(HintHost::worker_selection("default"), HintDefault::On)],
+    );
+    register(&mut registry, "last", ANY_ON);
+    let (config, _file) = config_with(
+        r#"
+worker_selection:
+  aggregated: default
+  prefill: kvcr
+  decode:
+    type: alpha
+  encode: legacy
+  instances:
+    - name: legacy
+      type: kvcr
+"#,
+    );
+    let factory = registry.resolve_hint_policies(&config).unwrap();
+    // `default`, and a role `worker_selection` doesn't list, run the built-in selector.
+    assert_eq!(
+        factory.names(WorkerType::Aggregated),
+        ["first", "not_under_kvcr", "builtin_only", "last"]
+    );
+    assert_eq!(
+        factory.names(WorkerType::Prefill),
+        ["first", "kvcr_only", "last"]
+    );
+    assert_eq!(
+        factory.names(WorkerType::Decode),
+        ["first", "not_under_kvcr", "last"]
+    );
+    // A deprecated instance name runs under its type.
+    assert_eq!(
+        factory.names(WorkerType::Encode),
+        ["first", "kvcr_only", "last"]
+    );
+}
+
+#[test]
+fn defaults_are_built_from_empty_parameters() {
+    let mut registry = RouterPluginRegistry::default();
+    registry
+        .register_hint_policy(
+            "needs_level",
+            Arc::new(|parameters| {
+                #[derive(serde::Deserialize)]
+                #[allow(dead_code)]
+                struct Required {
+                    level: u32,
+                }
+                parameters.deserialize::<Required>()?;
+                Ok(HintPolicyConstructor::shared(Recorder::new("needs_level")))
+            }),
+            ANY_ON,
+        )
+        .unwrap();
+    let error = registry
+        .resolve_hint_policies(&KvRouterConfig::default())
+        .err()
+        .unwrap();
+    assert!(
+        matches!(&error, HintPolicyRegistryError::Provider { policy_type, .. }
+            if policy_type == "needs_level"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_listed_hint_must_run_under_the_role_policy() {
+    let mut registry = RouterPluginRegistry::default();
+    register(&mut registry, "kv_fetch", ANY_ON);
+    register(
+        &mut registry,
+        "acme_priority",
+        [(HintHost::worker_selection("kvcr"), HintDefault::Off)],
+    );
+    let (config, _file) = config_with(
+        r#"
+worker_selection:
+  prefill:
+    type: dynamo-two-tier-cost-fn
+    hints:
+      - type: acme_priority
+"#,
+    );
+    let error = registry.resolve_hint_policies(&config).err().unwrap();
+    assert_eq!(
+        error.to_string(),
+        r#"hint-policy type "acme_priority" doesn't run under worker-selection type "dynamo-two-tier-cost-fn" (prefill); hints for that type: kv_fetch"#
+    );
+
+    let (config, _file) = config_with(
+        r#"
+worker_selection:
+  prefill:
+    type: kvcr
+    hints:
+      - type: acme_priority
+      - type: kv_fetch
+"#,
+    );
+    let factory = registry.resolve_hint_policies(&config).unwrap();
+    assert_eq!(
+        factory.names(WorkerType::Prefill),
+        ["acme_priority", "kv_fetch"]
+    );
+}
+
+#[test]
+fn registry_rejects_bad_names_and_hosts() {
+    let mut registry = RouterPluginRegistry::default();
+    let provider = || recorder_provider(Recorder::new("x"));
     assert!(matches!(
-        registry.register_hint_policy("", recorder_provider(Recorder::new("x"))),
+        registry.register_hint_policy("", provider(), ANY_ON),
         Err(HintPolicyRegistryError::EmptyName)
     ));
-    registry
-        .register_hint_policy("record", recorder_provider(Recorder::new("record")))
-        .unwrap();
+    register(&mut registry, "record", ANY_ON);
     assert!(matches!(
-        registry.register_hint_policy("record", recorder_provider(Recorder::new("record"))),
+        registry.register_hint_policy("record", provider(), ANY_ON),
         Err(HintPolicyRegistryError::Duplicate { .. })
     ));
     assert!(!registry.is_empty());
+
+    let error = registry
+        .register_hint_policy("x", provider(), [])
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        r#"hint-policy type "x" registers no hosts"#
+    );
+    let error = registry
+        .register_hint_policy(
+            "x",
+            provider(),
+            [
+                (HintHost::worker_selection("kvcr"), HintDefault::On),
+                (HintHost::worker_selection("kvcr"), HintDefault::Off),
+            ],
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        r#"hint-policy type "x" lists host WorkerSelection("kvcr") more than once"#
+    );
+    // A rejected registration leaves no type behind.
+    register(&mut registry, "x", ANY_ON);
+}
+
+#[test]
+fn resolve_plugins_rejects_hosts_no_linked_plugin_registers() {
+    let mut registry = RouterPluginRegistry::default();
+    registry
+        .register_worker_selection(
+            "kvcr",
+            Arc::new(|_| unreachable!("resolve_plugins builds no policy here")),
+        )
+        .unwrap();
+    registry
+        .register_request_classifier(
+            "classifier",
+            Arc::new(|_| unreachable!("resolve_plugins builds no classifier here")),
+        )
+        .unwrap();
+    register(
+        &mut registry,
+        "linked",
+        [
+            (HintHost::AnyWorkerSelection, HintDefault::On),
+            (HintHost::worker_selection("kvcr"), HintDefault::On),
+            (HintHost::worker_selection("default"), HintDefault::On),
+            (HintHost::request_classifier("classifier"), HintDefault::Off),
+        ],
+    );
+    registry
+        .resolve_plugins(&KvRouterConfig::default())
+        .unwrap();
+
+    for (host, expected) in [
+        (
+            HintHost::worker_selection("kvrc"),
+            r#"hint-policy type "typo" names host WorkerSelection("kvrc"), which no linked plugin registers"#,
+        ),
+        (
+            HintHost::request_classifier("missing"),
+            r#"hint-policy type "typo" names host RequestClassifier("missing"), which no linked plugin registers"#,
+        ),
+    ] {
+        let mut registry = registry.clone();
+        register(&mut registry, "typo", [(host, HintDefault::On)]);
+        let error = registry
+            .resolve_plugins(&KvRouterConfig::default())
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), expected);
+    }
 }
 
 #[test]
 fn resolution_reports_unknown_types_and_invalid_parameters() {
     let mut registry = RouterPluginRegistry::default();
+    register(&mut registry, "record", ANY_OFF);
     registry
-        .register_hint_policy("record", recorder_provider(Recorder::new("record")))
-        .unwrap();
-    registry
-        .register_hint_policy("strict", strict_provider())
+        .register_hint_policy("strict", strict_provider(), ANY_OFF)
         .unwrap();
 
-    let (config, _file) = config_with("hint_policies:\n  aggregated:\n    - type: missing\n");
+    let (config, _file) = config_with(
+        "worker_selection:\n  aggregated:\n    type: alpha\n    hints:\n      - type: missing\n",
+    );
     let error = registry.resolve_hint_policies(&config).err().unwrap();
     assert!(
         matches!(&error, HintPolicyRegistryError::UnknownType { available, .. }
@@ -267,7 +513,7 @@ fn resolution_reports_unknown_types_and_invalid_parameters() {
 
     for parameters in ["{level: -1}", "{unknown: 1}"] {
         let (config, _file) = config_with(&format!(
-            "hint_policies:\n  aggregated:\n    - type: strict\n      parameters: {parameters}\n"
+            "worker_selection:\n  aggregated:\n    type: alpha\n    hints:\n      - type: strict\n        parameters: {parameters}\n"
         ));
         assert!(
             matches!(
@@ -375,21 +621,22 @@ fn role_policies(policies: Vec<(&str, Recorder)>, defaults: bool) -> RoleHintPol
         partition.as_ref(),
     );
     if defaults {
-        let registry = RouterPluginRegistry::default()
-            .with_default_hint_policies(
-                instances
-                    .policies()
-                    .iter()
-                    .map(|(name, policy)| {
-                        let policy = Arc::clone(policy);
-                        (
-                            name.to_string(),
-                            HintPolicyConstructor::new(move |_, _, _| Arc::clone(&policy)),
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap();
+        let mut registry = RouterPluginRegistry::default();
+        for (name, policy) in instances.policies() {
+            let policy = Arc::clone(policy);
+            registry
+                .register_hint_policy(
+                    name.to_string(),
+                    Arc::new(move |_| {
+                        let policy = Arc::clone(&policy);
+                        Ok(HintPolicyConstructor::new(move |_, _, _| {
+                            Arc::clone(&policy)
+                        }))
+                    }),
+                    ANY_ON,
+                )
+                .unwrap();
+        }
         return registry
             .resolve_hint_policies(&KvRouterConfig::default())
             .unwrap()

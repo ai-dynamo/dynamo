@@ -5252,13 +5252,23 @@ async fn committed_session_lease_lives_as_long_as_the_response_stream() {
 }
 
 #[test]
-fn listed_hint_policies_reject_every_non_kv_mode() {
+fn listed_hints_reject_every_non_kv_mode() {
     use dynamo_kv_router::WorkerType;
 
     let policy_file = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(
         policy_file.path(),
-        "hint_policies:\n  aggregated:\n    - type: some_hint\n  prefill: []\n",
+        r#"
+worker_selection:
+  aggregated:
+    type: dynamo-default-cost-fn
+    hints:
+      - type: some_hint
+  prefill:
+    type: dynamo-default-cost-fn
+    hints: []
+  decode: dynamo-default-cost-fn
+"#,
     )
     .unwrap();
     let config = KvRouterConfig {
@@ -5277,17 +5287,17 @@ fn listed_hint_policies_reject_every_non_kv_mode() {
         assert!(
             error
                 .to_string()
-                .contains("hint_policies for aggregated run only on the KV path"),
+                .contains("the hints in worker_selection.aggregated run only on the KV path"),
             "{mode:?}: {error}"
         );
     }
     check_hint_policies_route_on_kv_path(RouterMode::KV, &config, &[WorkerType::Aggregated])
         .unwrap();
-    // A role listed with no policies, or not listed, runs only the passive defaults.
+    // An empty list, a bare entry and an unlisted role run only the passive defaults.
     check_hint_policies_route_on_kv_path(
         RouterMode::RoundRobin,
         &config,
-        &[WorkerType::Prefill, WorkerType::Decode],
+        &[WorkerType::Prefill, WorkerType::Decode, WorkerType::Encode],
     )
     .unwrap();
 }

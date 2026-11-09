@@ -1,38 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! YAML schema for the ordered hint policies each worker role runs.
+//! YAML schema for one hint in a worker-selection role's `hints` list.
 
 use std::collections::HashSet;
 
 use serde::Deserialize;
 
-use crate::WorkerType;
 use crate::scheduling::policy_config::{RouterPolicyConfigError, validate_identifier};
-
-/// Process-wide hint-policy configuration: the ordered hint policies each worker role runs.
-///
-/// A role the config doesn't list runs the registry's default hint policies. Listing a role, even
-/// as an empty list, replaces the defaults.
-#[derive(Debug, Clone, PartialEq)]
-pub struct HintPolicyConfig {
-    aggregated: Option<Vec<HintPolicyEntry>>,
-    prefill: Option<Vec<HintPolicyEntry>>,
-    decode: Option<Vec<HintPolicyEntry>>,
-    encode: Option<Vec<HintPolicyEntry>>,
-}
-
-impl HintPolicyConfig {
-    /// The hint policies a worker role lists, in order; `None` when the role isn't listed.
-    pub fn role(&self, worker_type: WorkerType) -> Option<&[HintPolicyEntry]> {
-        match worker_type {
-            WorkerType::Aggregated => self.aggregated.as_deref(),
-            WorkerType::Prefill => self.prefill.as_deref(),
-            WorkerType::Decode => self.decode.as_deref(),
-            WorkerType::Encode => self.encode.as_deref(),
-        }
-    }
-}
 
 /// One hint policy in a role's list.
 #[derive(Debug, Clone, PartialEq)]
@@ -59,44 +34,17 @@ impl HintPolicyEntry {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawHintPolicyConfig {
-    #[serde(default)]
-    aggregated: Option<Vec<RawHintPolicyEntry>>,
-    #[serde(default)]
-    prefill: Option<Vec<RawHintPolicyEntry>>,
-    #[serde(default)]
-    decode: Option<Vec<RawHintPolicyEntry>>,
-    #[serde(default)]
-    encode: Option<Vec<RawHintPolicyEntry>>,
-}
-
-impl RawHintPolicyConfig {
-    pub(crate) fn resolve(self) -> Result<HintPolicyConfig, RouterPolicyConfigError> {
-        Ok(HintPolicyConfig {
-            aggregated: resolve_role("aggregated", self.aggregated)?,
-            prefill: resolve_role("prefill", self.prefill)?,
-            decode: resolve_role("decode", self.decode)?,
-            encode: resolve_role("encode", self.encode)?,
-        })
-    }
-}
-
-fn resolve_role(
-    role: &str,
-    entries: Option<Vec<RawHintPolicyEntry>>,
-) -> Result<Option<Vec<HintPolicyEntry>>, RouterPolicyConfigError> {
-    let Some(entries) = entries else {
-        return Ok(None);
-    };
-    let location = format!("hint_policies {role}");
+/// Validate one role's `hints` list, read at `location`, in order.
+pub(crate) fn resolve_hints(
+    location: &str,
+    entries: Vec<RawHintPolicyEntry>,
+) -> Result<Vec<HintPolicyEntry>, RouterPolicyConfigError> {
     let mut names = HashSet::with_capacity(entries.len());
     let mut resolved = Vec::with_capacity(entries.len());
     for raw in entries {
-        validate_identifier(&raw.policy_type, "policy type", &location)?;
+        validate_identifier(&raw.policy_type, "policy type", location)?;
         if let Some(name) = &raw.name {
-            validate_identifier(name, "entry", &location)?;
+            validate_identifier(name, "entry", location)?;
         }
         if !matches!(raw.parameters, serde_yaml::Value::Mapping(_)) {
             return Err(RouterPolicyConfigError::Validation(format!(
@@ -116,12 +64,12 @@ fn resolve_role(
             parameters: raw.parameters,
         });
     }
-    Ok(Some(resolved))
+    Ok(resolved)
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawHintPolicyEntry {
+pub(crate) struct RawHintPolicyEntry {
     #[serde(rename = "type")]
     policy_type: String,
     #[serde(default = "empty_parameters")]

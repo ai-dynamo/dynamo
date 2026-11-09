@@ -242,9 +242,9 @@ class KvRouterConfigBase(ConfigBase):
             raise ValueError(f"invalid router settings: {exc}") from exc
 
     def hint_policy_roles(self) -> list[str]:
-        """Roles that list hint policies in --router-policy-config.
+        """Roles whose worker_selection entry lists hints in --router-policy-config.
 
-        A role listed with an empty list opts out of the defaults and runs none.
+        A role whose entry lists ``hints: []`` opts out of the defaults and runs none.
         """
         if self.router_policy_config is None:
             return []
@@ -252,12 +252,16 @@ class KvRouterConfigBase(ConfigBase):
             document = yaml.safe_load(source)
         if not isinstance(document, dict):
             raise ValueError("--router-policy-config must contain a YAML mapping")
-        hint_policies = document.get("hint_policies")
-        if hint_policies is None:
+        worker_selection = document.get("worker_selection")
+        if worker_selection is None:
             return []
-        if not isinstance(hint_policies, dict):
-            raise ValueError("hint_policies must contain a YAML mapping")
-        return [role for role, entries in hint_policies.items() if entries]
+        if not isinstance(worker_selection, dict):
+            raise ValueError("worker_selection must contain a YAML mapping")
+        return [
+            role
+            for role, entry in worker_selection.items()
+            if isinstance(entry, dict) and entry.get("hints")
+        ]
 
     def apply_router_config(self) -> None:
         self.apply_load_aware_preset()

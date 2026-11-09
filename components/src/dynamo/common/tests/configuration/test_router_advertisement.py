@@ -146,25 +146,40 @@ def test_unknown_mode_is_rejected():
         build_router_config(config)
 
 
-def _policy_config(tmp_path, hint_policies: str) -> str:
+def _policy_config(tmp_path, worker_selection: str) -> str:
     path = tmp_path / "router-policy.yaml"
-    path.write_text(f"hint_policies:\n{hint_policies}")
+    path.write_text(f"worker_selection:\n{worker_selection}")
     return str(path)
 
 
 @pytest.mark.parametrize("mode", ["round-robin", "least-loaded", "direct"])
-def test_hint_policies_off_the_kv_path_are_rejected(tmp_path, mode):
-    """Only the KV path runs hint policies, so another mode would drop them silently."""
-    policy = _policy_config(tmp_path, "  aggregated:\n    - type: kv_fetch\n")
+def test_hints_off_the_kv_path_are_rejected(tmp_path, mode):
+    """Only the KV path runs hints, so another mode would drop them silently."""
+    policy = _policy_config(
+        tmp_path,
+        "  aggregated:\n    type: dynamo-default-cost-fn\n"
+        "    hints:\n      - type: kv_fetch\n",
+    )
     config, _ = parse_worker_router_config(
         ["--router-mode", mode, "--router-policy-config", policy]
     )
-    with pytest.raises(ValueError, match="hint_policies for aggregated run only"):
+    with pytest.raises(
+        ValueError,
+        match="the hints in worker_selection for aggregated run only on the KV path",
+    ):
         build_router_config(config)
 
 
-def test_hint_policy_opt_out_is_allowed_off_the_kv_path(tmp_path):
-    policy = _policy_config(tmp_path, "  aggregated: []\n")
+@pytest.mark.parametrize(
+    "worker_selection",
+    [
+        "  aggregated:\n    type: dynamo-default-cost-fn\n    hints: []\n",
+        "  aggregated: dynamo-default-cost-fn\n",
+    ],
+)
+def test_default_hints_are_allowed_off_the_kv_path(tmp_path, worker_selection):
+    """An empty list, or an entry without hints, runs no hints that need the KV path."""
+    policy = _policy_config(tmp_path, worker_selection)
     config, _ = parse_worker_router_config(
         ["--router-mode", "round-robin", "--router-policy-config", policy]
     )
@@ -176,8 +191,8 @@ def test_hint_policy_opt_out_is_allowed_off_the_kv_path(tmp_path):
     [
         ("- type: kv_fetch\n", "--router-policy-config must contain a YAML mapping"),
         (
-            "hint_policies:\n  - type: kv_fetch\n",
-            "hint_policies must contain a YAML mapping",
+            "worker_selection:\n  - type: kv_fetch\n",
+            "worker_selection must contain a YAML mapping",
         ),
     ],
 )

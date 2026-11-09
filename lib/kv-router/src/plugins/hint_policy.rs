@@ -28,8 +28,8 @@ use crate::protocols::WorkerWithDpRank;
 use crate::scheduling::SessionContext;
 
 pub use crate::kv_hints::KvHintAction;
-pub(crate) use config::RawHintPolicyConfig;
-pub use config::{HintPolicyConfig, HintPolicyEntry};
+pub use config::HintPolicyEntry;
+pub(crate) use config::{RawHintPolicyEntry, resolve_hints};
 pub(crate) use registry::HintPolicyRegistry;
 pub use registry::{
     HintPolicyConstructor, HintPolicyFactory, HintPolicyParameters, HintPolicyProvider,
@@ -131,6 +131,37 @@ impl<'a> HintContext<'a> {
             .find(|booked| booked.copy() == copy)
             .and_then(BookedCopy::locations)
     }
+}
+
+/// A plugin a hint runs under. A hint names its hosts when it registers.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum HintHost {
+    /// Every worker-selection policy, including the built-in selector (`default`).
+    AnyWorkerSelection,
+    /// One worker-selection type.
+    WorkerSelection(String),
+    /// One request-classifier type. Checked at startup; matches no role yet.
+    RequestClassifier(String),
+}
+
+impl HintHost {
+    /// The worker-selection type `policy_type`; `default` is the built-in selector.
+    pub fn worker_selection(policy_type: impl Into<String>) -> Self {
+        Self::WorkerSelection(policy_type.into())
+    }
+
+    /// The request-classifier type `classifier_type`.
+    pub fn request_classifier(classifier_type: impl Into<String>) -> Self {
+        Self::RequestClassifier(classifier_type.into())
+    }
+}
+
+/// Whether a host runs the hint when the role's entry has no `hints`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HintDefault {
+    On,
+    Off,
 }
 
 /// A policy failure reported to the router. The message is included in logs and errors.
