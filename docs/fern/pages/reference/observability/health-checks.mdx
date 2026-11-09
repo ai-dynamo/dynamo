@@ -33,9 +33,9 @@ A live frontend returns `200 OK`:
 }
 ```
 
-During graceful shutdown, `/live` remains `200 OK` while the Frontend is draining admitted requests.
-After the drain finishes or times out and the service enters the stopping state, `/live` returns
-`503 Service Unavailable` with status `shutting_down`.
+During graceful shutdown, `/live` remains `200 OK` while the Frontend serves its propagation window
+and then drains admitted requests. After the drain finishes or times out and the service enters the
+stopping state, `/live` returns `503 Service Unavailable` with status `shutting_down`.
 
 The frontend `/health` endpoint returns `200 OK` while ready:
 
@@ -69,10 +69,12 @@ readiness probes on the default form:
 ```
 
 An empty `endpoints` or `instances` array means the frontend does not currently discover workers; it
-does not change the frontend response status by itself. As soon as graceful draining starts, `/health`
+does not change the frontend response status by itself. As soon as shutdown is requested, `/health`
 returns `503 Service Unavailable` with status `not_ready` and a `stage` value that identifies the
-current lifecycle stage. This removes the Frontend from readiness routing before admitted responses
-finish.
+current lifecycle stage: `propagating` while the Frontend still serves every request so endpoint
+updates can reach load balancers, then `draining` once it stops accepting new work, then `stopping`.
+This removes the Frontend from readiness routing before it stops serving and before admitted
+responses finish.
 
 ## Model-Specific Serving Readiness
 

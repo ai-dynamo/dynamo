@@ -105,6 +105,34 @@ impl
     }
 }
 
+/// A chat engine that streams 64 KiB chunks forever, so a client that stops
+/// reading fills the socket buffers and stalls the server's write.
+struct FloodEngine;
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for FloodEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, PipelineError> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let mut generator = request.response_generator(ctx.id().to_string());
+        let stream = stream! {
+            loop {
+                yield Annotated::from_data(generator.create_choice(0, Some("x".repeat(65536)), None, None));
+            }
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
 struct TestFrontend {
     port: u16,
     state: Arc<dynamo_llm::http::service::service_v2::State>,
@@ -140,6 +168,11 @@ impl TestFrontend {
             .model_manager()
             .add_chat_completions_model("quick-model", quick.mdcsum(), Arc::new(QuickEngine))
             .expect("register quick model");
+        let flood = ModelDeploymentCard::with_name_only("flood-model");
+        service
+            .model_manager()
+            .add_chat_completions_model("flood-model", flood.mdcsum(), Arc::new(FloodEngine))
+            .expect("register flood model");
         let cancel = CancellationToken::new();
         let join = service.spawn_with_listener(cancel.clone(), listener).await;
         wait_for_health(port).await;
@@ -199,6 +232,10 @@ async fn wait_for_health(port: u16) {
 }
 
 fn chat_request(model: &str) -> String {
+    chat_request_with_version(model, "HTTP/1.1")
+}
+
+fn chat_request_with_version(model: &str, version: &str) -> String {
     let body = serde_json::json!({
         "model": model,
         "stream": true,
@@ -206,11 +243,46 @@ fn chat_request(model: &str) -> String {
     })
     .to_string();
     format!(
-        "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n\
+        "POST /v1/chat/completions {version}\r\nHost: localhost\r\n\
          Content-Type: application/json\r\nConnection: keep-alive\r\n\
          Content-Length: {}\r\n\r\n{body}",
         body.len()
     )
+}
+
+/// Read until the chunked body terminator has arrived, so the keep-alive
+/// connection is idle again. Returns what was read.
+async fn read_until_terminator(stream: &mut TcpStream) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let _ = timeout(Duration::from_secs(3), async {
+        while !buf.windows(5).any(|w| w == b"0\r\n\r\n") {
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+    })
+    .await;
+    buf
+}
+
+/// Read to EOF, treating a reset (the server dropped the socket) like EOF, and
+/// return what arrived. Panics only if the socket stays open past `limit`.
+async fn read_to_end_lossy(stream: &mut TcpStream, limit: Duration) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    timeout(limit, async {
+        loop {
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+    })
+    .await
+    .expect("server did not close the connection");
+    buf
 }
 
 /// Read the response headers (up to the blank line) from a raw socket.
@@ -289,8 +361,7 @@ fn propagating_serves_reused_connection() {
         let warm = read_headers(&mut conn).await;
         assert!(warm.starts_with("HTTP/1.1 200"), "{warm}");
         // Drain the warm-up body so the connection returns to keep-alive idle.
-        let mut sink = vec![0u8; 4096];
-        let _ = timeout(Duration::from_millis(300), conn.read(&mut sink)).await;
+        read_until_terminator(&mut conn).await;
 
         frontend.cancel.cancel();
         frontend.wait_stage(ServiceStage::Propagating).await;
@@ -308,6 +379,9 @@ fn propagating_serves_reused_connection() {
             headers.to_ascii_lowercase().contains("connection: close"),
             "{headers}"
         );
+        // The retired connection is closed after the response.
+        let rest = read_to_end_lossy(&mut conn, Duration::from_secs(3)).await;
+        assert!(String::from_utf8_lossy(&rest).contains("[DONE]"));
     });
 }
 
@@ -330,17 +404,61 @@ fn draining_refuses_new_connections() {
         frontend.cancel.cancel();
         frontend.wait_stage(ServiceStage::Draining).await;
 
-        // A fresh connect now fails: the listener is gone.
-        let result = timeout(
-            Duration::from_secs(1),
-            TcpStream::connect(("127.0.0.1", frontend.port)),
-        )
-        .await
-        .expect("connect attempt timed out");
-        assert!(
-            result.is_err(),
-            "Draining must refuse new connections, got {result:?}"
-        );
+        // A fresh connect fails once the accept loop has dropped the listener. The
+        // stage is stored a few microseconds before that drop, so retry briefly.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            let result = timeout(
+                Duration::from_millis(200),
+                TcpStream::connect(("127.0.0.1", frontend.port)),
+            )
+            .await
+            .expect("connect attempt timed out");
+            match result {
+                Err(_) => break,
+                Ok(_accepted) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Ok(_) => panic!("Draining must refuse new connections"),
+            }
+        }
+        frontend.gate.notify_waiters();
+    });
+}
+
+/// I5: an idle HTTP/1.1 keep-alive connection is closed by the server as soon as
+/// Draining starts, so a pooled client cannot send its next request here.
+#[test]
+#[serial_test::serial]
+fn draining_retires_idle_keepalive_connection() {
+    with_timings("1", "10", async {
+        let frontend = TestFrontend::start().await;
+        let mut idle = TcpStream::connect(("127.0.0.1", frontend.port))
+            .await
+            .unwrap();
+        idle.write_all(chat_request("quick-model").as_bytes())
+            .await
+            .unwrap();
+        assert!(read_headers(&mut idle).await.starts_with("HTTP/1.1 200"));
+        read_until_terminator(&mut idle).await;
+
+        // A held stream on another connection keeps the frontend in Draining.
+        let mut held = TcpStream::connect(("127.0.0.1", frontend.port))
+            .await
+            .unwrap();
+        held.write_all(chat_request(MODEL).as_bytes())
+            .await
+            .unwrap();
+        let _ = read_headers(&mut held).await;
+
+        frontend.cancel.cancel();
+        frontend.wait_stage(ServiceStage::Draining).await;
+
+        let mut byte = [0u8; 1];
+        let read = timeout(Duration::from_secs(2), idle.read(&mut byte))
+            .await
+            .expect("idle keep-alive connection was not retired at Draining");
+        assert_eq!(read.unwrap_or(0), 0, "idle connection must see EOF");
         frontend.gate.notify_waiters();
     });
 }
@@ -410,11 +528,7 @@ fn deadline_abort_never_looks_complete() {
 
         frontend.cancel.cancel();
         // Never release the gate: the stream runs past the 2s drain deadline.
-        let mut rest = Vec::new();
-        timeout(Duration::from_secs(6), conn.read_to_end(&mut rest))
-            .await
-            .expect("aborted stream did not close")
-            .unwrap();
+        let rest = read_to_end_lossy(&mut conn, Duration::from_secs(6)).await;
         let body = String::from_utf8_lossy(&rest);
         assert!(
             !body.contains("[DONE]"),
@@ -428,7 +542,8 @@ fn deadline_abort_never_looks_complete() {
 }
 
 /// I10: the process reaches Stopping within the budget even when the client
-/// never reads its response (the send buffer fills and the write stalls).
+/// never reads its response: the flood stream fills the socket buffers, the
+/// server's write stalls, and only the hard close ends the connection.
 #[test]
 #[serial_test::serial]
 fn bounded_exit_with_a_client_that_never_reads() {
@@ -437,12 +552,12 @@ fn bounded_exit_with_a_client_that_never_reads() {
         let mut conn = TcpStream::connect(("127.0.0.1", frontend.port))
             .await
             .unwrap();
-        conn.write_all(chat_request(MODEL).as_bytes())
+        conn.write_all(chat_request("flood-model").as_bytes())
             .await
             .unwrap();
-        // Do not read the response at all.
+        // Let the flood fill the loopback buffers, then never read again.
+        tokio::time::sleep(Duration::from_millis(300)).await;
         frontend.cancel.cancel();
-        frontend.gate.notify_waiters();
 
         // P (1s) + D (2s) + close (1s) + margin.
         timeout(Duration::from_secs(8), async {
@@ -450,7 +565,9 @@ fn bounded_exit_with_a_client_that_never_reads() {
         })
         .await
         .expect("frontend did not reach Stopping within the budget");
-        drop(conn);
+        // The socket was dropped by the hard close: reading now ends.
+        let rest = read_to_end_lossy(&mut conn, Duration::from_secs(3)).await;
+        assert!(!String::from_utf8_lossy(&rest).contains("[DONE]"));
     });
 }
 
@@ -491,52 +608,50 @@ fn force_skips_window_and_drain() {
 }
 
 /// I8: a straggler that reaches the admission layer during Draining is rejected
-/// with 503 + `Retry-After: 1` + `Connection: close`, on an existing connection
-/// (so it is not refused at connect time).
+/// with 503 + `Retry-After: 1` + `Connection: close` in HTTP/1.1 and HTTP/1.0,
+/// its connection is closed, and the rejection does not cut an admitted stream.
+///
+/// The stage is driven directly so the listener stays open and the request
+/// reaches the admission gate instead of being refused at connect time.
 #[test]
 #[serial_test::serial]
-fn straggler_on_existing_connection_is_rejected() {
+fn straggler_rejected_with_retry_after_during_draining() {
     with_timings("1", "10", async {
         let frontend = TestFrontend::start().await;
-        // Warm a keep-alive connection before shutdown.
-        let mut conn = TcpStream::connect(("127.0.0.1", frontend.port))
-            .await
-            .unwrap();
-        conn.write_all(chat_request("quick-model").as_bytes())
-            .await
-            .unwrap();
-        let _ = read_headers(&mut conn).await;
-        let mut sink = vec![0u8; 4096];
-        let _ = timeout(Duration::from_millis(300), conn.read(&mut sink)).await;
-
-        // Hold a separate admitted stream so the frontend stays in Draining.
         let mut held = TcpStream::connect(("127.0.0.1", frontend.port))
             .await
             .unwrap();
         held.write_all(chat_request(MODEL).as_bytes())
             .await
             .unwrap();
-        let _ = read_headers(&mut held).await;
+        assert!(read_headers(&mut held).await.starts_with("HTTP/1.1 200"));
 
-        frontend.cancel.cancel();
-        frontend.wait_stage(ServiceStage::Draining).await;
-
-        // The warmed connection may survive into Draining via the keep-alive
-        // grace; a request on it now is rejected rather than served. If the
-        // connection was already retired, the straggler contract is satisfied by
-        // the refusal instead.
-        let wrote = conn
-            .write_all(chat_request("quick-model").as_bytes())
-            .await
-            .is_ok();
-        if wrote
-            && let Ok(headers) = timeout(Duration::from_secs(2), read_headers(&mut conn)).await
-            && headers.starts_with("HTTP/1.1 503")
-        {
+        frontend.state.start_draining();
+        for version in ["HTTP/1.1", "HTTP/1.0"] {
+            let mut conn = TcpStream::connect(("127.0.0.1", frontend.port))
+                .await
+                .unwrap();
+            conn.write_all(chat_request_with_version("quick-model", version).as_bytes())
+                .await
+                .unwrap();
+            let headers = read_headers(&mut conn).await;
+            assert!(headers.starts_with(&format!("{version} 503")), "{headers}");
             let lower = headers.to_ascii_lowercase();
             assert!(lower.contains("retry-after: 1"), "{headers}");
             assert!(lower.contains("connection: close"), "{headers}");
+            let body = read_to_end_lossy(&mut conn, Duration::from_secs(2)).await;
+            let body: serde_json::Value =
+                serde_json::from_slice(&body).expect("rejection body is JSON");
+            assert_eq!(body["message"], "Service is not ready");
         }
+
+        // The admitted stream is untouched by the rejections and finishes cleanly.
+        // Only the stage was advanced here, not the controller, so hyper keeps the
+        // connection alive afterwards; read to the chunk terminator, not to EOF.
         frontend.gate.notify_waiters();
+        let rest = read_until_terminator(&mut held).await;
+        let rest = String::from_utf8_lossy(&rest);
+        assert!(rest.contains("[DONE]"), "{rest}");
+        assert!(rest.contains("0\r\n\r\n"), "{rest}");
     });
 }

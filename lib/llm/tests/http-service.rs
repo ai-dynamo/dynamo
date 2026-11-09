@@ -4,6 +4,7 @@
 use anyhow::Error;
 use async_stream::stream;
 use base64::Engine as _;
+use dynamo_llm::http::service::ShutdownTimings;
 use dynamo_llm::protocols::{
     Annotated,
     codec::SseLineCodec,
@@ -235,7 +236,11 @@ async fn start_audio_service(
     tokio::task::JoinHandle<anyhow::Result<()>>,
 ) {
     let (listener, port) = bind_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
+    let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
+        .port(port)
+        .build()
+        .unwrap();
     service
         .enable_model_endpoint(EndpointType::Audios, true)
         .unwrap();
@@ -680,6 +685,7 @@ fn inc_counter(
 async fn test_http_service() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .port(port)
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
@@ -1030,14 +1036,11 @@ async fn wait_for_service_ready(port: u16) {
     }
 }
 
-// NOTE: `test_draining_http1_rejection_closes_keepalive_without_cutting_admitted_stream`
-// was superseded by the frontend graceful-shutdown contract. Its Propagating and
-// Draining scenarios now live in `tests/frontend_graceful_shutdown.rs` (T2, T3, T5, T7).
-
 #[tokio::test]
 async fn test_sse_keep_alive_emits_comments_during_idle_stream() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .port(port)
         .enable_chat_endpoints(true)
         .sse_keep_alive(std::time::Duration::from_millis(25))
@@ -1131,7 +1134,11 @@ async fn test_sse_keep_alive_emits_comments_during_idle_stream() {
 #[tokio::test]
 async fn test_disabled_batch_api_routes_are_hidden() {
     let (listener, port) = bind_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
+    let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
+        .port(port)
+        .build()
+        .unwrap();
 
     let token = CancellationToken::new();
     let cancel_token = token.clone();
@@ -1183,6 +1190,7 @@ async fn test_disabled_batch_api_routes_are_hidden() {
 async fn test_enabled_batch_api_routes_are_documented_and_return_not_implemented() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .port(port)
         .enable_batch_endpoints(true)
         .build()
@@ -1282,6 +1290,7 @@ async fn test_enabled_batch_api_routes_are_documented_and_return_not_implemented
 async fn test_client_disconnect_cancellation_unary() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
         .port(port)
@@ -1347,6 +1356,7 @@ async fn test_client_disconnect_cancellation_streaming() {
 
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
         .port(port)
@@ -1417,6 +1427,7 @@ async fn test_request_id_annotation() {
 
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
         .port(port)
@@ -1593,6 +1604,7 @@ async fn test_concurrent_requests_with_shared_client_request_id() {
     const MODEL: &str = "concurrent-echo-model";
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .port(port)
         .enable_chat_endpoints(true)
         .enable_responses_endpoints(true)
@@ -1710,6 +1722,7 @@ async fn test_concurrent_requests_with_shared_client_request_id() {
 async fn test_model_ready_endpoint() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .port(port)
         .enable_chat_endpoints(true)
         .build()
@@ -1819,6 +1832,7 @@ async fn test_model_ready_endpoint_non_displayable_shadow() {
 
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .port(port)
         .enable_chat_endpoints(true)
         .build()
@@ -1881,6 +1895,7 @@ async fn test_nvext_disabled_strips_request_and_response() {
 
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .enable_chat_endpoints(true)
         .enable_nvext(false)
         .port(port)
@@ -1948,6 +1963,7 @@ async fn test_nvext_disabled_strips_request_and_response() {
 async fn test_streaming_responses_returns_4xx_on_backend_invalid_argument() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .port(port)
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
@@ -2031,6 +2047,7 @@ async fn post_streaming_with_check(
 ) -> (StatusCode, String) {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .port(port)
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
@@ -2096,6 +2113,7 @@ fn delayed_error_chat_body() -> serde_json::Value {
 async fn test_streaming_chat_until_first_event_holds_status_for_first_item() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .port(port)
         .enable_chat_endpoints(true)
         .streaming_backend_error_check(BackendErrorCheck::UntilFirstEvent)
@@ -2287,6 +2305,7 @@ async fn start_anthropic_first_event_service(
 ) {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .port(port)
         .enable_chat_endpoints(true)
         .enable_anthropic_endpoints(true)
@@ -2555,6 +2574,7 @@ async fn assert_pre_commit_disconnect_is_recorded_once(on_kill: OnKill) {
 
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .port(port)
         .enable_chat_endpoints(true)
         .streaming_backend_error_check(BackendErrorCheck::UntilFirstEvent)
@@ -2745,6 +2765,7 @@ async fn test_batch_preflight_error_kills_sibling_prompts() {
 
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .port(port)
         .enable_cmpl_endpoints(true)
         .streaming_backend_error_check(BackendErrorCheck::UntilFirstEvent)
@@ -2903,7 +2924,11 @@ async fn test_audio_speech_alias_meters_under_primary_model() {
     engine.release.notify_one();
 
     let (listener, port) = bind_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
+    let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
+        .port(port)
+        .build()
+        .unwrap();
     service
         .enable_model_endpoint(EndpointType::Audios, true)
         .unwrap();
@@ -3020,7 +3045,11 @@ impl
 #[tokio::test]
 async fn test_audio_speech_speed_out_of_range_returns_400() {
     let (listener, port) = bind_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
+    let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
+        .port(port)
+        .build()
+        .unwrap();
     service
         .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true)
         .unwrap();
@@ -3124,7 +3153,11 @@ impl
 #[tokio::test]
 async fn test_audio_speech_backend_invalid_argument_returns_4xx() {
     let (listener, port) = bind_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
+    let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
+        .port(port)
+        .build()
+        .unwrap();
     service
         .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true)
         .unwrap();
@@ -3232,7 +3265,11 @@ impl
 #[tokio::test]
 async fn test_audio_speech_failed_status_meters_as_client_error() {
     let (listener, port) = bind_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
+    let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
+        .port(port)
+        .build()
+        .unwrap();
     service
         .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Audios, true)
         .unwrap();
@@ -3377,7 +3414,11 @@ impl
 #[tokio::test]
 async fn test_pooling_family_validation_errors_are_metered() {
     let (listener, port) = bind_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
+    let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
+        .port(port)
+        .build()
+        .unwrap();
     service
         .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Classify, true)
         .unwrap();
@@ -3565,7 +3606,11 @@ async fn start_images_service(
     tokio::task::JoinHandle<anyhow::Result<()>>,
 ) {
     let (listener, port) = bind_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
+    let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
+        .port(port)
+        .build()
+        .unwrap();
     service
         .enable_model_endpoint(EndpointType::Images, true)
         .unwrap();
@@ -3677,7 +3722,11 @@ impl AsyncEngine<SingleIn<NvCreateVideoRequest>, ManyOut<Annotated<NvVideosRespo
 #[tokio::test]
 async fn test_videos_non_positive_counts_return_400() {
     let (listener, port) = bind_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
+    let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
+        .port(port)
+        .build()
+        .unwrap();
     service
         .enable_model_endpoint(EndpointType::Videos, true)
         .unwrap();
@@ -3946,6 +3995,7 @@ mod zero_top_logprobs {
 async fn check_reject_media_openai(status: StatusCode) {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .enable_chat_endpoints(true)
         .enable_responses_endpoints(true)
         .media_rejection(
@@ -4211,6 +4261,7 @@ async fn check_reject_media_openai(status: StatusCode) {
 async fn check_reject_media_anthropic(status: StatusCode) {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
+        .shutdown_timings(ShutdownTimings::immediate())
         .enable_anthropic_endpoints(true)
         .media_rejection(
             dynamo_llm::frontend_config::MediaRejectionConfig::new(true, status.as_u16()).unwrap(),

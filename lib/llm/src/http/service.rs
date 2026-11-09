@@ -25,7 +25,7 @@ mod image_edits;
 pub mod metadata;
 mod openai;
 mod server;
-pub mod shutdown;
+pub(crate) mod shutdown;
 mod transcriptions;
 mod write_timeout;
 
@@ -50,6 +50,7 @@ pub use frontend_extension::{
     validate_extension_route_path,
 };
 pub use metrics::Metrics;
+pub use shutdown::ShutdownTimings;
 
 use crate::{
     preprocessor::OpenAIPreprocessor,

@@ -1997,7 +1997,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 
 	// Size the frontend's drain timeout from the final grace period, now that the
 	// podTemplate override and defaults are both applied.
-	applyFrontendDrainBudget(&podSpec, component.ComponentType)
+	applyFrontendDrainBudget(&podSpec, component.ComponentType, componentContext.Annotations)
 
 	return &podSpec, nil
 }
@@ -2018,9 +2018,15 @@ const (
 // The frontend serves a propagation window, then drains in-flight work. Keeping
 // propagation + drain + a margin within the grace period lets it finish before
 // Kubernetes sends SIGKILL. A user-set drain timeout is never overridden; it only
-// warns when it does not fit. Only frontend components are affected.
-func applyFrontendDrainBudget(podSpec *corev1.PodSpec, componentType v1beta1.ComponentType) {
+// warns when it does not fit. Only frontend components are affected, and only in
+// graphs created by an operator that carries this derivation (the
+// FrontendDrainBudget gate), so an operator-only upgrade does not roll existing
+// frontends. `annotations` are the pod template annotations carrying the origin.
+func applyFrontendDrainBudget(podSpec *corev1.PodSpec, componentType v1beta1.ComponentType, annotations map[string]string) {
 	if componentType != v1beta1.ComponentTypeFrontend || len(podSpec.Containers) == 0 {
+		return
+	}
+	if !compatibility.FrontendDrainBudget.Enabled(annotations) {
 		return
 	}
 	main := &podSpec.Containers[0]
@@ -2054,17 +2060,14 @@ func applyFrontendDrainBudget(podSpec *corev1.PodSpec, componentType v1beta1.Com
 	}
 
 	// Derive the drain timeout so propagation + drain + margin fits the grace period.
-	// A grace period too small to fit even a one-second drain is not a standard
-	// Kubernetes pod grace period — for example a Grove-managed pod, whose real
-	// termination budget is the orchestrator's TerminationDelay, keeps a tiny pod
-	// grace period. Leave the frontend's own default drain in that case rather than
-	// deriving a meaningless one-second drain.
+	// A grace period that cannot fit even a one-second drain still gets one, so the
+	// frontend does not fall back to its 50 s default and overrun SIGKILL by more.
 	drain := grace - propagation - frontendShutdownMarginSecs
 	if drain < 1 {
+		drain = 1
 		ctrllog.Log.WithName("frontend-drain-budget").Info(
-			"terminationGracePeriodSeconds is too small to derive a frontend drain timeout; leaving the frontend default in place",
+			"terminationGracePeriodSeconds is too small for the frontend propagation window and margin; clamping the derived drain timeout to 1s",
 			"propagationSecs", propagation, "graceSecs", grace)
-		return
 	}
 	main.Env = append(main.Env, corev1.EnvVar{
 		Name:  envFrontendDrainTimeoutSecs,

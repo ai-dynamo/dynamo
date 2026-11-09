@@ -23,14 +23,13 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::body::Bytes;
 use futures::Stream;
-use parking_lot::Mutex;
 use tokio::time::Instant;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use tokio_util::task::TaskTracker;
@@ -105,6 +104,17 @@ impl ShutdownTimings {
     pub fn total(&self) -> Duration {
         self.propagation + self.drain + self.close
     }
+
+    /// No propagation window and no drain: stop as soon as shutdown is requested,
+    /// giving open exchanges only the close bound. For embedders and tests whose
+    /// teardown must not wait on the production defaults.
+    pub fn immediate() -> Self {
+        Self {
+            propagation: Duration::ZERO,
+            drain: Duration::ZERO,
+            close: CLOSE_TIMEOUT,
+        }
+    }
 }
 
 fn parse_seconds(
@@ -156,7 +166,8 @@ pub struct ShutdownController {
     force: CancellationToken,
     /// Every connection task, including upgraded WebSocket sessions.
     tracker: TaskTracker,
-    deadline: Mutex<Option<Instant>>,
+    /// The abort deadline, set once when shutdown is requested.
+    deadline: OnceLock<Instant>,
     driving: AtomicBool,
 }
 
@@ -187,7 +198,7 @@ impl ShutdownController {
             stopped: CancellationToken::new(),
             force,
             tracker: TaskTracker::new(),
-            deadline: Mutex::new(None),
+            deadline: OnceLock::new(),
             driving: AtomicBool::new(false),
         }
     }
@@ -196,7 +207,8 @@ impl ShutdownController {
         self.timings
     }
 
-    pub fn observer(&self) -> &Arc<ServiceObserver> {
+    #[cfg(test)]
+    fn observer(&self) -> &Arc<ServiceObserver> {
         &self.observer
     }
 
@@ -210,32 +222,29 @@ impl ShutdownController {
         self.abort.child_token()
     }
 
-    /// Fires when the remaining sockets are dropped.
-    pub fn hard_token(&self) -> CancellationToken {
-        self.hard.child_token()
-    }
-
     /// Fires once the controller has reached Stopping.
     pub fn stopped_token(&self) -> CancellationToken {
         self.stopped.child_token()
     }
 
-    pub fn is_stopped(&self) -> bool {
+    #[cfg(test)]
+    fn is_stopped(&self) -> bool {
         self.stopped.is_cancelled()
     }
 
-    pub fn is_aborting(&self) -> bool {
+    #[cfg(test)]
+    fn is_aborting(&self) -> bool {
         self.abort.is_cancelled()
     }
 
-    /// Skip the remaining window and drain, abort in-flight work, and stop.
-    pub fn force(&self) {
-        self.force.cancel();
+    #[cfg(test)]
+    fn hard_token(&self) -> CancellationToken {
+        self.hard.child_token()
     }
 
-    /// The tracker every connection task runs on.
-    pub fn tracker(&self) -> &TaskTracker {
-        &self.tracker
+    #[cfg(test)]
+    fn tracked_connections(&self) -> usize {
+        self.tracker.len()
     }
 
     /// Spawn a connection task: tracked for the early exit and dropped at `hard`.
@@ -254,7 +263,7 @@ impl ShutdownController {
     /// Time left until the abort deadline, once shutdown has been requested.
     pub fn remaining(&self) -> Option<Duration> {
         self.deadline
-            .lock()
+            .get()
             .map(|deadline| deadline.saturating_duration_since(Instant::now()))
     }
 
@@ -274,7 +283,9 @@ impl ShutdownController {
             _ = self.force.cancelled() => {}
         }
         let started = Instant::now();
-        *self.deadline.lock() = Some(started + self.timings.propagation + self.timings.drain);
+        let _ = self
+            .deadline
+            .set(started + self.timings.propagation + self.timings.drain);
         self.observer.start_propagating();
         // Serve the window only if readiness was actually withdrawn into Propagating
         // here. If the stage was already advanced past Ready (readiness withdrawn by
@@ -330,8 +341,14 @@ impl ShutdownController {
 /// A response body stream that holds its inflight permit and ends with an error
 /// when the controller aborts: hyper closes HTTP/1.1 without the chunk terminator
 /// and resets the HTTP/2 stream, so the client cannot mistake it for completion.
+///
+/// The abort future is polled only while the body is waiting for its next chunk.
+/// A token stream is pending between tokens, so the abort is still noticed at
+/// once, and the per-chunk fast path stays free of the extra lock traffic that
+/// polling a pending cancellation future costs. A body that never goes pending
+/// is closed by the controller's hard deadline instead.
 pub(super) struct AbortableBodyStream<S> {
-    inner: Pin<Box<S>>,
+    inner: S,
     abort: Pin<Box<WaitForCancellationFutureOwned>>,
     ended: bool,
     _permit: InflightPermit,
@@ -340,7 +357,7 @@ pub(super) struct AbortableBodyStream<S> {
 impl<S> AbortableBodyStream<S> {
     pub(super) fn new(inner: S, abort: CancellationToken, permit: InflightPermit) -> Self {
         Self {
-            inner: Box::pin(inner),
+            inner,
             abort: Box::pin(abort.cancelled_owned()),
             ended: false,
             _permit: permit,
@@ -350,7 +367,7 @@ impl<S> AbortableBodyStream<S> {
 
 impl<S> Stream for AbortableBodyStream<S>
 where
-    S: Stream<Item = Result<Bytes, axum::Error>>,
+    S: Stream<Item = Result<Bytes, axum::Error>> + Unpin,
 {
     type Item = Result<Bytes, axum::Error>;
 
@@ -358,16 +375,19 @@ where
         if self.ended {
             return Poll::Ready(None);
         }
-        if self.abort.as_mut().poll(cx).is_ready() {
-            self.ended = true;
-            return Poll::Ready(Some(Err(axum::Error::new(shutdown_abort_error()))));
-        }
-        match self.inner.as_mut().poll_next(cx) {
+        match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(None) => {
                 self.ended = true;
                 Poll::Ready(None)
             }
-            other => other,
+            Poll::Ready(item) => Poll::Ready(item),
+            Poll::Pending => {
+                if self.abort.as_mut().poll(cx).is_ready() {
+                    self.ended = true;
+                    return Poll::Ready(Some(Err(axum::Error::new(shutdown_abort_error()))));
+                }
+                Poll::Pending
+            }
         }
     }
 }
@@ -479,7 +499,7 @@ mod tests {
         assert!(state_cancel.is_cancelled());
         assert_eq!(controller.observer().stage(), ServiceStage::Stopping);
         assert_eq!(
-            controller.tracker().len(),
+            controller.tracked_connections(),
             0,
             "dropped connections leave the tracker"
         );

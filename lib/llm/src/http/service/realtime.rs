@@ -107,11 +107,6 @@ async fn realtime_ws_handler(
         drop(permit);
         return upgrade_rejection();
     }
-    // Close the race where draining starts after the admission check.
-    if !state.is_admitting() {
-        drop(permit);
-        return upgrade_rejection();
-    }
 
     // Retire the session under the shared shutdown controller when the service is
     // serving one: the session body runs on the controller's tracker (so the
@@ -129,17 +124,29 @@ async fn realtime_ws_handler(
         .map(|c| c.timings().close)
         .unwrap_or(CLOSE_DRAIN_TIMEOUT);
 
+    // Spawn the tracked session task now, while this connection's own task still
+    // holds the tracker open, and hand it the socket once the upgrade completes.
+    // Spawning from inside `on_upgrade` instead would leave a gap after the
+    // connection task ends in which the drain could see an empty tracker.
+    let (socket_tx, socket_rx) = tokio::sync::oneshot::channel::<WebSocket>();
+    let session = async move {
+        // A dropped sender means the client went away before the 101 was sent.
+        if let Ok(socket) = socket_rx.await {
+            realtime_session(socket, state, shutdown, abort, close_timeout, permit).await;
+        }
+    };
+    match controller {
+        Some(controller) => {
+            controller.spawn_connection(session);
+        }
+        None => {
+            tokio::spawn(session);
+        }
+    }
+
     upgrade
         .on_upgrade(move |socket| async move {
-            let session = realtime_session(socket, state, shutdown, abort, close_timeout, permit);
-            match controller {
-                // on_upgrade spawns this future detached, so run the session body
-                // on the tracker to keep it inside the drain's accounting.
-                Some(controller) => {
-                    let _ = controller.spawn_connection(session).await;
-                }
-                None => session.await,
-            }
+            let _ = socket_tx.send(socket);
         })
         .into_response()
 }
@@ -318,12 +325,6 @@ impl RealtimeSession {
         }
     }
 
-    /// End the session at drain once no response is being delivered. Used as a
-    /// select guard, so the branch stays disabled while a reply is in flight.
-    fn should_end_for_shutdown(&self) -> bool {
-        self.shutdown.is_cancelled() && !self.response_in_progress
-    }
-
     /// Keep the client connection across worker attempts, retrying only eligible failures.
     async fn run<S, T>(
         &mut self,
@@ -425,8 +426,10 @@ impl RealtimeSession {
             }
             tokio::select! {
                 // Draining ends the session once the worker is between responses,
-                // so a reply in flight is delivered in full before the 1012.
-                _ = self.shutdown.cancelled(), if self.should_end_for_shutdown() => return Ok(()),
+                // so a reply in flight is delivered in full before the 1012. The
+                // guard only disables the branch mid-response; once `response.done`
+                // clears it, an already-cancelled token fires on the next iteration.
+                _ = self.shutdown.cancelled(), if !self.response_in_progress => return Ok(()),
                 _ = wait_for_deadline(self.recovery.deadline()) => anyhow::bail!("realtime recovery timed out"),
                 _ = wait_for_deadline(sender_deadline) => return Err(UnexpectedEnd.into()),
                 response = responses.next() => {
@@ -496,13 +499,22 @@ impl RealtimeSession {
         }
     }
 
-    /// Track whether the worker is mid-response so the drain delivers a reply in
-    /// full before closing. `response.created` opens a response and
-    /// `response.done` closes it.
+    /// Track whether the worker is mid-reply so the drain delivers it in full
+    /// before closing. A realtime response runs from `response.created` to
+    /// `response.done`; a transcription runs from the first speech or transcript
+    /// delta to its `completed` or `failed` event.
     fn track_response_progress(&mut self, event: &RealtimeServerEvent) {
         match event {
-            RealtimeServerEvent::ResponseCreated(_) => self.response_in_progress = true,
-            RealtimeServerEvent::ResponseDone(_) => self.response_in_progress = false,
+            RealtimeServerEvent::ResponseCreated(_)
+            | RealtimeServerEvent::InputAudioBufferSpeechStarted(_)
+            | RealtimeServerEvent::ConversationItemInputAudioTranscriptionDelta(_) => {
+                self.response_in_progress = true
+            }
+            RealtimeServerEvent::ResponseDone(_)
+            | RealtimeServerEvent::ConversationItemInputAudioTranscriptionCompleted(_)
+            | RealtimeServerEvent::ConversationItemInputAudioTranscriptionFailed(_) => {
+                self.response_in_progress = false
+            }
             _ => {}
         }
     }

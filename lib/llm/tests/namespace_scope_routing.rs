@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use dynamo_llm::discovery::{ModelManager, ModelWatcher};
 use dynamo_llm::entrypoint::RouterConfig;
+use dynamo_llm::http::service::ShutdownTimings;
 use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::model_type::{ModelInput, ModelType};
@@ -191,6 +192,7 @@ impl Frontend {
         let drt = runtime.clone();
         let (listener, port) = ports::bind_random_port().await;
         let service = HttpService::builder()
+            .shutdown_timings(ShutdownTimings::immediate())
             .host("127.0.0.1")
             .port(port)
             .enable_chat_endpoints(true)

@@ -57,4 +57,13 @@ var (
 		Name:             "MultinodeTopologyAliases",
 		MinOriginVersion: *semver.MustParse("1.6.0"),
 	}
+
+	// FrontendDrainBudget gates deriving the frontend's drain timeout
+	// (DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS) from the pod's termination grace
+	// period. Enabled for DGDs originally created by operator >= 1.7.0 so an
+	// operator upgrade does not roll existing frontends solely to add the variable.
+	FrontendDrainBudget = Gate{
+		Name:             "FrontendDrainBudget",
+		MinOriginVersion: *semver.MustParse("1.7.0"),
+	}
 )

@@ -149,6 +149,7 @@ func TestFrontendStartupProbeOriginPropagation(t *testing.T) {
 func TestApplyFrontendDrainBudget(t *testing.T) {
 	const propagationEnv = "DYN_FRONTEND_PROPAGATION_DELAY_SECS"
 	const drainEnv = "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS"
+	newGraph := map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0"}
 
 	drainValue := func(container corev1.Container) (string, bool) {
 		for _, env := range container.Env {
@@ -162,14 +163,16 @@ func TestApplyFrontendDrainBudget(t *testing.T) {
 	tests := []struct {
 		name          string
 		componentType v1beta1.ComponentType
+		annotations   map[string]string
 		grace         *int64
 		env           []corev1.EnvVar
-		wantDrain     string // expected derived drain value; "" means no drain env expected
+		wantDrain     string // expected drain value when injected
 		wantInjected  bool
 	}{
 		{
 			name:          "O1 default grace and propagation derive 50",
 			componentType: v1beta1.ComponentTypeFrontend,
+			annotations:   newGraph,
 			grace:         nil, // default 60
 			wantDrain:     "50",
 			wantInjected:  true,
@@ -177,6 +180,7 @@ func TestApplyFrontendDrainBudget(t *testing.T) {
 		{
 			name:          "O2 larger grace period derives 110",
 			componentType: v1beta1.ComponentTypeFrontend,
+			annotations:   newGraph,
 			grace:         new(int64(120)),
 			wantDrain:     "110",
 			wantInjected:  true,
@@ -184,6 +188,7 @@ func TestApplyFrontendDrainBudget(t *testing.T) {
 		{
 			name:          "O3 user-set propagation shrinks the derived drain",
 			componentType: v1beta1.ComponentTypeFrontend,
+			annotations:   newGraph,
 			grace:         new(int64(60)),
 			env:           []corev1.EnvVar{{Name: propagationEnv, Value: "15"}},
 			wantDrain:     "40",
@@ -192,33 +197,38 @@ func TestApplyFrontendDrainBudget(t *testing.T) {
 		{
 			name:          "O4 user-set drain is never overridden",
 			componentType: v1beta1.ComponentTypeFrontend,
+			annotations:   newGraph,
 			grace:         new(int64(60)),
 			env:           []corev1.EnvVar{{Name: drainEnv, Value: "200"}},
 			wantDrain:     "200",
 			wantInjected:  true,
 		},
 		{
-			name:          "O5 grace period smaller than the derived minimum leaves the frontend default",
+			name:          "O5 grace period below propagation plus margin clamps the drain to 1",
 			componentType: v1beta1.ComponentTypeFrontend,
+			annotations:   newGraph,
 			grace:         new(int64(8)),
-			wantInjected:  false,
-		},
-		{
-			name:          "grace period just large enough derives a 1s drain",
-			componentType: v1beta1.ComponentTypeFrontend,
-			grace:         new(int64(11)),
 			wantDrain:     "1",
 			wantInjected:  true,
 		},
 		{
-			name:          "Grove-sized pod grace period leaves the frontend default",
-			componentType: v1beta1.ComponentTypeFrontend,
-			grace:         new(int64(10)),
+			name:          "non-frontend components are unchanged",
+			componentType: v1beta1.ComponentTypeWorker,
+			annotations:   newGraph,
+			grace:         new(int64(60)),
 			wantInjected:  false,
 		},
 		{
-			name:          "non-frontend components are unchanged",
-			componentType: v1beta1.ComponentTypeWorker,
+			name:          "a graph created before operator 1.7.0 is left untouched",
+			componentType: v1beta1.ComponentTypeFrontend,
+			annotations:   map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"},
+			grace:         new(int64(60)),
+			wantInjected:  false,
+		},
+		{
+			name:          "a graph without an origin annotation is left untouched",
+			componentType: v1beta1.ComponentTypeFrontend,
+			annotations:   nil,
 			grace:         new(int64(60)),
 			wantInjected:  false,
 		},
@@ -234,8 +244,8 @@ func TestApplyFrontendDrainBudget(t *testing.T) {
 				},
 			}
 
-			t.Log("Apply the frontend drain budget")
-			applyFrontendDrainBudget(podSpec, tt.componentType)
+			t.Log("Apply the frontend drain budget under the graph's origin version")
+			applyFrontendDrainBudget(podSpec, tt.componentType, tt.annotations)
 
 			t.Log("Check the derived or preserved drain timeout")
 			value, present := drainValue(podSpec.Containers[0])
@@ -264,7 +274,9 @@ func TestApplyFrontendDrainBudgetIgnoresValueFrom(t *testing.T) {
 		},
 	}
 
-	applyFrontendDrainBudget(podSpec, v1beta1.ComponentTypeFrontend)
+	applyFrontendDrainBudget(podSpec, v1beta1.ComponentTypeFrontend, map[string]string{
+		commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.7.0",
+	})
 
 	t.Log("The env keeps its single valueFrom entry; no literal drain is appended")
 	require.Len(t, podSpec.Containers[0].Env, 1)

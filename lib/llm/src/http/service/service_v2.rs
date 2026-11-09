@@ -56,15 +56,23 @@ use crate::frontend_config::{
     MediaRejectionConfig, MetricsConfig,
 };
 
-/// Middleware that echoes `x-request-id` from request to response headers.
-async fn echo_request_id_header(
+/// Middleware on every route: echoes `x-request-id` from request to response, and
+/// once shutdown has begun retires the HTTP/1.x connection after this response so
+/// connection pools stop reusing a terminating frontend. HTTP/2 and gRPC
+/// connections are retired with GOAWAY by the accept loop instead.
+async fn finalize_response_headers(
+    axum::extract::State(state): axum::extract::State<Arc<State>>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let x_request_id = request.headers().get("x-request-id").cloned();
+    let version = request.version();
     let mut response = next.run(request).await;
     if let Some(value) = x_request_id {
         response.headers_mut().insert("x-request-id", value);
+    }
+    if version <= Version::HTTP_11 && !state.is_ready() {
+        response = close_draining_connection(response, version);
     }
     response
 }
@@ -130,22 +138,6 @@ fn add_retry_after(response: &mut axum::response::Response) {
     response
         .headers_mut()
         .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
-}
-
-/// Response layer applied to every route: once shutdown has begun, retire the
-/// HTTP/1.x connection after this response so connection pools stop reusing it.
-/// HTTP/2 and gRPC connections are retired with GOAWAY by the accept loop instead.
-async fn retire_http1_connection_when_not_ready(
-    axum::extract::State(state): axum::extract::State<Arc<State>>,
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let version = request.version();
-    let response = next.run(request).await;
-    if version <= Version::HTTP_11 && !state.is_ready() {
-        return close_draining_connection(response, version);
-    }
-    response
 }
 
 /// Error protocol of a mounted inference route, used when the readiness gate
@@ -537,12 +529,10 @@ impl ServiceObserver {
     /// connections here, while every admitted request is still served so that
     /// the endpoint update can reach them first.
     pub fn start_propagating(&self) {
-        let previous = self.stage();
-        if previous != ServiceStage::Ready {
+        if self.stage() != ServiceStage::Ready {
             return;
         }
         tracing::info!(
-            previous_stage = ?previous,
             inflight_requests = self.inflight_count(),
             "frontend service entering propagating stage"
         );
@@ -562,11 +552,6 @@ impl ServiceObserver {
         );
         self.stage
             .store(ServiceStage::Draining.as_u8(), Ordering::Release);
-        // A stage change can be the event the drain is waiting on, if the last
-        // permit dropped while still Ready or Propagating.
-        if self.inflight_count() == 0 {
-            self.inflight_zero.notify_waiters();
-        }
     }
 
     /// Mark the frontend as stopping.
@@ -867,12 +852,17 @@ impl State {
     }
 
     /// Record the shutdown controller for the current serving run. Called once,
-    /// when `run()` starts.
+    /// when `run()` starts; a second `run()` on the same service keeps the first.
     pub(super) fn set_shutdown_controller(
         &self,
         controller: Arc<super::shutdown::ShutdownController>,
     ) {
-        let _ = self.shutdown_controller.set(controller);
+        if self.shutdown_controller.set(controller).is_err() {
+            tracing::warn!(
+                "HTTP service run() called again on the same instance; handlers keep \
+                 observing the first run's shutdown controller"
+            );
+        }
     }
 
     pub(super) fn shutdown_controller(&self) -> Option<&Arc<super::shutdown::ShutdownController>> {
@@ -880,9 +870,17 @@ impl State {
     }
 
     /// Record the runtime's force-shutdown token so a second signal can skip the
-    /// window and drain. Called once, before `run()`.
+    /// window and drain. Called once, before `run()`; a later call is ignored
+    /// with a warning because the controller may already observe the first token.
     pub(super) fn set_force_token(&self, token: CancellationToken) {
-        let _ = self.force_token.set(token);
+        if self.force_token.set(token).is_err() {
+            tracing::warn!("force-shutdown token set after the HTTP service already had one");
+        }
+    }
+
+    /// Use `token` as the force-shutdown token unless one was set explicitly.
+    pub(super) fn init_force_token(&self, token: CancellationToken) {
+        let _ = self.force_token.get_or_init(|| token);
     }
 
     /// The force token for this run. When none was wired from a runtime, a
@@ -1092,6 +1090,7 @@ pub struct HttpService {
     /// Admin routes, served on their own listener when enabled.
     admin: Option<AdminListener>,
     frontend_load_target: Option<FrontendLoadTarget>,
+    shutdown_timings: Option<super::shutdown::ShutdownTimings>,
 }
 
 /// Admin routes and the address they are served on.
@@ -1243,6 +1242,12 @@ pub struct HttpServiceConfig {
     /// explicitly.
     #[builder(default = "BackendErrorCheck::from_env()")]
     streaming_backend_error_check: BackendErrorCheck,
+
+    /// Shutdown timings (propagation window, drain timeout, close bound). Defaults
+    /// to `DYN_FRONTEND_PROPAGATION_DELAY_SECS` and
+    /// `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` when not set explicitly.
+    #[builder(setter(strip_option), default = "None")]
+    shutdown_timings: Option<super::shutdown::ShutdownTimings>,
 }
 
 fn default_rl_port() -> u16 {
@@ -1278,9 +1283,17 @@ impl HttpService {
 
     /// Wire the runtime's force-shutdown token so a second shutdown signal makes
     /// this frontend skip the propagation window and the drain and abort
-    /// in-flight exchanges. Call before `run()`; has no effect afterwards.
+    /// in-flight exchanges. Only needed when the service was built without a
+    /// runtime (the Python binding); call before `run()`.
     pub fn set_force_shutdown_token(&self, token: CancellationToken) {
         self.state.set_force_token(token);
+    }
+
+    /// The shutdown timings this service runs with: the explicit builder value,
+    /// else the environment.
+    pub(crate) fn shutdown_timings(&self) -> super::shutdown::ShutdownTimings {
+        self.shutdown_timings
+            .unwrap_or_else(super::shutdown::ShutdownTimings::from_env)
     }
 
     pub fn model_manager(&self) -> &ModelManager {
@@ -1402,9 +1415,14 @@ impl HttpService {
         tracing::info!(address = %listener.local_addr()?, "{protocol} server listening");
 
         // One controller drives the shutdown stages for every listener of this run:
-        // the main HTTP(S) listener, the admin listener, and the RL listener.
-        let timings = super::shutdown::ShutdownTimings::from_env();
+        // the main HTTP(S) listener, the admin listener, and the RL listener. When
+        // the service was built with a runtime, a second shutdown signal reaches
+        // the controller through the runtime's force token.
+        let timings = self.shutdown_timings();
         warn_if_runtime_backstop_too_small(timings);
+        if let Some(target) = &self.frontend_load_target {
+            state.init_force_token(target.runtime.force_shutdown_token());
+        }
         let controller = Arc::new(super::shutdown::ShutdownController::new(
             state.service_observer(),
             timings,
@@ -2024,15 +2042,12 @@ impl HttpServiceConfigBuilder {
             );
         let router = router.fallback_service(unmatched_router);
 
-        // Once shutdown begins, retire the HTTP/1.x connection after every response
-        // on every route, so connection pools stop reusing a terminating frontend.
+        // Echo x-request-id for client correlation and, once shutdown begins, retire
+        // HTTP/1.x connections after their response, on every route.
         let router = router.layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            retire_http1_connection_when_not_ready,
+            finalize_response_headers,
         ));
-
-        // Echo x-request-id from request to response headers for client correlation
-        let router = router.layer(axum::middleware::from_fn(echo_request_id_header));
 
         let enable_rl_router = config.enable_rl || env_is_truthy("DYN_ENABLE_RL");
         let rl_router = if enable_rl_router {
@@ -2076,6 +2091,7 @@ impl HttpServiceConfigBuilder {
                 runtime,
                 namespace: crate::frontend_load::frontend_load_namespace(config.namespace),
             }),
+            shutdown_timings: config.shutdown_timings,
         })
     }
 
@@ -3091,6 +3107,58 @@ mod tests {
         assert_eq!(live(client.clone()).await, reqwest::StatusCode::OK);
 
         handle.abort();
+    }
+
+    /// The response layer retires HTTP/1.x connections on every route once
+    /// readiness is withdrawn, and leaves HTTP/2 alone (U3).
+    #[tokio::test]
+    async fn connection_close_applies_to_http1_only_once_not_ready() {
+        use tower::ServiceExt;
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let app = service.router.clone().with_state(());
+        let connection = |response: &axum::response::Response| {
+            response
+                .headers()
+                .get(header::CONNECTION)
+                .map(|value| value.to_str().unwrap().to_string())
+        };
+        let send = |version: Version, path: &str| {
+            let app = app.clone();
+            let request = axum::http::Request::builder()
+                .uri(path)
+                .version(version)
+                .body(Body::empty())
+                .unwrap();
+            async move { app.oneshot(request).await.unwrap() }
+        };
+
+        // Ready: no retirement on any protocol version.
+        for version in [Version::HTTP_10, Version::HTTP_11, Version::HTTP_2] {
+            assert_eq!(
+                connection(&send(version, "/health").await),
+                None,
+                "{version:?}"
+            );
+        }
+
+        state.start_propagating();
+        for path in ["/health", "/live", "/no-such-route"] {
+            for version in [Version::HTTP_10, Version::HTTP_11] {
+                let response = send(version, path).await;
+                assert_eq!(
+                    connection(&response).as_deref(),
+                    Some("close"),
+                    "{version:?} {path}"
+                );
+                assert_eq!(response.version(), version, "{path}");
+            }
+            assert_eq!(
+                connection(&send(Version::HTTP_2, path).await),
+                None,
+                "HTTP/2 is retired with GOAWAY, not a header: {path}"
+            );
+        }
     }
 
     #[tokio::test]

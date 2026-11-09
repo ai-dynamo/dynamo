@@ -312,9 +312,6 @@ async fn run_with_router_plugins(
             .collect::<Vec<String>>()
     );
 
-    // A second shutdown signal cancels this token; the frontend then skips the
-    // propagation window and the drain and aborts in-flight exchanges.
-    http_service.set_force_shutdown_token(distributed_runtime.force_shutdown_token());
     let _graceful_task = distributed_runtime.register_graceful_task();
     let run_result = http_service.run(distributed_runtime.child_token()).await;
 

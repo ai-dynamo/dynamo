@@ -216,6 +216,11 @@ pub struct KserveServiceConfig {
     /// Default: GrpcTuningConfig::from_env() - reads from environment variables with fallback to defaults.
     #[builder(default = "GrpcTuningConfig::from_env()")]
     grpc_tuning: GrpcTuningConfig,
+
+    /// Shutdown timings shared by the gRPC and metrics listeners. Defaults to the
+    /// environment when not set explicitly.
+    #[builder(setter(strip_option), default = "None")]
+    shutdown_timings: Option<crate::http::service::ShutdownTimings>,
 }
 
 impl KserveService {
@@ -278,7 +283,7 @@ impl KserveService {
         // follow the shared observer, driven by the companion HTTP service), then
         // let tonic send GOAWAY and drain in-flight RPCs. A forced shutdown skips
         // the remaining window. The runtime's Phase 2 backstop bounds the drain.
-        let timings = crate::http::service::shutdown::ShutdownTimings::from_env();
+        let timings = self.http_service.shutdown_timings();
         let force = self.http_service.state().force_shutdown_token();
         let shutdown = async move {
             observer.cancelled_owned().await;
@@ -309,7 +314,7 @@ impl KserveServiceConfigBuilder {
         // Create HTTP service with only non-inference endpoints (metrics, health, models list)
         // This provides the metrics endpoint, the shared metrics object, and the
         // frontend load publisher.
-        let http_service = http_service::HttpService::builder()
+        let mut http_service_builder = http_service::HttpService::builder()
             .port(config.http_metrics_port)
             .host(config.http_metrics_host.clone())
             .metrics_prefix(config.metrics_prefix)
@@ -321,8 +326,11 @@ impl KserveServiceConfigBuilder {
             .enable_cmpl_endpoints(false)
             .enable_embeddings_endpoints(false)
             .enable_responses_endpoints(false)
-            .enable_anthropic_endpoints(false)
-            .build()?;
+            .enable_anthropic_endpoints(false);
+        if let Some(timings) = config.shutdown_timings {
+            http_service_builder = http_service_builder.shutdown_timings(timings);
+        }
+        let http_service = http_service_builder.build()?;
 
         // Share the HTTP service's model manager, metrics, and lifecycle observer
         // with gRPC state so both listeners honor one readiness and shutdown contract.
@@ -1077,6 +1085,44 @@ mod readiness_gate_tests {
                 .ready,
             "a complete worker set → ServerReady=true"
         );
+
+        // Readiness is withdrawn the moment shutdown begins, even though the
+        // worker set is still complete: load balancers must stop routing here.
+        svc.http_service().state().start_propagating();
+        assert!(
+            !svc.server_ready(Request::new(ServerReadyRequest {}))
+                .await
+                .unwrap()
+                .get_ref()
+                .ready,
+            "ServerReady must be false once the frontend is shutting down"
+        );
+    }
+
+    /// Inference RPCs follow the shared admission gate: still served inside the
+    /// propagation window, rejected with UNAVAILABLE once the frontend drains.
+    #[tokio::test]
+    async fn infer_rpcs_follow_the_shutdown_admission_gate() {
+        let svc = KserveService::builder().build().unwrap();
+        let infer = || {
+            Request::new(ModelInferRequest {
+                model_name: "unknown".to_string(),
+                ..Default::default()
+            })
+        };
+
+        svc.http_service().state().start_propagating();
+        let status = svc.model_infer(infer()).await.unwrap_err();
+        assert_eq!(
+            status.code(),
+            tonic::Code::NotFound,
+            "propagating still admits the RPC: {status:?}"
+        );
+
+        svc.http_service().state().start_draining();
+        let status = svc.model_infer(infer()).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+        assert_eq!(status.message(), "frontend shutting down");
     }
 }
 

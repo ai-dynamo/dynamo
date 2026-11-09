@@ -252,6 +252,8 @@ spec:
             fieldRef:
               apiVersion: v1
               fieldPath: metadata.uid
+        - name: DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS
+          value: '50'
         image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.0
         imagePullPolicy: IfNotPresent
         livenessProbe:

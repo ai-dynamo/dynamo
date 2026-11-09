@@ -15,6 +15,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use dynamo_llm::endpoint_type::EndpointType;
 use dynamo_llm::engines::EchoBidirectionalEngine;
+use dynamo_llm::http::service::ShutdownTimings;
 use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_runtime::CancellationToken;
 use futures::{SinkExt, StreamExt};
@@ -57,8 +58,26 @@ async fn spawn_test_service(
     realtime_enabled: bool,
     register_echo_engine: bool,
 ) -> (u16, CancellationToken, JoinHandle<Result<()>>) {
+    // Teardown must not wait through the production propagation window.
+    spawn_test_service_with_timings(
+        realtime_enabled,
+        register_echo_engine,
+        ShutdownTimings::immediate(),
+    )
+    .await
+}
+
+async fn spawn_test_service_with_timings(
+    realtime_enabled: bool,
+    register_echo_engine: bool,
+    timings: ShutdownTimings,
+) -> (u16, CancellationToken, JoinHandle<Result<()>>) {
     let (listener, port) = bind_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
+    let service = HttpService::builder()
+        .port(port)
+        .shutdown_timings(timings)
+        .build()
+        .unwrap();
     if realtime_enabled {
         service
             .enable_model_endpoint(EndpointType::Realtime, true)
@@ -730,32 +749,53 @@ async fn realtime_websocket_recovers_after_unknown_model() {
     let _ = handle.await;
 }
 
+/// An idle session, before or after engine selection, gets its 1012 as soon as
+/// Draining starts: the drain timeout is 30 s and the close arrives within 2 s.
 #[tokio::test]
-#[serial_test::serial]
-async fn realtime_shutdown_closes_upgrades_before_and_after_engine_selection() {
-    temp_env::async_with_vars(
-        [
-            // Skip the propagation window so draining, and the 1012 close, start at once.
-            ("DYN_FRONTEND_PROPAGATION_DELAY_SECS", Some("0")),
-            ("DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS", Some("1")),
-        ],
-        async {
-            for select_engine in [false, true] {
-                let (port, token, handle) = spawn_test_service(true, true).await;
-                let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/v1/realtime")).await.unwrap();
-                expect_text_event(&mut ws, "session.created").await;
-                if select_engine {
-                    ws.send(Message::Text(serde_json::json!({
-                        "type": "session.update", "session": {"type": "realtime", "model": ECHO_MODEL}
-                    }).to_string().into())).await.unwrap();
-                    expect_text_event(&mut ws, "session.updated").await;
-                }
-                token.cancel();
-                let closed = tokio::time::timeout(Duration::from_secs(2), ws.next()).await.unwrap();
-                assert!(matches!(closed, Some(Ok(Message::Close(Some(ref frame)))) if frame.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Restart), "expected service-restart close: {closed:?}");
-                tokio::time::timeout(Duration::from_secs(3), handle).await.unwrap().unwrap().unwrap();
-                let _ = ws.close(None).await;
-            }
-        },
-    ).await;
+async fn realtime_shutdown_closes_idle_sessions_when_draining_starts() {
+    let timings = ShutdownTimings {
+        propagation: Duration::ZERO,
+        drain: Duration::from_secs(30),
+        close: Duration::from_secs(1),
+    };
+    for select_engine in [false, true] {
+        let (port, token, handle) = spawn_test_service_with_timings(true, true, timings).await;
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/v1/realtime"))
+                .await
+                .unwrap();
+        expect_text_event(&mut ws, "session.created").await;
+        if select_engine {
+            ws.send(Message::Text(
+                serde_json::json!({
+                    "type": "session.update", "session": {"type": "realtime", "model": ECHO_MODEL}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+            expect_text_event(&mut ws, "session.updated").await;
+        }
+        let drained_at = std::time::Instant::now();
+        token.cancel();
+        let closed = tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .unwrap();
+        assert!(
+            matches!(closed, Some(Ok(Message::Close(Some(ref frame)))) if frame.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Restart),
+            "expected service-restart close: {closed:?}"
+        );
+        assert!(
+            drained_at.elapsed() < Duration::from_secs(5),
+            "the 1012 must not wait for the 30 s drain timeout"
+        );
+        // The session ending empties the tracker, so the service stops early too.
+        tokio::time::timeout(Duration::from_secs(3), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let _ = ws.close(None).await;
+    }
 }

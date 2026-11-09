@@ -38,6 +38,7 @@ pub mod kserve_test {
     use async_stream::stream;
     use dynamo_llm::grpc::service::kserve::KserveService;
     use dynamo_llm::grpc::service::kserve::inference as kserve_inference;
+    use dynamo_llm::http::service::ShutdownTimings;
     use dynamo_llm::protocols::{
         Annotated,
         openai::{
@@ -1936,6 +1937,7 @@ pub mod kserve_test {
         let service = KserveService::builder()
             .port(grpc_port)
             .http_metrics_port(http_metrics_port)
+            .shutdown_timings(ShutdownTimings::immediate())
             .build()
             .unwrap();
 
