@@ -152,5 +152,6 @@ session affinity, TTFT p90 stays at the cached-prefix level of about 45 ms,
 while round robin pays a full prefill of about 0.6 to 0.8 seconds on a
 noticeable share of requests.
 
-Throughput still scaled almost linearly from concurrency 8 to 16 for both
-profiles, so eight workers were not saturated at the highest tested level.
+From concurrency 8 to 16, session-affinity throughput scaled almost linearly
+(1.9x) with TTFT p50 flat at 44 ms. Round-robin throughput grew only 1.7x and
+its TTFT p50 rose from 48 ms to 124 ms, so round robin was starting to queue.

@@ -41,10 +41,10 @@ kubectl -n "$NAMESPACE" wait \
   --timeout=14400s
 ```
 
-On eight H200 workers, the full sweep took about 70 to 90 minutes per profile,
-including package installation and video generation. Concurrency 1 accounts
-for a large share of that time, and each level prints its AIPerf
-summary to the log when it finishes. The 14,400-second timeout leaves headroom
+On eight H200 workers, the full sweep took about 70 minutes for round robin and
+about 55 minutes for session affinity, including package installation and video
+generation. Concurrency 1 accounts for about half of that time, and each level
+prints its AIPerf summary to the log when it finishes. The 14,400-second timeout leaves headroom
 for slower clusters.
 
 The log ends with the artifact directory. It has one subdirectory per

@@ -82,6 +82,7 @@ Run commands from the repository root:
 ```bash
 export CONTEXT="<your-kubernetes-context>"
 export NAMESPACE="<your-namespace>"
+export NGC_API_KEY="<your-ngc-api-key>"
 
 kubectl --context "$CONTEXT" create namespace "$NAMESPACE"
 : "${NGC_API_KEY:?Set NGC_API_KEY to your NGC API key}"
@@ -190,16 +191,20 @@ session-affinity manifest sets a 300-second TTL.
 
 ## Verify
 
-Forward the frontend Service and check that it serves the model:
+Forward the frontend Service. The command keeps running:
 
 ```bash
 kubectl --context "$CONTEXT" -n "$NAMESPACE" port-forward \
   "service/${DGD}-frontend" 8000:8000
+```
+
+In a second terminal, check that it serves the model:
+
+```bash
 curl -fsS http://localhost:8000/v1/models
 ```
 
-Run `curl` in a second terminal. The response lists
-`nvidia/cosmos3-nano-reasoner`.
+The response lists `nvidia/cosmos3-nano-reasoner`.
 
 ## Smoke test
 

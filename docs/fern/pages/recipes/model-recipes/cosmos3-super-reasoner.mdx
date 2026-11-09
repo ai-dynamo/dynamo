@@ -66,7 +66,7 @@ reach a worker that has already processed that video.
 
 In a matched eight-H200 benchmark, per-video session affinity improved
 throughput at every tested concurrency (22% to 41% more requests/s) and kept
-TTFT p90 below 50 ms. See
+TTFT p50 at 44 ms. See
 [Measured performance](#measured-performance).
 
 </Note>
@@ -82,6 +82,7 @@ Run commands from the repository root:
 ```bash
 export CONTEXT="<your-kubernetes-context>"
 export NAMESPACE="<your-namespace>"
+export NGC_API_KEY="<your-ngc-api-key>"
 
 kubectl --context "$CONTEXT" create namespace "$NAMESPACE"
 : "${NGC_API_KEY:?Set NGC_API_KEY to your NGC API key}"
@@ -190,16 +191,20 @@ session-affinity manifest sets a 300-second TTL.
 
 ## Verify
 
-Forward the frontend Service and check that it serves the model:
+Forward the frontend Service. The command keeps running:
 
 ```bash
 kubectl --context "$CONTEXT" -n "$NAMESPACE" port-forward \
   "service/${DGD}-frontend" 8000:8000
+```
+
+In a second terminal, check that it serves the model:
+
+```bash
 curl -fsS http://localhost:8000/v1/models
 ```
 
-Run `curl` in a second terminal. The response lists
-`nvidia/cosmos3-super-reasoner`.
+The response lists `nvidia/cosmos3-super-reasoner`.
 
 ## Smoke test
 
@@ -227,7 +232,9 @@ The [AIPerf workflow](https://github.com/ai-dynamo/dynamo/blob/main/recipes/cosm
 generates 200 synthetic 30-second, 2 FPS videos with FFmpeg before the
 measured sweep, so no external dataset or credentials are needed. It then sends
 20 questions for each video at every concurrency level: 4,000 requests with
-exactly 128 output tokens each. For session affinity, AIPerf sends one
+exactly 128 output tokens each. Every request puts the video before the
+question, so all questions about one video share a prompt prefix. For session
+affinity, AIPerf sends one
 `X-Dynamo-Session-ID` value, generated per video, on all 20 questions about
 that video; pure round robin sends no session-affinity header.
 
