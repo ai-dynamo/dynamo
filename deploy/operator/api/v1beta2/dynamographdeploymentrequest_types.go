@@ -326,7 +326,7 @@ type AISimSpec struct {
 	// field. The dgdr_run member must remain an object, and its operator-owned
 	// transport, identity, and runtime fields name, max_candidates, snapshot_dir,
 	// runtime_image, runtime_version_override, derive_runtime_images,
-	// num_gpus_per_node, and namespace are operator-owned. Request admission
+	// num_gpus_per_node, and namespace are operator-owned. Request and Run admission
 	// rejects them, and the Run controller enforces its values while lowering the
 	// immutable snapshot. A typed spec.workload.trace is an underlay like the other
 	// typed fields: it supplies the default traffic.source (type trace, format
@@ -336,10 +336,11 @@ type AISimSpec struct {
 	// parent object; the Run controller does not restore it. The typed
 	// PersistentVolumeClaim source alone decides the Run Job's trace mount and its
 	// claim dependency, so overriding a native path adds no volume mount.
-	// AISimulate validates the resulting input when the Run's Job starts; admission
-	// does not validate it against the AISimulate schema yet. The operator runs
-	// the AISimulate version from its configured planner image; Requests and Runs
-	// cannot select a different image or version.
+	// The operator runs the AISimulate version from its configured planner image;
+	// Requests and Runs cannot select a different image or version.
+	// Request and Run creation validate the merged input against the bundled AISimulate input
+	// schema. Request spec changes require the same validation; Run specs are immutable.
+	// Unchanged specs remain metadata-updatable after a bundled schema change.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
@@ -355,6 +356,32 @@ type RecommendationSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	MaxCandidates int32 `json:"maxCandidates,omitempty"`
+}
+
+// OverridesSpec patches the generated deployment independently for every selected Candidate.
+type OverridesSpec struct {
+	// DGD is one partial nvidia.com/v1beta1 DynamoGraphDeployment applied by the publisher
+	// using the DGD schema's Server-Side Apply merge rules. Other API versions are not supported.
+	// Components must already exist; named containers may be added. Atomic lists, including
+	// container command and args, replace the generated lists. The supported customization
+	// $patch: {args: append} on a container appends to its explicit generated args list;
+	// both the container and its args must already exist. No other $patch operation is supported.
+	// Application is atomic: a merge failure retains the unchanged generated deployment
+	// with Valid=False. A successful merge is checked by strict server-side dry-run;
+	// the dry-run response and its defaults are discarded. The Candidate retains the
+	// unpruned payload from before the check. Invalid Candidates count toward maxCandidates.
+	// Overrides may change any deployment configuration. Evaluation metrics are not
+	// recomputed and continue to describe the original AISimulate configuration.
+	// DGD labels and annotations become Candidate labels and annotations. A failed merge
+	// retains only the original generated metadata; a successful merge followed by failed
+	// dry-run validation retains the merged metadata on the invalid Candidate. Other metadata
+	// and publisher-owned keys cannot be overridden; such attempts fail atomically.
+	// The complete Candidate metadata must satisfy Kubernetes limits, including generated
+	// and reserved annotations. An override that exceeds those limits fails atomically.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:EmbeddedResource
+	DGD *runtime.RawExtension `json:"dgd,omitempty"`
 }
 
 // NativeSearchInput defines the v1beta2 search input shared by Requests and
@@ -403,6 +430,10 @@ type NativeSearchInput struct {
 	// Recommendation controls bounded projection into DGDC resources.
 	// +optional
 	Recommendation *RecommendationSpec `json:"recommendation,omitempty"`
+
+	// Overrides customizes the generated DGD without changing AISimulate execution.
+	// +optional
+	Overrides *OverridesSpec `json:"overrides,omitempty"`
 }
 
 // DynamoGraphDeploymentRequestNativeSpec contains the native v1beta2 request fields.
@@ -413,7 +444,7 @@ type DynamoGraphDeploymentRequestNativeSpec struct {
 // DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
 // Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta1) != has(self.model)",message="exactly one of native v1beta2 fields or v1beta1 must be specified"
-// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisim) || has(self.recommendation))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisim) || has(self.recommendation) || has(self.overrides))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta1) == has(oldSelf.v1beta1) && (!has(self.v1beta1) || self.v1beta1 == oldSelf.v1beta1)",message="the conversion carrier is immutable"
 type DynamoGraphDeploymentRequestSpec struct {
 	DynamoGraphDeploymentRequestNativeSpec `json:",inline"`

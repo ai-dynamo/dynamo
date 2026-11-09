@@ -3,28 +3,37 @@
 
 use super::*;
 
+/// What one stale-leaf sweep did.
+pub(super) struct Sweep {
+    pub(super) unlinked: usize,
+    /// Nodes the walk visited.
+    pub(super) visited: u64,
+}
+
 impl ConcurrentRadixTreeCompressed {
     #[cfg(test)]
     pub(crate) fn run_cleanup_for_test(&self) -> usize {
-        self.sweep_stale_children()
+        self.sweep_stale_children().unlinked
     }
 
     /// Unlinks holder-less, childless leaves that nothing else references, under the root
-    /// and every anchor, and returns how many it unlinked.
+    /// and every anchor.
     ///
     /// The walk takes no gate: it records only holder-less children and descends only
     /// into nodes with children, visiting children by reference. Each parent's candidates
     /// are then re-checked and unlinked under one try-locked exclusive gate, deepest
     /// parents first, so a dead chain goes in one pass. A parent whose gate stays taken
     /// keeps its dead children until the next sweep.
-    pub(super) fn sweep_stale_children(&self) -> usize {
+    pub(super) fn sweep_stale_children(&self) -> Sweep {
         const GATE_ATTEMPTS: usize = 4;
         let mut queue = VecDeque::from([self.root.clone()]);
         queue.extend(self.anchor_nodes.iter().map(|entry| entry.value().clone()));
         let mut candidates = Vec::new();
+        let mut visited = queue.len() as u64;
 
         while let Some(parent) = queue.pop_front() {
             parent.for_each_child(|key, child| {
+                visited += 1;
                 if child.is_holderless() {
                     candidates.push(CleanupEdge {
                         parent: Arc::downgrade(&parent),
@@ -76,7 +85,10 @@ impl ConcurrentRadixTreeCompressed {
                 }
             }
         }
-        removed
+        Sweep {
+            unlinked: removed,
+            visited,
+        }
     }
 
     /// Queues a leaf this lane's removal just killed for the lane's next idle drain. A
