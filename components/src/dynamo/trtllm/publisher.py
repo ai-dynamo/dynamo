@@ -874,7 +874,6 @@ class Publisher:
             return False
 
         def handle_stat(stat):
-            """Publish each rank's stats, using rank 0 for native TRT-LLM metrics."""
             kv_active_blocks = stat["kvCacheStats"]["usedNumBlocks"]
             kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
             dp_rank = int(stat.get("attentionDpRank", 0))
