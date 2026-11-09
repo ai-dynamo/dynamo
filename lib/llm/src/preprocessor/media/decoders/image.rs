@@ -793,6 +793,60 @@ mod tests {
         }
     }
 
+    /// Encoded 16-bit PNGs decode to the pixels that Pillow's `convert("RGB")` gives. The PNGs
+    /// come from pypng; the expected bytes from Pillow 11.3.0 `Image.open(png).convert("RGB")`.
+    #[rstest]
+    #[case::grey(
+        "iVBORw0KGgoAAAANSUhEUgAAAAUAAAABEAAAAABjBedsAAAAE0lEQVR4nGNgYGD4z8hQavD/PwAMawOk1Qn3MgAAAABJRU5ErkJggg==",
+        1,
+        &[0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255]
+    )]
+    #[case::grey_with_trns_key(
+        "iVBORw0KGgoAAAANSUhEUgAAAAMAAAABEAAAAABuG5crAAAAAnRSTlMAyOMsh7oAAAAPSURBVHicYyg1YDjx/z8ACQoDbMNVpCIAAAAASUVORK5CYII=",
+        1,
+        &[255, 255, 255, 200, 200, 200, 255, 255, 255]
+    )]
+    #[case::grey_alpha(
+        "iVBORw0KGgoAAAANSUhEUgAAAAMAAAABEAQAAADheQB8AAAAFUlEQVR4nGMoNWBgYDjx/z8jQwMDABkKA+2nh8FBAAAAAElFTkSuQmCC",
+        2,
+        &[117, 117, 117, 0, 0, 0, 1, 1, 1]
+    )]
+    #[case::rgb(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABEAIAAAAr0DSeAAAAFUlEQVR4nGNg/P+fgeH/q4T6/wwNACjSBkc6FpyfAAAAAElFTkSuQmCC",
+        3,
+        &[1, 255, 0, 234, 127, 0]
+    )]
+    #[case::rgba(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABEAYAAACksqPJAAAAGklEQVR4nGNg/P+fgeF/A8OrhPr/DA3//wMAQ1sIxQ74P4cAAAAASUVORK5CYII=",
+        4,
+        &[1, 255, 0, 234, 127, 0]
+    )]
+    fn test_sixteen_bit_png_matches_pillow_rgb(
+        #[case] png_b64: &str,
+        #[case] channels: usize,
+        #[case] pillow_rgb: &[u8],
+    ) {
+        use base64::{Engine as _, engine::general_purpose};
+        use dynamo_memory::actions::Slice as _;
+
+        let png = general_purpose::STANDARD.decode(png_b64).unwrap();
+        let decoded = ImageDecoder::default()
+            .decode(create_encoded_media_data(png))
+            .unwrap();
+        assert_eq!(decoded.tensor_info.shape[2], channels);
+        // SAFETY: nothing else holds the storage.
+        let pixels = unsafe { decoded.data.as_slice() }.unwrap();
+        // Pillow's convert("RGB") repeats a grey sample and drops alpha.
+        let rgb: Vec<u8> = pixels
+            .chunks(channels)
+            .flat_map(|pixel| match channels {
+                1 | 2 => [pixel[0]; 3],
+                _ => [pixel[0], pixel[1], pixel[2]],
+            })
+            .collect();
+        assert_eq!(rgb, pillow_rgb);
+    }
+
     fn pil_parity_fixture() -> (Vec<u8>, Vec<u8>, u32, u32) {
         use base64::{Engine as _, engine::general_purpose};
 
