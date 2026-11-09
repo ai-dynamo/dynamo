@@ -163,10 +163,7 @@ impl RetainedFlow {
     fn valid_source(&self, source: &Source) -> bool {
         self.current()
             && source.generation == self.generation
-            && self
-                .decode_host
-                .available_worker_ids()
-                .contains(&source.worker_id)
+            && self.decode_host.is_worker_available(source.worker_id)
     }
 
     pub(super) fn prepare_prefill(&self, request: &mut PreprocessedRequest) {

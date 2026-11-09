@@ -420,6 +420,13 @@ impl RoutingHost {
             .unwrap_or_default()
     }
 
+    pub(crate) fn is_worker_available(&self, worker_id: u64) -> bool {
+        self.inner
+            .client
+            .available_instance_ids()
+            .is_some_and(|ids| ids.contains(&worker_id))
+    }
+
     #[cfg(test)]
     pub(crate) fn occupancy_for_test(&self, worker_id: u64) -> u64 {
         self.inner.occupancy_for_test(worker_id)

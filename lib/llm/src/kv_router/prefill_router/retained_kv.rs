@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::mem::size_of;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -94,17 +95,19 @@ struct Entry {
 
 #[derive(Default)]
 struct State {
-    entries: VecDeque<Entry>,
+    entries: VecDeque<Arc<Entry>>,
     bytes: usize,
 }
 
 impl State {
-    fn retain(&mut self, mut keep: impl FnMut(&Entry) -> bool) {
+    fn retain(&mut self, mut keep: impl FnMut(&Entry) -> bool, retired: &mut Vec<Arc<Entry>>) {
         let mut bytes = 0;
         self.entries.retain(|entry| {
             let retained = keep(entry);
             if retained {
                 bytes += entry.bytes;
+            } else {
+                retired.push(entry.clone());
             }
             retained
         });
@@ -150,13 +153,19 @@ impl Catalog {
             return false;
         };
 
+        let entry = Arc::new(entry);
+        // Keep removed payloads alive until the state lock has been released.
+        let mut retired = Vec::new();
         let mut state = self.state.lock();
-        state.retain(|stored| stored.deadline > now);
+        state.retain(|stored| stored.deadline > now, &mut retired);
         // A worker's changed native peer or pipeline incarnation retires all old leases.
-        state.retain(|stored| {
-            stored.donor.source.worker_id != entry.donor.source.worker_id
-                || (stored.donor.source == entry.donor.source && stored.peer == entry.peer)
-        });
+        state.retain(
+            |stored| {
+                stored.donor.source.worker_id != entry.donor.source.worker_id
+                    || (stored.donor.source == entry.donor.source && stored.peer == entry.peer)
+            },
+            &mut retired,
+        );
         if state.entries.iter().any(|stored| {
             stored.donor.source == entry.donor.source
                 && stored.donor.kv_transfer_params["remote_request_id"]
@@ -171,6 +180,7 @@ impl Catalog {
                 return false;
             };
             state.bytes -= evicted.bytes;
+            retired.push(evicted);
         }
         state.bytes += entry.bytes;
         state.entries.push_back(entry);
@@ -184,14 +194,31 @@ impl Catalog {
         incoming_tokens: &[u32],
         now: Instant,
     ) -> Option<Donor> {
-        let mut state = self.state.lock();
-        state.retain(|entry| entry.deadline > now);
-        let mut lengths: Vec<_> = state
-            .entries
-            .iter()
-            .filter(|entry| entry.scope == *scope && entry.prefix.len() <= incoming_tokens.len())
-            .map(|entry| entry.prefix.len())
-            .collect();
+        let candidates = self.snapshot(scope, incoming_tokens.len(), now);
+        self.claim_snapshot(candidates, incoming_tokens, now)
+    }
+
+    fn snapshot(&self, scope: &Scope, incoming_len: usize, now: Instant) -> Vec<Arc<Entry>> {
+        let mut retired = Vec::new();
+        {
+            let mut state = self.state.lock();
+            state.retain(|entry| entry.deadline > now, &mut retired);
+            state
+                .entries
+                .iter()
+                .filter(|entry| entry.scope == *scope && entry.prefix.len() <= incoming_len)
+                .cloned()
+                .collect()
+        }
+    }
+
+    fn claim_snapshot(
+        &self,
+        candidates: Vec<Arc<Entry>>,
+        incoming_tokens: &[u32],
+        now: Instant,
+    ) -> Option<Donor> {
+        let mut lengths: Vec<_> = candidates.iter().map(|entry| entry.prefix.len()).collect();
         lengths.sort_unstable();
         lengths.dedup();
         let max_len = *lengths.last()?;
@@ -208,24 +235,45 @@ impl Catalog {
             })
             .collect();
 
-        let index = state
-            .entries
+        let winner = candidates
             .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                entry.scope == *scope
-                    && hashes.get(&entry.prefix.len()) == Some(&entry.prefix_hash)
+            .filter(|entry| {
+                hashes.get(&entry.prefix.len()) == Some(&entry.prefix_hash)
                     && incoming_tokens.get(..entry.prefix.len()) == Some(entry.prefix.as_slice())
             })
-            .max_by_key(|(_, entry)| entry.prefix.len())
-            .map(|(index, _)| index)?;
-        let entry = state.entries.remove(index)?;
-        state.bytes -= entry.bytes;
-        Some(entry.donor)
+            .max_by_key(|entry| entry.prefix.len())
+            .cloned()?;
+        let mut retired = Vec::new();
+        let entry = {
+            let mut state = self.state.lock();
+            let now = now.max(Instant::now());
+            state.retain(|entry| entry.deadline > now, &mut retired);
+            let index = state
+                .entries
+                .iter()
+                .position(|entry| Arc::ptr_eq(entry, &winner))?;
+            let entry = state.entries.remove(index)?;
+            state.bytes -= entry.bytes;
+            entry
+        };
+        drop(candidates);
+        drop(winner);
+        drop(retired);
+        Some(match Arc::try_unwrap(entry) {
+            Ok(entry) => entry.donor,
+            Err(entry) => Donor {
+                source: entry.donor.source.clone(),
+                kv_transfer_params: entry.donor.kv_transfer_params.clone(),
+            },
+        })
     }
 
     pub(super) fn clear(&self) {
-        *self.state.lock() = State::default();
+        let retired = {
+            let mut state = self.state.lock();
+            std::mem::take(&mut *state)
+        };
+        drop(retired);
     }
 
     fn hasher(&self) -> blake3::Hasher {
@@ -291,7 +339,8 @@ impl Catalog {
             .checked_add(scope.pipeline.len())?
             .checked_add(scope.cache_namespace.as_ref().map_or(0, String::len))?
             .checked_add(source.generation.len())?
-            .checked_add(size_of::<Entry>())?;
+            .checked_add(size_of::<Entry>())?
+            .checked_add(3 * size_of::<usize>())?;
         if bytes > self.config.max_bytes {
             return None;
         }
@@ -432,7 +481,7 @@ fn value_bytes(value: &Value, limit: usize, depth: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Barrier};
+    use std::sync::Barrier;
 
     use serde_json::json;
 
@@ -571,7 +620,9 @@ mod tests {
         assert!(insert(&catalog, &payload(), now));
         let mut hasher = catalog.hasher();
         hasher.update(&encode_tokens(&[1, 2, 9]));
-        catalog.state.lock().entries[0].prefix_hash = hasher.finalize();
+        Arc::get_mut(&mut catalog.state.lock().entries[0])
+            .unwrap()
+            .prefix_hash = hasher.finalize();
         assert!(catalog.claim(&scope(), &[1, 2, 9], now).is_none());
     }
 
@@ -754,6 +805,76 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn simultaneous_snapshots_cannot_claim_the_same_donor_twice() {
+        let catalog = Arc::new(catalog());
+        let now = Instant::now();
+        assert!(insert(&catalog, &payload(), now));
+        let barrier = Arc::new(Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let catalog = catalog.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let snapshot = catalog.snapshot(&scope(), 3, now);
+                    barrier.wait();
+                    catalog.claim_snapshot(snapshot, &[1, 2, 3], now)
+                })
+            })
+            .collect();
+        let donors: Vec<_> = threads
+            .into_iter()
+            .filter_map(|thread| thread.join().unwrap())
+            .collect();
+        assert_eq!(donors.len(), 1);
+        assert_eq!(
+            donors[0].kv_transfer_params,
+            payload()["kv_transfer_params"]
+        );
+        assert_eq!(catalog.state.lock().bytes, 0);
+    }
+
+    #[test]
+    fn a_snapshot_cannot_claim_an_evicted_or_replaced_entry() {
+        for clear in [false, true] {
+            let mut config = Config::new("test".into()).unwrap();
+            config.max_entries = 1;
+            let catalog = Catalog::new(config);
+            let now = Instant::now();
+            assert!(insert(&catalog, &payload(), now));
+            let snapshot = catalog.snapshot(&scope(), 3, now);
+            if clear {
+                catalog.clear();
+            }
+            let mut replacement = payload();
+            replacement["kv_transfer_params"]["remote_request_id"] = json!("replacement");
+            assert!(insert(&catalog, &replacement, now));
+            assert!(catalog.claim_snapshot(snapshot, &[1, 2, 3], now).is_none());
+            assert_eq!(
+                catalog
+                    .claim(&scope(), &[1, 2, 3], now)
+                    .unwrap()
+                    .kv_transfer_params["remote_request_id"],
+                "replacement"
+            );
+        }
+    }
+
+    #[test]
+    fn expiry_is_rechecked_after_snapshot_comparison() {
+        let catalog = catalog();
+        let now = Instant::now();
+        assert!(insert(&catalog, &payload(), now));
+        let snapshot = catalog.snapshot(&scope(), 3, now);
+        assert!(
+            catalog
+                .claim_snapshot(snapshot, &[1, 2, 3], now + Duration::from_secs(20))
+                .is_none()
+        );
+        assert!(catalog.state.lock().entries.is_empty());
+        assert_eq!(catalog.state.lock().bytes, 0);
     }
 
     #[test]
