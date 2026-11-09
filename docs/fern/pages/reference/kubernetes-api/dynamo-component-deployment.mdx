@@ -360,6 +360,10 @@ The operator maintains observed state under `status`.
 
   For a Deployment-backed component, `Available` is `False` with reason `ContainerCrashLooping` while a not-Ready Pod that the Deployment selects, other than one being deleted, has a container that restarted at least twice and is down after a non-zero exit. During a rollout this includes Pods of the previous template. LeaderWorkerSet-backed components do not report it.
 
+  For LeaderWorkerSet-backed DCDs, the operator also writes per-reconcile Pod observations at debug verbosity. The observations identify a current non-zero exit of the `main` container only when the Pod is not being deleted, has a Ready condition of False, and its timestamps, controller-owner chain, and template revision can be verified. Missing or inconsistent evidence is reported as unknown. A read failure is logged explicitly and does not change component conditions. These logs do not change the workload's recovery policy and do not count repeated recovery attempts or preserve history across reconciles or operator restarts.
+
+  The operator currently enables debug logging by default. Its manager binary accepts `--zap-log-level=debug`; use `--zap-encoder=json` for JSON-formatted output.
+
   <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#Condition" target="_blank">metav1.Condition</a>
 </ParamField>
 

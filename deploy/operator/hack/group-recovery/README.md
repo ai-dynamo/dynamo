@@ -63,6 +63,43 @@ DynamoGraphDeployment, DisaggregatedSet, and Grove diagnosis, durable reset
 and restart, isolation around 10,000 unrelated Pods, and inference remain
 unimplemented and unvalidated by this experiment.
 
+## Production LWS-DCD observations
+
+The Dynamo operator separately observes Pods owned by a
+DynamoComponentDeployment-backed LeaderWorkerSet during reconcile. That path
+reads the manager cache (`readOrigin=manager_cache`) and does not use this
+native fixture, DisaggregatedSet, or Grove.
+
+At debug verbosity the operator emits one structured line per observation:
+
+| Message | `verdict` |
+| --- | --- |
+| `Observed LeaderWorkerSet Pod failure evidence` | `CurrentFailure` |
+| `Observed LeaderWorkerSet Pod without current failure evidence` | `NoCurrentFailureEvidence` |
+| `LeaderWorkerSet Pod observation incomplete` | `Unknown` |
+
+`CurrentFailure` requires a non-deleting Pod with Ready=False, a current
+non-zero `main` exit, and verified creation / FinishedAt / Ready last
+transition times, controller-owner chain, and template revision. Missing
+creation, FinishedAt, Ready transition, or identity evidence is `Unknown`
+with a fixed `reason`. FinishedAt and Ready last-transition times more than
+five seconds ahead of reconcile time are also `Unknown`. When the cache
+Get/List itself fails, the operator logs
+`LeaderWorkerSet Pod observation unavailable` and leaves Available / Ready
+unchanged.
+
+Identity fields on the success path include `namespace`, `dcdName`,
+`dcdUID`, `dcdGeneration`, `lwsName`, `lwsUID`, `lwsGeneration`,
+`groupIndex`, `revision`, `leaderUID`, `podName`, `podUID`,
+`podResourceVersion`, `container`, `exitCode`, `finishedAt`, `ready`,
+`readyLastTransitionTime`, `reason`, and `readOrigin`. Repeated lines are
+the current level fact for that reconcile, not a recovery counter or
+durable history. The operator currently enables debug by default; the
+manager binary accepts `--zap-log-level=debug` and `--zap-encoder=json`.
+
+Production CPU results for this observation path remain pending. Do not
+treat the native counts above as operator validation.
+
 ## Prerequisites
 
 Use a real LeaderWorkerSet v0.10.0 controller, its validating and mutating

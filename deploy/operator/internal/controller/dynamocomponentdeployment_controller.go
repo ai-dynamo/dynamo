@@ -26,6 +26,7 @@ import (
 	"maps"
 	"time"
 
+	lwscontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/lws"
 	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -82,6 +83,7 @@ type DynamoComponentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch
 //+kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
@@ -433,6 +435,22 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 		return ComponentReconcileResult{}, fmt.Errorf("failed to sync the LeaderWorkerSet: %w", err)
 	}
 
+	// Observe current Pod evidence before readiness returns; provider Ready may lag.
+	// Observation read errors stay visible logs and must not change Available/Ready handling.
+	observations, observeErr := lwscontroller.Observe(ctx, r.Client, dynamoComponentDeployment, lwsObj, time.Now())
+	if observeErr != nil {
+		log.FromContext(ctx).Error(observeErr, "LeaderWorkerSet Pod observation unavailable",
+			"namespace", dynamoComponentDeployment.Namespace,
+			"dcdName", dynamoComponentDeployment.Name,
+			"dcdUID", dynamoComponentDeployment.UID,
+			"lwsName", lwsObj.Name,
+			"lwsUID", lwsObj.UID,
+			"readOrigin", lwscontroller.ReadOriginManagerCache,
+		)
+	} else {
+		logLeaderWorkerSetObservations(ctx, observations)
+	}
+
 	lwsReplicaStatus := getLeaderWorkerSetReplicasStatus(lwsObj)
 	lwsReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dynamoComponentDeployment)
 	applyComponentRuntimeStatus(&lwsReplicaStatus, dynamo.ResolveComponentRuntimeStatus(
@@ -474,6 +492,45 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 		gpuShape:             gpuShapeStatus,
 	}, nil
 }
+
+// logLeaderWorkerSetObservations records current level evidence; repeats are expected.
+func logLeaderWorkerSetObservations(ctx context.Context, observations []lwscontroller.Observation) {
+	logs := log.FromContext(ctx)
+	for i := range observations {
+		obs := observations[i]
+		message := "Observed LeaderWorkerSet Pod without current failure evidence"
+		switch obs.Verdict {
+		case lwscontroller.VerdictCurrentFailure:
+			message = "Observed LeaderWorkerSet Pod failure evidence"
+		case lwscontroller.VerdictUnknown:
+			message = "LeaderWorkerSet Pod observation incomplete"
+		}
+		logs.V(1).Info(message,
+			"verdict", obs.Verdict,
+			"reason", obs.Reason,
+			"namespace", obs.Namespace,
+			"dcdName", obs.DCDName,
+			"dcdUID", obs.DCDUID,
+			"dcdGeneration", obs.DCDGeneration,
+			"lwsName", obs.LWSName,
+			"lwsUID", obs.LWSUID,
+			"lwsGeneration", obs.LWSGeneration,
+			"groupIndex", obs.GroupIndex,
+			"revision", obs.Revision,
+			"leaderUID", obs.LeaderUID,
+			"podName", obs.PodName,
+			"podUID", obs.PodUID,
+			"podResourceVersion", obs.PodResourceVersion,
+			"container", obs.Container,
+			"exitCode", obs.ExitCode,
+			"finishedAt", obs.FinishedAt,
+			"ready", obs.Ready,
+			"readyLastTransitionTime", obs.ReadyLastTransitionTime,
+			"readOrigin", obs.ReadOrigin,
+		)
+	}
+}
+
 
 func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplicaStatus(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment, componentReconcileResult ComponentReconcileResult) error {
 	if componentReconcileResult.serviceReplicaStatus != nil {
@@ -1041,6 +1098,15 @@ func (r *DynamoComponentDeploymentReconciler) controllerBuilder(mgr ctrl.Manager
 	}
 
 	if r.RuntimeConfig.Gate.Enabled(features.LWS) {
+		if err := mgr.GetFieldIndexer().IndexField(
+			context.Background(),
+			&corev1.Pod{},
+			lwscontroller.SetNameIndex,
+			lwscontroller.SetNameIndexValues,
+		); err != nil {
+			return nil, fmt.Errorf("register Pod LeaderWorkerSet name index: %w", err)
+		}
+
 		m.Owns(&leaderworkersetv1.LeaderWorkerSet{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the LeaderWorkerSet
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
@@ -1048,6 +1114,17 @@ func (r *DynamoComponentDeploymentReconciler) controllerBuilder(mgr ctrl.Manager
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		}))
+		// Pod and StatefulSet watches enqueue only; Observe validates ownership strictly.
+		m.Watches(
+			&corev1.Pod{},
+			lwscontroller.EnqueueDCDForPod(mgr.GetClient()),
+			builder.WithPredicates(lwscontroller.PodObservationPredicate()),
+		)
+		m.Watches(
+			&appsv1.StatefulSet{},
+			lwscontroller.EnqueueDCDForStatefulSet(mgr.GetClient()),
+			builder.WithPredicates(lwscontroller.StatefulSetObservationPredicate()),
+		)
 	}
 
 	if r.Config.Ingress.UseVirtualService() {
