@@ -501,6 +501,12 @@ def _build_dynamo_preproc(
     else:
         routing = nvext_routing
 
+    # The HTTP layer has already validated keys and range. Copy so later edits
+    # to the preproc dict cannot change the caller's request, and map an empty
+    # dict to None like the Rust preprocessor's get_logit_bias.
+    logit_bias = request.get("logit_bias")
+    logit_bias = dict(logit_bias) if logit_bias else None
+
     preproc = {
         "model": model_name,
         "token_ids": prompt_token_ids,
@@ -524,6 +530,7 @@ def _build_dynamo_preproc(
             "top_k": request.get("top_k", 0) or -1,
             "min_p": request.get("min_p", 0.0),
             "seed": request.get("seed"),
+            "logit_bias": logit_bias,
             "guided_decoding": guided_decoding,
         },
         "output_options": {
