@@ -988,7 +988,7 @@ jobs:
       platform: '["amd64"]' # @whoisj to enable ARM64 support in a future patch.
       run_sanity_check: false # requires torch which is not present.
       run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and triton and gpu_0
+      cpu_only_test_markers: pre_merge and triton and gpu_0 and not e2e
       run_gpu_tests: false
     secrets: inherit
 

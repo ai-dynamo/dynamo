@@ -445,6 +445,9 @@ trtllm:
 triton:
   - 'components/src/dynamo/triton/**'
   - 'container/templates/triton_*'
+  - 'lib/sidecar/triton/**'
+  - 'tests/frontend/test_triton_sidecar*.py'
+  - 'tests/utils/triton_sidecar.py'
   - '!**/*.md'
   - '!**/*.rst'
 
