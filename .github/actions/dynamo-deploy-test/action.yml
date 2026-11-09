@@ -180,7 +180,10 @@ runs:
             | sed 's/^-//; s/-$//'
         }
         LANE="$(slug "deploy-${TEST_NAME}-${DYNAMO_TEST_PLATFORM}")"
-        export DD_TAGS="team:dynamo,lane:${LANE},test_suite:$(slug "${FRAMEWORK:-deploy}")"
+        # NOT test_suite: -- that key belongs to ddtrace, which emits it as an
+        # object (test_suite.fingerprint), so a string tag of the same name is
+        # dropped silently on ingest.
+        export DD_TAGS="team:dynamo,lane:${LANE},framework:$(slug "${FRAMEWORK:-deploy}")"
 
         # Only enable the plugin when a key is present; without it ddtrace
         # computes a session and silently drops it, which is how the last

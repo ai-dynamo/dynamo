@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_custom_policy_builtin::DefaultWorkerSelector;
+use dynamo_router_policies::DefaultWorkerSelector;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -249,11 +249,7 @@ mod tests {
             policy_file.path(),
             r#"
 worker_selection:
-  aggregated: custom
-  instances:
-    - name: custom
-      type: test
-      parameters: {}
+  aggregated: test
 "#,
         )
         .unwrap();
@@ -269,7 +265,7 @@ worker_selection:
         assert!(
             error
                 .to_string()
-                .contains("custom worker-selection policy \"custom\" is not supported by replay")
+                .contains("custom worker-selection policy \"test\" is not supported by replay")
         );
     }
 }

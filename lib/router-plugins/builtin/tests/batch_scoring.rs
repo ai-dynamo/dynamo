@@ -9,11 +9,11 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use dynamo_kv_router::{
-    KvRouterConfig, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerInputs,
-    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError, WorkerSelector,
+use dynamo_kv_router::plugins::worker_selection::{
+    WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerInputs, WorkerPicker,
+    WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
 };
+use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicyError, WorkerSelector};
 use support::fixture;
 
 #[derive(Debug, PartialEq)]

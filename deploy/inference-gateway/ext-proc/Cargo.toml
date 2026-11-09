@@ -16,7 +16,7 @@ name = "dynamo-ext-proc"
 path = "src/bin/dynamo-ext-proc.rs"
 
 [dependencies]
-dynamo-custom-policy-builtin = { workspace = true }
+dynamo-router-policies = { workspace = true }
 async-trait = { workspace = true }
 dynamo-kv-router = { workspace = true, features = [
     "metrics",
@@ -46,7 +46,9 @@ serde = { workspace = true }
 # of parsing them into a `Value` tree.
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+# `schedule-latency` lets the opt-in task metrics time how long a woken task
+# waits for a worker thread (`DYN_EPP_TASK_METRICS`).
+tokio = { workspace = true, features = ["schedule-latency"] }
 tokio-rustls = { workspace = true }
 tokio-util = { workspace = true }
 # `net` for TcpListenerStream (serve_with_incoming), `sync` for ReceiverStream.

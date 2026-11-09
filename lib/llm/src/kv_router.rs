@@ -10,17 +10,20 @@ use std::{
 
 use anyhow::Result;
 #[cfg(test)]
-use dynamo_kv_router::WorkerSelectionPolicy;
+use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
 use dynamo_kv_router::{
     DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionRef,
     SessionPrefixIndexer, SharedKvCache, TrackingHashAlgorithm, TrackingHashContext,
-    TrackingHashScope, WorkerSelectionPolicyFactory,
+    TrackingHashScope,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{
         ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
     },
     kv_hints::KvHint,
-    plugins::worker_selection::WorkerInfo,
+    plugins::{
+        request_classifier::{RequestClassifier, RequestClassifierContext},
+        worker_selection::{WorkerInfo, WorkerInputs, WorkerSelectionPolicyFactory},
+    },
     protocols::KV_EVENT_SUBJECT,
     protocols::{
         BlockExtraInfo, BlockHashOptions, PrefillLoadHint, RouterEvent, RouterRequest,
@@ -29,12 +32,10 @@ use dynamo_kv_router::{
     },
     scheduling::{
         CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, PotentialLoad,
-        RejectThresholdsProvider, RequestClassifier, RequestClassifierContext,
-        WorkerAvailabilityProvider, effective_prefill_tokens,
+        RejectThresholdsProvider, WorkerAvailabilityProvider, effective_prefill_tokens,
         overlap::cache_hit_estimates_from_tiered_matches,
         queue::{BookingHandle, SchedulerBookingDescriptor},
     },
-    selector::WorkerInputs,
     services::selection::{
         PromptView, Selected, SelectionAdmission, SelectionError, SelectionOperation,
         SelectionOutcome, SelectionRun, SessionBinding,
@@ -72,13 +73,8 @@ pub mod sequence;
 pub mod shared_cache;
 
 pub use dynamo_kv_router::scheduling::OverlapScoresResponse;
-// TODO(v1.7): Remove these compatibility aliases; use kv_router::plugins instead.
 pub use encoder_router::EncoderRouter;
 pub use indexer::Indexer;
-pub use plugins::{
-    install_router_plugin_registry as install_worker_selection_policy_registry,
-    router_plugin_registry as worker_selection_policy_registry,
-};
 pub use prefill_router::PrefillRouter;
 pub(crate) use request_lease::RequestAttemptRelease;
 pub use routing_host::{
@@ -99,7 +95,7 @@ use crate::{
 #[derive(Clone, Default)]
 pub enum SelectionPolicySource {
     /// The linked policy `KvRouterConfig` names for the worker role, resolved
-    /// from the installed [`worker_selection_policy_registry`]; Dynamo's
+    /// from the installed [`plugins::router_plugin_registry`]; Dynamo's
     /// default scorer and picker when it names none.
     #[default]
     Registry,
@@ -122,7 +118,7 @@ impl SelectionPolicySource {
         match self {
             Self::Factory(factory) => Ok(factory.clone()),
             Self::Prepared(prepared) => Ok(prepared.factory.clone()),
-            Self::Registry => worker_selection_policy_registry()
+            Self::Registry => plugins::router_plugin_registry()
                 .resolve_for_worker_type(config, worker_type)?
                 .ok_or_else(|| {
                     dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::MissingDefault
@@ -536,11 +532,24 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 // for worker-local kvindexer query
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
 
+/// Context marking a router's refusal of an unknown policy class when the request enters its
+/// class. It wraps the unchanged `DynamoError` and displays as it, so hosts see the same class,
+/// reason, status and message; the prefill handoff recognizes this refusal by type.
+#[derive(Debug)]
+pub(crate) struct UnknownPolicyClassRefusal(DynamoError);
+
+impl std::fmt::Display for UnknownPolicyClassRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
     // Keep the two overload cases apart. A single overloaded worker can be
     // retried elsewhere; a pool with no free worker cannot, and migrating it
     // would just bounce the request around. A filter rejection is unavailable,
     // not overload, and becomes HTTP 503.
+    let unknown_policy_class = matches!(error, scheduling::KvSchedulerError::UnknownPolicyClass(_));
     let (error_type, overloaded) = match error {
         scheduling::KvSchedulerError::PinnedWorkerOverloaded { .. } => {
             (ErrorType::WorkerOverloaded, true)
@@ -550,6 +559,7 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
         }
         scheduling::KvSchedulerError::DeadlineExceeded => (ErrorType::DeadlineExceeded, false),
         scheduling::KvSchedulerError::AllEligibleWorkersFiltered => (ErrorType::Unavailable, false),
+        scheduling::KvSchedulerError::UnknownPolicyClass(_) => (ErrorType::InvalidArgument, false),
         _ => return error.into(),
     };
 
@@ -570,6 +580,9 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
             .cause(PipelineError::ServiceOverloaded(message))
             .build()
             .into()
+    } else if unknown_policy_class {
+        let error = error.build();
+        anyhow::Error::new(error.clone()).context(UnknownPolicyClassRefusal(error))
     } else {
         error.build().into()
     }
@@ -588,7 +601,7 @@ fn cancelled_error(context_id: &str) -> anyhow::Error {
 pub struct KvRouter {
     indexer: Indexer,
     selection: embedded::EmbeddedSelection,
-    required_worker_inputs: dynamo_kv_router::selector::WorkerInputs,
+    required_worker_inputs: dynamo_kv_router::plugins::worker_selection::WorkerInputs,
     workers_with_configs: RuntimeConfigWatch,
     block_size: u32,
     kv_router_config: KvRouterConfig,
@@ -1000,7 +1013,9 @@ impl KvRouter {
         self.selection.scheduler().policy_control()
     }
 
-    pub fn required_worker_inputs(&self) -> dynamo_kv_router::selector::WorkerInputs {
+    pub fn required_worker_inputs(
+        &self,
+    ) -> dynamo_kv_router::plugins::worker_selection::WorkerInputs {
         self.required_worker_inputs
     }
 
@@ -2016,7 +2031,7 @@ mod tests {
     use tokio::sync::watch;
 
     use crate::local_model::runtime_config::ModelRuntimeConfig;
-    use dynamo_kv_router::selector::{
+    use dynamo_kv_router::plugins::worker_selection::{
         WorkerCandidate, WorkerFilter, WorkerInputView, WorkerPicker, WorkerSelectionContext,
     };
 
@@ -2035,6 +2050,26 @@ mod tests {
             .expect("overloaded workers should produce a DynamoError");
 
         assert_eq!(dynamo_error.error_type(), ErrorType::ResourceExhausted);
+    }
+
+    #[test]
+    fn unknown_policy_class_maps_to_invalid_argument() {
+        let error =
+            map_scheduler_error(KvSchedulerError::UnknownPolicyClass("missing".to_string()));
+        let dynamo_error = error
+            .downcast_ref::<DynamoError>()
+            .expect("an unknown policy class should produce a DynamoError");
+
+        assert_eq!(dynamo_error.error_type(), ErrorType::InvalidArgument);
+        assert_eq!(dynamo_error.message(), "unknown policy class \"missing\"");
+        assert_eq!(dynamo_error.reason().as_str(), "request.invalid_argument");
+        // The refusal context displays as the error and leaves it the one hosts classify.
+        assert!(error.downcast_ref::<UnknownPolicyClassRefusal>().is_some());
+        assert_eq!(error.to_string(), dynamo_error.to_string());
+        assert_eq!(
+            crate::http::service::error::find_canonical_error_in_chain(error.as_ref()),
+            Some(dynamo_error)
+        );
     }
 
     #[test]
@@ -3353,7 +3388,7 @@ mod tests {
             let constructions = Arc::clone(&constructions);
             Arc::new(move |config: &KvRouterConfig, _, _| {
                 constructions.fetch_add(1, Ordering::SeqCst);
-                dynamo_custom_policy_builtin::default_policy(config.clone(), "decode")
+                dynamo_router_policies::default_policy(config.clone(), "decode")
             })
         };
         let config = KvRouterConfig::default();
@@ -3609,7 +3644,9 @@ mod tests {
 
     #[tokio::test]
     async fn client_availability_distinguishes_startup_from_last_worker_removal() {
-        use dynamo_kv_router::scheduling::{RoutingEligibility, WorkerEligibilityError};
+        use dynamo_kv_router::scheduling::{
+            RoutingEligibility, WorkerEligibilityError, WorkerIdSet,
+        };
 
         const DECODE_WORKER: u64 = 1;
         const PREFILL_WORKER: u64 = 2;
@@ -3636,9 +3673,10 @@ mod tests {
         ]);
         let constraints = RoutingConstraints::default();
         let validate = |available: &HashSet<u64>, worker: u64| {
+            let available: WorkerIdSet = available.iter().copied().collect();
             let pinned = WorkerWithDpRank::from_worker_id(worker);
             RoutingEligibility::new(None, None, Some(pinned), &constraints)
-                .with_available_workers(Some(available))
+                .with_available_workers(Some(&available))
                 .validate_worker_rank(&workers, pinned)
                 .map(|_| ())
         };
