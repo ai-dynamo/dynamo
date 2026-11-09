@@ -532,3 +532,86 @@ async def test_managed_entrypoint_serves_status_while_controller_runs(
         with pytest.raises(asyncio.CancelledError):
             await task
     assert controller.phase == "recovery_required"
+
+
+def _managed_entrypoint(policy, capacity, monkeypatch):
+    """Run main with endpoints whose serve_endpoint futures the test resolves."""
+    served: dict[str, asyncio.Future] = {}
+    registered = asyncio.Event()
+    controller = ManagedAllocationController(
+        policy, capacity, poll_interval_seconds=0.001
+    )
+
+    class Endpoint:
+        def __init__(self, name):
+            self.name = name
+
+        def serve_endpoint(self, callback, **kwargs):
+            served[self.name] = asyncio.get_running_loop().create_future()
+            if len(served) == 3:
+                registered.set()
+            return served[self.name]
+
+    class Runtime:
+        def endpoint(self, name):
+            return Endpoint(name)
+
+    monkeypatch.setenv("DYN_NAMESPACE", "global-infra")
+    monkeypatch.setenv("POD_NAMESPACE", "prod")
+    monkeypatch.setattr(gp_main, "ManagedKubernetesCapacity", lambda *args: capacity)
+    monkeypatch.setattr(
+        gp_main, "ManagedAllocationController", lambda *args, **kwargs: controller
+    )
+    config = GlobalPlannerConfig(
+        managed_allocation=ManagedAllocationConfig(
+            policy=policy, caller_namespaces={"interactive": "chat", "batch": "jobs"}
+        )
+    )
+    task = asyncio.create_task(gp_main.main.__wrapped__(Runtime(), config))
+    return task, controller, served, registered
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)
+async def test_managed_entrypoint_stops_controller_when_endpoints_return(
+    policy, capacity, monkeypatch
+):
+    # Runtime shutdown (e.g. etcd lease loss) returns every serve_endpoint
+    # normally; main itself is never cancelled here.
+    task, controller, served, registered = _managed_entrypoint(
+        policy, capacity, monkeypatch
+    )
+    try:
+        await asyncio.wait_for(registered.wait(), 2)
+        while controller.phase != "ready":
+            await asyncio.sleep(0.001)
+        for future in served.values():
+            future.set_result(None)
+        await asyncio.wait_for(task, 2)
+    finally:
+        task.cancel()
+    assert controller.phase == "recovery_required"
+    assert controller.reason.startswith("controller stopped")
+    writes = list(capacity.writes)
+    controller.submit("interactive", 3, "i1")
+    await asyncio.sleep(0.01)
+    assert capacity.writes == writes
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)
+async def test_managed_entrypoint_cancels_endpoints_when_controller_fails(
+    policy, capacity, monkeypatch
+):
+    task, controller, served, registered = _managed_entrypoint(
+        policy, capacity, monkeypatch
+    )
+    try:
+        await asyncio.wait_for(registered.wait(), 2)
+        capacity.error = RuntimeError("controller bug")
+        with pytest.raises(RuntimeError, match="controller bug"):
+            await asyncio.wait_for(task, 2)
+    finally:
+        task.cancel()
+    assert all(future.cancelled() for future in served.values())
+    assert controller.phase == "recovery_required"

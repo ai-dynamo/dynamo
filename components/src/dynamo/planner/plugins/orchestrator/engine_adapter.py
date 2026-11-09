@@ -1871,6 +1871,23 @@ class OrchestratorEngineAdapter:
         publish_unchanged_demand = (
             self._config.global_planner_managed_allocation and not deployment_scaling
         )
+        # Managed demand also treats a RECONCILE SET as explicit: it is the
+        # role's final target even when PROPOSE omitted the role. RECONCILE
+        # AT_LEAST/AT_MOST are not: a non-binding bound returns only the
+        # ready-count baseline, which must never replace retained demand.
+        reconcile_set_components = (
+            frozenset(
+                ComponentKey(sub_component_type=target.sub_component_type)
+                for result in outcome.reconcile_results or []
+                if isinstance(result.result, OverrideResult)
+                for target in result.result.targets
+                if target.type == OverrideType.SET and target.replicas is not None
+            )
+            if publish_unchanged_demand
+            else frozenset()
+        )
+        prefill_explicit = prefill_proposed or prefill_key in reconcile_set_components
+        decode_explicit = decode_proposed or decode_key in reconcile_set_components
         gpu_budget_reconcile = (
             not deployment_scaling and self._gpu_budget_reconcile_needed(worker_counts)
         )
@@ -2001,20 +2018,20 @@ class OrchestratorEngineAdapter:
         )
 
         if self._config.enable_power_awareness or publish_unchanged_demand:
-            # Restore the explicit PROPOSE-stage mask before the final budget
+            # Restore the explicit-target mask before the final budget
             # boundary. Omitted roles are still charged via ``current_*`` inside
             # the clamps, but can never become emitted targets. A disaggregated
             # floor repair temporarily keeps both roles adjustable so the paired
             # GPU/power clamps can first shrink a peer that occupies the budget.
             if (
-                not prefill_proposed
+                not prefill_explicit
                 and not prefill_floor_needed
                 and not floor_reconcile
                 and not gpu_budget_reconcile
             ):
                 num_p = None
             if (
-                not decode_proposed
+                not decode_explicit
                 and not decode_floor_needed
                 and not batch_floor_needed
                 and not batch_idle_target_needed
@@ -2039,14 +2056,14 @@ class OrchestratorEngineAdapter:
             if (
                 num_p is not None
                 and num_p == current_p
-                and not prefill_proposed
+                and not prefill_explicit
                 and not prefill_floor_needed
             ):
                 num_p = None
             if (
                 num_d is not None
                 and num_d == current_d
-                and not decode_proposed
+                and not decode_explicit
                 and not decode_floor_needed
                 and not batch_floor_needed
             ):
