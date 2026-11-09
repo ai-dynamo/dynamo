@@ -114,6 +114,54 @@ The earlier `--connector` flag is no longer accepted by the vLLM backend. Settin
 - `--connector none` or `--connector null` reports that the flag is no longer needed, because no connector is already the default. There is no equivalent value to migrate to, so none is shown.
 - `DYN_CONNECTOR` set to an empty or whitespace-only value reports that the variable is no longer supported, without an equivalent value.
 
+## Server-managed retained KV reuse
+
+**Experimental.** The frontend can reuse retained decoder KV on a later OpenAI
+chat or completion request, including when prefill has evicted that prefix.
+Clients send ordinary inference requests; they do not supply transfer addresses.
+Native Generate APIs are not required and should remain disabled on public frontends.
+
+Set `DYN_VLLM_RETAINED_KV_REUSE_TRUST_DOMAIN` on the **frontend**, before starting it.
+The value is an operator-defined cache authorization domain: a nonempty string
+of at most 256 bytes after trimming whitespace. The default is unset (disabled).
+There is no corresponding CLI flag. Both workers require a direct `NixlConnector`
+with `bidirectional_kv_xfer: true` and `kv_load_failure_policy: "recompute"`.
+Configure `decoder_kv_blocks_ttl` for the intended interval between turns.
+
+For example, add these native vLLM settings to each worker's existing transfer
+configuration, preserving its `kv_role`:
+
+```json
+{
+  "kv_connector": "NixlConnector",
+  "kv_role": "kv_both",
+  "kv_load_failure_policy": "recompute",
+  "kv_connector_extra_config": {
+    "bidirectional_kv_xfer": true,
+    "decoder_kv_blocks_ttl": 30
+  }
+}
+```
+
+The frontend combines its trust domain with the request's existing cache namespace
+and sends that effective namespace to both engines. A caller-supplied tenant header
+or cache salt does not authenticate a tenant. For mutually untrusted tenants,
+authenticate at a gateway that strips and overwrites tenant headers and prevents
+direct frontend access, or deploy a separate frontend and worker cache domain per tenant.
+
+Reuse requires an exact token prefix covering the complete exported computed
+range. Edited history, chat-template changes, and omitted reasoning or special
+tokens can prevent a match. Unsupported inputs (including LoRA, multimodal,
+embeddings, native envelopes, and multiple choices) continue through ordinary inference.
+Parallelism and KV-layout compatibility remain governed by vLLM's NIXL connector.
+
+Each model pipeline keeps at most 128 metadata entries and 64 MiB of logical entry
+data, with a maximum prefix of 131,072 tokens and a local age limit of 20 seconds.
+Entries are claimed once and invalidated on pipeline replacement. Engine source
+expiry remains authoritative. A miss, frontend restart, different frontend replica,
+or failed optional load recomputes instead of requiring client retries.
+The catalog does not own or extend the lifetime of GPU allocations.
+
 ## Worker role and disaggregation
 
 These flags control which role this worker plays in a disaggregated deployment. The default when no `--disaggregation-mode` is set is aggregated (`agg`).

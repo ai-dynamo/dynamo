@@ -163,7 +163,8 @@ impl PrefillRouter {
         session_affinity_mode: SessionAffinityMode,
     ) -> Arc<Self> {
         Arc::new(Self {
-            binding: arc_swap::ArcSwapOption::empty(),
+            binding: Arc::new(arc_swap::ArcSwapOption::empty()),
+            retained_kv: None,
             target: parking_lot::Mutex::new(None),
             target_tx: None,
             decode_routing_host: std::sync::OnceLock::new(),
@@ -217,7 +218,10 @@ impl PrefillRouter {
             .and_then(|c| c.conditional_disagg_decode_busy_threshold);
 
         let router = Arc::new(Self {
-            binding: arc_swap::ArcSwapOption::empty(),
+            binding: Arc::new(arc_swap::ArcSwapOption::empty()),
+            retained_kv: super::retained_kv::Config::from_env()
+                .map(super::retained_kv::Catalog::new)
+                .map(Arc::new),
             target: parking_lot::Mutex::new(None),
             target_tx: Some(target_tx),
             decode_routing_host: std::sync::OnceLock::new(),
@@ -604,6 +608,9 @@ impl PrefillRouter {
             return;
         }
         *current = target_id.clone();
+        if let Some(catalog) = &self.retained_kv {
+            catalog.clear();
+        }
         let reuses_binding = target_id.is_some()
             && self
                 .binding

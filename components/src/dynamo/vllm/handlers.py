@@ -98,6 +98,14 @@ from dynamo.vllm.kv_connector_protocols import (
     make_kv_connector_protocol,
 )
 from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
+from dynamo.vllm.retained_kv import (
+    RETAINED_KV_KEY,
+    RetainedKvCapture,
+    retained_cache_salt,
+    retained_kv_capture,
+    retained_prefill_params,
+    retained_terminal_metadata,
+)
 
 from .args import Config
 from .backend_args import _configured_artifact_router_profile
@@ -623,6 +631,10 @@ def _apply_nvext_cache_salt(request: Dict[str, Any], prompt: Any) -> None:
     unchanged.
     """
     if not isinstance(prompt, dict):
+        return
+    server_salt = retained_cache_salt(request)
+    if server_salt is not None:
+        prompt["cache_salt"] = f"{_DYNAMO_CACHE_SALT_PREFIX}{server_salt}"
         return
     for source in _iter_nvext_sources(request):
         cache_salt = source.get("cache_salt")
@@ -3536,6 +3548,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         kv_hints=None,
         artifact_session=None,
         emit_routed_experts=True,
+        retained_capture: RetainedKvCapture | None = None,
+        expose_kv_transfer_params=True,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -3705,10 +3719,25 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 out, prompt_logprobs_payload
                             )
                         kv_transfer_params = getattr(res, "kv_transfer_params", None)
-                        if kv_transfer_params is not None:
+                        if kv_transfer_params is not None and expose_kv_transfer_params:
                             engine_data = out.setdefault("engine_data", {})
                             if isinstance(engine_data, dict):
                                 engine_data["kv_transfer_params"] = kv_transfer_params
+                        if (
+                            retained_capture is not None
+                            and normalized_finish_reason in ("stop", "length")
+                            and len(res.outputs) == 1
+                            and output_idx == 0
+                        ):
+                            metadata = retained_terminal_metadata(
+                                retained_capture,
+                                getattr(res, "prompt_token_ids", None),
+                                kv_transfer_params,
+                            )
+                            if metadata is not None:
+                                out.setdefault("extra_args", {})[RETAINED_KV_KEY] = (
+                                    metadata
+                                )
                         # Emit the EFFECTIVE trim offset: clamp the requested
                         # routed_experts_prompt_start to the prompt length. vLLM
                         # clamps the returned routing rows the same way, so an
@@ -4304,6 +4333,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         if want_engine_data
                         else None
                     )
+                    retained_capture = retained_kv_capture(
+                        request,
+                        getattr(self.engine_client, "vllm_config", None),
+                        sampling_params,
+                        is_decode_only=is_decode_only,
+                        lora_request=lora_request,
+                    )
                     accumulated_token_ids: dict[int, list[int]] = {}
                     accumulated_log_probs: dict[int, list[float]] = {}
                     try:
@@ -4322,6 +4358,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             # decode attempt's count would not be local reuse.
                             report_kv_cache_hit=kv_params is None,
                             want_engine_data=want_engine_data,
+                            retained_capture=retained_capture,
+                            expose_kv_transfer_params=engine_generate_input is not None,
                             kv_hints=kv_hints,
                             artifact_session=artifact_session,
                             emit_routed_experts=(
@@ -4644,6 +4682,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Extract LoRA request if present
         model_name = request.get("model")
         lora_request = self._resolve_lora_request(model_name)
+        retained_params = retained_prefill_params(
+            request,
+            self.engine_client.vllm_config,
+            kv_protocol,
+            sampling_params,
+            lora_request=lora_request,
+        )
+        if retained_params is not None:
+            _update_kv_transfer_params(sampling_params, retained_params)
         if lora_request:
             logger.info(
                 f"Prefill request {request_id} will use LoRA adapter: {model_name} "
