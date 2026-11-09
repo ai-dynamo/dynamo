@@ -4,7 +4,7 @@
 """Unit tests for the Python ``Worker`` shim."""
 
 import logging
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -19,16 +19,11 @@ from dynamo.common.backend import worker as worker_module  # noqa: E402
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 
-class _NoopRustWorker:
-    def __init__(self, engine, config, loop, raw=False):
-        pass
-
-    async def run(self):
-        return None
-
-
 async def test_run_keeps_host_logging_when_configure_logging_is_false(monkeypatch):
-    monkeypatch.setattr(worker_module._backend, "Worker", _NoopRustWorker)
+    rust_worker = MagicMock(run=AsyncMock())
+    monkeypatch.setattr(
+        worker_module._backend, "Worker", MagicMock(return_value=rust_worker)
+    )
     # Registered so the variable run() exports is restored.
     monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
     root = logging.getLogger()

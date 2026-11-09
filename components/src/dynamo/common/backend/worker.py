@@ -144,9 +144,8 @@ class WorkerConfig:
     kv_state_endpoint: Optional[str] = None
     default_thinking_mode: Optional[str] = None
     response_plane: str = "tcp"
-    # Configure this process's Python logging for Dynamo (root logger bridged
-    # to the Rust logger, vLLM and SGLang loggers). Set False when the engine
-    # is embedded in a host process that owns its logging.
+    # False skips configure_dynamo_logging() in run(), for engines embedded in a
+    # host process that owns its Python logging.
     configure_logging: bool = True
 
     @classmethod
