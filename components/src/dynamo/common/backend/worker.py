@@ -144,6 +144,10 @@ class WorkerConfig:
     kv_state_endpoint: Optional[str] = None
     default_thinking_mode: Optional[str] = None
     response_plane: str = "tcp"
+    # Configure this process's Python logging for Dynamo (root logger bridged
+    # to the Rust logger, vLLM and SGLang loggers). Set False when the engine
+    # is embedded in a host process that owns its logging.
+    configure_logging: bool = True
 
     @classmethod
     def from_runtime_config(
@@ -218,7 +222,8 @@ class Worker:
         self.config = config
 
     async def run(self) -> None:
-        configure_dynamo_logging()
+        if self.config.configure_logging:
+            configure_dynamo_logging()
 
         if self.config.use_kv_events:
             # The runtime auto-detects NATS now; the field is preserved on
