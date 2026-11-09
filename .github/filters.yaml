@@ -96,6 +96,8 @@ examples:
   - 'tests/test_generate_kustomize_openapi.py'
   - 'tests/test_kustomize_matrix.py'
   - 'docs/tests/**'
+  # Recipe and benchmark catalogs: docs/tests runs validate.py over them.
+  - 'docs/fern/pages/recipes/**/_catalog/**'
   - 'deploy/operator/config/crd/bases/**'
 
 ignore:
@@ -239,6 +241,9 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
+  # An AISimulate pin bump must refresh the schema used by operator admission.
+  - 'pyproject.toml'
+  - 'container/deps/requirements.aisimulate.txt'
   - 'docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md'
   - 'deploy/helm/charts/platform/**'
   # The operator check owns the real Go/Python DGD override contract test.

@@ -274,11 +274,7 @@ mod tests {
             policy_file.path(),
             r#"
 worker_selection:
-  aggregated: custom
-  instances:
-    - name: custom
-      type: test
-      parameters: {}
+  aggregated: test
 "#,
         )
         .unwrap();
@@ -294,7 +290,7 @@ worker_selection:
         assert!(
             error
                 .to_string()
-                .contains("custom worker-selection policy \"custom\" is not supported by replay")
+                .contains("custom worker-selection policy \"test\" is not supported by replay")
         );
     }
 }

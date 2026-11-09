@@ -539,6 +539,11 @@ jobs:
 
         cargo test --locked -p dynamo-llm --no-default-features \
           --features kv-router-stress --bench kv_router_bench --no-run
+    - name: Run NVTX feature tests
+      # Only this step and "Lint the NVTX feature" turn on the nvtx feature here.
+      # The lint step and the image builds compile it but run no tests. So this
+      # step is the only one that runs the feature-on tests in lib/runtime/src/nvtx.rs.
+      run: "cargo test --locked -p dynamo-runtime --features nvtx --lib nvtx::"
 
   rust-clippy:
     needs: changed-files
@@ -575,6 +580,13 @@ jobs:
         # service, and the build without the optional policy catalog.
         cargo clippy --locked --no-deps --features custom-policy,select-service --all-targets -- -D warnings
         cargo clippy --locked --no-deps --no-default-features --all-targets -- -D warnings
+    - name: Lint the NVTX feature
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      # The default job builds this crate with the feature off, so the feature-on
+      # half of every `#[cfg(feature = "nvtx")]` — including the tests gated the
+      # other way — is otherwise never linted under -D warnings.
+      run: "cargo clippy --locked --no-deps -p dynamo-runtime --features nvtx --all-targets -- -D warnings"
     - name: Lint feature-gated benchmark entrypoints
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

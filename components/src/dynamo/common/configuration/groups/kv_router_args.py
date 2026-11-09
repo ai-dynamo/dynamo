@@ -645,7 +645,7 @@ class KvRouterArgGroup(ArgGroup):
             default=None,
             help=(
                 "KV Router: Startup-only YAML configuration for shared router settings, "
-                "policy-class queues, worker-selection instances, and hint policies. "
+                "policy-class queues, per-role worker-selection policies, and hint policies. "
                 "When omitted, router_queue_threshold and router_queue_policy define "
                 "one synthetic policy class; queueing remains disabled unless "
                 "router_queue_threshold is set."
@@ -693,7 +693,7 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_PREFILL_POLICY",
             default=None,
             help=(
-                "KV Router: Process-local named worker-selection instance for "
+                "KV Router: Process-local worker-selection policy type for "
                 "disaggregated prefill workers in this router process. "
                 "Overrides worker_selection.prefill from --router-policy-config. "
                 "Use 'default' for Dynamo's built-in worker selector."
@@ -710,7 +710,7 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_DECODE_POLICY",
             default=None,
             help=(
-                "KV Router: Process-local named worker-selection instance for decode "
+                "KV Router: Process-local worker-selection policy type for decode "
                 "workers in this router process. "
                 "Overrides worker_selection.decode from --router-policy-config. "
                 "Use 'default' for Dynamo's built-in worker selector."

@@ -343,7 +343,7 @@ _Appears in:_
 | `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `minAvailable` _integer_ | MinAvailable maps to Grove PodClique minAvailable for single-node and<br />Grove PodCliqueScalingGroup minAvailable for multi-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />Deprecated: use providerOverride.value.spec.minAvailable for a standalone<br />Grove PodClique, or providerOverride.value.minAvailable for a scaling group.<br />The effective minimum is immutable after creation; moving the same value<br />to the new form is supported without changing the update strategy.<br />Grove uses RollingRecreate unless a strategy annotation explicitly overrides it.<br />New Grove deployments default the provider-native form to 1. Scale-to-zero<br />preserves the minimum until replicas becomes positive again.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  |  |
-| `roles` _[ComponentRoleSpec](#componentrolespec) array_ | Roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each with its own conductor role, or a shared draft and<br />target pair with a conductor role only on the target. Every LPX role<br />requires its own podTemplate. |  | MaxItems: 2 <br />Optional: \{\} <br /> |
+| `roles` _[ComponentRoleSpec](#componentrolespec) array_ | Roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each serving through its own conductor role or agent<br />runtime init container, or a draft and target pair in which only the<br />target serves. Every LPX role requires its own podTemplate. |  | MaxItems: 2 <br />Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed by the DGDSA and external autoscalers scale the service<br />via the Scale subresource; when disabled, replicas are set directly. Opt in with<br />`scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because<br />`enabled` defaults to false. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp".<br />Deprecated: omit this field for the native Rust EPP. Presence of eppConfig<br />keeps the Go EPP Pod contract until migration clears it. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
@@ -390,7 +390,7 @@ _Appears in:_
 | `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `minAvailable` _integer_ | MinAvailable maps to Grove PodClique minAvailable for single-node and<br />Grove PodCliqueScalingGroup minAvailable for multi-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />Deprecated: use providerOverride.value.spec.minAvailable for a standalone<br />Grove PodClique, or providerOverride.value.minAvailable for a scaling group.<br />The effective minimum is immutable after creation; moving the same value<br />to the new form is supported without changing the update strategy.<br />Grove uses RollingRecreate unless a strategy annotation explicitly overrides it.<br />New Grove deployments default the provider-native form to 1. Scale-to-zero<br />preserves the minimum until replicas becomes positive again.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  |  |
-| `roles` _object array_ | Roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each with its own conductor role, or a shared draft and<br />target pair with a conductor role only on the target. Every LPX role<br />requires its own podTemplate. Standalone DCD roles support `name`, `replicas`, and `podTemplate`; `providerOverride` is a DGD-only provider context. |  | MaxItems: 2 <br />Optional: \{\} <br /> |
+| `roles` _object array_ | Roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each serving through its own conductor role or agent<br />runtime init container, or a draft and target pair in which only the<br />target serves. Every LPX role requires its own podTemplate. Standalone DCD roles support `name`, `replicas`, and `podTemplate`; `providerOverride` is a DGD-only provider context. |  | MaxItems: 2 <br />Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed by the DGDSA and external autoscalers scale the service<br />via the Scale subresource; when disabled, replicas are set directly. Opt in with<br />`scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because<br />`enabled` defaults to false. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp".<br />Deprecated: omit this field for the native Rust EPP. Presence of eppConfig<br />keeps the Go EPP Pod contract until migration clears it. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
@@ -2015,7 +2015,6 @@ any `extraPodSpec`-style escape hatch. Container paths are relative to the compo
 
 
 _Appears in:_
-- [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec)
 - [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -2029,7 +2028,7 @@ _Appears in:_
 | `replicas` _integer_ | replicas is the desired number of Pods for this component. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `minAvailable` _integer_ | minAvailable maps to Grove PodCliqueScalingGroup minAvailable for<br />components rendered as a scaling group (multi-node, inter-pod GMS, or<br />`experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove<br />PodClique minAvailable for all other single-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />Deprecated: use providerOverride.value.spec.minAvailable for a standalone<br />Grove PodClique, or providerOverride.value.minAvailable for a scaling group.<br />The effective minimum is immutable after creation; moving the same value<br />to the new form is supported without changing the update strategy.<br />Grove uses RollingRecreate unless a strategy annotation explicitly overrides it.<br />New Grove deployments default the provider-native form to 1. Scale-to-zero<br />preserves the minimum until replicas becomes positive again.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  | Optional: \{\} <br /> |
-| `roles` _[ComponentRoleSpec](#componentrolespec) array_ | roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each with its own conductor role, or a shared draft and<br />target pair with a conductor role only on the target. Every LPX role<br />requires its own podTemplate. |  | MaxItems: 2 <br />Optional: \{\} <br /> |
+| `roles` _[ComponentRoleSpec](#componentrolespec) array_ | roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each serving through its own conductor role or agent<br />runtime init container, or a draft and target pair in which only the<br />target serves. Every LPX role requires its own podTemplate. |  | MaxItems: 2 <br />Optional: \{\} <br /> |
 | `sharedMemorySize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.<br />`nil` selects the operator default (8Gi), a positive quantity sets a<br />custom size, and `"0"` disables the shared-memory volume entirely.<br />Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its<br />`disabled bool` + `size Quantity` pattern. |  | Optional: \{\} <br /> |
 | `modelRef` _[ModelReference](#modelreference)_ | modelRef references a model served by this component. When specified,<br />a headless service is created for endpoint discovery. |  | Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter.<br />Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the<br />`replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the<br />Scale subresource; omit the field to opt out. |  | Optional: \{\} <br /> |
@@ -2063,7 +2062,7 @@ _Appears in:_
 | `replicas` _integer_ | replicas is the desired number of Pods for this component. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `minAvailable` _integer_ | minAvailable maps to Grove PodCliqueScalingGroup minAvailable for<br />components rendered as a scaling group (multi-node, inter-pod GMS, or<br />`experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove<br />PodClique minAvailable for all other single-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />Deprecated: use providerOverride.value.spec.minAvailable for a standalone<br />Grove PodClique, or providerOverride.value.minAvailable for a scaling group.<br />The effective minimum is immutable after creation; moving the same value<br />to the new form is supported without changing the update strategy.<br />Grove uses RollingRecreate unless a strategy annotation explicitly overrides it.<br />New Grove deployments default the provider-native form to 1. Scale-to-zero<br />preserves the minimum until replicas becomes positive again.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  | Optional: \{\} <br /> |
-| `roles` _object array_ | roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each with its own conductor role, or a shared draft and<br />target pair with a conductor role only on the target. Every LPX role<br />requires its own podTemplate. Standalone DCD roles support `name`, `replicas`, and `podTemplate`; `providerOverride` is a DGD-only provider context. |  | MaxItems: 2 <br />Optional: \{\} <br /> |
+| `roles` _object array_ | roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each serving through its own conductor role or agent<br />runtime init container, or a draft and target pair in which only the<br />target serves. Every LPX role requires its own podTemplate. Standalone DCD roles support `name`, `replicas`, and `podTemplate`; `providerOverride` is a DGD-only provider context. |  | MaxItems: 2 <br />Optional: \{\} <br /> |
 | `sharedMemorySize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.<br />`nil` selects the operator default (8Gi), a positive quantity sets a<br />custom size, and `"0"` disables the shared-memory volume entirely.<br />Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its<br />`disabled bool` + `size Quantity` pattern. |  | Optional: \{\} <br /> |
 | `modelRef` _[ModelReference](#modelreference)_ | modelRef references a model served by this component. When specified,<br />a headless service is created for endpoint discovery. |  | Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter.<br />Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the<br />`replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the<br />Scale subresource; omit the field to opt out. |  | Optional: \{\} <br /> |
@@ -2129,7 +2128,6 @@ v1beta1 releases. Component-level experimental features live under
 
 
 _Appears in:_
-- [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec)
 - [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -2346,7 +2344,6 @@ DynamoGraphDeploymentSpec defines the desired state of a DynamoGraphDeployment.
 
 _Appears in:_
 - [DynamoGraphDeployment](#dynamographdeployment)
-- [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2986,7 +2983,6 @@ All other providers, versions, targets, and fields are rejected.
 _Appears in:_
 - [ComponentRoleSpec](#componentrolespec)
 - [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
-- [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec)
 - [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -3005,7 +3001,6 @@ Restart specifies the restart policy for a graph deployment.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec)
 - [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -3208,7 +3203,6 @@ SpecTopologyConstraint defines deployment-level topology placement requirements.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec)
 - [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -3321,7 +3315,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `inputOverrides` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from<br />the typed fields. It uses the upstream AISimulate JSON contract, including<br />snake_case names. Values here take precedence, and null deletes a lowered<br />field. The dgdr_run member must remain an object, and its operator-owned<br />transport, identity, and runtime fields name, max_candidates, snapshot_dir,<br />runtime_image, runtime_version_override, derive_runtime_images,<br />num_gpus_per_node, and namespace are operator-owned. Request admission<br />rejects them, and the Run controller enforces its values while lowering the<br />immutable snapshot. A typed spec.workload.trace is an underlay like the other<br />typed fields: it supplies the default traffic.source (type trace, format<br />dynamo and the mounted trace file in paths) and the recorded-arrival<br />traffic.load. Overrides can replace those values, including<br />traffic.source.type, format, and paths, and null deletes the named field or<br />parent object; the Run controller does not restore it. The typed<br />PersistentVolumeClaim source alone decides the Run Job's trace mount and its<br />claim dependency, so overriding a native path adds no volume mount.<br />AISimulate validates the resulting input when the Run's Job starts; admission<br />does not validate it against the AISimulate schema yet. The operator runs<br />the AISimulate version from its configured planner image; Requests and Runs<br />cannot select a different image or version. |  | Type: object <br />Optional: \{\} <br /> |
+| `inputOverrides` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from<br />the typed fields. It uses the upstream AISimulate JSON contract, including<br />snake_case names. Values here take precedence, and null deletes a lowered<br />field. The dgdr_run member must remain an object, and its operator-owned<br />transport, identity, and runtime fields name, max_candidates, snapshot_dir,<br />runtime_image, runtime_version_override, derive_runtime_images,<br />num_gpus_per_node, and namespace are operator-owned. Request and Run admission<br />rejects them, and the Run controller enforces its values while lowering the<br />immutable snapshot. A typed spec.workload.trace is an underlay like the other<br />typed fields: it supplies the default traffic.source (type trace, format<br />dynamo and the mounted trace file in paths) and the recorded-arrival<br />traffic.load. Overrides can replace those values, including<br />traffic.source.type, format, and paths, and null deletes the named field or<br />parent object; the Run controller does not restore it. The typed<br />PersistentVolumeClaim source alone decides the Run Job's trace mount and its<br />claim dependency, so overriding a native path adds no volume mount.<br />The operator runs the AISimulate version from its configured planner image;<br />Requests and Runs cannot select a different image or version.<br />Request and Run creation validate the merged input against the bundled AISimulate input<br />schema. Request spec changes require the same validation; Run specs are immutable.<br />Unchanged specs remain metadata-updatable after a bundled schema change. |  | Type: object <br />Optional: \{\} <br /> |
 
 
 #### Backend
@@ -3433,35 +3427,8 @@ DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
 | `apiVersion` _string_ | `nvidia.com/v1beta2` | | |
 | `kind` _string_ | `DynamoGraphDeploymentCandidate` | | |
 | `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
-| `spec` _[DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec)_ |  |  | Required: \{\} <br /> |
+| `spec` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Spec is exactly the unpruned DGD spec, before dry-run defaulting or webhook mutation.<br />It is opaque so invalid field types and unknown fields can be retained with Valid=False.<br />A failed override leaves the generated spec unchanged. Immutability is enforced by admission<br />because CEL cannot inspect fields in an opaque object. |  | Type: object <br />Required: \{\} <br /> |
 | `status` _[DynamoGraphDeploymentCandidateStatus](#dynamographdeploymentcandidatestatus)_ |  |  | Optional: \{\} <br /> |
-
-
-#### DynamoGraphDeploymentCandidateSpec
-
-
-
-DynamoGraphDeploymentCandidateSpec is an immutable evaluated point: the
-inline DGD spec plus its resolved evaluation parameters.
-
-
-
-_Appears in:_
-- [DynamoGraphDeploymentCandidate](#dynamographdeploymentcandidate)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the root resource generated by the selected<br />graph-level workload provider. For Grove it uses apiVersion<br />`grove.io/v1alpha1`, target `PodCliqueSet`, and may set only<br />`spec.template.topologyConstraint`. It cannot select or change the provider. |  | Optional: \{\} <br /> |
-| `annotations` _object (keys:string, values:string)_ | annotations to propagate to all child resources (PCS, DCD, Deployments,<br />and pod templates). Component-level (`podTemplate`) values take precedence<br />on conflict. |  | Optional: \{\} <br /> |
-| `labels` _object (keys:string, values:string)_ | labels to propagate to all child resources. Same precedence rules as `annotations`. |  | Optional: \{\} <br /> |
-| `priorityClassName` _string_ | priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.<br />Requires the Grove pathway. |  | Optional: \{\} <br /> |
-| `components` _[DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec) array_ | components are the components deployed as part of this graph. Each entry<br />carries its own stable logical `name`, and names must be unique within<br />the list. Component types are generally repeatable, except `type: epp`<br />which may appear at most once. |  | MaxItems: 25 <br />Optional: \{\} <br /> |
-| `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | env is prepended to every component's environment. Component-specific<br />env entries with the same name take precedence and may reference values<br />from this list. |  | Optional: \{\} <br /> |
-| `backendFramework` _string_ | backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
-| `restart` _[Restart](#restart)_ | restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
-| `topologyConstraint` _[SpecTopologyConstraint](#spectopologyconstraint)_ | topologyConstraint is the deployment-level topology constraint. When<br />set, `spec.topologyConstraint.clusterTopologyName` names the ClusterTopology<br />CR to use. `spec.topologyConstraint.packDomain` is optional at this<br />level and can be omitted when only components carry constraints.<br />Components without their own `topologyConstraint` inherit from this value. |  | Optional: \{\} <br /> |
-| `experimental` _[DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec)_ | experimental groups graph-level preview features whose API shape and<br />behavior may change in breaking ways between v1beta1 releases. |  | Optional: \{\} <br /> |
-| `parameters` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Parameters are the resolved evaluation parameters for this point. |  | Type: object <br />Required: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentCandidateStatus
@@ -3477,7 +3444,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `metrics` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Metrics are the resolved evaluation metrics for this point. |  | Type: object <br />Optional: \{\} <br /> |
+| `parameters` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Parameters are the original resolved evaluation inputs. Overrides do not change them. |  | Type: object <br />Optional: \{\} <br /> |
+| `metrics` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Metrics are the resolved evaluation metrics for this point.<br />They describe the original evaluated configuration, not a deployment changed by overrides. |  | Type: object <br />Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions records the final Valid result for the Candidate's DGD:<br />- Valid=True, ValidationSucceeded: atomic override application and strict server-side<br />  dry-run succeeded; the API object is structurally valid and passed admission at checking time.<br />- Valid=False, OverrideTargetNotFound: an override names a component absent from the generated DGD.<br />- Valid=False, OverrideFailed: the override could not be applied in full, for example because<br />  it changes reserved metadata or supplies an invalid merge directive. The original DGD is retained.<br />- Valid=False, ValidationFailed: the resulting DGD was rejected by strict dry-run admission.<br />Check for Valid=True before using spec as a DGD. An absent condition is not success.<br />Valid reports API validity, not deployment readiness or successful image pulls and GPU scheduling.<br />Invalid Candidates remain visible and count toward recommendation.maxCandidates. |  | Optional: \{\} <br /> |
 
 
 #### v1beta2 DynamoGraphDeploymentRequest
@@ -3519,6 +3488,7 @@ _Appears in:_
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
+| `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISimulate execution. |  | Optional: \{\} <br /> |
 
 
 #### v1beta2 DynamoGraphDeploymentRequestNativeStatus
@@ -3561,6 +3531,7 @@ _Appears in:_
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
+| `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISimulate execution. |  | Optional: \{\} <br /> |
 | `v1beta1` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | V1Beta1 losslessly preserves a native v1beta1 spec while this object is<br />represented through v1beta2. It is mutually exclusive with native fields.<br />This field is a read-only conversion view; modify the request through the<br />native v1beta1 API. |  | Type: object <br />Optional: \{\} <br /> |
 
 
@@ -3628,6 +3599,7 @@ _Appears in:_
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
+| `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISimulate execution. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentRunStatus
@@ -3651,7 +3623,7 @@ _Appears in:_
 | `startTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | StartTime is when execution started. |  | Optional: \{\} <br /> |
 | `completionTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CompletionTime is present only after a terminal outcome. |  | Optional: \{\} <br /> |
 | `lastProgressTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | LastProgressTime is the latest coarse-grained progress update or heartbeat.<br />Writers should update it periodically, not for every evaluation. |  | Optional: \{\} <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains standard Kubernetes conditions merged by type. |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains standard Kubernetes conditions merged by type.<br />Completed is owned by the Run controller. Published is owned by the publisher:<br />False reports a retryable Candidate preparation error, including a forbidden DGD dry-run;<br />True means the current Candidate projection is published, including any invalid Candidates.<br />A preparation error leaves the Run open and is retried until configuration is repaired<br />or the Run is stopped. Published does not determine the Run's terminal outcome. |  | Optional: \{\} <br /> |
 
 
 #### EvaluationProgress
@@ -3790,6 +3762,7 @@ _Appears in:_
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisim` _[AISimSpec](#aisimspec)_ | AISim supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
+| `overrides` _[OverridesSpec](#v1beta2-overridesspec)_ | Overrides customizes the generated DGD without changing AISimulate execution. |  | Optional: \{\} <br /> |
 
 
 #### ObjectiveMetric
@@ -3864,6 +3837,25 @@ _Appears in:_
 | `metric` _[ObjectiveMetric](#objectivemetric)_ | Metric is the scalar target when mode is Optimize.<br />When omitted in Optimize mode, admission defaults it to ThroughputPerGPU. |  | Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU] <br />Optional: \{\} <br /> |
 | `metrics` _[ObjectiveMetric](#objectivemetric) array_ | Metrics is reserved for the future Pareto implementation. |  | Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU] <br />MaxItems: 2 <br />MinItems: 2 <br />Optional: \{\} <br /> |
 | `sla` _[ObjectiveSLASpec](#objectiveslaspec)_ | SLA defines per-request latency bounds used to calculate goodput. Admission defaults an<br />omitted SLA to TTFT 2000 ms and ITL 30 ms. An explicit empty object opts out of those<br />defaults. spec.aisim.inputOverrides.evaluation.sla overrides the bounds it names. |  | Optional: \{\} <br /> |
+
+
+#### v1beta2 OverridesSpec
+
+
+
+OverridesSpec patches the generated deployment independently for every selected Candidate.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec)
+- [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec)
+- [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec)
+- [NativeSearchInput](#nativesearchinput)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `dgd` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | DGD is one partial nvidia.com/v1beta1 DynamoGraphDeployment applied by the publisher<br />using the DGD schema's Server-Side Apply merge rules. Other API versions are not supported.<br />Components must already exist; named containers may be added. Atomic lists, including<br />container command and args, replace the generated lists. The supported customization<br />$patch: \{args: append\} on a container appends to its explicit generated args list;<br />both the container and its args must already exist. No other $patch operation is supported.<br />Application is atomic: a merge failure retains the unchanged generated deployment<br />with Valid=False. A successful merge is checked by strict server-side dry-run;<br />the dry-run response and its defaults are discarded. The Candidate retains the<br />unpruned payload from before the check. Invalid Candidates count toward maxCandidates.<br />Overrides may change any deployment configuration. Evaluation metrics are not<br />recomputed and continue to describe the original AISimulate configuration.<br />DGD labels and annotations become Candidate labels and annotations. A failed merge<br />retains only the original generated metadata; a successful merge followed by failed<br />dry-run validation retains the merged metadata on the invalid Candidate. Other metadata<br />and publisher-owned keys cannot be overridden; such attempts fail atomically.<br />The complete Candidate metadata must satisfy Kubernetes limits, including generated<br />and reserved annotations. An override that exceeds those limits fails atomically. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
 
 
 #### RecommendationSpec
