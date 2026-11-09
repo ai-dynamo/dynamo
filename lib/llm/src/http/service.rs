@@ -24,6 +24,7 @@ mod decision_lifecycle;
 mod image_edits;
 pub mod metadata;
 mod openai;
+mod request_span;
 mod server;
 mod transcriptions;
 mod write_timeout;

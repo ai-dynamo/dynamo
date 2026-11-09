@@ -1573,6 +1573,17 @@ fn append_route_docs(
     Ok(())
 }
 
+/// The "http response sent" event every HTTP route logs in its request span.
+pub(super) fn log_response(response: &Response<Body>, latency: Duration) {
+    let status = response.status();
+    let latency_ms = latency.as_millis();
+    if status.is_server_error() || status.is_client_error() {
+        tracing::error!(status = %status.as_u16(), latency_ms = %latency_ms, "http response sent");
+    } else {
+        tracing::info!(status = %status.as_u16(), latency_ms = %latency_ms, "http response sent");
+    }
+}
+
 impl HttpServiceConfigBuilder {
     pub fn add_frontend_route_extension<F>(mut self, extension: F) -> Self
     where
@@ -1712,13 +1723,7 @@ impl HttpServiceConfigBuilder {
 
         // Shared on_response callback for both system and inference routes
         let on_response = |response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
-            let status = response.status();
-            let latency_ms = latency.as_millis();
-            if status.is_server_error() || status.is_client_error() {
-                tracing::error!(status = %status.as_u16(), latency_ms = %latency_ms, "http response sent");
-            } else {
-                tracing::info!(status = %status.as_u16(), latency_ms = %latency_ms, "http response sent");
-            }
+            log_response(response, latency)
         };
 
         // System routes (health, metrics, models) — debug-level spans
@@ -1790,11 +1795,9 @@ impl HttpServiceConfigBuilder {
             append_route_docs(&mut all_docs, &mut seen_route_docs, route_docs)?;
             inference_router = inference_router.merge(route);
         }
-        inference_router = inference_router.layer(
-            TraceLayer::new_for_http()
-                .make_span_with(make_inference_request_span)
-                .on_response(on_response),
-        );
+        inference_router = inference_router.layer(axum::middleware::from_fn(
+            super::request_span::inference_request_span,
+        ));
         inference_router = inference_router.layer(axum::middleware::from_fn_with_state(
             Arc::new(InferenceReadinessState {
                 state: state.clone(),
