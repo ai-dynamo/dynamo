@@ -3,9 +3,15 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # TokenSpeed bring-up image for iterating on the Dynamo common LLMEngine path.
-# Layers Dynamo (built from source via maturin) on top of a public TokenSpeed
-# runtime image, so you can ship a Dynamo+TokenSpeed worker before NVIDIA
-# publishes an `nvcr.io/nvidia/ai-dynamo/tokenspeed-runtime` image.
+# Layers Dynamo (built from source via maturin) on top of TokenSpeed's runner
+# image plus pinned TokenSpeed nightly wheels, so you can ship a
+# Dynamo+TokenSpeed worker before NVIDIA publishes an
+# `nvcr.io/nvidia/ai-dynamo/tokenspeed-runtime` image.
+#
+# Unlike Dynamo's vLLM and SGLang images, this does not start FROM the engine's
+# own published container: no published TokenSpeed image contains the pinned
+# revision. See "Why this build differs from the vLLM and SGLang images" in
+# this directory's README.md.
 #
 # Build context must be the Dynamo repo root (the source tree is COPY'd in).
 #
@@ -25,9 +31,10 @@
 #     .
 #
 # The default BASE_IMAGE pins lightseekorg/tokenspeed-runner at an immutable
-# CUDA-13 multi-arch digest (matches B200/GB300's CUDA 13.x driver). Build for
-# arm64 (GB200/GB300) with:
-#   --build-arg ARCH=arm64
+# CUDA-13 multi-arch digest (matches B200/GB300's CUDA 13.x driver). The
+# TokenSpeed wheels follow the target platform (BuildKit's TARGETARCH), so a
+# build on an arm64 host (GB200/GB300) needs no extra flags. --build-arg
+# ARCH=amd64|arm64 overrides it.
 #
 # The runner image is the runtime base only. This Dockerfile installs the
 # TokenSpeed nightly wheels that SemiAnalysisAI/InferenceX#4780 pins: the
@@ -38,11 +45,12 @@
 # over that wire, so a TokenSpeed older than this rewrite (any revision that
 # still ships an in-process `Engine` with a `tokenizer_manager`) cannot work.
 ARG BASE_IMAGE=ghcr.io/lightseekorg/tokenspeed-runner:cu130-torch-2.14.0-flashinfer-0.7.1rc2@sha256:1086943cd27a22b7d414c64ca088bee24f53a971fdae78e231c182c50b4e43d2
-ARG ARCH=amd64
+ARG ARCH=
 ARG CARGO_BUILD_JOBS=16
 
 FROM ${BASE_IMAGE} AS tokenspeed_base
 ARG ARCH
+ARG TARGETARCH
 ARG TOKENSPEED_WHL=https://github.com/lightseekorg/whl/releases/download
 ARG TOKENSPEED_VERSION=0.1.1.post20261102
 ARG TOKENSPEED_KERNEL_VERSION=0.1.4.post20261102
@@ -67,6 +75,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # change them together with the versions above.
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     set -eux; \
+    ARCH="${ARCH:-${TARGETARCH}}"; \
     case "${ARCH}" in \
         amd64) \
             KERNEL_PLATFORM=manylinux_2_28_x86_64; ENGINE_PLATFORM=linux_x86_64; \

@@ -87,13 +87,37 @@ The Dynamo worker drives TokenSpeed's headless engine over its msgpack ZMQ wire
 (`tokenspeed_engine`). TokenSpeed revisions from before that rewrite, which ship an
 in-process `Engine` with a `tokenizer_manager`, cannot run this worker.
 
+#### Why this build differs from the vLLM and SGLang images
+
+Dynamo's vLLM and SGLang images start from each engine's published release
+container, such as `vllm/vllm-openai` and `lmsysorg/sglang`, and add Dynamo on top
+through the shared templates in [`container/`](../../../../../container/). This recipe
+can't do that yet:
+
+- The TokenSpeed images on Docker Hub (`lightseekorg/tokenspeed`) predate the pinned
+  revision. As of November 6, 2026, the newest is `nightly-621b53` from October 25. It
+  is 146 commits behind `0e6ee353d7bd` and lacks wire, handshake, and P/D changes that
+  this worker depends on. The `0.1.1` release is older still.
+- The nightly wheels are the only published build of the pinned revision. They are
+  also how InferenceX#4780 installs TokenSpeed, so this image runs the same engine
+  binaries as that benchmark.
+
+The Dockerfile therefore starts from the runner image, which has TokenSpeed's
+dependencies but not TokenSpeed itself, and installs the wheels. It installs
+pre-compiled TokenSpeed and only compiles Dynamo. When TokenSpeed publishes an image
+that contains the msgpack-wire engine, the Dockerfile can switch to starting from it
+by digest, as the vLLM and SGLang images do. TokenSpeed could then join the shared
+`container/` build.
+
 The Dockerfile has two reachable targets:
 
 - `--target runtime`: slim image, no compilers. Use for production-leaning deploys.
 - `--target dev`: keeps `cargo`, `rustc`, `maturin`, build-essential, git, etc. Useful
   when iterating on the Rust bindings inside the pod (`maturin develop` inline).
 
-For arm64 base images, add `--build-arg ARCH=arm64`.
+The TokenSpeed wheels follow the build platform, so building on an arm64 host
+installs the arm64 wheels. To override it, pass `--build-arg ARCH=amd64` or
+`--build-arg ARCH=arm64`.
 
 ### 2. Push to a cluster-reachable registry
 
