@@ -6,7 +6,7 @@ use std::path::Path;
 use dynamo_llm::{
     local_model::runtime_config::TokenizerBackend,
     model_card::ModelDeploymentCard,
-    tokenizers::{HuggingFaceTokenizer, traits::Encoder},
+    tokenizers::{EncodeSegment, HuggingFaceTokenizer, traits::Encoder},
 };
 use dynamo_runtime::metrics::frontend_perf::{
     TOKENIZER_CACHE_CACHED_TOKENS_TOTAL, TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL,
@@ -93,6 +93,65 @@ fn model_card_tokenizer_cache_reuses_only_matching_identities() -> anyhow::Resul
             assert_eq!(card.mdcsum(), fast.mdcsum());
             check(&fast, false)?;
             check(&fast, true)?;
+            Ok(())
+        },
+    )
+}
+
+// The cache encodes long segments and the specials around them separately, so any
+// truncation or padding left in `tokenizer.json` would apply to each piece.
+#[test]
+fn model_card_tokenizer_ignores_truncation_and_padding() -> anyhow::Result<()> {
+    temp_env::with_vars(
+        [
+            ("DYN_TOKENIZER_CACHE", Some("1")),
+            ("DYN_TOKENIZER_CACHE_BYTES", Some("1048576")),
+            ("DYN_TOKENIZER_CACHE_EXTEND", Some("1")),
+        ],
+        || -> anyhow::Result<()> {
+            let model_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data/sample-models/TinyLlama_v1.1");
+            let temp = tempfile::tempdir()?;
+            for entry in std::fs::read_dir(&model_dir)? {
+                let entry = entry?;
+                std::fs::copy(entry.path(), temp.path().join(entry.file_name()))?;
+            }
+            let path = temp.path().join("tokenizer.json");
+            let mut json: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+            json["truncation"] = serde_json::json!({
+                "direction": "Right", "max_length": 12, "strategy": "LongestFirst", "stride": 0
+            });
+            json["padding"] = serde_json::json!({
+                "strategy": {"Fixed": 512}, "direction": "Right", "pad_to_multiple_of": null,
+                "pad_id": 0, "pad_type_id": 0, "pad_token": "<unk>"
+            });
+            std::fs::write(&path, serde_json::to_vec(&json)?)?;
+
+            let user = "hello world ".repeat(16);
+            let segments = [
+                EncodeSegment::control("<s>"),
+                EncodeSegment::ordinary(&user),
+                EncodeSegment::control("</s>"),
+            ];
+            let expected = HuggingFaceTokenizer::from_file(
+                model_dir.join("tokenizer.json").to_str().unwrap(),
+            )?
+            .encode_segments(&segments)?;
+            for backend in [TokenizerBackend::Default, TokenizerBackend::Fastokens] {
+                let mut card = ModelDeploymentCard::load_from_disk(temp.path(), None)?;
+                card.runtime_config.tokenizer_backend = Some(backend);
+                card.runtime_config.tokenizer_fallback_enabled = Some(false);
+                let tokenizer = card.tokenizer()?;
+                // Cold, then warm.
+                for _ in 0..2 {
+                    assert_eq!(
+                        tokenizer.encode_segments(&segments)?.token_ids(),
+                        expected.token_ids(),
+                        "{backend:?}"
+                    );
+                }
+            }
             Ok(())
         },
     )
