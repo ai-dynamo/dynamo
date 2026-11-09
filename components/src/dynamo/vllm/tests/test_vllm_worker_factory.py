@@ -610,6 +610,30 @@ async def test_wait_and_load_benchmark_rejects_inconsistent_status(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("skip_reason", "hinted"),
+    [("fake_prefix_cache_validation_failed", True), ("shape mismatch", False)],
+)
+async def test_wait_and_load_benchmark_hints_real_seed_for_fake_prefix_misses(
+    monkeypatch, tmp_path, skip_reason, hinted
+):
+    output_path = tmp_path / "benchmark.json"
+    payload = _single_rank_benchmark_payload(expected_points=2)
+    payload["coverage"]["skipped_points"] = 1
+    payload["skipped_points"] = [{"reason": skip_reason}]
+    output_path.write_text(json.dumps(payload))
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+
+    with pytest.raises(RuntimeError, match="inconsistent complete status") as exc_info:
+        await _wait_and_load_benchmark(
+            {"output_path": str(output_path), "timeout": 1}, Mock()
+        )
+    assert ("DYN_BENCH_PREFILL_REAL_SEED=on" in str(exc_info.value)) is hinted
+
+
+@pytest.mark.asyncio
 async def test_wait_and_load_benchmark_aggregates_dp_coverage(monkeypatch, tmp_path):
     base_path = tmp_path / "benchmark.json"
     point = {"benchmark_id": 1, "point_type": "prefill"}
