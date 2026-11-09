@@ -375,7 +375,14 @@ mod tests {
             .component("workers")
             .unwrap()
             .endpoint("generate");
-        let client = endpoint.client().await.unwrap();
+        let monitor = CancellationToken::new();
+        let client = endpoint
+            .client_with_cancellation(monitor.clone())
+            .await
+            .unwrap();
+        monitor.cancel();
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_instances().await.unwrap();
         client.override_discovered_instances(vec![7]);
         client.override_instance_avail(vec![7]);
         let load = RoutingLoadContext::start(
@@ -417,9 +424,7 @@ mod tests {
         });
         router.binding.store(Some(binding.clone()));
         router.set_decode_routing_host(host).unwrap();
-        // Initial endpoint monitoring can publish its empty discovery snapshot
-        // while the async routing setup runs. Install the synthetic workers last.
-        tokio::task::yield_now().await;
+        // Only this test updates membership after stopping endpoint reconciliation.
         client.override_discovered_instances(vec![7]);
         client.override_instance_avail(vec![7]);
         Fixture {
