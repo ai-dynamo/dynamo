@@ -43,7 +43,7 @@ once_cell = { version = "1" }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-dynamo-llm = { path = "../../llm" }
+dynamo-llm = { workspace = true, default-features = true }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-dynamo-llm = { path = "../../llm", default-features = false }
+dynamo-llm = { workspace = true }

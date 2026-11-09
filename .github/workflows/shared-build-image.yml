@@ -303,7 +303,7 @@ jobs:
         id: calculate-builder-flavor
         shell: bash
         run: |
-          if [[ ${{ inputs.framework }} != @(vllm|sglang|trtllm) ]]; then
+          if [[ ${{ inputs.framework }} != @(vllm|sglang|trtllm|triton) ]]; then
             echo "builder_flavor=general" >> $GITHUB_OUTPUT
           else
             echo "builder_flavor=${{ inputs.framework }}" >> $GITHUB_OUTPUT
@@ -541,9 +541,14 @@ jobs:
           # The build checkout is shallow with no tags. Make the refs each
           # baseline rule needs reachable (all best-effort; a miss just yields an
           # empty base_sha and a baseline_unavailable diff). Depth 30 gives the
-          # first-parent baseline walks enough history to find an artifact:
-          git fetch --deepen=30 --quiet || true                                     # HEAD~N (main post-merge walk)
-          git fetch --tags --quiet || true                                          # vX.Y.Z tags (release branch)
+          # first-parent baseline walks enough history to find an artifact. Fetch
+          # HEAD by SHA with an explicit depth; `--deepen` is far slower here.
+          git fetch --no-tags --depth=31 origin "$(git rev-parse HEAD)" --quiet || true # HEAD~N (main post-merge walk)
+          # Only the release rule reads tags. With no refspec, this fetch also
+          # downloads every branch on origin, so run it only for release builds.
+          if [[ "${DIFF_BASE_BRANCH}" == release/* || "${DIFF_CURRENT_BRANCH}" == release/* ]]; then
+            git fetch --tags --quiet || true                                        # vX.Y.Z tags (release branch)
+          fi
           if [ "${DIFF_BASE_BRANCH}" = "main" ] \
             && [ -n "${DIFF_MERGE_BASE_SHA}" ]; then
             git fetch --no-tags --depth=30 origin "${DIFF_MERGE_BASE_SHA}" --quiet || true # stable PR fork-point walk

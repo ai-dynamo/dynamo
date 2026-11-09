@@ -10,8 +10,9 @@ pub use dynamo_kv_router::kv_hints::{
 };
 use dynamo_kv_router::{
     config::RouterConfigOverride,
+    plugins::request_classifier::AbortCause,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
-    scheduling::{AbortCause, RequestLifecycle},
+    scheduling::RequestLifecycle,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
 use serde::{Deserialize, Serialize};
@@ -19,8 +20,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::extensions::{AgentContext, RouterParams};
+use super::llm_backend::DecoderCheckpoint;
 use super::timing::{RequestPhase, RequestTracker};
 use super::{OutputOptions, SamplingOptions, StopConditions};
+use crate::kv_router::RequestAttemptRelease;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -135,6 +138,7 @@ struct MigrationStateInner {
     excluded_worker_ids: Vec<WorkerId>,
     last_error: Option<DynamoError>,
     request_lifecycle: Option<Box<RequestLifecycle>>,
+    prefill_release: Option<RequestAttemptRelease>,
 }
 
 impl MigrationState {
@@ -223,6 +227,26 @@ impl MigrationState {
             return;
         };
         lifecycle.abort(error.map(owned_abort_error));
+    }
+
+    /// Park the latest attempt's remote prefill booking. Its prefill can
+    /// outlive a failed decode to serve an in-flight KV transfer, so only a
+    /// committed retry, which re-books the same request ID, releases it early.
+    pub(crate) fn store_prefill_release(&self, release: RequestAttemptRelease) {
+        self.inner
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prefill_release = Some(release);
+    }
+
+    pub(crate) fn take_prefill_release(&self) -> Option<RequestAttemptRelease> {
+        self.inner
+            .get()?
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prefill_release
+            .take()
     }
 }
 
@@ -361,9 +385,16 @@ pub type MultimodalDataMap = std::collections::HashMap<String, Vec<MultimodalDat
 /// Backend cache UUIDs aligned positionally with multimodal data slots.
 pub type MultimodalUuidMap = std::collections::HashMap<String, Vec<Option<String>>>;
 
+/// A reference into [`MultimodalDataMap`] preserving the media traversal order.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct MultimodalItemRef {
+    pub modality: String,
+    pub index: usize,
+}
+
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The `dynamo.llm-preprocessor`
 /// crate is responsible for converting request from the public APIs to this internal representation.
-#[derive(Serialize, Deserialize, Debug, Clone, Builder)]
+#[derive(Serialize, Deserialize, Clone, Builder)]
 pub struct PreprocessedRequest {
     /// ID of the model to use.
     ///
@@ -419,6 +450,13 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_uuids: Option<MultimodalUuidMap>,
+
+    /// Media references in gather order: content parts, after the formatter's
+    /// message ordering. A chat template that regroups media by modality
+    /// renders a different placeholder order.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_modal_order: Option<Vec<MultimodalItemRef>>,
 
     /// Optional multimodal routing-only fields (separate from execution payload).
     #[builder(default)]
@@ -493,19 +531,14 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration_link: Option<TraceLink>,
 
-    /// Text withheld by the previous attempt's decoder as a possible (but
-    /// unresolved) prefix of a hidden stop sequence, carried into a migration
-    /// retry so the new attempt's decoder does not silently drop it and can
-    /// still complete the match if the continuation supplies the rest of the
-    /// sequence. Set by the migration `RetryManager` (in-process, on its own
-    /// in-memory `PreprocessedRequest`) from the last successfully processed
-    /// response before a retry, and consumed once by `Backend` -- also
-    /// in-process, one hop later in the same pipeline -- when seeding the
-    /// retry's decoder. `#[serde(skip)]` keeps it that way: it never needs to,
-    /// and must not, reach a remote worker over the wire.
+    /// Decoder state from the previous attempt, carried into a migration retry so the
+    /// fresh decoder can restore withheld stop-filter text and replay any token IDs still
+    /// buffered by incremental detokenization. `RetryManager` sets it and `Backend`
+    /// consumes it in the same frontend process; `#[serde(skip)]` prevents it from reaching
+    /// a remote worker.
     #[builder(default)]
     #[serde(skip)]
-    pub(crate) jail_seed: Option<String>,
+    pub(crate) jail_seed: Option<DecoderCheckpoint>,
 
     /// Bootstrap info for disaggregated serving
     #[builder(default)]
@@ -714,6 +747,17 @@ where
     Ok(value)
 }
 
+impl std::fmt::Debug for PreprocessedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreprocessedRequest")
+            .field("model", &self.model)
+            .field("token_count", &self.token_ids.len())
+            .field("output_options", &self.output_options)
+            .field("extra_args", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
 impl PreprocessedRequest {
     pub fn phase(&self) -> RequestPhase {
         self.tracker
@@ -763,6 +807,14 @@ impl PreprocessedRequest {
             .as_ref()
             .filter(|mm| !mm.routing_token_ids.is_empty() && mm.expanded_prompt_len > 0)
             .map_or(self.token_ids.len(), |mm| mm.expanded_prompt_len)
+    }
+}
+
+/// The worker's backend admission gate admits a request under `routing.dp_rank`:
+/// the rank routing selected for this dispatch, which the backend serves it on.
+impl crate::admission_gate::AdmissionRequest for PreprocessedRequest {
+    fn dp_rank(&self) -> Option<u32> {
+        self.routing.as_ref().and_then(|routing| routing.dp_rank)
     }
 }
 
@@ -983,6 +1035,82 @@ mod tests {
         ids.iter().flat_map(|id| id.to_le_bytes()).collect()
     }
 
+    /// A native worker's ingress reads the rank from the body as sent, under
+    /// either request-plane codec: `routing.dp_rank` when it is set, and no rank
+    /// when it, or `routing`, is missing or null.
+    #[tokio::test]
+    async fn worker_ingress_reads_routing_dp_rank_from_the_body() {
+        use crate::admission_gate::AdmissionRequest;
+        use dynamo_runtime::pipeline::network::{
+            IngressRequestDecoder, RequestPlanePayloadCodec, SerdeIngressPayloadAdapter,
+        };
+        use serde_json::{Value, json};
+
+        let body = |routing: Option<Value>| {
+            let mut body = json!({
+                "model": "m",
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {},
+                "sampling_options": {},
+                "output_options": {},
+            });
+            if let Some(routing) = routing {
+                body["routing"] = routing;
+            }
+            body
+        };
+        let cases = [
+            (
+                body(Some(json!({"dp_rank": 5, "prefill_dp_rank": 3}))),
+                Some(5),
+            ),
+            (body(Some(json!({"dp_rank": null}))), None),
+            (body(Some(json!({"backend_instance_id": 7}))), None),
+            (body(Some(Value::Null)), None),
+            (body(None), None),
+        ];
+        for (body, expected) in cases {
+            for codec in [
+                RequestPlanePayloadCodec::Json,
+                RequestPlanePayloadCodec::Msgpack,
+            ] {
+                let request: PreprocessedRequest = SerdeIngressPayloadAdapter
+                    .decode_request(codec, codec.encode(&body).unwrap().into())
+                    .await
+                    .unwrap();
+                assert_eq!(request.dp_rank(), expected, "{body}");
+            }
+        }
+    }
+
+    #[test]
+    fn worker_extension_numbers_remain_native_for_independent_receivers() {
+        use dynamo_runtime::pipeline::network::RequestPlanePayloadCodec;
+        #[derive(Deserialize)]
+        struct BackendSettings {
+            temperature: f64,
+            ranks: Vec<u64>,
+        }
+        #[derive(Deserialize)]
+        struct BackendRequest {
+            extra_args: BackendSettings,
+        }
+        let request: PreprocessedRequest = serde_json::from_value(serde_json::json!({
+            "model": "m", "token_ids": [1, 2, 3], "stop_conditions": {},
+            "sampling_options": {}, "output_options": {},
+            "extra_args": {"temperature": 0.7, "ranks": [0, 5]}
+        }))
+        .unwrap();
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let received: BackendRequest = codec.decode(&codec.encode(&request).unwrap()).unwrap();
+            assert_eq!(received.extra_args.temperature, 0.7);
+            assert_eq!(received.extra_args.ranks, vec![0, 5]);
+        }
+    }
+
     #[test]
     fn packed_token_ids_deserialize_from_msgpack_bytes() {
         let ids = vec![0u32, 1, 128_000, i32::MAX as u32];
@@ -1103,6 +1231,20 @@ mod tests {
         assert!(!Arc::ptr_eq(&request.token_ids, &cloned.token_ids));
         assert_eq!(request.token_ids.as_slice(), &[1, 2, 3]);
         assert_eq!(cloned.token_ids.as_slice(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn metadata_upload_capability_is_serialized_but_never_debug_logged() {
+        let mut request = request_with_tokens(vec![1, 2, 3]);
+        request.extra_args = Some(
+            serde_json::json!({"nvext": {"metadata_upload": {"destination": {"url": "https://storage.example?sig=secret", "required_headers": {"x-token": "private-token"}}}}}),
+        );
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("secret"));
+        assert!(!debug.contains("private-token"));
+        let serialized = serde_json::to_string(&request).unwrap();
+        assert!(serialized.contains("sig=secret"));
+        assert!(serialized.contains("private-token"));
     }
 
     #[test]

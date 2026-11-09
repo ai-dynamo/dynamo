@@ -19,6 +19,7 @@ from dynamo.common.configuration.groups.http_args import HttpConfigBase, from_en
 
 from .url_validator import (
     _MAX_REDIRECTS,
+    MediaSizeError,
     UrlValidationError,
     UrlValidationPolicy,
     describe_error_detail,
@@ -93,7 +94,7 @@ async def collect_capped(
     async for chunk in chunks:
         total += len(chunk)
         if max_bytes is not None and total > max_bytes:
-            raise UrlValidationError(
+            raise MediaSizeError(
                 f"Media exceeds the {max_bytes} byte download limit: "
                 f"{describe_media_source(url)}"
             )
@@ -128,7 +129,8 @@ class HttpClient(abc.ABC):
         Single-shot: no retries. Raises one of the unified exception
         classes above; callers never see native aiohttp classes.
 
-        ``policy=None``: use the backend's built-in redirect handling.
+        ``policy=None``: follow redirects, up to the backend's limit, without
+        validating each hop against a URL policy.
 
         ``max_bytes`` set: refuse a body larger than that while it is being
         read, so an attacker-chosen URL cannot buffer an unbounded response.
@@ -204,7 +206,7 @@ class HttpClient(abc.ABC):
         policy: Optional[UrlValidationPolicy] = None,
         read_timeout: Optional[float] = None,
     ) -> bytes:
-        """Backend's native redirect-following GET (no SSRF policy applied).
+        """Redirect-following GET with no URL policy on any hop.
 
         ``policy`` is not applied to the URL here. It is passed so a backend
         can honor a request that is stricter than the deployment baseline at

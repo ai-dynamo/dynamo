@@ -87,7 +87,7 @@ func TestDGDGMSResourceClaimsReconciler_DRAValidation(t *testing.T) {
 				RuntimeConfig: &controller_common.RuntimeConfig{},
 			}
 			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+				Name: "test-dgd", Namespace: "default",
 				Spec: v1beta1.DynamoGraphDeploymentSpec{
 					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{tt.spec},
 				},
@@ -114,7 +114,7 @@ func TestDGDGMSResourceClaimsReconciler_ToleratesNonGMSComponents(t *testing.T) 
 	ctx := context.Background()
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Name: "test-dgd", Namespace: "default",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
@@ -148,7 +148,7 @@ func TestDGDGMSResourceClaimsReconciler_CleansStaleNonGMSResourceClaimTemplate(t
 	ctx := context.Background()
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Name: "test-dgd", Namespace: "default",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
@@ -160,12 +160,10 @@ func TestDGDGMSResourceClaimsReconciler_CleansStaleNonGMSResourceClaimTemplate(t
 	}
 	templateName := "test-dgd-decode-gpu"
 	rct := &resourcev1.ResourceClaimTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      templateName,
-			Namespace: "default",
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(dgd, v1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
-			},
+		Name:      templateName,
+		Namespace: "default",
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(dgd, v1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
 		},
 	}
 	cl := fake.NewClientBuilder().
@@ -199,7 +197,7 @@ func TestDGDGMSResourceClaimsReconciler_DoesNotDeleteSnapshotJobTemplate(t *test
 	checkpointID := "snapshot-job-checkpoint"
 
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Name: "test-dgd", Namespace: "default",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
@@ -229,15 +227,13 @@ func TestDGDGMSResourceClaimsReconciler_DoesNotDeleteSnapshotJobTemplate(t *test
 		},
 	}
 	snapshotJob := &snapshotv1alpha1.SnapshotJob{
-		ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-" + checkpointID, Namespace: "default"},
+		Name: "checkpoint-" + checkpointID, Namespace: "default",
 	}
 	checkpointTemplate := &resourcev1.ResourceClaimTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      checkpointGMSResourceClaimTemplateName(checkpointID),
-			Namespace: "default",
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(snapshotJob, snapshotv1alpha1.GroupVersion.WithKind("SnapshotJob")),
-			},
+		Name:      checkpointGMSResourceClaimTemplateName(checkpointID),
+		Namespace: "default",
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(snapshotJob, snapshotv1alpha1.GroupVersion.WithKind("SnapshotJob")),
 		},
 		Spec: resourcev1.ResourceClaimTemplateSpec{
 			Spec: resourcev1.ResourceClaimSpec{
@@ -254,7 +250,7 @@ func TestDGDGMSResourceClaimsReconciler_DoesNotDeleteSnapshotJobTemplate(t *test
 			},
 		},
 	}
-	deviceClass := &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: dra.DefaultDeviceClassName}}
+	deviceClass := &resourcev1.DeviceClass{Name: dra.DefaultDeviceClassName}
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(dgd, snapshotJob, checkpointTemplate, deviceClass).

@@ -151,7 +151,7 @@ func TestEventuallyWatchdogWarningIncludesExternalCaller(t *testing.T) {
 
 	t.Log("Point the warning at the test call site instead of the Eventually wrapper")
 	var warning string
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		if strings.Contains(line, "WARNING: Eventually condition at") {
 			warning = line
 			break
@@ -224,7 +224,7 @@ func runHelperTest(t *testing.T, testName string) string {
 func extractErrorTrace(output string) []string {
 	var trace []string
 	inTrace := false
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "Error Trace:") {
 			parts := strings.SplitN(trimmed, "\t", 2)

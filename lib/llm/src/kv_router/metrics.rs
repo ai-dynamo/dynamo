@@ -25,8 +25,8 @@
 //!   Populated by `RoutingHost::generate()` and its `RequestGuard` as it observes
 //!   the streaming response (TTFT on first token, ITL per output block,
 //!   ISL/OSL/kv_hit_rate at routing and completion).
-//!   - Frontend, builtin modes without affinity or LoRA filtering: populated by `RoutingHost`;
-//!     modes that still bypass the host remain registered as zeros
+//!   - Frontend, builtin modes (with or without session affinity): request-level metrics
+//!     populated by `RoutingHost`; KV metrics stay at zero (no KV index)
 //!   - Frontend, KV mode (aggregated and disaggregated): available on default port
 //!     8000 via the `drt_metrics` bridge, populated per-request
 //!   - Standalone router (`python -m dynamo.router`): available on `DYN_SYSTEM_PORT`
@@ -43,7 +43,7 @@
 //! (`dynamo_component_inflight_requests`, `dynamo_component_requests_total`, etc.)
 //! via the system status server when `DYN_SYSTEM_PORT` is explicitly set.
 //!
-//! See also: `docs/observability/metrics.md` (Router Metrics section).
+//! See also: `docs/fern/pages/reference/observability/metrics-catalog.mdx` (Router metrics section).
 
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
@@ -65,9 +65,13 @@ use prometheus::{
 
 use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::RequestPhase;
+
+mod worker_registered;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
 use dynamo_kv_router::indexer::ApproximateLruStats;
 use dynamo_kv_router::sequences::LocalWorkerLoad;
+use worker_registered::RouterWorkerRegistered;
+pub(crate) use worker_registered::{RegistrationAvailabilityProvider, RouterWorkerRegistration};
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
@@ -508,7 +512,7 @@ impl dynamo_kv_router::services::selection::ReplicaIngressObserver
 
 /// Component-scoped router gauges for worker discovery.
 pub(crate) struct RouterWorkerStatusMetrics {
-    pub registered: IntGaugeVec,
+    registered: RouterWorkerRegistered,
     pub kv_event_source_mismatch_workers: IntGaugeVec,
 }
 
@@ -524,12 +528,13 @@ impl RouterWorkerStatusMetrics {
         ROUTER_WORKER_STATUS_METRICS
             .get_or_init(|| {
                 let metrics = component.metrics();
-                let registered = metrics
-                    .create_intgaugevec(
+                let registered = dynamo_runtime::metrics::create_metric(
+                        component,
                         router::WORKER_REGISTERED,
                         "Whether the router currently has this worker/dp_rank registered (1 = registered)",
-                        &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE],
                         &[],
+                        None,
+                        None,
                     )
                     .expect("failed to create router_worker_registered gauge");
                 let kv_event_source_mismatch_workers = metrics
@@ -555,41 +560,15 @@ impl RouterWorkerStatusMetrics {
             .clone()
     }
 
-    /// Gauges on no registry, for observer tests that only read them back.
-    #[cfg(test)]
-    pub(crate) fn unregistered() -> Self {
-        Self {
-            registered: IntGaugeVec::new(
-                Opts::new(router::WORKER_REGISTERED, "registered"),
-                &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE],
-            )
-            .expect("valid gauge"),
-            kv_event_source_mismatch_workers: IntGaugeVec::new(
-                Opts::new(router::KV_EVENT_SOURCE_MISMATCH_WORKERS, "mismatch"),
-                &[
-                    labels::MODEL,
-                    labels::WORKER_TYPE,
-                    TARGET_NAMESPACE_LABEL,
-                    TARGET_COMPONENT_LABEL,
-                    TARGET_ENDPOINT_LABEL,
-                ],
-            )
-            .expect("valid gauge"),
-        }
-    }
-
-    pub fn set_registered(&self, worker_id: u64, dp_rank: u32, worker_type: &str) {
-        let worker_id = worker_id.to_string();
-        let dp_rank = dp_rank.to_string();
-        let labels = &[worker_id.as_str(), dp_rank.as_str(), worker_type];
-        self.registered.with_label_values(labels).set(1);
-    }
-
-    pub fn remove_worker(&self, worker_id: u64, dp_rank: u32, worker_type: &str) {
-        let worker_id = worker_id.to_string();
-        let dp_rank = dp_rank.to_string();
-        let labels = &[worker_id.as_str(), dp_rank.as_str(), worker_type];
-        let _ = self.registered.remove_label_values(labels);
+    pub fn watch_workers(
+        &self,
+        workers: crate::discovery::RuntimeConfigWatch,
+        worker_type: &'static str,
+        cancellation: tokio_util::sync::CancellationToken,
+        available_workers: Option<RegistrationAvailabilityProvider>,
+    ) -> Arc<RouterWorkerRegistration> {
+        self.registered
+            .watch(workers, worker_type, cancellation, available_workers)
     }
 
     pub fn set_kv_event_source_mismatch_workers(
@@ -664,6 +643,7 @@ impl WorkerLoadMetrics {
         }
     }
 
+    #[cfg(test)]
     fn register(&self, registry: &prometheus::Registry) -> Result<(), prometheus::Error> {
         registry.register(Box::new(self.active_decode_blocks.clone()))?;
         registry.register(Box::new(self.active_prefill_tokens.clone()))?;
@@ -712,14 +692,6 @@ impl WorkerLoadMetrics {
 
 pub static WORKER_LOAD_METRICS: LazyLock<WorkerLoadMetrics> = LazyLock::new(WorkerLoadMetrics::new);
 
-/// Register the worker load gauges with the given Prometheus registry.
-/// Called during frontend HTTP service setup (`service_v2.rs`), served on port 8000.
-pub fn register_worker_load_metrics(
-    registry: &prometheus::Registry,
-) -> Result<(), prometheus::Error> {
-    WORKER_LOAD_METRICS.register(registry)
-}
-
 // ---------------------------------------------------------------------------
 // Router queue and admission metrics
 // ---------------------------------------------------------------------------
@@ -731,7 +703,7 @@ pub struct RouterQueueMetrics {
     pub pending_cached_tokens: IntGaugeVec,
     pub backpressure_total: IntCounterVec,
     pub received_total: IntCounterVec,
-    pub deadline_rejections_total: IntCounterVec,
+    pub rejected_total: IntCounterVec,
 }
 
 #[derive(Clone)]
@@ -744,9 +716,11 @@ pub struct RouterQueueMetricHandles {
     pub cached_token_limit_rejections: IntCounter,
     pub received_total: IntCounter,
     pub rejected_due_time_passed_total: IntCounter,
+    pub rejected_queue_size_exceeded_total: IntCounter,
     // Shared by clones for one scheduler; separate schedulers may share Prometheus labels.
     reported_received: Arc<std::sync::atomic::AtomicU64>,
     reported_due_time_passed: Arc<std::sync::atomic::AtomicU64>,
+    reported_queue_size_exceeded: Arc<std::sync::atomic::AtomicU64>,
 }
 
 pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> = LazyLock::new(|| {
@@ -789,10 +763,10 @@ pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> = LazyLock::new(||
             ),
             &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
         ).expect("valid router admission received metric"),
-        deadline_rejections_total: IntCounterVec::new(
+        rejected_total: IntCounterVec::new(
             Opts::new(
                 format!("{}_router_admission_rejected_total", name_prefix::FRONTEND),
-                "Total router admission rejections by deadline reason",
+                "Total router admission rejections by reason",
             ),
             &[labels::MODEL, labels::WORKER_TYPE, "policy_class", "reason"],
         ).expect("valid router admission rejection metric"),
@@ -819,13 +793,12 @@ impl RouterQueueMetrics {
             self.backpressure_total
                 .with_label_values(&[model, worker_type, policy_class, reason])
         };
+        let admission_rejection = |reason| {
+            self.rejected_total
+                .with_label_values(&[model, worker_type, policy_class, reason])
+        };
         // Reserved by DEP #13891; no predicted-miss admission policy exists yet.
-        self.deadline_rejections_total.with_label_values(&[
-            model,
-            worker_type,
-            policy_class,
-            "predicted_miss",
-        ]);
+        admission_rejection("predicted_miss");
         RouterQueueMetricHandles {
             pending_requests: self.pending_requests.with_label_values(&queue_labels),
             pending_isl_tokens: self.pending_isl_tokens.with_label_values(&queue_labels),
@@ -834,32 +807,40 @@ impl RouterQueueMetrics {
             raw_isl_limit_rejections: rejection("raw_isl_token_limit"),
             cached_token_limit_rejections: rejection("cached_token_limit"),
             received_total: self.received_total.with_label_values(&queue_labels),
-            rejected_due_time_passed_total: self.deadline_rejections_total.with_label_values(&[
-                model,
-                worker_type,
-                policy_class,
-                "due_time_passed",
-            ]),
+            rejected_due_time_passed_total: admission_rejection("due_time_passed"),
+            rejected_queue_size_exceeded_total: admission_rejection("queue_size_exceeded"),
             reported_received: Arc::default(),
             reported_due_time_passed: Arc::default(),
+            reported_queue_size_exceeded: Arc::default(),
         }
     }
 }
 
 impl RouterQueueMetricHandles {
-    /// Export only unseen increments, including when concurrent updates carry older snapshots.
-    pub(super) fn update_admission(&self, received: u64, due_time_passed: u64) {
-        use std::sync::atomic::Ordering;
-        let previous = self
-            .reported_received
-            .fetch_max(received, Ordering::Relaxed);
-        self.received_total
-            .inc_by(received.saturating_sub(previous));
-        let previous = self
-            .reported_due_time_passed
-            .fetch_max(due_time_passed, Ordering::Relaxed);
-        self.rejected_due_time_passed_total
-            .inc_by(due_time_passed.saturating_sub(previous));
+    /// Export only unseen increments of the scheduler's cumulative totals, including when
+    /// concurrent updates carry older snapshots.
+    pub(super) fn update_admission(
+        &self,
+        received: u64,
+        due_time_passed: u64,
+        queue_size_exceeded: u64,
+    ) {
+        for (counter, reported, total) in [
+            (&self.received_total, &self.reported_received, received),
+            (
+                &self.rejected_due_time_passed_total,
+                &self.reported_due_time_passed,
+                due_time_passed,
+            ),
+            (
+                &self.rejected_queue_size_exceeded_total,
+                &self.reported_queue_size_exceeded,
+                queue_size_exceeded,
+            ),
+        ] {
+            let previous = reported.fetch_max(total, std::sync::atomic::Ordering::Relaxed);
+            counter.inc_by(total.saturating_sub(previous));
+        }
     }
 }
 
@@ -874,7 +855,7 @@ pub fn register_router_queue_metrics(
     registry.register(Box::new(m.pending_cached_tokens.clone()))?;
     registry.register(Box::new(m.backpressure_total.clone()))?;
     registry.register(Box::new(m.received_total.clone()))?;
-    registry.register(Box::new(m.deadline_rejections_total.clone()))?;
+    registry.register(Box::new(m.rejected_total.clone()))?;
     Ok(())
 }
 
@@ -1540,6 +1521,7 @@ impl RemoteIndexerMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_runtime::metrics::PrometheusMetric;
     use prometheus::{Encoder, TextEncoder};
 
     #[test]
@@ -1670,7 +1652,7 @@ dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",w
     fn test_router_worker_status_metrics_pef() {
         let registry = prometheus::Registry::new();
         let metrics = RouterWorkerStatusMetrics {
-            registered: IntGaugeVec::new(
+            registered: RouterWorkerRegistered::with_opts(
                 Opts::new(
                     format!(
                         "{}_{}",
@@ -1679,7 +1661,6 @@ dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",w
                     ),
                     "Whether the router currently has this worker/dp_rank registered (1 = registered)",
                 ),
-                &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE],
             )
             .unwrap(),
             kv_event_source_mismatch_workers: IntGaugeVec::new(
@@ -1708,7 +1689,17 @@ dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",w
             .register(Box::new(metrics.kv_event_source_mismatch_workers.clone()))
             .unwrap();
 
-        metrics.set_registered(123, 0, "decode");
+        let (workers_tx, workers_rx) =
+            tokio::sync::watch::channel(std::collections::HashMap::from([(
+                123,
+                crate::local_model::runtime_config::ModelRuntimeConfig::default(),
+            )]));
+        let _registration = metrics.watch_workers(
+            workers_rx,
+            "decode",
+            tokio_util::sync::CancellationToken::new(),
+            None,
+        );
         metrics.set_kv_event_source_mismatch_workers(
             "model-a", "decode", "ns-a", "decode", "generate", 2,
         );
@@ -1736,7 +1727,7 @@ dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",w
             "\nActual PEF:\n{output}"
         );
 
-        metrics.remove_worker(123, 0, "decode");
+        workers_tx.send(std::collections::HashMap::new()).unwrap();
         let output = gather_pef(&registry);
         assert!(
             !output.contains("router_worker_id=\"123\""),
@@ -1786,10 +1777,10 @@ dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",w
             ),
             &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
         ).expect("valid router admission received metric"),
-        deadline_rejections_total: IntCounterVec::new(
+        rejected_total: IntCounterVec::new(
             Opts::new(
                 format!("{}_router_admission_rejected_total", name_prefix::FRONTEND),
-                "Total router admission rejections by deadline reason",
+                "Total router admission rejections by reason",
             ),
             &[labels::MODEL, labels::WORKER_TYPE, "policy_class", "reason"],
         ).expect("valid router admission rejection metric"),
@@ -1819,16 +1810,16 @@ dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",w
             .register(Box::new(metrics.received_total.clone()))
             .unwrap();
         registry
-            .register(Box::new(metrics.deadline_rejections_total.clone()))
+            .register(Box::new(metrics.rejected_total.clone()))
             .unwrap();
         let handles = metrics.handles("model", "decode", "default");
-        handles.update_admission(10, 1);
-        handles.clone().update_admission(10, 1);
-        handles.update_admission(9, 0);
+        handles.update_admission(10, 1, 3);
+        handles.clone().update_admission(10, 1, 3);
+        handles.update_admission(9, 0, 2);
         // A replacement scheduler with the same labels adds its own counts.
         metrics
             .handles("model", "decode", "default")
-            .update_admission(2, 1);
+            .update_admission(2, 1, 1);
         handles.pending_requests.set(5);
         handles.pending_isl_tokens.set(1024);
         handles.pending_cached_tokens.set(512);
@@ -1838,10 +1829,11 @@ dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",w
 # HELP dynamo_frontend_router_admission_received_total Total attempts received by router admission; includes retries and excludes advisory probes
 # TYPE dynamo_frontend_router_admission_received_total counter
 dynamo_frontend_router_admission_received_total{model=\"model\",policy_class=\"default\",worker_type=\"decode\"} 12
-# HELP dynamo_frontend_router_admission_rejected_total Total router admission rejections by deadline reason
+# HELP dynamo_frontend_router_admission_rejected_total Total router admission rejections by reason
 # TYPE dynamo_frontend_router_admission_rejected_total counter
 dynamo_frontend_router_admission_rejected_total{model=\"model\",policy_class=\"default\",reason=\"due_time_passed\",worker_type=\"decode\"} 2
 dynamo_frontend_router_admission_rejected_total{model=\"model\",policy_class=\"default\",reason=\"predicted_miss\",worker_type=\"decode\"} 0
+dynamo_frontend_router_admission_rejected_total{model=\"model\",policy_class=\"default\",reason=\"queue_size_exceeded\",worker_type=\"decode\"} 4
 # HELP dynamo_frontend_router_queue_backpressure_total Total number of router scheduler queue backpressure rejections
 # TYPE dynamo_frontend_router_queue_backpressure_total counter
 dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"cached_token_limit\",worker_type=\"decode\"} 0

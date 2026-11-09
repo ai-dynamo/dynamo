@@ -19,20 +19,29 @@
 //! The [`service_v2::HttpService`] can be further extended to host any [`axum::Router`] using the [`service_v2::HttpServiceConfigBuilder`].
 
 mod anthropic;
+mod batch_proxy;
+mod decision_lifecycle;
+mod image_edits;
 pub mod metadata;
 mod openai;
+mod server;
+mod transcriptions;
+mod write_timeout;
 
 pub mod busy_threshold;
 pub mod disconnect;
 pub mod error;
+pub mod format_generate;
 pub mod frontend_extension;
-pub mod generate;
+
 pub mod health;
 pub mod metrics;
 pub mod openapi_docs;
 pub mod realtime;
+pub mod router_policy;
 pub mod service_v2;
-pub mod sglang_generate;
+pub mod systemone;
+mod worker_metrics;
 
 pub use axum;
 pub use frontend_extension::{
@@ -78,13 +87,22 @@ fn apply_request_tool_call_parsing_options(
     let converted_tool_choice = crate::preprocessor::tool_choice::convert_tool_choice(tool_choice);
     let effective_tools = crate::preprocessor::tool_choice::effective_tools(&request.inner)?;
     let converted_tools = crate::preprocessor::tool_choice::convert_tools(effective_tools.as_ref());
+    let structural_tag_config = parsing_options.structural_tag.as_ref();
+    let has_structured_output = request
+        .inner
+        .response_format
+        .as_ref()
+        .is_some_and(|format| !matches!(format, dynamo_protocols::types::ResponseFormat::Text));
     let uses_structural_tag = crate::preprocessor::structural_tag::structural_tag_decision(
-        parsing_options.tool_call_parser.as_deref(),
+        (
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        ),
         &converted_tool_choice,
         &converted_tools,
         request.inner.parallel_tool_calls,
-        parsing_options.structural_tag_mode,
-        parsing_options.structural_tag_scope,
+        structural_tag_config,
+        has_structured_output,
         parsing_options.exclude_tools_when_tool_choice_none,
     )?
     .is_required();
@@ -110,8 +128,8 @@ mod tests {
 
     #[test]
     fn raw_batch_reasoning_policy_respects_deployment_default_and_client_override() {
-        let mut options =
-            ParsingOptions::new(Some("gemma4".to_string()), Some("gemma4".to_string()));
+        // Reasoning selector only: the Gemma 4 tool-call parser keeps reasoning on.
+        let mut options = ParsingOptions::new(None, Some("gemma4".to_string()));
         options.default_thinking_mode = Some("enabled".to_string());
         assert!(
             !apply_request_tool_call_parsing_options(options.clone(), &request(json!("auto")))
@@ -125,6 +143,42 @@ mod tests {
                 .unwrap()
                 .reasoning_disabled
         );
+    }
+
+    #[test]
+    fn frontend_thinking_default_reaches_reasoning_policy() {
+        // Kimi K2.5 reasons unless the request or a default turns thinking off.
+        let options = ParsingOptions::new(None, Some("kimi_k25".to_string()));
+        let reasoning_disabled = |defaults: &crate::frontend_config::ChatTemplateDefaults,
+                                  kwargs: Value| {
+            let mut req = request(json!("auto"));
+            req.chat_template_args = serde_json::from_value(kwargs).unwrap();
+            defaults.apply_to_request(&mut req);
+            req.normalize_reasoning_template_args().unwrap();
+            apply_request_tool_call_parsing_options(options.clone(), &req)
+                .unwrap()
+                .reasoning_disabled
+        };
+        let mut defaults = crate::frontend_config::ChatTemplateDefaults::default();
+        assert!(!reasoning_disabled(&defaults, Value::Null));
+        defaults.set_default_chat_template_kwargs(
+            json!({"enable_thinking": false}).as_object().cloned(),
+        );
+        assert!(reasoning_disabled(&defaults, Value::Null));
+        for unset in [Value::Null, json!("auto")] {
+            assert!(reasoning_disabled(
+                &defaults,
+                json!({"enable_thinking": unset})
+            ));
+            assert!(reasoning_disabled(
+                &defaults,
+                json!({"reasoning_effort": unset})
+            ));
+        }
+        assert!(!reasoning_disabled(
+            &defaults,
+            json!({"enable_thinking": true})
+        ));
     }
 
     #[test]
@@ -208,10 +262,16 @@ mod tests {
                     let result = apply_request_tool_call_parsing_options(options, &req).unwrap();
                     assert_eq!(
                         result.reasoning_disabled,
-                        if family == "gemma4" {
-                            thinking != Some(true)
-                        } else {
-                            thinking == Some(false)
+                        match family {
+                            "gpt_oss" => false,
+                            "glm47" => false,
+                            "beam" => false,
+                            // Kept on with the Gemma 4 tool-call parser.
+                            "gemma4" => thinking != Some(true) && tool.is_none(),
+                            // Spark's template has no reasoning-off mode; keep parsing
+                            // its private channel even when thinking=false is requested.
+                            "muse_spark" => false,
+                            _ => thinking == Some(false),
                         },
                         "{selector} {tool:?} {reasoning:?} {thinking:?}"
                     );
@@ -267,7 +327,9 @@ mod tests {
                         "name": "lookup",
                         "parameters": {
                             "type": "object",
-                            "properties": {"query": {"type": "string"}}
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"],
+                            "additionalProperties": false
                         },
                         "strict": true
                     }]
@@ -402,15 +464,14 @@ mod tests {
     // The registry-builder gap this test suite exists to close: a non-Kimi parser
     // (qwen3_coder, which the parser registry does register a structural-tag builder
     // for) with a forced tool_choice must still resolve to `StructuralTag` once the
-    // operator has globally enabled structural-tag mode — matching the real
-    // preprocessing path (`apply_tool_choice_structural_tag`'s
-    // `structural_tag_mode != Off` branch), not the narrower Kimi-only reconstruction
-    // this helper used before this fix.
+    // operator has configured structural tags — matching the real preprocessing
+    // path, not the narrower Kimi-only reconstruction this helper used before
+    // this fix.
     #[test]
     fn operator_enabled_mode_resolves_structural_tag_for_a_non_kimi_parser() {
         let parsing_options = ParsingOptions {
             tool_call_parser: Some("qwen3_coder".to_string()),
-            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::On,
+            structural_tag: Some(Default::default()),
             ..Default::default()
         };
         let result =
@@ -419,15 +480,113 @@ mod tests {
         assert_eq!(
             result.guided_tool_constraint,
             GuidedToolConstraint::StructuralTag,
-            "an operator-enabled structural_tag_mode must apply to any registry-supported \
+            "an operator-configured structural tag must apply to any registry-supported \
              parser, not only the Kimi-intrinsic case"
         );
     }
 
-    // With the low-level ParsingOptions default (`structural_tag_mode = Off`),
-    // the same non-Kimi parser must NOT get a structural tag. Regular workers
-    // explicitly publish the deployment's default-on policy into the model card;
-    // native sidecars that do not do so retain this conservative default.
+    #[test]
+    fn harmony_v1_ignores_advertised_structural_tags_when_reconstructing_tool_constraints() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::harmony_v1_ignores_advertised_structural_tags_when_reconstructing_tool_constraints"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "1",
+            )],
+        ) {
+            return;
+        }
+        for parser in ["harmony", "gpt_oss"] {
+            for (choice, expected) in [
+                (json!("auto"), GuidedToolConstraint::None),
+                (json!("none"), GuidedToolConstraint::None),
+                (json!("required"), GuidedToolConstraint::GuidedJsonRequired),
+                (
+                    json!({"type":"function","function":{"name":"get_weather"}}),
+                    GuidedToolConstraint::GuidedJsonNamed {
+                        tool_name: "get_weather".to_string(),
+                    },
+                ),
+            ] {
+                let options = ParsingOptions {
+                    tool_call_parser: Some(parser.to_string()),
+                    structural_tag: Some(Default::default()),
+                    ..Default::default()
+                };
+                let result =
+                    apply_request_tool_call_parsing_options(options, &request(choice)).unwrap();
+                assert_eq!(result.guided_tool_constraint, expected, "{parser}");
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_oss_v2_reconstructs_required_parallel_arrays_separately_from_native_calls() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::gpt_oss_v2_reconstructs_required_parallel_arrays_separately_from_native_calls"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        for parser in ["harmony", "gpt_oss"] {
+            for (choice, parallel, expected) in [
+                (
+                    json!("required"),
+                    None,
+                    GuidedToolConstraint::GuidedJsonRequired,
+                ),
+                (
+                    json!("required"),
+                    Some(true),
+                    GuidedToolConstraint::GuidedJsonRequired,
+                ),
+                (
+                    json!("required"),
+                    Some(false),
+                    GuidedToolConstraint::StructuralTag,
+                ),
+                (
+                    json!("auto"),
+                    Some(true),
+                    GuidedToolConstraint::StructuralTag,
+                ),
+                (
+                    json!({"type":"function","function":{"name":"get_weather"}}),
+                    None,
+                    GuidedToolConstraint::StructuralTag,
+                ),
+            ] {
+                let options = ParsingOptions {
+                    tool_call_parser: Some(parser.to_string()),
+                    structural_tag: Some(crate::local_model::runtime_config::StructuralTagConfig {
+                        scope: crate::local_model::runtime_config::StructuralTagScope::Always,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let mut request = request(choice);
+                request.inner.parallel_tool_calls = parallel;
+                let result = apply_request_tool_call_parsing_options(options, &request).unwrap();
+                assert_eq!(
+                    result.guided_tool_constraint, expected,
+                    "{parser} {parallel:?}"
+                );
+            }
+        }
+    }
+
+    // The low-level ParsingOptions default remains conservative. Regular
+    // workers explicitly publish the deployment-facing On/Always policy;
+    // native sidecars without an operator configuration retain optional tags OFF.
     #[test]
     fn parsing_options_default_mode_off_does_not_resolve_structural_tag() {
         let parsing_options = ParsingOptions {
@@ -443,8 +602,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tools_with_structured_output_are_classified_as_structural_tag() {
+        let mut request = request(json!("auto"));
+        request.inner.response_format = Some(
+            serde_json::from_value(json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "response",
+                    "schema": {"type": "object"}
+                }
+            }))
+            .expect("response_format must deserialize"),
+        );
+        let config = crate::local_model::runtime_config::StructuralTagConfig {
+            allow_tool_calls_with_structured_output: true,
+            ..Default::default()
+        };
+        let parsing_options = ParsingOptions {
+            tool_call_parser: Some("qwen3_coder".to_string()),
+            structural_tag: Some(config),
+            ..Default::default()
+        };
+
+        let result = apply_request_tool_call_parsing_options(parsing_options, &request)
+            .expect("tools with structured output must resolve a constraint");
+
+        assert_eq!(
+            result.guided_tool_constraint,
+            GuidedToolConstraint::StructuralTag
+        );
+    }
+
     // `tool_choice: none` must never leave the client able to observe a tool call or
-    // a tool-call finish reason, regardless of the operator's structural-tag mode or
+    // a tool-call finish reason, regardless of the operator's structural-tag policy or
     // exclusion setting. The real preprocessing path may install a ban tag at
     // generation time for `none` (which is a request-time generation constraint on
     // the engine, tracked separately from this field), but that must not surface as
@@ -459,7 +650,7 @@ mod tests {
         for exclude_tools_when_tool_choice_none in [true, false] {
             let parsing_options = ParsingOptions {
                 tool_call_parser: Some("qwen3_coder".to_string()),
-                structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::On,
+                structural_tag: Some(Default::default()),
                 exclude_tools_when_tool_choice_none,
                 ..Default::default()
             };
@@ -659,7 +850,7 @@ mod tests {
     }
 
     // Same gap, operator-enabled path: qwen3_coder only gets a structural tag when
-    // `structural_tag_mode = On` (it is not Kimi-intrinsic). Confirms the fix isn't
+    // structural tags are configured (it is not Kimi-intrinsic). Confirms the fix isn't
     // narrowly scoped to the two Kimi-intrinsic parsers.
     #[test]
     fn operator_enabled_qwen3_coder_required_with_empty_tools_is_rejected() {
@@ -673,7 +864,7 @@ mod tests {
             serde_json::from_value(value).expect("request must deserialize");
         let parsing_options = ParsingOptions {
             tool_call_parser: Some("qwen3_coder".to_string()),
-            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::On,
+            structural_tag: Some(Default::default()),
             ..Default::default()
         };
         let result = apply_request_tool_call_parsing_options(parsing_options, &request);
@@ -706,7 +897,7 @@ mod tests {
             serde_json::from_value(value).expect("request must deserialize");
         let parsing_options = ParsingOptions {
             tool_call_parser: Some("qwen3_coder".to_string()),
-            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::On,
+            structural_tag: Some(Default::default()),
             ..Default::default()
         };
         let result = apply_request_tool_call_parsing_options(parsing_options, &request);
@@ -718,11 +909,23 @@ mod tests {
     }
 }
 
-/// Documentation for a route
+/// Handler contract advertised by a route, independent of its configured URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OpenApiRouteKind {
+    ChatCompletions,
+    Completions,
+    Embeddings,
+    Responses,
+    Decisions,
+    SystemOne,
+}
+
+/// Documentation for a route, with optional handler-specific schema metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RouteDoc {
     method: axum::http::Method,
     path: String,
+    openapi_kind: Option<OpenApiRouteKind>,
 }
 
 impl std::fmt::Display for RouteDoc {
@@ -732,17 +935,33 @@ impl std::fmt::Display for RouteDoc {
 }
 
 impl RouteDoc {
+    /// Describe a method/path without inferring a handler contract from its URL.
     pub fn new<T: Into<String>>(method: axum::http::Method, path: T) -> Self {
         RouteDoc {
             method,
             path: path.into(),
+            openapi_kind: None,
         }
     }
 
+    /// Associate this route with its handler contract, including at custom paths.
+    /// Only POST operations currently consume this metadata.
+    pub fn with_openapi_kind(mut self, kind: OpenApiRouteKind) -> Self {
+        self.openapi_kind = Some(kind);
+        self
+    }
+
+    /// Return the handler contract, if the registering router supplied one.
+    pub fn openapi_kind(&self) -> Option<OpenApiRouteKind> {
+        self.openapi_kind
+    }
+
+    /// Return the registered HTTP method.
     pub fn method(&self) -> &axum::http::Method {
         &self.method
     }
 
+    /// Return the registered URL path, including any operator override.
     pub fn path(&self) -> &str {
         &self.path
     }

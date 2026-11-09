@@ -15,6 +15,19 @@ httpx = pytest.importorskip("httpx")
 TickInput = planner_types.TickInput
 WorkerCounts = planner_types.WorkerCounts
 JevAutoscaler = importlib.import_module("autoscaling_arena.adapters.jev").JevAutoscaler
+engine_protocol = importlib.import_module("dynamo.planner.core.engine_protocol")
+
+
+@pytest.mark.unit
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
+def test_jev_keeps_the_common_tick_contract_without_runtime_reconfiguration(tmp_path):
+    engine = make_engine(tmp_path, lambda request: httpx.Response(200, json={}))
+    try:
+        assert isinstance(engine, engine_protocol.EngineProtocol)
+        assert isinstance(engine.initial_tick(0.0), planner_types.ScheduledTick)
+    finally:
+        asyncio.run(engine.shutdown())
 
 
 def snapshot(at=15):

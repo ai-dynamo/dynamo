@@ -27,10 +27,8 @@ use dynamo_backend_common::{
     PreprocessedRequest, RawEngine, RuntimeConfig as RsRuntimeConfig,
     SnapshotPublisher as RsSnapshotPublisher, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
 };
-use dynamo_llm::local_model::runtime_config::{
-    StructuralTagMode as RsStructuralTagMode, StructuralTagSchemaMode as RsStructuralTagSchemaMode,
-    StructuralTagScope as RsStructuralTagScope,
-};
+use dynamo_llm::admission_gate::WorkerAdmissionGate;
+use dynamo_llm::local_model::runtime_config::StructuralTagConfig as RsStructuralTagConfig;
 use dynamo_llm::model_type::ModelInput as RsModelInput;
 use dynamo_runtime as rs;
 use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_context};
@@ -155,11 +153,13 @@ fn trtllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyo3(signature = (argv=None))]
 fn _run_trtllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = trtllm_sidecar_argv(argv.unwrap_or_default());
-    let bootstrap = dynamo_trtllm_sidecar::TrtllmSidecarEngine::try_from_args_async(cli_argv)
-        .map_err(sidecar_startup_to_pyerr)?;
-
-    py.allow_threads(move || dynamo_sidecar_common::run(bootstrap))
-        .map_err(sidecar_run_to_pyerr)
+    py.allow_threads(move || dynamo_trtllm_sidecar::run(cli_argv))
+        .map_err(
+            |err| match err.downcast::<dynamo_sidecar_common::SidecarStartupError>() {
+                Ok(startup) => sidecar_startup_to_pyerr(startup),
+                Err(error) => pyo3::exceptions::PyRuntimeError::new_err(error.to_string()),
+            },
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -434,9 +434,7 @@ impl WorkerConfig {
         runtime = None,
         disaggregation_mode = DisaggregationMode::Aggregated,
         health_check_payload = None,
-        structural_tag_mode = "off".to_string(),
-        structural_tag_scope = "auto".to_string(),
-        structural_tag_schema = "auto".to_string(),
+        structural_tag = None,
         route_to_encoder = false,
         media_decoder = None,
         media_fetcher = None,
@@ -463,9 +461,7 @@ impl WorkerConfig {
         runtime: Option<RuntimeConfig>,
         disaggregation_mode: DisaggregationMode,
         health_check_payload: Option<PyObject>,
-        structural_tag_mode: String,
-        structural_tag_scope: String,
-        structural_tag_schema: String,
+        structural_tag: Option<&Bound<'_, PyDict>>,
         route_to_encoder: bool,
         media_decoder: Option<MediaDecoder>,
         media_fetcher: Option<MediaFetcher>,
@@ -498,33 +494,17 @@ impl WorkerConfig {
             }
             _ => None,
         };
-        let st_mode = match structural_tag_mode.as_str() {
-            "off" => RsStructuralTagMode::Off,
-            "on" => RsStructuralTagMode::On,
-            other => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Invalid structural_tag_mode: {other}. Expected 'off' or 'on'."
-                )));
-            }
-        };
-        let st_scope = match structural_tag_scope.as_str() {
-            "auto" => RsStructuralTagScope::Auto,
-            "always" => RsStructuralTagScope::Always,
-            other => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Invalid structural_tag_scope: {other}. Expected 'auto' or 'always'."
-                )));
-            }
-        };
-        let st_schema = match structural_tag_schema.as_str() {
-            "auto" => RsStructuralTagSchemaMode::Auto,
-            "strict" => RsStructuralTagSchemaMode::Strict,
-            other => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Invalid structural_tag_schema: {other}. Expected 'auto' or 'strict'."
-                )));
-            }
-        };
+        let structural_tag = structural_tag
+            .map(|config| -> anyhow::Result<_> {
+                let value = depythonize(config)?;
+                Ok(RsStructuralTagConfig::from_value_strict(value)?)
+            })
+            .transpose()
+            .map_err(|error| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid structural_tag config: {error}"
+                ))
+            })?;
         Ok(Self {
             inner: RsWorkerConfig {
                 namespace,
@@ -547,9 +527,7 @@ impl WorkerConfig {
                 metrics_labels,
                 disaggregation_mode: disaggregation_mode.into(),
                 health_check_payload,
-                structural_tag_mode: st_mode,
-                structural_tag_scope: st_scope,
-                structural_tag_schema: st_schema,
+                structural_tag,
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
                 route_to_encoder,
                 // Python vLLM owns and serves its existing `.rl` endpoint.
@@ -672,13 +650,20 @@ impl Worker {
             // pipeline) routes through `PyRawEngine` + `RsWorker::new_raw`
             // (JSON adapter); everything else is a token-pipeline
             // `LLMEngine`.
+            //
+            // One admission gate handle for this single-shot worker: the Rust
+            // `Worker` admits through it, and the engine hands it on with the
+            // serving endpoint, so the engine's own registrations size that
+            // same gate.
+            let admission_gate = WorkerAdmissionGate::default();
             let worker = if raw {
-                let py_engine = PyRawEngine::new(engine, event_loop);
+                let py_engine = PyRawEngine::new(engine, event_loop, admission_gate.clone());
                 RsWorker::new_raw(Arc::new(py_engine), config)
             } else {
-                let py_engine = PyLLMEngine::new(engine, event_loop);
+                let py_engine = PyLLMEngine::new(engine, event_loop, admission_gate.clone());
                 RsWorker::new(Arc::new(py_engine), config)
-            };
+            }
+            .with_admission_gate(admission_gate);
 
             let result = worker.run(runtime.clone()).await.map_err(to_pyerr);
 
@@ -709,15 +694,23 @@ struct PyEngineCore {
     event_loop: Arc<PyObject>,
     trace_contexts: Arc<StdMutex<HashMap<String, DistributedTraceContext>>>,
     request_metadata: Arc<StdMutex<HashMap<String, BTreeMap<String, String>>>>,
+    /// The admission gate of the `Worker` driving this engine, handed to the
+    /// engine with its serving endpoint.
+    admission_gate: WorkerAdmissionGate,
 }
 
 impl PyEngineCore {
-    fn new(engine: Arc<PyObject>, event_loop: Arc<PyObject>) -> Self {
+    fn new(
+        engine: Arc<PyObject>,
+        event_loop: Arc<PyObject>,
+        admission_gate: WorkerAdmissionGate,
+    ) -> Self {
         Self {
             engine,
             event_loop,
             trace_contexts: Arc::new(StdMutex::new(HashMap::new())),
             request_metadata: Arc::new(StdMutex::new(HashMap::new())),
+            admission_gate,
         }
     }
 
@@ -1225,6 +1218,9 @@ impl PyEngineCore {
     ) -> Result<(), DynamoError> {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
+        // The Worker's own gate, so a model the engine registers through this
+        // endpoint sizes the gate the Worker admits through.
+        let admission_gate = self.admission_gate.clone();
 
         let py_future = tokio::task::spawn_blocking(move || {
             Python::with_gil(|py| -> PyResult<_> {
@@ -1233,6 +1229,7 @@ impl PyEngineCore {
                     crate::Endpoint {
                         inner: endpoint,
                         event_loop: event_loop.bind(py).clone().unbind(),
+                        admission_gate,
                     },
                 )?;
                 let coroutine = engine
@@ -1322,9 +1319,13 @@ struct PyLLMEngine {
 }
 
 impl PyLLMEngine {
-    fn new(engine: Arc<PyObject>, event_loop: Arc<PyObject>) -> Self {
+    fn new(
+        engine: Arc<PyObject>,
+        event_loop: Arc<PyObject>,
+        admission_gate: WorkerAdmissionGate,
+    ) -> Self {
         Self {
-            core: PyEngineCore::new(engine, event_loop),
+            core: PyEngineCore::new(engine, event_loop, admission_gate),
         }
     }
 }
@@ -1478,9 +1479,13 @@ struct PyRawEngine {
 }
 
 impl PyRawEngine {
-    fn new(engine: Arc<PyObject>, event_loop: Arc<PyObject>) -> Self {
+    fn new(
+        engine: Arc<PyObject>,
+        event_loop: Arc<PyObject>,
+        admission_gate: WorkerAdmissionGate,
+    ) -> Self {
         Self {
-            core: PyEngineCore::new(engine, event_loop),
+            core: PyEngineCore::new(engine, event_loop, admission_gate),
         }
     }
 }
@@ -1624,6 +1629,7 @@ fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
     let dp_rank: u32 = item.getattr("dp_rank")?.extract()?;
     match cls.as_str() {
         "ZmqSource" => Ok(RsKvEventSource::Zmq {
+            heartbeat_timeout: None,
             endpoint: item.getattr("endpoint")?.extract()?,
             topic: item.getattr("topic")?.extract()?,
             dp_rank,

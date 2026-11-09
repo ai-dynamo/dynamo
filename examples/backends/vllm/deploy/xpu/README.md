@@ -15,6 +15,8 @@ Hardware-specific deployment templates for Intel XPU GPUs using Kubernetes Dynam
 | `agg_tracing_xpu_dra.yaml` | Aggregated + Tracing | Single worker with OpenTelemetry tracing |
 | `agg_router_xpu_dra.yaml` | Aggregated + KV Router | Aggregated deployment with KV routing |
 | `agg_router_kv_approx_xpu_dra.yaml` | Aggregated + KV Router (Local) | KV routing without NATS dependency |
+| `agg_lora_xpu_dra.yaml` | Aggregated + LoRA | Text generation with dynamic LoRA adapters |
+| `agg_qwen_lora_xpu_dra.yaml` | Aggregated + Multimodal LoRA | Vision-language generation with dynamic LoRA adapters |
 | `disagg_xpu_dra.yaml` | Disaggregated | Prefill/decode separation with NixlConnector |
 | `disagg_tracing_xpu_dra.yaml` | Disaggregated + Tracing | Disaggregated with OpenTelemetry tracing |
 | `disagg_planner_xpu_dra.yaml` | Disaggregated + Planner | Global Planner for throughput scaling |
@@ -24,20 +26,37 @@ Hardware-specific deployment templates for Intel XPU GPUs using Kubernetes Dynam
 
 1. **Kubernetes v1.34+** with DRA API v1 enabled
 2. **[Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes)** installed with DeviceClass `gpu.intel.com`
-3. **Custom XPU runtime image** built with Intel XPU support:
+3. **Frontend runtime image** available to the cluster. Replace
+   `nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag` in the selected template with
+   a published or custom vLLM runtime image.
+4. **Custom XPU runtime image** built with Intel XPU support:
    ```bash
    python container/render.py --framework=vllm --device=xpu --target=runtime
    docker build -t nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag \
      -f container/vllm-runtime-xpu-amd64-rendered.Dockerfile .
    ```
    See [container/README.md](../../../../../container/README.md) for complete build instructions.
-4. **HuggingFace token secret**:
+5. **Hugging Face token secret**:
    ```bash
    export HF_TOKEN=your_hf_token
    kubectl create secret generic hf-token-secret \
      --from-literal=HF_TOKEN=${HF_TOKEN} \
      -n ${NAMESPACE}
    ```
+
+## LoRA Template Setup
+
+The LoRA templates use namespace-scoped secrets, a MinIO deployment, an
+uploaded adapter, and a `DynamoModel` resource configured in the LoRA
+directories.
+
+| Template | Setup Guide | Supporting Manifests |
+|----------|-------------|----------------------|
+| `agg_lora_xpu_dra.yaml` | [LoRA Deployment Guide](../lora/README.md) | `../lora/minio-secret.yaml`, `../lora/sync-lora-job.yaml`, `../lora/lora-model.yaml` |
+| `agg_qwen_lora_xpu_dra.yaml` | [Multimodal LoRA Deployment Guide](../lora/multimodal/README.md) | `../lora/multimodal/minio-secret.yaml`, `../lora/multimodal/sync-lora-job.yaml`, `../lora/multimodal/lora-model.yaml` |
+
+Follow the corresponding guide to create `hf-token-secret`, deploy MinIO,
+upload the adapter, apply the XPU manifest, and register the adapter.
 
 ## Key Differences from NVIDIA Templates
 
