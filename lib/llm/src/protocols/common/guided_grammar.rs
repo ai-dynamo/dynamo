@@ -157,6 +157,8 @@ struct Parser<'t, 'a> {
 }
 
 impl<'t, 'a> Parser<'t, 'a> {
+    /// Index rule names before reading bodies so forward references can be resolved.
+    /// Duplicate definitions or unsupported syntax give no verdict.
     fn parse(tokens: &'t [Token<'a>]) -> Option<Self> {
         let mut rules = HashMap::new();
         for pair in tokens.windows(2) {
@@ -192,6 +194,7 @@ impl<'t, 'a> Parser<'t, 'a> {
         self.tokens.get(self.pos + offset).copied()
     }
 
+    /// Record each alternative separately; any one can make `lhs` productive.
     fn alternatives(&mut self, lhs: usize) -> Option<()> {
         loop {
             let required = self.sequence()?;
