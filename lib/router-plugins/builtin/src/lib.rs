@@ -141,12 +141,10 @@ worker_selection:
         let (config, resolved) = resolve(
             r#"
 worker_selection:
-  prefill: kvcr
-  instances:
-    - name: kvcr
-      type: kvcr
-      parameters:
-        shared_cache_multiplier: 0.5
+  prefill:
+    type: kvcr
+    parameters:
+      shared_cache_multiplier: 0.5
 "#,
         );
         let factory = resolved
