@@ -210,14 +210,48 @@ def test_token_budget_matches_sglang_policy(
 
 
 @pytest.mark.parametrize(
-    "disaggregation_mode, runtime_supported, enable_multimodal, capability_expected",
+    "disaggregation_mode, runtime_supported, worker_flags, capability_expected, reasoning_gate_expected",
     [
-        (None, True, False, False),
-        ("null", True, False, False),
-        ("prefill", False, False, False),
-        ("prefill", True, True, False),
-        ("prefill", True, False, True),
-        ("decode", True, False, True),
+        (None, True, {}, False, True),
+        ("null", True, {}, False, True),
+        ("prefill", False, {}, False, False),
+        ("prefill", True, {}, True, True),
+        ("decode", True, {}, True, True),
+        *[
+            pytest.param(
+                mode,
+                True,
+                {"enable_multimodal": True, "frontend_decoding": True},
+                False,
+                True,
+                id=f"frontend-decoded-media-{mode}",
+            )
+            for mode in ("null", "prefill", "decode")
+        ],
+        pytest.param(
+            "prefill",
+            True,
+            {"enable_multimodal": True, "multimodal_worker": True},
+            False,
+            False,
+            id="dedicated-multimodal-prefill",
+        ),
+        pytest.param(
+            "decode",
+            True,
+            {"enable_multimodal": True, "multimodal_worker": True},
+            False,
+            False,
+            id="dedicated-multimodal-decode",
+        ),
+        pytest.param(
+            "encode",
+            False,
+            {"enable_multimodal": True, "multimodal_encode_worker": True},
+            False,
+            False,
+            id="multimodal-encoder",
+        ),
     ],
 )
 def test_runtime_config_publishes_supported_disagg_capabilities(
@@ -226,8 +260,9 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     caplog,
     disaggregation_mode,
     runtime_supported,
-    enable_multimodal,
+    worker_flags,
     capability_expected,
+    reasoning_gate_expected,
 ):
     server_args = SimpleNamespace(
         allow_auto_truncate=False,
@@ -242,7 +277,8 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     )
     dynamo_args = register.DynamoConfig()
     dynamo_args.enable_local_indexer = False
-    dynamo_args.enable_multimodal = enable_multimodal
+    for name, value in worker_flags.items():
+        setattr(dynamo_args, name, value)
     capacity = SimpleNamespace(
         max_num_seqs=None,
         max_num_batched_tokens=None,
@@ -293,9 +329,7 @@ def test_runtime_config_publishes_supported_disagg_capabilities(
     if capability_expected:
         assert json.loads(runtime_config.runtime_data[capability]) is True
     reasoning_gate = register.TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY
-    assert (reasoning_gate in runtime_config.runtime_data) is (
-        runtime_supported and not enable_multimodal
-    )
+    assert (reasoning_gate in runtime_config.runtime_data) is reasoning_gate_expected
     if reasoning_gate in runtime_config.runtime_data:
         assert json.loads(runtime_config.runtime_data[reasoning_gate]) is True
     assert "Failed to get runtime config" not in caplog.text
