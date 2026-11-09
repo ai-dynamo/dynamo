@@ -813,6 +813,7 @@ class FrontendArgGroup(ArgGroup):
             flag_name="--reject-media",
             env_var="DYN_REJECT_MEDIA",
             default=False,
+            env=self.env,
             help=(
                 "Refuse chat requests that carry image, video, or audio content in "
                 "any message, including history, before routing. For frontends that "
@@ -826,6 +827,7 @@ class FrontendArgGroup(ArgGroup):
             flag_name="--reject-media-status-code",
             env_var="DYN_REJECT_MEDIA_STATUS_CODE",
             default=415,
+            env=self.env,
             help=(
                 "HTTP status (4xx or 5xx) for a request refused by --reject-media. "
                 "Set it to a status an upstream gateway fails over on, such as 429, "

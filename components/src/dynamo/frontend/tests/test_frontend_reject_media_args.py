@@ -5,7 +5,11 @@ import argparse
 
 import pytest
 
-from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
+from dynamo.frontend.frontend_args import (
+    FrontendArgGroup,
+    FrontendConfig,
+    build_frontend_parser,
+)
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
@@ -56,3 +60,21 @@ def test_reject_media_environment_configuration(
 def test_reject_media_status_code_must_be_an_error_status(status: str) -> None:
     with pytest.raises(ValueError, match="--reject-media-status-code"):
         parse_frontend_config(["--reject-media-status-code", status])
+
+
+def test_reject_media_uses_supplied_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DYN_REJECT_MEDIA", "false")
+    monkeypatch.setenv("DYN_REJECT_MEDIA_STATUS_CODE", "503")
+
+    parser, env_dests = build_frontend_parser(
+        {"DYN_REJECT_MEDIA": "true", "DYN_REJECT_MEDIA_STATUS_CODE": "429"}
+    )
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    config.validate()
+
+    assert config.reject_media is True
+    assert config.reject_media_status_code == 429
+    assert env_dests["DYN_REJECT_MEDIA"] == "reject_media"
+    assert env_dests["DYN_REJECT_MEDIA_STATUS_CODE"] == "reject_media_status_code"
