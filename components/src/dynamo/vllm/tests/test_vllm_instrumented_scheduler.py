@@ -1881,6 +1881,7 @@ def test_connector_work_prevents_idle_until_drained(heartbeat_scheduler, pending
         else:
             stub.ec_connector = connector
 
+    assert heartbeat() == []
     stub.update_from_output(output, object())
     assert not stub.waiting and not stub.running and not stub._inflight_outputs
     frames = heartbeat()
