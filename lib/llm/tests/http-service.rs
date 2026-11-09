@@ -64,6 +64,7 @@ struct CounterEngine {}
 #[derive(Default)]
 struct NvExtCaptureEngine {
     nvext: std::sync::Mutex<Option<Option<NvExt>>>,
+    messages: std::sync::Mutex<Option<serde_json::Value>>,
 }
 
 impl NvExtCaptureEngine {
@@ -395,6 +396,10 @@ impl
         request: SingleIn<NvCreateChatCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         self.nvext.lock().unwrap().replace(request.nvext.clone());
+        self.messages
+            .lock()
+            .unwrap()
+            .replace(serde_json::to_value(&request.inner.messages)?);
         CounterEngine {}.generate(request).await
     }
 }
@@ -4058,11 +4063,18 @@ async fn check_reject_media_openai(status: StatusCode) {
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap();
-    let card = ModelDeploymentCard::with_name_only("text-only");
+    let mut card = ModelDeploymentCard::with_name_only("text-only");
+    card.runtime_config
+        .set_engine_specific(
+            dynamo_llm::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES,
+            vec!["text"],
+        )
+        .unwrap();
+    let checksum = card.mdcsum().to_string();
     let engine = Arc::new(NvExtCaptureEngine::default());
     state
         .manager()
-        .add_chat_completions_model("text-only", card.mdcsum(), engine.clone())
+        .add_chat_completions_model_with_card("text-only", &checksum, card, engine.clone())
         .unwrap();
 
     let url = format!("http://localhost:{port}/v1/chat/completions");
@@ -4214,43 +4226,61 @@ async fn check_reject_media_openai(status: StatusCode) {
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), status, "{path}");
-        let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["code"], status.as_u16(), "{path}");
-        assert_eq!(
-            body["message"],
-            format!(
-                "Model does not accept {} input; received unsupported content type '{content_type}'.",
-                if content_type == "input_audio" {
-                    "audio"
-                } else {
-                    content_type.trim_end_matches("_url")
-                }
-            ),
-            "{path}: {content_type}"
-        );
-        compare_counter(
-            &metrics,
-            &metric_model,
-            &endpoint,
-            &RequestType::Stream,
-            &Status::Error,
-            &ErrorType::UnsupportedModality,
-            refusals_before + 1,
-        );
-        compare_counter(
-            &metrics,
-            &metric_model,
-            &endpoint,
-            &RequestType::Stream,
-            &Status::Error,
-            &ErrorType::Overload,
-            overloads_before,
-        );
-        assert!(
-            engine.nvext.lock().unwrap().is_none(),
-            "refused request must not reach the engine: {path}"
-        );
+        if content_type == "image_url" && request["model"] == "text-only" {
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let _ = response.text().await.unwrap();
+            let captured = engine.messages.lock().unwrap().take().unwrap().to_string();
+            assert!(captured.contains("[image omitted]"), "{path}: {captured}");
+            assert!(!captured.contains("image_url"), "{path}: {captured}");
+            assert!(engine.nvext.lock().unwrap().take().is_some());
+            compare_counter(
+                &metrics,
+                &metric_model,
+                &endpoint,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::UnsupportedModality,
+                refusals_before,
+            );
+        } else {
+            assert_eq!(response.status(), status, "{path}");
+            let body: serde_json::Value = response.json().await.unwrap();
+            assert_eq!(body["code"], status.as_u16(), "{path}");
+            assert_eq!(
+                body["message"],
+                format!(
+                    "Model does not accept {} input; received unsupported content type '{content_type}'.",
+                    if content_type == "input_audio" {
+                        "audio"
+                    } else {
+                        content_type.trim_end_matches("_url")
+                    }
+                ),
+                "{path}: {content_type}"
+            );
+            compare_counter(
+                &metrics,
+                &metric_model,
+                &endpoint,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::UnsupportedModality,
+                refusals_before + 1,
+            );
+            compare_counter(
+                &metrics,
+                &metric_model,
+                &endpoint,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Overload,
+                overloads_before,
+            );
+            assert!(
+                engine.nvext.lock().unwrap().is_none(),
+                "refused request must not reach the engine: {path}"
+            );
+        }
 
         let response = client
             .post(format!("http://localhost:{port}{path}"))
@@ -4318,12 +4348,24 @@ async fn check_reject_media_anthropic(status: StatusCode) {
     let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
     wait_for_service_ready(port).await;
 
-    let metric_model = state.manager().metric_model_for("unregistered").to_string();
+    let mut card = ModelDeploymentCard::with_name_only("text-only");
+    card.runtime_config
+        .set_engine_specific(
+            dynamo_llm::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES,
+            vec!["text"],
+        )
+        .unwrap();
+    let checksum = card.mdcsum().to_string();
+    let engine = Arc::new(NvExtCaptureEngine::default());
+    state
+        .manager()
+        .add_chat_completions_model_with_card("text-only", &checksum, card, engine.clone())
+        .unwrap();
+    let metric_model = state.manager().metric_model_for("text-only").to_string();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap();
-    // No model is registered: conversion or lookup first would answer 400/404.
     let image_sources = [
         serde_json::json!({"type": "base64", "media_type": "image/png", "data": "AAAA"}),
         serde_json::json!({"type": "url", "url": "https://example.com/a.png"}),
@@ -4332,7 +4374,7 @@ async fn check_reject_media_anthropic(status: StatusCode) {
         for in_tool_result in [false, true] {
             let image = serde_json::json!({"type": "image", "source": source});
             let content = if in_tool_result {
-                serde_json::json!([{"type": "tool_result", "tool_use_id": "call_1", "content": [{"text": "caption"}, image]}])
+                serde_json::json!([{"type": "tool_result", "tool_use_id": "call_1", "content": [{"type": "text", "text": "caption"}, image]}])
             } else {
                 serde_json::json!([image])
             };
@@ -4346,7 +4388,7 @@ async fn check_reject_media_anthropic(status: StatusCode) {
             let response = client
                 .post(format!("http://localhost:{port}/v1/messages"))
                 .json(&serde_json::json!({
-                    "model": "unregistered", "max_tokens": 16,
+                    "model": "text-only", "max_tokens": 16,
                     "messages": [{"role": "user", "content": content}]
                 }))
                 .send()
@@ -4354,21 +4396,17 @@ async fn check_reject_media_anthropic(status: StatusCode) {
                 .unwrap();
             assert_eq!(
                 response.status(),
-                status,
+                StatusCode::OK,
                 "tool_result={in_tool_result}, source={source}"
             );
-            let request_id = response.headers()["request-id"]
-                .to_str()
-                .unwrap()
-                .to_owned();
-            let body: serde_json::Value = response.json().await.unwrap();
-            assert_eq!(body["type"], "error");
-            assert_eq!(body["request_id"], request_id);
-            assert_eq!(body["error"]["type"], "invalid_request_error");
-            assert_eq!(
-                body["error"]["message"],
-                "Model does not accept image input; received unsupported content type 'image_url'."
-            );
+            let _ = response.text().await.unwrap();
+            let captured = engine.messages.lock().unwrap().take().unwrap().to_string();
+            assert!(captured.contains("[image omitted]"), "{captured}");
+            assert!(!captured.contains("image_url"), "{captured}");
+            if in_tool_result {
+                assert!(captured.contains("caption") && captured.contains("call_1"));
+            }
+
             compare_counter(
                 &state.metrics_clone(),
                 &metric_model,
@@ -4376,10 +4414,24 @@ async fn check_reject_media_anthropic(status: StatusCode) {
                 &RequestType::Unary,
                 &Status::Error,
                 &ErrorType::UnsupportedModality,
-                before + 1,
+                before,
             );
         }
     }
+
+    let duplicate_model = r#"{"model":"text-only","model":"text-only","max_tokens":16,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://invalid.invalid/image"}}]}]}"#;
+    let response = client
+        .post(format!("http://localhost:{port}/v1/messages"))
+        .header("content-type", "application/json")
+        .body(duplicate_model)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "duplicate fields must survive image omission"
+    );
 
     for invalid_field in ["model", "max_tokens", "role"] {
         let mut request = serde_json::json!({
@@ -4439,7 +4491,7 @@ async fn test_reject_media_preserves_openai_422() {
 }
 
 #[tokio::test]
-async fn test_reject_media_anthropic_refuses_before_model_lookup() {
+async fn test_text_only_images_are_omitted_anthropic() {
     check_reject_media_anthropic(StatusCode::TOO_MANY_REQUESTS).await;
 }
 
@@ -4501,4 +4553,112 @@ async fn test_reject_media_disabled_preserves_backend_422_through_http_middlewar
     assert_eq!(body["code"], 422);
     assert_eq!(svc.engine.take_requests().await.len(), 1);
     svc.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_image_omission_uses_model_modalities_without_global_rejection() {
+    use dynamo_llm::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES;
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .host("127.0.0.1")
+        .enable_chat_endpoints(true)
+        .enable_responses_endpoints(true)
+        .enable_anthropic_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let engine = Arc::new(NvExtCaptureEngine::default());
+    for (name, modalities) in [
+        ("text-only", Some(vec!["text"])),
+        ("vision", Some(vec!["text", "image"])),
+        ("unknown", None),
+    ] {
+        let mut card = ModelDeploymentCard::with_name_only(name);
+        if let Some(modalities) = modalities {
+            card.runtime_config
+                .set_engine_specific(SUPPORTED_INPUT_MODALITIES, modalities)
+                .unwrap();
+        }
+        let checksum = card.mdcsum().to_string();
+        state
+            .manager()
+            .add_chat_completions_model_with_card(name, &checksum, card, engine.clone())
+            .unwrap();
+    }
+    let cancel = CancellationToken::new();
+    let join = service.spawn_with_listener(cancel.clone(), listener).await;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    for name in ["text-only", "vision", "unknown"] {
+        for (path, mut body) in [
+            (
+                "/v1/chat/completions",
+                serde_json::json!({"messages":[{"role":"user","content":[
+                {"type":"text","text":"before"}, {"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}},
+                {"type":"text","text":"after"}]}]}),
+            ),
+            (
+                "/v1/responses",
+                serde_json::json!({"input":[{"role":"user","content":[
+                {"type":"input_text","text":"before"}, {"type":"input_image","image_url":"data:image/png;base64,AAAA"},
+                {"type":"input_text","text":"after"}]}]}),
+            ),
+            (
+                "/v1/messages",
+                serde_json::json!({"max_tokens":1,"messages":[{"role":"user","content":[
+                {"type":"text","text":"before"}, {"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}},
+                {"type":"text","text":"after"}]}]}),
+            ),
+        ] {
+            body["model"] = serde_json::json!(name);
+            let response = client
+                .post(format!("http://127.0.0.1:{port}{path}"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = response.text().await.unwrap();
+            assert_eq!(status, StatusCode::OK, "{name} {path}: {body}");
+            let captured = engine.messages.lock().unwrap().take().unwrap();
+            let captured = captured.to_string();
+            assert_eq!(
+                captured.contains("[image omitted]"),
+                name == "text-only",
+                "{name} {path}: {captured}"
+            );
+            assert_eq!(
+                captured.contains("image_url"),
+                name != "text-only",
+                "{name} {path}: {captured}"
+            );
+            assert!(captured.contains("before") && captured.contains("after"));
+            if name == "text-only" {
+                assert!(
+                    captured.find("before").unwrap() < captured.find("[image omitted]").unwrap()
+                );
+                assert!(
+                    captured.find("[image omitted]").unwrap() < captured.find("after").unwrap()
+                );
+            }
+        }
+    }
+    let mut counts = Vec::new();
+    for part in [
+        serde_json::json!({"type":"image","source":{"type":"url","url":"https://invalid.invalid/image"}}),
+        serde_json::json!({"type":"text","text":"[image omitted]"}),
+    ] {
+        let response = client.post(format!("http://127.0.0.1:{port}/v1/messages/count_tokens"))
+            .json(&serde_json::json!({"model":"text-only","messages":[{"role":"user","content":[part]}]}))
+            .send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        counts.push(response.json::<serde_json::Value>().await.unwrap()["input_tokens"].clone());
+    }
+    assert_eq!(counts[0], counts[1]);
+    cancel.cancel();
+    join.await.unwrap().unwrap();
 }

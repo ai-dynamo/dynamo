@@ -1391,6 +1391,13 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend_from_slice(b"\0sglang_systemone_serial_v1\0true");
                 }
 
+                // A representative WorkerSet card must not hide different input capabilities.
+                append_runtime_contract_checksum(
+                    &mut bytes_to_hash,
+                    &self.runtime_config,
+                    crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES,
+                );
+
                 // The Qwen video contract is resolved per cohort, not per card.
                 // Nemotron contracts still partition WorkerSets by checksum.
                 append_runtime_contract_checksum(
@@ -3810,6 +3817,16 @@ mod ownership_tests {
         }
 
         let missing = ModelDeploymentCard::with_name_only("model");
+        let text = card_with_contract(
+            crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES,
+            serde_json::json!(["text"]),
+        );
+        let vision = card_with_contract(
+            crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES,
+            serde_json::json!(["text", "image"]),
+        );
+        assert_ne!(missing.mdcsum(), text.mdcsum());
+        assert_ne!(text.mdcsum(), vision.mdcsum());
         let qwen = card_with_contract(
             VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
             serde_json::json!({

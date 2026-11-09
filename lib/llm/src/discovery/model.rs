@@ -248,6 +248,28 @@ impl Model {
         self.worker_sets.load().is_empty()
     }
 
+    /// A missing or malformed advertisement never proves a modality unsupported.
+    pub(crate) fn input_modality_support(&self, modality: &str) -> Option<bool> {
+        let sets = self.worker_sets.load();
+        let mut unknown = sets.is_empty();
+        for set in sets.values() {
+            let value = set
+                .card()
+                .runtime_config
+                .runtime_data
+                .get(crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES);
+            match value.and_then(serde_json::Value::as_array) {
+                Some(values) if values.iter().all(serde_json::Value::is_string) => {
+                    if values.iter().any(|value| value.as_str() == Some(modality)) {
+                        return Some(true);
+                    }
+                }
+                _ => unknown = true,
+            }
+        }
+        if unknown { None } else { Some(false) }
+    }
+
     pub fn worker_set_count(&self) -> usize {
         self.worker_sets.load().len()
     }
@@ -2551,5 +2573,40 @@ mod tests {
             !model.is_ready_to_serve(),
             "only an incomplete namespace remains: not ready to serve"
         );
+    }
+
+    #[test]
+    fn input_modality_support_preserves_unknown_and_mixed_workers() {
+        use crate::local_model::runtime_config::SUPPORTED_INPUT_MODALITIES;
+        for (values, expected) in [
+            (vec![], None),
+            (vec![None], None),
+            (vec![Some(serde_json::json!(["text"]))], Some(false)),
+            (vec![Some(serde_json::json!(["text", "image"]))], Some(true)),
+            (vec![Some(serde_json::json!(["text"])), None], None),
+            (
+                vec![
+                    Some(serde_json::json!(["text"])),
+                    Some(serde_json::json!(["image"])),
+                ],
+                Some(true),
+            ),
+            (vec![Some(serde_json::json!([7]))], None),
+            (vec![Some(serde_json::json!("text"))], None),
+        ] {
+            let model = Model::new("test".into());
+            for (index, value) in values.into_iter().enumerate() {
+                let name = index.to_string();
+                let mut card = ModelDeploymentCard::with_name_only("test");
+                if let Some(value) = value {
+                    card.runtime_config
+                        .runtime_data
+                        .insert(SUPPORTED_INPUT_MODALITIES.into(), value);
+                }
+                let checksum = card.mdcsum().to_string();
+                model.add_worker_set(name.clone(), Arc::new(WorkerSet::new(name, checksum, card)));
+            }
+            assert_eq!(model.input_modality_support("image"), expected);
+        }
     }
 }

@@ -3834,6 +3834,10 @@ async fn chat_completions(
         return Err(err_response);
     }
 
+    if super::image_omission::should_omit_images(&state, &model) {
+        super::image_omission::omit_chat_images(&mut request.inner.messages);
+    }
+
     if let Err(err_response) = reject_media_if_configured(&state, &request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -4585,6 +4589,10 @@ async fn responses(
     if let Err(err_response) = validate_responses_fields(&request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
+    }
+
+    if super::image_omission::should_omit_images(&state, &model) {
+        super::image_omission::omit_response_images(&mut request.inner.input);
     }
 
     if let Err(err_response) = reject_media(media_refusal_for_content_type(&state, || {

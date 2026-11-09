@@ -449,6 +449,13 @@ async fn handler_anthropic_messages(
         streaming,
         &request_id,
     );
+    let request = if super::image_omission::should_omit_images(&state, &canonical_model) {
+        request.omit_images().map_err(|error| {
+            AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
+        })?
+    } else {
+        request
+    };
     if state.media_rejection().enabled() {
         let content_type = request.media_content_type(&headers).map_err(|error| {
             AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
@@ -1039,10 +1046,21 @@ async fn anthropic_messages(
 /// Handler for POST /v1/messages/count_tokens.
 /// Returns an estimated input token count using a len/3 heuristic.
 async fn handler_count_tokens(
-    State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
     request: ValidatedRequest<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
+    let (model, _) = request.identity();
+    let canonical = state
+        .manager()
+        .resolve_canonical_name(resolve_request_model(&model, template.as_ref()));
+    let request = if super::image_omission::should_omit_images(&state, &canonical) {
+        request
+            .omit_images()
+            .map_err(|error| AnthropicHandlerError::validation(error).into_response())?
+    } else {
+        request
+    };
     let mut request = request
         .into_request(&headers)
         .map_err(|error| AnthropicHandlerError::validation(error).into_response())?;

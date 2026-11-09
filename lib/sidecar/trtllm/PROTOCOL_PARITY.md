@@ -236,3 +236,25 @@ requests correctly reject before dispatch, but their public diagnostic is only
 closed-prefill explanation as public; it contains no request content, rendered
 prompt, path or underlying exception. The existing GLM regression also checks
 that public message. This correction is not in the published f57 artifacts.
+
+
+## Image blocks for text-only models
+
+When every registered worker for the selected model explicitly excludes image
+input, Chat Completions, Responses, Anthropic Messages and Messages token
+counting replace each image block with the literal text `[image omitted]`.
+Surrounding text, message order and tool-result IDs are preserved. URL/base64
+images and cached UUID/file references are omitted before media loading.
+
+The TRT-LLM sidecar publishes `supported_input_modalities` in each model's
+runtime metadata, derived from `Control.GetModelInfo`. Capability differences
+partition worker sets through the model-card checksum. Any image-capable worker,
+missing metadata or malformed metadata preserves the image path; missing
+capabilities are not treated as proof that images are unsupported. Other
+backends can advertise the same metadata contract.
+
+No global switch is required. Existing `--reject-media` policy still applies to
+remaining media; image-capable and unknown models retain its existing rejection
+behavior when that explicit policy is enabled. Audio/video behavior and native
+image-generation endpoints are unchanged. Existing sidecars without the new
+metadata retain the unknown-capability behavior.
