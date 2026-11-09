@@ -3,9 +3,7 @@
 
 # The default decode cost D + W·N with W = 1000 blocks per active request.
 worker_selection:
-  decode: default-w1000
-  instances:
-    - name: default-w1000
-      type: dynamo-default-cost-fn
-      parameters:
-        decode_active_request_weight: 1000
+  decode:
+    type: dynamo-default-cost-fn
+    parameters:
+      decode_active_request_weight: 1000

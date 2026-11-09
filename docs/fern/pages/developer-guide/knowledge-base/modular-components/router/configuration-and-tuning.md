@@ -263,15 +263,13 @@ Each worker pool keeps its own bindings, so prefill and decode stages bind sessi
 
 ```yaml
 worker_selection:
-  decode: kvca
-  instances:
-    - name: kvca
-      type: dynamo-kv-capacity-aware
-      parameters:
-        capacity_fraction: 1.0
-        count_priority: true
-        decode_active_request_weight: 0
-        capacity_blocks: 20000
+  decode:
+    type: dynamo-kv-capacity-aware
+    parameters:
+      capacity_fraction: 1.0
+      count_priority: true
+      decode_active_request_weight: 0
+      capacity_blocks: 20000
 ```
 
 | Parameter | Default | Meaning |

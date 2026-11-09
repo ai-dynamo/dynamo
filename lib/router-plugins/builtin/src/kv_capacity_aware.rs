@@ -21,7 +21,7 @@ use dynamo_kv_router::{KvRouterConfig, WorkerType};
 use parking_lot::Mutex;
 use rustc_hash::FxHashSet;
 
-/// Policy type selected by `worker_selection.instances[].type`.
+/// Policy type selected by `worker_selection.<role>.type`.
 pub const POLICY_TYPE: &str = "dynamo-kv-capacity-aware";
 
 /// `capacity_fraction` applies in parts per million, so the fit test is exact: with 0.7 and a
@@ -789,15 +789,13 @@ mod tests {
 
         const POLICY_YAML: &str = r#"
 worker_selection:
-  decode: kvca
-  instances:
-    - name: kvca
-      type: dynamo-kv-capacity-aware
-      parameters:
-        capacity_blocks: 20000
-        capacity_fraction: 1.0
-        count_priority: true
-        decode_active_request_weight: 0
+  decode:
+    type: dynamo-kv-capacity-aware
+    parameters:
+      capacity_blocks: 20000
+      capacity_fraction: 1.0
+      count_priority: true
+      decode_active_request_weight: 0
 "#;
         let configured = |yaml: &str| {
             let file = tempfile::NamedTempFile::new().unwrap();
@@ -815,7 +813,7 @@ worker_selection:
             let factory = registry
                 .resolve(&config)
                 .unwrap()
-                .expect("a configured decode instance resolves");
+                .expect("a configured decode policy resolves");
             (file, config, factory)
         };
         let partition = RoutingPartitionRef::new("model", "default");

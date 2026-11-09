@@ -3,10 +3,8 @@
 
 # The kv-capacity-aware policy with the same W as default_w1000.yaml.
 worker_selection:
-  decode: kvca
-  instances:
-    - name: kvca
-      type: dynamo-kv-capacity-aware
-      parameters:
-        capacity_fraction: 1.0
-        decode_active_request_weight: 1000
+  decode:
+    type: dynamo-kv-capacity-aware
+    parameters:
+      capacity_fraction: 1.0
+      decode_active_request_weight: 1000

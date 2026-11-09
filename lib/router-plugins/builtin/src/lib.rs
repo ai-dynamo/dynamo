@@ -145,20 +145,18 @@ worker_selection:
         let (config, resolved) = resolve(
             r#"
 worker_selection:
-  decode: kvca
-  instances:
-    - name: kvca
-      type: dynamo-kv-capacity-aware
-      parameters:
-        capacity_fraction: 1.0
-        count_priority: true
-        decode_active_request_weight: 0
-        capacity_blocks: 20000
+  decode:
+    type: dynamo-kv-capacity-aware
+    parameters:
+      capacity_fraction: 1.0
+      count_priority: true
+      decode_active_request_weight: 0
+      capacity_blocks: 20000
 "#,
         );
         let factory = resolved
             .unwrap()
-            .expect("a configured instance resolves to a factory");
+            .expect("a configured policy resolves to a factory");
         factory(
             &config,
             WorkerType::Decode,
@@ -168,12 +166,10 @@ worker_selection:
         let (_config, resolved) = resolve(
             r#"
 worker_selection:
-  decode: kvca
-  instances:
-    - name: kvca
-      type: dynamo-kv-capacity-aware
-      parameters:
-        capacity_ceiling: 20000
+  decode:
+    type: dynamo-kv-capacity-aware
+    parameters:
+      capacity_ceiling: 20000
 "#,
         );
         let Err(error) = resolved else {
