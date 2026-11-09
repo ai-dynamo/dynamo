@@ -277,9 +277,12 @@ protocol lines in the decode worker's log:
 kubectl logs <decode-worker-pod> | grep -E "intra-node|inter-node|cuda_ipc|tcp/|rc_mlx5"
 ```
 
-For a GPU-to-GPU KV read, `cuda_ipc` means NVLink, an RDMA device such as
-`rc_mlx5` means RDMA, and `tcp` means the transfer goes over TCP. For example,
-with vLLM, two default pods on one node show this line for the KV read:
+For a GPU-to-GPU KV read, `cuda_ipc` means CUDA IPC, an RDMA device such as
+`rc_mlx5` means RDMA, and `tcp` means the transfer goes over TCP. CUDA IPC uses
+NVLink only when the two GPUs are connected by NVLink; otherwise it goes over
+PCIe. To check, run `nvidia-smi topo -m` on the node: `NV#` between the two
+GPUs means NVLink. For example, with vLLM, two default pods on one node show
+this line for the KV read:
 
 ```text
 intra-node ... 0..inf | software emulation | tcp/eth0
@@ -295,9 +298,12 @@ connection.
 Everything above keeps prefill and decode on **one node**. When a worker's
 parallelism exceeds the GPUs on a node, or you want prefill and decode pools on
 separate machines, the KV cache travels over the **network**, and that path needs
-**RDMA** (InfiniBand or RoCE). Without it, transfers fall back to TCP and KV
-movement can dominate TTFT and throughput. The same RDMA setup also serves
-separate pods on one node when you do not use the NVLink opt-in.
+**RDMA** (InfiniBand or RoCE). Systems with multi-node NVLink, such as GB200 or
+GB300 racks with IMEX, can instead move the KV cache over NVLink between nodes in
+one NVLink domain; that setup is not covered here. Without either, transfers fall
+back to TCP and KV movement can dominate TTFT and throughput. The same RDMA
+setup also serves separate pods on one node when you do not use the NVLink
+opt-in.
 
 Multi-node adds RDMA fields to each worker (`rdma/ib` resource requests, the
 `IPC_LOCK` capability, and `UCX_*` transport env vars) plus an RDMA device plugin
@@ -321,8 +327,8 @@ device plugin:
 > This pattern runs workers with `hostPID: true` and `privileged: true`. The
 > namespace must allow Pod Security level `privileged`, and each worker can see
 > every process and device on the host. It helps only when prefill and decode
-> run on the same node; across nodes you still need RDMA. Decide with your
-> cluster administrator whether this trade-off is acceptable.
+> run on the same node; across nodes you still need RDMA or multi-node NVLink.
+> Decide with your cluster administrator whether this trade-off is acceptable.
 
 ```yaml
     decode:
@@ -374,7 +380,16 @@ device plugin:
             - decode
 ```
 
-Apply the same change to the prefill worker. The pieces work together:
+Apply the same change to the prefill worker, and keep its own `replicas` and
+`envFromSecret`.
+
+The workers can use CUDA IPC only when they run on the same node. On a cluster
+with more than one GPU node, place all prefill and decode replicas on one node,
+for example with a `nodeSelector` on `kubernetes.io/hostname` in each worker's
+`extraPodSpec`. That node needs a free GPU for every replica: seven for this
+example (three prefill, four decode).
+
+The pieces work together:
 
 - `hostPID: true` lets UCX treat CUDA IPC as reachable between the two pods.
 - `privileged: true` makes the peer GPU visible, so the importing worker can
