@@ -295,6 +295,19 @@ pub(crate) fn unsupported_family(
     Ok(None)
 }
 
+/// Whether the configured family needs the tokenizer vocabulary check of
+/// [`unsupported_family`] before it can be selected.
+pub(crate) fn needs_tokenizer_check(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+) -> bool {
+    configured_family(tool_call_parser, reasoning_parser).is_some_and(|family| {
+        FAMILY_REQUIRED_TOKENS
+            .iter()
+            .any(|&(required_by, ..)| required_by == family)
+    })
+}
+
 /// A selected unified family, unless the model's tokenizer cannot serve it: `auto`
 /// then keeps the v1 parser, while an explicit `DYN_PARSER_VERSION=2` keeps the
 /// operator's choice.

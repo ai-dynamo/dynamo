@@ -489,6 +489,7 @@ impl ModelWatcher {
         let mut worker_set =
             WorkerSet::new(namespace.clone(), spec.mdc_checksum.clone(), card.clone());
         worker_set.set_mistral_disabled_thinking_effort(card.mistral_disabled_thinking_effort()?);
+        worker_set.set_unsupported_unified_family(unsupported_unified_family(card)?);
         let allocator_trim = worker_set.initialize_allocator_trim_on_teardown();
         worker_set.set_lifecycle_cancellation(cancellation.clone());
         if card.model_type.supports_images() {
@@ -1140,6 +1141,25 @@ impl ModelWatcher {
             let _ = dispatch.send(update);
         }
     }
+}
+
+/// The configured unified family this card's tokenizer cannot serve. Only a family
+/// that checks the vocabulary loads the tokenizer here, so per-request parsing agrees
+/// with the preprocessor even when no local chat pipeline loads one.
+fn unsupported_unified_family(card: &ModelDeploymentCard) -> anyhow::Result<Option<&'static str>> {
+    use crate::protocols::openai::chat_completions::unified_parser;
+    let tool_call_parser = card.runtime_config.tool_call_parser.as_deref();
+    let reasoning_parser = card.runtime_config.reasoning_parser.as_deref();
+    if !card.model_type.supports_chat()
+        || !card.has_tokenizer()
+        || !unified_parser::needs_tokenizer_check(tool_call_parser, reasoning_parser)
+    {
+        return Ok(None);
+    }
+    let tokenizer = card
+        .tokenizer()
+        .context("tokenizer for the unified parser family check")?;
+    unified_parser::unsupported_family(tool_call_parser, reasoning_parser, &**tokenizer)
 }
 
 #[async_trait]
