@@ -444,6 +444,15 @@ Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. 
 
         **Notes:** `[THINK]...[/THINK]`
       </Accordion>
+      <Accordion title="Mistral v11+ tokenizers (tekken.json), including Mistral Large 4">
+        **Parser:** `mistral`, served by the `dynamo-parsers-v2` unified family `mistral_4`
+
+        **Upstream name:** Same name across Dynamo, vLLM, and SGLang
+
+        **Force-reasoning:** <Badge intent="note" minimal>No</Badge>
+
+        **Notes:** Output starts as content and `[THINK]` opens reasoning. `reasoning_effort` controls whether the model thinks; a thought it writes stays in `reasoning_content` even with thinking disabled.
+      </Accordion>
     </AccordionGroup>
   </Accordion>
 

@@ -458,8 +458,11 @@ impl TokenizerKind {
 /// and with it the whole card. A tekken tokenizer therefore travels in its own
 /// `tekken_tokenizer` field, which those frontends ignore, and `tokenizer` stays null
 /// as they write it for a tekken-only checkpoint. The in-memory card keeps
-/// `TekkenJson`; a `tokenizer` that names it directly is still read.
+/// `TekkenJson`; a `tokenizer` that names it directly is still read. Frontends of
+/// the `v1.7.0-mistral-large-4-dev.1` prerelease read tekken only from `tokenizer`,
+/// so in that deployment upgrade frontends before workers.
 /// TODO(v1.10): write `tokenizer` directly once v1.7 leaves the N-2 window.
+/// TODO(v1.12): drop the `tekken_tokenizer` reader once v1.9 leaves the N-2 window.
 mod tokenizer_wire {
     use super::{CheckedFile, TokenizerKind};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -1456,9 +1459,21 @@ impl ModelDeploymentCard {
                 // mdcsum regardless of `read_dir` order, and (b) the same
                 // bytes under different filenames don't collide — otherwise
                 // the frontend cache could serve a local_dir missing siblings.
+                // The copy `advertise_tekken_for_older_frontends` adds duplicates the
+                // tokenizer slot, so it leaves the checksum as the typed slot sets it.
+                let tekken = match &self.tokenizer {
+                    Some(TokenizerKind::TekkenJson(file)) => Some(file),
+                    _ => None,
+                };
                 let mut extras: Vec<(&str, &str)> = self
                     .extra_files
                     .iter()
+                    .filter(|cf| {
+                        tekken.is_none_or(|tekken| {
+                            cf.basename() != tekken.basename()
+                                || cf.checksum().hash() != tekken.checksum().hash()
+                        })
+                    })
                     .map(|cf| (cf.basename().unwrap_or(""), cf.checksum().hash()))
                     .collect();
                 extras.sort_unstable();
@@ -1972,6 +1987,28 @@ impl ModelDeploymentCard {
 
     pub fn requires_preprocessing(&self) -> bool {
         matches!(self.model_input, ModelInput::Tokens)
+    }
+
+    /// Advertise a tekken tokenizer as an extra metadata file too.
+    ///
+    /// Compatibility with frontends that predate [`TokenizerKind::TekkenJson`] (v1.7
+    /// and older) during rolling upgrades: they read a tekken card's `tokenizer` as
+    /// null (see `tokenizer_wire`) and fetch self-hosted files only through the typed
+    /// slots and `extra_files`, so without this their Python chat processors never
+    /// receive `tekken.json`. Call it after the typed slots point at their served
+    /// locations, so the copy shares the tokenizer's URL.
+    /// TODO(v1.10): Remove when v1.7 falls outside the N-2 compatibility window.
+    pub(crate) fn advertise_tekken_for_older_frontends(&mut self) {
+        if let Some(TokenizerKind::TekkenJson(tekken)) = &self.tokenizer {
+            let tekken = tekken.clone();
+            if !self
+                .extra_files
+                .iter()
+                .any(|file| file.checksum() == tekken.checksum())
+            {
+                self.extra_files.push(tekken);
+            }
+        }
     }
 
     /// Iterate populated metadata slots in deterministic order:
@@ -2935,6 +2972,46 @@ mod tests {
         let read: ModelDeploymentCard = serde_json::from_value(wire).unwrap();
         assert_eq!(read.mdcsum(), card.mdcsum());
         assert!(matches!(read.tokenizer, Some(TokenizerKind::TekkenJson(_))));
+    }
+
+    /// Older frontends fetch self-hosted files through `extra_files`, so a served tekken
+    /// card lists its tokenizer there too.
+    #[test]
+    fn self_hosted_tekken_card_lists_the_tokenizer_for_older_frontends() {
+        let mut card = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-mistral-tekken",
+            None,
+        )
+        .unwrap();
+        let Some(TokenizerKind::TekkenJson(tekken)) = card.tokenizer.clone() else {
+            panic!("mock checkpoint must load its tekken tokenizer");
+        };
+        let plain = card.clone();
+        card.advertise_tekken_for_older_frontends();
+        card.advertise_tekken_for_older_frontends();
+        // The copy is the tokenizer slot again, so the cohort checksum stays put.
+        assert_eq!(card.mdcsum(), plain.mdcsum());
+        assert_eq!(
+            card.extra_files
+                .iter()
+                .filter(|file| file.checksum() == tekken.checksum())
+                .count(),
+            1
+        );
+
+        let wire = serde_json::to_value(&card).unwrap();
+        let read: ModelDeploymentCard = serde_json::from_value(wire).unwrap();
+        assert!(matches!(read.tokenizer, Some(TokenizerKind::TekkenJson(_))));
+        assert_eq!(read.mdcsum(), card.mdcsum());
+
+        let mut hf = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let before = hf.extra_files.len();
+        hf.advertise_tekken_for_older_frontends();
+        assert_eq!(hf.extra_files.len(), before);
     }
 
     #[test]

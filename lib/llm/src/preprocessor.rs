@@ -3030,7 +3030,7 @@ impl OpenAIPreprocessor {
                     tracing::warn!(
                         model = %mdc.display_name,
                         error = format!("{error:#}"),
-                        "Tool calls are not grammar-enforced for the Unified mistral family"
+                        "Tool calls are not grammar-enforced for the Unified mistral_4 family"
                     );
                     None
                 }
@@ -7688,7 +7688,7 @@ impl OpenAIPreprocessor {
     ///   only when no content was generated (non-streaming, in the aggregator).
     /// For DeepSeek: follows the same effective mode used by the prompt renderer.
     /// For Mistral: disabled unless `reasoning_effort` is present and not `none`
-    ///   on the legacy parsers; the unified `mistral` family never disables it.
+    ///   on the legacy parsers; the unified `mistral_4` family never disables it.
     /// For Gemma 4: reasoning is opt-in and disabled unless chat_template_args
     ///   explicitly enables thinking. Gemma 4's chat template injects reasoning
     ///   markers only when enable_thinking=true. The exception is the unified route
@@ -11132,9 +11132,6 @@ mod tests {
         }
     }
 
-    // The Unified mistral family is the default generation, and its forced-choice
-    // grammar keeps the native call format, so the stream parser must read native
-    // calls for `auto` and forced choices alike.
     #[test]
     fn test_unified_mistral_keeps_reasoning_when_effort_none() {
         use crate::protocols::openai::GuidedToolConstraint;
@@ -11184,6 +11181,9 @@ mod tests {
         }
     }
 
+    // The Unified mistral_4 family is the default generation, and its forced-choice
+    // grammar keeps the native call format, so the stream parser must read native
+    // calls for `auto` and forced choices alike.
     #[tokio::test]
     async fn unified_mistral_streams_native_calls() {
         if crate::test_utils::run_isolated(

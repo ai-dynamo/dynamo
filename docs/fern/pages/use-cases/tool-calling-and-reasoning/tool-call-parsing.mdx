@@ -400,6 +400,13 @@ The **Upstream name** field shows where the vLLM or SGLang parser name differs f
 
         **Notes:** `[TOOL_CALLS]...[/TOOL_CALLS]`
       </Accordion>
+      <Accordion title="Mistral v11+ tokenizers (tekken.json), including Mistral Large 4">
+        **Parser:** `mistral`, served by the `dynamo-parsers-v2` unified family `mistral_4`
+
+        **Upstream name:** Same name across Dynamo, vLLM, and SGLang
+
+        **Notes:** `[TOOL_CALLS]NAME[ARGS]{json}` calls with `[THINK]` reasoning; pair with `--dyn-reasoning-parser mistral`. The unified route applies when the tokenizer has `[ARGS]`; older Mistral tokenizers keep the parser above under auto. On dynamo.vllm with the `auto` or `guidance` structured-output backend, mistral-common's grammar holds forced `tool_choice`, `auto` with tools, and a reply JSON schema. Other workers parse the native format but do not enforce a forced `tool_choice`. See the [Mistral Large 4 recipe](../../recipes/model-recipes/mistral-large-4.mdx).
+      </Accordion>
     </AccordionGroup>
   </Accordion>
 

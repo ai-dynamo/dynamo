@@ -281,7 +281,7 @@ mod tests {
         }
     }
 
-    // A non-streaming forced choice on the Unified mistral family must re-read
+    // A non-streaming forced choice on the Unified mistral_4 family must re-read
     // the aggregated native output, not hand it to the guided-JSON reader.
     #[tokio::test]
     async fn unified_mistral_forced_choices_batch_native_calls() {

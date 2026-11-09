@@ -253,12 +253,13 @@ pub(crate) fn parsers_v2_selected() -> bool {
     super::tool_parser_v2::enabled()
 }
 
-/// Vocabulary tokens a unified family's call format needs. A tokenizer without them
-/// predates that format, so `auto` falls back to the v1 parser of the same name;
-/// every family listed here must also name a v1 parser. A `mistral` vocabulary
-/// without `[ARGS]` is pre-v11 and writes `[TOOL_CALLS]` followed by a JSON array,
-/// upstream vLLM's `_is_pre_v11_tokeniser` vocabulary check.
-const FAMILY_REQUIRED_TOKENS: &[(&str, &str)] = &[(MISTRAL_UNIFIED_FAMILY, "[ARGS]")];
+/// Vocabulary tokens a unified family's call format needs, with the v1 parser that
+/// serves a tokenizer without them. Such a tokenizer predates that format, so `auto`
+/// falls back to the v1 parser, which only a selector naming it can reach. A Mistral
+/// vocabulary without `[ARGS]` is pre-v11 and writes `[TOOL_CALLS]` followed by a
+/// JSON array, stock vLLM's `_is_pre_v11_tokeniser` vocabulary check.
+const FAMILY_REQUIRED_TOKENS: &[(&str, &str, &str)] =
+    &[(MISTRAL_UNIFIED_FAMILY, "[ARGS]", "mistral")];
 
 /// The configured unified family this tokenizer cannot serve, if any. Model setup
 /// resolves it once, and [`supported_family`] applies it to every selection.
@@ -270,13 +271,24 @@ pub(crate) fn unsupported_family(
     let Some(family) = configured_family(tool_call_parser, reasoning_parser) else {
         return Ok(None);
     };
-    for &(required_by, token) in FAMILY_REQUIRED_TOKENS {
+    for &(required_by, token, v1_parser) in FAMILY_REQUIRED_TOKENS {
         if required_by == family
             && tokenizer
                 .token_to_id(token)
                 .map_err(|error| error.context(format!("look up {token} for {family}")))?
                 .is_none()
         {
+            // Only the v1 name has a parser to fall back to.
+            if let Some(selector) = [tool_call_parser, reasoning_parser]
+                .into_iter()
+                .flatten()
+                .find(|selector| *selector != v1_parser)
+            {
+                anyhow::bail!(
+                    "parser `{selector}` needs a tokenizer with {token}; configure \
+                     `{v1_parser}` for this model"
+                );
+            }
             return Ok(Some(family));
         }
     }
@@ -13683,8 +13695,6 @@ pub(crate) mod tests {
         assert_eq!(configured_family(Some("qwen3_coder"), Some("glm47")), None);
     }
 
-    /// v11+ tokenizers keep Unified `mistral`; a pre-v11 tokenizer, which has
-    /// `[TOOL_CALLS]` but no `[ARGS]`, keeps the v1 parser under `auto`.
     #[test]
     fn mistral_batch_output_splits_reasoning_text_and_calls() {
         let parsed = parse_complete(
@@ -13729,6 +13739,8 @@ pub(crate) mod tests {
         );
     }
 
+    /// v11+ tokenizers keep Unified `mistral_4`; a pre-v11 tokenizer, which has
+    /// `[TOOL_CALLS]` but no `[ARGS]`, keeps the v1 `mistral` parser under `auto`.
     #[test]
     fn unified_mistral_requires_the_args_token() {
         if crate::test_utils::run_isolated(
@@ -13759,6 +13771,15 @@ pub(crate) mod tests {
                 unsupported_family(tool, reasoning, &pre_v11).unwrap(),
                 mistral
             );
+        }
+        // `mistral_4` names no v1 parser, so a pre-v11 tokenizer is a setup error.
+        for (tool, reasoning) in [
+            (Some("mistral_4"), None),
+            (Some("mistral"), Some("mistral_4")),
+        ] {
+            assert_eq!(unsupported_family(tool, reasoning, &tekken).unwrap(), None);
+            let error = unsupported_family(tool, reasoning, &pre_v11).unwrap_err();
+            assert!(error.to_string().contains("configure `mistral`"), "{error}");
         }
         // Families without required tokens are always supported.
         assert_eq!(
