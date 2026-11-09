@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError, distribution
+from importlib.util import find_spec
 from pathlib import Path
 
 import numpy as np
@@ -38,17 +39,24 @@ MOONCAKE_TRACE_FIRST20 = """{"timestamp": 0, "input_length": 6755, "output_lengt
 
 
 # AISimulate ships as the ``aisim`` distribution from 0.14.0 onward; earlier
-# releases used ``aisimulate``. The import name is ``aisimulate`` for both.
+# releases used ``aisimulate``. The import name is ``aisimulate`` for both, and an
+# unrelated project also uses the ``aisim`` name, so require the import as well.
 _AISIMULATE_DISTRIBUTIONS = ("aisim", "aisimulate")
 
 
-def _require_aisimulate_distribution(*, allow_module_level: bool = False) -> None:
+def _aisimulate_installed() -> bool:
     for name in _AISIMULATE_DISTRIBUTIONS:
         try:
             distribution(name)
-            return
         except PackageNotFoundError:
             continue
+        return find_spec("aisimulate") is not None
+    return False
+
+
+def _require_aisimulate_distribution(*, allow_module_level: bool = False) -> None:
+    if _aisimulate_installed():
+        return
     pytest.skip(
         "Dynamo replay integration tests require the optional AISimulate "
         f"distribution (one of {', '.join(_AISIMULATE_DISTRIBUTIONS)})",
