@@ -57,7 +57,6 @@ def sidecar_embeddings_stack(request, tmp_path, start_services_with_http):
 
 @pytest.fixture(scope="function")
 def sidecar_tensor_stack(request, tmp_path, start_services_with_grpc):
-    # The sidecar serves `--export` models as raw KServe v2 tensor models.
     yield from sidecar_stack(
         request, tmp_path, start_services_with_grpc, "--export", _CLASSIFIER_MODEL
     )

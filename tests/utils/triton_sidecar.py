@@ -109,13 +109,7 @@ class TritonSidecarProcess(ManagedProcess):
 
 
 def sidecar_stack(request, tmp_path, frontend_ports, task_flag, model):
-    """Launch tritonserver + dynamo-triton-sidecar on top of a Dynamo frontend.
-
-    `frontend_ports` is the `(frontend_port, system_port)` tuple from either the
-    HTTP fixture (`start_services_with_http`) or the gRPC fixture
-    (`start_services_with_grpc`). The sidecar only sees `system_port`, so the
-    frontend transport doesn't change the sidecar launch.
-    """
+    """Launch tritonserver + dynamo-triton-sidecar on top of a Dynamo frontend."""
     frontend_port, system_port = frontend_ports
     triton_ports = allocate_ports(2, DynamoPortRange.SERVE.value)
     triton_grpc_port, triton_http_port = triton_ports
