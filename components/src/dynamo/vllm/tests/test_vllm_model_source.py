@@ -131,7 +131,7 @@ async def test_ngc_worker_fetches_weights_before_engine_setup(
 @pytest.mark.parametrize(
     "extra_args,snapshot,error",
     [
-        (["--realtime", "--enable-lora"], False, "--enable-lora"),
+        (["--endpoint-types", "realtime", "--enable-lora"], False, "--enable-lora"),
         (
             ["--embedding-worker", "--embedding-worker-processes", "2"],
             True,

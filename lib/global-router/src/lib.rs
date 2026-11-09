@@ -9,7 +9,7 @@
 //! from round trips this process measures, and count this process's own
 //! requests in an [`InFlightTracker`].
 
-mod affinity;
+pub mod affinity;
 mod load;
 mod pool;
 mod selector;
