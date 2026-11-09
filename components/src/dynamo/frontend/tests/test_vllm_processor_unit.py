@@ -1441,6 +1441,12 @@ async def test_generator_accepts_zero_top_logprobs(
         ({"logprobs": True, "top_logprobs": 1}, 1, None),
         ({"logprobs": True, "top_logprobs": 0, "prompt_logprobs": 0}, 0, 0),
         ({"logprobs": True, "top_logprobs": 1, "prompt_logprobs": 3}, 1, 3),
+        # Explicit ids replace the top-k count, as on the worker.
+        (
+            {"logprobs": True, "top_logprobs": 1, "logprob_token_ids": [5, 6]},
+            None,
+            None,
+        ),
         ({"prompt_logprobs": 0}, None, 0),
         ({"stream": True}, None, None),
         ({"stream": True, "prompt_logprobs": 0}, None, None),
@@ -1477,7 +1483,7 @@ async def test_generator_forwards_chat_logprobs_count(
     generation_config,
 ):
     class RequestForSampling(SimpleNamespace):
-        model_fields = frozenset({"prompt_logprobs"})
+        model_fields = frozenset({"prompt_logprobs", "logprob_token_ids"})
 
     monkeypatch.setattr(
         vllm_processor_module,
@@ -1490,6 +1496,7 @@ async def test_generator_forwards_chat_logprobs_count(
                     logprobs=request_options.get("logprobs"),
                     top_logprobs=request_options.get("top_logprobs"),
                     prompt_logprobs=request_options.get("prompt_logprobs"),
+                    logprob_token_ids=request_options.get("logprob_token_ids"),
                     top_k=None,
                     min_p=None,
                     cache_salt=None,
@@ -1558,6 +1565,12 @@ async def test_generator_forwards_chat_logprobs_count(
     assert (
         captured["dynamo_preproc"]["output_options"]["prompt_logprobs"]
         == expected_prompt_logprobs
+    )
+    sampling_passthrough = (
+        captured["dynamo_preproc"].get("extra_args", {}).get("sampling_options", {})
+    )
+    assert sampling_passthrough.get("logprob_token_ids") == request_options.get(
+        "logprob_token_ids"
     )
 
 
@@ -1825,95 +1838,6 @@ async def test_generator_sends_disabled_top_k_and_min_p_as_unset(
 
     assert captured["sampling_options"]["top_k"] == expected_top_k
     assert captured["sampling_options"]["min_p"] == expected_min_p
-
-
-@pytest.mark.asyncio
-async def test_generator_forwards_sampling_passthrough_fields(
-    vllm_processor_module,
-    monkeypatch,
-):
-    """Passthrough fields reach the worker as the Rust preprocessor sends them."""
-
-    class RequestForSampling(SimpleNamespace):
-        model_fields = frozenset({"logprob_token_ids"})
-
-    monkeypatch.setattr(
-        vllm_processor_module,
-        "preprocess_chat_request",
-        AsyncMock(
-            return_value=SimpleNamespace(
-                request_for_sampling=RequestForSampling(
-                    max_completion_tokens=None,
-                    max_tokens=1,
-                    logprobs=True,
-                    top_logprobs=0,
-                    cache_salt=None,
-                    mm_processor_kwargs=None,
-                    top_k=None,
-                    min_p=None,
-                    logprob_token_ids=[5, 6],
-                ),
-                tool_parser=None,
-                chat_template_kwargs={},
-                engine_prompt={"prompt": "Hello"},
-                prompt_token_ids=[1],
-                guided_decoding=None,
-                uses_dynamo_json_tool_call_fallback=False,
-            )
-        ),
-    )
-    monkeypatch.setattr(
-        vllm_processor_module.InputProcessor, "assign_request_id", lambda request: None
-    )
-
-    def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
-        return SimpleNamespace(
-            sampling_params=sampling_params.clone(), mm_features=None
-        )
-
-    processor = vllm_processor_module.VllmProcessor(
-        tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
-        input_processor=SimpleNamespace(
-            generation_config_fields={},
-            renderer=SimpleNamespace(
-                process_for_engine_async=AsyncMock(return_value={})
-            ),
-            process_inputs=process_inputs,
-            model_config=None,
-        ),
-        output_processor=object(),
-        tool_parser_class=None,
-        reasoning_parser_class=None,
-        routed_engine=object(),
-    )
-    captured = {}
-
-    async def capture_generate_and_stream(
-        request_id, request, dynamo_preproc, *args, **kwargs
-    ):
-        captured.update(dynamo_preproc)
-        yield {}
-
-    monkeypatch.setattr(processor, "_generate_and_stream", capture_generate_and_stream)
-
-    passthrough = {
-        "allowed_token_ids": [3, 4],
-        "bad_words_token_ids": [[7, 8]],
-        "logprob_token_ids": [5, 6],
-        "vllm_xargs": {"diffusion_max_steps": 1},
-    }
-    async for _ in processor._generator_inner(
-        {
-            "model": "test",
-            "messages": [{"role": "user", "content": "Hello"}],
-            **passthrough,
-        }
-    ):
-        pass
-
-    assert captured["extra_args"]["sampling_options"] == passthrough
-    # Explicit logprob_token_ids replace the top-k count, as on the worker.
-    assert captured["output_options"]["logprobs"] is None
 
 
 @pytest.mark.asyncio
@@ -5047,6 +4971,23 @@ def test_sampling_logprobs_count_accepts_chat_bool(vllm_processor_module):
     assert count(False, 0) is None
     assert count(None, 0) is None
     assert count(False, True) is None
+
+
+@pytest.mark.parametrize(
+    "request_options,expected",
+    [
+        ({"logprobs": True}, 0),
+        ({"logprobs": True, "top_logprobs": 1}, 1),
+        ({"logprobs": True, "logprob_token_ids": [5, 6]}, 3),
+        ({"logprobs": True, "top_logprobs": 1, "logprob_token_ids": [5, 6]}, 3),
+        ({"logprob_token_ids": [5, 6]}, None),
+    ],
+)
+def test_choice_top_logprobs_lists_every_explicit_token(
+    vllm_processor_module, request_options, expected
+):
+    """Explicit ids list the sampled token and every named id, as vLLM does."""
+    assert vllm_processor_module._choice_top_logprobs(request_options) == expected
 
 
 def test_chat_choice_logprobs_from_worker_chunk(vllm_processor_module, tokenizer):

@@ -97,6 +97,21 @@ def _sampling_logprobs_count(logprobs: Any, top_logprobs: Any) -> int | None:
     return None
 
 
+def _choice_top_logprobs(request: dict[str, Any]) -> int | None:
+    """How many alternatives each response logprob entry lists.
+
+    With explicit ``logprob_token_ids`` the worker scores the sampled token and
+    each named id, and vLLM's chat server lists them all, whatever
+    ``top_logprobs`` says.
+    """
+    count = _sampling_logprobs_count(
+        request.get("logprobs"), request.get("top_logprobs")
+    )
+    if count is not None and (token_ids := request.get("logprob_token_ids")):
+        return len(token_ids) + 1
+    return count
+
+
 def _reject_unsupported_chat_logprobs(logprobs: Any, top_logprobs: Any) -> None:
     """Validate chat logprob options before preprocessing.
 
@@ -683,24 +698,15 @@ def _normalize_vllm_image_parts(messages: list[Any]) -> None:
 
 
 # Request fields the vLLM worker applies from extra_args.sampling_options, sent
-# as the client wrote them. Keep in step with the Rust preprocessor's
-# `sampling_passthrough_args` (lib/llm/src/preprocessor.rs).
+# as the client wrote them: the Rust preprocessor's `sampling_passthrough_args`
+# (lib/llm/src/preprocessor.rs) without `detokenize`, which the worker's token
+# path always turns off.
 _SAMPLING_PASSTHROUGH_FIELDS = (
-    "detokenize",
     "allowed_token_ids",
     "bad_words_token_ids",
     "logprob_token_ids",
     "vllm_xargs",
 )
-
-
-def _sampling_passthrough_args(request: dict[str, Any]) -> dict[str, Any]:
-    """The request's passthrough fields for the worker's sampling options."""
-    return {
-        key: request[key]
-        for key in _SAMPLING_PASSTHROUGH_FIELDS
-        if request.get(key) is not None
-    }
 
 
 def _disabled_as_unset(value: Any, requested: Any) -> Any:
@@ -1123,10 +1129,13 @@ class VllmProcessor:
         }
         if guided_decoding is not None:
             dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding
-        if sampling_passthrough := _sampling_passthrough_args(request):
-            dynamo_preproc.setdefault("extra_args", {})[
-                "sampling_options"
-            ] = sampling_passthrough
+        sampling_passthrough = {
+            key: request[key]
+            for key in _SAMPLING_PASSTHROUGH_FIELDS
+            if request.get(key) is not None
+        }
+        if sampling_passthrough:
+            dynamo_preproc["extra_args"] = {"sampling_options": sampling_passthrough}
         if reasoning_metadata.engine_reasoning_ended is not None:
             dynamo_preproc[
                 "reasoning_ended"
@@ -1298,10 +1307,7 @@ class VllmProcessor:
         audio_count = len(_mm_counts.get("audio_url", []))
         pending_choice_logprobs: dict[int, list[dict[str, Any]]] = {}
         emitted_choice_tokens: dict[int, list[int]] = {}
-        choice_top_logprobs = _sampling_logprobs_count(
-            request.get("logprobs"),
-            request.get("top_logprobs"),
-        )
+        choice_top_logprobs = _choice_top_logprobs(request)
         return_tokens_as_token_ids = request.get("return_tokens_as_token_ids") is True
         prompt_logprobs = PromptLogprobsAccumulator(request)
         pending_terminals: dict[int, dict[str, Any]] = {}

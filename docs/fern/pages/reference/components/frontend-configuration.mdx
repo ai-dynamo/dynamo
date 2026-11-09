@@ -995,9 +995,7 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
 <ParamField path="DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS" type="boolean" default="false">
   When truthy, `/v1/chat/completions` and `/v1/completions` ignore and drop unknown top-level
   request fields instead of rejecting the request. This does not forward arbitrary fields to a
-  backend. Named passthrough fields (`cache_salt`, `stop_token_ids`, `detokenize`,
-  `allowed_token_ids`, `bad_words_token_ids`, `logprob_token_ids`, `vllm_xargs`) remain subject to
-  their normal validation and handling.
+  backend. Named passthrough fields remain subject to their normal validation and handling.
 </ParamField>
 
 <ParamField path="DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION" type="boolean" default="false">
