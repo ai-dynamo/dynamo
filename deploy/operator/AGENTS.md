@@ -47,6 +47,10 @@ SPDX-License-Identifier: Apache-2.0
   annotation, never from informer delivery semantics.
 - An operator-only upgrade must not roll or materially alter unchanged
   workloads unless an explicit, documented migration or opt-in requires it.
+- Any backward-incompatible rendering change that would trigger a workload
+  rollout must be protected by a compatibility or feature gate. Existing
+  resources must retain their prior rendered behavior by default, and tests
+  must cover both the legacy and enabled paths.
 - Admission validation should enforce state invariants independent of the
   request operation. Distinguish between `CREATE` and `UPDATE` only for
   exceptional, intentional API semantics, and document why the distinction is
