@@ -48,6 +48,12 @@ and SGLang 0.5.22 implement only for Hopper and Blackwell (FlashMLA sparse,
 FlashAttention-3, NSA). The checkpoint is small but cannot run on the 24 GiB
 Ada runners behind the post-merge lanes, so this file is ``nightly`` +
 ``h100`` and runs in the ``vllm-h100-test`` / ``sglang-h100-test`` lanes.
+
+SGLang builds that carry sgl-project/sglang#43043 (0.5.23 and later) fill
+image tokens with pad values of their own. Since #17126 the router keeps every
+block from the first such value on out of its index, and every image prompt
+here holds one in its first block, so on those builds the SGLang tests skip
+until exact SGLang image routing lands in #17082.
 """
 
 from __future__ import annotations
@@ -384,6 +390,14 @@ def start_glm_mm_services(
     first worker's registration while its etcd lease expires.
     """
     backend = request.param
+    if backend == "sglang":
+        # Deferred so that collection never imports SGLang.
+        from dynamo.sglang._compat import sglang_has_wide_mm_pad_values
+
+        if sglang_has_wide_mm_pad_values():
+            # The router drops image blocks from wide-pad sources (#17126).
+            pytest.skip("exact SGLang image routing needs #17082")
+
     namespace = f"router-rust-mm-glm-{backend}"
     with reserved_ports(count=4, start_port=12000) as ports:
         frontend_port, system_port, kv_event_port, nccl_port = ports
