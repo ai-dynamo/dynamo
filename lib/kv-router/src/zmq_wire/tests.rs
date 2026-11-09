@@ -1922,3 +1922,46 @@ fn test_unrecognized_media_do_not_pollute_cache_namespace_state() {
     };
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
 }
+
+#[test]
+fn non_utf8_extra_key_does_not_fail_the_batch() {
+    struct BinaryKey(Vec<u8>);
+    impl Serialize for BinaryKey {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_bytes(&self.0)
+        }
+    }
+
+    #[derive(Serialize)]
+    struct Stored {
+        #[serde(rename = "type")]
+        event_type: &'static str,
+        block_hashes: Vec<u64>,
+        parent_block_hash: Option<u64>,
+        token_ids: Vec<u32>,
+        block_size: usize,
+        extra_keys: Vec<Option<Vec<BinaryKey>>>,
+    }
+
+    // vLLM publishes a prompt-embeds block's key as a raw SHA-256 digest.
+    let digest = vec![0xFF_u8; 32];
+    assert!(std::str::from_utf8(&digest).is_err());
+    let events = [(11, Some(vec![BinaryKey(digest)])), (12, None)].map(|(hash, keys)| Stored {
+        event_type: "BlockStored",
+        block_hashes: vec![hash],
+        parent_block_hash: None,
+        token_ids: vec![0, 0],
+        block_size: 2,
+        extra_keys: vec![keys],
+    });
+
+    let payload = to_vec_named(&(0.0_f64, events, Some(0_i32))).unwrap();
+    let batch = decode_event_batch(&payload).expect("a binary key must not fail the batch");
+    assert_eq!(batch.events.len(), 2);
+    assert!(
+        batch
+            .events
+            .iter()
+            .all(|event| matches!(event, RawKvEvent::BlockStored { .. }))
+    );
+}

@@ -2712,6 +2712,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "seqlock",
  "serde",
+ "serde_bytes",
  "serde_json",
  "serde_yaml",
  "slotmap",
