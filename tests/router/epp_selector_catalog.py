@@ -542,8 +542,7 @@ def assert_named_policy_source_contract() -> None:
         "provider(&WorkerSelectionPolicyParameters::new(parameters))"
         ".map(Some)"
         ".map_err(|source|WorkerSelectionPolicyRegistryError::Provider{"
-        "policy_type:policy_type.to_owned(),source,})"
-        not in collapsed_resolve
+        "policy_type:policy_type.to_owned(),source,})" not in collapsed_resolve
     ):
         raise AssertionError(
             "resolve_selected no longer shares the provider type/parameter "
@@ -768,7 +767,7 @@ def assert_named_policy_source_contract() -> None:
         is_default_body,
     ):
         raise AssertionError(
-            "is_default no longer matches only the reserved Named(\"default\") "
+            'is_default no longer matches only the reserved Named("default") '
             "selection"
         )
     from_value_body = _fn_decl_and_body(
