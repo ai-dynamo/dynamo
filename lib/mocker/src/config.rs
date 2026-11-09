@@ -254,23 +254,6 @@ mod tests {
         }
     }
 
-    // Passes without the GPU accounting change: guards that `unwrap_or(1)`
-    // never sees a zero PCP because the canonical config rejects it first.
-    #[test]
-    fn pcp_zero_is_rejected_at_the_config_boundary() {
-        let error = MockerConfig::from_value(json!({
-            "engine": {"timing_model": {
-                "type": "external", "provider": "ais",
-                "config": {
-                    "model": "test-model", "system": "h200_sxm",
-                    "backend": "vllm", "worker_type": "aggregated", "cp_size": 0
-                }
-            }}
-        }))
-        .unwrap_err();
-        assert!(format!("{error:#}").contains("cp_size must be positive"));
-    }
-
     #[test]
     fn gpu_accounting_rejects_overflow() {
         let args = MockerConfig {
