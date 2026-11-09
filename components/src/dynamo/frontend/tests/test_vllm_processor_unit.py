@@ -963,11 +963,8 @@ class TestReasoningParserMetadata:
         }
 
 
-# MiniMax M3 fixture: the real vLLM parser over the Qwen3 tokenizer plus the two
-# M3 markers as ordinary vocabulary entries, as in the M3 tokenizer (vLLM's
-# parser refuses a tokenizer that lacks them). It keeps the parser's marker
-# handling and the decoded prompt tail; it leaves out the M3 chat template and
-# weights, which this gate does not read.
+# Qwen3 tokenizer plus the two M3 markers, which vLLM's M3 parser requires;
+# this gate does not read the M3 chat template or weights.
 @pytest.fixture(scope="module")
 def m3_tokenizer():
     tokenizer = AutoTokenizer.from_pretrained(MODEL)

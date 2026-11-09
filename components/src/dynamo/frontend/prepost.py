@@ -1038,9 +1038,8 @@ class StreamingPostProcessor:
         # `enable_thinking` is the convention adopted across the modern
         # reasoning-capable model families that vLLM supports; templates
         # that don't honor it simply leave it unset (no effect here).
-        # MiniMax M3 is decided by the rendered prompt instead: its gate stays
-        # open and response_reasoning_ended carries the decision (see
-        # _reasoning_parser_enabled).
+        # MiniMax M3 keeps this gate open; response_reasoning_ended carries its
+        # prompt-based decision (see _reasoning_parser_enabled).
         self.reasoning_parser = (
             reasoning_parser_class(
                 tokenizer,
