@@ -307,6 +307,88 @@ async fn streaming_text_baseline() {
 
 #[tokio::test]
 #[serial]
+async fn refusal_fragments_reach_messages_content_and_events() {
+    temp_env::async_with_vars(ENV, async {
+        for stream in [false, true] {
+            for include_text in [false, true] {
+                let mut script = load_agent_fixture("text.sse").await.unwrap();
+                let chunk = script[1].data.as_mut().unwrap();
+                if !include_text {
+                    chunk.inner.choices[0].delta.content = None;
+                }
+                chunk.inner.choices[0].delta.refusal = Some("I cannot ".into());
+                let mut tail = script[1].clone();
+                let delta = &mut tail.data.as_mut().unwrap().inner.choices[0].delta;
+                delta.content = None;
+                delta.refusal = Some("help with that.".into());
+                script.insert(2, tail);
+                let svc = HarnessService::start([script]).await;
+                let response = post_messages(
+                    &svc,
+                    &json!({
+                        "model": MODEL,
+                        "max_tokens": 64,
+                        "stream": stream,
+                        "messages": [{"role": "user", "content": "ping"}]
+                    }),
+                )
+                .await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let expected = if include_text {
+                    "Pong.I cannot help with that."
+                } else {
+                    "I cannot help with that."
+                };
+                if stream {
+                    let events = parse_anthropic_sse(&response.text().await.unwrap())
+                        .await
+                        .unwrap();
+                    let count = |name: &str| events.iter().filter(|e| e.event == name).count();
+                    assert_eq!(count("content_block_start"), 1);
+                    assert_eq!(count("content_block_stop"), 1);
+                    let start = events
+                        .iter()
+                        .find(|event| event.event == "content_block_start")
+                        .unwrap();
+                    assert_eq!(start.data["content_block"]["type"], "text");
+                    let deltas: Vec<_> = events
+                        .iter()
+                        .filter(|event| event.event == "content_block_delta")
+                        .collect();
+                    for event in &deltas {
+                        assert_eq!(event.data["delta"]["type"], "text_delta");
+                        assert_eq!(event.data["index"], start.data["index"]);
+                    }
+                    let texts: Vec<_> = deltas
+                        .iter()
+                        .map(|event| event.data["delta"]["text"].as_str().unwrap())
+                        .collect();
+                    let mut expected_texts = vec!["I cannot ", "help with that."];
+                    if include_text {
+                        expected_texts.insert(0, "Pong.");
+                    }
+                    assert_eq!(texts, expected_texts);
+                    assert_eq!(texts.concat(), expected);
+                    let message_delta = events
+                        .iter()
+                        .find(|event| event.event == "message_delta")
+                        .unwrap();
+                    assert_eq!(message_delta.data["delta"]["stop_reason"], "end_turn");
+                } else {
+                    let body: Value = response.json().await.unwrap();
+                    assert_eq!(body["content"], json!([{"type": "text", "text": expected}]));
+                    assert_eq!(body["stop_reason"], "end_turn");
+                }
+                assert_eq!(svc.engine.remaining_scripts().await, 0);
+                svc.shutdown().await;
+            }
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 async fn fragmented_tool_arguments_close_after_all_deltas() {
     temp_env::async_with_vars(ENV, async {
         let svc =
