@@ -1424,7 +1424,8 @@ impl Serialize for ResponseForSpec<'_> {
             serialize_optional_entry(&mut map, "tool_choice", &response.tool_choice)?;
         }
         if let Some(tools) = self.spec.template_tools {
-            map.serialize_entry("tools", tools)?;
+            let tools = super::echoed_tools_json(tools).map_err(serde::ser::Error::custom)?;
+            map.serialize_entry("tools", &tools)?;
         } else {
             serialize_optional_entry(&mut map, "tools", &response.tools)?;
         }
@@ -3322,5 +3323,59 @@ mod tests {
             completed_json["response"]["output"][0]["content"][0]["type"],
             "reasoning_text"
         );
+    }
+
+    /// Lifecycle snapshots echo function tools with a present `description`
+    /// key, `null` when the request omitted it or sent `null`.
+    #[test]
+    fn test_lifecycle_events_echo_null_function_tool_descriptions() {
+        let tools: Vec<super::super::RequestTool> = serde_json::from_value(serde_json::json!([
+            {"type":"function","name":"fn0","parameters":{"type":"object"}},
+            {"type":"function","name":"fn1","description":null,"parameters":{"type":"object"}},
+            {"type":"function","name":"fn2","description":"fixture","parameters":{"type":"object"}},
+            {"type":"namespace","name":"fs","description":"Files","tools":[
+                {"type":"function","name":"read","parameters":{"type":"object"}}]}
+        ]))
+        .unwrap();
+        let params = ResponseParams {
+            tools: Some(tools.iter().map(|tool| tool.inner.clone()).collect()),
+            template_tools: Some(tools),
+            ..Default::default()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let events = [
+            ResponseStreamEvent::ResponseCreated(ResponseCreatedEvent {
+                sequence_number: conv.next_seq(),
+                response: conv.make_response(Status::InProgress, vec![]),
+            }),
+            ResponseStreamEvent::ResponseInProgress(ResponseInProgressEvent {
+                sequence_number: conv.next_seq(),
+                response: conv.make_response(Status::InProgress, vec![]),
+            }),
+            ResponseStreamEvent::ResponseCompleted(ResponseCompletedEvent {
+                sequence_number: conv.next_seq(),
+                response: conv.make_response(Status::Completed, vec![]),
+            }),
+        ];
+        for event in &events {
+            let json = optimized_event_json(&conv, event);
+            let tools = &json["response"]["tools"];
+            // Presence-aware: indexing a missing key also yields `Null`.
+            for (tool, expected) in [
+                (&tools[0], serde_json::Value::Null),
+                (&tools[1], serde_json::Value::Null),
+                (&tools[2], serde_json::json!("fixture")),
+                (&tools[3]["tools"][0], serde_json::Value::Null),
+            ] {
+                let tool = tool.as_object().unwrap();
+                assert!(
+                    tool.contains_key("description"),
+                    "{}: {tool:?}",
+                    json["type"]
+                );
+                assert_eq!(tool["description"], expected);
+                assert_eq!(tool["strict"], true);
+            }
+        }
     }
 }
