@@ -2,19 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Pools as the router core's workers: one worker per reachable pool, keyed
-//! by a hash of the pool id.
+//! by a hash of the pool id and model.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dynamo_global_common::PoolId;
 use dynamo_kv_router::WorkerId;
 use dynamo_kv_router::services::selection::{CatalogReconciler, WorkerRequest};
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use xxhash_rust::xxh3::xxh3_64;
+use xxhash_rust::xxh3::Xxh3;
 
 use crate::Pool;
 use crate::selector::reachable;
@@ -24,14 +23,20 @@ pub(super) const ROUTING_GROUP: &str = "global";
 /// Required by the core; pools have no KV blocks.
 const BLOCK_SIZE: u32 = 1;
 
-pub(super) fn worker_id(pool: &PoolId) -> WorkerId {
-    xxh3_64(pool.as_str().as_bytes())
+/// One per pool id and model, so a pool that changes model is a new worker
+/// and the old one retires like any pool that leaves.
+pub(super) fn worker_id(pool: &Pool) -> WorkerId {
+    let mut hasher = Xxh3::new();
+    hasher.update(pool.id.as_str().as_bytes());
+    hasher.update(&[0]);
+    hasher.update(pool.model.as_bytes());
+    hasher.digest()
 }
 
 /// The endpoint is required by the core but never dialed.
 fn worker(pool: &Pool) -> WorkerRequest {
     WorkerRequest {
-        worker_id: worker_id(&pool.id),
+        worker_id: worker_id(pool),
         model_name: pool.model.clone(),
         routing_group: ROUTING_GROUP.to_owned(),
         endpoint: Some(pool.id.to_string()),
@@ -60,9 +65,10 @@ const RETRY_AFTER: Duration = Duration::from_secs(5);
 
 /// Where a core worker stands against the published pools.
 enum Membership {
-    /// In the latest pools.
-    Wanted,
-    /// Left the latest pools, which are not published yet.
+    /// In the latest pools; `published` once pools naming it are.
+    Wanted { published: bool },
+    /// Left the latest pools, which are not published yet, after pools
+    /// naming it were.
     Left,
     /// Left the published pools at this instant.
     Retiring(Instant),
@@ -86,13 +92,24 @@ pub(super) async fn reconcile<S>(
     let mut snapshot = pools.borrow_and_update().clone();
     loop {
         let wanted = workers((*snapshot).as_ref());
-        for (_, membership) in members.values_mut() {
-            if matches!(membership, Membership::Wanted) {
+        // A worker no published pools named can go at once: no select names it.
+        members.retain(|_, (_, membership)| match membership {
+            Membership::Wanted { published: false } => false,
+            Membership::Wanted { published: true } => {
                 *membership = Membership::Left;
+                true
             }
-        }
+            _ => true,
+        });
         for worker in &wanted {
-            members.insert(worker.worker_id, (worker.clone(), Membership::Wanted));
+            let published = matches!(
+                members.get(&worker.worker_id),
+                Some((_, Membership::Left | Membership::Retiring(_)))
+            );
+            members.insert(
+                worker.worker_id,
+                (worker.clone(), Membership::Wanted { published }),
+            );
         }
         let now = Instant::now();
         members.retain(|_, (_, membership)| {
@@ -105,7 +122,7 @@ pub(super) async fn reconcile<S>(
             .chain(
                 members
                     .values()
-                    .filter(|(_, membership)| !matches!(membership, Membership::Wanted))
+                    .filter(|(_, membership)| !matches!(membership, Membership::Wanted { .. }))
                     .map(|(worker, _)| worker.clone()),
             )
             .collect::<Vec<_>>();
@@ -114,8 +131,10 @@ pub(super) async fn reconcile<S>(
                 applied.send_replace(snapshot.clone());
                 let published = Instant::now();
                 for (_, membership) in members.values_mut() {
-                    if matches!(membership, Membership::Left) {
-                        *membership = Membership::Retiring(published);
+                    match membership {
+                        Membership::Wanted { published: named } => *named = true,
+                        Membership::Left => *membership = Membership::Retiring(published),
+                        Membership::Retiring(_) => {}
                     }
                 }
                 false
@@ -168,7 +187,7 @@ mod tests {
         );
         let worker = worker(&blue);
 
-        assert_eq!(worker.worker_id, worker_id(&blue.id));
+        assert_eq!(worker.worker_id, worker_id(&blue));
         assert_eq!(worker.model_name, "qwen");
         assert_eq!(worker.routing_group, ROUTING_GROUP);
         assert_eq!(worker.endpoint.as_deref(), Some(blue.id.as_str()));
@@ -177,9 +196,11 @@ mod tests {
             (Some(0), Some(1))
         );
         assert!(worker.block_size.is_some_and(|size| size > 0));
+        assert_ne!(worker_id(&blue), worker_id(&pool("green", "qwen", &[])));
         assert_ne!(
-            worker_id(&blue.id),
-            worker_id(&pool("green", "qwen", &[]).id)
+            worker_id(&blue),
+            worker_id(&pool("blue", "llama", &[])),
+            "a pool that changes model is a new worker"
         );
     }
 
@@ -188,10 +209,7 @@ mod tests {
         let draining = pool("draining", "qwen", &[]);
         let live = pool("live", "qwen", &["http://live:8000"]);
 
-        assert_eq!(
-            ids(&workers(&[draining, live.clone()])),
-            [worker_id(&live.id)]
-        );
+        assert_eq!(ids(&workers(&[draining, live.clone()])), [worker_id(&live)]);
         assert!(workers(&[]).is_empty());
     }
 }

@@ -92,7 +92,7 @@ impl SelectionCoreSelector {
         let allowed = candidates
             .iter()
             .filter(|pool| reachable(pool))
-            .map(|pool| worker_id(&pool.id))
+            .map(|pool| worker_id(pool))
             .collect::<HashSet<_>>();
         if allowed.is_empty() {
             return None;
@@ -101,7 +101,7 @@ impl SelectionCoreSelector {
         let Some(pool) = candidates
             .iter()
             .copied()
-            .find(|pool| worker_id(&pool.id) == selected.worker_id && reachable(pool))
+            .find(|pool| worker_id(pool) == selected.worker_id && reachable(pool))
         else {
             tracing::warn!(
                 model = request.model,
@@ -261,7 +261,7 @@ mod tests {
 
     /// A pass the core rejects publishes nothing: the applied pools stay
     /// selectable, and the next snapshot is applied.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_failed_apply_keeps_the_applied_pools() {
         let blue = pool("blue", "qwen", &["http://blue-0:8000"]);
         let green = pool("green", "qwen", &["http://green-0:8000"]);
@@ -334,5 +334,56 @@ mod tests {
             picks(&selection_core, &[&green]).await,
             Some(green.id.clone())
         );
+    }
+
+    /// A pool that changes model in place retires under its old model, so a
+    /// select that read the earlier pools still finds it.
+    #[tokio::test(start_paused = true)]
+    async fn a_pool_that_changes_model_retires_under_the_old_one() {
+        let qwen = pool("blue", "qwen", &["http://blue-0:8000"]);
+        let llama = pool("blue", "llama", &["http://blue-0:8000"]);
+        let selection_core =
+            SelectionCoreSelector::new(SelectionCorePolicy::RoundRobin, Arc::default())
+                .await
+                .unwrap();
+        let (catalog, subscription) = watch::channel(Arc::new(vec![qwen.clone()]));
+        let (mut applied, reconcile) =
+            selection_core.reconcile_catalog(subscription, CancellationToken::new());
+        tokio::spawn(reconcile);
+        applied.changed().await.unwrap();
+
+        catalog.send_replace(Arc::new(vec![llama.clone()]));
+        applied.changed().await.unwrap();
+        assert_eq!(
+            picks(&selection_core, &[&qwen]).await,
+            Some(qwen.id.clone())
+        );
+        let request = RoutingRequest::new("llama");
+        assert!(selection_core.select(&request, &[&llama]).await.is_some());
+    }
+
+    /// A pool that leaves before any published pools named it does not hold
+    /// back later snapshots.
+    #[tokio::test(start_paused = true)]
+    async fn an_unpublished_pool_that_leaves_does_not_block_publishing() {
+        let blue = pool("blue", "qwen", &["http://blue-0:8000"]);
+        let green = pool("green", "qwen", &["http://green-0:8000"]);
+        let selection_core =
+            SelectionCoreSelector::new(SelectionCorePolicy::RoundRobin, Arc::default())
+                .await
+                .unwrap();
+        let (catalog, subscription) = watch::channel(Arc::new(vec![blue.clone()]));
+        let (mut applied, reconcile) =
+            selection_core.reconcile_catalog(subscription, CancellationToken::new());
+        tokio::spawn(reconcile);
+        applied.changed().await.unwrap();
+
+        // Green twice fails the pass, so green is never published.
+        catalog.send_replace(Arc::new(vec![blue.clone(), green.clone(), green.clone()]));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!applied.has_changed().unwrap());
+        catalog.send_replace(Arc::new(vec![blue.clone()]));
+        applied.changed().await.unwrap();
+        assert_eq!(picks(&selection_core, &[&green]).await, None);
     }
 }
