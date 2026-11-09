@@ -51,7 +51,7 @@ worker_selection:
 """
 STOCK_EPP_UNKNOWN_TYPE_DIAGNOSTIC = (
     'unknown worker-selection policy type "dynamo-default-cost-fn"; '
-    "linked policy types: least-loaded, random, round-robin"
+    "available: least-loaded, random, round-robin"
 )
 # Const name, source path, and the literal available_policy_types sorts.
 _STOCK_EPP_ROUTING_MODE_CONSTS = (
@@ -181,10 +181,10 @@ NAMED_POLICY_SCOPE_DIGESTS: dict[str, str] = {
         "ce97f88ce842c2791bf902e593b8b58320d9de39608bffffeb4e44390cf5001f"
     ),
     "selected_worker_selection_policy_instances_from": (
-        "95279f9ecb0c3703fff5a9e6c446089e088417ea04fad8005abf2b5abc699289"
+        "422c40fe597345a2dcb6cdadf8ea247a1274aafdbfc4127599bb3c48d94506b5"
     ),
     "registry_resolve_selected": (
-        "525e41c4a2f1f81426f61ee7c92237bc30b94eca6fb8f9b836e7208a346d7cd4"
+        "6f463f6726a7d9c139776180abf98dfbdd1fef59af095f4ea7ee924ad92d069c"
     ),
     "preferred_taint_multiplier": (
         "dff08a0e830e1f0dfa4d4e3e9127de26927bb85d5caec4e559ffd749079e21fe"
@@ -288,7 +288,7 @@ def _assert_stock_epp_routing_mode_catalog(file_text: dict[Path, str]) -> None:
     linked = ", ".join(sorted(values))
     expected = (
         'unknown worker-selection policy type "dynamo-default-cost-fn"; '
-        f"linked policy types: {linked}"
+        f"available: {linked}"
     )
     if STOCK_EPP_UNKNOWN_TYPE_DIAGNOSTIC != expected:
         raise AssertionError(
@@ -420,14 +420,29 @@ def assert_named_policy_source_contract() -> None:
         re.compile(NAMED_POLICY_SCOPE_SPECS[3].declaration_regex),
         NAMED_POLICY_SCOPE_SPECS[3].label,
     )
+    if not re.search(
+        r"WorkerSelectionPolicySelection::Named\(\s*name\.to_owned\(\)\s*\)",
+        selections_body,
+    ):
+        raise AssertionError(
+            "CLI/env overrides no longer convert trimmed names into Named selections"
+        )
+    if not re.search(
+        r"policy_config\.and_then\(\s*select\s*\)\.cloned\(\)",
+        selections_body,
+    ):
+        raise AssertionError(
+            "YAML role selections are no longer cloned as Named/Inline values"
+        )
     for stage, field in (
         ("prefill", "router_prefill_policy"),
         ("decode", "router_decode_policy"),
     ):
         pattern = (
-            rf"let\s+{stage}\s*=\s*normalized\(\s*self\.{field}\.as_deref\(\)\s*\)"
+            rf"let\s+{stage}\s*=\s*named\(\s*self\.{field}\.as_deref\(\)\s*\)"
             rf"\s*\.or_else\(\s*\|\|\s*global\.clone\(\)\s*\)"
-            rf"\s*\.or_else\("
+            rf"\s*\.or_else\(\s*\|\|\s*yaml\(\s*"
+            rf"WorkerSelectionConfig::{stage}\s*\)\s*\)"
         )
         if re.search(pattern, selections_body, flags=re.DOTALL) is None:
             raise AssertionError(
@@ -435,16 +450,21 @@ def assert_named_policy_source_contract() -> None:
                 f"explicit-stage > global env > YAML"
             )
     if not re.search(
-        r"let\s+aggregated\s*=\s*global\.clone\(\)\s*\.or\(\s*yaml_aggregated\s*\)",
+        r"let\s+aggregated\s*=\s*global\s*\.\s*clone\(\)\s*\.or_else\(\s*\|\|\s*"
+        r"yaml\(\s*WorkerSelectionConfig::aggregated\s*\)\s*\)",
         selections_body,
+        flags=re.DOTALL,
     ):
         raise AssertionError(
             "aggregated selection no longer applies global env over YAML"
         )
-    if 'name != "default"' not in selections_body:
+    if not re.search(
+        r"selected\.filter\(\s*\|\s*selection\s*\|\s*!\s*selection\.is_default\(\)\s*\)",
+        selections_body,
+    ):
         raise AssertionError(
-            "reserved selection default is no longer stripped before custom "
-            "instance resolution"
+            "reserved Named(default) is no longer filtered via is_default before "
+            "custom instance resolution"
         )
 
     resolve_body = _fn_decl_and_body(
@@ -452,21 +472,107 @@ def assert_named_policy_source_contract() -> None:
         re.compile(NAMED_POLICY_SCOPE_SPECS[4].declaration_regex),
         NAMED_POLICY_SCOPE_SPECS[4].label,
     )
-    if "UnknownType" not in resolve_body:
+    collapsed_resolve = re.sub(r"\s+", "", resolve_body)
+    if (
+        "letSome(selected)=selectedelse{returnOk(self.default_factory.clone());}"
+        not in collapsed_resolve
+    ):
         raise AssertionError(
-            "resolve_selected no longer maps a missing provider type to UnknownType"
+            "resolve_selected no longer returns the host default for an absent "
+            "selection"
         )
-    if "UnknownInstance" not in resolve_body:
+    if (
+        'WorkerSelectionPolicySelection::Named(name)ifname=="default"'
+        "=>{returnOk(self.default_factory.clone());}"
+    ) not in collapsed_resolve:
         raise AssertionError(
-            "resolve_selected no longer maps a missing instance to UnknownInstance"
+            "resolve_selected no longer returns the host default for Named(default)"
+        )
+    if "matchconfig.and_then(|config|config.instance(name)){" not in collapsed_resolve:
+        raise AssertionError(
+            "resolve_selected no longer looks up a deprecated configured instance "
+            "before a bare linked provider type"
+        )
+    if (
+        "Some(instance)=>(instance.policy_type(),instance.parameters().clone())"
+        not in collapsed_resolve
+    ):
+        raise AssertionError(
+            "resolve_selected no longer supplies a configured instance's type and "
+            "parameters"
+        )
+    if (
+        "Noneifself.providers.contains_key(name.as_str())=>("
+        "name.as_str(),serde_yaml::Value::Mapping(Default::default()),)"
+        not in collapsed_resolve
+    ):
+        raise AssertionError(
+            "resolve_selected no longer resolves a bare linked provider type with "
+            "an empty parameter mapping"
+        )
+    if (
+        "None=>{returnErr(WorkerSelectionPolicyRegistryError::UnknownType{"
+        "name:name.clone(),available:self.available_selections(config),});}"
+        not in collapsed_resolve
+    ):
+        raise AssertionError(
+            "resolve_selected no longer raises UnknownType via available_selections "
+            "for an unknown Named selection"
+        )
+    if (
+        "WorkerSelectionPolicySelection::Inline(instance)=>{"
+        "(instance.policy_type(),instance.parameters().clone())}"
+        not in collapsed_resolve
+    ):
+        raise AssertionError(
+            "resolve_selected no longer supplies an Inline selection's type and "
+            "parameters"
+        )
+    if (
+        "self.providers.get(policy_type).ok_or_else(||{"
+        "WorkerSelectionPolicyRegistryError::UnknownType{"
+        "name:policy_type.to_owned(),available:self.available_policy_types(),}})"
+        not in collapsed_resolve
+    ):
+        raise AssertionError(
+            "resolve_selected no longer rejects an unlinked provider type via "
+            "available_policy_types"
+        )
+    if (
+        "provider(&WorkerSelectionPolicyParameters::new(parameters))"
+        ".map(Some)"
+        ".map_err(|source|WorkerSelectionPolicyRegistryError::Provider{"
+        "policy_type:policy_type.to_owned(),source,})"
+        not in collapsed_resolve
+    ):
+        raise AssertionError(
+            "resolve_selected no longer shares the provider type/parameter "
+            "construction flow"
         )
     registry_text = file_text[REPO_ROOT / "lib/kv-router/src/plugins/registry.rs"]
     if (
-        "unknown worker-selection policy type {name:?}; linked policy types: {available}"
+        "unknown worker-selection policy type {name:?}; available: {available}"
         not in registry_text
     ):
         raise AssertionError(
             "WorkerSelectionPolicyRegistryError::UnknownType Display spelling drifted"
+        )
+    available_selections_body = _fn_decl_and_body(
+        registry_text,
+        re.compile(
+            r"fn\s+available_selections\s*\(\s*&self\s*,\s*config:\s*"
+            r"Option<&WorkerSelectionConfig>\s*\)\s*->\s*String\s*\{"
+        ),
+        "available_selections",
+    )
+    if (
+        '"<none>"' not in available_selections_body
+        or "sort_unstable()" not in available_selections_body
+        or "instance_names" not in available_selections_body
+    ):
+        raise AssertionError(
+            "available_selections no longer reports sorted linked types plus "
+            "deprecated instance names, or no longer uses available=<none>"
         )
     available_body = _fn_decl_and_body(
         registry_text,
@@ -651,6 +757,80 @@ def assert_named_policy_source_contract() -> None:
 
     ws_path = REPO_ROOT / "lib/kv-router/src/plugins/worker_selection/config.rs"
     ws_text = _strip_rust_comments(ws_path.read_text(encoding="utf-8"))
+    is_default_body = _fn_decl_and_body(
+        ws_text,
+        re.compile(r"pub\s+fn\s+is_default\s*\(\s*&self\s*\)\s*->\s*bool\s*\{"),
+        "WorkerSelectionPolicySelection::is_default",
+    )
+    if not re.search(
+        r"matches!\(\s*self\s*,\s*Self::Named\(\s*name\s*\)\s+if\s+name\s*==\s*"
+        r'"default"\s*\)',
+        is_default_body,
+    ):
+        raise AssertionError(
+            "is_default no longer matches only the reserved Named(\"default\") "
+            "selection"
+        )
+    from_value_body = _fn_decl_and_body(
+        ws_text,
+        re.compile(
+            r"fn\s+from_value\s*\(\s*role:\s*&str\s*,\s*value:\s*"
+            r"serde_yaml::Value\s*\)\s*->\s*Result<Self,\s*"
+            r"RouterPolicyConfigError>\s*\{"
+        ),
+        "RawRoleSelection::from_value",
+    )
+    if not re.search(
+        r"serde_yaml::Value::String\(\s*name\s*\)\s*=>\s*"
+        r"Ok\(\s*Self::Named\(\s*name\s*\)\s*\)",
+        from_value_body,
+    ):
+        raise AssertionError(
+            "role YAML strings are no longer parsed as Named selections"
+        )
+    if not re.search(
+        r"serde_yaml::Value::Mapping\(\s*_\s*\)\s*=>\s*"
+        r"serde_yaml::from_value\(\s*value\s*\)\s*"
+        r"\.map\(\s*Self::Inline\s*\)",
+        from_value_body,
+        flags=re.DOTALL,
+    ):
+        raise AssertionError(
+            "role YAML mappings are no longer parsed as Inline selections"
+        )
+    if (
+        "must be a policy type name or a {{type, parameters}} mapping"
+        not in from_value_body
+    ):
+        raise AssertionError(
+            "role YAML no longer rejects non-string/non-mapping selection values"
+        )
+    resolve_instance_body = _fn_decl_and_body(
+        ws_text,
+        re.compile(
+            r"fn\s+resolve_instance\s*\([^;{]*?\)\s*->\s*"
+            r"Result<WorkerSelectionInstance,\s*RouterPolicyConfigError>\s*\{"
+        ),
+        "resolve_instance",
+    )
+    if "validate_identifier" not in resolve_instance_body:
+        raise AssertionError(
+            "resolve_instance no longer validates the policy type identifier"
+        )
+    if not re.search(
+        r"if\s+!\s*matches!\(\s*parameters\s*,\s*"
+        r"serde_yaml::Value::Mapping\(\s*_\s*\)\s*\)\s*\{"
+        r"\s*return\s+Err\(",
+        resolve_instance_body,
+        flags=re.DOTALL,
+    ):
+        raise AssertionError(
+            "resolve_instance no longer rejects non-mapping parameters"
+        )
+    if "parameters must be a YAML mapping" not in resolve_instance_body:
+        raise AssertionError(
+            "worker_selection parameters are no longer required to be a YAML mapping"
+        )
     resolve_cfg = _fn_decl_and_body(
         ws_text,
         re.compile(
@@ -662,6 +842,26 @@ def assert_named_policy_source_contract() -> None:
     if "instance name 'default' is reserved" not in resolve_cfg:
         raise AssertionError(
             "worker_selection YAML no longer rejects reserved instance name default"
+        )
+    if not re.search(
+        r'if\s+inline\.policy_type\s*==\s*"default"\s*\{\s*return\s+Err\(',
+        resolve_cfg,
+        flags=re.DOTALL,
+    ):
+        raise AssertionError(
+            "worker_selection YAML no longer rejects inline type: default"
+        )
+    if "type 'default' takes no parameters" not in resolve_cfg:
+        raise AssertionError(
+            "worker_selection YAML no longer reports the inline default diagnostic"
+        )
+    if "WorkerSelectionPolicySelection::Named(name)" not in resolve_cfg:
+        raise AssertionError(
+            "worker_selection resolve no longer builds Named role selections"
+        )
+    if "WorkerSelectionPolicySelection::Inline(" not in resolve_cfg:
+        raise AssertionError(
+            "worker_selection resolve no longer builds Inline role selections"
         )
 
     if NAMED_POLICY_CATALOG_ROWS != (
@@ -1176,7 +1376,7 @@ def run_named_policy_catalog(stack, *, tmp_path) -> dict[str, Any]:
             )
         if STOCK_EPP_UNKNOWN_TYPE_DIAGNOSTIC != (
             'unknown worker-selection policy type "dynamo-default-cost-fn"; '
-            "linked policy types: least-loaded, random, round-robin"
+            "available: least-loaded, random, round-robin"
         ):
             raise AssertionError(
                 "stock EPP UnknownType diagnostic constant drifted from source"
