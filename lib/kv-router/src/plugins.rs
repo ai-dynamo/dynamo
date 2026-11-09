@@ -21,6 +21,7 @@ pub use registry::{
 
 pub use resolve::{PluginConfigError, RouterResponsibilities, resolve_role};
 
+use hint_policy::HintPolicyRegistryError;
 use request_classifier::{RequestClassifierFactory, RequestClassifierRegistryError};
 use worker_selection::WorkerSelectionPolicyFactory;
 
@@ -74,4 +75,6 @@ pub enum RouterPluginRegistryError {
     WorkerSelection(#[from] WorkerSelectionPolicyRegistryError),
     #[error(transparent)]
     RequestClassifier(#[from] RequestClassifierRegistryError),
+    #[error(transparent)]
+    HintPolicy(#[from] HintPolicyRegistryError),
 }

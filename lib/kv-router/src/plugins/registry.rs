@@ -10,7 +10,7 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use super::hint_policy::{
-    HintPolicyConstructor, HintPolicyFactory, HintPolicyProvider, HintPolicyRegistry,
+    HintDefault, HintHost, HintPolicyFactory, HintPolicyProvider, HintPolicyRegistry,
     HintPolicyRegistryError,
 };
 use super::request_classifier::RequestClassifierRegistry;
@@ -115,6 +115,15 @@ impl RouterPluginRegistry {
         &self,
         config: &KvRouterConfig,
     ) -> Result<super::RouterPlugins, super::RouterPluginRegistryError> {
+        self.hint_policies.check_hosts(|host| match host {
+            HintHost::AnyWorkerSelection => true,
+            HintHost::WorkerSelection(policy_type) => {
+                policy_type == "default" || self.providers.contains_key(policy_type)
+            }
+            HintHost::RequestClassifier(classifier_type) => {
+                self.request_classifiers.contains(classifier_type)
+            }
+        })?;
         Ok(super::RouterPlugins {
             worker_selection: self.resolve(config)?,
             custom_worker_selection: config
@@ -162,32 +171,29 @@ impl RouterPluginRegistry {
         self.request_classifiers.resolve(config)
     }
 
-    /// Register a hint-policy type, a peer of worker-selection and request-classifier plugins.
+    /// Register a hint-policy type, a peer of worker-selection and request-classifier plugins,
+    /// with its hosts: the plugins it runs under, and whether each runs it by default.
+    ///
+    /// A role may list the hint in its `worker_selection` entry's `hints` only when one of its
+    /// hosts matches the role's worker-selection type. A role whose entry lists no `hints` runs the
+    /// hints registered [`HintDefault::On`] for its type. A host that names one type overrides
+    /// [`HintHost::AnyWorkerSelection`] for that type. Hosts must be distinct, and
+    /// [`Self::resolve_plugins`] rejects one that no linked plugin registers.
+    ///
+    /// Default hints are passive: the router starts no resources for what they read, and a non-KV
+    /// routing mode skips them instead of failing, so they act only where the role's own
+    /// configuration already provides their inputs.
     pub fn register_hint_policy(
         &mut self,
         name: impl Into<String>,
         provider: HintPolicyProvider,
+        hosts: impl IntoIterator<Item = (HintHost, HintDefault)>,
     ) -> Result<(), HintPolicyRegistryError> {
-        self.hint_policies.register(name, provider)
-    }
-
-    /// Supply the hint policies a role runs when its `worker_selection` entry lists no `hints`, the
-    /// way [`Self::with_default_factory`] supplies the default worker selection. Listing `hints`,
-    /// even as an empty list, replaces them.
-    ///
-    /// Defaults are passive: the router starts no resources for what they read, and a non-KV routing
-    /// mode skips them instead of failing, so they act only where the role's own configuration
-    /// already provides their inputs.
-    pub fn with_default_hint_policies(
-        mut self,
-        policies: impl IntoIterator<Item = (String, HintPolicyConstructor)>,
-    ) -> Result<Self, HintPolicyRegistryError> {
-        self.hint_policies.set_defaults(policies)?;
-        Ok(self)
+        self.hint_policies.register(name, provider, hosts)
     }
 
     /// Resolve each role's hints once at startup, from its `worker_selection` entry. A role whose
-    /// entry lists no `hints` runs the default hint policies, if the host supplied any.
+    /// entry lists no `hints` runs the hints registered as on by default for its policy type.
     pub fn resolve_hint_policies(
         &self,
         config: &KvRouterConfig,
