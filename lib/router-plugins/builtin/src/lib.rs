@@ -220,7 +220,7 @@ worker_selection:
             std::fs::write(
                 policy_file.path(),
                 format!(
-                    "worker_selection:\n  prefill: kvcr\n  instances:\n    - name: kvcr\n      type: kvcr\n      parameters: {{shared_cache_multiplier: 0.5}}\n{hint_policies}"
+                    "worker_selection:\n  prefill:\n    type: kvcr\n    parameters: {{shared_cache_multiplier: 0.5}}\n{hint_policies}"
                 ),
             )
             .unwrap();

@@ -291,12 +291,10 @@ The `hint_policies` section of the same YAML file lists, for each worker role, t
 
 ```yaml
 worker_selection:
-  prefill: kvcr
-  instances:
-    - name: kvcr
-      type: kvcr
-      parameters:
-        shared_cache_multiplier: 0.5
+  prefill:
+    type: kvcr
+    parameters:
+      shared_cache_multiplier: 0.5
 hint_policies:
   prefill:
     - type: kv_fetch
