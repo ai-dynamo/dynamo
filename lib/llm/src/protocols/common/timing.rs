@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
@@ -136,6 +136,9 @@ pub struct RequestTracker {
     /// Decode worker ID - set once when known.
     decode_worker_id: OnceLock<u64>,
 
+    /// Number of migrations recorded for this request - after one, the worker fields may legitimately change.
+    migrations: AtomicU32,
+
     /// Decode DP rank - set once when known.
     decode_dp_rank: OnceLock<u32>,
 
@@ -251,6 +254,7 @@ impl RequestTracker {
             prefill_worker_id: OnceLock::new(),
             prefill_dp_rank: OnceLock::new(),
             decode_worker_id: OnceLock::new(),
+            migrations: AtomicU32::new(0),
             decode_dp_rank: OnceLock::new(),
             prefill_worker_type: OnceLock::new(),
             decode_worker_type: OnceLock::new(),
@@ -402,30 +406,20 @@ impl RequestTracker {
         *self.phase.lock()
     }
 
-    fn record_once_u64(slot: &OnceLock<u64>, value: u64, field_name: &'static str) {
+    fn record_once_u64(slot: &OnceLock<u64>, value: u64, field_name: &'static str, migrated: bool) {
         if let Some(existing) = slot.get() {
             if *existing != value {
-                tracing::error!(
-                    field = field_name,
-                    existing = *existing,
-                    new = value,
-                    "Conflicting request tracker write"
-                );
+                Self::log_conflicting_write(field_name, *existing, value, migrated);
             }
             return;
         }
         let _ = slot.set(value);
     }
 
-    fn record_once_u32(slot: &OnceLock<u32>, value: u32, field_name: &'static str) {
+    fn record_once_u32(slot: &OnceLock<u32>, value: u32, field_name: &'static str, migrated: bool) {
         if let Some(existing) = slot.get() {
             if *existing != value {
-                tracing::error!(
-                    field = field_name,
-                    existing = *existing,
-                    new = value,
-                    "Conflicting request tracker write"
-                );
+                Self::log_conflicting_write(field_name, *existing, value, migrated);
             }
             return;
         }
@@ -436,19 +430,50 @@ impl RequestTracker {
         slot: &OnceLock<&'static str>,
         value: &'static str,
         field_name: &'static str,
+        migrated: bool,
     ) {
         if let Some(existing) = slot.get() {
             if *existing != value {
-                tracing::error!(
-                    field = field_name,
-                    existing = *existing,
-                    new = value,
-                    "Conflicting request tracker write"
-                );
+                Self::log_conflicting_write(field_name, *existing, value, migrated);
             }
             return;
         }
         let _ = slot.set(value);
+    }
+
+    /// Logs a second write with a different value: error for a request that stayed on one
+    /// worker, debug after a migration. The first recorded value is kept either way.
+    fn log_conflicting_write<T: std::fmt::Debug>(
+        field_name: &'static str,
+        existing: T,
+        new: T,
+        migrated: bool,
+    ) {
+        if migrated {
+            tracing::debug!(
+                field = field_name,
+                existing = ?existing,
+                new = ?new,
+                "Request tracker field changed after migration"
+            );
+        } else {
+            tracing::error!(
+                field = field_name,
+                existing = ?existing,
+                new = ?new,
+                "Conflicting request tracker write"
+            );
+        }
+    }
+
+    /// Record that the request was migrated to another worker.
+    pub fn record_migration(&self) {
+        self.migrations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Number of migrations recorded for this request.
+    pub fn migrations(&self) -> u32 {
+        self.migrations.load(Ordering::Relaxed)
     }
 
     fn record_prefill_worker(
@@ -457,14 +482,21 @@ impl RequestTracker {
         dp_rank: Option<u32>,
         worker_type: &'static str,
     ) {
-        Self::record_once_u64(&self.prefill_worker_id, instance_id, "prefill_worker_id");
+        let migrated = self.migrations() > 0;
+        Self::record_once_u64(
+            &self.prefill_worker_id,
+            instance_id,
+            "prefill_worker_id",
+            migrated,
+        );
         if let Some(rank) = dp_rank {
-            Self::record_once_u32(&self.prefill_dp_rank, rank, "prefill_dp_rank");
+            Self::record_once_u32(&self.prefill_dp_rank, rank, "prefill_dp_rank", migrated);
         }
         Self::record_once_worker_type(
             &self.prefill_worker_type,
             worker_type,
             "prefill_worker_type",
+            migrated,
         );
     }
 
@@ -474,11 +506,22 @@ impl RequestTracker {
         dp_rank: Option<u32>,
         worker_type: &'static str,
     ) {
-        Self::record_once_u64(&self.decode_worker_id, instance_id, "decode_worker_id");
+        let migrated = self.migrations() > 0;
+        Self::record_once_u64(
+            &self.decode_worker_id,
+            instance_id,
+            "decode_worker_id",
+            migrated,
+        );
         if let Some(rank) = dp_rank {
-            Self::record_once_u32(&self.decode_dp_rank, rank, "decode_dp_rank");
+            Self::record_once_u32(&self.decode_dp_rank, rank, "decode_dp_rank", migrated);
         }
-        Self::record_once_worker_type(&self.decode_worker_type, worker_type, "decode_worker_type");
+        Self::record_once_worker_type(
+            &self.decode_worker_type,
+            worker_type,
+            "decode_worker_type",
+            migrated,
+        );
     }
 
     /// Record worker ID, optional DP rank, and worker type based on the current phase.
@@ -676,17 +719,18 @@ impl RequestTracker {
     /// annotation, and `build_response_nvext` surface it on the split-router path.
     /// First-write-wins per field: this process's own recordings take precedence.
     pub fn set_external_worker_info(&self, info: WorkerIdInfo) {
+        let migrated = self.migrations() > 0;
         if let Some(id) = info.prefill_worker_id {
-            Self::record_once_u64(&self.prefill_worker_id, id, "prefill_worker_id");
+            Self::record_once_u64(&self.prefill_worker_id, id, "prefill_worker_id", migrated);
         }
         if let Some(rank) = info.prefill_dp_rank {
-            Self::record_once_u32(&self.prefill_dp_rank, rank, "prefill_dp_rank");
+            Self::record_once_u32(&self.prefill_dp_rank, rank, "prefill_dp_rank", migrated);
         }
         if let Some(id) = info.decode_worker_id {
-            Self::record_once_u64(&self.decode_worker_id, id, "decode_worker_id");
+            Self::record_once_u64(&self.decode_worker_id, id, "decode_worker_id", migrated);
         }
         if let Some(rank) = info.decode_dp_rank {
-            Self::record_once_u32(&self.decode_dp_rank, rank, "decode_dp_rank");
+            Self::record_once_u32(&self.decode_dp_rank, rank, "decode_dp_rank", migrated);
         }
     }
 
@@ -784,6 +828,21 @@ mod tests {
     use super::*;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn test_worker_change_after_migration_keeps_first_value() {
+        let tracker = RequestTracker::new();
+        tracker.record_worker(1, Some(0), "decode");
+        assert_eq!(tracker.decode_worker_id(), Some(1));
+        assert_eq!(tracker.migrations(), 0);
+
+        // Retried on another worker: the change is expected and the first recorded worker is kept.
+        tracker.record_migration();
+        tracker.record_worker(2, Some(1), "decode");
+        assert_eq!(tracker.migrations(), 1);
+        assert_eq!(tracker.decode_worker_id(), Some(1));
+        assert_eq!(tracker.decode_dp_rank(), Some(0));
+    }
 
     #[test]
     fn test_record_isl_osl() {

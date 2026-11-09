@@ -762,6 +762,9 @@ where
             from_worker_id,
             attempt: self.failed_attempt(route_trace.as_deref()),
         });
+        if let Some(tracker) = self.request.tracker.as_ref() {
+            tracker.record_migration();
+        }
         tracing::info!(
             target: "request_span",
             {
