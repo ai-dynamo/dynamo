@@ -70,7 +70,11 @@ fn needs_engine_stop(
     engine_finished: &HashSet<u32>,
     choices: usize,
 ) -> bool {
-    !locally_finished.is_empty() && locally_finished.union(engine_finished).count() >= choices
+    locally_finished
+        .difference(engine_finished)
+        .next()
+        .is_some()
+        && locally_finished.union(engine_finished).count() >= choices
 }
 
 /// Internal state for managing token decoding and stream processing
@@ -80,8 +84,8 @@ struct DecoderUnfoldState {
     stream: ManyOut<ExecutionOutputStream>,
     decoders: HashMap<u32, Decoder>,
     finished_choices: HashSet<u32>,
-    /// Choices the engine finished itself. Separate from `finished_choices`, which
-    /// also drops a choice's later chunks.
+    /// Choices the engine finished itself. `finished_choices` also drops a choice's
+    /// later chunks, so of these it holds only the ones finished with decoded text.
     engine_finished_choices: HashSet<u32>,
     validate_engine_decode: bool,
     no_stop_trim: bool,
@@ -400,6 +404,15 @@ impl
                         let has_finish = data.finish_reason.is_some();
                         if has_finish {
                             state.finished_choices.insert(choice_idx);
+                            state.engine_finished_choices.insert(choice_idx);
+                            if needs_engine_stop(
+                                &state.finished_choices,
+                                &state.engine_finished_choices,
+                                state.decoders.len(),
+                            ) {
+                                state.stream.context().stop_generating();
+                                state.finished = true;
+                            }
                         }
                         // This path bypasses the decoder entirely (the engine pre-decoded
                         // its own text for this chunk), but the decoder for this choice is
@@ -2652,6 +2665,15 @@ mod tests {
         })
     }
 
+    fn decoded_text_finish(index: u32) -> Annotated<LLMEngineOutput> {
+        Annotated::from_data(LLMEngineOutput {
+            text: Some("done".into()),
+            finish_reason: Some(FinishReason::Stop),
+            index: Some(index),
+            ..Default::default()
+        })
+    }
+
     #[rstest::rstest]
     #[case::engine_finish_then_local_stop(vec![
         scripted(1, 0, Some(FinishReason::Stop)),
@@ -2662,6 +2684,10 @@ mod tests {
         scripted(1, 0, Some(FinishReason::Stop)),
     ])]
     #[case::every_choice_stops_locally(vec![scripted(2, 0, None), scripted(2, 1, None)])]
+    #[case::local_stop_then_decoded_text_finish(vec![
+        scripted(2, 1, None),
+        decoded_text_finish(0),
+    ])]
     #[tokio::test]
     async fn backend_stops_engine_once_every_choice_has_finished(
         #[case] finishes: Vec<Annotated<LLMEngineOutput>>,
@@ -2671,12 +2697,14 @@ mod tests {
         assert_eq!(run_scripted(chunks).await, (true, 2, 2));
     }
 
+    #[rstest::rstest]
+    #[case::token_ids(scripted(1, 0, Some(FinishReason::Stop)))]
+    #[case::decoded_text(decoded_text_finish(0))]
     #[tokio::test]
-    async fn backend_leaves_engine_alone_when_it_finishes_every_choice() {
-        let chunks = vec![
-            scripted(1, 0, Some(FinishReason::Stop)),
-            scripted(1, 1, Some(FinishReason::Stop)),
-        ];
+    async fn backend_leaves_engine_alone_when_it_finishes_every_choice(
+        #[case] first_finish: Annotated<LLMEngineOutput>,
+    ) {
+        let chunks = vec![first_finish, scripted(1, 1, Some(FinishReason::Stop))];
         assert_eq!(run_scripted(chunks).await, (false, 2, 2));
     }
 
