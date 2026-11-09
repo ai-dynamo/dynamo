@@ -108,6 +108,29 @@ def test_retune_reaches_the_replay_host_as_written() -> None:
     assert _hook_config(kept)["retune"] == explicit
 
 
+def test_predict_retune_searches_the_scaling_policy_not_user_constraints() -> None:
+    # Imported here: the domains module imports the adapter schemas on use.
+    from dynamo.planner.retune.domains import expand_planner_domain
+
+    provider = create_provider()
+    planner = {"scaling_policy": {"preset": ["load_180_5", "load_180_10"]}}
+    spec = provider.compile_prediction(
+        {"policy": "enabled", "retune": {**_RETUNE, "planner": planner}},
+        _context(sla=_SLA),
+    )
+
+    domain = expand_planner_domain(_host_config(spec))
+    assert domain.grid["load_adjustment_interval_seconds"] == [5, 10]
+    with pytest.raises(ValueError, match="user constraints, not tuning knobs"):
+        provider.compile_prediction(
+            {
+                "policy": "enabled",
+                "retune": {**_RETUNE, "planner": {"max_num_gpus": {"choices": [4, 8]}}},
+            },
+            _context(sla=_SLA),
+        )
+
+
 def _write_trace(path: Path, *, count: int, start_ms: int, prefix: str) -> None:
     rows = [
         {
@@ -238,3 +261,131 @@ def test_prediction_only_fields_need_an_enabled_policy_and_predict() -> None:
     for field in ({"retune": _RETUNE}, {"advisory": False}):
         with pytest.raises(ValueError, match="not supported by aisimulate recommend"):
             provider.compile_recommendation({"policy": "enabled", **field}, context)
+
+
+def _recommendation_context() -> RecommendationAdapterContext:
+    return RecommendationAdapterContext(
+        engine={},
+        traffic={},
+        evaluation={},
+        optimization={},
+        sweep=SweepContext(
+            core_search_space={"deployment_mode": ["agg"]},
+            workload={"trace_path": None, "isl": 512, "osl": 128},
+            goal={"target": "goodput_per_gpu"},
+            show_progress=False,
+        ),
+    )
+
+
+def _live_base(**overrides: Any) -> dict[str, Any]:
+    from dynamo.planner.simulation.config import retune_sweep_base
+
+    config = PlannerConfig(
+        namespace="test-ns",
+        mode="agg",
+        optimization_target="sla",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        ttft_ms=60.0,
+        itl_ms=100.0,
+        metric_pulling_prometheus_endpoint="http://prometheus:9090",
+        **overrides,
+    )
+    return retune_sweep_base(config.model_dump(mode="json"))
+
+
+def test_retune_sweep_replays_the_live_base_with_each_point() -> None:
+    from aisimulate.sweeper.provider import CandidateContext
+    from aisimulate.sweeper.replay import BackendDeploymentSpec
+
+    provider = create_provider()
+    base = _live_base()
+    points = [
+        {"load_scaling_down_sensitivity": 70},
+        {
+            "load_scaling_down_sensitivity": 90,
+            "throughput_adjustment_interval_seconds": 360,
+        },
+    ]
+    warmup = {
+        "180": [[180.0, 5.0, 100.0, 20.0, None, None]],
+        "360": [[360.0, 10.0, 100.0, 20.0, None, None]],
+    }
+    plan = provider.compile_recommendation(
+        {"retune_sweep": {"base": base, "points": points, "warmup": warmup}},
+        _recommendation_context(),
+    )
+
+    assert plan.fragment.choices_by_branch == {"agg": {"retune_point": points}}
+    context = CandidateContext(
+        sample={"deployment_mode": "agg", "tp": 2, "attention_dp": 1},
+        backend_deployment=BackendDeploymentSpec(
+            deployment_mode="agg",
+            backend="vllm",
+            backend_version="0.11.0",
+            agg_engine_args={"engine_type": "vllm"},
+            num_workers=2,
+        ),
+    )
+    spec = provider.materialize_candidate(plan, {"retune_point": points[1]}, context)
+
+    # Candidate parameters are the section narrowed to the point and its
+    # own warmup; the hook carries the inner planner.
+    assert spec.config == {
+        "retune_sweep": {
+            "base": base,
+            "points": [points[1]],
+            "warmup": {"360": warmup["360"]},
+        }
+    }
+    (hook,) = spec.runtime_hooks
+    planner = hook.config["planner_config"]
+    assert planner["load_scaling_down_sensitivity"] == 90
+    assert planner["throughput_adjustment_interval_seconds"] == 360
+    assert planner["advisory"] is False and planner.get("retune") is None
+    assert planner["decode_engine_num_gpu"] == 2
+    assert "metric_pulling_prometheus_endpoint" not in planner
+    # The warmup of the point's own throughput interval.
+    assert hook.config["warmup_observations"] == warmup["360"]
+    config = PlannerConfig.from_config_arg(json.dumps(planner))
+    assert config.ttft_ms == 60.0 and config.scaling_enabled()
+    # aisimulate predict replays the candidate from its config alone.
+    again = provider.compile_prediction(spec.config, _context(sla=_SLA))
+    assert again.config == spec.config
+    assert again.runtime_hooks[0].config["warmup_observations"] == warmup["360"]
+    assert again.runtime_hooks[0].config["planner_config"]["decode_engine_num_gpu"] == 1
+    with pytest.raises(ValueError, match="replays one planner.retune_sweep point"):
+        provider.compile_prediction(
+            {"retune_sweep": {"base": base, "points": points}}, _context(sla=_SLA)
+        )
+
+
+@pytest.mark.parametrize(
+    ("section", "match"),
+    [
+        ({"base": {"namespace": "x"}, "points": [{}]}, r"cannot set \['namespace'\]"),
+        (
+            {"base": {}, "points": [{"max_gpu_budget": 4}]},
+            "sets \\['max_gpu_budget'\\]",
+        ),
+        ({"base": {}, "points": []}, "at least 1 item"),
+        (
+            {
+                "base": {
+                    "optimization_target": "sla",
+                    "enable_load_scaling": False,
+                    "enable_throughput_scaling": False,
+                },
+                "points": [{}],
+            },
+            "At least one scaling mode must be enabled",
+        ),
+    ],
+    ids=["base-field", "point-field", "no-points", "no-scaling"],
+)
+def test_retune_sweep_rejects_what_a_live_planner_never_sends(section, match) -> None:
+    with pytest.raises(ValueError, match=match):
+        create_provider().compile_recommendation(
+            {"retune_sweep": section}, _recommendation_context()
+        )

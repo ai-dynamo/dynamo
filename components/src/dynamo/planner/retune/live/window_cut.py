@@ -53,8 +53,10 @@ from typing import Any, BinaryIO, Literal, Optional, Protocol, Union, get_args
 
 import numpy as np
 
+from dynamo.planner.core.types import TrafficObservation
 from dynamo.planner.retune.live.contracts import SupportsIsSet, WindowCutResult
 from dynamo.planner.retune.window import (
+    ObservationBuckets,
     _dumps,
     _new_counts,
     _parse_request_end,
@@ -285,6 +287,166 @@ def cut_window_inprocess(
         raise WindowCutError(
             "window_cut_failed", f"{type(error).__name__}: {error}"
         ) from error
+
+
+@dataclass(frozen=True)
+class TraceHistory:
+    """Traffic before and in a window, bucketed per throughput interval.
+
+    Keys are throughput intervals in seconds. ``observations`` are the
+    buckets of history and window that end at the window end, for the load
+    predictor pre-sweep and a predictor swap; ``warmups`` the buckets of
+    history alone that end at the window start, the warmup of a candidate's
+    inner planner. ``history_requests`` counts the history rows.
+    """
+
+    observations: dict[int, tuple[TrafficObservation, ...]]
+    warmups: dict[int, tuple[TrafficObservation, ...]]
+    history_requests: int
+    dropped_members: int
+
+
+def bucket_history(
+    segments_root: StrPath,
+    history_start_ms: float,
+    window_start_ms: float,
+    window_end_ms: float,
+    as_of_ms: float,
+    intervals_s: Sequence[int],
+    *,
+    deadline_s: float,
+    cancel: Optional[SupportsIsSet] = None,
+) -> TraceHistory:
+    """``bucket_history_inprocess`` in a spawned child process.
+
+    The child is killed at ``deadline_s`` (absolute wall-clock seconds) or
+    on ``cancel``, as ``cut_window``'s is; failures raise ``WindowCutError``.
+    """
+
+    if not math.isfinite(deadline_s):
+        raise ValueError("deadline_s must be finite")
+    deadline = time.monotonic() + (deadline_s - time.time())
+    started = time.monotonic()
+    result: TraceHistory = _run_in_child(
+        bucket_history_inprocess,
+        (
+            os.fspath(segments_root),
+            history_start_ms,
+            window_start_ms,
+            window_end_ms,
+            as_of_ms,
+            tuple(int(interval) for interval in intervals_s),
+        ),
+        {},
+        deadline=deadline,
+        cancel=cancel,
+        name=f"retune-history-{int(round(window_end_ms))}",
+    )
+    logger.info(
+        "retune history [%s, %s) of window ending %s: %d requests bucketed at "
+        "%s s in %.1fs; dropped %d gzip members",
+        history_start_ms,
+        window_start_ms,
+        window_end_ms,
+        result.history_requests,
+        sorted(result.observations),
+        time.monotonic() - started,
+        result.dropped_members,
+    )
+    return result
+
+
+def bucket_history_inprocess(
+    segments_root: StrPath,
+    history_start_ms: float,
+    window_start_ms: float,
+    window_end_ms: float,
+    as_of_ms: float,
+    intervals_s: Sequence[int],
+) -> TraceHistory:
+    """Bucket the requests of ``[history_start_ms, window_end_ms)`` that
+    completed by ``as_of_ms``, at each interval of ``intervals_s``.
+
+    Row selection and censoring are the window cut's; as in
+    ``retune.window.read_trace_history``, rows are streamed and not
+    de-duplicated. A gzip member that fails validation is skipped and
+    counted, without the cut's corruption limit: a few lost history rows
+    only perturb a predictor's warmup. Failures raise ``WindowCutError``.
+    """
+
+    if not history_start_ms <= window_start_ms < window_end_ms <= as_of_ms:
+        raise ValueError(
+            "need history_start_ms <= window_start_ms < window_end_ms <= as_of_ms"
+        )
+    observations = {
+        int(interval): ObservationBuckets(
+            end_ms=window_end_ms,
+            interval_ms=int(interval) * 1000.0,
+            duration_s=float(interval),
+        )
+        for interval in intervals_s
+    }
+    warmups = {
+        interval: ObservationBuckets(
+            end_ms=window_start_ms,
+            interval_ms=buckets.interval_ms,
+            duration_s=buckets.duration_s,
+        )
+        for interval, buckets in observations.items()
+    }
+    targets = (*observations.values(), *warmups.values())
+    history_requests = 0
+    dropped = 0
+    try:
+        files = _segment_files(os.fspath(segments_root))
+        items = _trace_items(files, history_start_ms / 1000.0 - SEGMENT_MTIME_MARGIN_S)
+        try:
+            for _, path, item in items:
+                if not isinstance(item, _Member):
+                    dropped += isinstance(item, _Garbage)
+                    continue
+                for index, raw in enumerate(item.payload.split(b"\n")):
+                    if not raw.strip():
+                        continue
+                    location = f"{path}@{item.offset}:{index + 1}"
+                    event = _event(raw, location, "trace_corrupt")
+                    # Buckets read arrival, ISL and OSL only, as the replay
+                    # read task's history does: no hashes needed.
+                    row = (
+                        None
+                        if event is None
+                        else _request_row(
+                            event, location, "trace_corrupt", need_hashes=False
+                        )
+                    )
+                    if row is None or not (
+                        history_start_ms <= row.arrival_ms < window_end_ms
+                    ):
+                        continue
+                    if row.completion_ms > as_of_ms:
+                        continue
+                    if row.arrival_ms < window_start_ms:
+                        history_requests += 1
+                    for target in targets:
+                        target.add(row.arrival_ms, row.input_length, row.output_tokens)
+        finally:
+            items.close()
+    except OSError as error:
+        raise WindowCutError(
+            "window_cut_failed", f"{type(error).__name__}: {error}"
+        ) from error
+    return TraceHistory(
+        observations={
+            interval: tuple(buckets.observations())
+            for interval, buckets in observations.items()
+        },
+        warmups={
+            interval: tuple(buckets.observations())
+            for interval, buckets in warmups.items()
+        },
+        history_requests=history_requests,
+        dropped_members=dropped,
+    )
 
 
 def _validate(
@@ -978,10 +1140,14 @@ def _event(
 
 
 def _request_row(
-    event: dict[str, Any], location: str, failure: WindowCutFailure
+    event: dict[str, Any],
+    location: str,
+    failure: WindowCutFailure,
+    *,
+    need_hashes: bool = True,
 ) -> Optional[_RequestRow]:
     try:
-        return _parse_request_end(event, location, need_hashes=True)
+        return _parse_request_end(event, location, need_hashes=need_hashes)
     except ValueError as error:
         raise WindowCutError(failure, str(error)) from error
 

@@ -7,8 +7,8 @@
 //! - `POST /pools`: a PoolRelay registers its pool. It calls this on a timer,
 //!   and each call is also the pool's heartbeat.
 //! - `GET /routers`: the Global Router replicas a PoolRelay connects to.
-//! - `POST /routers`: `RegisterRouter` from the design, not available yet.
-//!   It answers `501` with the reason.
+//! - `POST /routers`: register or renew one router incarnation when explicitly
+//!   enabled. Static and MCS router directories answer `501`.
 //! - `GET /pools`: the pools a Global Router routes to. `complete` is false
 //!   while the list may be missing pools: for one lease after the service
 //!   starts, while PoolRelays may not have registered yet; with MCS, also
@@ -39,6 +39,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::pool_discovery::{
     Completeness, DiscoveryError, PoolDirectory, PoolRegistrar, PoolRegistration, ReplicaDirectory,
+    RouterRegistrar,
 };
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, State};
@@ -46,7 +47,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use dynamo_global_common::{PoolsResponse, RoutersResponse};
+use dynamo_global_common::{PoolsResponse, RouterRegistration, RoutersResponse};
 use dynamo_http_server::lifecycle::ServiceObserver;
 use dynamo_http_server::server::{HttpServer, HttpServerConfig};
 use tokio::net::TcpListener;
@@ -60,6 +61,8 @@ pub struct PoolDiscoveryBackend {
     /// `None` when the backend takes no registrations: `POST /pools` then
     /// answers `501`.
     pub registrar: Option<Arc<dyn PoolRegistrar>>,
+    /// Enabled explicitly for trusted-network router self-registration.
+    pub router_registrar: Option<Arc<dyn RouterRegistrar>>,
 }
 
 impl fmt::Debug for PoolDiscoveryBackend {
@@ -166,24 +169,28 @@ async fn list_routers(State(shared): State<Arc<Shared>>) -> Response {
     match shared.backend.routers.list().await {
         Ok(snapshot) => Json(RoutersResponse {
             routers: snapshot.items,
+            complete: snapshot.completeness == Completeness::Exact,
         })
         .into_response(),
         Err(error) => error_response(error),
     }
 }
 
-/// `RegisterRouter` from the design. The service takes no router
-/// registrations yet, so every call answers `501`, whatever its body. With
-/// MCS, routers need not register. Without it, how a router proves it is a
-/// router, and what it sends, are not decided, and trusting every caller
-/// would let a fake router entry receive every pool's state.
-async fn register_router() -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        "router registration is not implemented yet. Router replicas come from the router \
-         Service's EndpointSlices, which MCS imports, or from the service's configuration.",
-    )
-        .into_response()
+async fn register_router(
+    State(shared): State<Arc<Shared>>,
+    registration: Result<Json<RouterRegistration>, JsonRejection>,
+) -> Response {
+    let Some(registrar) = &shared.backend.router_registrar else {
+        return (StatusCode::NOT_IMPLEMENTED, "router registration is disabled; router replicas come from configuration or EndpointSlices").into_response();
+    };
+    let Json(registration) = match registration {
+        Ok(registration) => registration,
+        Err(rejection) => return rejection.into_response(),
+    };
+    match registrar.register_router(registration).await {
+        Ok(lease) => Json(lease).into_response(),
+        Err(error) => error_response(error),
+    }
 }
 
 /// Until both directories have answered once, lists what `GET /pools` and
@@ -266,6 +273,7 @@ mod tests {
             pools: pools.clone(),
             routers: Arc::new(StaticReplicaDirectory::new(vec![router_replica()])),
             registrar: Some(pools),
+            router_registrar: None,
         }
     }
 
@@ -355,7 +363,7 @@ mod tests {
         assert_eq!(status, reqwest::StatusCode::OK);
         assert_eq!(
             routers,
-            json!({"routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}]})
+            json!({"routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}], "complete": true})
         );
         shutdown.cancel();
     }
@@ -392,7 +400,7 @@ mod tests {
             let reason = response.text().await.unwrap();
             // The reason names no flags: the binary's flags are not this layer's.
             assert!(
-                reason.starts_with("router registration is not implemented yet")
+                reason.starts_with("router registration is disabled")
                     && reason.contains("EndpointSlices")
                     && !reason.contains("--"),
                 "{reason}"
@@ -511,6 +519,7 @@ mod tests {
             pools: Arc::new(Down),
             routers: Arc::new(Down),
             registrar: None,
+            router_registrar: None,
         })
         .await;
         for path in ["/pools", "/routers", "/healthz"] {
