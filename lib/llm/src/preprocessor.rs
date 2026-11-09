@@ -13343,7 +13343,7 @@ responses_tools: None,
                 FinishReason::Length
             };
             assert!(
-                has_finish_reason(&output, expected_finish.clone()),
+                has_finish_reason(&output, expected_finish),
                 "ending={ending:?}"
             );
             let response = NvCreateChatCompletionResponse::from_annotated_stream(
