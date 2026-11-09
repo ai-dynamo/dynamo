@@ -428,6 +428,7 @@ mod tests {
     use tokio::time::Instant;
 
     use super::*;
+    use crate::plugins::worker_selection::WorkerSelectionPolicySelection;
     use crate::plugins::worker_selection::{WorkerLoadInput, WorkerLoadInputExt};
     use dynamo_admission::profile::UnknownPolicyClassError;
     use dynamo_scheduler::types::KvSchedulerError;
@@ -445,24 +446,25 @@ mod tests {
         let config = RouterPolicyConfig::from_yaml(
             r#"
 worker_selection:
-  aggregated: example
-  instances:
-    - name: example
-      type: example-policy
-      parameters:
-        score_weight: 1.0
+  aggregated:
+    type: example-policy
+    parameters:
+      score_weight: 1.0
 "#,
         )
         .unwrap();
 
         let selection = config.worker_selection().unwrap();
-        assert_eq!(selection.aggregated_instance(), Some("example"));
-        let instance = selection.instance("example").unwrap();
+        let Some(WorkerSelectionPolicySelection::Inline(instance)) = selection.aggregated() else {
+            panic!("an inline spec resolves to an inline selection");
+        };
         assert_eq!(instance.policy_type(), "example-policy");
+        assert_eq!(selection.aggregated().unwrap().label(), "example-policy");
         assert!(matches!(
             instance.parameters(),
             serde_yaml::Value::Mapping(_)
         ));
+        assert!(selection.instance_names().is_empty());
         assert_eq!(
             config
                 .resolve_profile(None, Some(2.0), RouterQueuePolicy::Wspt)
@@ -521,6 +523,37 @@ request_classifier:
         let config = RouterPolicyConfig::from_yaml(
             r#"
 worker_selection:
+  prefill: cache-aware
+  decode: default
+  encode:
+    type: media-aware
+"#,
+        )
+        .unwrap();
+
+        let selection = config.worker_selection().unwrap();
+        assert_eq!(selection.aggregated(), None);
+        assert_eq!(
+            selection.prefill(),
+            Some(&WorkerSelectionPolicySelection::Named(
+                "cache-aware".to_string()
+            ))
+        );
+        assert!(selection.decode().unwrap().is_default());
+        assert_eq!(selection.encode().unwrap().label(), "media-aware");
+        assert!(matches!(
+            selection.encode(),
+            Some(WorkerSelectionPolicySelection::Inline(instance))
+                if instance.parameters() == &serde_yaml::Value::Mapping(Default::default())
+        ));
+    }
+
+    /// The deprecated `instances:` list still resolves: roles reference entries by name.
+    #[test]
+    fn worker_selection_accepts_deprecated_named_instances() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+worker_selection:
   prefill: prefill-policy
   decode: default
   encode: encode-policy
@@ -536,10 +569,18 @@ worker_selection:
         .unwrap();
 
         let selection = config.worker_selection().unwrap();
-        assert_eq!(selection.aggregated_instance(), None);
-        assert_eq!(selection.prefill_instance(), Some("prefill-policy"));
-        assert_eq!(selection.decode_instance(), Some("default"));
-        assert_eq!(selection.encode_instance(), Some("encode-policy"));
+        assert_eq!(selection.aggregated(), None);
+        assert_eq!(selection.prefill().unwrap().label(), "prefill-policy");
+        assert!(selection.decode().unwrap().is_default());
+        assert_eq!(selection.encode().unwrap().label(), "encode-policy");
+        assert_eq!(
+            selection.instance("prefill-policy").unwrap().policy_type(),
+            "cache-aware"
+        );
+        assert_eq!(
+            selection.instance_names(),
+            vec!["encode-policy".to_string(), "prefill-policy".to_string()]
+        );
     }
 
     #[test]
@@ -550,38 +591,37 @@ worker_selection: {}
 "#,
             r#"
 worker_selection:
-  aggregated: missing
-  instances:
-    - name: present
-      type: alpha
+  aggregated: ""
 "#,
             r#"
 worker_selection:
-  prefill: missing
-  instances:
-    - name: present
-      type: alpha
+  aggregated: "two words"
 "#,
             r#"
 worker_selection:
-  decode: missing
-  instances:
-    - name: present
-      type: alpha
+  aggregated:
+    type: alpha
+    parameters: 1
 "#,
             r#"
 worker_selection:
-  encode: missing
-  instances:
-    - name: present
-      type: alpha
+  aggregated:
+    type: default
 "#,
             r#"
 worker_selection:
-  default: present
-  instances:
-    - name: present
-      type: alpha
+  aggregated:
+    name: alpha
+    type: alpha
+"#,
+            r#"
+worker_selection:
+  aggregated:
+    parameters: {}
+"#,
+            r#"
+worker_selection:
+  default: alpha
 "#,
             r#"
 worker_selection:

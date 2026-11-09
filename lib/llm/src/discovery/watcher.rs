@@ -2403,9 +2403,6 @@ mod tests {
             r#"
 worker_selection:
   aggregated: test
-  instances:
-    - name: test
-      type: test
 request_classifier:
   type: test
 "#,

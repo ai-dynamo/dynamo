@@ -314,7 +314,7 @@ where
     let mut policy_file = NamedTempFile::new().expect("create worker-selection policy config");
     write!(
         policy_file,
-        "\nworker_selection:\n  {}: test\n  instances:\n    - name: test\n      type: test\n",
+        "\nworker_selection:\n  {}: test\n",
         worker_type.as_str(),
     )
     .expect("write worker-selection policy config");

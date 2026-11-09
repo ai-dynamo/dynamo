@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use dynamo_kv_router::plugins::prelude::*;
 
-/// Policy type selected by `worker_selection.instances[].type`.
+/// Policy type selected under a `worker_selection` role.
 pub const POLICY_TYPE: &str = "dynamo-two-tier-cost-fn";
 
 /// Keep these equal to `experimental/sgl-router`'s `cache_aware_zmq` defaults, so an instance

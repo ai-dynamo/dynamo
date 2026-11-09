@@ -461,10 +461,6 @@ models:
             r#"
 worker_selection:
   aggregated: first-eligible
-  instances:
-    - name: first-eligible
-      type: first-eligible
-      parameters: {}
 "#,
         )
         .expect("write policy file");
@@ -756,10 +752,6 @@ worker_selection:
             r#"
 worker_selection:
   aggregated: expected-output-recorder
-  instances:
-    - name: expected-output-recorder
-      type: expected-output-recorder
-      parameters: {}
 "#,
         )
         .expect("write policy file");

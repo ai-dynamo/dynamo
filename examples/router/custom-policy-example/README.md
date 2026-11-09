@@ -15,7 +15,7 @@ policy crate -> catalog crate -> router-policy YAML -> frontend or EPP binary
 
 - The policy crate owns the filtering, scoring, and picking algorithm.
 - The catalog gives each policy type a stable name.
-- The YAML file creates named policy instances and supplies parameters.
+- The YAML file selects a policy type for each worker role and supplies its parameters.
 - The frontend or EPP links the catalog at compile time.
 
 Dynamo owns discovery, eligibility, queueing, validation, reservations, accounting, and metrics. A policy sees only eligible workers and returns one candidate row.
@@ -81,7 +81,7 @@ Read the [custom worker-selection guide](https://github.com/ai-dynamo/dynamo/blo
 
 ## 3. Parse Parameters and Build the Factory
 
-The registry calls the provider once at startup for the selected policy instance. The provider parses and validates the YAML parameters. It then returns a factory that captures the validated values:
+The registry calls the provider once at startup for each role's selected policy. The provider parses and validates the YAML parameters. It then returns a factory that captures the validated values:
 
 ```rust
 #[derive(serde::Deserialize)]
@@ -126,7 +126,7 @@ fn provider(
 The provider and factory have different lifetimes:
 
 1. The registry matches the YAML `type` to a provider.
-2. The provider parses one named instance and returns one shared factory.
+2. The provider parses that role's parameters and returns one shared factory; roles with the same type and parameters share it.
 3. Dynamo calls the factory once for each model and routing-group partition.
 4. Each factory call creates a new filter, scorer, and picker set for that partition.
 
@@ -148,47 +148,39 @@ Choose a stable, unique type name. The name becomes part of the YAML contract.
 
 Add the policy dependency and registration call to the catalog that ships with the host process. See [`catalog/src/lib.rs`](catalog/src/lib.rs).
 
-## 5. Configure a Policy Instance
+## 5. Configure Each Role
 
 Create a YAML file outside the source tree:
 
 ```yaml
 worker_selection:
-  aggregated: simple-filter-score-pick
-  prefill: disagg-prefill
-  decode: disagg-decode
-  encode: simple-filter-score-pick
-  instances:
-    - name: simple-filter-score-pick
-      type: simple-filter-score-pick
-      parameters:
-        min_device_overlap_blocks: 0
-    - name: filter-score-pick-cache-affinity
-      type: simple-filter-score-pick
-      parameters:
-        min_device_overlap_blocks: 8
-    - name: disagg-prefill
-      type: disagg-filter-score-pick
-      parameters:
-        min_device_overlap_blocks: 0
-    - name: disagg-decode
-      type: disagg-filter-score-pick
-      parameters:
-        min_device_overlap_blocks: 0
-    - name: simple-stacked-score-pick
-      type: simple-stacked-score-pick
-      parameters: {}
-    - name: soft-pin-repin
-      type: soft-pin-repin
-      parameters:
-        max_active_requests: 0
+  aggregated:
+    type: simple-filter-score-pick
+    parameters:
+      min_device_overlap_blocks: 0
+  prefill:
+    type: disagg-filter-score-pick
+    parameters:
+      min_device_overlap_blocks: 0
+  decode:
+    type: disagg-filter-score-pick
+    parameters:
+      min_device_overlap_blocks: 0
+  encode:
+    type: simple-filter-score-pick
+    parameters:
+      min_device_overlap_blocks: 0
 ```
 
-- `type` selects a registered provider.
-- `name` identifies one configured instance.
-- `worker_selection.aggregated`, `worker_selection.prefill`, `worker_selection.decode`, and `worker_selection.encode` select separate instances for their matching worker pools.
+Each role names a policy type and the parameters that type validates. Raise
+`min_device_overlap_blocks` on one role to require cache affinity for that pool only. A role may be
+a bare type name when the type accepts an empty `parameters` mapping, as `simple-stacked-score-pick`
+does.
+
+- `type` selects a registered provider; `parameters` is the mapping it validates.
+- `worker_selection.aggregated`, `worker_selection.prefill`, `worker_selection.decode`, and `worker_selection.encode` select separate policies for their matching worker pools.
 - `worker_selection.encode` applies only to surface-carrying encode worker sets that construct the standard KV chooser. The surface-less multimodal encoder hop uses `EncoderRouter` and round-robin selection instead.
-- `--router-prefill-policy` and `--router-decode-policy` override the matching YAML selections.
+- `--router-prefill-policy` and `--router-decode-policy` override the matching YAML selections with a policy type run on default parameters.
 - `DYN_ROUTER_PREFILL_POLICY` and `DYN_ROUTER_DECODE_POLICY` provide stage-specific environment overrides.
 - `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides every worker-type YAML selection.
 - The override value `default` selects Dynamo's built-in policy.
@@ -281,7 +273,7 @@ The [custom routing API reference](https://github.com/ai-dynamo/dynamo/blob/main
 
 Use the embedded Python frontend for this local test. The standalone EPP uses Kubernetes `InferencePool` discovery. Complete [Run With the Python Frontend](#run-with-the-python-frontend) first so that the extension links this example catalog.
 
-Create `/tmp/worker-selection.yaml` with the policy instances from [Configure a Policy Instance](#5-configure-a-policy-instance).
+Create `/tmp/worker-selection.yaml` with the role selections from [Configure Each Role](#5-configure-each-role).
 
 Use `min_device_overlap_blocks: 0` for this test. A positive threshold can reject every worker on a cold request or a replay path without raw tier data.
 
@@ -289,10 +281,9 @@ For overload-aware soft affinity, follow the [`soft-pin-repin` two-Mocker walkth
 
 ### Aggregated Policy
 
-In the first terminal, start the frontend with the `simple-filter-score-pick` policy:
+In the first terminal, start the frontend. The YAML selects `simple-filter-score-pick` for the aggregated pool:
 
 ```bash
-DYN_ROUTER_WORKER_SELECTION_POLICY=simple-filter-score-pick \
 python -m dynamo.frontend \
   --router-mode kv \
   --router-policy-config /tmp/worker-selection.yaml \
@@ -323,7 +314,7 @@ curl localhost:8000/v1/chat/completions \
 
 A response confirms that the linked provider created the policy and selected a Mocker worker. The frontend log records the selected worker and its policy cost as `logit`.
 
-Keep the Mocker process active to try `simple-stacked-score-pick`. Stop the frontend and restart it with:
+Keep the Mocker process active to try `simple-stacked-score-pick`. It takes no parameters, so the environment override can name the type directly. Stop the frontend and restart it with:
 
 ```bash
 DYN_ROUTER_WORKER_SELECTION_POLICY=simple-stacked-score-pick \
@@ -338,19 +329,15 @@ Send the same request. This time, `logit` is the sum of the active-request and u
 
 ### Disaggregated Policy
 
-Stop the frontend and Mocker processes. Start the frontend with separate named prefill and decode policy instances:
+Stop the frontend and Mocker processes. Start the frontend again; the YAML's `prefill` and `decode` roles select `disagg-filter-score-pick` for each pool:
 
 ```bash
 python -m dynamo.frontend \
   --router-mode kv \
   --router-policy-config /tmp/worker-selection.yaml \
-  --router-prefill-policy disagg-prefill \
-  --router-decode-policy disagg-decode \
   --discovery-backend file \
   --http-port 8000
 ```
-
-The two flags override `worker_selection.prefill` and `worker_selection.decode`. Omit the flags to use the YAML selections.
 
 In the second terminal, start two prefill Mocker workers:
 

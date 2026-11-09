@@ -106,7 +106,7 @@ fn prelude_plugins_resolve_through_the_registry() {
         .unwrap();
     let registry: RouterPluginRegistry = registry;
     let policy = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(policy.path(), "worker_selection:\n  aggregated: prelude\n  prefill: prelude\n  decode: prelude\n  encode: prelude\n  instances:\n    - name: prelude\n      type: prelude\n").unwrap();
+    std::fs::write(policy.path(), "worker_selection:\n  aggregated: prelude\n  prefill: prelude\n  decode: prelude\n  encode: prelude\n").unwrap();
     let config = KvRouterConfig {
         router_policy_config: Some(policy.path().display().to_string()),
         ..Default::default()

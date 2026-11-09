@@ -30,7 +30,7 @@ pub use super::registry::{
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
 pub(crate) use config::RawWorkerSelectionConfig;
-pub use config::{WorkerSelectionConfig, WorkerSelectionInstance};
+pub use config::{WorkerSelectionConfig, WorkerSelectionInstance, WorkerSelectionPolicySelection};
 pub use dynamo_router_protocol::session::WorkerSelectionInputTrigger;
 pub use dynamo_scheduler::selector::{WorkerCapacityExt, WorkerInfoExt, WorkerLoadInputExt};
 

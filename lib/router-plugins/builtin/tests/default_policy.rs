@@ -736,7 +736,7 @@ fn named_default_parameters_resolve_and_reject_invalid_values() {
         ("unknown: 1", false),
     ] {
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        write!(file, "worker_selection:\n  aggregated: tuned\n  instances:\n    - name: tuned\n      type: dynamo-default-cost-fn\n      parameters:\n        {parameter}\n").unwrap();
+        write!(file, "worker_selection:\n  aggregated:\n    type: dynamo-default-cost-fn\n    parameters:\n      {parameter}\n").unwrap();
         let config = KvRouterConfig {
             router_policy_config: Some(file.path().display().to_string()),
             ..Default::default()
@@ -801,7 +801,7 @@ fn yaml_parameters_override_legacy_config_and_omissions_inherit_it() {
     ] {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), format!(
-            "worker_selection:\n  aggregated: tuned\n  instances:\n    - name: tuned\n      type: dynamo-default-cost-fn\n      parameters: {parameters}\n"
+            "worker_selection:\n  aggregated:\n    type: dynamo-default-cost-fn\n    parameters: {parameters}\n"
         )).unwrap();
         let config = KvRouterConfig {
             router_policy_config: Some(file.path().display().to_string()),
@@ -860,7 +860,7 @@ fn shared_cache_credit_defaults_and_legacy_precedence_apply_to_selection() {
     ] {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), format!(
-            "router:\n  shared_cache_type: {cache_type}\nworker_selection:\n  aggregated: tuned\n  instances:\n    - name: tuned\n      type: dynamo-default-cost-fn\n      parameters: {parameters}\n"
+            "router:\n  shared_cache_type: {cache_type}\nworker_selection:\n  aggregated:\n    type: dynamo-default-cost-fn\n    parameters: {parameters}\n"
         )).unwrap();
         let mut config = KvRouterConfig {
             router_policy_config: Some(file.path().display().to_string()),
