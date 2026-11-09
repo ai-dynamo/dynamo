@@ -152,7 +152,7 @@ func TestMergeFailureRecordsIndependentCapacityTable(t *testing.T) {
 		t.Log("Admit one record in each of 16 partitions through public Merge")
 		f := newFixture()
 		batch := make([]Observation, 0, failureRecordMaxGroups)
-		for i := 0; i < failureRecordMaxGroups; i++ {
+		for i := range failureRecordMaxGroups {
 			obs := currentFailureObservation(f, f.leaderPod, 23)
 			group := i
 			obs.GroupIndex = &group
@@ -191,7 +191,7 @@ func TestMergeFailureRecordsIndependentCapacityTable(t *testing.T) {
 		t.Log("Admit eight distinct leaders in one partition through public Merge")
 		f := newFixture()
 		batch := make([]Observation, 0, failureRecordMaxPerGroup)
-		for i := 0; i < failureRecordMaxPerGroup; i++ {
+		for i := range failureRecordMaxPerGroup {
 			obs := currentFailureObservation(f, f.leaderPod, 23)
 			obs.LeaderUID = types.UID(fmt.Sprintf("per-group-leader-%d", i))
 			obs.PodUID = types.UID(fmt.Sprintf("per-group-pod-%d", i))
@@ -414,7 +414,7 @@ func TestMergeFailureRecordsRejectsInconsistentStoredTimes(t *testing.T) {
 func TestMergeFailureRecordsCapacityDoesNotEvict(t *testing.T) {
 	f := newFixture()
 	existing := make([]failureRecordEntry, 0, failureRecordMaxEntries)
-	for i := 0; i < failureRecordMaxEntries; i++ {
+	for i := range failureRecordMaxEntries {
 		existing = append(existing, failureRecordEntry{
 			DCDGeneration:           2,
 			LWSName:                 "decode",

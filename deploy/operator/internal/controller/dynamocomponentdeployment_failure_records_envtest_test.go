@@ -51,7 +51,6 @@ func TestFailureRecordsPersistUsesServerUIDAndResourceVersion(t *testing.T) {
 	require.NoError(t, env.Client().Get(ctx, client.ObjectKeyFromObject(dcd), dcd))
 	require.NotEmpty(t, dcd.UID)
 	require.NotEmpty(t, dcd.ResourceVersion)
-	preWriteRV := dcd.ResourceVersion
 
 	t.Log("Seed an unrelated status condition that metadata Patch must not touch")
 	dcd.Status.Conditions = []metav1.Condition{{
@@ -63,7 +62,7 @@ func TestFailureRecordsPersistUsesServerUIDAndResourceVersion(t *testing.T) {
 	}}
 	require.NoError(t, env.Client().Status().Update(ctx, dcd))
 	require.NoError(t, env.Client().Get(ctx, client.ObjectKeyFromObject(dcd), dcd))
-	preWriteRV = dcd.ResourceVersion
+	preWriteRV := dcd.ResourceVersion
 
 	batch := failureRecordBatch(dcd, 0, "leader-uid", "pod-uid", "decode-0", now)
 

@@ -80,10 +80,7 @@ func PersistFailureRecords(
 		UnavailableReason: outcome.UnavailableReason,
 	}
 	if outcome.NextExpiry != nil {
-		result.RequeueAfter = outcome.NextExpiry.Sub(now)
-		if result.RequeueAfter < time.Second {
-			result.RequeueAfter = time.Second
-		}
+		result.RequeueAfter = max(outcome.NextExpiry.Sub(now), time.Second)
 	}
 
 	logs := log.FromContext(ctx)

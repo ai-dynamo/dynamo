@@ -250,10 +250,7 @@ func admitFailureObservations(
 	windowFloor time.Time,
 	now time.Time,
 ) []failureRecordEntry {
-	capHint := len(observations)
-	if capHint > failureRecordMaxEntries+1 {
-		capHint = failureRecordMaxEntries + 1
-	}
+	capHint := min(len(observations), failureRecordMaxEntries+1)
 	out := make([]failureRecordEntry, 0, capHint)
 	seen := map[recordIdentity]struct{}{}
 	firstObserved := metav1.NewTime(now)
