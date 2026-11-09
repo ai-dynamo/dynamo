@@ -704,6 +704,8 @@ pub struct RouterQueueMetrics {
     pub backpressure_total: IntCounterVec,
     pub received_total: IntCounterVec,
     pub rejected_total: IntCounterVec,
+    /// Queue wait of every attempt that reached admission; zero for direct admissions.
+    pub queue_wait_seconds: HistogramVec,
 }
 
 #[derive(Clone)]
@@ -717,6 +719,7 @@ pub struct RouterQueueMetricHandles {
     pub received_total: IntCounter,
     pub rejected_due_time_passed_total: IntCounter,
     pub rejected_queue_size_exceeded_total: IntCounter,
+    pub queue_wait_seconds: prometheus::Histogram,
     // Shared by clones for one scheduler; separate schedulers may share Prometheus labels.
     reported_received: Arc<std::sync::atomic::AtomicU64>,
     reported_due_time_passed: Arc<std::sync::atomic::AtomicU64>,
@@ -778,8 +781,27 @@ pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> = LazyLock::new(||
             &[labels::MODEL, labels::WORKER_TYPE, "policy_class", "reason"],
         )
         .expect("Failed to create router_queue_backpressure_total counter"),
+        queue_wait_seconds: HistogramVec::new(
+            HistogramOpts::new(
+                format!(
+                    "{}_{}",
+                    name_prefix::FRONTEND,
+                    frontend_service::ROUTER_QUEUE_WAIT_SECONDS
+                ),
+                "Time a request waited in the router scheduler queue before worker selection, in seconds; requests admitted without queueing record zero",
+            )
+            .buckets(ROUTER_QUEUE_WAIT_BUCKETS.to_vec()),
+            &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
+        )
+        .expect("Failed to create router_queue_wait_seconds histogram"),
     }
 });
+
+/// Buckets for `router_queue_wait_seconds`: sub-millisecond admission through a 30 s wait,
+/// with edges at the 0.1 s, 0.5 s, 1 s, and 5 s marks a TTFT alert is likely to use.
+const ROUTER_QUEUE_WAIT_BUCKETS: [f64; 11] = [
+    0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 30.0,
+];
 
 impl RouterQueueMetrics {
     pub fn handles(
@@ -809,6 +831,7 @@ impl RouterQueueMetrics {
             received_total: self.received_total.with_label_values(&queue_labels),
             rejected_due_time_passed_total: admission_rejection("due_time_passed"),
             rejected_queue_size_exceeded_total: admission_rejection("queue_size_exceeded"),
+            queue_wait_seconds: self.queue_wait_seconds.with_label_values(&queue_labels),
             reported_received: Arc::default(),
             reported_due_time_passed: Arc::default(),
             reported_queue_size_exceeded: Arc::default(),
@@ -856,6 +879,7 @@ pub fn register_router_queue_metrics(
     registry.register(Box::new(m.backpressure_total.clone()))?;
     registry.register(Box::new(m.received_total.clone()))?;
     registry.register(Box::new(m.rejected_total.clone()))?;
+    registry.register(Box::new(m.queue_wait_seconds.clone()))?;
     Ok(())
 }
 

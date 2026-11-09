@@ -36,8 +36,8 @@ use super::selector::{
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, AvailableWorkerIds,
     KvSchedulerError, NonMaxOverlapSelection, NonMaxOverlapSelectionObserver,
-    OverloadedWorkerProvider, SchedulingContext, SchedulingRequest, SchedulingResponse,
-    WorkerAvailabilityProvider, WorkerIdSet,
+    OverloadedWorkerProvider, QueueWait, QueueWaitObserver, QueueWaitPath, SchedulingContext,
+    SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider, WorkerIdSet,
 };
 use crate::plugins::request_classifier::ClassifyRequest;
 use crate::plugins::worker_selection::{
@@ -815,6 +815,8 @@ struct SchedulerQueueActor<
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     available_worker_ids: Option<Arc<AvailableWorkerIds>>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
+    /// Queue-wait observer, invoked inline when a request leaves the queue for admission.
+    queue_wait_observer: Arc<OnceLock<QueueWaitObserver>>,
     /// Per-candidate cost capture for admitted selections, installed once by the host.
     selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
     reject_thresholds: Option<RejectThresholdsProvider>,
@@ -853,6 +855,8 @@ pub struct SchedulerQueue<
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     supports_overlap_refresh: bool,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
+    /// Queue-wait observer, invoked inline when a request leaves the queue for admission.
+    queue_wait_observer: Arc<OnceLock<QueueWaitObserver>>,
     /// Per-candidate cost capture for admitted selections, installed once by the host.
     selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
     reject_thresholds: Option<RejectThresholdsProvider>,
@@ -963,6 +967,7 @@ impl<
         });
         let cleanup = Arc::new(AdmissionCleanup::default());
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
+        let queue_wait_observer = Arc::new(OnceLock::new());
         let selection_trace = Arc::new(OnceLock::new());
         let start_time = Instant::now();
         let capacity_updates = queueing_enabled.then(|| Arc::new(CapacityUpdates::new()));
@@ -1018,6 +1023,7 @@ impl<
             overloaded_worker_provider: overloaded_worker_provider.clone(),
             available_worker_ids: available_worker_ids.clone(),
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
+            queue_wait_observer: Arc::clone(&queue_wait_observer),
             selection_trace: Arc::clone(&selection_trace),
             reject_thresholds: reject_thresholds.clone(),
         };
@@ -1042,6 +1048,7 @@ impl<
             overloaded_worker_provider,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
             non_max_overlap_selection_observer,
+            queue_wait_observer,
             selection_trace,
             reject_thresholds,
             _marker: PhantomData,
@@ -1066,6 +1073,17 @@ impl<
         self.non_max_overlap_selection_observer
             .set(observer)
             .is_ok()
+    }
+
+    /// Install the observer for queue waits of requests that reach admission.
+    ///
+    /// The observer runs inline on the scheduler actor, once per admitted attempt: with the
+    /// measured wait for a request extracted from a class queue, and with a zero wait for a
+    /// request that took a direct-admission carve-out.
+    ///
+    /// Returns `false` when an observer is already installed.
+    pub fn set_queue_wait_observer(&self, observer: QueueWaitObserver) -> bool {
+        self.queue_wait_observer.set(observer).is_ok()
     }
 
     /// Install per-candidate cost capture for admitted selections.
@@ -1735,6 +1753,7 @@ impl<
         // `queue_rejection` would reject with `limit: 0`. Admit directly instead
         // so selection reports the real condition, `NoEndpoints`.
         if self.workers_with_configs.borrow().is_empty() {
+            self.observe_queue_wait(class_index, Duration::ZERO, QueueWaitPath::Direct);
             return self.admit_one(context, request, decay_now, prepared) == Admission::Booked;
         }
         // A class with any zero per-worker limit never queues: keep the direct
@@ -1759,6 +1778,7 @@ impl<
                     )
                 });
             if !should_queue {
+                self.observe_queue_wait(class_index, Duration::ZERO, QueueWaitPath::Direct);
                 return self.admit_one(context, request, decay_now, prepared) == Admission::Booked;
             }
             // The availability check and load projection can take time. Judge this request's
@@ -2220,6 +2240,9 @@ impl<
                 }
             }
             let queued = candidate.into_payload();
+            // The wait ends at the drain's clock read that extracted the entry; an overlap
+            // refresh between extraction and admission is selection work, not queue wait.
+            let queue_wait = decay_now.saturating_duration_since(queued.enqueue_at);
             // Only this turn's request has rows, and a refresh replaces the overlap
             // they were built from.
             let prepared = if queued.enqueue_turn == self.turn && !refreshed {
@@ -2246,6 +2269,7 @@ impl<
                     attempt_tx: queued.attempt_tx,
                     lifecycle_transfer: queued.lifecycle_transfer,
                 };
+                self.observe_queue_wait(class_index, queue_wait, QueueWaitPath::Queued);
                 self.admit_one(context, queued.request, Instant::now(), prepared)
             };
             self.pending.settle(charge, admission != Admission::Refused);
@@ -2732,6 +2756,17 @@ impl<
             tracing::error!(%request_id, %error, "Failed to roll back scheduler booking");
         }
         Admission::Refused
+    }
+
+    /// Report one request's queue wait as it leaves the queue for admission.
+    fn observe_queue_wait(&self, class_index: usize, wait: Duration, path: QueueWaitPath) {
+        if let Some(observer) = self.queue_wait_observer.get() {
+            observer(QueueWait {
+                class_index,
+                wait,
+                path,
+            });
+        }
     }
 
     fn dispatch_non_max_overlap_selection(
@@ -4141,6 +4176,83 @@ policy_classes:
     }
 
     #[tokio::test(start_paused = true)]
+    async fn queued_request_reports_its_queue_wait() {
+        let (queue, slots) = make_queue(1, 16, 64, Some(0.0));
+        let (observer_tx, mut observer_rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(queue.set_queue_wait_observer(Arc::new(move |wait| {
+            observer_tx
+                .send(wait)
+                .expect("observer receiver should remain open");
+        })));
+        // Only one observer can be installed.
+        assert!(!queue.set_queue_wait_observer(Arc::new(|_| {})));
+
+        // An uncontended request enters its class queue and leaves it in the same actor
+        // turn, so its wait is reported on the queued path with no elapsed time.
+        let (active, active_rx) = make_request("active", 64);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+        let first = observer_rx.recv().await.expect("observer channel closed");
+        assert_eq!(first.class_index, 0);
+        assert_eq!(first.path, QueueWaitPath::Queued);
+        assert!(first.wait < Duration::from_millis(1), "{first:?}");
+
+        // The worker is busy, so the next request parks and nothing is reported yet.
+        let (parked, parked_rx) = make_request("parked", 64);
+        queue.enqueue(parked).await;
+        assert_eq!(queue.pending_count(), 1);
+        assert!(observer_rx.try_recv().is_err());
+
+        // Capacity frees 250 ms later; the drain that admits the request reports the wait
+        // measured from its enqueue to that drain's clock read.
+        tokio::time::advance(Duration::from_millis(250)).await;
+        slots
+            .mark_prefill_completed(&"active".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"active".to_string(), decay_now()).unwrap();
+        queue.update().await;
+        parked_rx.await.unwrap().unwrap();
+
+        let second = observer_rx.recv().await.expect("observer channel closed");
+        assert_eq!(second.class_index, 0);
+        assert_eq!(second.path, QueueWaitPath::Queued);
+        assert!(
+            second.wait >= Duration::from_millis(250) && second.wait < Duration::from_millis(260),
+            "{second:?}"
+        );
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn direct_admission_reports_zero_queue_wait() {
+        // With zero discovered workers every request is admitted directly so selection can
+        // report `NoEndpoints`; the observer still sees one zero-wait report per attempt.
+        let (queue, _slots) = make_queue(0, 16, 64, None);
+        let (observer_tx, mut observer_rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(queue.set_queue_wait_observer(Arc::new(move |wait| {
+            observer_tx
+                .send(wait)
+                .expect("observer receiver should remain open");
+        })));
+
+        let (request, response_rx) = make_request("no-workers", 64);
+        queue.enqueue(request).await;
+        assert!(matches!(
+            response_rx.await.unwrap(),
+            Err(KvSchedulerError::NoEndpoints)
+        ));
+        let wait = observer_rx.recv().await.expect("observer channel closed");
+        assert_eq!(
+            wait,
+            QueueWait {
+                class_index: 0,
+                wait: Duration::ZERO,
+                path: QueueWaitPath::Direct,
+            }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn deadline_expiry_during_refresh_is_counted_once() {
         let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::default()));
         let (queue, slots) = make_queue_with_blocking_refresher(
@@ -4566,6 +4678,7 @@ policy_classes:
             non_max_overlap_selection_observer: Arc::clone(
                 &queue.non_max_overlap_selection_observer,
             ),
+            queue_wait_observer: Arc::clone(&queue.queue_wait_observer),
             selection_trace: Arc::clone(&queue.selection_trace),
             reject_thresholds: queue.reject_thresholds.clone(),
         }

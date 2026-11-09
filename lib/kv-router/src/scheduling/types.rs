@@ -262,6 +262,35 @@ impl NonMaxOverlapSelection {
     }
 }
 
+/// How a request reached admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueWaitPath {
+    /// The request entered a policy class queue and was extracted by a drain.
+    Queued,
+    /// The request took a direct-admission carve-out (zero discovered workers, or a
+    /// never-queues class with capacity) and never entered a class queue.
+    Direct,
+}
+
+/// One request's wait in the scheduler queue, reported when it leaves the queue for
+/// admission. Rejected, expired, and cancelled entries are not reported here; the
+/// admission counters already count them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueWait {
+    /// Index of the request's policy class in the resolved profile.
+    pub class_index: usize,
+    /// Time from queue insertion to extraction for admission, on the actor's clock.
+    /// Zero for [`QueueWaitPath::Direct`], so every admitted attempt reports once.
+    pub wait: std::time::Duration,
+    /// Whether the request waited in a class queue or was admitted directly.
+    pub path: QueueWaitPath,
+}
+
+/// Callback invoked inline on the scheduler actor when a request leaves the queue for
+/// admission. It runs in the drain loop, so it must return promptly and must not call
+/// back into the scheduler.
+pub type QueueWaitObserver = Arc<dyn Fn(QueueWait) + Send + Sync + 'static>;
+
 #[derive(Debug)]
 pub struct AdvisorySchedulingResponse {
     pub response: SchedulingResponse,
