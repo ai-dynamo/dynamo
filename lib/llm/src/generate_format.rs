@@ -170,15 +170,15 @@ pub trait GenerateExchange: Send {
         emit: &mut dyn FnMut(&Value),
     ) -> Result<(), DynamoError>;
 
-    /// Continue after a failed attempt, atomically: rewrite `request` for the
-    /// next attempt, whose prompt Dynamo has already extended with the
-    /// `delivered_tokens`, or return the output that ends the request; and
-    /// rebase this exchange so later outputs continue the earlier ones.
+    /// Continue after a failed attempt, atomically: update the engine-native
+    /// body of `request`, whose canonical prompt and budgets Dynamo has already
+    /// rebased onto the `delivered_tokens`, and rebase this exchange so later
+    /// outputs continue the earlier ones.
     fn migrate(
         &mut self,
         delivered_tokens: usize,
         request: &mut PreprocessedRequest,
-    ) -> Result<Option<LLMEngineOutput>, String>;
+    ) -> Result<(), String>;
 
     /// Unary: the client response. Streaming: an optional final chunk.
     fn finish(&mut self) -> Result<Option<Value>, DynamoError>;
@@ -189,7 +189,7 @@ impl RequestContinuation for Mutex<Box<dyn GenerateExchange>> {
         &self,
         delivered_tokens: usize,
         request: &mut PreprocessedRequest,
-    ) -> Result<Option<LLMEngineOutput>, String> {
+    ) -> Result<(), String> {
         self.lock().migrate(delivered_tokens, request)
     }
 }
@@ -337,12 +337,8 @@ pub(crate) mod test_formats {
             Ok(())
         }
 
-        fn migrate(
-            &mut self,
-            _: usize,
-            _: &mut PreprocessedRequest,
-        ) -> Result<Option<LLMEngineOutput>, String> {
-            Ok(None)
+        fn migrate(&mut self, _: usize, _: &mut PreprocessedRequest) -> Result<(), String> {
+            Ok(())
         }
 
         fn finish(&mut self) -> Result<Option<Value>, DynamoError> {

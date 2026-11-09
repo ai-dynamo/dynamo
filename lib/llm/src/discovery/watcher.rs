@@ -848,7 +848,7 @@ impl ModelWatcher {
                     anyhow::anyhow!("generate pipeline requires preprocessed routing")
                 })?;
                 let generate_engine = routing
-                    .build_generate_pipeline(
+                    .build_preprocessed_pipeline(
                         card,
                         self.migration_limit,
                         self.migration_max_seq_len,

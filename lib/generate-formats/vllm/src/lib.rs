@@ -556,7 +556,7 @@ impl GenerateExchange for VllmExchange {
         &mut self,
         _delivered_tokens: usize,
         _request: &mut PreprocessedRequest,
-    ) -> Result<Option<LLMEngineOutput>, String> {
+    ) -> Result<(), String> {
         Err("vLLM generate requests do not migrate yet".to_string())
     }
 
