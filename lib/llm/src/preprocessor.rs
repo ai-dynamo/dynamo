@@ -384,6 +384,9 @@ fn tool_content_part_as_user(
         ChatCompletionRequestToolMessageContentPart::AudioUrl(part) => {
             ChatCompletionRequestUserMessageContentPart::AudioUrl(part.clone())
         }
+        ChatCompletionRequestToolMessageContentPart::Custom(part) => {
+            ChatCompletionRequestUserMessageContentPart::Custom(part.clone())
+        }
     })
 }
 

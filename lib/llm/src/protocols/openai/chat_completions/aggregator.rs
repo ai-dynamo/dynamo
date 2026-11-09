@@ -3560,9 +3560,10 @@ mod tests {
         assert!(result.is_ok());
         let response = result.unwrap();
         let choice = &response.inner.choices[0];
+        // Unified Hermes preserves the prose newline before the tool envelope.
         assert_eq!(
             choice.message.content,
-            Some(ChatCompletionMessageContent::Text("hello".to_string()))
+            Some(ChatCompletionMessageContent::Text("hello\n".to_string()))
         );
         assert_eq!(
             choice.finish_reason,
