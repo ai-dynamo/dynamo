@@ -245,7 +245,7 @@ pub enum ExtraKeyItem {
     HashWithSignedOffset((String, i64)),
     HashWithUnsignedOffset((String, u64)),
     /// Raw keys, such as vLLM's prompt-embeds SHA-256 digest, arrive as msgpack `bin`.
-    Bytes(#[serde(with = "serde_bytes")] Vec<u8>),
+    Bytes(#[serde(deserialize_with = "serde_bytes::deserialize")] Vec<u8>),
     Signed(i64),
     Unsigned(u64),
     Float(f64),
