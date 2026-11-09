@@ -37,9 +37,10 @@ does not list LongCat. This is an experimental Dynamo integration example.
 - The same model checkpoint and TokenSpeed revision on every worker. Reserve at
   least 900 GB of disk per host; the pinned checkpoint contains about 748 GB of weights.
 
-Attention data parallelism must be one inside each worker. Scale with independent
-replicas. Both prefill and decode must use matching tensor/expert parallelism and
-cache geometry. The launcher's H200 default uses `flashinfer_cutlass`. GB300 uses
+A worker can run attention data parallelism (`--data-parallel-size N
+--attn-tp-size 1`), including across nodes; decode finds a request's prefill rank
+from its bootstrap room, so the two roles' attention-DP sizes may differ. Both
+must use matching attention tensor parallelism and cache geometry. The launcher's H200 default uses `flashinfer_cutlass`. GB300 uses
 `flashinfer_trtllm` with the native routing fix and the flags below.
 
 ## Build the Image
@@ -214,7 +215,21 @@ worker IDs, overlap scores, timings, and a `passed` result.
 - Prefill generates one token for the native handoff. Decode retains the client's
   generation budget.
 - `--kv-events-config '{"enable_kv_cache_events":true}'` enables native cache
-  mutation events. Prefix caching must remain enabled.
+  mutation events. Prefix caching must remain enabled. KV events require attention
+  DP=1; with attention DP > 1, run the frontend with `--router-mode kv
+  --no-router-kv-events`, or with a non-KV router mode.
+- With attention DP > 1, the worker registers its DP size, and a KV-mode router
+  picks a rank per request. A prefill request always runs on rank
+  `bootstrap_room % dp_size`, where decode looks for its KV cache; the router mints
+  rooms to match the rank it picks, and the worker drops a prefill rank that
+  disagrees with its room. Decode runs on the router's rank. Without a router-chosen
+  rank, TokenSpeed places prefill and decode by the room.
+- A multi-node worker runs `python -m dynamo.tokenspeed` with the same arguments
+  and its own `--node-rank` on every node. The first node registers the worker; the
+  others run only their engine ranks. With the default loopback
+  `--data-parallel-address`, every node dials `--dist-init-addr`'s host on
+  `--data-parallel-rpc-port` (default 30500), so that port must be free on the first
+  node.
 - KV events also require `--kv-block-size`, set to the engine's KV prefix
   granularity. Each TokenSpeed model picks its granularity at startup and logs it
   as `prefix_granularity=N` in its `Allocated cache arena` line. Pass the same

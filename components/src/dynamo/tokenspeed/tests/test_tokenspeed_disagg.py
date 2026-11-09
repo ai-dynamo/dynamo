@@ -372,12 +372,127 @@ async def test_multi_node_binds_the_configured_handshake_port(native):
         await engine.cleanup()
 
 
-async def test_follower_node_is_rejected_before_launch(native):
+async def test_follower_node_engine_refuses_to_register(native):
     engine = make_engine(node_rank=1)
-    with pytest.raises(ValueError, match="first node"):
+    with pytest.raises(ValueError, match="engine ranks only"):
         await engine.start(worker_id=1)
     assert native.launches == []
     await engine.cleanup()
+
+
+@pytest.mark.parametrize(
+    "address,dist_init_addr,expected",
+    [
+        # TokenSpeed's loopback default: every node uses the first node's
+        # --dist-init-addr host, where the worker runs.
+        ("127.0.0.1", "10.0.0.5:29500", ("10.0.0.5", 30500)),
+        ("127.0.0.1", "[fd00::5]:29500", ("fd00::5", 30500)),
+        ("10.0.0.9", "10.0.0.5:29500", ("10.0.0.9", 30500)),
+    ],
+)
+def test_multi_node_handshake_endpoint(address, dist_init_addr, expected):
+    args = server_args(
+        data_parallel_address=address,
+        dist_init_addr=dist_init_addr,
+        mapping=dp_mapping(8, nnodes=2),
+    )
+    assert llm_engine.handshake_endpoint(args) == expected
+
+
+def test_multi_node_handshake_needs_a_reachable_address():
+    args = server_args(dist_init_addr=None, mapping=dp_mapping(8, nnodes=2))
+    with pytest.raises(ValueError, match="--dist-init-addr"):
+        llm_engine.handshake_endpoint(args)
+
+
+async def test_multi_node_leader_binds_and_launches_on_dist_init_host(native):
+    with_dp_engines(native, 8)
+    engine = make_engine(
+        dist_init_addr="10.0.0.5:29500", mapping=dp_mapping(8, nnodes=2)
+    )
+    try:
+        await engine.start(worker_id=1)
+        [bind] = native.binds
+        assert bind["handshake_address"] == "tcp://10.0.0.5:30500"
+        assert bind["input_address"] == "tcp://10.0.0.5:0"
+        assert bind["num_engines"] == 8
+        assert native.launches[0].argv[-4:] == [
+            "--data-parallel-address",
+            "10.0.0.5",
+            "--data-parallel-rpc-port",
+            "30500",
+        ]
+    finally:
+        await engine.cleanup()
+
+
+def follower_config(**overrides):
+    return SimpleNamespace(
+        server_args=server_args(
+            node_rank=1,
+            dist_init_addr="10.0.0.5:29500",
+            mapping=dp_mapping(8, nnodes=2),
+            **overrides,
+        ),
+        engine_argv=["--model", "test-model", "--nnodes", "2", "--node-rank", "1"],
+    )
+
+
+def test_follower_node_runs_its_ranks_against_the_leader(monkeypatch):
+    execs = []
+    monkeypatch.setattr(llm_engine.os, "execv", lambda *call: execs.append(call))
+    llm_engine.run_follower_node(follower_config(disaggregation_mode="prefill"))
+    [(executable, argv)] = execs
+    assert argv == [
+        executable,
+        "-m",
+        llm_engine.LAUNCHER_MODULE,
+        "--model",
+        "test-model",
+        "--nnodes",
+        "2",
+        "--node-rank",
+        "1",
+        "--data-parallel-address",
+        "10.0.0.5",
+        "--data-parallel-rpc-port",
+        "30500",
+    ]
+
+
+@pytest.mark.parametrize(
+    "overrides,message",
+    [
+        ({"kv_events_config": '{"enable_kv_cache_events":true}'}, "attention DP=1"),
+        (
+            {
+                "disaggregation_mode": "decode",
+                "disaggregation_transfer_backend": "fake",
+            },
+            "Mooncake",
+        ),
+    ],
+)
+def test_follower_node_rejects_what_the_leader_rejects(monkeypatch, overrides, message):
+    monkeypatch.setattr(llm_engine.os, "execv", Mock())
+    with pytest.raises(ValueError, match=message):
+        llm_engine.run_follower_node(follower_config(**overrides))
+    llm_engine.os.execv.assert_not_called()
+
+
+@pytest.mark.parametrize("node_rank", [0, 1])
+def test_entry_point_routes_followers_away_from_registration(monkeypatch, node_rank):
+    from dynamo.tokenspeed import unified_main
+
+    config = follower_config()
+    config.server_args.node_rank = node_rank
+    monkeypatch.setattr(unified_main, "parse_args", lambda argv: config)
+    followers, workers = Mock(), Mock()
+    monkeypatch.setattr(unified_main, "run_follower_node", followers)
+    monkeypatch.setattr(unified_main, "run", workers)
+    unified_main.main([])
+    assert followers.called == (node_rank == 1)
+    assert workers.called == (node_rank == 0)
 
 
 async def test_registration_without_block_size_leaves_kv_geometry_unset(native):
@@ -486,19 +601,175 @@ async def test_bad_handoff_rejected_before_native_request(native, bootstrap):
         await engine.cleanup()
 
 
+async def test_unsupported_disagg_fails_before_start(native):
+    engine = make_engine(
+        disaggregation_mode="decode", disaggregation_transfer_backend="fake"
+    )
+    with pytest.raises(ValueError, match="Mooncake"):
+        await engine.start(worker_id=1)
+    assert native.launches == []
+    await engine.cleanup()
+
+
+def dp_mapping(dp_size, nnodes=1):
+    return SimpleNamespace(attn=SimpleNamespace(dp_size=dp_size), nnodes=nnodes)
+
+
+def with_dp_engines(native, dp_size):
+    native.engines = [
+        {**native.engines[0], "index": rank, "data_parallel_rank": rank}
+        for rank in range(dp_size)
+    ]
+
+
+def handoff(room):
+    return {
+        "bootstrap_host": "prefill.example",
+        "bootstrap_port": 9000,
+        "bootstrap_room": room,
+    }
+
+
+@pytest.mark.parametrize("mode", ["null", "prefill", "decode"])
+async def test_attention_dp_registers_its_ranks(monkeypatch, native, mode):
+    monkeypatch.setenv(BOOTSTRAP_HOST_ENV, "prefill.example")
+    with_dp_engines(native, 4)
+    engine = make_engine(disaggregation_mode=mode, mapping=dp_mapping(4))
+    try:
+        registration = await engine.start(worker_id=1)
+        assert native.binds[0]["num_engines"] == 4
+        # The router enumerates ranks [0, 4) and, for prefill, mints rooms
+        # with room % 4 == the rank it chose.
+        assert registration.llm.data_parallel_size == 4
+        assert registration.llm.data_parallel_start_rank == 0
+    finally:
+        await engine.cleanup()
+
+
+async def test_single_rank_registers_no_dp_layout(native):
+    engine = make_engine()
+    try:
+        registration = await engine.start(worker_id=1)
+        assert registration.llm.data_parallel_size is None
+        assert registration.llm.data_parallel_start_rank is None
+    finally:
+        await engine.cleanup()
+
+
+@pytest.mark.parametrize("mode", ["null", "decode"])
+@pytest.mark.parametrize("rank", [0, 3])
+async def test_routed_dp_rank_pins_the_request(native, mode, rank):
+    with_dp_engines(native, 4)
+    engine = make_engine(disaggregation_mode=mode, mapping=dp_mapping(4))
+    await engine.start(worker_id=1)
+    # Decode's own rank is independent of the room: decode finds the prefill
+    # rank from the room, whatever rank it runs on.
+    request = {"token_ids": [1], "routing": {"dp_rank": rank, "prefill_dp_rank": 2}}
+    if mode == "decode":
+        request["bootstrap_info"] = handoff(room=5)
+    try:
+        await drain(engine.generate(request, context("pinned")))
+        assert native.submitted[0].data_parallel_rank == rank
+    finally:
+        await engine.cleanup()
+
+
 @pytest.mark.parametrize(
-    "overrides,message",
+    "dp_size,routing",
     [
-        (
-            {"mapping": SimpleNamespace(attn=SimpleNamespace(dp_size=2), nnodes=1)},
-            "attention DP=1",
-        ),
-        ({"disaggregation_transfer_backend": "fake"}, "Mooncake"),
+        (4, {}),
+        (4, {"dp_rank": 4}),
+        (4, {"dp_rank": -1}),
+        # A single-rank engine drops pins, as TokenSpeed itself does.
+        (1, {"dp_rank": 0}),
     ],
 )
-async def test_unsupported_disagg_fails_before_start(native, overrides, message):
-    engine = make_engine(disaggregation_mode="decode", **overrides)
-    with pytest.raises(ValueError, match=message):
+async def test_missing_or_invalid_dp_rank_leaves_placement_to_tokenspeed(
+    native, dp_size, routing
+):
+    with_dp_engines(native, dp_size)
+    engine = make_engine(mapping=dp_mapping(dp_size))
+    await engine.start(worker_id=1)
+    try:
+        await drain(
+            engine.generate({"token_ids": [1], "routing": routing}, context("r"))
+        )
+        assert not hasattr(native.submitted[0], "data_parallel_rank")
+    finally:
+        await engine.cleanup()
+
+
+@pytest.mark.parametrize(
+    "routing,room,expected",
+    [
+        # The router mints room % dp_size == its rank: the pin agrees.
+        ({"dp_rank": 2}, 4 * 1000 + 2, 2),
+        ({"prefill_dp_rank": 3}, 4 * 7 + 3, 3),
+        # A disagreeing pin would be rejected by TokenSpeed, and decode looks
+        # for the KV cache on rank room % dp_size: the room wins.
+        ({"dp_rank": 1}, 4 * 1000 + 2, None),
+        ({}, 4 * 1000 + 2, None),
+    ],
+)
+async def test_prefill_pin_must_agree_with_the_room(
+    monkeypatch, native, caplog, routing, room, expected
+):
+    monkeypatch.setenv(BOOTSTRAP_HOST_ENV, "prefill.example")
+    with_dp_engines(native, 4)
+    engine = make_engine(disaggregation_mode="prefill", mapping=dp_mapping(4))
+    await engine.start(worker_id=1)
+    request = {"token_ids": [1], "routing": routing, "bootstrap_info": handoff(room)}
+    try:
+        await drain(engine.generate(request, context("prefill")))
+        [submitted] = native.submitted
+        assert submitted.bootstrap_room == room
+        assert getattr(submitted, "data_parallel_rank", None) == expected
+        ignored = "Ignoring prefill DP rank" in caplog.text
+        assert ignored == (routing.get("dp_rank") not in (None, expected))
+    finally:
+        await engine.cleanup()
+
+
+@pytest.mark.parametrize("rank", [0, 5, 7])
+async def test_prefill_fallback_room_lands_on_the_routed_rank(
+    monkeypatch, native, rank
+):
+    monkeypatch.setenv(BOOTSTRAP_HOST_ENV, "prefill.example")
+    with_dp_engines(native, 8)
+    engine = make_engine(disaggregation_mode="prefill", mapping=dp_mapping(8))
+    await engine.start(worker_id=1)
+    try:
+        chunks = await drain(
+            engine.generate(
+                {"token_ids": [1], "routing": {"dp_rank": rank}}, context("sync")
+            )
+        )
+        [submitted] = native.submitted
+        assert submitted.bootstrap_room % 8 == rank
+        assert submitted.data_parallel_rank == rank
+        assert chunks[0]["disaggregated_params"]["bootstrap_room"] == (
+            submitted.bootstrap_room
+        )
+    finally:
+        await engine.cleanup()
+
+
+@pytest.mark.parametrize("dp_size,rank", [(1, None), (8, 0), (8, 7), (48, 47)])
+def test_bootstrap_room_residue_and_range(dp_size, rank):
+    for _ in range(200):
+        room = disagg.bootstrap_room(rank, dp_size)
+        assert 0 <= room <= 2**63 - 1
+        if rank is not None:
+            assert room % dp_size == rank
+
+
+async def test_kv_events_with_attention_dp_fail_before_start(native):
+    engine = make_engine(
+        kv_block_size=64,
+        kv_events_config='{"enable_kv_cache_events":true}',
+        mapping=dp_mapping(2),
+    )
+    with pytest.raises(ValueError, match="attention DP=1"):
         await engine.start(worker_id=1)
     assert native.launches == []
     await engine.cleanup()

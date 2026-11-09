@@ -45,13 +45,6 @@ def validate_disagg_compatibility(mode: DisaggregationMode, server_args: Any) ->
         != "mooncake"
     ):
         raise ValueError("Dynamo TokenSpeed disaggregation requires Mooncake")
-    if attention_dp_size(server_args) != 1:
-        # TokenSpeed assigns P/D requests by bootstrap_room modulo DP size.
-        # Dynamo's selected cache-owning DP rank must not be silently ignored.
-        raise ValueError(
-            "Dynamo TokenSpeed disaggregation requires attention DP=1; "
-            "use independent workers for multiple prefill/decode replicas"
-        )
 
 
 def runtime_disaggregated_endpoint(server_args: Any) -> tuple[str, int]:
@@ -95,6 +88,8 @@ def bootstrap_kwargs(
     request: dict[str, Any],
     mode: DisaggregationMode,
     prefill_endpoint: tuple[str, int] | None = None,
+    dp_rank: int | None = None,
+    dp_size: int = 1,
 ) -> dict[str, Any]:
     """Validate the handoff, creating a room for synchronous prefill if needed."""
     if mode == DisaggregationMode.AGGREGATED:
@@ -105,8 +100,7 @@ def bootstrap_kwargs(
         info = {
             "bootstrap_host": prefill_host,
             "bootstrap_port": prefill_port,
-            # Match the router's signed-64-bit room range and attention DP=1.
-            "bootstrap_room": secrets.randbits(63),
+            "bootstrap_room": bootstrap_room(dp_rank, dp_size),
         }
     if not isinstance(info, dict):
         raise InvalidArgument(
@@ -128,3 +122,13 @@ def bootstrap_kwargs(
     ):
         raise InvalidArgument("Invalid TokenSpeed bootstrap host, port, or room")
     return {"bootstrap_host": host, "bootstrap_port": port, "bootstrap_room": room}
+
+
+def bootstrap_room(dp_rank: int | None = None, dp_size: int = 1) -> int:
+    """A random room in the router's signed-64-bit range. With a DP rank,
+    ``room % dp_size == dp_rank``: TokenSpeed runs a prefill request on that
+    residue, and decode finds its KV cache there."""
+    max_room = 2**63 - 1
+    if dp_rank is None or dp_size <= 1:
+        return secrets.randbits(63)
+    return secrets.randbelow((max_room - dp_rank) // dp_size + 1) * dp_size + dp_rank

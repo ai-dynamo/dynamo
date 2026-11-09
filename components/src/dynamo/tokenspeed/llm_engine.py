@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,7 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 from dynamo._core import Context
+from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
     EngineConfig,
     GenerateChunk,
@@ -85,6 +87,8 @@ class TokenspeedLLMEngine(LLMEngine):
         self.engine_argv = list(engine_argv or [])
         self.kv_block_size = kv_block_size
         self.disaggregation_mode = resolve_disaggregation_mode(server_args)
+        # Attention-DP ranks, one engine each.
+        self._dp_size = attention_dp_size(server_args)
         self._bootstrap_endpoint: tuple[str, int] | None = None
         self._kv_source: ZmqSource | None = None
         self._kv_event_dir: tempfile.TemporaryDirectory | None = None
@@ -107,7 +111,10 @@ class TokenspeedLLMEngine(LLMEngine):
     async def from_args(
         cls, argv: list[str] | None = None
     ) -> tuple[TokenspeedLLMEngine, WorkerConfig]:
-        config = parse_args(argv)
+        return cls.from_config(parse_args(argv))
+
+    @classmethod
+    def from_config(cls, config: Any) -> tuple[TokenspeedLLMEngine, WorkerConfig]:
         engine = cls(
             config.server_args,
             engine_argv=config.engine_argv,
@@ -124,12 +131,11 @@ class TokenspeedLLMEngine(LLMEngine):
     async def start(self, worker_id: int) -> EngineConfig:
         del worker_id
         validate_disagg_compatibility(self.disaggregation_mode, self.server_args)
-        nnodes = _num_nodes(self.server_args)
-        if int(getattr(self.server_args, "node_rank", None) or 0) != 0:
+        if is_follower_node(self.server_args):
             raise ValueError(
-                "The Dynamo TokenSpeed worker runs on the first node only; start "
-                f"the other nodes with `python -m {LAUNCHER_MODULE}` and the same "
-                "--data-parallel-address/--data-parallel-rpc-port"
+                "A TokenSpeed node other than the first runs its engine ranks "
+                "only; start it through `python -m dynamo.tokenspeed`, which "
+                "launches them without registering a worker"
             )
         bootstrap_host, bootstrap_port = None, None
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -140,16 +146,13 @@ class TokenspeedLLMEngine(LLMEngine):
         native = _tokenspeed_engine_module()
         self._loop = asyncio.get_running_loop()
         self._encoder = _io_struct_module().MsgpackEncoder()
-        host = str(getattr(self.server_args, "data_parallel_address", "127.0.0.1"))
-        # Ranks on other nodes dial the configured port; a single node binds
-        # a free one so that several workers can share a host.
-        port = int(self.server_args.data_parallel_rpc_port) if nnodes > 1 else 0
+        host, port = handshake_endpoint(self.server_args)
         listener = native.FrontendListener.bind(
             handshake_address=_tcp_address(host, port),
             input_address=_tcp_address(host, 0),
             output_address=_tcp_address(host, 0),
             first_engine_index=int(getattr(self.server_args, "zmq_engine_index", 0)),
-            num_engines=attention_dp_size(self.server_args),
+            num_engines=self._dp_size,
             routing=(
                 "least_in_flight"
                 if self.disaggregation_mode == DisaggregationMode.AGGREGATED
@@ -224,6 +227,10 @@ class TokenspeedLLMEngine(LLMEngine):
                     if chunked_prefill_size and chunked_prefill_size > 0
                     else None
                 ),
+                # The router picks among these ranks and, for prefill, mints
+                # bootstrap rooms with room % data_parallel_size == its rank.
+                data_parallel_size=self._dp_size if self._dp_size > 1 else None,
+                data_parallel_start_rank=0 if self._dp_size > 1 else None,
             ),
         )
 
@@ -257,11 +264,7 @@ class TokenspeedLLMEngine(LLMEngine):
                 "(--disable-prefix-caching); no KV events will be published"
             )
             return ["--kv-events-config", self.server_args.kv_events_config]
-        if attention_dp_size(self.server_args) != 1:
-            raise ValueError(
-                "TokenSpeed KV-aware routing currently requires attention DP=1; "
-                "use independent worker replicas"
-            )
+        validate_kv_events_topology(self.server_args)
         if self.kv_block_size is None:
             raise ValueError(
                 "TokenSpeed KV events require --kv-block-size, the engine's prefix "
@@ -376,16 +379,23 @@ class TokenspeedLLMEngine(LLMEngine):
             raise RuntimeError(self._failure)
         normalize_request_token_ids(request)
 
+        dp_rank = self._routed_dp_rank(request)
         bootstrap = bootstrap_kwargs(
-            request, self.disaggregation_mode, self._bootstrap_endpoint
+            request,
+            self.disaggregation_mode,
+            self._bootstrap_endpoint,
+            dp_rank=dp_rank,
+            dp_size=self._dp_size,
         )
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            dp_rank = self._prefill_pin(dp_rank, bootstrap["bootstrap_room"])
         _validate_single_choice_sampling(request)
         sampling_params = build_sampling_params(request, self._model_max_len)
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             sampling_params["max_new_tokens"] = 1
             sampling_params.pop("min_new_tokens", None)
         frames = self._encode_request(
-            request.get("token_ids", []), sampling_params, bootstrap, context
+            request.get("token_ids", []), sampling_params, bootstrap, context, dp_rank
         )
         rid = frames.rid
 
@@ -428,21 +438,51 @@ class TokenspeedLLMEngine(LLMEngine):
                 # engine must not keep generating for nobody.
                 self._schedule_abort(rid)
 
+    def _routed_dp_rank(self, request: GenerateRequest) -> int | None:
+        """The attention-DP rank the router chose for this request, if any."""
+        if self._dp_size <= 1:
+            return None
+        rank = forced_dp_rank(request)
+        if rank is None and self.disaggregation_mode == DisaggregationMode.PREFILL:
+            routing = request.get("routing") or {}
+            prefill_rank = routing.get("prefill_dp_rank")
+            rank = None if prefill_rank is None else int(prefill_rank)
+        return validate_global_dp_rank(rank, 0, self._dp_size, "TokenSpeed")
+
+    def _prefill_pin(self, dp_rank: int | None, room: int) -> int | None:
+        """A prefill request runs on rank ``room % dp_size``: decode locates
+        its KV cache by that residue, and TokenSpeed rejects a prefill pin
+        that disagrees. Keep the router's pin only when it agrees."""
+        if dp_rank is None or room % self._dp_size == dp_rank:
+            return dp_rank
+        logger.warning(
+            "Ignoring prefill DP rank %d: bootstrap room %d places the request "
+            "on rank %d of %d",
+            dp_rank,
+            room,
+            room % self._dp_size,
+            self._dp_size,
+        )
+        return None
+
     def _encode_request(
         self,
         token_ids: list[int],
         sampling_params: dict[str, Any],
         bootstrap: dict[str, Any],
         context: Context,
+        dp_rank: int | None = None,
     ) -> _EncodedRequest:
         io_struct = _io_struct_module()
         rid = context.id() or uuid.uuid4().hex
+        pin = {} if dp_rank is None else {"data_parallel_rank": dp_rank}
         native_request = io_struct.TokenizedGenerateReqInput(
             rid=rid,
             input_ids=list(token_ids),
             sampling_params=_sampling_params_cls()(**sampling_params),
             stream=True,
             **bootstrap,
+            **pin,
         )
         frames = [bytes(frame) for frame in self._encoder.encode(native_request)]
         return _EncodedRequest(rid, frames)
@@ -690,6 +730,97 @@ def _num_nodes(server_args: Any) -> int:
     return int(
         getattr(mapping, "nnodes", None) or getattr(server_args, "nnodes", None) or 1
     )
+
+
+def is_follower_node(server_args: Any) -> bool:
+    """Whether this process serves a node other than the engine's first."""
+    return int(getattr(server_args, "node_rank", None) or 0) != 0
+
+
+def handshake_endpoint(server_args: Any) -> tuple[str, int]:
+    """The handshake address the worker binds and every node's ranks dial.
+
+    A single node binds a free port on ``--data-parallel-address``, so that
+    several workers can share a host. Across nodes, every node must agree on
+    the address without talking to the worker first: the configured
+    ``--data-parallel-rpc-port``, on ``--data-parallel-address`` or, if that
+    is loopback (TokenSpeed's default), on ``--dist-init-addr``'s host, the
+    first node, where the worker runs.
+    """
+    host = str(getattr(server_args, "data_parallel_address", None) or "127.0.0.1")
+    if _num_nodes(server_args) <= 1:
+        return host, 0
+    if _is_loopback(host):
+        dist_init_addr = getattr(server_args, "dist_init_addr", None)
+        if not dist_init_addr:
+            raise ValueError(
+                "A multi-node TokenSpeed worker needs --data-parallel-address "
+                "reachable from every node, or --dist-init-addr"
+            )
+        host = _resolve_host(str(dist_init_addr).rsplit(":", 1)[0])
+    return host, int(server_args.data_parallel_rpc_port)
+
+
+def validate_kv_events_topology(server_args: Any) -> None:
+    if attention_dp_size(server_args) != 1:
+        # Each rank publishes its own KV events (on its own node); the worker
+        # subscribes to one publisher and tags no DP rank.
+        raise ValueError(
+            "TokenSpeed KV events currently require attention DP=1; with "
+            "attention DP > 1, route without --router-kv-events"
+        )
+
+
+def run_follower_node(config: Any) -> None:
+    """Run a follower node's engine ranks in place of this process.
+
+    The worker on the first node registers every rank with Dynamo; another
+    node's ranks only dial its handshake. ``exec`` hands this process to
+    TokenSpeed's launcher, so a shutdown signal reaches it directly.
+    """
+    server_args = config.server_args
+    validate_disagg_compatibility(resolve_disaggregation_mode(server_args), server_args)
+    if kv_events_enabled(
+        kv_events_config_dict(getattr(server_args, "kv_events_config", None))
+    ):
+        validate_kv_events_topology(server_args)
+    host, port = handshake_endpoint(server_args)
+    argv = [
+        sys.executable,
+        "-m",
+        LAUNCHER_MODULE,
+        *config.engine_argv,
+        "--data-parallel-address",
+        host,
+        "--data-parallel-rpc-port",
+        str(port),
+    ]
+    logger.info(
+        "TokenSpeed node %s runs its engine ranks only: %s",
+        getattr(server_args, "node_rank", None),
+        " ".join(argv[1:]),
+    )
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(sys.executable, argv)
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False  # A hostname.
+
+
+def _resolve_host(host: str) -> str:
+    host = host.strip("[]")
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        return socket.gethostbyname(host)
 
 
 def _tcp_address(host: str, port: int) -> str:
