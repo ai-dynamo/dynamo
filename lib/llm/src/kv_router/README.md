@@ -142,6 +142,7 @@ errors, which return to the client.
 | Input | Source |
 |---|---|
 | Request id, cancellation | the `Context` around the request |
+| Booking id of a migration retry's remote prefill | `<request id>#<attempt>`, set on the `Context` by `PrefillRouter` from the migration attempt |
 | Policy class | context metadata key `policy-class` (header `x-dynamo-meta-policy-class`) |
 | Session-affinity id | the `Context`, set by the HTTP layer |
 | Agent session context | `PreprocessedRequest::agent_context` |
@@ -192,6 +193,11 @@ released by `KvRouter::free`, not by a handle. `KvRouter::add_request` uses it.
 
 Booking descriptors carry the attempt id, so late cleanup from an old attempt cannot release a
 newer booking that reused the same request id and worker.
+
+A remote prefill can outlive its migration attempt to serve a KV transfer that a decode worker
+already started; it keeps its booking, with the load it carries, until it finishes. A migration
+retry therefore books its prefill under `<request id>#<attempt>`, and the first attempt books under
+the request id. The worker still receives the request id.
 
 ## Cancellation
 

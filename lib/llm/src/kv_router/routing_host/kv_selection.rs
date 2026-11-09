@@ -77,6 +77,8 @@ impl<'a> RoutingRequestParts<'a> {
 }
 
 pub(super) struct SelectionOptions {
+    /// Overrides the request id the scheduler books under.
+    pub(super) booking_id: Option<String>,
     pub(super) pinned_target: Option<AffinityTarget>,
     pub(super) affinity_target: Option<AffinityTarget>,
     pub(super) planned_worker: Option<WorkerWithDpRank>,
@@ -87,6 +89,7 @@ pub(super) struct SelectionOptions {
 
 struct BestMatchArgs<'a> {
     context_id: &'a str,
+    booking_id: Option<&'a str>,
     routing_parts: RoutingRequestParts<'a>,
     router_config_override: Option<&'a RouterConfigOverride>,
     update_states: bool,
@@ -111,6 +114,7 @@ impl RoutingHost {
             .kv_router()
             .find_best_match_details_with_policy_class_inner(
                 Some(args.context_id),
+                args.booking_id,
                 args.routing_parts.token_ids,
                 args.routing_parts.block_mm_infos,
                 args.router_config_override,
@@ -213,6 +217,7 @@ impl RoutingHost {
         let return_routing_hashes =
             !is_query_only && self.kv_router().indexer().records_routing_decisions();
         let SelectionOptions {
+            booking_id,
             pinned_target,
             affinity_target,
             planned_worker,
@@ -281,6 +286,7 @@ impl RoutingHost {
             let selection = self
                 .select_best_match(BestMatchArgs {
                     context_id,
+                    booking_id: booking_id.as_deref(),
                     routing_parts,
                     router_config_override: request.router_config_override.as_ref(),
                     update_states: !is_query_only,
@@ -349,6 +355,7 @@ impl RoutingHost {
 
         self.select_best_match(BestMatchArgs {
             context_id,
+            booking_id: booking_id.as_deref(),
             routing_parts,
             router_config_override: request.router_config_override.as_ref(),
             update_states: !is_query_only,
