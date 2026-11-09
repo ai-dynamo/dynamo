@@ -10,12 +10,12 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 4 Kubernetes API packages with 214 typed CRD and config sections.
+Dynamo publishes 4 Kubernetes API packages with 219 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">74 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">76 types</Card>
-<Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">35 types</Card>
+<Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">40 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
 </CardGroup>
 
@@ -387,7 +387,7 @@ SubComponentType indicates the sub-role of this component (for example, "prefill
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime version in this component's runtime image. Paths below are relative to the component spec. Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar is present, otherwise extraPodSpec.mainContainer.image, or the main image in each selected role PodTemplate. DGD admission requires it when any selected runtime image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime version in this component's runtime image. Paths below are relative to the component spec. Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar is present, otherwise extraPodSpec.mainContainer.image, or the main image in each selected role PodTemplate. For frontend, worker, prefill, decode, planner, and epp components, DGD admission requires it when any selected runtime image has no parseable semantic-version tag; controller-generated DCDs may omit it. Untyped components and custom component types do not require it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -473,7 +473,7 @@ See [MultinodeSpec](#multinodespec).
 </ParamField>
 
 <ParamField path="roles" type="ComponentRoleSpec array">
-Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components each require an agent role. A DGD may contain independent LPX components, each with its own conductor role, or a shared draft and target pair with a conductor role only on the target. Every LPX role requires its own podTemplate.
+Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components each require an agent role. A DGD may contain independent LPX components, each serving through its own conductor role or agent runtime init container, or a draft and target pair in which only the target serves. Every LPX role requires its own podTemplate.
 See [ComponentRoleSpec](#componentrolespec).
 **Validation:** MaxItems: 2  Optional: \&#123;\&#125;
 </ParamField>
@@ -560,7 +560,7 @@ SubComponentType indicates the sub-role of this component (for example, "prefill
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime version in this component's runtime image. Paths below are relative to the component spec. Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar is present, otherwise extraPodSpec.mainContainer.image, or the main image in each selected role PodTemplate. DGD admission requires it when any selected runtime image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime version in this component's runtime image. Paths below are relative to the component spec. Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar is present, otherwise extraPodSpec.mainContainer.image, or the main image in each selected role PodTemplate. For frontend, worker, prefill, decode, planner, and epp components, DGD admission requires it when any selected runtime image has no parseable semantic-version tag; controller-generated DCDs may omit it. Untyped components and custom component types do not require it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -646,7 +646,7 @@ See [MultinodeSpec](#multinodespec).
 </ParamField>
 
 <ParamField path="roles" type="object array">
-Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components each require an agent role. A DGD may contain independent LPX components, each with its own conductor role, or a shared draft and target pair with a conductor role only on the target. Every LPX role requires its own podTemplate. Standalone DCD roles support `name`, `replicas`, and `podTemplate`; `providerOverride` is a DGD-only provider context.
+Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components each require an agent role. A DGD may contain independent LPX components, each serving through its own conductor role or agent runtime init container, or a draft and target pair in which only the target serves. Every LPX role requires its own podTemplate. Standalone DCD roles support `name`, `replicas`, and `podTemplate`; `providerOverride` is a DGD-only provider context.
 **Validation:** MaxItems: 2  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2844,7 +2844,7 @@ any `extraPodSpec`-style escape hatch. Container paths are relative to the compo
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
+**Appears in:** [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 <ParamField path="providerOverride" type="ProviderOverride">
 providerOverride configures the primary Grove unit representing this DGD component. With apiVersion `grove.io/v1alpha1`, target is `PodCliqueTemplateSpec` for a single-node component or `PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set `topologyConstraint` and `rollingUpdate.maxUnavailable`. Standalone DCD OpenAPI omits this field.
@@ -2864,7 +2864,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride overrides the Dynamo runtime compatibility version inferred from podTemplate.spec.containers[name=main].image. In sidecar mode, it instead overrides the version inferred from podTemplate.spec.initContainers[name=runtime].image. The same rules apply to roles[].podTemplate. For non-LPX components in sidecar mode, main container images are not used to infer Dynamo versions, including for roles without a runtime init container. This field does not change container images. For non-LPX components, DGD admission requires this field when any runtime image tag lacks a parseable semantic version. Controller-generated DCDs may omit it. An override is also needed when the parsed tag differs from the Dynamo runtime version. The value must use canonical MAJOR.MINOR.PATCH format, for example "1.4.0", and match the Dynamo version in every affected runtime container. Setting or changing an override of 1.5.0 or later may trigger a rollout.
+RuntimeVersionOverride overrides the Dynamo runtime compatibility version inferred from podTemplate.spec.containers[name=main].image. In sidecar mode, it instead overrides the version inferred from podTemplate.spec.initContainers[name=runtime].image. The same rules apply to roles[].podTemplate. For non-LPX components in sidecar mode, main container images are not used to infer Dynamo versions, including for roles without a runtime init container. This field does not change container images. For frontend, worker, prefill, decode, planner, and epp components, DGD admission requires this field when any runtime image tag lacks a parseable semantic version. Components without a type and controller-generated DCDs may omit it. An override is also needed when the parsed tag differs from the Dynamo runtime version. The value must use canonical MAJOR.MINOR.PATCH format, for example "1.4.0", and match the Dynamo version in every affected runtime container. Setting or changing an override of 1.5.0 or later may trigger a rollout.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2896,7 +2896,7 @@ See [MultinodeSpec](#v1beta1-multinodespec).
 </ParamField>
 
 <ParamField path="roles" type="ComponentRoleSpec array">
-roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components each require an agent role. A DGD may contain independent LPX components, each with its own conductor role, or a shared draft and target pair with a conductor role only on the target. Every LPX role requires its own podTemplate.
+roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components each require an agent role. A DGD may contain independent LPX components, each serving through its own conductor role or agent runtime init container, or a draft and target pair in which only the target serves. Every LPX role requires its own podTemplate.
 See [ComponentRoleSpec](#v1beta1-componentrolespec).
 **Validation:** MaxItems: 2  Optional: \&#123;\&#125;
 </ParamField>
@@ -2979,7 +2979,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride overrides the Dynamo runtime compatibility version inferred from podTemplate.spec.containers[name=main].image. In sidecar mode, it instead overrides the version inferred from podTemplate.spec.initContainers[name=runtime].image. The same rules apply to roles[].podTemplate. For non-LPX components in sidecar mode, main container images are not used to infer Dynamo versions, including for roles without a runtime init container. This field does not change container images. For non-LPX components, DGD admission requires this field when any runtime image tag lacks a parseable semantic version. Controller-generated DCDs may omit it. An override is also needed when the parsed tag differs from the Dynamo runtime version. The value must use canonical MAJOR.MINOR.PATCH format, for example "1.4.0", and match the Dynamo version in every affected runtime container. Setting or changing an override of 1.5.0 or later may trigger a rollout.
+RuntimeVersionOverride overrides the Dynamo runtime compatibility version inferred from podTemplate.spec.containers[name=main].image. In sidecar mode, it instead overrides the version inferred from podTemplate.spec.initContainers[name=runtime].image. The same rules apply to roles[].podTemplate. For non-LPX components in sidecar mode, main container images are not used to infer Dynamo versions, including for roles without a runtime init container. This field does not change container images. For frontend, worker, prefill, decode, planner, and epp components, DGD admission requires this field when any runtime image tag lacks a parseable semantic version. Components without a type and controller-generated DCDs may omit it. An override is also needed when the parsed tag differs from the Dynamo runtime version. The value must use canonical MAJOR.MINOR.PATCH format, for example "1.4.0", and match the Dynamo version in every affected runtime container. Setting or changing an override of 1.5.0 or later may trigger a rollout.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3011,7 +3011,7 @@ See [MultinodeSpec](#v1beta1-multinodespec).
 </ParamField>
 
 <ParamField path="roles" type="object array">
-roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components each require an agent role. A DGD may contain independent LPX components, each with its own conductor role, or a shared draft and target pair with a conductor role only on the target. Every LPX role requires its own podTemplate. Standalone DCD roles support `name`, `replicas`, and `podTemplate`; `providerOverride` is a DGD-only provider context.
+roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components each require an agent role. A DGD may contain independent LPX components, each serving through its own conductor role or agent runtime init container, or a draft and target pair in which only the target serves. Every LPX role requires its own podTemplate. Standalone DCD roles support `name`, `replicas`, and `podTemplate`; `providerOverride` is a DGD-only provider context.
 **Validation:** MaxItems: 2  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3126,7 +3126,7 @@ v1beta1 releases. Component-level experimental features live under
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
+**Appears in:** [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 <ParamField path="kvTransferPolicy" type="KvTransferPolicy">
 kvTransferPolicy configures topology-aware routing for KV-cache transfers between prefill and decode workers.
@@ -3534,7 +3534,7 @@ DynamoGraphDeploymentSpec defines the desired state of a DynamoGraphDeployment.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeployment](#v1beta1-dynamographdeployment), [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec)
+**Appears in:** [DynamoGraphDeployment](#v1beta1-dynamographdeployment)
 
 <ParamField path="providerOverride" type="ProviderOverride">
 providerOverride configures the root resource generated by the selected graph-level workload provider. For Grove it uses apiVersion `grove.io/v1alpha1`, target `PodCliqueSet`, and may set only `spec.template.topologyConstraint`. It cannot select or change the provider.
@@ -3893,17 +3893,17 @@ See [GPUSKUType](#gpuskutype).
 </ParamField>
 
 <ParamField path="vramMb" type="float">
-VRAMMB is the VRAM per GPU in MiB. When omitted, auto-detected from cluster GPU nodes. Nominal values within 10% of the measured value identify the same shape. When this value differs by more than 10% from the auto-selected shape and totalGpus is omitted, the request is rejected.
+VRAMMB is the VRAM per GPU in MiB. When omitted, auto-detected from cluster GPU nodes. An explicit value within 10% of the auto-selected shape's measured VRAM permits automatic GPU-budget discovery. This tolerance applies only to the requested value; aggregating discovered nodes still requires equal measured VRAM. When this value differs by more than 10% and totalGpus is omitted, automatic GPU-budget discovery fails and the DGDR enters phase Failed before a profiling Job is created; set totalGpus explicitly to use that override.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="totalGpus" type="integer">
-TotalGPUs is the GPU budget for profiling and deployment. The profiler uses this to determine parallelism and replica count. When omitted, computed by summing GPUs on nodes matching the selected shape: GPU type, GPUs per node, and VRAM per GPU. The result is temporarily capped at 32 to limit profiler search space. For example, same-type nodes with 8 and 4 GPUs represent 12 GPUs of inventory, while the selected 8-GPU shape yields an automatic budget of 8. This cap may be removed in a future release. Set this field explicitly to override the derived budget or use a numGpusPerNode or vramMb value that differs from the selected shape. A shape override without an explicit totalGpus is rejected.
+TotalGPUs is the GPU budget for profiling and deployment. The profiler uses this to determine parallelism and replica count. When omitted, computed by summing GPUs on nodes matching the auto-selected shape: GPU type, GPUs per node, and VRAM per GPU. The result is temporarily capped at 32 to limit profiler search space. For example, same-type nodes with 8 and 4 GPUs represent 12 GPUs of inventory, while the auto-selected 8-GPU shape yields an automatic budget of 8. This cap may be removed in a future release. Set this field explicitly to override the derived budget, use a different numGpusPerNode, or use a vramMb value more than 10% from the auto-selected shape's measured VRAM. These shape overrides require an explicit totalGpus.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="numGpusPerNode" type="integer">
-NumGPUsPerNode is the number of GPUs per node. When omitted, auto-detected as the highest GPU count on any discovered node of the selected GPU type. In clusters whose nodes have different GPU counts, set this explicitly to the node size you intend to schedule on. When this value differs from the auto-selected shape and totalGpus is omitted, the request is rejected.
+NumGPUsPerNode is the number of GPUs per node. When omitted, auto-detected as the highest GPU count on any discovered node of the selected GPU type. In clusters whose nodes have different GPU counts, set this explicitly to the node size you intend to schedule on. When this value differs from the auto-selected shape and totalGpus is omitted, automatic GPU-budget discovery fails and the DGDR enters phase Failed before a profiling Job is created; set totalGpus explicitly to use that override.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -4292,7 +4292,7 @@ All other providers, versions, targets, and fields are rejected.
 
 
 **Kind:** `type`
-**Appears in:** [ComponentRoleSpec](#v1beta1-componentrolespec), [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
+**Appears in:** [ComponentRoleSpec](#v1beta1-componentrolespec), [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 <ParamField path="apiVersion" type="string" required={true}>
 apiVersion is the Kubernetes API group and version of the provider schema. Grove requires `grove.io/v1alpha1`.
@@ -4316,7 +4316,7 @@ Restart specifies the restart policy for a graph deployment.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
+**Appears in:** [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 <ParamField path="id" type="string" required={true}>
 id is an arbitrary string that triggers a restart when changed. Any modification to this value initiates a restart of the graph deployment according to the configured strategy.
@@ -4525,7 +4525,7 @@ SpecTopologyConstraint defines deployment-level topology placement requirements.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
+**Appears in:** [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 <ParamField path="clusterTopologyName" type="string">
 clusterTopologyName is the name of the ClusterTopology resource that defines the topology hierarchy for this deployment.
@@ -4611,22 +4611,22 @@ Package v1beta2 contains API Schema definitions for the nvidia.com v1beta2 API g
 <Card title="DynamoGraphDeploymentRun" href="#dynamographdeploymentrun" />
 </CardGroup>
 
-<Accordion id="aisimulaterunstatus" title="AISimulateRunStatus">
-AISimulateRunStatus reports the exact public recommendation input used for this execution.
+<Accordion id="aisimrunstatus" title="AISimRunStatus">
+AISimRunStatus reports the exact public recommendation input used for this execution.
 
 
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)
 
 <ParamField path="input" type="RawExtension">
-Input is the fully lowered AISimulate input after typed fields, derived defaults and spec.aisimulate.inputOverrides have been merged. Field names and nesting use the upstream AISimulate JSON contract.
+Input is the fully lowered AISimulate input after typed fields, derived defaults and spec.aisim.inputOverrides have been merged. Field names and nesting use the upstream AISimulate JSON contract.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** Type: object  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
-<Accordion id="aisimulatespec" title="AISimulateSpec">
-AISimulateSpec supplies public recommendation input to the AISimulate version in the operator's configured
+<Accordion id="aisimspec" title="AISimSpec">
+AISimSpec supplies public recommendation input to the AISimulate version in the operator's configured
 planner image.
 
 
@@ -4634,7 +4634,7 @@ planner image.
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
 <ParamField path="inputOverrides" type="RawExtension">
-InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from the typed fields. It uses the upstream AISimulate JSON contract, including snake_case names. Values here take precedence, and null deletes a lowered field. The dgdr_run member must remain an object, and its operator-owned transport, identity, and runtime fields name, max_candidates, snapshot_dir, runtime_image, runtime_version_override, derive_runtime_images, num_gpus_per_node, and namespace are operator-owned. Request admission rejects them, and the Run controller enforces its values while lowering the immutable snapshot. The operator runs the AISimulate version from its configured planner image; Requests and Runs cannot select a different image or version.
+InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from the typed fields. It uses the upstream AISimulate JSON contract, including snake_case names. Values here take precedence, and null deletes a lowered field. The dgdr_run member must remain an object, and its operator-owned transport, identity, and runtime fields name, max_candidates, snapshot_dir, runtime_image, runtime_version_override, derive_runtime_images, num_gpus_per_node, and namespace are operator-owned. Request and Run admission rejects them, and the Run controller enforces its values while lowering the immutable snapshot. A typed spec.workload.trace is an underlay like the other typed fields: it supplies the default traffic.source (type trace, format dynamo and the mounted trace file in paths) and the recorded-arrival traffic.load. Overrides can replace those values, including traffic.source.type, format, and paths, and null deletes the named field or parent object; the Run controller does not restore it. The typed PersistentVolumeClaim source alone decides the Run Job's trace mount and its claim dependency, so overriding a native path adds no volume mount. The operator runs the AISimulate version from its configured planner image; Requests and Runs cannot select a different image or version. Request and Run creation validate the merged input against the bundled AISimulate input schema. Request spec changes require the same validation; Run specs are immutable. Unchanged specs remain metadata-updatable after a bundled schema change.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** Type: object  Optional: \&#123;\&#125;
 </ParamField>
@@ -4663,13 +4663,15 @@ BranchProgress reports progress for one independently optimized AISimulate branc
 **Kind:** `type`
 **Appears in:** [DGDRRunProgress](#dgdrrunprogress)
 
-<ParamField path="name" type="string">
+<ParamField path="name" type="string" required={true}>
 Name is the executor-defined stable branch identifier.
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="rounds" type="RoundProgress">
+<ParamField path="rounds" type="RoundProgress" required={true}>
 Rounds reports optimizer progress for this branch.
 See [RoundProgress](#roundprogress).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4682,10 +4684,12 @@ CandidateProgress reports bounded Kubernetes publication, not all internal trial
 
 <ParamField path="paretoFront" type="integer">
 ParetoFront is the number of feasible points on the current Pareto front.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="published" type="integer">
 Published is the number of Candidate resources currently referenced by this run.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4749,85 +4753,18 @@ DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="spec" type="DynamoGraphDeploymentCandidateSpec">
-See [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec).
+<ParamField path="spec" type="RawExtension" required={true}>
+Spec is exactly the unpruned DGD spec, before dry-run defaulting or webhook mutation. It is opaque so invalid field types and unknown fields can be retained with Valid=False. A failed override leaves the generated spec unchanged. Immutability is enforced by admission because CEL cannot inspect fields in an opaque object.
+See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
+**Validation:** Type: object  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="status" type="DynamoGraphDeploymentCandidateStatus">
 See [DynamoGraphDeploymentCandidateStatus](#dynamographdeploymentcandidatestatus).
-</ParamField>
-</Accordion>
-
-<Accordion id="dynamographdeploymentcandidatespec" title="DynamoGraphDeploymentCandidateSpec">
-DynamoGraphDeploymentCandidateSpec is an immutable evaluated point: the
-inline DGD spec plus its resolved evaluation parameters.
-
-
-**Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentCandidate](#dynamographdeploymentcandidate)
-
-<ParamField path="providerOverride" type="ProviderOverride">
-providerOverride configures the root resource generated by the selected graph-level workload provider. For Grove it uses apiVersion `grove.io/v1alpha1`, target `PodCliqueSet`, and may set only `spec.template.topologyConstraint`. It cannot select or change the provider.
-See [ProviderOverride](#provideroverride).
 **Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="annotations" type="object (keys:string, values:string)">
-annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates). Component-level (`podTemplate`) values take precedence on conflict.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="labels" type="object (keys:string, values:string)">
-labels to propagate to all child resources. Same precedence rules as `annotations`.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="priorityClassName" type="string">
-priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets. Requires the Grove pathway.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="components" type="DynamoComponentDeploymentSharedSpec array">
-components are the components deployed as part of this graph. Each entry carries its own stable logical `name`, and names must be unique within the list. Component types are generally repeatable, except `type: epp` which may appear at most once.
-See [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec).
-**Validation:** MaxItems: 25  Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="env" type="EnvVar array">
-env is prepended to every component's environment. Component-specific env entries with the same name take precedence and may reference values from this list.
-See [EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="backendFramework" type="string">
-backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm").
-**Validation:** Enum: [sglang vllm trtllm]
-</ParamField>
-
-<ParamField path="restart" type="Restart">
-restart specifies the restart policy for the graph deployment.
-See [Restart](#restart).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="topologyConstraint" type="SpecTopologyConstraint">
-topologyConstraint is the deployment-level topology constraint. When set, `spec.topologyConstraint.clusterTopologyName` names the ClusterTopology CR to use. `spec.topologyConstraint.packDomain` is optional at this level and can be omitted when only components carry constraints. Components without their own `topologyConstraint` inherit from this value.
-See [SpecTopologyConstraint](#spectopologyconstraint).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="experimental" type="DynamoGraphDeploymentExperimentalSpec">
-experimental groups graph-level preview features whose API shape and behavior may change in breaking ways between v1beta1 releases.
-See [DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="parameters" type="RawExtension">
-Parameters are the resolved evaluation parameters for this point.
-See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
-**Validation:** Type: object
 </ParamField>
 </Accordion>
 
@@ -4838,10 +4775,22 @@ DynamoGraphDeploymentCandidateStatus describes evaluation, never deployment heal
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentCandidate](#dynamographdeploymentcandidate)
 
-<ParamField path="metrics" type="RawExtension">
-Metrics are the resolved evaluation metrics for this point.
+<ParamField path="parameters" type="RawExtension">
+Parameters are the original resolved evaluation inputs. Overrides do not change them.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
 **Validation:** Type: object  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="metrics" type="RawExtension">
+Metrics are the resolved evaluation metrics for this point. They describe the original evaluated configuration, not a deployment changed by overrides.
+See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
+**Validation:** Type: object  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="conditions" type="Condition array">
+Conditions records the final Valid result for the Candidate's DGD: - Valid=True, ValidationSucceeded: atomic override application and strict server-side   dry-run succeeded; the API object is structurally valid and passed admission at checking time. - Valid=False, OverrideTargetNotFound: an override names a component absent from the generated DGD. - Valid=False, OverrideFailed: the override could not be applied in full, for example because   it changes reserved metadata or supplies an invalid merge directive. The original DGD is retained. - Valid=False, ValidationFailed: the resulting DGD was rejected by strict dry-run admission. Check for Valid=True before using spec as a DGD. An absent condition is not success. Valid reports API validity, not deployment readiness or successful image pulls and GPU scheduling. Invalid Candidates remain visible and count toward recommendation.maxCandidates.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4862,14 +4811,17 @@ DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment sear
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="spec" type="DynamoGraphDeploymentRequestSpec">
+<ParamField path="spec" type="DynamoGraphDeploymentRequestSpec" required={true}>
 See [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="status" type="DynamoGraphDeploymentRequestStatus">
 See [DynamoGraphDeploymentRequestStatus](#v1beta2-dynamographdeploymentrequeststatus).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4899,7 +4851,7 @@ See [HardwareSpec](#v1beta2-hardwarespec).
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults. spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names. The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction search. Lowering independently defaults optimizer.max_trials to 320.
+Workload defines the traffic model used for every candidate evaluation: synthetic static traffic or a recorded trace. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults, and a trace workload receives no static default. spec.aisim.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names, including the fields a trace lowers. The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction search. Lowering independently defaults optimizer.max_trials to 320.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4910,15 +4862,21 @@ See [ObjectiveSpec](#objectivespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="aisimulate" type="AISimulateSpec">
-AISimulate supplies public recommendation input to the operator's AISimulate execution bundle.
-See [AISimulateSpec](#aisimulatespec).
+<ParamField path="aisim" type="AISimSpec">
+AISim supplies public recommendation input to the operator's AISimulate execution bundle.
+See [AISimSpec](#aisimspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="recommendation" type="RecommendationSpec">
 Recommendation controls bounded projection into DGDC resources.
 See [RecommendationSpec](#recommendationspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="overrides" type="OverridesSpec">
+Overrides customizes the generated DGD without changing AISimulate execution.
+See [OverridesSpec](#v1beta2-overridesspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -4981,7 +4939,7 @@ See [HardwareSpec](#v1beta2-hardwarespec).
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults. spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names. The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction search. Lowering independently defaults optimizer.max_trials to 320.
+Workload defines the traffic model used for every candidate evaluation: synthetic static traffic or a recorded trace. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults, and a trace workload receives no static default. spec.aisim.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names, including the fields a trace lowers. The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction search. Lowering independently defaults optimizer.max_trials to 320.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4992,15 +4950,21 @@ See [ObjectiveSpec](#objectivespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="aisimulate" type="AISimulateSpec">
-AISimulate supplies public recommendation input to the operator's AISimulate execution bundle.
-See [AISimulateSpec](#aisimulatespec).
+<ParamField path="aisim" type="AISimSpec">
+AISim supplies public recommendation input to the operator's AISimulate execution bundle.
+See [AISimSpec](#aisimspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="recommendation" type="RecommendationSpec">
 Recommendation controls bounded projection into DGDC resources.
 See [RecommendationSpec](#recommendationspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="overrides" type="OverridesSpec">
+Overrides customizes the generated DGD without changing AISimulate execution.
+See [OverridesSpec](#v1beta2-overridesspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -5065,14 +5029,17 @@ DynamoGraphDeploymentRun is one immutable accepted DGDR request and its executio
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="spec" type="DynamoGraphDeploymentRunSpec">
+<ParamField path="spec" type="DynamoGraphDeploymentRunSpec" required={true}>
 See [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec).
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="status" type="DynamoGraphDeploymentRunStatus">
 See [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5082,7 +5049,7 @@ Request admission resolves its structural defaults before the Request controller
 Request admission defaulting does not apply to Runs.
 
 The Run reconciler lowers this immutable typed snapshot plus inputOverrides exactly once and
-records the resulting public recommendation input in status.aisimulate.input.
+records the resulting public recommendation input in status.aisim.input.
 
 
 **Kind:** `type`
@@ -5107,7 +5074,7 @@ See [HardwareSpec](#v1beta2-hardwarespec).
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults. spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names. The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction search. Lowering independently defaults optimizer.max_trials to 320.
+Workload defines the traffic model used for every candidate evaluation: synthetic static traffic or a recorded trace. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults, and a trace workload receives no static default. spec.aisim.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names, including the fields a trace lowers. The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction search. Lowering independently defaults optimizer.max_trials to 320.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5118,15 +5085,21 @@ See [ObjectiveSpec](#objectivespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="aisimulate" type="AISimulateSpec">
-AISimulate supplies public recommendation input to the operator's AISimulate execution bundle.
-See [AISimulateSpec](#aisimulatespec).
+<ParamField path="aisim" type="AISimSpec">
+AISim supplies public recommendation input to the operator's AISimulate execution bundle.
+See [AISimSpec](#aisimspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="recommendation" type="RecommendationSpec">
 Recommendation controls bounded projection into DGDC resources.
 See [RecommendationSpec](#recommendationspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="overrides" type="OverridesSpec">
+Overrides customizes the generated DGD without changing AISimulate execution.
+See [OverridesSpec](#v1beta2-overridesspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -5156,9 +5129,9 @@ See [DGDRRunProgress](#dgdrrunprogress).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="aisimulate" type="AISimulateRunStatus">
-AISimulate reports the effective input executed by AISimulate.
-See [AISimulateRunStatus](#aisimulaterunstatus).
+<ParamField path="aisim" type="AISimRunStatus">
+AISim reports the effective input executed by AISimulate.
+See [AISimRunStatus](#aisimrunstatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -5187,7 +5160,7 @@ See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#
 </ParamField>
 
 <ParamField path="conditions" type="Condition array">
-Conditions contains standard Kubernetes conditions merged by type.
+Conditions contains standard Kubernetes conditions merged by type. Completed is owned by the Run controller. Published is owned by the publisher: False reports a retryable Candidate preparation error, including a forbidden DGD dry-run; True means the current Candidate projection is published, including any invalid Candidates. A preparation error leaves the Run open and is retried until configuration is repaired or the Run is stopped. Published does not determine the Run's terminal outcome.
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5202,30 +5175,37 @@ EvaluationProgress reports unique candidate outcomes without creating one resour
 
 <ParamField path="scheduled" type="integer">
 Scheduled is the number of unique evaluations accepted for execution.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="running" type="integer">
 Running is the number of evaluations currently executing.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="feasible" type="integer">
 Feasible is the number of completed evaluations that satisfy all constraints.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="infeasible" type="integer">
 Infeasible is the number of completed evaluations that violate at least one constraint.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="failed" type="integer">
 Failed is the number of evaluations that ended in an execution error.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="unsupported" type="integer">
 Unsupported is the number of configurations rejected as unsupported before evaluation.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="cacheHits" type="integer">
 CacheHits is the number of evaluations satisfied from a prior result.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5274,14 +5254,14 @@ KVCapacityFractionRange defines the searched fraction of a candidate's KV capaci
 **Kind:** `type`
 **Appears in:** [KVCapacityFractionSpec](#kvcapacityfractionspec)
 
-<ParamField path="min" type="float">
+<ParamField path="min" type="float" required={true}>
 Min is the lower end of the searched fraction range.
-**Validation:** ExclusiveMinimum: true  Maximum: 1  Minimum: 0
+**Validation:** ExclusiveMinimum: true  Maximum: 1  Minimum: 0  Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="max" type="float">
+<ParamField path="max" type="float" required={true}>
 Max is the upper end of the searched fraction range.
-**Validation:** ExclusiveMinimum: true  Maximum: 1  Minimum: 0
+**Validation:** ExclusiveMinimum: true  Maximum: 1  Minimum: 0  Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5311,9 +5291,9 @@ ModelSpec identifies the model whose deployment configurations are evaluated.
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
-<ParamField path="name" type="string">
+<ParamField path="name" type="string" required={true}>
 Name identifies the model in the syntax accepted by the selected backend.
-**Validation:** MinLength: 1
+**Validation:** MinLength: 1  Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5344,7 +5324,7 @@ See [HardwareSpec](#v1beta2-hardwarespec).
 </ParamField>
 
 <ParamField path="workload" type="WorkloadSpec">
-Workload defines the synthetic traffic model used for every candidate evaluation. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults. spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names. The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction search. Lowering independently defaults optimizer.max_trials to 320.
+Workload defines the traffic model used for every candidate evaluation: synthetic static traffic or a recorded trace. When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10; an explicit empty workload receives the same shape. workload.static: \&#123;\&#125; opts out of all traffic defaults. Any other static object is completed with its missing defaults, and a trace workload receives no static default. spec.aisim.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over every lowered traffic field it names, including the fields a trace lowers. The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction search. Lowering independently defaults optimizer.max_trials to 320.
 See [WorkloadSpec](#v1beta2-workloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -5355,15 +5335,21 @@ See [ObjectiveSpec](#objectivespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="aisimulate" type="AISimulateSpec">
-AISimulate supplies public recommendation input to the operator's AISimulate execution bundle.
-See [AISimulateSpec](#aisimulatespec).
+<ParamField path="aisim" type="AISimSpec">
+AISim supplies public recommendation input to the operator's AISimulate execution bundle.
+See [AISimSpec](#aisimspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="recommendation" type="RecommendationSpec">
 Recommendation controls bounded projection into DGDC resources.
 See [RecommendationSpec](#recommendationspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="overrides" type="OverridesSpec">
+Overrides customizes the generated DGD without changing AISimulate execution.
+See [OverridesSpec](#v1beta2-overridesspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -5444,9 +5430,23 @@ See [ObjectiveMetric](#objectivemetric).
 </ParamField>
 
 <ParamField path="sla" type="ObjectiveSLASpec">
-SLA defines per-request latency bounds used to calculate goodput. Admission defaults an omitted SLA to TTFT 2000 ms and ITL 30 ms. An explicit empty object opts out of those defaults. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names.
+SLA defines per-request latency bounds used to calculate goodput. Admission defaults an omitted SLA to TTFT 2000 ms and ITL 30 ms. An explicit empty object opts out of those defaults. spec.aisim.inputOverrides.evaluation.sla overrides the bounds it names.
 See [ObjectiveSLASpec](#objectiveslaspec).
 **Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta2-overridesspec" title="v1beta2 OverridesSpec">
+OverridesSpec patches the generated deployment independently for every selected Candidate.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
+
+<ParamField path="dgd" type="RawExtension">
+DGD is one partial nvidia.com/v1beta1 DynamoGraphDeployment applied by the publisher using the DGD schema's Server-Side Apply merge rules. Other API versions are not supported. Components must already exist; named containers may be added. Atomic lists, including container command and args, replace the generated lists. The supported customization $patch: \&#123;args: append\&#125; on a container appends to its explicit generated args list; both the container and its args must already exist. No other $patch operation is supported. Application is atomic: a merge failure retains the unchanged generated deployment with Valid=False. A successful merge is checked by strict server-side dry-run; the dry-run response and its defaults are discarded. The Candidate retains the unpruned payload from before the check. Invalid Candidates count toward maxCandidates. Overrides may change any deployment configuration. Evaluation metrics are not recomputed and continue to describe the original AISimulate configuration. DGD labels and annotations become Candidate labels and annotations. A failed merge retains only the original generated metadata; a successful merge followed by failed dry-run validation retains the merged metadata on the invalid Candidate. Other metadata and publisher-owned keys cannot be overridden; such attempts fail atomically. The complete Candidate metadata must satisfy Kubernetes limits, including generated and reserved annotations. An override that exceeds those limits fails atomically.
+See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
+**Validation:** EmbeddedResource: \&#123;\&#125;  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5470,8 +5470,9 @@ ResourceReference identifies a namespaced resource by name and UID.
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)
 
-<ParamField path="name" type="string">
+<ParamField path="name" type="string" required={true}>
 Name is the resource name.
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="uid" type="UID">
@@ -5488,12 +5489,14 @@ RoundProgress reports completed and planned optimizer rounds.
 **Kind:** `type`
 **Appears in:** [BranchProgress](#branchprogress)
 
-<ParamField path="completed" type="integer">
+<ParamField path="completed" type="integer" required={true}>
 Completed is the number of finished rounds.
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="total" type="integer">
+<ParamField path="total" type="integer" required={true}>
 Total is the number of planned rounds.
+**Validation:** Required: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -5546,16 +5549,110 @@ See [StaticLoadSpec](#staticloadspec).
 </ParamField>
 </Accordion>
 
+<Accordion id="traceformat" title="TraceFormat">
+TraceFormat identifies the decoder of a recorded request trace. Lowering translates it to
+AISimulate's native traffic.source.format.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Dynamo]
+**Appears in:** [TraceWorkloadSpec](#traceworkloadspec)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Dynamo</Badge> TraceFormatDynamo is the Dynamo request trace (dynamo.request.trace.v1) that the frontend records, as JSON Lines or gzip-compressed JSON Lines. It lowers to AISimulate's dynamo format.
+</Accordion>
+
+<Accordion id="tracepvcsource" title="TracePVCSource">
+TracePVCSource names one trace file on a PersistentVolumeClaim in the Request namespace.
+
+
+**Kind:** `type`
+**Appears in:** [TraceSourceSpec](#tracesourcespec)
+
+<ParamField path="claimName" type="string" required={true}>
+ClaimName is the PersistentVolumeClaim, in the Request namespace, that holds the trace. The Run Job mounts only the trace file from it, read-only, and only into the AISimulate container. Each Run protects the claim with the finalizer `nvidia.com/dgdr-run-<run-uid>` until the Run completes or, for a Run deleted before it completes, until no Job of the Run is left. Garbage collection deletes the Job of a deleted Run before the Job's pod, so the finalizer of a deleted Run can be released while that pod still stops; Kubernetes PersistentVolumeClaim protection keeps the claim until no pod uses it. Deleting the claim cancels the Runs that read it.
+**Validation:** MaxLength: 253  MinLength: 1  Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`  Required: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="subPath" type="string" required={true}>
+SubPath names one trace file relative to the root of the claim; the Run Job mounts it as the subPath of the claim volume. It is neither a directory nor a glob. It must not start or end with '/' and must not contain empty, '.' or '..' segments or a NUL character, which no file name can hold. The file must be complete before the Request is created and must never be rewritten: every Run of the Request reads it when its Job starts.
+**Validation:** MaxLength: 1024  MinLength: 1  Required: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="tracereplayspec" title="TraceReplaySpec">
+TraceReplaySpec configures how AISimulate replays a decoded trace.
+
+
+**Kind:** `type`
+**Appears in:** [TraceWorkloadSpec](#traceworkloadspec)
+
+<ParamField path="arrivalSpeedupRatio" type="float">
+ArrivalSpeedupRatio multiplies the recorded request-arrival rate. 1.0 preserves it. When omitted, the recorded arrival times are replayed unchanged.
+**Validation:** ExclusiveMinimum: true  Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="tracesourcespec" title="TraceSourceSpec">
+TraceSourceSpec identifies exactly one trace artifact. A PersistentVolumeClaim is the only
+source in this release.
+
+
+**Kind:** `type`
+**Appears in:** [TraceWorkloadSpec](#traceworkloadspec)
+
+<ParamField path="persistentVolumeClaim" type="TracePVCSource">
+PersistentVolumeClaim reads the trace from a PersistentVolumeClaim in the Request namespace.
+See [TracePVCSource](#tracepvcsource).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="traceworkloadspec" title="TraceWorkloadSpec">
+TraceWorkloadSpec replays a recorded request trace open loop at its recorded arrival times.
+
+
+**Kind:** `type`
+**Appears in:** [WorkloadSpec](#v1beta2-workloadspec)
+
+<ParamField path="format" type="TraceFormat" default="Dynamo">
+Format identifies the trace decoder. Defaults to Dynamo.
+See [TraceFormat](#traceformat).
+**Validation:** Enum: [Dynamo]  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="source" type="TraceSourceSpec" required={true}>
+Source identifies the trace artifact.
+See [TraceSourceSpec](#tracesourcespec).
+**Validation:** Required: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="replay" type="TraceReplaySpec">
+Replay configures how the decoded trace is replayed.
+See [TraceReplaySpec](#tracereplayspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
 <Accordion id="v1beta2-workloadspec" title="v1beta2 WorkloadSpec">
-WorkloadSpec defines the synthetic traffic model used for every candidate evaluation.
+WorkloadSpec defines the traffic model used for every candidate evaluation. static and
+trace are mutually exclusive.
 
 
 **Kind:** `type`
 **Appears in:** [DynamoGraphDeploymentRequestNativeSpec](#v1beta2-dynamographdeploymentrequestnativespec), [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec), [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec), [NativeSearchInput](#nativesearchinput)
 
 <ParamField path="static" type="StaticWorkloadSpec">
-Static defines AISimulate synthetic traffic. When omitted, admission supplies the complete static default. An explicit empty object opts out; any nonempty object is completed with omitted inputTokens, outputTokens and load defaults.
+Static defines AISimulate synthetic traffic. When omitted without a trace, admission supplies the complete static default. An explicit empty object opts out; any nonempty object is completed with omitted inputTokens, outputTokens and load defaults.
 See [StaticWorkloadSpec](#staticworkloadspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="trace" type="TraceWorkloadSpec">
+Trace replays a recorded request trace from a PersistentVolumeClaim in the Request namespace. Admission supplies no static default when it is set. The Run Job mounts only the trace file, read-only through a subPath of the claim, at /var/run/aisimulate/trace/trace.jsonl, or trace.jsonl.gz when subPath ends in .gz. The trace lowers to the default traffic.source and traffic.load, which spec.aisim.inputOverrides can replace or delete.
+See [TraceWorkloadSpec](#traceworkloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>

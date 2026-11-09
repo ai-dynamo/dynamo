@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+job_name: swe-one
+jobs_dir: /work/jobs
+n_attempts: 1
+n_concurrent_trials: 1
+agents:
+  - import_path: dynamo_pi:DynamoPi
+    # Keep "dynamo/" and match the served model ID from /v1/models.
+    model_name: dynamo/RadixArk/GLM-5.3-Flash-NVFP4
+    kwargs:
+      version: "0.72.1"
+      thinking: "off"
+    env:
+      # SGLang aggregated GB200 recipe in namespace inference. Update for your deployment.
+      DYNAMO_BASE_URL: http://glm53-flash-sglang-agg-gb200-frontend.inference.svc.cluster.local:8000/v1
+      # Blank means "use the context window the endpoint advertises".
+      DYNAMO_CONTEXT_WINDOW: ""
+      DYNAMO_MAX_TOKENS: "8192"
+      # Enable only for a scheduler that consumes session-final notifications.
+      DYN_AGENT_SESSION_FINAL: "0"
+verifier:
+  # The prepared image carries the build wheels and the grader's packages, so
+  # the unchanged test script runs without registry access.
+  env:
+    UV_OFFLINE: "1"
+    PIP_NO_INDEX: "1"
+    PIP_FIND_LINKS: /opt/wheels
+environment:
+  import_path: substrate_environment:SubstrateEnvironment
+  delete: true
+  kwargs:
+    # Control plane, through kubectl-ate with the runner's ServiceAccount token.
+    kube_context: in-cluster
+    ate_cli: /usr/local/bin/kubectl-ate
+    ate_endpoint: api.ate-system.svc:443
+    ate_token_file: /var/run/secrets/ateapi/token
+    # Guest daemon, through the Substrate router with the runner's pod certificate.
+    router_endpoint: atenet-router.ate-system.svc:443
+    credential_bundle: /run/substrate/credential-bundle.pem
+    trust_bundle: /run/substrate/trust-bundle.pem
+    egress_policy: /etc/harbor/egress.yaml
+    ready_timeout: 1200
+    template_map:
+      astropy__astropy-12907: swe-astropy-12907-pi
+tasks:
+  - path: /work/tasks/astropy__astropy-12907

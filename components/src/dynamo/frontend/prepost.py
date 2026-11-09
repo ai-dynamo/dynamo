@@ -14,13 +14,19 @@ from dataclasses import dataclass
 from functools import lru_cache, partial
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
 )
 from vllm.reasoning import ReasoningParser
-from vllm.renderers import ChatParams, merge_kwargs
+from vllm.renderers import ChatParams
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.renderers.hf import resolve_chat_template
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
@@ -29,12 +35,6 @@ from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
 from dynamo.common.utils.guided_json import admits_only_empty_object
-from dynamo.frontend.vllm_protocol import (
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
-    make_tool_call_id,
-)
 from dynamo.llm.exceptions import InvalidArgument
 
 from .responses_history import responses_history_template, responses_tools_request
@@ -583,7 +583,6 @@ def _prepare_request(
     model_config: ModelConfig | None = None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
-    default_chat_template_kwargs: dict[str, Any] | None = None,
     default_thinking_mode: str | None = None,
     validated_request: ChatCompletionRequest | None = None,
     guidance_snapshots: dict[str, Any] | None = None,
@@ -657,14 +656,9 @@ def _prepare_request(
     raw_template_args = (
         request.get("chat_template_args") if isinstance(request, dict) else None
     )
-    # Reuse vLLM's merge so unset request values (None/"auto") keep the server
-    # default; copy the result since the default dict is shared across requests
-    # and we mutate reasoning_effort below.
+    # A copy, because reasoning_effort is written into it below.
     chat_template_kwargs = dict(
-        merge_kwargs(
-            default_chat_template_kwargs,
-            request_for_sampling.chat_template_kwargs or raw_template_args or {},
-        )
+        request_for_sampling.chat_template_kwargs or raw_template_args or {}
     )
     # reasoning_effort is a request-level thinking control. Put an explicit
     # value into the kwargs before applying the deployment default so the two
@@ -782,7 +776,6 @@ async def preprocess_chat_request(
     model_config: ModelConfig | None = None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
-    default_chat_template_kwargs: dict[str, Any] | None = None,
     default_thinking_mode: str | None = None,
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
@@ -817,7 +810,6 @@ async def preprocess_chat_request(
         model_config=model_config,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
         enable_auto_tool_choice=enable_auto_tool_choice,
-        default_chat_template_kwargs=default_chat_template_kwargs,
         default_thinking_mode=default_thinking_mode,
         validated_request=validated_request,
         guidance_snapshots=guidance_snapshots,
@@ -1089,6 +1081,7 @@ class StreamingPostProcessor:
         # this correctly, so we accumulate text here and fall back to the
         # non-streaming extract_tool_calls() once the buffer is complete.
         self._tool_text_buffer: str | None = None
+        self._pending_tool_opener = ""
         self._dynamo_json_fallback_chunks: dict[int, list[str]] = {}
 
     @property
@@ -1521,6 +1514,20 @@ class StreamingPostProcessor:
                 return None
             return self._build_choice(output, delta)
 
+        if self._pending_tool_opener:
+            delta_text = self._pending_tool_opener + delta_text
+            self._pending_tool_opener = ""
+            markers = self._tool_start_markers()
+            if any(delta_text.startswith(marker) for marker in markers):
+                self._tool_text_buffer = ""
+            elif any(marker.startswith(delta_text) for marker in markers):
+                if not output.finish_reason:
+                    self._pending_tool_opener = delta_text
+                    return None
+                return self._build_choice(
+                    output, {"role": "assistant", "content": delta_text}
+                )
+
         current_text = self.previous_text + delta_text
         current_token_ids = self.previous_token_ids + delta_token_ids
 
@@ -1636,7 +1643,21 @@ class StreamingPostProcessor:
                             None,
                         )
                 else:
-                    # Plain content (or no content) after reasoning end.
+                    if post_content and not output.finish_reason:
+                        # Hold only the trailing text that can complete a tool opener.
+                        # The preceding text can still be streamed immediately.
+                        prefix_length = max(
+                            (
+                                size
+                                for marker in tool_start_markers
+                                for size in range(1, len(marker))
+                                if post_content.endswith(marker[:size])
+                            ),
+                            default=0,
+                        )
+                        if prefix_length:
+                            self._pending_tool_opener = post_content[-prefix_length:]
+                            post_content = post_content[:-prefix_length]
                     delta_message = self._compose_delta_message(
                         reasoning=saved_reasoning,
                         content=post_content if post_content else None,

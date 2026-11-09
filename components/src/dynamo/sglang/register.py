@@ -134,7 +134,7 @@ def _supports_systemone_serial(
     output_type: ModelType,
     worker_type: WorkerType,
 ) -> bool:
-    """Gate the serialized SGLang 0.5.19/0.5.22 execution profile.
+    """Gate the serialized SGLang 0.5.19/0.5.22/0.5.23 execution profile.
 
     CUDA is the qualified deployment; device support is not validated here,
     and XPU remains unqualified.
@@ -161,10 +161,10 @@ def _supports_systemone_serial(
     if not eligible:
         return False
     installed = version("sglang")
-    if re.fullmatch(r"0\.5\.(?:19|22)(?:\+cu[0-9]+)?", installed) is None:
+    if re.fullmatch(r"0\.5\.(?:19|22|23)(?:\+cu[0-9]+)?", installed) is None:
         logging.warning(
             "Decision scoring is disabled: the serial worker uses SGLang %s; "
-            "the qualified CUDA profiles require SGLang 0.5.19 or 0.5.22",
+            "the qualified CUDA profiles require SGLang 0.5.19, 0.5.22, or 0.5.23",
             installed,
         )
         return False
@@ -473,12 +473,33 @@ def _mooncake_tenant_id(extra_config: dict[str, Any]) -> str:
 
 
 def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, Any]]:
-    if getattr(server_args, "hicache_storage_backend", None) != "mooncake":
+    # SGLang's direct external linker writes GPU KV straight to Mooncake with its own
+    # key layout and names keys after model_path rather than served_model_name.
+    linker = (
+        bool(getattr(server_args, "enable_unified_cache_external_linker", False))
+        and getattr(server_args, "unified_cache_external_linker_backend", None)
+        == "mooncake"
+    )
+    if (
+        getattr(server_args, "hicache_storage_backend", None) != "mooncake"
+        and not linker
+    ):
         return None
 
-    extra_config = _parse_hicache_storage_extra_config(
-        getattr(server_args, "hicache_storage_backend_extra_config", None)
+    # Since sgl-project/sglang#46388 the linker reads its storage options from
+    # --unified-cache-external-linker-config (a JSON object) and falls back to the
+    # deprecated --hicache-storage-backend-extra-config only when that is unset.
+    linker_config = (
+        getattr(server_args, "unified_cache_external_linker_config", None)
+        if linker
+        else None
     )
+    if isinstance(linker_config, dict):
+        extra_config = dict(linker_config)
+    else:
+        extra_config = _parse_hicache_storage_extra_config(
+            getattr(server_args, "hicache_storage_backend_extra_config", None)
+        )
 
     tp_size = int(getattr(server_args, "tp_size", 1) or 1)
     pp_size = int(getattr(server_args, "pp_size", 1) or 1)
@@ -529,8 +550,10 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         "should_split_heads": should_split_heads,
         "extra_backend_tag": extra_backend_tag,
         "key_prefix": _mooncake_key_prefix(
-            extra_config, getattr(server_args, "served_model_name", None)
+            extra_config,
+            getattr(server_args, "model_path" if linker else "served_model_name", None),
         ),
+        "key_layout": "linker" if linker else "hicache",
         "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT") or None,
     }
 
@@ -629,8 +652,14 @@ async def get_runtime_config(
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
-    # Multimodal and diffusion handlers do not forward the per-request gate.
-    if llm_handler and not getattr(server_args, "dllm_algorithm", None):
+    # Frontend-decoded media uses the regular LLM handlers, which forward the
+    # reasoning gate. Dedicated multimodal pipelines register through an encoder;
+    # diffusion handlers do not forward the gate.
+    if (
+        not dynamo_args.multimodal_worker
+        and not dynamo_args.multimodal_encode_worker
+        and not getattr(server_args, "dllm_algorithm", None)
+    ):
         publish_sglang_structural_tag_reasoning_policy(
             runtime_config, engine, server_args
         )
