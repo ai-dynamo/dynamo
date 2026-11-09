@@ -498,7 +498,7 @@ def _eagle_enabled_for(
     if not is_eagle or model_config is None:
         return is_eagle
     try:
-        uses_ssm_state = sglang_uses_ssm_state(model_config)
+        return not sglang_uses_ssm_state(model_config)
     except Exception as e:
         # Same graceful degradation as above. Keep the is_eagle()-only answer this function gave
         # before it looked at the model; that is wrong only for hybrid linear-attention models.
@@ -509,8 +509,6 @@ def _eagle_enabled_for(
             speculative_algorithm,
         )
         return True
-    # None: this sglang predates uses_ssm_state; keep the is_eagle()-only answer.
-    return uses_ssm_state is not True
 
 
 def _get_token_budget(engine: sgl.Engine, server_args: ServerArgs) -> TokenBudget:

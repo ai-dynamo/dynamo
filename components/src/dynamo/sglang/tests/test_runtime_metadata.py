@@ -178,7 +178,7 @@ def test_eagle_enabled_for_speculative_algorithm(speculative_algorithm, expected
     ],
 )
 def test_eagle_enabled_for_hybrid_linear_attention_model(
-    speculative_algorithm, hybrid, expected
+    register, speculative_algorithm, hybrid, expected
 ):
     # sglang's radix tree bigram-keys KV events only when is_eagle() holds AND it has no Mamba
     # component, which it gets exactly when uses_ssm_state(model_config) holds. A hybrid model
@@ -188,8 +188,6 @@ def test_eagle_enabled_for_hybrid_linear_attention_model(
     from sglang.srt.configs import Qwen3NextConfig
     from transformers import LlamaConfig
 
-    from dynamo.sglang.register import _eagle_enabled_for
-
     # The ModelConfig fields sglang's uses_ssm_state() reads.
     model_config = SimpleNamespace(
         hf_config=Qwen3NextConfig() if hybrid else LlamaConfig(),
@@ -197,19 +195,13 @@ def test_eagle_enabled_for_hybrid_linear_attention_model(
         is_draft_model=False,
     )
 
-    assert _eagle_enabled_for(speculative_algorithm, model_config) is expected
+    assert register._eagle_enabled_for(speculative_algorithm, model_config) is expected
 
 
-@pytest.mark.parametrize("ssm_check", ["unavailable", "raises"])
-def test_eagle_enabled_for_keeps_is_eagle_when_ssm_check_fails(monkeypatch, ssm_check):
-    # An sglang without uses_ssm_state (None), or a check that raises, keeps the
-    # is_eagle()-only answer instead of crashing registration.
-    from dynamo.sglang import register
-
+def test_eagle_enabled_for_keeps_is_eagle_when_ssm_check_raises(register, monkeypatch):
+    # A check that raises keeps the is_eagle()-only answer instead of crashing registration.
     def fake_uses_ssm_state(_model_config):
-        if ssm_check == "raises":
-            raise AttributeError("hf_config")
-        return None
+        raise AttributeError("hf_config")
 
     monkeypatch.setattr(register, "sglang_uses_ssm_state", fake_uses_ssm_state)
 

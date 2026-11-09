@@ -166,18 +166,15 @@ def sglang_default_mla_attention_backend(server_args: Any) -> str | None:
     return backend if isinstance(backend, str) else None
 
 
-def sglang_uses_ssm_state(model_config: Any) -> bool | None:
-    """Return SGLang's ``uses_ssm_state(model_config)``, or None if it is unavailable.
+def sglang_uses_ssm_state(model_config: Any) -> bool:
+    """Return SGLang's ``uses_ssm_state(model_config)``.
 
     SGLang gives the radix tree a Mamba component exactly when this holds.
     Deferred: ``kv_cache_builder`` imports the KV pools and the radix cache, and
     this compatibility module is also collected on CPU-only CI hosts.
     """
-    try:
-        from sglang.srt.mem_cache.kv_cache_builder import uses_ssm_state
-    except ImportError:
-        # SGLang before v0.5.19 has no uses_ssm_state.
-        return None
+    from sglang.srt.mem_cache.kv_cache_builder import uses_ssm_state
+
     return bool(uses_ssm_state(model_config))
 
 
