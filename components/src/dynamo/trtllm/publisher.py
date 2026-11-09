@@ -58,6 +58,11 @@ _KV_EVENTS_TIMEOUT_SEC = 0.0
 _PUBLISH_MIN_SLEEP_SEC = 0.01
 _PUBLISH_MAX_SLEEP_SEC = 0.1
 _PUBLISH_BACKOFF_FACTOR = 2.0
+# TRT-LLM emits no IterationStats while it cannot schedule a batch (for example
+# a prefill worker under KV backpressure). FpmDirectPublisher fills any 1 s gap
+# (IDLE_HEARTBEAT_INTERVAL in lib/llm/src/fpm_publisher.rs) with an all-zero
+# idle heartbeat, so the last known queue is re-sent well inside that window.
+_FPM_QUEUED_REFRESH_SEC = 0.5
 # Keep a continuously ready TRT-LLM iterator from starving its batch handler.
 _POLLING_BATCH_MAX_ITEMS = 256
 _KV_EVENTS_MIN_SLEEP_SEC = 0.005
@@ -569,6 +574,13 @@ class Publisher:
         # the publisher is shut down and None'd. Prevents silent planner poison
         # when running against a TRT-LLM version that predates #13199.
         self._fpm_schema_checked: bool = False
+        # Per attention-DP rank: queued fields of the last FPM frame and its
+        # monotonic publish time. Only touched on the stats thread.
+        self._fpm_last_queued: dict[int, tuple[int, int, int, int]] = {}
+        self._fpm_last_publish_time: dict[int, float] = {}
+        # Set by the worker once the request handler exists. Returns whether
+        # any request is still outstanding; without it no queue is re-sent.
+        self.has_inflight_requests: Optional[Callable[[], bool]] = None
         self.kv_event_publishers: Optional[
             Dict[int, KvEventPublisher]
         ] = None  # One per attention_dp_rank
@@ -765,6 +777,7 @@ class Publisher:
         max_sleep: float,
         backoff_factor: float,
         batch_size_handler_fn=None,
+        poll_complete_fn=None,
     ):
         sleep_s = min_sleep
         while not self._stop_event.is_set():
@@ -803,6 +816,9 @@ class Publisher:
 
             if batch and batch_size_handler_fn is not None:
                 batch_size_handler_fn(len(batch))
+
+            if poll_complete_fn is not None:
+                poll_complete_fn()
 
             if not batch:
                 await asyncio.sleep(sleep_s)
@@ -966,6 +982,13 @@ class Publisher:
                         queued_sum_decode_kv_tokens=queued_sum_decode_kv_tokens,
                         wall_time_secs=wall_time_secs,
                     )
+                    self._fpm_last_queued[dp_rank] = (
+                        queued_num_prefill,
+                        queued_sum_prefill_tokens,
+                        queued_num_decode,
+                        queued_sum_decode_kv_tokens,
+                    )
+                    self._fpm_last_publish_time[dp_rank] = time.monotonic()
                 except Exception as e:
                     # Defensive (broad on purpose): the FPM publish path is
                     # cold compared to ActiveLoad/Prometheus and we'd rather
@@ -984,8 +1007,56 @@ class Publisher:
             _PUBLISH_MIN_SLEEP_SEC,
             _PUBLISH_MAX_SLEEP_SEC,
             _PUBLISH_BACKOFF_FACTOR,
+            poll_complete_fn=self._refresh_fpm_queued_heartbeats,
         )
         return True
+
+    def _refresh_fpm_queued_heartbeats(self) -> None:
+        """Re-send the last known queue for ranks whose engine is stalled.
+
+        Each frame has empty scheduled fields and ``wall_time_secs == 0`` like
+        the idle heartbeat it pre-empts, so the Planner's regression model
+        still skips it. Refresh stops once a stats row reports an empty queue
+        or no request is outstanding; the Rust idle heartbeat then resumes.
+        """
+        if self.fpm_publisher is None or self.has_inflight_requests is None:
+            return
+        if not self.has_inflight_requests():
+            # Requests cancelled while the engine was stalled leave no final
+            # stats row, so the remembered queue would otherwise go stale.
+            self._fpm_last_queued.clear()
+            return
+        now = time.monotonic()
+        for dp_rank, queued in self._fpm_last_queued.items():
+            if not any(queued):
+                continue
+            if now - self._fpm_last_publish_time.get(dp_rank, 0.0) < (
+                _FPM_QUEUED_REFRESH_SEC
+            ):
+                continue
+            (
+                queued_num_prefill,
+                queued_sum_prefill_tokens,
+                queued_num_decode,
+                queued_sum_decode_kv_tokens,
+            ) = queued
+            try:
+                self.fpm_publisher.publish(
+                    dp_rank=dp_rank,
+                    scheduled_num_prefill_requests=0,
+                    scheduled_sum_prefill_tokens=0,
+                    scheduled_sum_prefill_kv_tokens=0,
+                    scheduled_num_decode_requests=0,
+                    scheduled_sum_decode_kv_tokens=0,
+                    queued_num_prefill_requests=queued_num_prefill,
+                    queued_sum_prefill_tokens=queued_sum_prefill_tokens,
+                    queued_num_decode_requests=queued_num_decode,
+                    queued_sum_decode_kv_tokens=queued_sum_decode_kv_tokens,
+                    wall_time_secs=0.0,
+                )
+            except Exception as e:
+                logging.warning(f"FPM queued heartbeat publish failed: {e}")
+            self._fpm_last_publish_time[dp_rank] = now
 
     async def _publish_kv_cache_events_task(self):
         """

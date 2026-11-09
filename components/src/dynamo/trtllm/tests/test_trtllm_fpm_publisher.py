@@ -875,6 +875,172 @@ async def test_polling_loop_chains_handler_failure_from_fetch_failure():
     assert drained_batches == []
 
 
+# ---------------------------------------------------------------------------
+# Queued work across engine stalls
+# ---------------------------------------------------------------------------
+
+# Matches IDLE_HEARTBEAT_INTERVAL in lib/llm/src/fpm_publisher.rs: any publish
+# gap this long is filled with an all-zero idle heartbeat.
+_RUST_IDLE_HEARTBEAT_SEC = 1.0
+
+_STALLED_PREFILL_IBS = {
+    "numQueuedContextRequests": 2,
+    "numQueuedCtxTokens": 60000,
+    "numQueuedGenRequests": 0,
+    "numQueuedGenKvTokens": 0,
+    "numPausedRequests": 0,
+    "numPausedKvTokens": 0,
+}
+_EMPTY_QUEUE_IBS = {
+    **_STALLED_PREFILL_IBS,
+    "numQueuedContextRequests": 0,
+    "numQueuedCtxTokens": 0,
+}
+
+
+async def _run_stats_task_with_fake_clock(
+    monkeypatch, rows_by_poll, *, inflight=lambda _now: True, run_secs=5.0
+):
+    """Run the real stats task against a fake engine and a fake clock.
+
+    ``rows_by_poll`` maps a poll index to the stats rows the engine returns on
+    that poll; every other poll drains nothing, as TRT-LLM does while it
+    cannot schedule a batch. Returns the fake time of each FPM publish, the
+    publish kwargs, and the final fake time.
+    """
+    clock = 0.0
+    polls = 0
+    publish_times = []
+    publish_kwargs = []
+
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub._stop_event = threading.Event()
+    pub.engine = MagicMock()
+    pub.metrics_publisher = MagicMock()
+    pub.component_gauges = MagicMock()
+    pub.metrics_collector = None
+    pub.fpm_publisher = MagicMock()
+    pub._fpm_schema_checked = True
+    pub._fpm_last_queued = {}
+    pub._fpm_last_publish_time = {}
+    pub.has_inflight_requests = lambda: inflight(clock)
+
+    def record_publish(**kwargs):
+        publish_times.append(clock)
+        publish_kwargs.append(kwargs)
+
+    pub.fpm_publisher.publish.side_effect = record_publish
+
+    async def fetch_stats(timeout):
+        nonlocal polls
+        rows = rows_by_poll.get(polls, [])
+        polls += 1
+        for row in rows:
+            yield row
+
+    async def advance_clock(delay):
+        nonlocal clock
+        clock += delay
+        if clock >= run_secs:
+            pub._stop_event.set()
+
+    pub.engine.llm.get_stats_async = fetch_stats
+    monkeypatch.setattr(asyncio, "sleep", advance_clock)
+    monkeypatch.setattr(
+        publisher_mod, "time", type("FakeTime", (), {"monotonic": lambda: clock})
+    )
+
+    assert await pub._publish_stats_task() is True
+    return publish_times, publish_kwargs, clock
+
+
+def _max_publish_gap(publish_times, end):
+    points = [0.0, *publish_times, end]
+    return max(b - a for a, b in zip(points, points[1:]))
+
+
+@pytest.mark.asyncio
+async def test_stalled_engine_keeps_queued_prefill_in_fpm_heartbeats(monkeypatch):
+    """KV backpressure: after one row reporting ~60k queued prefill tokens the
+    engine emits nothing. The worker must keep publishing that queue more
+    often than the Rust idle heartbeat, so no all-zero frame replaces it."""
+    stalled_row = _build_fake_stat(ibs_overrides=_STALLED_PREFILL_IBS)
+
+    times, frames, end = await _run_stats_task_with_fake_clock(
+        monkeypatch, {0: [stalled_row]}
+    )
+
+    assert len(frames) > 1
+    assert _max_publish_gap(times, end) < _RUST_IDLE_HEARTBEAT_SEC
+    for frame in frames[1:]:
+        assert frame == {
+            "dp_rank": 0,
+            "scheduled_num_prefill_requests": 0,
+            "scheduled_sum_prefill_tokens": 0,
+            "scheduled_sum_prefill_kv_tokens": 0,
+            "scheduled_num_decode_requests": 0,
+            "scheduled_sum_decode_kv_tokens": 0,
+            "queued_num_prefill_requests": 2,
+            "queued_sum_prefill_tokens": 60000,
+            "queued_num_decode_requests": 0,
+            "queued_sum_decode_kv_tokens": 0,
+            "wall_time_secs": 0.0,
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("inflight_until", [0.0, 2.0])
+async def test_stalled_engine_stops_queued_heartbeats_without_inflight_requests(
+    monkeypatch, inflight_until
+):
+    """With no outstanding request the engine queue must be empty (for example
+    after cancellation), so the idle heartbeat has to resume."""
+    stalled_row = _build_fake_stat(ibs_overrides=_STALLED_PREFILL_IBS)
+
+    times, _frames, _end = await _run_stats_task_with_fake_clock(
+        monkeypatch,
+        {0: [stalled_row]},
+        inflight=lambda now: now < inflight_until,
+    )
+
+    assert all(t <= inflight_until for t in times)
+    if inflight_until == 0.0:
+        assert len(times) == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_queue_row_stops_queued_heartbeats(monkeypatch):
+    stalled_row = _build_fake_stat(ibs_overrides=_STALLED_PREFILL_IBS)
+    drained_row = _build_fake_stat(ibs_overrides=_EMPTY_QUEUE_IBS)
+
+    times, frames, _end = await _run_stats_task_with_fake_clock(
+        monkeypatch, {0: [stalled_row], 20: [drained_row]}
+    )
+
+    drained_index = next(
+        i
+        for i, frame in enumerate(frames)
+        if frame["wall_time_secs"] > 0 and frame["queued_sum_prefill_tokens"] == 0
+    )
+    assert drained_index > 1
+    assert drained_index == len(frames) - 1
+
+
+@pytest.mark.asyncio
+async def test_queued_heartbeats_refresh_only_ranks_with_queued_work(monkeypatch):
+    """Under attention DP only rank 0 carries the engine-global queue."""
+    rank0 = _build_fake_stat(ibs_overrides=_STALLED_PREFILL_IBS, attentionDpRank=0)
+    rank1 = _build_fake_stat(ibs_overrides=_EMPTY_QUEUE_IBS, attentionDpRank=1)
+
+    _times, frames, _end = await _run_stats_task_with_fake_clock(
+        monkeypatch, {0: [rank0, rank1]}
+    )
+
+    refreshes = [f for f in frames if f["wall_time_secs"] == 0.0]
+    assert refreshes
+    assert {f["dp_rank"] for f in refreshes} == {0}
+
+
 def test_managed_thread_stops_after_task_error():
     errors = queue.Queue()
     calls = 0
