@@ -4532,7 +4532,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             return normalized
 
         monkeypatch.setattr(
-            sglang_prepost_module,
+            sglang_prompt_renderer_module,
             "process_content_for_template_format",
             normalize_for_template,
         )
