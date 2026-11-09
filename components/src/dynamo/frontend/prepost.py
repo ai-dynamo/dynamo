@@ -1579,7 +1579,12 @@ class StreamingPostProcessor:
             remainder = trimmed[len(_GEMMA4_THOUGHT_LABEL) :]
         elif not output.finish_reason and (
             _GEMMA4_EMPTY_THOUGHT_CHANNEL.startswith(trimmed)
-            or (ids_partial and _GEMMA4_THOUGHT_LABEL.startswith(trimmed))
+            # Also hold after the ids are complete: a request `stop` makes
+            # vLLM's detokenizer hold text back, so text can lag the ids.
+            or (
+                (ids_partial or ids_complete)
+                and _GEMMA4_THOUGHT_LABEL.startswith(trimmed)
+            )
         ):
             return None
 

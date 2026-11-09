@@ -3695,6 +3695,20 @@ class TestGemma4EmptyThoughtChannel:
         deltas = [(text, [token_id]) for text, token_id in _G4_LABEL_EMPTY]
         assert self._stream(post, deltas) == "final answer"
 
+    def test_text_lagging_ids_is_stripped(self, tokenizer):
+        """A request `stop` makes vLLM's detokenizer hold text back, so the
+        channel ids can be complete while the text is still `thought`."""
+        post = self._post(tokenizer)
+        deltas = [
+            ("", [100]),
+            ("thought", [45518]),
+            ("", [107]),
+            ("", [101]),
+            ("\nfinal", [7]),
+            (" answer", [8]),
+        ]
+        assert self._stream(post, deltas) == "final answer"
+
     def test_plain_answer_is_unchanged(self, tokenizer):
         self._assert_all_splits(
             tokenizer, self._text_splits("final answer"), "final answer"
