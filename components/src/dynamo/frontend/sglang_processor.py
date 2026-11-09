@@ -28,7 +28,6 @@ from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 
 from .responses_history import responses_tools_request
-from .sglang_deepseek import resolve_deepseek_spec
 from .sglang_prepost import (
     ReasoningParser,
     SglangStreamingPostProcessor,
@@ -42,6 +41,7 @@ from .sglang_prepost import (
     preprocess_chat_request,
     resolve_skip_special_tokens,
 )
+from .sglang_prompt_renderer import PromptRenderer, build_prompt_renderer
 from .structural_tag_policy import runtime_structural_tag_options
 from .thinking import runtime_default_thinking_mode
 from .usage import response_usage, update_usage_metadata
@@ -322,7 +322,7 @@ _w_default_thinking_mode: str | None = None
 _w_structural_tag_mode: str = "off"
 _w_structural_tag_scope: str = "auto"
 _w_structural_tag_schema: str = "auto"
-_w_deepseek_spec: str | None = None
+_w_prompt_renderer: PromptRenderer | None = None
 
 
 def _load_chat_template(chat_template: str | None) -> str | None:
@@ -377,13 +377,12 @@ def _init_worker(
     structural_tag_mode: str = "off",
     structural_tag_scope: str = "auto",
     structural_tag_schema: str = "auto",
-    deepseek_spec: str | None = None,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
     global _w_default_thinking_mode, _w_structural_tag_mode
-    global _w_structural_tag_scope, _w_structural_tag_schema, _w_deepseek_spec
+    global _w_structural_tag_scope, _w_structural_tag_schema, _w_prompt_renderer
     _w_tokenizer = _load_tokenizer(model_path, trust_remote_code)
     if chat_template is not None:
         _w_tokenizer.chat_template = chat_template
@@ -395,7 +394,13 @@ def _init_worker(
     _w_structural_tag_mode = structural_tag_mode
     _w_structural_tag_scope = structural_tag_scope
     _w_structural_tag_schema = structural_tag_schema
-    _w_deepseek_spec = deepseek_spec
+    _w_prompt_renderer = build_prompt_renderer(
+        _w_tokenizer,
+        model_path=model_path,
+        chat_template=chat_template,
+        tool_call_parser_name=tool_call_parser_name,
+        reasoning_parser_name=reasoning_parser_name,
+    )
 
 
 def _preprocess_worker(
@@ -415,7 +420,7 @@ def _preprocess_worker(
         structural_tag_mode=_w_structural_tag_mode,
         structural_tag_scope=_w_structural_tag_scope,
         structural_tag_schema=_w_structural_tag_schema,
-        deepseek_spec=_w_deepseek_spec,
+        prompt_renderer=_w_prompt_renderer,
     )
 
     n = request.get("n", 1)
@@ -586,7 +591,7 @@ class SglangProcessor:
         structural_tag_mode: str = "off",
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
-        deepseek_spec: str | None = None,
+        prompt_renderer: PromptRenderer | None = None,
     ):
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
@@ -614,7 +619,7 @@ class SglangProcessor:
         self.structural_tag_mode = structural_tag_mode
         self.structural_tag_scope = structural_tag_scope
         self.structural_tag_schema = structural_tag_schema
-        self.deepseek_spec = deepseek_spec
+        self.prompt_renderer = prompt_renderer
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -719,7 +724,7 @@ class SglangProcessor:
                 structural_tag_mode=self.structural_tag_mode,
                 structural_tag_scope=self.structural_tag_scope,
                 structural_tag_schema=self.structural_tag_schema,
-                deepseek_spec=self.deepseek_spec,
+                prompt_renderer=self.prompt_renderer,
             )
 
             if self.debug_perf:
@@ -1239,10 +1244,6 @@ class SglangEngineFactory:
             tokenizer.chat_template = chat_template
 
         eos_token_ids = _model_eos_token_ids(tokenizer, local_dir)
-        # An explicit user template takes precedence over checkpoint encoding.
-        deepseek_spec = (
-            resolve_deepseek_spec(local_dir) if chat_template is None else None
-        )
 
         # Static reasoning-template scan (mirrors sglang's template_manager).
         # Shared with worker-pool processes via initargs so they compute the
@@ -1273,6 +1274,13 @@ class SglangEngineFactory:
         if default_thinking_mode:
             logger.info("SGLang default thinking mode: %s", default_thinking_mode)
 
+        prompt_renderer = build_prompt_renderer(
+            tokenizer,
+            model_path=local_dir,
+            chat_template=chat_template,
+            tool_call_parser_name=tool_call_parser_name,
+            reasoning_parser_name=reasoning_parser_name,
+        )
         preprocess_pool = None
         preprocess_workers = self.config.preprocess_workers
         assert preprocess_workers is not None  # Resolved by FrontendConfig.validate().
@@ -1297,7 +1305,6 @@ class SglangEngineFactory:
                     structural_tag_mode,
                     structural_tag_scope,
                     structural_tag_schema,
-                    deepseek_spec,
                 ),
             )
             futures = [
@@ -1337,7 +1344,7 @@ class SglangEngineFactory:
             structural_tag_mode=structural_tag_mode,
             structural_tag_scope=structural_tag_scope,
             structural_tag_schema=structural_tag_schema,
-            deepseek_spec=deepseek_spec,
+            prompt_renderer=prompt_renderer,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none
