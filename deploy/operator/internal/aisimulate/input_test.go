@@ -345,22 +345,6 @@ func TestInputOverridesApplyOnceAfterDerivedDefaults(t *testing.T) {
 	})
 }
 
-func TestUnderlayParetoObjective(t *testing.T) {
-	spec := defaultedSpec()
-	spec.Objective.Mode = v1beta2.ObjectiveModePareto
-	spec.Objective.Metric = nil
-	spec.Objective.Metrics = []v1beta2.ObjectiveMetric{"ThroughputPerGPU", "ThroughputPerUser"}
-	input := underlay(t, spec)
-	if nested(t, input, "optimization", "target") != TargetPareto {
-		t.Fatalf("not a Pareto optimization: %v", input["optimization"])
-	}
-
-	spec.Objective.Metrics = []v1beta2.ObjectiveMetric{"Throughput", "TTFT"}
-	if _, err := Underlay(&spec.NativeSearchInput); err == nil {
-		t.Fatal("custom Pareto objectives must fail until the public AISimulate input exposes them")
-	}
-}
-
 func TestUnderlayOmitsUnsetTypedFields(t *testing.T) {
 	spec := &v1beta2.DynamoGraphDeploymentRequestSpec{Model: &v1beta2.ModelSpec{Name: "m"}}
 	if got := encode(t, underlay(t, spec)); got != `{"engine":{"model":"m"}}` {

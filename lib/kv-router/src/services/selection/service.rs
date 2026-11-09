@@ -704,11 +704,7 @@ mod tests {
             policy_file.path(),
             r#"
 worker_selection:
-  prefill: custom
-  instances:
-    - name: custom
-      type: acme
-      parameters: {}
+  prefill: acme
 "#,
         )
         .unwrap();
