@@ -114,6 +114,7 @@ SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
     "tool_call_structural_tag_excludes_reasoning"
 )
+LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY = "llguidance_lark_grammar"
 
 
 async def close_configured_artifact_runtime() -> None:
@@ -183,6 +184,22 @@ def configure_muse_structural_tag_reasoning(
         config.dyn_tool_call_parser is None and config.dyn_reasoning_parser in spark
     ):
         vllm_config.structured_outputs_config.enable_in_reasoning = True
+
+
+def publish_vllm_llguidance_lark_grammar(
+    runtime_config: ModelRuntimeConfig, vllm_config: VllmConfig
+) -> None:
+    """Tell the frontend whether a lark `guided_decoding.grammar` reaches llguidance.
+
+    vLLM's `auto` backend sends a lark grammar that xgrammar rejects, such as one
+    with `<[id]>` special tokens or `%json`, to llguidance. An explicit backend
+    other than `guidance` gets no fallback.
+    """
+    backend = vllm_config.structured_outputs_config.backend
+    runtime_config.set_engine_specific(
+        LLGUIDANCE_LARK_GRAMMAR_RUNTIME_KEY,
+        json.dumps(backend in ("auto", "guidance")),
+    )
 
 
 def should_register_model_ignore_weights(config: Config) -> bool:
@@ -951,6 +968,7 @@ async def register_vllm_model(
     """
     runtime_config = ModelRuntimeConfig()
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
+    publish_vllm_llguidance_lark_grammar(runtime_config, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)
     dp_range = get_dp_range_for_worker(vllm_config)
