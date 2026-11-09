@@ -95,5 +95,20 @@ Hello star!
 
 ## Deployment to Kubernetes
 
-To deploy `deploy/hello_world.yaml` to Kubernetes, see the
-[Custom Backends and Testing example](../../../docs/fern/pages/recipes/examples/custom-backends.mdx).
+Note that this a very simple degenerate example which does not demonstrate the standard Dynamo FrontEnd-Backend deployment. The hello-world client is not a web server, it is a one-off function which sends the predefined text "world,sun,moon,star" to the backend. The example is meant to show the HelloWorldWorker. As such you will only see the HelloWorldWorker pod in deployment. The client will run and exit and the pod will not be operational.
+
+
+Follow the [Quickstart Guide](../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx) to install Dynamo Kubernetes Platform.
+Then deploy to kubernetes using
+
+```bash
+export NAMESPACE=<your-namespace>
+cd dynamo
+kubectl apply -f examples/custom_backend/hello_world/deploy/hello_world.yaml -n ${NAMESPACE}
+```
+
+to delete your deployment:
+
+```bash
+kubectl delete dynamographdeployment hello-world -n ${NAMESPACE}
+```

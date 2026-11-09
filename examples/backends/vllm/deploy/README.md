@@ -3,36 +3,367 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# vLLM Kubernetes Deployment Examples
+# vLLM Kubernetes Deployment Configurations
 
-This directory holds `DynamoGraphDeployment` (DGD) manifests for vLLM. They use the
-`nvidia.com/v1beta1` API.
+This directory contains Kubernetes Custom Resource Definition (CRD) templates for deploying vLLM inference graphs using the **DynamoGraphDeployment** resource.
 
-For prerequisites, deployment steps, and configuration, see the
-[Examples catalog](../../../../docs/fern/pages/recipes/examples/overview.mdx), which renders each manifest with a deployment customizer, and
-[Deploy with DGD](../../../../docs/fern/pages/kubernetes/model-deployment/deploy-with-dgd.md). For
-vLLM worker flags, see the [vLLM backend guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/overview.md).
+The `deploy/*.yaml` templates use the supported `nvidia.com/v1beta1` API.
 
-## Contents
+## Available Deployment Patterns
 
-| Path | Docs example |
-|---|---|
-| `agg.yaml` | [Aggregated Serving](../../../../docs/fern/pages/recipes/examples/aggregated.mdx) |
-| `agg_router.yaml` | [Aggregated KV-Aware Routing](../../../../docs/fern/pages/recipes/examples/aggregated-kv-routing.mdx) |
-| `agg_router_kv_approx.yaml` | [Approximate Cache Tracking](../../../../docs/fern/pages/recipes/examples/approximate-kv-routing.mdx) |
-| `agg_asr.yaml`, `agg_asr_realtime.yaml` | [Audio and Realtime Serving](../../../../docs/fern/pages/recipes/examples/audio.mdx) |
-| `agg_failover.yaml`, `gms-failover.yaml` | [GPU Failover](../../../../docs/fern/pages/recipes/examples/failover.mdx) |
-| `agg_gms.yaml` | [GPU Memory Service](../../../../docs/fern/pages/recipes/examples/gpu-memory-service.mdx) |
-| `agg_kvbm.yaml`, `disagg_kvbm*.yaml` | [KV Block Manager](../../../../docs/fern/pages/recipes/examples/kvbm.mdx) |
-| `agg_omni_audio.yaml` | [Audio Generation](../../../../docs/fern/pages/recipes/examples/audio-generation.mdx) |
-| `agg_omni_image.yaml` | [Image Generation](../../../../docs/fern/pages/recipes/examples/image-generation.mdx) |
-| `agg_tracing.yaml`, `disagg_tracing.yaml` | [OpenTelemetry Tracing](../../../../docs/fern/pages/recipes/examples/tracing.mdx) |
-| `disagg.yaml` | [Disaggregated Serving](../../../../docs/fern/pages/recipes/examples/disaggregated.mdx) |
-| `disagg_router.yaml` | [Disaggregated KV-Aware Routing](../../../../docs/fern/pages/recipes/examples/disaggregated-kv-routing.mdx) |
-| `disagg_planner.yaml` | [Planner Autoscaling](../../../../docs/fern/pages/recipes/examples/planner.mdx) |
-| `disagg-multinode.yaml` | [Multinode Disaggregation](../../../../docs/fern/pages/recipes/examples/multinode.mdx) |
-| `gaie/` | [Gateway API Routing](../../../../docs/fern/pages/recipes/examples/gateway-api.mdx) |
-| `kvcr/` | [KV Cache Runner](../../../../docs/fern/pages/recipes/examples/kvcr.mdx) |
-| `lora/` | [LoRA Serving](../../../../docs/fern/pages/recipes/examples/lora.mdx) |
-| `v1beta1/` | [LMCache](../../../../docs/fern/pages/recipes/examples/lmcache.mdx) |
-| `xpu/` | [Deploy on Intel GPUs](../../../../docs/fern/pages/kubernetes/model-deployment/deploy-on-intel-gpus.mdx) |
+### 1. **Aggregated Deployment** (`agg.yaml`)
+Basic deployment pattern with frontend and a single decode worker.
+
+**Architecture:**
+- `Frontend`: OpenAI-compatible API server (with kv router mode disabled)
+- `worker`: Single worker handling both prefill and decode
+
+### 2. **Aggregated Router Deployment** (`agg_router.yaml`)
+Enhanced aggregated deployment with KV cache routing capabilities.
+
+**Architecture:**
+- `Frontend`: OpenAI-compatible API server (with kv router mode enabled)
+- `worker`: Single worker handling both prefill and decode
+
+### 3. **Disaggregated Deployment** (`disagg.yaml`)
+High-performance deployment with separated prefill and decode workers.
+
+**Architecture:**
+- `Frontend`: HTTP API server coordinating between workers
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
+- Communication via NIXL transfer backend
+
+### 4. **Disaggregated Router Deployment** (`disagg_router.yaml`)
+Advanced disaggregated deployment with KV cache routing capabilities.
+
+**Architecture:**
+- `Frontend`: HTTP API server with KV-aware routing
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
+
+### 5. **Global Planner Deployments** (see [`examples/global_planner/`](../../../global_planner/))
+Centralized scaling across multiple DGDs via GlobalPlanner. Examples include single-endpoint multi-pool and multi-model GPU budget patterns. See the [global planner examples](../../../global_planner/) for details.
+
+### 6. **Deployments with Intel XPU** (see [`xpu/`](./xpu/))
+
+Hardware-specific templates for Intel XPU GPUs using Kubernetes DRA.
+
+See [`xpu/README.md`](./xpu/README.md) for available templates, prerequisites, and usage.
+
+### 7. **Aggregated + LMCache MP Deployment** (`v1beta1/agg_lmcache.yaml`)
+Aggregated deployment that offloads KV cache to a per-node LMCache MP DaemonSet, sharing tensors with the worker via cross-Pod CUDA IPC. See the [Deploy LMCache MP guide](../../../../docs/fern/pages/kubernetes/kv-cache-offloading/lmcache.mdx) for the full recipe.
+
+**Architecture:**
+- `Frontend`: OpenAI-compatible API server
+- `worker`: Single worker, `hostIPC: true` + `runAsUser: 0` (required for cross-Pod CUDA IPC with the LMCache server)
+- `LMCacheEngine` (separate CR): per-node DaemonSet that imports the worker's KV-cache IPC handles and serves cache hits over ZMQ
+
+### 8. **Aggregated KVCR Deployments** (`kvcr/`)
+
+Two-node aggregated deployments with a process-local KVCR tier or a resilient
+KVCR memory-service sidecar. See [`kvcr/README.md`](./kvcr/README.md) for image,
+RDMA, and lifecycle requirements.
+
+### 9. **Aggregated Speech Recognition** (`agg_asr.yaml`)
+Serves Qwen3-ASR through `/v1/chat/completions` with `audio_url` content parts. See [Speech Recognition on Kubernetes](../../../../docs/fern/pages/use-cases/speech/voice-pipelines.md#speech-recognition-on-kubernetes) for audio transfer and image requirements, and the [vLLM multimodal guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#speech-recognition-asr) for request and output format.
+
+**Architecture:**
+- `Frontend`: OpenAI-compatible API server with the vLLM chat processor (`--dyn-chat-processor vllm`), because the original Qwen3-ASR checkpoints ship no `tokenizer.json`. `DYNAMO_DISABLE_NIXL_MM=1` makes the worker load the audio, because shared-memory handoff does not cross pods.
+- `worker`: Single worker with `--enable-multimodal`
+
+### 10. **Aggregated Streaming Speech Recognition** (`agg_asr_realtime.yaml`)
+Streams Qwen3-ASR transcription over the `/v1/realtime` WebSocket. See the [vLLM multimodal guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#streaming-transcription) for the client and session format.
+
+**Architecture:**
+- `Frontend`: OpenAI-compatible API server. Realtime models do not tokenize in the frontend, so it needs no chat processor.
+- `worker`: Single worker with `--realtime` and the `Qwen3ASRRealtimeGeneration` architecture selected through `--hf-overrides`. A realtime worker cannot also serve `/v1/chat/completions`; deploy `agg_asr.yaml` for that. The worker resamples audio with `scipy`, which the vLLM runtime image does not include, so run it from an image with `scipy` installed; see [Image Requirements](../../../../docs/fern/pages/use-cases/speech/voice-pipelines.md#image-requirements).
+
+## CRD Structure
+
+All templates use the **DynamoGraphDeployment** CRD:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: <deployment-name>
+spec:
+  components:
+  - name: <component-name>
+    type: worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          # Container configuration
+```
+
+### Key Configuration Options
+
+**Resource Management:**
+```yaml
+podTemplate:
+  spec:
+    containers:
+    - name: main
+      resources:
+        requests:
+          cpu: "10"
+          memory: "20Gi"
+        limits:
+          nvidia.com/gpu: "1"
+```
+
+**Container Configuration:**
+```yaml
+podTemplate:
+  spec:
+    containers:
+    - name: main
+      image: my-registry/vllm-runtime:my-tag
+      workingDir: /workspace/examples/backends/vllm
+      command:
+      - python3
+      - -m
+      - dynamo.vllm
+      args:
+      - --model
+      - Qwen/Qwen3-0.6B
+      # Optional: Enable prompt embeddings feature
+      # - --enable-prompt-embeds
+      # Other model-specific arguments
+```
+
+**Common vLLM Flags:**
+- `--enable-prompt-embeds`: Enable prompt embeddings feature
+- `--enable-multimodal`: Enable multimodal (vision) support
+- `--disaggregation-mode prefill`: Prefill-only mode for disaggregated serving
+- `--kv-transfer-config '<json>'`: KV transfer backend configuration (e.g., `'{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'` on prefill and `'{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'` on decode)
+
+## Prerequisites
+
+Before using these templates, ensure you have:
+
+1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
+2. **Kubernetes cluster with GPU support**
+3. **Container registry access** for vLLM runtime images (optional for default NGC CUDA images - `nvcr.io/nvidia/ai-dynamo/*` images are publicly accessible; Intel XPU users should build custom images with `--device xpu`)
+4. **Hugging Face token secret** (referenced through `envFrom.secretRef`)
+
+### Container Images
+
+We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts). If you'd prefer to use your own registry, build and push your own image:
+
+```bash
+python container/render.py --framework=vllm --output-short-filename
+docker build -f container/rendered.Dockerfile .
+# Tag and push to your container registry
+# Update the image references in the YAML files
+```
+
+### Planner Perf Model Bootstrap (SLA Planner Only)
+
+The SLA Planner deployment (`disagg_planner.yaml`) can start from native AIC estimates when available, optional pre-deployment profiling data, or live FPM observations after warmup. See the [pre-deployment profiling guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md) for the optional bootstrap workflow.
+
+## Usage
+
+### 1. Choose Your Template
+Select the deployment pattern that matches your requirements:
+- Use `agg.yaml` for simple testing
+- Use `agg_router.yaml` for production with load balancing
+- Use `disagg.yaml` for maximum performance
+- Use `disagg_router.yaml` for high-performance with KV cache routing
+- Use `disagg_planner.yaml` for SLA-optimized performance
+- Use `xpu/agg_xpu_dra.yaml` for aggregated deployment on Intel XPU clusters using Kubernetes DRA
+- Use `xpu/disagg_xpu_dra.yaml` for disaggregated deployment on Intel XPU clusters using Kubernetes DRA
+- Use [global planner examples](../../../global_planner/) for centralized scaling across multiple DGDs
+
+### 2. Customize Configuration
+Edit the template to match your environment:
+
+```yaml
+# Update image registry and tag
+image: my-registry/vllm-runtime:my-tag
+
+# Configure your model
+args:
+  - "--model"
+  - "your-org/your-model"
+```
+
+### 3. Deploy
+
+Use the following command to deploy the deployment file.
+
+First, create a secret for the HuggingFace token.
+```bash
+export HF_TOKEN=your_hf_token
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN=${HF_TOKEN} \
+  -n ${NAMESPACE}
+```
+
+Then, deploy the model using the deployment file.
+
+Export the NAMESPACE you used in your Dynamo Kubernetes Platform Installation.
+
+```bash
+cd <dynamo-source-root>/examples/backends/vllm/deploy
+export DEPLOYMENT_FILE=agg.yaml
+
+kubectl apply -f $DEPLOYMENT_FILE -n $NAMESPACE
+```
+
+#### Deploy with Intel XPU
+
+For Intel XPU clusters with DRA support (Kubernetes v1.34+ and [Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes) installed):
+
+```bash
+# Apply any XPU template
+kubectl apply -f xpu/agg_xpu_dra.yaml -n $NAMESPACE
+
+# Verify allocation
+kubectl get resourceclaim -n $NAMESPACE
+kubectl get resourceslices
+```
+
+See [`xpu/README.md`](./xpu/README.md) for the full list of XPU templates and requirements.
+
+### 4. Using Custom Dynamo Frameworks Image for vLLM
+
+To use a custom dynamo frameworks image for vLLM, you can update the deployment file using yq:
+
+```bash
+export DEPLOYMENT_FILE=agg.yaml
+export FRAMEWORK_RUNTIME_IMAGE=<vllm-image>
+
+yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then .image = env(FRAMEWORK_RUNTIME_IMAGE) else . end)' $DEPLOYMENT_FILE > $DEPLOYMENT_FILE.generated
+kubectl apply -f $DEPLOYMENT_FILE.generated -n $NAMESPACE
+```
+
+### 5. Port Forwarding
+
+After deployment, forward the frontend service to access the API:
+
+```bash
+kubectl port-forward deployment/vllm-v1-disagg-frontend-<pod-uuid-info> 8000:8000
+```
+
+### 6. Update worker routing taints
+
+The operator enables the worker system server on port `9090`. Select one vLLM worker pod and forward that port:
+
+```bash
+export WORKER_POD=$(kubectl get pods -n "$NAMESPACE" \
+  -l nvidia.com/dynamo-component=decode \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl port-forward -n "$NAMESPACE" pod/"$WORKER_POD" 9090:9090
+```
+
+In another terminal, replace the caller-managed routing taints for that worker:
+
+```bash
+curl --fail-with-body \
+  -X POST http://localhost:9090/engine/update/model_taints \
+  -H 'Content-Type: application/json' \
+  -d '{"taints":["capacity/fast"]}'
+```
+
+The `taints` array is a replacement, not a merge. Send an empty array to clear caller-managed taints. Dynamo preserves generated `dynamo.topology/` taints and rejects callers that use that reserved prefix. The request updates only the selected worker pod; repeat it for each target worker.
+
+Dynamic taint updates require every frontend/router consumer and the target worker to run a Dynamo version containing this API and the value-aware discovery watcher. Mixed-version operation is unsupported: an older frontend/router can retain stale taints even after the worker reports a successful update. For a safe rollout, upgrade all frontends/routers first, then upgrade workers, and only then enable taint updates.
+
+The system endpoint has no user-facing authentication layer. Keep port `9090` on a trusted control network or use `kubectl port-forward`; do not expose it publicly.
+
+## Configuration Options
+
+### Environment Variables
+
+To change `DYN_LOG` level, edit the yaml file by adding:
+
+```yaml
+...
+spec:
+  components:
+  - name: <component-name>
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          env:
+          - name: DYN_LOG
+            value: debug # or another log level
+  ...
+```
+
+### vLLM Worker Configuration
+
+vLLM workers are configured through command-line arguments. Key parameters include:
+
+- `--model`: Model to serve (e.g., `Qwen/Qwen3-0.6B`)
+- `--disaggregation-mode prefill`: Enable prefill-only mode for disaggregated serving
+- `--metrics-endpoint-port`: Port for publishing KV metrics to Dynamo
+
+See the [vLLM CLI documentation](https://docs.vllm.ai/en/v0.9.2/configuration/serve_args.html?h=serve+arg) for the full list of configuration options.
+
+## Testing the Deployment
+
+Send a test request to verify your deployment:
+
+```bash
+curl localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [
+    {
+        "role": "user",
+        "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
+    }
+    ],
+    "stream": false,
+    "max_tokens": 30
+  }'
+```
+
+## Model Configuration
+
+All templates use **Qwen/Qwen3-0.6B** as the default model, but you can use any vLLM-supported LLM model and configuration arguments.
+
+## Monitoring and Health
+
+- **Frontend health endpoint**: `http://<frontend-service>:8000/health`
+- **Liveness probes**: Check process health regularly
+- **KV metrics**: Published via metrics endpoint port
+
+## Request Migration
+
+You can enable [request migration](../../../../docs/fern/pages/kubernetes/fault-tolerance/request-migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
+
+```yaml
+args:
+  - "--migration-limit"
+  - "3"
+```
+
+## Further Reading
+
+- **Deployment Guide**: [Deploy with DGD](../../../../docs/fern/pages/kubernetes/model-deployment/deploy-with-dgd.md)
+- **Quickstart**: [Deployment Quickstart](../../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
+- **Platform Setup**: [Dynamo Kubernetes Platform Installation](../../../../docs/fern/pages/kubernetes/installation/install-dynamo.md)
+- **SLA Planner**: [SLA Planner Quickstart Guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md)
+- **Global Planner**: [Global Planner Deployment Guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/global-planner-guide.md)
+- **Deployment Examples**: [Examples catalog](../../../../docs/fern/pages/recipes/examples/overview.mdx)
+- **Architecture Docs**: [Disaggregated Serving](../../../../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md), [KV-Aware Routing](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/overview.md)
+
+## Troubleshooting
+
+Common issues and solutions:
+
+1. **Pod fails to start**: Check image registry access and HuggingFace token secret
+2. **GPU not allocated**: Verify cluster has GPU nodes and proper resource limits
+3. **Health check failures**: Review model loading logs and increase `initialDelaySeconds`
+4. **Out of memory**: Increase memory limits or reduce model batch size
+5. **Port forwarding issues**: Ensure correct pod UUID in port-forward command
+
+For additional support, refer to the [deployment troubleshooting guide](../../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
