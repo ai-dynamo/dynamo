@@ -273,7 +273,7 @@ These flags are retained for backward compatibility and will be removed in a fut
 </ParamField>
 
 <ParamField path="--mm-prompt-template" type="string" default="null" deprecated={true}>
-  **Deprecated** — has no effect and will be removed in v1.7. The frontend renders multimodal prompts with the model's chat template, so this value is never applied. To override the chat template, use `--custom-jinja-template`.
+  **Deprecated** — has no effect and will be removed in v1.9. Multimodal prompts are rendered with the model's chat template, so this value is never applied. To override the chat template, use `--custom-jinja-template`.
 
   Environment variable: `DYN_VLLM_MM_PROMPT_TEMPLATE`
 </ParamField>

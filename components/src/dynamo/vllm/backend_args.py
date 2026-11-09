@@ -165,12 +165,12 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="DYN_VLLM_MM_PROMPT_TEMPLATE",
             default=None,
             help=(
-                "Has no effect: the frontend renders multimodal prompts with the "
+                "Has no effect: multimodal prompts are rendered with the "
                 "model's chat template, so this template is never applied."
             ),
             deprecated=Deprecated(
                 replacement="--custom-jinja-template",
-                remove_in="v1.7",
+                remove_in="v1.9",
             ),
         )
 
