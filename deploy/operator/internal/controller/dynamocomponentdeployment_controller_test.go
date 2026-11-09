@@ -941,6 +941,8 @@ func Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSe
 		ownedByDCD         bool
 		failReplacementLWS bool
 		wantLegacyGone     bool
+		legacyBecomesReady bool
+		foreignReplacement bool
 	}{
 		{name: "legacy LWS controlled by the DCD is deleted", ownedByDCD: true, wantLegacyGone: true},
 		{name: "legacy LWS controlled by another object is kept", ownedByDCD: false, wantLegacyGone: false},
@@ -949,6 +951,8 @@ func Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSe
 		{name: "serving 52-character legacy LWS is kept", dcdName: strings.Repeat("a", 50), readyReplicas: 1, ownedByDCD: true},
 		{name: "partly serving legacy LWS is kept", readyReplicas: 1, ownedByDCD: true},
 		{name: "old 50-character name is kept even while unready", dcdName: strings.Repeat("a", 48), ownedByDCD: true},
+		{name: "legacy becomes ready while replacement is created", dcdName: strings.Repeat("a", 49), ownedByDCD: true, legacyBecomesReady: true},
+		{name: "serving legacy keeps another component's replacement", readyReplicas: 1, ownedByDCD: true, foreignReplacement: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -975,15 +979,37 @@ func Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSe
 				}
 			}
 			replacement := &leaderworkersetv1.LeaderWorkerSet{Name: leaderWorkerSetName(dcd), Namespace: "default"}
+			replacement.OwnerReferences = []metav1.OwnerReference{
+				*metav1.NewControllerRef(dcd, v1beta1.GroupVersion.WithKind("DynamoComponentDeployment")),
+			}
+			if tt.foreignReplacement {
+				other := multinodeLWSTestDCD(t, "replacement-owner")
+				replacement.OwnerReferences = []metav1.OwnerReference{
+					*metav1.NewControllerRef(other, v1beta1.GroupVersion.WithKind("DynamoComponentDeployment")),
+				}
+			}
 			r := multinodeLWSTestReconciler(dcd, legacy)
-			if tt.ownedByDCD && !tt.wantLegacyGone && !tt.failReplacementLWS {
+			if tt.ownedByDCD && !tt.wantLegacyGone && !tt.failReplacementLWS && !tt.legacyBecomesReady {
 				r = multinodeLWSTestReconciler(dcd, legacy, replacement)
 			}
-			if tt.failReplacementLWS {
+			if tt.failReplacementLWS || tt.legacyBecomesReady {
 				r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
 					Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 						if _, ok := obj.(*leaderworkersetv1.LeaderWorkerSet); ok {
-							return errors.New("injected LeaderWorkerSet create failure")
+							if tt.failReplacementLWS {
+								return errors.New("injected LeaderWorkerSet create failure")
+							}
+							if err := c.Create(ctx, obj, opts...); err != nil {
+								return err
+							}
+
+							// Expose legacy readiness between replacement sync and cleanup.
+							current := &leaderworkersetv1.LeaderWorkerSet{}
+							if err := c.Get(ctx, client.ObjectKeyFromObject(legacy), current); err != nil {
+								return err
+							}
+							current.Status.ReadyReplicas = 1
+							return c.Status().Update(ctx, current)
 						}
 						return c.Create(ctx, obj, opts...)
 					},
@@ -998,7 +1024,22 @@ func Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSe
 				require.Error(t, err)
 			} else {
 				require.NoError(t, err)
-				require.NoError(t, r.Get(ctx, types.NamespacedName{Name: boundedName, Namespace: "default"}, &leaderworkersetv1.LeaderWorkerSet{}))
+			}
+
+			t.Log("Reconcile again after readiness changes to converge on one managed LWS")
+			if tt.legacyBecomesReady {
+				for range 3 {
+					result, err = r.reconcileLeaderWorkerSetResources(ctx, dcd)
+					require.NoError(t, err)
+				}
+			}
+			if !tt.failReplacementLWS {
+				err = r.Get(ctx, client.ObjectKeyFromObject(replacement), &leaderworkersetv1.LeaderWorkerSet{})
+				if tt.ownedByDCD && !tt.wantLegacyGone && !tt.foreignReplacement {
+					require.True(t, k8serrors.IsNotFound(err), "unused replacement should be deleted, got %v", err)
+				} else {
+					require.NoError(t, err)
+				}
 			}
 
 			t.Log("Check legacy ownership and serving groups still control cleanup")

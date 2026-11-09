@@ -424,8 +424,8 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 	}, nil
 }
 
-// reconcileLeaderWorkerSetResources syncs the selected LWS and cleans up only non-serving
-// oversized legacy resources before reporting the selected workload's status.
+// reconcileLeaderWorkerSetResources syncs the selected LWS and removes unused controlled
+// resources without deleting serving legacy groups before reporting workload status.
 func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
 	leaderWorkerSetModified, lwsObj, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
 		return r.generateLeaderWorkerSet(ctx, generateResourceOption{
@@ -436,11 +436,9 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 		return ComponentReconcileResult{}, fmt.Errorf("failed to sync the LeaderWorkerSet: %w", err)
 	}
 
-	// Never delete the legacy LWS selected for this reconciliation, even if readiness changes.
-	if lwsObj.Name != legacyLeaderWorkerSetName(dynamoComponentDeployment.Name) {
-		if err := r.deleteLegacyOversizedLeaderWorkerSet(ctx, dynamoComponentDeployment); err != nil {
-			return ComponentReconcileResult{}, fmt.Errorf("failed to delete the oversized legacy LeaderWorkerSet: %w", err)
-		}
+	// Clean up the unused name after sync so later readiness changes still converge.
+	if err := r.deleteUnselectedLeaderWorkerSet(ctx, dynamoComponentDeployment, lwsObj.Name); err != nil {
+		return ComponentReconcileResult{}, fmt.Errorf("failed to delete the unused LeaderWorkerSet: %w", err)
 	}
 
 	lwsReplicaStatus := getLeaderWorkerSetReplicasStatus(lwsObj)
@@ -722,25 +720,32 @@ func preserveLegacyLeaderWorkerSet(legacy *leaderworkersetv1.LeaderWorkerSet) bo
 	return len(legacy.Name) <= maxLegacyLeaderWorkerSetNameLength || legacy.Status.ReadyReplicas > 0
 }
 
-// deleteLegacyOversizedLeaderWorkerSet removes a non-serving oversized legacy LWS
-// only when this DCD controls it and its replacement has synced.
-func (r *DynamoComponentDeploymentReconciler) deleteLegacyOversizedLeaderWorkerSet(ctx context.Context, dcd *nvidiacomv1beta1.DynamoComponentDeployment) error {
+// deleteUnselectedLeaderWorkerSet removes the unused controlled LWS after the selected
+// resource syncs. It preserves serving legacy groups; dcd must be non-nil.
+func (r *DynamoComponentDeploymentReconciler) deleteUnselectedLeaderWorkerSet(ctx context.Context, dcd *nvidiacomv1beta1.DynamoComponentDeployment, selectedName string) error {
 	legacyName := legacyLeaderWorkerSetName(dcd.Name)
-	if legacyName == leaderWorkerSetName(dcd) {
+	boundedName := leaderWorkerSetName(dcd)
+	if legacyName == boundedName {
 		return nil
 	}
-	legacy := &leaderworkersetv1.LeaderWorkerSet{}
-	if err := r.Get(ctx, types.NamespacedName{Name: legacyName, Namespace: dcd.Namespace}, legacy); err != nil {
+
+	// If serving legacy groups won selection, remove the abandoned bounded replacement.
+	unusedName := legacyName
+	if selectedName == legacyName {
+		unusedName = boundedName
+	}
+	unused := &leaderworkersetv1.LeaderWorkerSet{}
+	if err := r.Get(ctx, types.NamespacedName{Name: unusedName, Namespace: dcd.Namespace}, unused); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	if !metav1.IsControlledBy(legacy, dcd) || preserveLegacyLeaderWorkerSet(legacy) {
+	if !metav1.IsControlledBy(unused, dcd) || (unusedName == legacyName && preserveLegacyLeaderWorkerSet(unused)) {
 		return nil
 	}
-	log.FromContext(ctx).Info("Deleting LeaderWorkerSet whose name is too long for StatefulSet revision labels", "name", legacyName)
+	log.FromContext(ctx).Info("Deleting unused LeaderWorkerSet after workload selection", "name", unusedName)
 
 	// Reject deletion if the checked resource's ownership or readiness has changed.
-	return client.IgnoreNotFound(r.Delete(ctx, legacy, client.Preconditions{
-		UID: &legacy.UID, ResourceVersion: &legacy.ResourceVersion,
+	return client.IgnoreNotFound(r.Delete(ctx, unused, client.Preconditions{
+		UID: &unused.UID, ResourceVersion: &unused.ResourceVersion,
 	}))
 }
 
