@@ -34,65 +34,13 @@ func resolvePod(
 	lws *leaderworkersetv1.LeaderWorkerSet,
 	pod *corev1.Pod,
 ) (resolvedPod, string, error) {
-	if dcd.UID == "" || lws.UID == "" || dcd.Generation == 0 || lws.Generation == 0 {
-		return resolvedPod{}, ReasonMissingRootIdentity, nil
-	}
-	if dcd.DeletionTimestamp != nil || lws.DeletionTimestamp != nil {
-		return resolvedPod{}, ReasonRootDeleting, nil
-	}
-	if lws.Status.ObservedGeneration != lws.Generation {
-		return resolvedPod{}, ReasonLWSObservedGenerationLag, nil
-	}
-	if pod.Namespace != dcd.Namespace || pod.Namespace != lws.Namespace {
-		return resolvedPod{}, ReasonDCDIdentityMismatch, nil
+	if reason := validateResolveRoots(dcd, lws, pod); reason != "" {
+		return resolvedPod{}, reason, nil
 	}
 
-	setName := pod.Labels[leaderworkersetv1.SetNameLabelKey]
-	if setName == "" {
-		return resolvedPod{}, ReasonMissingSetNameLabel, nil
-	}
-	if setName != lws.Name {
-		return resolvedPod{}, ReasonLWSIdentityMismatch, nil
-	}
-
-	groupLabel := pod.Labels[leaderworkersetv1.GroupIndexLabelKey]
-	if groupLabel == "" {
-		return resolvedPod{}, ReasonMissingGroupIndexLabel, nil
-	}
-	groupIndex, err := strconv.Atoi(groupLabel)
-	if err != nil || groupIndex < 0 {
-		return resolvedPod{}, ReasonGroupIndexInvalid, nil
-	}
-
-	workerLabel := pod.Labels[leaderworkersetv1.WorkerIndexLabelKey]
-	if workerLabel == "" {
-		return resolvedPod{}, ReasonMissingWorkerIndexLabel, nil
-	}
-	workerIndex, err := strconv.Atoi(workerLabel)
-	if err != nil || workerIndex < 0 {
-		return resolvedPod{}, ReasonWorkerIndexInvalid, nil
-	}
-
-	// Compare in int space so large label values cannot wrap through int32.
-	replicas := 1
-	if lws.Spec.Replicas != nil {
-		replicas = int(*lws.Spec.Replicas)
-	}
-	if groupIndex >= replicas {
-		return resolvedPod{}, ReasonGroupIndexOutOfRange, nil
-	}
-
-	size := 1
-	if lws.Spec.LeaderWorkerTemplate.Size != nil {
-		size = int(*lws.Spec.LeaderWorkerTemplate.Size)
-	}
-	if size < 1 || workerIndex >= size {
-		return resolvedPod{}, ReasonWorkerIndexOutOfRange, nil
-	}
-
-	podRevision := pod.Labels[leaderworkersetv1.RevisionKey]
-	if podRevision == "" {
-		return resolvedPod{}, ReasonMissingRevision, nil
+	groupLabel, groupIndex, workerIndex, podRevision, reason := parsePodIdentityLabels(pod, lws)
+	if reason != "" {
+		return resolvedPod{}, reason, nil
 	}
 
 	owningSTS, reason, err := getControllerStatefulSet(ctx, reader, pod)
@@ -111,60 +59,15 @@ func resolvePod(
 	leaderUID := pod.UID
 	if workerIndex == 0 {
 		// Leader: Pod → leader STS → LWS → DCD.
-		reason, err = validateLeaderWorkerSetOwner(owningSTS, lws)
-		if err != nil || reason != "" {
-			return resolvedPod{}, reason, err
-		}
-		reason = validateDynamoComponentDeploymentOwner(lws, dcd)
-		if reason != "" {
+		if reason := validateSTSChainToDCD(owningSTS, lws, dcd); reason != "" {
 			return resolvedPod{}, reason, nil
 		}
 	} else {
 		// Follower: Pod → worker STS → leader Pod → leader STS → LWS → DCD.
-		leaderPod, reason, err := getControllerPod(ctx, reader, owningSTS)
+		leaderUID, reason, err = resolveFollowerLeaderChain(ctx, reader, owningSTS, lws, dcd, groupLabel, podRevision)
 		if err != nil || reason != "" {
 			return resolvedPod{}, reason, err
 		}
-		if leaderPod.DeletionTimestamp != nil {
-			return resolvedPod{}, ReasonDependencyDeleting, nil
-		}
-		if leaderPod.Labels[leaderworkersetv1.WorkerIndexLabelKey] != "0" {
-			return resolvedPod{}, ReasonLeaderWorkerIndexMismatch, nil
-		}
-		if leaderPod.Labels[leaderworkersetv1.SetNameLabelKey] != lws.Name {
-			return resolvedPod{}, ReasonLWSIdentityMismatch, nil
-		}
-		if leaderPod.Labels[leaderworkersetv1.GroupIndexLabelKey] != groupLabel {
-			return resolvedPod{}, ReasonGroupIndexInvalid, nil
-		}
-		leaderRevision := leaderPod.Labels[leaderworkersetv1.RevisionKey]
-		if leaderRevision == "" {
-			return resolvedPod{}, ReasonMissingRevision, nil
-		}
-		if leaderRevision != podRevision {
-			return resolvedPod{}, ReasonRevisionMismatch, nil
-		}
-
-		leaderSTS, reason, err := getControllerStatefulSet(ctx, reader, leaderPod)
-		if err != nil || reason != "" {
-			return resolvedPod{}, reason, err
-		}
-		if leaderSTS.DeletionTimestamp != nil {
-			return resolvedPod{}, ReasonDependencyDeleting, nil
-		}
-		leaderSTSRevision := leaderSTS.Spec.Template.Labels[leaderworkersetv1.RevisionKey]
-		if leaderSTSRevision == "" || leaderSTSRevision != podRevision {
-			return resolvedPod{}, ReasonLeaderSTSTemplateRevisionMismatch, nil
-		}
-		reason, err = validateLeaderWorkerSetOwner(leaderSTS, lws)
-		if err != nil || reason != "" {
-			return resolvedPod{}, reason, err
-		}
-		reason = validateDynamoComponentDeploymentOwner(lws, dcd)
-		if reason != "" {
-			return resolvedPod{}, reason, nil
-		}
-		leaderUID = leaderPod.UID
 	}
 
 	return resolvedPod{
@@ -172,6 +75,145 @@ func resolvePod(
 		revision:   podRevision,
 		leaderUID:  leaderUID,
 	}, "", nil
+}
+
+// validateResolveRoots checks frozen DCD/LWS identity before any dependency reads.
+func validateResolveRoots(
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	lws *leaderworkersetv1.LeaderWorkerSet,
+	pod *corev1.Pod,
+) string {
+	if dcd.UID == "" || lws.UID == "" || dcd.Generation == 0 || lws.Generation == 0 {
+		return ReasonMissingRootIdentity
+	}
+	if dcd.DeletionTimestamp != nil || lws.DeletionTimestamp != nil {
+		return ReasonRootDeleting
+	}
+	if lws.Status.ObservedGeneration != lws.Generation {
+		return ReasonLWSObservedGenerationLag
+	}
+	if pod.Namespace != dcd.Namespace || pod.Namespace != lws.Namespace {
+		return ReasonDCDIdentityMismatch
+	}
+	return ""
+}
+
+// parsePodIdentityLabels validates set-name, group/worker indices, ranges, and revision labels.
+// groupLabel is returned raw so follower comparison preserves zero-padding differences.
+func parsePodIdentityLabels(
+	pod *corev1.Pod,
+	lws *leaderworkersetv1.LeaderWorkerSet,
+) (groupLabel string, groupIndex, workerIndex int, podRevision string, reason string) {
+	setName := pod.Labels[leaderworkersetv1.SetNameLabelKey]
+	if setName == "" {
+		return "", 0, 0, "", ReasonMissingSetNameLabel
+	}
+	if setName != lws.Name {
+		return "", 0, 0, "", ReasonLWSIdentityMismatch
+	}
+
+	groupLabel = pod.Labels[leaderworkersetv1.GroupIndexLabelKey]
+	if groupLabel == "" {
+		return "", 0, 0, "", ReasonMissingGroupIndexLabel
+	}
+	groupIndex, err := strconv.Atoi(groupLabel)
+	if err != nil || groupIndex < 0 {
+		return "", 0, 0, "", ReasonGroupIndexInvalid
+	}
+
+	workerLabel := pod.Labels[leaderworkersetv1.WorkerIndexLabelKey]
+	if workerLabel == "" {
+		return "", 0, 0, "", ReasonMissingWorkerIndexLabel
+	}
+	workerIndex, err = strconv.Atoi(workerLabel)
+	if err != nil || workerIndex < 0 {
+		return "", 0, 0, "", ReasonWorkerIndexInvalid
+	}
+
+	// Compare in int space so large label values cannot wrap through int32.
+	replicas := 1
+	if lws.Spec.Replicas != nil {
+		replicas = int(*lws.Spec.Replicas)
+	}
+	if groupIndex >= replicas {
+		return "", 0, 0, "", ReasonGroupIndexOutOfRange
+	}
+
+	size := 1
+	if lws.Spec.LeaderWorkerTemplate.Size != nil {
+		size = int(*lws.Spec.LeaderWorkerTemplate.Size)
+	}
+	if size < 1 || workerIndex >= size {
+		return "", 0, 0, "", ReasonWorkerIndexOutOfRange
+	}
+
+	podRevision = pod.Labels[leaderworkersetv1.RevisionKey]
+	if podRevision == "" {
+		return "", 0, 0, "", ReasonMissingRevision
+	}
+	return groupLabel, groupIndex, workerIndex, podRevision, ""
+}
+
+// resolveFollowerLeaderChain walks worker STS → leader Pod → leader STS → LWS → DCD.
+func resolveFollowerLeaderChain(
+	ctx context.Context,
+	reader client.Reader,
+	workerSTS *appsv1.StatefulSet,
+	lws *leaderworkersetv1.LeaderWorkerSet,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	groupLabel, podRevision string,
+) (types.UID, string, error) {
+	leaderPod, reason, err := getControllerPod(ctx, reader, workerSTS)
+	if err != nil || reason != "" {
+		return "", reason, err
+	}
+	if leaderPod.DeletionTimestamp != nil {
+		return "", ReasonDependencyDeleting, nil
+	}
+	if leaderPod.Labels[leaderworkersetv1.WorkerIndexLabelKey] != "0" {
+		return "", ReasonLeaderWorkerIndexMismatch, nil
+	}
+	if leaderPod.Labels[leaderworkersetv1.SetNameLabelKey] != lws.Name {
+		return "", ReasonLWSIdentityMismatch, nil
+	}
+	if leaderPod.Labels[leaderworkersetv1.GroupIndexLabelKey] != groupLabel {
+		return "", ReasonGroupIndexInvalid, nil
+	}
+	leaderRevision := leaderPod.Labels[leaderworkersetv1.RevisionKey]
+	if leaderRevision == "" {
+		return "", ReasonMissingRevision, nil
+	}
+	if leaderRevision != podRevision {
+		return "", ReasonRevisionMismatch, nil
+	}
+
+	leaderSTS, reason, err := getControllerStatefulSet(ctx, reader, leaderPod)
+	if err != nil || reason != "" {
+		return "", reason, err
+	}
+	if leaderSTS.DeletionTimestamp != nil {
+		return "", ReasonDependencyDeleting, nil
+	}
+	leaderSTSRevision := leaderSTS.Spec.Template.Labels[leaderworkersetv1.RevisionKey]
+	if leaderSTSRevision == "" || leaderSTSRevision != podRevision {
+		return "", ReasonLeaderSTSTemplateRevisionMismatch, nil
+	}
+	if reason := validateSTSChainToDCD(leaderSTS, lws, dcd); reason != "" {
+		return "", reason, nil
+	}
+	return leaderPod.UID, "", nil
+}
+
+// validateSTSChainToDCD checks STS → LWS ownership then LWS → DCD ownership.
+func validateSTSChainToDCD(
+	sts *appsv1.StatefulSet,
+	lws *leaderworkersetv1.LeaderWorkerSet,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+) string {
+	if reason := validateLeaderWorkerSetOwner(sts, lws); reason != "" {
+		return reason
+	}
+	return validateDynamoComponentDeploymentOwner(lws, dcd)
 }
 
 func getControllerStatefulSet(
@@ -222,18 +264,18 @@ func getControllerPod(
 	return pod, "", nil
 }
 
-func validateLeaderWorkerSetOwner(sts *appsv1.StatefulSet, lws *leaderworkersetv1.LeaderWorkerSet) (string, error) {
+func validateLeaderWorkerSetOwner(sts *appsv1.StatefulSet, lws *leaderworkersetv1.LeaderWorkerSet) string {
 	ref := metav1.GetControllerOf(sts)
 	if reason := validateOwnerRef(ref, leaderWorkerSetAPIVersion, leaderWorkerSetKind); reason != "" {
-		return reason, nil
+		return reason
 	}
 	if ref.Name != lws.Name || ref.UID != lws.UID {
-		return ReasonLWSIdentityMismatch, nil
+		return ReasonLWSIdentityMismatch
 	}
 	if lws.Namespace != sts.Namespace {
-		return ReasonLWSIdentityMismatch, nil
+		return ReasonLWSIdentityMismatch
 	}
-	return "", nil
+	return ""
 }
 
 func validateDynamoComponentDeploymentOwner(

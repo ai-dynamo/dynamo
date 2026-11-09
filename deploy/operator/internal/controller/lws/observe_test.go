@@ -18,7 +18,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
@@ -166,7 +165,7 @@ func TestObserveIdentityAndRevisionUnknown(t *testing.T) {
 			name: "non-controller owner",
 			mutate: func(f *fixture) {
 				// GetControllerOf ignores Controller=false, so the Pod has no controller owner.
-				f.leaderPod.OwnerReferences[0].Controller = ptr.To(false)
+				f.leaderPod.OwnerReferences[0].Controller = new(false)
 			},
 			pod:    "leader",
 			reason: ReasonMissingOwner,
@@ -541,7 +540,7 @@ func TestObserveRootEpochRecheck(t *testing.T) {
 						Kind:       nvidiacomv1beta1.DynamoComponentDeploymentGVK.Kind,
 						Name:       f.dcd.Name,
 						UID:        "other-dcd-uid",
-						Controller: ptr.To(true),
+						Controller: new(true),
 					}}
 				}
 				return nil
@@ -590,7 +589,7 @@ func TestObserveDedupesSameIncarnation(t *testing.T) {
 
 func TestObserveDistinctGroupsAreNotDeduped(t *testing.T) {
 	f := newFixture()
-	f.lws.Spec.Replicas = ptr.To(int32(2))
+	f.lws.Spec.Replicas = new(int32(2))
 
 	otherLeaderSTS := f.leaderSTS.DeepCopy()
 	otherLeaderSTS.Name = "decode-group1-sts"
@@ -602,7 +601,7 @@ func TestObserveDistinctGroupsAreNotDeduped(t *testing.T) {
 		Kind:       statefulSetKind,
 		Name:       otherLeaderSTS.Name,
 		UID:        otherLeaderSTS.UID,
-		Controller: ptr.To(true),
+		Controller: new(true),
 	}}
 	failMain(otherLeader, 23, f.finished, f.readyLTT)
 	otherLeaderSTS.OwnerReferences = []metav1.OwnerReference{{
@@ -610,7 +609,7 @@ func TestObserveDistinctGroupsAreNotDeduped(t *testing.T) {
 		Kind:       leaderWorkerSetKind,
 		Name:       f.lws.Name,
 		UID:        f.lws.UID,
-		Controller: ptr.To(true),
+		Controller: new(true),
 	}}
 
 	reader := f.reader(f.dcd, f.lws, f.leaderSTS, otherLeaderSTS, f.leaderPod, otherLeader)

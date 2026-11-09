@@ -2440,7 +2440,7 @@ func Test_reconcileLeaderWorkerSetResources_ObservesWithoutChangingReadiness(t *
 
 	t.Log("Parse the structured failure evidence line for witness identity")
 	foundFailure := false
-	for _, line := range strings.Split(logs.String(), "\n") {
+	for line := range strings.SplitSeq(logs.String(), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -2542,14 +2542,12 @@ func readyLWSObservationFixture(t *testing.T) (
 
 	now := metav1.Now()
 	lws := &leaderworkersetv1.LeaderWorkerSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       "observe-component-0",
-			Namespace:  "default",
-			UID:        "lws-uid",
-			Generation: 2,
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(dcd, v1beta1.DynamoComponentDeploymentGVK),
-			},
+		Name:       "observe-component-0",
+		Namespace:  "default",
+		UID:        "lws-uid",
+		Generation: 2,
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(dcd, v1beta1.DynamoComponentDeploymentGVK),
 		},
 		Spec: leaderworkersetv1.LeaderWorkerSetSpec{
 			Replicas: new(int32(1)),
@@ -2569,48 +2567,42 @@ func readyLWSObservationFixture(t *testing.T) (
 		},
 	}
 	leaderSTS := &appsv1.StatefulSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "observe-component-0",
-			Namespace: "default",
-			UID:       "sts-uid",
-			Labels:    map[string]string{leaderworkersetv1.SetNameLabelKey: "observe-component-0"},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "leaderworkerset.x-k8s.io/v1",
-				Kind:       "LeaderWorkerSet",
-				Name:       lws.Name,
-				UID:        lws.UID,
-				Controller: new(true),
-			}},
-		},
+		Name:      "observe-component-0",
+		Namespace: "default",
+		UID:       "sts-uid",
+		Labels:    map[string]string{leaderworkersetv1.SetNameLabelKey: "observe-component-0"},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "leaderworkerset.x-k8s.io/v1",
+			Kind:       "LeaderWorkerSet",
+			Name:       lws.Name,
+			UID:        lws.UID,
+			Controller: new(true),
+		}},
 		Spec: appsv1.StatefulSetSpec{
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{leaderworkersetv1.RevisionKey: "rev-1"},
-				},
+				Labels: map[string]string{leaderworkersetv1.RevisionKey: "rev-1"},
 			},
 		},
 	}
 	leaderPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "observe-component-0-0",
-			Namespace:         "default",
-			UID:               "pod-uid",
-			ResourceVersion:   "7",
-			CreationTimestamp: metav1.NewTime(now.Add(-time.Minute)),
-			Labels: map[string]string{
-				leaderworkersetv1.SetNameLabelKey:     "observe-component-0",
-				leaderworkersetv1.GroupIndexLabelKey:  "0",
-				leaderworkersetv1.WorkerIndexLabelKey: "0",
-				leaderworkersetv1.RevisionKey:         "rev-1",
-			},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "apps/v1",
-				Kind:       "StatefulSet",
-				Name:       leaderSTS.Name,
-				UID:        leaderSTS.UID,
-				Controller: new(true),
-			}},
+		Name:              "observe-component-0-0",
+		Namespace:         "default",
+		UID:               "pod-uid",
+		ResourceVersion:   "7",
+		CreationTimestamp: metav1.NewTime(now.Add(-time.Minute)),
+		Labels: map[string]string{
+			leaderworkersetv1.SetNameLabelKey:     "observe-component-0",
+			leaderworkersetv1.GroupIndexLabelKey:  "0",
+			leaderworkersetv1.WorkerIndexLabelKey: "0",
+			leaderworkersetv1.RevisionKey:         "rev-1",
 		},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "apps/v1",
+			Kind:       "StatefulSet",
+			Name:       leaderSTS.Name,
+			UID:        leaderSTS.UID,
+			Controller: new(true),
+		}},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			Conditions: []corev1.PodCondition{{

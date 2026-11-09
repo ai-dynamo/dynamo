@@ -17,7 +17,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
@@ -49,49 +48,41 @@ func newFixture() *fixture {
 	readyLTT := metav1.NewTime(now.Add(-45 * time.Second))
 
 	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       "decode",
-			Namespace:  testNamespace,
-			UID:        "dcd-uid",
-			Generation: 2,
-		},
+		Name:       "decode",
+		Namespace:  testNamespace,
+		UID:        "dcd-uid",
+		Generation: 2,
 	}
 	lws := &leaderworkersetv1.LeaderWorkerSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       "decode",
-			Namespace:  testNamespace,
-			UID:        "lws-uid",
-			Generation: 2,
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(dcd, nvidiacomv1beta1.DynamoComponentDeploymentGVK),
-			},
+		Name:       "decode",
+		Namespace:  testNamespace,
+		UID:        "lws-uid",
+		Generation: 2,
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(dcd, nvidiacomv1beta1.DynamoComponentDeploymentGVK),
 		},
 		Spec: leaderworkersetv1.LeaderWorkerSetSpec{
-			Replicas: ptr.To(int32(1)),
+			Replicas: new(int32(1)),
 			LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
-				Size: ptr.To(int32(2)),
+				Size: new(int32(2)),
 			},
 		},
 		Status: leaderworkersetv1.LeaderWorkerSetStatus{ObservedGeneration: 2},
 	}
 
 	leaderSTS := &appsv1.StatefulSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "decode",
-			Namespace: testNamespace,
-			UID:       "leader-sts-uid",
-			Labels: map[string]string{
-				leaderworkersetv1.SetNameLabelKey: "decode",
-			},
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(lws, leaderWorkerSetGVK()),
-			},
+		Name:      "decode",
+		Namespace: testNamespace,
+		UID:       "leader-sts-uid",
+		Labels: map[string]string{
+			leaderworkersetv1.SetNameLabelKey: "decode",
+		},
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(lws, leaderWorkerSetGVK()),
 		},
 		Spec: appsv1.StatefulSetSpec{
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{leaderworkersetv1.RevisionKey: testRevision},
-				},
+				Labels: map[string]string{leaderworkersetv1.RevisionKey: testRevision},
 			},
 		},
 	}
@@ -103,23 +94,19 @@ func newFixture() *fixture {
 	failMain(leaderPod, 23, finished, readyLTT)
 
 	workerSTS := &appsv1.StatefulSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "decode-0",
-			Namespace: testNamespace,
-			UID:       "worker-sts-uid",
-			Labels: map[string]string{
-				leaderworkersetv1.SetNameLabelKey:    "decode",
-				leaderworkersetv1.GroupIndexLabelKey: "0",
-			},
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(leaderPod, corev1.SchemeGroupVersion.WithKind(podKind)),
-			},
+		Name:      "decode-0",
+		Namespace: testNamespace,
+		UID:       "worker-sts-uid",
+		Labels: map[string]string{
+			leaderworkersetv1.SetNameLabelKey:    "decode",
+			leaderworkersetv1.GroupIndexLabelKey: "0",
+		},
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(leaderPod, corev1.SchemeGroupVersion.WithKind(podKind)),
 		},
 		Spec: appsv1.StatefulSetSpec{
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{leaderworkersetv1.RevisionKey: testRevision},
-				},
+				Labels: map[string]string{leaderworkersetv1.RevisionKey: testRevision},
 			},
 		},
 	}
@@ -170,18 +157,16 @@ func leaderWorkerSetGVK() schema.GroupVersionKind {
 
 func basePod(name, uid, group, worker string, createdAt metav1.Time) *corev1.Pod {
 	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              name,
-			Namespace:         testNamespace,
-			UID:               types.UID(uid),
-			ResourceVersion:   "10",
-			CreationTimestamp: createdAt,
-			Labels: map[string]string{
-				leaderworkersetv1.SetNameLabelKey:     "decode",
-				leaderworkersetv1.GroupIndexLabelKey:  group,
-				leaderworkersetv1.WorkerIndexLabelKey: worker,
-				leaderworkersetv1.RevisionKey:         testRevision,
-			},
+		Name:              name,
+		Namespace:         testNamespace,
+		UID:               types.UID(uid),
+		ResourceVersion:   "10",
+		CreationTimestamp: createdAt,
+		Labels: map[string]string{
+			leaderworkersetv1.SetNameLabelKey:     "decode",
+			leaderworkersetv1.GroupIndexLabelKey:  group,
+			leaderworkersetv1.WorkerIndexLabelKey: worker,
+			leaderworkersetv1.RevisionKey:         testRevision,
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}

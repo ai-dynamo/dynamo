@@ -15,7 +15,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -137,7 +136,7 @@ func TestStatefulSetObservationPredicate(t *testing.T) {
 	})
 
 	t.Run("unrelated StatefulSet is excluded", func(t *testing.T) {
-		sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "unrelated", Namespace: testNamespace}}
+		sts := &appsv1.StatefulSet{Name: "unrelated", Namespace: testNamespace}
 		assert.False(t, pred.Create(event.CreateEvent{Object: sts}))
 	})
 }
@@ -162,7 +161,7 @@ func TestEnqueueDCDForPodAndStatefulSet(t *testing.T) {
 			Kind:       "DynamoComponentDeployment",
 			Name:       "other-dcd",
 			UID:        "other-dcd",
-			Controller: ptr.To(true),
+			Controller: new(true),
 		}}
 		mapped := f.reader(f.dcd, f.lws, other)
 
@@ -176,10 +175,10 @@ func TestEnqueueDCDForPodAndStatefulSet(t *testing.T) {
 	})
 
 	t.Run("unrelated Pod is excluded", func(t *testing.T) {
-		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		pod := &corev1.Pod{
 			Name: "deploy-pod", Namespace: testNamespace,
 			Labels: map[string]string{commonconsts.KubeLabelDynamoSelector: "decode"},
-		}}
+		}
 		assert.Empty(t, enqueueNames(t, EnqueueDCDForPod(reader), nil, pod))
 	})
 

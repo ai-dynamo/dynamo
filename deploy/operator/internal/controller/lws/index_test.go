@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -30,9 +29,9 @@ func TestSetNameIndexValues(t *testing.T) {
 	}{
 		{
 			name: "LWS Pod",
-			obj: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+			obj: &corev1.Pod{Labels: map[string]string{
 				leaderworkersetv1.SetNameLabelKey: "decode",
-			}}},
+			}},
 			want: []string{"decode"},
 		},
 		{name: "Pod without set name", obj: &corev1.Pod{}},
@@ -53,22 +52,22 @@ func TestListPodsBySetName(t *testing.T) {
 		WithScheme(scheme.Scheme).
 		WithIndex(&corev1.Pod{}, SetNameIndex, SetNameIndexValues).
 		WithObjects(
-			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			&corev1.Pod{
 				Name: "decode-0", Namespace: "inference",
 				Labels: map[string]string{leaderworkersetv1.SetNameLabelKey: "decode"},
-			}},
-			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			},
+			&corev1.Pod{
 				Name: "decode-0-1", Namespace: "inference",
 				Labels: map[string]string{leaderworkersetv1.SetNameLabelKey: "decode"},
-			}},
-			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			},
+			&corev1.Pod{
 				Name: "other", Namespace: "inference",
 				Labels: map[string]string{leaderworkersetv1.SetNameLabelKey: "other"},
-			}},
-			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			},
+			&corev1.Pod{
 				Name: "elsewhere", Namespace: "other-namespace",
 				Labels: map[string]string{leaderworkersetv1.SetNameLabelKey: "decode"},
-			}},
+			},
 		).
 		Build()
 
