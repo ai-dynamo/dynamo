@@ -326,8 +326,10 @@ device plugin:
 
 ```yaml
     decode:
+      envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
+      replicas: 4
       resources:
         limits:
           gpu: "1"
