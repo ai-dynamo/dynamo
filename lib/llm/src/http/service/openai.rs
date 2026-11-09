@@ -4130,6 +4130,15 @@ async fn chat_completions(
         return Err(err_response);
     }
 
+    // Refuse client multimodal kwargs the operator does not trust before any
+    // media is fetched or decoded.
+    if let Err(err_response) =
+        validate_chat_completion_mm_kwargs(state.mm_request_kwargs_policy(), &request)
+    {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
     // Handle required fields like messages shouldn't be empty.
     if let Err(err_response) = validate_chat_completion_required_fields(&request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -4553,6 +4562,40 @@ pub fn validate_chat_completion_unsupported_fields(
         ));
     }
 
+    Ok(())
+}
+
+/// Rejects client-supplied `mm_processor_kwargs` and `media_io_kwargs` that
+/// `policy` does not accept. A client value overrides the worker's own
+/// `--mm-processor-kwargs`, so without this a server limit such as `max_pixels`
+/// can be raised per request.
+pub fn validate_chat_completion_mm_kwargs(
+    policy: &service_v2::MmRequestKwargsPolicy,
+    request: &NvCreateChatCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    let fields = [
+        (
+            "mm_processor_kwargs",
+            request.inner.mm_processor_kwargs.as_ref(),
+        ),
+        ("media_io_kwargs", request.media_io_kwargs.as_ref()),
+    ];
+    for (field, value) in fields {
+        if let Err(key) = policy.check(value) {
+            let message = match key {
+                Some(key) => format!(
+                    "{VALIDATION_PREFIX}`{field}` key `{key}` is not allowed by this server's multimodal request kwargs policy"
+                ),
+                None => format!(
+                    "{VALIDATION_PREFIX}`{field}` is not allowed by this server's multimodal request kwargs policy"
+                ),
+            };
+            return Err(ErrorMessage::from_http_error(
+                ErrorClass::InvalidRequest,
+                HttpError { code: 400, message },
+            ));
+        }
+    }
     Ok(())
 }
 

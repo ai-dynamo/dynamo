@@ -90,6 +90,19 @@ authenticates the gateway on the gateway-to-frontend connection. End-user
 authentication and authorization remain the gateway's responsibility. See
 [HTTP TLS and mTLS](../../reference/components/tls-configuration.mdx#http-tls-and-mtls).
 
+### Limit client multimodal processing options
+
+For multimodal models, a client can send `mm_processor_kwargs` and `media_io_kwargs`
+in a chat completions request. These values override the worker's
+`--mm-processor-kwargs`, so a limit such as `max_pixels` does not bound a request
+that raises it. If you rely on such a limit, set `DYN_MM_REQUEST_KWARGS_POLICY=deny`
+on the frontend, or `allowlist` with `DYN_MM_REQUEST_KWARGS_ALLOWLIST` to keep
+specific keys such as `use_audio_in_video`. The default, `allow`, forwards client
+values unchanged. See
+[Client multimodal kwargs](../../reference/components/frontend-configuration.mdx#client-multimodal-kwargs).
+This setting covers `/v1/chat/completions` and does not yet cover `/v1/pooling` or
+`/v1/classify`.
+
 ## Securing the Internal Communication Planes
 
 Dynamo components coordinate over three internal communication planes —

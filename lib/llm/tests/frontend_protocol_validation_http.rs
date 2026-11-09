@@ -15,7 +15,8 @@ use dynamo_runtime::{
     config::environment_names::llm::{
         DYN_DISABLE_FRONTEND_NVEXT, DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
         DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
-        DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
+        DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, DYN_MM_REQUEST_KWARGS_ALLOWLIST,
+        DYN_MM_REQUEST_KWARGS_POLICY,
     },
     error::{DynamoError, ErrorType as DynamoErrorType},
 };
@@ -34,11 +35,13 @@ mod scripted_chat_engine;
 use http_harness::{HarnessService, MODEL, load_agent_fixture};
 use scripted_chat_engine::{Script, ScriptedChatEngine};
 
-const BASE_ENV: [(&str, Option<&str>); 4] = [
+const BASE_ENV: [(&str, Option<&str>); 6] = [
     (DYN_ENABLE_ANTHROPIC_API, Some("1")),
     (DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0")),
     (DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, None),
     (DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, None),
+    (DYN_MM_REQUEST_KWARGS_POLICY, None),
+    (DYN_MM_REQUEST_KWARGS_ALLOWLIST, None),
 ];
 
 fn nvext_disabled_env() -> Vec<(&'static str, Option<&'static str>)> {
@@ -533,6 +536,188 @@ fn strict_tool_requests(function: Value) -> [(&'static str, Value); 3] {
             }),
         ),
     ]
+}
+
+fn mm_policy_env(
+    policy: &'static str,
+    allowlist: Option<&'static str>,
+) -> Vec<(&'static str, Option<&'static str>)> {
+    let mut env = BASE_ENV.to_vec();
+    env.retain(|(name, _)| {
+        *name != DYN_MM_REQUEST_KWARGS_POLICY && *name != DYN_MM_REQUEST_KWARGS_ALLOWLIST
+    });
+    env.push((DYN_MM_REQUEST_KWARGS_POLICY, Some(policy)));
+    env.push((DYN_MM_REQUEST_KWARGS_ALLOWLIST, allowlist));
+    env
+}
+
+fn mm_chat_request(extra: Value) -> Value {
+    let mut body = json!({"model":MODEL,"messages":[{"role":"user","content":"hi"}]});
+    body.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    body
+}
+
+fn mm_ok_script() -> Script {
+    vec![Annotated::from_data(
+        serde_json::from_value(json!({
+            "id":"chat-ok","object":"chat.completion.chunk","created":1,"model":MODEL,
+            "choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},
+                        "finish_reason":"stop","logprobs":null}]
+        }))
+        .unwrap(),
+    )]
+}
+
+/// Asserts a 400 `Validation: ` rejection that never reached the engine.
+async fn assert_mm_kwargs_rejected(svc: &HarnessService, body: Value, expect_in_message: &str) {
+    let response = post_json(svc, "/v1/chat/completions", body).await;
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let error: Value = bounded(response.json()).await.unwrap();
+    assert_eq!(error["code"], 400);
+    assert_eq!(error["type"], "Bad Request");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.starts_with("Validation: "), "{message}");
+    assert!(message.contains(expect_in_message), "{message}");
+    assert!(svc.engine.take_requests().await.is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn mm_request_kwargs_deny_rejects_before_dispatch() {
+    temp_env::async_with_vars(mm_policy_env("deny", None), async {
+        let svc = HarnessService::start([mm_ok_script(), mm_ok_script(), mm_ok_script()]).await;
+        for streaming in [false, true] {
+            assert_mm_kwargs_rejected(
+                &svc,
+                mm_chat_request(json!({"stream":streaming,"mm_processor_kwargs":{"max_pixels":1}})),
+                "`mm_processor_kwargs` is not allowed",
+            )
+            .await;
+            assert_mm_kwargs_rejected(
+                &svc,
+                mm_chat_request(
+                    json!({"stream":streaming,"media_io_kwargs":{"video":{"num_frames":16}}}),
+                ),
+                "`media_io_kwargs` is not allowed",
+            )
+            .await;
+        }
+        // Any other JSON shape is rejected too.
+        for odd in [json!([1]), json!("x")] {
+            assert_mm_kwargs_rejected(
+                &svc,
+                mm_chat_request(json!({"mm_processor_kwargs":odd})),
+                "`mm_processor_kwargs` is not allowed",
+            )
+            .await;
+        }
+        for (request_type, count) in [(RequestType::Unary, 4), (RequestType::Stream, 2)] {
+            assert_error_metrics(
+                &svc,
+                &Endpoint::ChatCompletions,
+                &request_type,
+                &[(ErrorType::Validation, count)],
+            );
+        }
+
+        // Requests without kwargs, or with empty ones, are not penalized.
+        for extra in [
+            json!({}),
+            json!({"mm_processor_kwargs":{}}),
+            json!({"mm_processor_kwargs":null,"media_io_kwargs":{}}),
+        ] {
+            let response = post_json(&svc, "/v1/chat/completions", mm_chat_request(extra)).await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+        }
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn mm_request_kwargs_allowlist_accepts_only_listed_keys() {
+    temp_env::async_with_vars(
+        mm_policy_env("allowlist", Some("use_audio_in_video")),
+        async {
+            let svc = HarnessService::start([mm_ok_script()]).await;
+            assert_mm_kwargs_rejected(
+                &svc,
+                mm_chat_request(json!({"mm_processor_kwargs":{
+                "use_audio_in_video":true,"max_pixels":1}})),
+                "key `max_pixels` is not allowed",
+            )
+            .await;
+            assert_mm_kwargs_rejected(
+                &svc,
+                mm_chat_request(json!({"media_io_kwargs":{"video":{"num_frames":16}}})),
+                "key `video` is not allowed",
+            )
+            .await;
+
+            let response = post_json(
+                &svc,
+                "/v1/chat/completions",
+                mm_chat_request(json!({"mm_processor_kwargs":{"use_audio_in_video":true}})),
+            )
+            .await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let requests = svc.engine.take_requests().await;
+            assert_eq!(requests.len(), 1);
+            assert_eq!(
+                requests[0].inner.mm_processor_kwargs,
+                Some(json!({"use_audio_in_video":true}))
+            );
+            svc.shutdown().await;
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn mm_request_kwargs_default_and_allow_forward_unchanged() {
+    let kwargs = json!({"max_pixels":1,"use_audio_in_video":true});
+    for env in [BASE_ENV.to_vec(), mm_policy_env("allow", None)] {
+        temp_env::async_with_vars(env, async {
+            let svc = HarnessService::start([mm_ok_script()]).await;
+            let response = post_json(
+                &svc,
+                "/v1/chat/completions",
+                mm_chat_request(
+                    json!({"mm_processor_kwargs":kwargs,"media_io_kwargs":{"video":{"fps":2}}}),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let requests = svc.engine.take_requests().await;
+            assert_eq!(requests[0].inner.mm_processor_kwargs, Some(kwargs.clone()));
+            assert_eq!(
+                requests[0].media_io_kwargs,
+                Some(json!({"video":{"fps":2}}))
+            );
+            svc.shutdown().await;
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn mm_request_kwargs_unrecognized_policy_fails_closed() {
+    temp_env::async_with_vars(mm_policy_env("denny", None), async {
+        let svc = HarnessService::start(Vec::new()).await;
+        assert_mm_kwargs_rejected(
+            &svc,
+            mm_chat_request(json!({"mm_processor_kwargs":{"max_pixels":1}})),
+            "`mm_processor_kwargs` is not allowed",
+        )
+        .await;
+        svc.shutdown().await;
+    })
+    .await;
 }
 
 #[tokio::test]

@@ -1047,6 +1047,26 @@ A frontend that serves text-only models can refuse media before routing. A refus
   Environment variable: `DYN_REJECT_MEDIA_STATUS_CODE`
 </ParamField>
 
+### Client multimodal kwargs
+
+`/v1/chat/completions` accepts `mm_processor_kwargs` and `media_io_kwargs` in the request body and forwards them to the worker. A request value overrides the worker's own `--mm-processor-kwargs`, so a client can raise a limit such as `max_pixels` and increase the image token count, encoder memory, and processor-cache size. The frontend can refuse these fields before it fetches or decodes any media. A refused request never reaches a worker and receives HTTP `400` with a message that starts with `Validation: `.
+
+This policy covers `/v1/chat/completions`. It does not apply to `/v1/pooling` or `/v1/classify`, which also accept `mm_processor_kwargs`.
+
+<ParamField path="DYN_MM_REQUEST_KWARGS_POLICY" type="string" default="allow">
+  How the frontend treats client-supplied `mm_processor_kwargs` and `media_io_kwargs`:
+
+  - `allow`: forward them unchanged.
+  - `deny`: reject a request whose value is a non-empty object, or any other non-null JSON shape.
+  - `allowlist`: accept only the top-level keys in `DYN_MM_REQUEST_KWARGS_ALLOWLIST`.
+
+  Absent, `null`, and `{}` values are always accepted. An unrecognized value is treated as `deny` and logged as an error, so a typo does not remove the restriction. The policy is read once when the frontend starts.
+</ParamField>
+
+<ParamField path="DYN_MM_REQUEST_KWARGS_ALLOWLIST" type="string" default="">
+  Comma-separated top-level keys that `allowlist` accepts, for example `use_audio_in_video`. For `media_io_kwargs` the top-level keys are modality names such as `video`, and the frontend does not inspect the values under them. An empty list rejects every non-empty value.
+</ParamField>
+
 ### Endpoint path customization
 
 All endpoint paths can be overridden via environment variables:
