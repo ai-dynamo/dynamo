@@ -647,7 +647,7 @@ impl ResponseStreamConverter {
                 self.append_reasoning_delta(reasoning, events);
             }
 
-            // Handle text content deltas â extract text from the enum
+            // Handle text content deltas — extract text from the enum
             let content_text = match &delta.content {
                 Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
                 Some(ChatCompletionMessageContent::Parts(_)) => {
@@ -3674,7 +3674,7 @@ mod tests {
             item_id: "msg_1".to_string(),
             output_index: 0,
             content_index: 0,
-            delta: "line\nquote\"slash\\ cjk æ¼¢å­ emoji ð".to_string(),
+            delta: "line\nquote\"slash\\ cjk 漢字 emoji 🚀".to_string(),
             logprobs: Some(vec![]),
         });
         let tool_event = ResponseStreamEvent::ResponseFunctionCallArgumentsDone(
