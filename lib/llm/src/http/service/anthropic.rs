@@ -920,7 +920,6 @@ async fn anthropic_messages(
                         };
 
                         converter.append_chunk_events(&stream_resp, &mut events);
-                        converter.append_usage_ping(&mut events);
                         for event in events.drain(..) {
                             yield event.map_err(axum::Error::new);
                         }

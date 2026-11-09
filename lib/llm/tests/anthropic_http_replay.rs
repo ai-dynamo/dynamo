@@ -480,7 +480,7 @@ async fn completed_tool_block_precedes_gated_tail(#[case] per_tool_completion: b
 /// `fragmented-tool.sse` with cumulative usage on each tool-call chunk, two
 /// output tokens per chunk as with speculative decoding (2, 4, 6), and the
 /// position of its finish chunk.
-async fn tool_script_with_running_usage() -> (Script, usize) {
+async fn tool_script_with_running_usage(step: u32) -> (Script, usize) {
     let mut script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
     let mut output = 0;
     for data in script.iter_mut().filter_map(|chunk| chunk.data.as_mut()) {
@@ -490,7 +490,7 @@ async fn tool_script_with_running_usage() -> (Script, usize) {
             .iter()
             .any(|choice| choice.delta.tool_calls.is_some())
         {
-            output += 2;
+            output += step;
             data.inner.usage = Some(CompletionUsage {
                 prompt_tokens: 30,
                 completion_tokens: output,
@@ -500,7 +500,7 @@ async fn tool_script_with_running_usage() -> (Script, usize) {
             });
         }
     }
-    assert_eq!(output, 6);
+    assert_eq!(output, 3 * step);
     let finish = script
         .iter()
         .position(|chunk| {
@@ -531,7 +531,7 @@ fn list_tmp_request() -> Value {
 #[serial]
 async fn held_tool_call_usage_reaches_client_before_the_call_completes() {
     temp_env::async_with_vars(ENV, async {
-        let (script, finish) = tool_script_with_running_usage().await;
+        let (script, finish) = tool_script_with_running_usage(2).await;
         let (svc, gate) = HarnessService::start_with_gated_tail(script, finish).await;
         let response = post_messages(&svc, &list_tmp_request()).await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
@@ -603,29 +603,33 @@ async fn held_tool_call_usage_reaches_client_before_the_call_completes() {
 #[serial]
 async fn backend_error_mid_tool_call_keeps_generated_usage() {
     temp_env::async_with_vars(ENV, async {
-        let (mut script, finish) = tool_script_with_running_usage().await;
-        script.truncate(finish);
-        let error = DynamoError::builder()
-            .error_type(DynamoErrorType::Backend(BackendError::EngineShutdown))
-            .message("engine died mid tool call")
-            .build();
-        let svc = HarnessService::start_with_backend_error(script, error).await;
-        let response = post_messages(&svc, &list_tmp_request()).await;
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let events = parse_anthropic_sse(&response.text().await.unwrap())
-            .await
-            .unwrap();
+        // With one token per chunk the last chunk stays within the ping
+        // tolerance, so only the error path can publish it.
+        for step in [1, 2] {
+            let (mut script, finish) = tool_script_with_running_usage(step).await;
+            script.truncate(finish);
+            let error = DynamoError::builder()
+                .error_type(DynamoErrorType::Backend(BackendError::EngineShutdown))
+                .message("engine died mid tool call")
+                .build();
+            let svc = HarnessService::start_with_backend_error(script, error).await;
+            let response = post_messages(&svc, &list_tmp_request()).await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let events = parse_anthropic_sse(&response.text().await.unwrap())
+                .await
+                .unwrap();
 
-        assert_eq!(events.last().unwrap().event, "error");
-        let last_usage = events
-            .iter()
-            .rev()
-            .find_map(|event| event.data.get("usage"))
-            .expect("no usage reached the client before the error");
-        assert_eq!(last_usage["output_tokens"], 6);
-        assert_eq!(last_usage["total_tokens"], 36);
+            assert_eq!(events.last().unwrap().event, "error");
+            let last_usage = events
+                .iter()
+                .rev()
+                .find_map(|event| event.data.get("usage"))
+                .expect("no usage reached the client before the error");
+            assert_eq!(last_usage["output_tokens"], 3 * step, "step {step}");
+            assert_eq!(last_usage["total_tokens"], 30 + 3 * step, "step {step}");
 
-        svc.shutdown().await;
+            svc.shutdown().await;
+        }
     })
     .await;
 }
