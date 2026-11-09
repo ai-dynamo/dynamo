@@ -1,17 +1,51 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::protocols::{ExternalSequenceBlockHash, ResidencyOwnerKey, WorkerWithDpRank};
-use rustc_hash::FxHashSet;
+use super::MatchDetails;
+use crate::protocols::{
+    ExternalSequenceBlockHash, LocalBlockHash, ResidencyOwnerKey, WorkerWithDpRank,
+};
+use rustc_hash::{FxHashMap, FxHashSet};
+
+/// Coverage at the start of a compressed edge, before its blocks are compared.
+#[derive(Clone, Copy)]
+pub struct MatchEdge<'a> {
+    pub full_workers: &'a FxHashSet<WorkerWithDpRank>,
+    pub worker_cutoffs: &'a FxHashMap<WorkerWithDpRank, usize>,
+    pub incoming_workers: &'a FxHashSet<WorkerWithDpRank>,
+    pub prefix_depth: usize,
+    pub first_node: bool,
+    /// The attention walk's existing equal-set check needs no coverage update.
+    pub all_workers_continue: bool,
+}
+
+/// The first edge's actual compared prefix, borrowed under its existing read
+/// guard. Candidate cutoffs bound credit independently of the physical edge.
+pub struct MatchFirstEdge<'a> {
+    pub full_workers: &'a FxHashSet<WorkerWithDpRank>,
+    pub worker_cutoffs: &'a FxHashMap<WorkerWithDpRank, usize>,
+    pub matched_blocks: &'a [(LocalBlockHash, ExternalSequenceBlockHash)],
+    pub query_blocks: usize,
+    pub requested_endpoint: Option<ExternalSequenceBlockHash>,
+    pub terminal: bool,
+}
 
 /// Optional query-local evidence collection during an attention-tree walk.
 ///
 /// Candidate workers are announced before the first block. Block positions are
 /// one-based from the request root; final worker scores bound each worker's
 /// actual coverage. Callbacks must not mutate or reenter the indexer and should
-/// only use query-local state or immutable snapshots: concurrent trees invoke
-/// them under their existing node read guard.
+/// only update query-local state. External reads may take checkpoint-record
+/// locks, but must not acquire tree mutation locks: concurrent trees invoke
+/// callbacks under their existing node read guard.
 pub trait MatchObserver: Send {
+    /// Return true to observe each block immediately after it matches. This
+    /// replaces the first-edge proof and deferred callbacks for this edge.
+    /// Coverage ending inside the edge must be frozen before a later block.
+    fn begin_edge(&mut self, _edge: MatchEdge<'_>) -> bool {
+        false
+    }
+
     /// A proof-only observer needs the first-node boundary and final endpoint,
     /// but no per-worker or per-block callbacks. Returning false never changes
     /// the attention walk itself.
@@ -27,9 +61,30 @@ pub trait MatchObserver: Send {
     fn begin_path(&mut self, count: usize, _endpoint_hint: Option<ExternalSequenceBlockHash>) {
         self.reserve_workers(count);
     }
+    /// Opt into a common credit bound after comparing the first edge. Returning
+    /// a positive bound stops this query only; the tree additionally verifies
+    /// it does not exceed the matched prefix or any candidate's cutoff. The
+    /// observer is responsible for proving the bound applies to every worker.
+    fn begin_first_edge(&mut self, edge: MatchFirstEdge<'_>) -> Option<usize> {
+        self.begin_path(
+            edge.full_workers.len() + edge.worker_cutoffs.len(),
+            edge.requested_endpoint,
+        );
+        None
+    }
     fn observe_worker(&mut self, worker: WorkerWithDpRank);
     fn observe_cache_owner(&mut self, _owner: ResidencyOwnerKey) {}
     fn observe_block(&mut self, position: usize, hash: ExternalSequenceBlockHash);
+
+    /// Fused observers can borrow the walk's candidate coverage without copying it.
+    fn observe_block_with_coverage(
+        &mut self,
+        position: usize,
+        hash: ExternalSequenceBlockHash,
+        _edge: &MatchEdge<'_>,
+    ) {
+        self.observe_block(position, hash);
+    }
 
     /// Exact eligible workers at a common final endpoint. The tree verifies
     /// every returned worker while emitting its ordinary result. The observer
@@ -40,6 +95,19 @@ pub trait MatchObserver: Send {
         _hash: ExternalSequenceBlockHash,
     ) -> Option<&FxHashSet<WorkerWithDpRank>> {
         None
+    }
+
+    /// Consume the query-owned surviving set while emitting final credit. Prior
+    /// cutoff results are already in `details`; implementations must handle
+    /// those too. Returning the set delegates ordinary emission to the tree.
+    fn emit_match_details(
+        &mut self,
+        active: FxHashSet<WorkerWithDpRank>,
+        _raw_end: u32,
+        _raw_hash: Option<ExternalSequenceBlockHash>,
+        _details: &mut MatchDetails,
+    ) -> Result<(), FxHashSet<WorkerWithDpRank>> {
+        Err(active)
     }
 }
 
@@ -90,6 +158,78 @@ mod tests {
 
     fn query() -> Vec<LocalBlockHash> {
         vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(99)]
+    }
+
+    struct BoundedObserver {
+        bound: usize,
+        recording: RecordingObserver,
+    }
+
+    impl MatchObserver for BoundedObserver {
+        fn begin_first_edge(&mut self, edge: MatchFirstEdge<'_>) -> Option<usize> {
+            assert_eq!(edge.matched_blocks.len(), 2);
+            assert!(edge.terminal);
+            self.recording.begin_path(
+                edge.full_workers.len() + edge.worker_cutoffs.len(),
+                edge.requested_endpoint,
+            );
+            Some(self.bound)
+        }
+
+        fn observe_worker(&mut self, worker: WorkerWithDpRank) {
+            self.recording.observe_worker(worker);
+        }
+
+        fn observe_block(&mut self, position: usize, hash: ExternalSequenceBlockHash) {
+            self.recording.observe_block(position, hash);
+        }
+    }
+
+    #[tokio::test]
+    async fn observer_credit_bound_is_limited_by_actual_matches_and_worker_cutoffs() {
+        let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 16);
+        for worker in [1, 2] {
+            indexer
+                .apply_event_and_wait(make_store_event(worker, &[11, 12, 13]))
+                .await
+                .unwrap();
+        }
+        indexer
+            .apply_event_and_wait(make_remove_event_with_parent(2, &[11], &[12, 13]))
+            .await
+            .unwrap();
+        for bound in [0, 1, 2, 3, usize::MAX] {
+            let mut observer = BoundedObserver {
+                bound,
+                recording: RecordingObserver::default(),
+            };
+            let details = indexer.backend().find_match_details_impl_with_observer(
+                &query(),
+                false,
+                true,
+                &mut observer,
+            );
+            let accepted = bound == 1;
+            assert_eq!(
+                details.overlap_scores.scores[&WorkerWithDpRank::new(1, 0)],
+                if accepted { 1 } else { 2 },
+            );
+            assert_eq!(
+                details.overlap_scores.scores[&WorkerWithDpRank::new(2, 0)],
+                1
+            );
+            let chain = &details
+                .kv_transfer_candidates
+                .as_ref()
+                .unwrap()
+                .block_hashes;
+            assert_eq!(chain.len(), if accepted { 1 } else { 2 });
+            if accepted {
+                assert!(observer.recording.blocks.is_empty());
+            } else {
+                assert_observed_prefix(&observer.recording, &details);
+            }
+        }
     }
 
     struct UniformProofObserver {

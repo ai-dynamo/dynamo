@@ -13,7 +13,8 @@ use crate::protocols::{LocalBlockHash, OverlapScores};
 use crate::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
 
 use super::backend::{Indexer, RemotePrimary, SideIndexer};
-use crate::indexer::hybrid_prefix::{EndpointPrefixProof, HybridPrefixEvaluator, cap_side_overlay};
+use crate::indexer::forward_prefix::ForwardDeviceEvaluator;
+use crate::indexer::hybrid_prefix::{HybridPrefixEvaluator, cap_side_overlay};
 
 /// Block hashes for one lookup, borrowed when the caller keeps them and owned
 /// when it does not, so a borrowed query is copied only at the one boundary
@@ -245,7 +246,7 @@ impl<'a> LookupPipeline<'a> {
             if (!with_side || self.side.is_none())
                 && let Some(details) = self
                     .primary
-                    .try_endpoint_proof(sequence, retain, max_blocks, residency)
+                    .find_forward_device(sequence, retain, max_blocks, residency)
             {
                 return Ok(details);
             }
@@ -301,7 +302,7 @@ impl<'a> LookupPipeline<'a> {
         let (mut device, lower) = if let Some(residency) = self.group_residency() {
             if lower_tier.is_empty()
                 && (!with_side || self.side.is_none())
-                && let Some(device) = self.primary.try_endpoint_proof(
+                && let Some(device) = self.primary.find_forward_device(
                     sequence,
                     options.retain_kv_transfer_chain,
                     options.max_reusable_blocks,
@@ -419,7 +420,7 @@ impl<'a> LookupPipeline<'a> {
 }
 
 impl<'a> PrimaryLookup<'a> {
-    fn try_endpoint_proof(
+    fn find_forward_device(
         &self,
         sequence: &HashInput<'_>,
         retain: bool,
@@ -429,26 +430,15 @@ impl<'a> PrimaryLookup<'a> {
         let Self::Concurrent(primary) = self else {
             return None;
         };
-        let sequence = sequence.as_slice();
-        let end = max_blocks.unwrap_or(sequence.len()).min(sequence.len());
-        if end == 0 && !sequence.is_empty() {
-            return None;
-        }
-        // A bounded walk is accepted only when its exact complete cohort is
-        // proven hybrid. Otherwise retry the full query: an unknown dense
-        // worker must retain the general evaluator's original raw coverage.
-        let mut proof = if end < sequence.len() {
-            EndpointPrefixProof::bounded(residency)
-        } else {
-            EndpointPrefixProof::new(residency)
-        };
+        let mut evaluator = ForwardDeviceEvaluator::new(residency, max_blocks);
         let mut details = primary.backend().find_match_details_impl_with_observer(
-            &sequence[..end],
+            sequence.as_slice(),
             false,
             retain,
-            &mut proof,
+            &mut evaluator,
         );
-        proof.finish(&mut details).then_some(details)
+        evaluator.finish(&mut details);
+        Some(details)
     }
 
     async fn find_observed(
@@ -607,7 +597,7 @@ pub(super) async fn merge_side_or_warn(
 
 #[cfg(test)]
 mod tests {
-    use super::{EndpointPrefixProof, HybridPrefixEvaluator};
+    use super::{ForwardDeviceEvaluator, HybridPrefixEvaluator};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -714,7 +704,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn endpoint_proof_matches_general_evaluator_and_rejects_removed_state() {
+    async fn forward_presence_matches_general_evaluator_and_observes_cleared_state() {
         use crate::indexer::HybridResumeCaps;
 
         for missing in [false, true] {
@@ -722,7 +712,7 @@ mod tests {
             let sequence: Vec<_> = [11, 12, 13].into_iter().map(LocalBlockHash).collect();
             let chain = compute_seq_hash_for_block(&sequence);
             let workers = [WorkerWithDpRank::new(1, 0), WorkerWithDpRank::new(2, 0)];
-            // Finish all layout publications before storing the common endpoint.
+            // Declare every layout before storing the common checkpoint.
             for worker in workers {
                 indexer.declare_recurrent_layout(worker, &[0, 1], 1);
             }
@@ -796,27 +786,28 @@ mod tests {
                     actual.hybrid_resume_caps,
                     HybridResumeCaps::UniformConfirmed { .. }
                 ));
-                let mut proof = EndpointPrefixProof::new(lower_tier.group_residency());
-                let speculative = primary
-                    .backend()
-                    .find_match_details_impl_with_observer(&sequence, false, false, &mut proof);
-                assert!(proof.confirms(&speculative));
                 lower_tier.group_residency().clear_worker(workers[0]);
-                assert!(
-                    !proof.confirms(&speculative),
-                    "state invalidation fences an in-flight proof"
+                let mut observer = ForwardDeviceEvaluator::new(lower_tier.group_residency(), None);
+                let mut after_clear = primary.backend().find_match_details_impl_with_observer(
+                    &sequence,
+                    false,
+                    false,
+                    &mut observer,
                 );
+                observer.finish(&mut after_clear);
+                assert!(!after_clear.overlap_scores.scores.contains_key(&workers[0]));
+                assert_eq!(after_clear.hybrid_resume_caps.get(&workers[0]), Some(&0));
             } else {
                 assert!(matches!(
                     actual.hybrid_resume_caps,
-                    HybridResumeCaps::Explicit(_)
+                    HybridResumeCaps::SparseConfirmed(_)
                 ));
             }
         }
     }
 
     #[tokio::test]
-    async fn bounded_endpoint_proof_matches_general_caps_and_keeps_dense_fallback_coverage() {
+    async fn bounded_forward_presence_matches_general_caps_and_keeps_dense_coverage() {
         use crate::indexer::HybridResumeCaps;
 
         for with_dense_worker in [false, true] {

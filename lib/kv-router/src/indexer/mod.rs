@@ -64,6 +64,8 @@ fn warn_on_unit_block_size(indexer_type: &'static str, kv_block_size: u32) {
 }
 // The standalone-indexer lookup is the optional consumer of this module.
 #[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
+pub(crate) mod forward_prefix;
+#[cfg_attr(not(feature = "standalone-indexer"), allow(dead_code))]
 pub(crate) mod hybrid_prefix;
 mod kv_cache_groups;
 mod kv_indexer;
@@ -98,7 +100,7 @@ pub use kv_indexer::*;
 pub use local::*;
 pub use lower_tier::*;
 pub use lower_tier_indexers::*;
-pub use match_observer::MatchObserver;
+pub use match_observer::{MatchEdge, MatchFirstEdge, MatchObserver};
 pub use metrics::*;
 #[cfg(feature = "bench")]
 pub use observation::*;

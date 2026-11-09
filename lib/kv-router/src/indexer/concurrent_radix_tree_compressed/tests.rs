@@ -18,6 +18,95 @@ fn worker(worker_id: u64) -> WorkerWithDpRank {
     WorkerWithDpRank::new(worker_id, 0)
 }
 
+#[test]
+fn fused_observer_runs_before_comparing_the_next_block() {
+    type Trace = Arc<parking_lot::Mutex<Vec<(char, usize)>>>;
+
+    struct Sequence {
+        blocks: Vec<LocalBlockHash>,
+        trace: Trace,
+    }
+
+    impl HashSequence for Sequence {
+        fn len(&self) -> usize {
+            self.blocks.len()
+        }
+
+        fn at(&self, index: usize) -> LocalBlockHash {
+            self.trace.lock().push(('c', index));
+            self.blocks[index]
+        }
+    }
+
+    struct Observer(Trace);
+
+    impl MatchObserver for Observer {
+        fn begin_edge(&mut self, edge: crate::indexer::MatchEdge<'_>) -> bool {
+            assert!(edge.first_node);
+            assert_eq!(edge.prefix_depth, 0);
+            self.0.lock().push(('e', edge.prefix_depth));
+            true
+        }
+
+        fn begin_first_edge(&mut self, _edge: crate::indexer::MatchFirstEdge<'_>) -> Option<usize> {
+            panic!("fused observers must not probe the terminal checkpoint first");
+        }
+
+        fn observe_worker(&mut self, _worker: WorkerWithDpRank) {
+            panic!("begin_edge supplies candidate coverage");
+        }
+
+        fn observe_block(&mut self, position: usize, _hash: ExternalSequenceBlockHash) {
+            self.0.lock().push(('o', position));
+        }
+    }
+
+    let tree = ConcurrentRadixTreeCompressed::new();
+    apply_direct(
+        &tree,
+        &mut direct_lookup(),
+        make_store_event(1, &[11, 12, 13, 14]),
+    );
+    let trace = Trace::default();
+    let sequence = Sequence {
+        blocks: local_hashes(&[11, 12, 13, 99]),
+        trace: trace.clone(),
+    };
+    let mut active = WorkerSet::default();
+    let mut scores = OverlapScores::default();
+    let outcome = tree
+        .root
+        .child_snapshot(LocalBlockHash(11))
+        .unwrap()
+        .find_match_step(FindStepInput {
+            sequence: &sequence,
+            seq_pos: 0,
+            first_node: true,
+            prev_depth: 0,
+            prev_edge_last_hash: None,
+            active: &mut active,
+            scores: &mut scores,
+            last_matched_hashes: None,
+            kv_transfer_chain: None,
+            observer: Some(&mut Observer(trace.clone())),
+        });
+
+    assert_eq!(outcome.edge_match_len, 3);
+    assert_eq!(outcome.active_count, 1);
+    assert_eq!(
+        *trace.lock(),
+        [
+            ('e', 0),
+            ('o', 1),
+            ('c', 1),
+            ('o', 2),
+            ('c', 2),
+            ('o', 3),
+            ('c', 3)
+        ],
+    );
+}
+
 fn direct_lookup() -> DirectLookup {
     LaneLookup::default()
 }

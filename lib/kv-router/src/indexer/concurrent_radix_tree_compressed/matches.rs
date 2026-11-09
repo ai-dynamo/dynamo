@@ -192,10 +192,21 @@ impl ConcurrentRadixTreeCompressed {
         walk_result: MatchWalkResult,
         mut observer: Option<&mut dyn MatchObserver>,
     ) {
+        let mut active = walk_result.active.into_workers();
+        if let Some(observer) = observer.as_deref_mut() {
+            match observer.emit_match_details(
+                active,
+                walk_result.matched_depth,
+                walk_result.prev_edge_last_hash,
+                details,
+            ) {
+                Ok(()) => return,
+                Err(workers) => active = workers,
+            }
+        }
         // A uniform result has no earlier cutoffs or workers dropped at a node
         // boundary. Its already-owned active set can carry the immutable caps.
-        let eligible = if details.overlap_scores.scores.is_empty() && !walk_result.active.is_empty()
-        {
+        let eligible = if details.overlap_scores.scores.is_empty() && !active.is_empty() {
             walk_result.prev_edge_last_hash.and_then(|hash| {
                 observer.as_mut().and_then(|observer| {
                     observer.uniform_resume_workers(walk_result.matched_depth, hash)
@@ -206,7 +217,7 @@ impl ConcurrentRadixTreeCompressed {
         };
         if let Some(eligible) = eligible {
             let mut confirmed = true;
-            for worker in &walk_result.active {
+            for worker in &active {
                 confirmed &= eligible.contains(worker);
                 details
                     .overlap_scores
@@ -218,12 +229,12 @@ impl ConcurrentRadixTreeCompressed {
             }
             if confirmed {
                 details.hybrid_resume_caps = super::super::HybridResumeCaps::uniform_confirmed(
-                    walk_result.active.into_workers(),
+                    active,
                     walk_result.matched_depth,
                 );
             }
         } else {
-            for worker in &walk_result.active {
+            for worker in &active {
                 details
                     .overlap_scores
                     .scores
