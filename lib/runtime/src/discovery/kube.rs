@@ -42,13 +42,14 @@ fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
     Ok(())
 }
 
-async fn update_model_taints_and_persist<F, Fut>(
+async fn update_metadata_and_persist<T, U, F, Fut>(
     metadata: &Arc<RwLock<DiscoveryMetadata>>,
-    id: ModelCardInstanceId,
-    taints: HashSet<String>,
+    update: U,
     persist: F,
-) -> Result<bool>
+) -> Result<T>
 where
+    T: Send + 'static,
+    U: FnOnce(&mut DiscoveryMetadata) -> Result<T> + Send + 'static,
     F: FnOnce(DiscoveryMetadata) -> Fut + Send + 'static,
     Fut: Future<Output = Result<DiscoveryMetadata>> + Send + 'static,
 {
@@ -59,16 +60,16 @@ where
     tokio::spawn(async move {
         let mut metadata = metadata.write().await;
         let mut candidate = metadata.clone();
-        let changed = candidate.update_model_taints(&id, taints)?;
+        let result = update(&mut candidate)?;
 
         // Persist even a local no-op. This repairs an authoritative CR that may differ after an
         // earlier commit/ack ambiguity instead of trusting potentially stale local metadata.
         let persisted = persist(candidate).await?;
         *metadata = persisted;
-        Ok(changed)
+        Ok(result)
     })
     .await
-    .map_err(|error| anyhow::anyhow!("model taint persistence task failed: {error}"))?
+    .map_err(|error| anyhow::anyhow!("discovery persistence task failed: {error}"))?
 }
 
 /// Kubernetes-based discovery client
@@ -85,6 +86,26 @@ pub struct KubeDiscoveryClient {
 }
 
 impl KubeDiscoveryClient {
+    async fn update_metadata<T, U>(&self, update: U) -> Result<T>
+    where
+        T: Send + 'static,
+        U: FnOnce(&mut DiscoveryMetadata) -> Result<T> + Send + 'static,
+    {
+        let kube_client = self.kube_client.clone();
+        let pod_info = self.pod_info.clone();
+        update_metadata_and_persist(&self.metadata, update, move |candidate| async move {
+            let cr = build_cr(
+                &pod_info.target.cr_name(),
+                &pod_info.pod_name,
+                &pod_info.pod_uid,
+                &candidate,
+            )?;
+            apply_cr(&kube_client, &pod_info.pod_namespace, &cr).await?;
+            Ok(candidate)
+        })
+        .await
+    }
+
     /// Waits until the daemon holds its first complete view of the cluster.
     ///
     /// Fails when the daemon stopped or failed first, or when `cancel_token` fires.
@@ -219,81 +240,58 @@ impl Discovery for KubeDiscoveryClient {
             instance_id
         );
 
-        // Write to local metadata and persist to CR
-        // IMPORTANT: Hold the write lock across the CR write to prevent race conditions
-        let mut metadata = self.metadata.write().await;
-
-        // Clone state for rollback in case CR persistence fails
-        let original_state = metadata.clone();
-
-        let registered_instance = match &instance {
-            DiscoveryInstance::Endpoint(inst) => {
-                tracing::info!(
-                    "Registering endpoint: namespace={}, component={}, endpoint={}, instance_id={:x}",
-                    inst.namespace,
-                    inst.component,
-                    inst.endpoint,
-                    instance_id
-                );
-                metadata.register_endpoint(instance.clone())?;
-                instance.clone()
-            }
-            DiscoveryInstance::Model {
-                namespace,
-                component,
-                endpoint,
-                ..
-            } => {
-                tracing::info!(
-                    "Registering model card: namespace={}, component={}, endpoint={}, instance_id={:x}",
+        let registered_instance = self.update_metadata(move |candidate| {
+            let registered_instance = match &instance {
+                DiscoveryInstance::Endpoint(inst) => {
+                    tracing::info!(
+                        "Registering endpoint: namespace={}, component={}, endpoint={}, instance_id={:x}",
+                        inst.namespace,
+                        inst.component,
+                        inst.endpoint,
+                        instance_id
+                    );
+                    candidate.register_endpoint(instance.clone())?;
+                    instance.clone()
+                }
+                DiscoveryInstance::Model {
                     namespace,
                     component,
                     endpoint,
-                    instance_id
-                );
-                metadata.register_model_card(instance.clone())?
-            }
-            DiscoveryInstance::EventChannel { scope, topic, .. } => {
-                tracing::info!(
-                    "Registering event channel: scope={:?}, topic={}, instance_id={:x}",
-                    scope,
-                    topic,
-                    instance_id
-                );
-                metadata.register_event_channel(instance.clone())?;
-                instance.clone()
-            }
-            DiscoveryInstance::EventSource { scope, topic, .. } => {
-                tracing::info!(
-                    "Registering event source: scope={:?}, topic={}, publisher_id={:x}",
-                    scope,
-                    topic,
-                    instance_id
-                );
-                metadata.register_event_source(instance.clone())?;
-                instance.clone()
-            }
-        };
+                    ..
+                } => {
+                    tracing::info!(
+                        "Registering model card: namespace={}, component={}, endpoint={}, instance_id={:x}",
+                        namespace,
+                        component,
+                        endpoint,
+                        instance_id
+                    );
+                    candidate.register_model_card(instance.clone())?
+                }
+                DiscoveryInstance::EventChannel { scope, topic, .. } => {
+                    tracing::info!(
+                        "Registering event channel: scope={:?}, topic={}, instance_id={:x}",
+                        scope,
+                        topic,
+                        instance_id
+                    );
+                    candidate.register_event_channel(instance.clone())?;
+                    instance.clone()
+                }
+                DiscoveryInstance::EventSource { scope, topic, .. } => {
+                    tracing::info!(
+                        "Registering event source: scope={:?}, topic={}, publisher_id={:x}",
+                        scope,
+                        topic,
+                        instance_id
+                    );
+                    candidate.register_event_source(instance.clone())?;
+                    instance.clone()
+                }
+            };
 
-        // Build and apply the CR with the updated metadata
-        // This persists the metadata to Kubernetes for other pods to discover
-        let cr_name = self.pod_info.target.cr_name();
-        let cr = build_cr(
-            &cr_name,
-            &self.pod_info.pod_name,
-            &self.pod_info.pod_uid,
-            &metadata,
-        )?;
-
-        if let Err(e) = apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await {
-            // Rollback local state on CR persistence failure
-            tracing::warn!(
-                "Failed to persist metadata to CR, rolling back local state: {}",
-                e
-            );
-            *metadata = original_state;
-            return Err(e);
-        }
+            Ok(registered_instance)
+        }).await?;
 
         tracing::debug!("Persisted metadata to DynamoWorkerMetadata CR");
 
@@ -305,22 +303,9 @@ impl Discovery for KubeDiscoveryClient {
         id: ModelCardInstanceId,
         taints: HashSet<String>,
     ) -> Result<()> {
-        let kube_client = self.kube_client.clone();
-        let pod_namespace = self.pod_info.pod_namespace.clone();
-        let cr_name = self.pod_info.target.cr_name();
-        let pod_name = self.pod_info.pod_name.clone();
-        let pod_uid = self.pod_info.pod_uid.clone();
-        let changed = update_model_taints_and_persist(
-            &self.metadata,
-            id,
-            taints,
-            move |candidate| async move {
-                let cr = build_cr(&cr_name, &pod_name, &pod_uid, &candidate)?;
-                apply_cr(&kube_client, &pod_namespace, &cr).await?;
-                Ok(candidate)
-            },
-        )
-        .await?;
+        let changed = self
+            .update_metadata(move |candidate| candidate.update_model_taints(&id, taints))
+            .await?;
         if !changed {
             return Ok(());
         }
@@ -332,78 +317,55 @@ impl Discovery for KubeDiscoveryClient {
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
         let instance_id = instance.instance_id();
 
-        // Write to local metadata and persist to CR
-        // IMPORTANT: Hold the write lock across the CR write to prevent race conditions
-        let mut metadata = self.metadata.write().await;
-
-        // Clone state for rollback in case CR persistence fails
-        let original_state = metadata.clone();
-
-        match &instance {
-            DiscoveryInstance::Endpoint(inst) => {
-                tracing::info!(
-                    "Unregistering endpoint: namespace={}, component={}, endpoint={}, instance_id={:x}",
-                    inst.namespace,
-                    inst.component,
-                    inst.endpoint,
-                    instance_id
-                );
-                metadata.unregister_endpoint(&instance)?;
-            }
-            DiscoveryInstance::Model {
-                namespace,
-                component,
-                endpoint,
-                ..
-            } => {
-                tracing::info!(
-                    "Unregistering model card: namespace={}, component={}, endpoint={}, instance_id={:x}",
+        self.update_metadata(move |candidate| {
+            match &instance {
+                DiscoveryInstance::Endpoint(inst) => {
+                    tracing::info!(
+                        "Unregistering endpoint: namespace={}, component={}, endpoint={}, instance_id={:x}",
+                        inst.namespace,
+                        inst.component,
+                        inst.endpoint,
+                        instance_id
+                    );
+                    candidate.unregister_endpoint(&instance)?;
+                }
+                DiscoveryInstance::Model {
                     namespace,
                     component,
                     endpoint,
-                    instance_id
-                );
-                metadata.unregister_model_card(&instance)?;
+                    ..
+                } => {
+                    tracing::info!(
+                        "Unregistering model card: namespace={}, component={}, endpoint={}, instance_id={:x}",
+                        namespace,
+                        component,
+                        endpoint,
+                        instance_id
+                    );
+                    candidate.unregister_model_card(&instance)?;
+                }
+                DiscoveryInstance::EventChannel { scope, topic, .. } => {
+                    tracing::info!(
+                        "Unregistering event channel: scope={:?}, topic={}, instance_id={:x}",
+                        scope,
+                        topic,
+                        instance_id
+                    );
+                    candidate.unregister_event_channel(&instance)?;
+                }
+                DiscoveryInstance::EventSource { scope, topic, .. } => {
+                    tracing::info!(
+                        "Unregistering event source: scope={:?}, topic={}, publisher_id={:x}",
+                        scope,
+                        topic,
+                        instance_id
+                    );
+                    candidate.unregister_event_source(&instance)?;
+                }
             }
-            DiscoveryInstance::EventChannel { scope, topic, .. } => {
-                tracing::info!(
-                    "Unregistering event channel: scope={:?}, topic={}, instance_id={:x}",
-                    scope,
-                    topic,
-                    instance_id
-                );
-                metadata.unregister_event_channel(&instance)?;
-            }
-            DiscoveryInstance::EventSource { scope, topic, .. } => {
-                tracing::info!(
-                    "Unregistering event source: scope={:?}, topic={}, publisher_id={:x}",
-                    scope,
-                    topic,
-                    instance_id
-                );
-                metadata.unregister_event_source(&instance)?;
-            }
-        }
 
-        // Build and apply the CR with the updated metadata
-        // This persists the removal to Kubernetes for other pods to see
-        let cr_name = self.pod_info.target.cr_name();
-        let cr = build_cr(
-            &cr_name,
-            &self.pod_info.pod_name,
-            &self.pod_info.pod_uid,
-            &metadata,
-        )?;
-
-        if let Err(e) = apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await {
-            // Rollback local state on CR persistence failure
-            tracing::warn!(
-                "Failed to persist metadata removal to CR, rolling back local state: {}",
-                e
-            );
-            *metadata = original_state;
-            return Err(e);
-        }
+            Ok(())
+        }).await?;
 
         tracing::debug!("Persisted metadata removal to DynamoWorkerMetadata CR");
 
@@ -636,13 +598,22 @@ mod tests {
                 Ok::<_, std::convert::Infallible>(response)
             }
         });
-        let discovery = KubeDiscoveryClient {
+        let discovery = discovery_client(KubeClient::new(service, "default"));
+        assert!(discovery.check_connection().await.is_err());
+        available.store(true, Ordering::Release);
+        assert!(discovery.check_connection().await.is_ok());
+        available.store(false, Ordering::Release);
+        assert!(discovery.check_connection().await.is_err());
+    }
+
+    fn discovery_client(kube_client: KubeClient) -> KubeDiscoveryClient {
+        KubeDiscoveryClient {
             instance_id: 1,
             metadata: Arc::new(RwLock::new(DiscoveryMetadata::new())),
             list_state: Arc::new(RwLock::new(HashMap::new())),
             event_tx: broadcast::channel(1).0,
             daemon_state: watch::channel(DaemonState::Pending).1,
-            kube_client: KubeClient::new(service, "default"),
+            kube_client,
             pod_info: PodInfo {
                 pod_name: "worker".into(),
                 pod_namespace: "default".into(),
@@ -651,12 +622,72 @@ mod tests {
                 mode: KubeDiscoveryMode::Pod,
                 target: utils::KubeDiscoveryTarget::Pod("worker".into()),
             },
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::transient(503, 2, true)]
+    #[case::permanent(422, 1, false)]
+    #[tokio::test]
+    async fn registration_commits_only_after_persistence(
+        #[case] error_code: u16,
+        #[case] expected_writes: usize,
+        #[case] succeeds: bool,
+    ) {
+        use axum::{
+            body::Body,
+            http::{Request, Response},
         };
-        assert!(discovery.check_connection().await.is_err());
-        available.store(true, Ordering::Release);
-        assert!(discovery.check_connection().await.is_ok());
-        available.store(false, Ordering::Release);
-        assert!(discovery.check_connection().await.is_err());
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let writes = Arc::new(AtomicUsize::new(0));
+        let service_writes = writes.clone();
+        let service = tower::service_fn(move |request: Request<kube::client::Body>| {
+            let writes = service_writes.clone();
+            async move {
+                let response = match request.method().as_str() {
+                    "GET" => Response::builder().status(404).body(Body::from(
+                        r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404,"message":"not found"}"#,
+                    )).unwrap(),
+                    "POST" => {
+                        if writes.fetch_add(1, Ordering::SeqCst) == 0 {
+                            Response::builder().status(error_code).body(Body::from(
+                                serde_json::json!({
+                                    "kind": "Status", "apiVersion": "v1", "status": "Failure",
+                                    "reason": "InjectedFailure", "code": error_code, "message": "injected failure"
+                                }).to_string(),
+                            )).unwrap()
+                        } else {
+                            let body = axum::body::to_bytes(Body::new(request.into_body()), usize::MAX).await.unwrap();
+                            Response::builder().status(201).body(Body::from(body)).unwrap()
+                        }
+                    }
+                    method => panic!("unexpected method: {method}"),
+                };
+                Ok::<_, std::convert::Infallible>(response)
+            }
+        });
+        let discovery = discovery_client(KubeClient::new(service, "default"));
+        let spec = DiscoverySpec::Endpoint {
+            namespace: "ns".into(),
+            component: "component".into(),
+            endpoint: "endpoint".into(),
+            transport: TransportType::Tcp("127.0.0.1:1234".into()),
+            device_type: None,
+            request_plane_codec: None,
+        };
+        let instance = spec.clone().into_instance(discovery.instance_id());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            discovery.register_internal(spec),
+        )
+        .await
+        .expect("registration did not finish");
+        assert_eq!(result.is_ok(), succeeds);
+        assert_eq!(writes.load(Ordering::SeqCst), expected_writes);
+        let metadata = discovery.metadata.read().await;
+        let expected = if succeeds { vec![instance] } else { vec![] };
+        assert_eq!(metadata.get_all_endpoints(), expected);
     }
 
     fn endpoint_instance(instance_id: u64, transport: &str) -> DiscoveryInstance {
@@ -934,10 +965,11 @@ mod tests {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
 
         let task = tokio::spawn(async move {
-            update_model_taints_and_persist(
+            update_metadata_and_persist(
                 &task_metadata,
-                id,
-                HashSet::from(["new".to_string()]),
+                move |candidate| {
+                    candidate.update_model_taints(&id, HashSet::from(["new".to_string()]))
+                },
                 move |candidate| async move {
                     *task_remote.write().await = candidate.clone();
                     remote_committed_tx.send(()).unwrap();
@@ -996,10 +1028,9 @@ mod tests {
         let persisted = Arc::new(RwLock::new(None));
         let task_persisted = persisted.clone();
 
-        let changed = update_model_taints_and_persist(
+        let changed = update_metadata_and_persist(
             &metadata,
-            id,
-            HashSet::from(["old".to_string()]),
+            move |candidate| candidate.update_model_taints(&id, HashSet::from(["old".to_string()])),
             move |candidate| async move {
                 *task_persisted.write().await = Some(candidate.clone());
                 Ok(candidate)
