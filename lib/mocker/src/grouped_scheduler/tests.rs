@@ -17,6 +17,43 @@ use crate::live::{LiveEngine, LiveEngineOptions};
 
 use super::*;
 
+#[test]
+fn host_loop_is_rejected_before_live_tasks_start() {
+    let args = MockerConfig::from_value(serde_json::json!({
+        "engine": {"backend": "sglang", "sglang": {"host_loop": true}}
+    }))
+    .unwrap();
+    let grouped = create_grouped_scheduler(
+        args.clone(),
+        vec![GroupedSchedulerRankSinks::default()],
+        None,
+    );
+    assert!(
+        grouped
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("sglang.host_loop")
+    );
+    let single = create_single_rank_scheduler_with_rank_sink(
+        args,
+        0,
+        RankSinks {
+            output: RankOutputSink::None,
+            kv_event_publishers: KvEventPublishers::default(),
+            fpm_publisher: FpmPublisher::default(),
+        },
+        None,
+    );
+    assert!(
+        single
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("sglang.host_loop")
+    );
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CapturedEffect {
     KvStored,
@@ -119,6 +156,148 @@ fn cancellation_translation_preserves_explicit_discard() {
     }
 }
 
+#[test]
+fn cache_usage_retains_admission_measurement_without_inventing_missing_counts() {
+    let compatibility = CompatibilityState::new(args(1));
+    let request_id = Uuid::from_u128(29);
+    compatibility.native_request(request(29, 0)).unwrap();
+    let output = |completed| aisimulate_core::engine::Output {
+        request_id,
+        token_id: None,
+        completed,
+        rejected: false,
+        cached_tokens: None,
+    };
+    assert_eq!(
+        compatibility.output_signal(output(false)).cached_tokens,
+        None
+    );
+    for reused_input_tokens in [2, 4] {
+        compatibility.record_admissions(&[Admission {
+            request_id,
+            reused_input_tokens,
+            cache_tier_attribution: None,
+        }]);
+    }
+    assert_eq!(
+        compatibility.output_signal(output(false)).cached_tokens,
+        Some(2)
+    );
+    assert_eq!(
+        compatibility.output_signal(output(false)).cached_tokens,
+        None
+    );
+    assert_eq!(
+        compatibility.output_signal(output(true)).cached_tokens,
+        None
+    );
+    compatibility.native_request(request(29, 0)).unwrap();
+    assert_eq!(
+        compatibility.output_signal(output(false)).cached_tokens,
+        None
+    );
+    for reused_input_tokens in [0, 4] {
+        compatibility.record_admissions(&[Admission {
+            request_id,
+            reused_input_tokens,
+            cache_tier_attribution: None,
+        }]);
+    }
+    assert_eq!(
+        compatibility.output_signal(output(false)).cached_tokens,
+        Some(0)
+    );
+    assert_eq!(
+        compatibility
+            .output_signal(aisimulate_core::engine::Output {
+                cached_tokens: Some(3),
+                ..output(false)
+            })
+            .cached_tokens,
+        Some(3)
+    );
+    compatibility.apply_cleanup(Cleanup::Request(request_id));
+    assert_eq!(
+        compatibility.output_signal(output(true)).cached_tokens,
+        None
+    );
+}
+
+#[test]
+fn terminal_cache_usage_preserves_explicit_counts_and_cleans_up() {
+    for (explicit, expected) in [(None, Some(2)), (Some(0), Some(0)), (Some(3), Some(3))] {
+        let compatibility = CompatibilityState::new(args(1));
+        let request_id = Uuid::from_u128(30);
+        compatibility.native_request(request(30, 0)).unwrap();
+        compatibility.record_admissions(&[Admission {
+            request_id,
+            reused_input_tokens: 2,
+            cache_tier_attribution: None,
+        }]);
+        let output = aisimulate_core::engine::Output {
+            request_id,
+            token_id: None,
+            completed: true,
+            rejected: false,
+            cached_tokens: explicit,
+        };
+        assert_eq!(compatibility.output_signal(output).cached_tokens, expected);
+        compatibility.native_request(request(30, 0)).unwrap();
+        assert_eq!(
+            compatibility
+                .output_signal(aisimulate_core::engine::Output {
+                    request_id,
+                    token_id: None,
+                    completed: true,
+                    rejected: false,
+                    cached_tokens: None,
+                })
+                .cached_tokens,
+            None
+        );
+    }
+}
+
+#[tokio::test]
+async fn sglang_zero_output_reports_cold_and_warm_admission_cache_usage() {
+    let mut config = args(1);
+    config.backend = crate::common::protocols::EngineType::Sglang;
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let GroupedSchedulers {
+        schedulers, actor, ..
+    } = create_grouped_scheduler(
+        config,
+        vec![GroupedSchedulerRankSinks {
+            output_tx: Some(output_tx),
+            ..Default::default()
+        }],
+        Some(cancel.clone()),
+    )
+    .unwrap();
+    for (id, expected_cached) in [(40, 0), (41, 4)] {
+        schedulers[0]
+            .request_sender()
+            .send(DirectRequest {
+                tokens: vec![1, 2, 3, 4],
+                max_output_tokens: 0,
+                uuid: Some(Uuid::from_u128(id)),
+                ..Default::default()
+            })
+            .unwrap();
+        let outputs = tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let output = outputs.last().unwrap();
+        assert!(output.completed);
+        assert!(!output.rejected);
+        assert_eq!(output.cached_tokens, Some(expected_cached));
+    }
+    cancel.cancel();
+    actor.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn noop_cancellation_only_cleans_metadata_when_output_is_discarded() {
     for (suppressed_pending_output, expect_handoff_delay) in [(false, true), (true, false)] {
@@ -128,7 +307,9 @@ async fn noop_cancellation_only_cleans_metadata_when_output_is_discarded() {
         engine_args.kv_transfer_bytes_per_token = Some(1_000_000);
         let compatibility = CompatibilityState::new(engine_args);
         let request_id = Uuid::from_u128(10 + u128::from(suppressed_pending_output));
-        compatibility.native_request(request(request_id.as_u128(), 0));
+        compatibility
+            .native_request(request(request_id.as_u128(), 0))
+            .unwrap();
 
         let (lifecycle_tx, _lifecycle_rx) = mpsc::channel(1);
         let (metrics_tx, _metrics_rx) = watch::channel(MockerMetrics::new(0, 0, 128));

@@ -14,7 +14,7 @@ use dynamo_kv_router::plugins::{RouterPluginRegistry, WorkerSelectionPolicyRegis
 /// A catalog that supplies both plugin types can return `Result<(), Box<dyn std::error::Error>>`
 /// while worker-only catalogs can return `WorkerSelectionPolicyRegistryError`.
 ///
-/// The policies Dynamo ships are registered separately from `dynamo-custom-policy-builtin`, so
+/// The policies Dynamo ships are registered separately from `dynamo-router-policies`, so
 /// replacing this crate adds policies alongside them rather than displacing them.
 pub fn register(
     _registry: &mut RouterPluginRegistry,

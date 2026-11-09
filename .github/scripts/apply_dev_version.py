@@ -30,6 +30,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from helm_chart_version import set_chart_versions
+
 PYPROJECT_TARGETS = [
     "pyproject.toml",
     "lib/bindings/python/pyproject.toml",
@@ -372,38 +374,6 @@ def stamp_workspace_pin(path: Path, new: str, inject: bool = True) -> list[str]:
     return stamped
 
 
-def set_helm(path: Path, old: str, new: str) -> None:
-    text = path.read_text()
-
-    # Top-level version/appVersion set unconditionally: a rewrite keyed on `old`
-    # leaves stale values when a reused branch widens the helm subset.
-    top = re.compile(
-        r'^(?P<pre>(?:appVersion|version)\s*:\s*)(?P<q>"?)[^"\n]*(?P=q)(?P<post>\s*)$',
-        re.MULTILINE,
-    )
-    text, n_top = top.subn(
-        lambda m: f"{m.group('pre')}{m.group('q')}{new}{m.group('q')}{m.group('post')}",
-        text,
-    )
-    if n_top == 0:
-        raise RuntimeError(f"no top-level version/appVersion in {path}")
-
-    # dynamo-operator (file:// subchart) pin always rides the workspace version;
-    # the hop is bounded to the entry so it can't reach nats/etcd/....
-    text = re.sub(
-        r"(?m)^(\s*-\s+name:\s*dynamo-operator\s*\n"
-        r"(?:(?!\s*-\s)[^\n]*\n)*?"
-        r'\s*version\s*:\s*)("?)[^"\n]*\2(\s*)$',
-        lambda m: f"{m.group(1)}{m.group(2)}{new}{m.group(2)}{m.group(3)}",
-        text,
-    )
-
-    # Deliberately no generic indented-version rewrite: dynamo-operator is the
-    # only first-party dep pin, and a keyed catch-all would clobber a foreign
-    # pin that equals the workspace version (nats is pinned 1.3.2).
-    path.write_text(text)
-
-
 # Bounds the repository->tag hop at the next `repository:` line, so a block
 # with no tag fails loudly instead of rewriting another image's tag.
 _TAG_HOP = r"(?:(?![^\n]*repository:)[^\n]*\n)*?"
@@ -669,7 +639,7 @@ def set_release_version(
     # Chart identity -- only for charts in the --helm subset.
     for token, rel in HELM_CHART_TARGETS:
         if token in helm and _exists(rel):
-            set_helm(root / rel, old, semver)
+            set_chart_versions(root / rel, semver)
     # First-party image tags: published image -> new_version (NGC tag form, not
     # SemVer); published chart with excluded image -> pin to the recorded tag; no
     # recorded tag (''/'my-tag') -> fail at cut time, the chart could never resolve.

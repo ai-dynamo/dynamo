@@ -20,8 +20,11 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
+
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -29,7 +32,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -1007,6 +1009,8 @@ func oldWorkerPodsTerminated(dcds []*nvidiacomv1beta1.DynamoComponentDeployment,
 	return true
 }
 
+// oldWorkerComponentDrained reports whether componentName's old worker DCDs
+// are at zero replicas and all their Pods are terminal.
 func (r *dgdWorkerRolloutReconciler) oldWorkerComponentDrained(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -1016,30 +1020,11 @@ func (r *dgdWorkerRolloutReconciler) oldWorkerComponentDrained(
 	if !oldWorkerDCDsAtZero(oldDCDs) {
 		return false, nil
 	}
-	pods, err := r.listDGDComponentPods(ctx, dgd, componentName)
+	pods, err := podcontroller.ListComponentPods(ctx, r, dgd.Namespace, dgd.Name, componentName)
 	if err != nil {
 		return false, err
 	}
 	return oldWorkerPodsTerminated(oldDCDs, pods), nil
-}
-
-func (r *dgdWorkerRolloutReconciler) listDGDComponentPods(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	componentName string,
-) ([]corev1.Pod, error) {
-	podList := &corev1.PodList{}
-	if err := r.List(
-		ctx,
-		podList,
-		client.InNamespace(dgd.Namespace),
-		client.MatchingFields{
-			dgdComponentPodIndex: dgdComponentPodIndexValue(dgd.Name, componentName),
-		},
-	); err != nil {
-		return nil, fmt.Errorf("failed to list pods for DGD %s component %s: %w", dgd.Name, componentName, err)
-	}
-	return podList.Items, nil
 }
 
 // getDesiredWorkerReplicas returns the total desired replicas across all worker components.
@@ -1537,9 +1522,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 		oldWorkerComponentReplicas[componentName] = oldTarget
 		newWorkerReplicas[componentName] = newTarget
 
-		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDs, oldTarget) {
-			oldWorkerDCDReplicas[dcdName] = target
-		}
+		maps.Copy(oldWorkerDCDReplicas, allocateOldWorkerDCDReplicas(oldDCDs, oldTarget))
 
 		logger.V(1).Info("Worker update replica calculation",
 			"component", componentName,
@@ -1560,9 +1543,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			continue
 		}
 		oldWorkerComponentReplicas[componentName] = 0
-		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDs, 0) {
-			oldWorkerDCDReplicas[dcdName] = target
-		}
+		maps.Copy(oldWorkerDCDReplicas, allocateOldWorkerDCDReplicas(oldDCDs, 0))
 	}
 
 	return dynamo.RollingUpdateContext{
@@ -1625,7 +1606,7 @@ func cloneInt64(value *int64) *int64 {
 	if value == nil {
 		return nil
 	}
-	return ptr.To(*value)
+	return new(*value)
 }
 
 func componentReplicaResourceNames(status *nvidiacomv1beta1.ComponentReplicaStatus, fallback string) []string {

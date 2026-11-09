@@ -46,7 +46,6 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
@@ -243,7 +242,7 @@ func restoreSharedAlphaOnlySimpleFields(dst *DynamoComponentDeploymentSharedSpec
 		dst.SubComponentType = preserved.SubComponentType
 	}
 	if dst.DynamoNamespace == nil && preserved.DynamoNamespace != nil {
-		dst.DynamoNamespace = ptr.To(*preserved.DynamoNamespace)
+		dst.DynamoNamespace = new(*preserved.DynamoNamespace)
 	}
 	if dst.Autoscaling == nil && preserved.Autoscaling != nil {
 		cp := *preserved.Autoscaling
@@ -331,7 +330,7 @@ func saveSharedAlphaOnlySpec(src, save *DynamoComponentDeploymentSharedSpec, inc
 		hasSave = true
 	}
 	if src.DynamoNamespace != nil {
-		save.DynamoNamespace = ptr.To(*src.DynamoNamespace)
+		save.DynamoNamespace = new(*src.DynamoNamespace)
 		hasSave = true
 	}
 	if src.Autoscaling != nil {
@@ -351,7 +350,7 @@ func saveSharedAlphaOnlySpec(src, save *DynamoComponentDeploymentSharedSpec, inc
 		hasSave = true
 	}
 	if src.EnvFromSecret != nil {
-		save.EnvFromSecret = ptr.To(*src.EnvFromSecret)
+		save.EnvFromSecret = new(*src.EnvFromSecret)
 		hasSave = true
 	}
 	if resourcesNeedPreservation(src.Resources) {
@@ -463,7 +462,7 @@ func saveSharedMainContainerOrigins(src, save *DynamoComponentDeploymentSharedSp
 	}
 	if src.EnvFromSecret != nil || len(main.EnvFrom) > 0 {
 		if src.EnvFromSecret != nil {
-			save.EnvFromSecret = ptr.To(*src.EnvFromSecret)
+			save.EnvFromSecret = new(*src.EnvFromSecret)
 		}
 		ensureExtraPodSpecMainContainer(save).EnvFrom = slices.Clone(main.EnvFrom)
 	}
@@ -610,7 +609,7 @@ func saveSharedHubOnlySpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, con
 		return nil
 	}
 	if sharedFrontendSidecarNeedsPreservation(src, converted) {
-		save.FrontendSidecar = ptr.To(*src.FrontendSidecar)
+		save.FrontendSidecar = new(*src.FrontendSidecar)
 	}
 	if src.PodTemplate != nil {
 		if err := saveSharedPodTemplateHubOnlyFields(src, converted, save); err != nil {
@@ -1559,7 +1558,7 @@ func buildSharedPodTemplateFromAlpha(src *DynamoComponentDeploymentSharedSpec, p
 
 func setFrontendSidecarReferenceToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec) {
 	if src.FrontendSidecar != nil {
-		dst.FrontendSidecar = ptr.To(defaultFrontendSidecarContainerName)
+		dst.FrontendSidecar = new(defaultFrontendSidecarContainerName)
 	}
 }
 
@@ -1576,7 +1575,7 @@ func buildMainContainerFromDedicated(src *DynamoComponentDeploymentSharedSpec) c
 	if src.EnvFromSecret != nil && *src.EnvFromSecret != "" {
 		ctr.EnvFrom = append(ctr.EnvFrom, corev1.EnvFromSource{
 			SecretRef: &corev1.SecretEnvSource{
-				LocalObjectReference: corev1.LocalObjectReference{Name: *src.EnvFromSecret},
+				Name: *src.EnvFromSecret,
 			},
 		})
 	}
@@ -1734,7 +1733,7 @@ func restoreSharedHubOnlyFrontendSidecar(dst, preserved *v1beta1.DynamoComponent
 		!podTemplateHasContainer(dst.PodTemplate, *preserved.FrontendSidecar) {
 		return
 	}
-	dst.FrontendSidecar = ptr.To(*preserved.FrontendSidecar)
+	dst.FrontendSidecar = new(*preserved.FrontendSidecar)
 }
 
 func sharedFrontendSidecarHasPreservedPodTemplateContainer(preserved *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
@@ -2248,7 +2247,7 @@ func appendFrontendSidecar(podTpl *corev1.PodTemplateSpec, fs *FrontendSidecarSp
 	if fs.EnvFromSecret != nil && *fs.EnvFromSecret != "" {
 		ctr.EnvFrom = append(ctr.EnvFrom, corev1.EnvFromSource{
 			SecretRef: &corev1.SecretEnvSource{
-				LocalObjectReference: corev1.LocalObjectReference{Name: *fs.EnvFromSecret},
+				Name: *fs.EnvFromSecret,
 			},
 		})
 	}
@@ -2273,9 +2272,9 @@ func frontendSidecarSpecFromContainer(ctr corev1.Container, origin *FrontendSide
 	out.Args = slices.Clone(ctr.Args)
 	out.Envs = slices.Clone(ctr.Env)
 	if secretName, ok := frontendSidecarEnvFromSecret(ctr.EnvFrom); ok {
-		out.EnvFromSecret = ptr.To(secretName)
+		out.EnvFromSecret = new(secretName)
 	} else if origin != nil && origin.EnvFromSecret != nil && *origin.EnvFromSecret == "" {
-		out.EnvFromSecret = ptr.To("")
+		out.EnvFromSecret = new("")
 	} else {
 		out.EnvFromSecret = nil
 	}
@@ -2362,7 +2361,7 @@ func restoreEnvFromSecretFromPreserved(dst, preserved *DynamoComponentDeployment
 		return
 	}
 	if *preserved.EnvFromSecret == "" {
-		dst.EnvFromSecret = ptr.To("")
+		dst.EnvFromSecret = new("")
 		return
 	}
 	if !mainContainerPresent {
@@ -2379,7 +2378,7 @@ func restoreEnvFromSecretFromPreserved(dst, preserved *DynamoComponentDeployment
 	if len(envFrom) == 0 || !envFromSecretMatches(envFrom[len(envFrom)-1], *preserved.EnvFromSecret) {
 		return
 	}
-	dst.EnvFromSecret = ptr.To(*preserved.EnvFromSecret)
+	dst.EnvFromSecret = new(*preserved.EnvFromSecret)
 	dst.ExtraPodSpec.MainContainer.EnvFrom = slices.Clone(envFrom[:len(envFrom)-1])
 	if len(dst.ExtraPodSpec.MainContainer.EnvFrom) == 0 {
 		dst.ExtraPodSpec.MainContainer.EnvFrom = nil
@@ -2721,7 +2720,7 @@ func appendMissingVolumeMounts(dst []VolumeMount, mounts []VolumeMount) []Volume
 func envFromSecretMatches(envFrom corev1.EnvFromSource, name string) bool {
 	return apiequality.Semantic.DeepEqual(envFrom, corev1.EnvFromSource{
 		SecretRef: &corev1.SecretEnvSource{
-			LocalObjectReference: corev1.LocalObjectReference{Name: name},
+			Name: name,
 		},
 	})
 }

@@ -110,13 +110,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         clang \
         libclang-dev \
         libfontconfig-dev && \
-    # Use system python explicitly: some runtime bases put a framework venv first on PATH.
-    # PIP_BREAK_SYSTEM_PACKAGES env var works across pip versions: pip >=23 honours
-    # it; older pip silently ignores it but predates the PEP 668 EXTERNALLY-MANAGED
-    # marker (Ubuntu <23.04), so no override is needed there in the first place.
-    # pip >=26 made the --break-system-packages flag require a boolean argument,
-    # so the env-var form is the only portable spelling.
-    PIP_BREAK_SYSTEM_PACKAGES=1 /usr/bin/python3 -m pip install --no-cache-dir yq && \
+    # Target system Python even when a framework venv is first on PATH.
+    # Debian pip lacks RECORD metadata; overlay it instead of uninstalling it.
+    PIP_BREAK_SYSTEM_PACKAGES=1 /usr/bin/python3 -m pip install --no-cache-dir --ignore-installed --upgrade certifi==2026.10.23 pip==26.2.2 yq && \
     rm -rf /var/lib/apt/lists/* && \
     # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
     git lfs install
@@ -235,9 +231,13 @@ ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins
-{% elif framework == "trtllm" or (framework == "vllm" and device == "cuda") %}
-# trtllm and vLLM CUDA dev images inherit upstream containers that ship NIXL
-# inside Python wheels. These env vars provide a stable prefix for source builds.
+{% elif framework == "trtllm" %}
+# Reuse TRT-LLM's native SDK for source builds as well as runtime transfers.
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+# Runtime registers both architecture-specific native paths with ldconfig.
+# Keep those inherited paths rather than selecting another Python wheel copy.
+{% elif framework == "vllm" and device == "cuda" %}
+# vLLM's NIXL wheel provides the stable prefix used for source builds.
 # For vLLM CUDA, /opt/dynamo/nixl is a symlink to the wheel's
 # .nixl_cu${CUDA_MAJOR}.mesonpy.libs directory, with headers added by the dev stage.
 ENV NIXL_PREFIX=/opt/dynamo/nixl \
@@ -270,8 +270,10 @@ ENV CUDA_HOME=/usr/local/cuda \
 # Framework-specific paths are conditionally added in /etc/profile.d/50-framework-paths.sh
 ARG PYTHON_VERSION
 ENV LD_LIBRARY_PATH=\
+{% if framework != "trtllm" %}
 ${NIXL_LIB_DIR}:\
 ${NIXL_PLUGIN_DIR}:\
+{% endif %}
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 ${LD_LIBRARY_PATH}

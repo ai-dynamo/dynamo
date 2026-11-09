@@ -19,7 +19,6 @@ import (
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/yaml"
@@ -140,7 +139,7 @@ func main() {
 			patchData,
 			metav1.PatchOptions{
 				FieldManager: fieldManager,
-				Force:        ptr.To(true),
+				Force:        new(true),
 			},
 		)
 		if err != nil {

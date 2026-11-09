@@ -87,7 +87,7 @@ func TestWithPodIdentityClassifiesLoRAFallback(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Labels: tt.labels},
+				Labels: tt.labels,
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{
 					Name:    consts.MainContainerName,
 					Command: tt.command,
@@ -104,11 +104,11 @@ func TestWithPodIdentityClassifiesLoRAFallback(t *testing.T) {
 
 func TestWithPodIdentityFillsSharedModelSliceMetadata(t *testing.T) {
 	candidate := modelendpoint.Candidate{PodName: "prefill-0"}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+	pod := &corev1.Pod{Labels: map[string]string{
 		consts.KubeLabelDynamoSelector:            "graph-prefill-hash",
 		consts.KubeLabelDynamoComponent:           "prefill",
 		consts.KubeLabelDynamoGraphDeploymentName: "graph",
-	}}}
+	}}
 
 	identified := withPodIdentity(candidate, pod)
 	if identified.WorkloadName != "graph-prefill-hash" || identified.GraphDeploymentName != "graph" {
@@ -138,9 +138,9 @@ func TestWithPodIdentityClassifiesNativeSidecarLoRAFallback(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Configure a prefill Pod with separate engine and runtime launches")
 			pod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+				Labels: map[string]string{
 					consts.KubeLabelDynamoComponentType: consts.ComponentTypePrefill, consts.KubeLabelDynamoGraphDeploymentName: "graph",
-				}},
+				},
 				Spec: corev1.PodSpec{
 					Containers:     []corev1.Container{{Name: consts.MainContainerName, Command: tc.engine}},
 					InitContainers: []corev1.Container{{Name: "runtime", Command: tc.command}},
@@ -163,7 +163,7 @@ func TestWithPodIdentityClassifiesNativeSidecarLoRAFallback(t *testing.T) {
 
 func TestWithPodIdentityUsesControllerOwnerWhenSelectorIsAbsent(t *testing.T) {
 	controller := true
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+	pod := &corev1.Pod{
 		Labels: map[string]string{
 			consts.KubeLabelDynamoComponent:           "prefill",
 			consts.KubeLabelDynamoGraphDeploymentName: "graph",
@@ -172,8 +172,7 @@ func TestWithPodIdentityUsesControllerOwnerWhenSelectorIsAbsent(t *testing.T) {
 			Kind:       "LeaderWorkerSet",
 			Name:       "graph-prefill-hash",
 			Controller: &controller,
-		}},
-	}}
+		}}}
 
 	identified := withPodIdentity(modelendpoint.Candidate{PodName: "prefill-0"}, pod)
 	if identified.WorkloadName != "graph-prefill-hash" {

@@ -153,11 +153,13 @@ fn trtllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyo3(signature = (argv=None))]
 fn _run_trtllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = trtllm_sidecar_argv(argv.unwrap_or_default());
-    let bootstrap = dynamo_trtllm_sidecar::TrtllmSidecarEngine::try_from_args_async(cli_argv)
-        .map_err(sidecar_startup_to_pyerr)?;
-
-    py.allow_threads(move || dynamo_sidecar_common::run(bootstrap))
-        .map_err(sidecar_run_to_pyerr)
+    py.allow_threads(move || dynamo_trtllm_sidecar::run(cli_argv))
+        .map_err(
+            |err| match err.downcast::<dynamo_sidecar_common::SidecarStartupError>() {
+                Ok(startup) => sidecar_startup_to_pyerr(startup),
+                Err(error) => pyo3::exceptions::PyRuntimeError::new_err(error.to_string()),
+            },
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -1627,6 +1629,7 @@ fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
     let dp_rank: u32 = item.getattr("dp_rank")?.extract()?;
     match cls.as_str() {
         "ZmqSource" => Ok(RsKvEventSource::Zmq {
+            heartbeat_timeout: None,
             endpoint: item.getattr("endpoint")?.extract()?,
             topic: item.getattr("topic")?.extract()?,
             dp_rank,

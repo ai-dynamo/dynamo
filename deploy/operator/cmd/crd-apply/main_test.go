@@ -22,7 +22,6 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
 
@@ -30,7 +29,7 @@ const objectType = "object"
 
 func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 	t.Log("Start a local API server with its default request and storage limits")
-	env := &envtest.Environment{UseExistingCluster: ptr.To(false)}
+	env := &envtest.Environment{UseExistingCluster: new(false)}
 	config, err := env.Start()
 	if err != nil {
 		t.Fatal(err)

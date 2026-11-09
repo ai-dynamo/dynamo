@@ -62,6 +62,7 @@ from dynamo.trtllm.conversation_affinity import (
 )
 from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.engine_monitor import exit_worker_on_fatal_error
+from dynamo.trtllm.errors import guided_decoding_error_to_invalid_argument
 from dynamo.trtllm.health_check import HEALTH_CHECK_CACHE_SALT
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
@@ -1333,6 +1334,10 @@ class HandlerBase(BaseGenerativeHandler):
             generate_async = self.engine.llm.generate_async
             try:
                 generation_result = generate_async(**generate_kwargs)
+            except RequestError as e:
+                # The engine owns request validation, including its token budget.
+                # Surface pre-submission rejections as 400 without copying its rules.
+                raise InvalidArgument(str(e)) from e
             except (ValueError, TypeError, NotImplementedError) as e:
                 # TRT-LLM performs request validation and preprocessing synchronously in
                 # `generate_async()`, before executor submission. A TypeError can also mean
@@ -1599,14 +1604,18 @@ class HandlerBase(BaseGenerativeHandler):
         # 2. Per-request errors - send to client, don't shutdown
         except RequestError as e:
             error_msg = str(e)
-            logging.warning(f"Request {request_id} error: {error_msg}")
+            logging.warning("Request %s error: %s", request_id, error_msg)
+            if not output_tokens_per_choice:
+                client_error = guided_decoding_error_to_invalid_argument(error_msg)
+                if client_error is not None:
+                    raise client_error from e
             yield {
                 "finish_reason": {"error": error_msg},
                 "token_ids": [],
             }
 
-        # 3. EngineShutdown - let it propagate to the Rust bridge
-        except EngineShutdown:
+        # 3. Typed errors - let the Rust bridge preserve their error codes
+        except (EngineShutdown, InvalidArgument):
             raise
 
         # 4. ALL OTHER ERRORS - graceful shutdown
@@ -1678,6 +1687,12 @@ class HandlerBase(BaseGenerativeHandler):
             for key, value in request["sampling_options"].items()
             if value is not None
         }
+        # TRT-LLM's SamplingParams has no logit_bias field, so reject a
+        # non-empty bias instead of generating without it.
+        if overrides.pop("logit_bias", None):
+            raise InvalidArgument(
+                "logit_bias is not supported by the TensorRT-LLM backend"
+            )
         if "top_k" in overrides:
             overrides["top_k"] = normalize_top_k_for_trtllm(overrides["top_k"])
 

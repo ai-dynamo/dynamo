@@ -19,11 +19,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/rest"
-	k8sptr "k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -53,7 +51,7 @@ func TestDynamoGraphDeploymentValidateUpdateLPXGate(t *testing.T) {
 	oldDGD := newBetaDGDForValidation()
 	oldDGD.Spec.Components[0].ComponentType = nvidiacomv1beta1.ComponentTypeLPX
 	newDGD := oldDGD.DeepCopy()
-	newDGD.Spec.Components[0].Replicas = k8sptr.To(int32(2))
+	newDGD.Spec.Components[0].Replicas = new(int32(2))
 
 	t.Log("Invoke the stateful validator independently of the handler's new-state traversal")
 	ctx := features.WithGate(t.Context(), features.Gates{Grove: true})
@@ -74,10 +72,8 @@ func assertFieldPaths(t *testing.T, errs field.ErrorList, want []string) {
 
 func newBetaDGDForValidation() *nvidiacomv1beta1.DynamoGraphDeployment {
 	return &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-graph",
-			Namespace: "default",
-		},
+		Name:      "test-graph",
+		Namespace: "default",
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
@@ -85,7 +81,7 @@ func newBetaDGDForValidation() *nvidiacomv1beta1.DynamoGraphDeployment {
 					ComponentName:          "frontend",
 					ComponentType:          nvidiacomv1beta1.ComponentTypeFrontend,
 					RuntimeVersionOverride: "1.1.0",
-					Replicas:               k8sptr.To(int32(1)),
+					Replicas:               new(int32(1)),
 					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
 					}},
@@ -94,7 +90,7 @@ func newBetaDGDForValidation() *nvidiacomv1beta1.DynamoGraphDeployment {
 					ComponentName:          "worker",
 					ComponentType:          nvidiacomv1beta1.ComponentTypeWorker,
 					RuntimeVersionOverride: "1.1.0",
-					Replicas:               k8sptr.To(int32(2)),
+					Replicas:               new(int32(2)),
 					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
 					}},
@@ -288,7 +284,7 @@ func TestDynamoGraphDeploymentUpdateAllowsUnchangedRoleGMSState(t *testing.T) {
 		}}}}
 	}
 	oldDGD := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "roles", Namespace: "default"},
+		Name: "roles", Namespace: "default",
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
@@ -307,10 +303,9 @@ func TestDynamoGraphDeploymentUpdateAllowsUnchangedRoleGMSState(t *testing.T) {
 			}},
 		},
 	}
-	validation := &dynamoGraphDeploymentValidation{sharedValidation: sharedValidation{
+	validation := &dynamoGraphDeploymentValidation{
 		ctx:                  features.WithGate(context.Background(), features.Gates{Grove: true}),
-		runtimeVersionSource: runtimeVersionSourceV1Beta1,
-	}}
+		runtimeVersionSource: runtimeVersionSourceV1Beta1}
 
 	newDGD := oldDGD.DeepCopy()
 	assertFieldPaths(t, validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD), nil)

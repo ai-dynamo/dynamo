@@ -32,6 +32,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
+	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
 	vcbatchv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
@@ -48,6 +49,7 @@ func newClusterTestScheme() *runtime.Scheme {
 	utilruntime.Must(monitoringv1.AddToScheme(scheme))
 	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
 	utilruntime.Must(lwsscheme.AddToScheme(scheme))
+	utilruntime.Must(disaggregatedsetv1.AddToScheme(scheme))
 	utilruntime.Must(gaiev1.Install(scheme))
 	utilruntime.Must(appsv1.AddToScheme(scheme))
 	utilruntime.Must(admissionregistrationv1.AddToScheme(scheme))
