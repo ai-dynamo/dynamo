@@ -57,9 +57,10 @@ pub enum KvTokenIds {
     Bigram(Vec<(u64, u64)>),
 }
 
-/// Stand-in for a decoded token id that does not fit in `u32`. No vocabulary
-/// reaches it, and it is above `MM_PAD_SHIFT_VALUE`, so it always classifies as
-/// an unmapped multimodal value and fails closed.
+/// Stand-in for a decoded token id that does not fit in `u32`, and the mark on a
+/// block with a raw binary key. No vocabulary reaches it, and it is above
+/// `MM_PAD_SHIFT_VALUE`, so it always classifies as an unmapped multimodal value
+/// and fails closed.
 pub const WIDE_TOKEN_SENTINEL: u32 = u32::MAX;
 
 /// Per-event storage locality emitted by vLLM alongside `medium`. Absent on
