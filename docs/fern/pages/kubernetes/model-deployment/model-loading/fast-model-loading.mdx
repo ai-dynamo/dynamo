@@ -118,10 +118,12 @@ Run your normal PVC download Job. Because the directory default is now wide, eve
 Add the load format and (optionally) a concurrency hint to the vLLM worker:
 
 ```yaml
-services:
-  worker:
-    extraPodSpec:
-      mainContainer:
+components:
+- name: worker
+  podTemplate:
+    spec:
+      containers:
+      - name: main
         args:
           - --model
           - <org>/<model>

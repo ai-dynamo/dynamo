@@ -134,7 +134,7 @@ Deploy TensorRT-LLM with Dynamo on Kubernetes using a `DynamoGraphDeployment`. B
 
 ```bash
 # yq
-yq -i '(.spec.services[].extraPodSpec.mainContainer.image) |= sub(":1\.0\.2", ":<your-tag>")' deploy.yaml
+yq -i '(.spec.components[].podTemplate.spec.containers[] | select(.name == "main") | .image) |= sub(":1\.0\.2", ":<your-tag>")' deploy.yaml
 # sed fallback
 sed -i.bak 's|:1\.0\.2|:<your-tag>|g' deploy.yaml
 ```

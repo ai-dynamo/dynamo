@@ -1,52 +1,48 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: agg-kvbm-qwen3-32b
 spec:
-  pvcs:
-  - create: false
-    name: model-cache
-  - create: false
-    name: compilation-cache
-  services:
-    Frontend:
-      componentType: frontend
-      envs:
-        - name: HF_HOME
-          value: /home/dynamo/.cache/huggingface
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
-          workingDir: /workspace
           command:
-            - python3
-            - -m
-            - dynamo.frontend
-      replicas: 1
-      subComponentType: null
-    worker:
-      componentType: worker
-      envFromSecret: hf-token-secret
-      volumeMounts:
-      - name: model-cache
-        mountPoint: /home/dynamo/.cache/huggingface
-      - name: compilation-cache
-        mountPoint: /home/dynamo/.cache/vllm
-        useAsCompilationCache: true
-      extraPodSpec:
-        mainContainer:
+          - python3
+          - -m
+          - dynamo.frontend
+          workingDir: /workspace
+          env:
+          - name: HF_HOME
+            value: /home/dynamo/.cache/huggingface
+  - name: worker
+    type: worker
+    replicas: 1
+    compilationCache:
+      pvcName: compilation-cache
+      mountPath: /home/dynamo/.cache/vllm
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
           args:
           - --model
           - Qwen/Qwen3-32B
           - --kv-transfer-config
           - '{"kv_connector":"DynamoConnector","kv_role":"kv_both","kv_connector_module_path":"kvbm.vllm_integration.connector"}'
-          command:
-          - python3
-          - -m
-          - dynamo.vllm
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          workingDir: /workspace
           env:
           - name: DYN_HEALTH_CHECK_ENABLED
             value: "false"
@@ -55,12 +51,20 @@ spec:
           # NOTE: change this to tune the CPU cache size for your system
           - name: DYN_KVBM_CPU_CACHE_GB
             value: "100"
-          workingDir: /workspace
-      replicas: 1
-      resources:
-        limits:
-          gpu: "1"
-          memory: "200Gi"
-        requests:
-          gpu: "1"
-          memory: "150Gi"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            requests:
+              memory: "150Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "200Gi"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - name: model-cache
+            mountPath: /home/dynamo/.cache/huggingface
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache

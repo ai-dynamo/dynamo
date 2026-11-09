@@ -218,22 +218,24 @@ The vLLM example topology is in [examples/global_planner/global-planner-vllm-tes
 The `GlobalPlanner` section is minimal:
 
 ```yaml
-GlobalPlanner:
-  componentType: default
+components:
+- name: GlobalPlanner
   replicas: 1
-  extraPodSpec:
-    mainContainer:
-      image: ${DYNAMO_IMAGE}
-      command:
-        - python3
-        - -m
-        - dynamo.global_planner
-      args:
-        - --config
-        - |
-          {"managed_namespaces": ["${K8S_NAMESPACE}-gp-prefill-0",
-                                  "${K8S_NAMESPACE}-gp-prefill-1",
-                                  "${K8S_NAMESPACE}-gp-decode-0"]}
+  podTemplate:
+    spec:
+      containers:
+      - name: main
+        image: ${DYNAMO_IMAGE}
+        command:
+          - python3
+          - -m
+          - dynamo.global_planner
+        args:
+          - --config
+          - |
+            {"managed_namespaces": ["${K8S_NAMESPACE}-gp-prefill-0",
+                                    "${K8S_NAMESPACE}-gp-prefill-1",
+                                    "${K8S_NAMESPACE}-gp-decode-0"]}
 ```
 
 The values passed to `managed_namespaces` are the pool planners' **Dynamo namespaces** (`caller_namespace`), not raw Kubernetes namespaces. In many examples they share the same string prefix, but they are logically different identifiers.

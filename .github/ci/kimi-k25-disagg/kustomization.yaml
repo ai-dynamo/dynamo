@@ -4,6 +4,10 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: dynamo-nightly-dsv4
+# Provides the strategic-merge schema (x-kubernetes-list-type=map) so the
+# v1beta1 spec.components list merges by name instead of being replaced.
+components:
+- ../../../recipes/kustomize/components/dynamo-openapi
 commonLabels:
   ci-run: local
 resources:
@@ -28,18 +32,44 @@ patches:
     kind: DynamoGraphDeployment
     name: kimi-k25-disagg-kv-eagle
   patch: |-
+    # Components are sorted by name: Frontend is index 0, decode 1, prefill 2.
+    # The op: test guards pin the positional paths to the expected shape.
+    - op: test
+      path: /spec/components/0/name
+      value: Frontend
+    - op: test
+      path: /spec/components/0/podTemplate/spec/containers/0/name
+      value: main
     - op: add
-      path: /spec/services/Frontend/extraPodSpec/mainContainer/env/-
+      path: /spec/components/0/podTemplate/spec/containers/0/env/-
       value: {name: HF_HOME, value: /opt/models}
+    - op: test
+      path: /spec/components/1/name
+      value: decode
+    - op: test
+      path: /spec/components/1/podTemplate/spec/containers/0/name
+      value: main
+    - op: test
+      path: /spec/components/1/podTemplate/spec/volumes/0/name
+      value: model-cache
     - op: replace
-      path: /spec/services/prefill/extraPodSpec/resourceClaims/0/resourceClaimTemplateName
+      path: /spec/components/1/podTemplate/spec/resourceClaims/0/resourceClaimTemplateName
       value: kimi-k25-disagg-compute-domain-channel
     - op: replace
-      path: /spec/services/prefill/extraPodSpec/volumes/0/persistentVolumeClaim/claimName
+      path: /spec/components/1/podTemplate/spec/volumes/0/persistentVolumeClaim/claimName
       value: shared-model-cache
+    - op: test
+      path: /spec/components/2/name
+      value: prefill
+    - op: test
+      path: /spec/components/2/podTemplate/spec/containers/0/name
+      value: main
+    - op: test
+      path: /spec/components/2/podTemplate/spec/volumes/0/name
+      value: model-cache
     - op: replace
-      path: /spec/services/decode/extraPodSpec/resourceClaims/0/resourceClaimTemplateName
+      path: /spec/components/2/podTemplate/spec/resourceClaims/0/resourceClaimTemplateName
       value: kimi-k25-disagg-compute-domain-channel
     - op: replace
-      path: /spec/services/decode/extraPodSpec/volumes/0/persistentVolumeClaim/claimName
+      path: /spec/components/2/podTemplate/spec/volumes/0/persistentVolumeClaim/claimName
       value: shared-model-cache

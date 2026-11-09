@@ -111,19 +111,25 @@ Use the provided template for gpt-oss-20b with TP=2:
 
 # Deploy directly (adjust values as needed):
 kubectl apply -n <namespace> -f - <<'EOF'
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: gpt-oss-20b-bench
 spec:
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
         imagePullSecrets:
           - name: nvcrimagepullsecret
-        mainContainer:
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+        containers:
+        - name: main
           image: <your-image>
           command: ["/bin/sh", "-c"]
           args: ["python3 -m dynamo.frontend --router-mode round-robin --http-port 8000"]
@@ -142,22 +148,24 @@ spec:
           volumeMounts:
             - name: model-cache
               mountPath: /model-store
-        volumes:
-          - name: model-cache
-            persistentVolumeClaim:
-              claimName: model-cache
 
-    worker:
-      componentType: worker
-      replicas: 4                    # <-- number of backend replicas
-      extraPodSpec:
+  - name: worker
+    type: worker
+    replicas: 4                    # <-- number of backend replicas
+    podTemplate:
+      spec:
         imagePullSecrets:
           - name: nvcrimagepullsecret
         tolerations:
           - effect: NoSchedule
             key: nvidia.com/gpu
             operator: Exists
-        mainContainer:
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+        containers:
+        - name: main
           image: <your-image>
           command: ["/bin/sh", "-c"]
           args:
@@ -182,10 +190,6 @@ spec:
           volumeMounts:
             - name: model-cache
               mountPath: /model-store
-        volumes:
-          - name: model-cache
-            persistentVolumeClaim:
-              claimName: model-cache
 EOF
 
 # Wait for all pods to be ready

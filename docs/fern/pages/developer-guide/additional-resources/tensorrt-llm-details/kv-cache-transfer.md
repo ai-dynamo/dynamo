@@ -158,13 +158,16 @@ spec:
 Both prefill and decode services must include ResourceClaims:
 
 ```yaml
-resources:
-  claims:
-    - name: compute-domain-channel
-extraPodSpec:
-  resourceClaims:
-    - name: compute-domain-channel
-      resourceClaimTemplateName: my-compute-domain-channel
+podTemplate:
+  spec:
+    resourceClaims:
+      - name: compute-domain-channel
+        resourceClaimTemplateName: my-compute-domain-channel
+    containers:
+    - name: main
+      resources:
+        claims:
+          - name: compute-domain-channel
 ```
 
 Required NCCL environment variables for GB200:

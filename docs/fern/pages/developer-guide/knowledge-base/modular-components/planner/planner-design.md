@@ -201,7 +201,7 @@ Directly PATCHes the DGD resource to update replica counts. The operator watches
 **Design decisions:**
 
 - Uses `DYN_PARENT_DGD_K8S_NAME` to find its parent DGD (injected by operator)
-- Resolves services by `subComponentType` field (prefill/decode), with fallback to legacy component names
+- Resolves components by `type` field (prefill/decode), with fallback to legacy component names
 - Validates deployment structure on startup: checks that prefill and decode services exist and model names match
 
 ### VirtualConnector

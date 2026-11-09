@@ -664,26 +664,29 @@ class DeploymentSpec:
     def set_logging(self, enable_jsonl: bool = True, log_level: str = "debug"):
         """Configure logging for the deployment
 
+        Sets graph-level env vars so every component inherits them
+        (``spec.envs`` on v1alpha1 manifests, ``spec.env`` on v1beta1).
+
         Args:
             enable_jsonl: Enable JSON line logging (sets DYN_LOGGING_JSONL=true)
             log_level: Set log level (sets DYN_LOG to specified level)
         """
-        spec = self._deployment_spec
-        if "envs" not in spec["spec"]:
-            spec["spec"]["envs"] = []
+        env_key = "env" if self._schema == SCHEMA_V1BETA1 else "envs"
+        spec = self._deployment_spec["spec"]
+        envs = spec.setdefault(env_key, [])
 
         # Remove any existing logging env vars to avoid duplicates
-        spec["spec"]["envs"] = [
+        envs[:] = [
             env
-            for env in spec["spec"]["envs"]
+            for env in envs
             if env.get("name") not in ["DYN_LOGGING_JSONL", "DYN_LOG"]
         ]
 
         if enable_jsonl:
-            spec["spec"]["envs"].append({"name": "DYN_LOGGING_JSONL", "value": "true"})
+            envs.append({"name": "DYN_LOGGING_JSONL", "value": "true"})
 
         if log_level:
-            spec["spec"]["envs"].append({"name": "DYN_LOG", "value": log_level})
+            envs.append({"name": "DYN_LOG", "value": log_level})
 
     def get_logging_config(self) -> dict:
         """Get current logging configuration

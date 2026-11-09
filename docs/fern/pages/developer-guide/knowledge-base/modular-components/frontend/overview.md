@@ -61,19 +61,22 @@ See the [KServe gRPC Frontend](frontend-guide.md) page for KServe-specific confi
 ### Kubernetes
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: frontend-example
 spec:
-  graphs:
-    - name: frontend
-      replicas: 1
-      services:
-        - name: Frontend
-          image: nvcr.io/nvidia/dynamo/dynamo-vllm:latest
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
           command:
-            - python
+            - python3
             - -m
             - dynamo.frontend
             - --http-port

@@ -1,14 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-disagg-nebius-ib
 spec:
-  services:
-    DecodeWorker:
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: DecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           env:
-            - name: UCX_RNDV_THRESH
-              value: "8192"
+          - name: UCX_RNDV_THRESH
+            value: "8192"

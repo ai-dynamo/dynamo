@@ -173,8 +173,9 @@ spec:
 You can then use `s3://hf-models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B` as your Dataset mount.
 
 <!--
-Maintenance: The DynamoGraphDeployment examples below use the legacy v1alpha1 API and are stale.
-Track their update or removal in GitHub issue #13852.
+Maintenance: The DynamoGraphDeployment examples below were migrated to the
+nvidia.com/v1beta1 API; their surrounding Fluid workflow has not been re-validated.
+Track their refresh or removal in GitHub issue #13852.
 -->
 
 ## Usage with Dynamo
@@ -182,27 +183,41 @@ Track their update or removal in GitHub issue #13852.
 Mount the Fluid-generated PVC in your DynamoGraphDeployment:
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: model-caching
 spec:
-  pvcs:
-    - name: s3-model
-  envs:
-    - name: HF_HOME
-      value: /model
-    - name: DYN_DEPLOYMENT_CONFIG
-      value: '{"Common": {"model": "/model", ...}}'
-  services:
-    worker:
-      volumeMounts:
+  env:
+  - name: HF_HOME
+    value: /model
+  - name: DYN_DEPLOYMENT_CONFIG
+    value: '{"Common": {"model": "/model", ...}}'
+  components:
+  - name: Processor
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          volumeMounts:
+          - name: s3-model
+            mountPath: /model
+        volumes:
         - name: s3-model
-          mountPoint: /model
-    Processor:
-      volumeMounts:
+          persistentVolumeClaim:
+            claimName: s3-model
+  - name: worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          volumeMounts:
+          - name: s3-model
+            mountPath: /model
+        volumes:
         - name: s3-model
-          mountPoint: /model
+          persistentVolumeClaim:
+            claimName: s3-model
 ```
 
 
@@ -280,44 +295,56 @@ spec:
 and the associated DynamoGraphDeployment with pod affinity to schedule the vllm worker on the same node than the Alluxio cache worker
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: my-hello-world
 spec:
-  envs:
+  env:
   - name: DYN_LOG
     value: "debug"
   - name: DYN_DEPLOYMENT_CONFIG
-    value: '{"Common": {"model": "/model", "block-size": 64, "max-model-len": 16384},
-      "Frontend": {"served_model_name": "meta-llama/Llama-3.3-70B-Instruct", "endpoint":
-      "dynamo.Processor.chat/completions", "port": 8000}, "Processor": {"router":
-      "round-robin", "router-num-threads": 4, "common-configs": ["model", "block-size",
+    value: '{"Common": {"model": "/model", "block-size": 64, "max-model-len": 16384}, "Frontend": {"served_model_name":
+      "meta-llama/Llama-3.3-70B-Instruct", "endpoint": "dynamo.Processor.chat/completions", "port": 8000},
+      "Processor": {"router": "round-robin", "router-num-threads": 4, "common-configs": ["model", "block-size",
       "max-model-len"]}, "worker": {"tensor-parallel-size": 4, "enforce-eager": true, "max-num-batched-tokens":
-      16384, "enable-prefix-caching": true, "ServiceArgs": {"workers": 1, "resources":
-      {"gpu": "4", "memory": "40Gi"}}, "common-configs": ["model", "block-size", "max-model-len"]},
-      "Planner": {"environment": "kubernetes", "no-operation": true}}'
-  pvcs:
-    - name: llama-3-3-70b-instruct-model
-  services:
-    Processor:
-      volumeMounts:
+      16384, "enable-prefix-caching": true, "ServiceArgs": {"workers": 1, "resources": {"gpu": "4", "memory":
+      "40Gi"}}, "common-configs": ["model", "block-size", "max-model-len"]}, "Planner": {"environment":
+      "kubernetes", "no-operation": true}}'
+  components:
+  - name: Processor
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          volumeMounts:
+          - name: llama-3-3-70b-instruct-model
+            mountPath: /model
+        volumes:
         - name: llama-3-3-70b-instruct-model
-          mountPoint: /model
-    worker:
-      volumeMounts:
-        - name: llama-3-3-70b-instruct-model
-          mountPoint: /model
-      extraPodSpec:
+          persistentVolumeClaim:
+            claimName: llama-3-3-70b-instruct-model
+  - name: worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          volumeMounts:
+          - name: llama-3-3-70b-instruct-model
+            mountPath: /model
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
               nodeSelectorTerms:
-                - matchExpressions:
-                  - key: fluid.io/s-alluxio-my-namespace-llama-3-3-70b-instruct-model
-                    operator: In
-                    values:
-                      - "true"
+              - matchExpressions:
+                - key: fluid.io/s-alluxio-my-namespace-llama-3-3-70b-instruct-model
+                  operator: In
+                  values:
+                  - "true"
+        volumes:
+        - name: llama-3-3-70b-instruct-model
+          persistentVolumeClaim:
+            claimName: llama-3-3-70b-instruct-model
 ```
 
 

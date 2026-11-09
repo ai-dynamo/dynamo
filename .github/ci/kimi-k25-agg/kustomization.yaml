@@ -4,6 +4,10 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: dynamo-nightly-dsv4
+# Provides the strategic-merge schema (x-kubernetes-list-type=map) so the
+# v1beta1 spec.components list merges by name instead of being replaced.
+components:
+- ../../../recipes/kustomize/components/dynamo-openapi
 commonLabels:
   ci-run: local
 resources:
@@ -27,29 +31,46 @@ patches:
     kind: DynamoGraphDeployment
     name: kimi-k25-agg-kv-eagle
   patch: |-
+    # Components are sorted by name: Frontend is index 0, agg is index 1.
+    # The op: test guards pin the positional paths to the expected shape.
+    - op: test
+      path: /spec/components/0/name
+      value: Frontend
+    - op: test
+      path: /spec/components/0/podTemplate/spec/containers/0/name
+      value: main
     - op: add
-      path: /spec/services/Frontend/extraPodSpec/mainContainer/env/-
+      path: /spec/components/0/podTemplate/spec/containers/0/env/-
       value: {name: HF_HOME, value: /opt/models}
+    - op: test
+      path: /spec/components/1/name
+      value: agg
+    - op: test
+      path: /spec/components/1/podTemplate/spec/containers/0/name
+      value: main
     # Spread MPI ranks across both GPU pods and keep each pod's ranks contiguous.
     - op: add
-      path: /spec/services/agg/extraPodSpec/mainContainer/env/-
+      path: /spec/components/1/podTemplate/spec/containers/0/env/-
       value: {name: PRTE_MCA_rmaps_default_mapping_policy, value: "node:oversubscribe"}
     - op: add
-      path: /spec/services/agg/extraPodSpec/mainContainer/env/-
+      path: /spec/components/1/podTemplate/spec/containers/0/env/-
       value: {name: PRTE_MCA_rmaps_default_ranking_policy, value: slot}
     # These pods expose no gIB devices; Socket preserves intra-clique MNNVL.
     - op: add
-      path: /spec/services/agg/extraPodSpec/mainContainer/env/-
+      path: /spec/components/1/podTemplate/spec/containers/0/env/-
       value: {name: NCCL_NET, value: Socket}
+    - op: test
+      path: /spec/components/1/podTemplate/spec/volumes/0/name
+      value: model-cache
     - op: replace
-      path: /spec/services/agg/extraPodSpec/resourceClaims/0/resourceClaimTemplateName
+      path: /spec/components/1/podTemplate/spec/resourceClaims/0/resourceClaimTemplateName
       value: kimi-k25-compute-domain-channel
     - op: replace
-      path: /spec/services/agg/extraPodSpec/volumes/0/persistentVolumeClaim/claimName
+      path: /spec/components/1/podTemplate/spec/volumes/0/persistentVolumeClaim/claimName
       value: shared-model-cache
     - op: add
-      path: /spec/services/agg/extraPodSpec/mainContainer/volumeMounts/-
+      path: /spec/components/1/podTemplate/spec/containers/0/volumeMounts/-
       value: {name: sshd-run, mountPath: /run/sshd}
     - op: add
-      path: /spec/services/agg/extraPodSpec/volumes/-
+      path: /spec/components/1/podTemplate/spec/volumes/-
       value: {name: sshd-run, emptyDir: {}}

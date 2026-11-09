@@ -56,68 +56,68 @@ Save the following manifest as `dgd-vllm.yaml`. Replace `matrixhub.example.com:3
 If you change the model, update both `--model` and `--served-model-name`, and ensure that the repository is available in MatrixHub.
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-qwen
   namespace: dynamo-system
 spec:
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      resources:
-        requests:
-          cpu: "2"
-          memory: "4Gi"
-        limits:
-          cpu: "2"
-          memory: "4Gi"
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
-          workingDir: /workspace
-          env:
-            - name: HF_ENDPOINT
-              value: http://matrixhub.example.com:30001
           command: ["python3", "-m", "dynamo.frontend"]
           args: ["--http-port", "8000"]
-
-    decode:
-      componentType: worker
-      subComponentType: decode
-      replicas: 1
-      resources:
-        requests:
-          cpu: "4"
-          memory: "16Gi"
-          custom:
-            nvidia.com/gpu: "1"
-        limits:
-          cpu: "4"
-          memory: "16Gi"
-          custom:
-            nvidia.com/gpu: "1"
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
           workingDir: /workspace
           env:
-            - name: HF_ENDPOINT
-              value: http://matrixhub.example.com:30001
+          - name: HF_ENDPOINT
+            value: http://matrixhub.example.com:30001
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+  - name: decode
+    type: decode
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
           command: ["python3", "-m", "dynamo.vllm"]
           args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --served-model-name
-            - Qwen/Qwen3-0.6B
-            - --tensor-parallel-size
-            - "1"
-            - --gpu-memory-utilization
-            - "0.85"
-            - --max-model-len
-            - "8192"
-            - --no-enable-log-requests
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --tensor-parallel-size
+          - "1"
+          - --gpu-memory-utilization
+          - "0.85"
+          - --max-model-len
+          - "8192"
+          - --no-enable-log-requests
+          workingDir: /workspace
+          env:
+          - name: HF_ENDPOINT
+            value: http://matrixhub.example.com:30001
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "4"
+              memory: "16Gi"
+              nvidia.com/gpu: "1"
 ```
 
 `HF_ENDPOINT` directs the Hugging Face client used by the frontend and worker to MatrixHub.

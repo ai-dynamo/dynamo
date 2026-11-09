@@ -104,146 +104,60 @@ spec:
     resourceClaimTemplate:
       name: trtllm-test-compute-domain-channel
 ---
-
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: trtllm-disagg-multinode
 spec:
-  pvcs:
-    - name: model-cache
-      create: false
-  envs:
-    - name: NCCL_MNNVL_ENABLE
-      value: "1"
-    - name: NCCL_CUMEM_ENABLE
-      value: "1"
-    - name: TLLM_LOG_LEVEL
-      value: "info"
-    - name: TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER
-      value: "1"
-    - name: TRTLLM_ENABLE_PDL
-      value: "1"
   backendFramework: trtllm
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      volumeMounts:
-        - name: model-cache
-          mountPoint: /model-cache
-      extraPodSpec:
-        tolerations: []
-        affinity: {}
-        mainContainer:
+  env:
+  - name: NCCL_MNNVL_ENABLE
+    value: "1"
+  - name: NCCL_CUMEM_ENABLE
+    value: "1"
+  - name: TLLM_LOG_LEVEL
+    value: "info"
+  - name: TRTLLM_MOE_ENABLE_ALLTOALL_WITHOUT_ALLGATHER
+    value: "1"
+  - name: TRTLLM_ENABLE_PDL
+    value: "1"
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
-          env:
-            - name: HF_HOME
-              value: /model-cache
+          command:
+          - /bin/sh
+          - -c
           args:
           - |
             python3 -m dynamo.frontend --http-port 8000
-          command:
-          - /bin/sh
-          - -c
-    prefill:
-      componentType: worker
-      subComponentType: prefill
-      replicas: 1
-      # NOTE: Prefill uses 1 node (no multinode section = single node)
-      #       and contributes to ComputeDomain.numNodes (see above)
-      volumeMounts:
-        - name: model-cache
-          mountPoint: /model-cache
-      sharedMemory:
-        size: 800Gi
-      resources:
-        requests:
-          cpu: "130"
-          memory: "850Gi"
-        limits:
-          cpu: "130"
-          memory: "850Gi"
-          gpu: "4"
-        claims:
-          - name: compute-domain-channel
-      extraPodSpec:
-        tolerations: []
-        affinity: {}
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
-          workingDir: /workspace/components/backends/trtllm
-          # NOTE: If your PVCs (Persistent Volume Claims) are really slow,
-          #       you might need to increase 'failureThreshold' below to allow more time for startup
-          startupProbe:
-            httpGet:
-              path: /live
-              port: 9090
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 600
+          env:
+          - name: HF_HOME
+            value: /model-cache
           volumeMounts:
-            - name: prefill-config-volume
-              mountPath: /config
-          command:
-          - /bin/sh
-          - -c
-          args:
-          - >-
-            python3 -m dynamo.trtllm
-            --model-path /model-cache/deepseek-r1-fp4
-            --served-model-name deepseek-ai/DeepSeek-R1
-            --extra-engine-args /config/prefill_config.yaml
-            --disaggregation-mode prefill
-        resourceClaims:
-          - name: compute-domain-channel
-            resourceClaimTemplateName: trtllm-test-compute-domain-channel
+          - name: model-cache
+            mountPath: /model-cache
         volumes:
-          - name: prefill-config-volume
-            configMap:
-              name: prefill-config
-    decode:
-      componentType: worker
-      subComponentType: decode
-      replicas: 1
-      volumeMounts:
         - name: model-cache
-          mountPoint: /model-cache
-      multinode:
+          persistentVolumeClaim:
+            claimName: model-cache
+  - name: decode
+    type: decode
+    replicas: 1
+    multinode:
         # NOTE: This nodeCount contributes to ComputeDomain.numNodes (see above)
-        nodeCount: 8
-      sharedMemory:
-        size: 800Gi
-      resources:
-        requests:
-          cpu: "130"
-          memory: "850Gi"
-        limits:
-          cpu: "130"
-          memory: "850Gi"
-          gpu: "4"
-        claims:
-          - name: compute-domain-channel
-      extraPodSpec:
-        tolerations: []
-        affinity: {}
-        mainContainer:
+      nodeCount: 8
+    sharedMemorySize: 800Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
-          workingDir: /workspace/components/backends/trtllm
-          # NOTE: If your PVCs (Persistent Volume Claims) are really slow,
-          #       you might need to increase 'failureThreshold' below to allow more time for startup
-          startupProbe:
-            httpGet:
-              path: /live
-              port: 9090
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 600
-          volumeMounts:
-            - name: decode-config-volume
-              mountPath: /config
           command:
           - /bin/sh
           - -c
@@ -254,10 +168,96 @@ spec:
             --served-model-name deepseek-ai/DeepSeek-R1
             --extra-engine-args /config/decode_config_dep32.yaml
             --disaggregation-mode decode
-        resourceClaims:
-          - name: compute-domain-channel
-            resourceClaimTemplateName: trtllm-test-compute-domain-channel
-        volumes:
+          workingDir: /workspace/components/backends/trtllm
+          # NOTE: If your PVCs (Persistent Volume Claims) are really slow,
+          #       you might need to increase 'failureThreshold' below to allow more time for startup
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 600
+          resources:
+            requests:
+              cpu: "130"
+              memory: "850Gi"
+            limits:
+              cpu: "130"
+              memory: "850Gi"
+              nvidia.com/gpu: "4"
+            claims:
+            - name: compute-domain-channel
+          volumeMounts:
           - name: decode-config-volume
-            configMap:
-              name: decode-config
+            mountPath: /config
+          - name: model-cache
+            mountPath: /model-cache
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: trtllm-test-compute-domain-channel
+        volumes:
+        - name: decode-config-volume
+          configMap:
+            name: decode-config
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+  - name: prefill
+    type: prefill
+    replicas: 1
+    sharedMemorySize: 800Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - >-
+            python3 -m dynamo.trtllm
+            --model-path /model-cache/deepseek-r1-fp4
+            --served-model-name deepseek-ai/DeepSeek-R1
+            --extra-engine-args /config/prefill_config.yaml
+            --disaggregation-mode prefill
+          workingDir: /workspace/components/backends/trtllm
+          # NOTE: If your PVCs (Persistent Volume Claims) are really slow,
+          #       you might need to increase 'failureThreshold' below to allow more time for startup
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 600
+          resources:
+      # NOTE: Prefill uses 1 node (no multinode section = single node)
+      #       and contributes to ComputeDomain.numNodes (see above)
+            requests:
+              cpu: "130"
+              memory: "850Gi"
+            limits:
+              cpu: "130"
+              memory: "850Gi"
+              nvidia.com/gpu: "4"
+            claims:
+            - name: compute-domain-channel
+          volumeMounts:
+          - name: prefill-config-volume
+            mountPath: /config
+          - name: model-cache
+            mountPath: /model-cache
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: trtllm-test-compute-domain-channel
+        volumes:
+        - name: prefill-config-volume
+          configMap:
+            name: prefill-config
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache

@@ -1,18 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: q32b-1p1d-cloud-provider
 spec:
-  services:
-    PrefillWorker:
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: DecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           env: &nscaleEnvironment
-            - name: GPU_MEMORY_UTILIZATION
-              value: "0.70"
-    DecodeWorker:
-      extraPodSpec:
-        mainContainer:
+          - name: GPU_MEMORY_UTILIZATION
+            value: "0.70"
+  - name: PrefillWorker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           env: *nscaleEnvironment

@@ -1,44 +1,50 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: disagg-router-6p-2d
 spec:
-  pvcs:
-  - create: false
-    name: model-cache
-  - create: false
-    name: compilation-cache
-  services:
-    Frontend:
-      componentType: frontend
-      envs:
-        - name: HF_HOME
-          value: /home/dynamo/.cache/huggingface
-      extraPodSpec:
-        mainContainer:
-          args:
-            - --router-mode
-            - kv
-          command:
-            - python
-            - -m
-            - dynamo.frontend
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          command:
+          - python
+          - -m
+          - dynamo.frontend
+          args:
+          - --router-mode
+          - kv
           workingDir: /workspace
-      replicas: 1
-      resources:
-        requests:
-          cpu: "8"
-        limits:
-          cpu: "8"
-      subComponentType: null
-    decode:
-      componentType: worker
-      envFromSecret: hf-token-secret
-      extraPodSpec:
-        mainContainer:
+          env:
+          - name: HF_HOME
+            value: /home/dynamo/.cache/huggingface
+          resources:
+            requests:
+              cpu: "8"
+            limits:
+              cpu: "8"
+  - name: decode
+    type: decode
+    replicas: 2
+    compilationCache:
+      pvcName: compilation-cache
+      mountPath: /home/dynamo/.cache/vllm
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
           args:
           - --model
           - Qwen/Qwen3-32B
@@ -59,42 +65,48 @@ spec:
           - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
           - --max-model-len
           - '131072'
-          command:
-          - python3
-          - -m
-          - dynamo.vllm
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           workingDir: /workspace
           env:
           - name: DYN_HEALTH_CHECK_ENABLED
             value: "false"
           - name: HF_HOME
             value: /home/dynamo/.cache/huggingface
-      replicas: 2
-      resources:
-        limits:
-          gpu: '2'
-          custom:
-            rdma/ib: "2"
-        requests:
-          gpu: '2'
-      subComponentType: decode
-      volumeMounts:
-      - name: model-cache
-        mountPoint: /home/dynamo/.cache/huggingface
-      - name: compilation-cache
-        mountPoint: /home/dynamo/.cache/vllm
-        useAsCompilationCache: true
-    prefill:
-      componentType: worker
-      envFromSecret: hf-token-secret
-      extraPodMetadata:
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            requests:
+              nvidia.com/gpu: '2'
+            limits:
+              nvidia.com/gpu: '2'
+              rdma/ib: "2"
+          volumeMounts:
+          - name: model-cache
+            mountPath: /home/dynamo/.cache/huggingface
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+  - name: prefill
+    type: prefill
+    replicas: 6
+    compilationCache:
+      pvcName: compilation-cache
+      mountPath: /home/dynamo/.cache/vllm
+    podTemplate:
+      metadata:
         annotations:
           prometheus.io/scrape: "true"
           prometheus.io/port: "9400"
           prometheus.io/path: "/metrics"
-      extraPodSpec:
-        mainContainer:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
           args:
           - --model
           - Qwen/Qwen3-32B
@@ -116,29 +128,25 @@ spec:
           - '131072'
           - --kv-events-config
           - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
-          command:
-          - python3
-          - -m
-          - dynamo.vllm
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          workingDir: /workspace
           env:
           - name: DYN_HEALTH_CHECK_ENABLED
             value: "false"
           - name: HF_HOME
             value: /home/dynamo/.cache/huggingface
-          workingDir: /workspace
-      replicas: 6
-      resources:
-        limits:
-          gpu: '2'
-          custom:
-            rdma/ib: "2"
-        requests:
-          gpu: '2'
-      subComponentType: prefill
-      volumeMounts:
-      - name: model-cache
-        mountPoint: /home/dynamo/.cache/huggingface
-      - name: compilation-cache
-        mountPoint: /home/dynamo/.cache/vllm
-        useAsCompilationCache: true
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            requests:
+              nvidia.com/gpu: '2'
+            limits:
+              nvidia.com/gpu: '2'
+              rdma/ib: "2"
+          volumeMounts:
+          - name: model-cache
+            mountPath: /home/dynamo/.cache/huggingface
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache

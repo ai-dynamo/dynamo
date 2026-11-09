@@ -11,67 +11,69 @@ kind: Component
 patches:
   - target:
       group: nvidia.com
-      version: v1alpha1
+      version: v1beta1
       kind: DynamoGraphDeployment
     path: dgd-worker-efa-resources-patch.yaml
   - target:
       group: nvidia.com
-      version: v1alpha1
+      version: v1beta1
       kind: DynamoGraphDeployment
     patch: |
-      apiVersion: nvidia.com/v1alpha1
+      apiVersion: nvidia.com/v1beta1
       kind: DynamoGraphDeployment
       metadata:
         name: q32b-1p1d-cloud-provider
       spec:
-        services:
-          DecodeWorker:
-            extraPodSpec:
-              affinity:
-                nodeAffinity:
-                  requiredDuringSchedulingIgnoredDuringExecution:
-                    nodeSelectorTerms:
-                      - matchExpressions:
-                          - key: node.kubernetes.io/instance-type
-                            operator: In
-                            values:
-                              - "p5.48xlarge"
-                              - "ml.p5.48xlarge"
-                podAffinity:
-                  requiredDuringSchedulingIgnoredDuringExecution:
-                    - labelSelector:
-                        matchExpressions:
-                          - key: nvidia.com/dynamo-graph-deployment-name
-                            operator: In
-                            values:
-                              - q32b-1p1d-cloud-provider
-                          - key: nvidia.com/dynamo-component-type
-                            operator: In
-                            values:
-                              - worker
-                      topologyKey: topology.kubernetes.io/zone
-          PrefillWorker:
-            extraPodSpec:
-              affinity:
-                nodeAffinity:
-                  requiredDuringSchedulingIgnoredDuringExecution:
-                    nodeSelectorTerms:
-                      - matchExpressions:
-                          - key: node.kubernetes.io/instance-type
-                            operator: In
-                            values:
-                              - "p5.48xlarge"
-                              - "ml.p5.48xlarge"
-                podAffinity:
-                  requiredDuringSchedulingIgnoredDuringExecution:
-                    - labelSelector:
-                        matchExpressions:
-                          - key: nvidia.com/dynamo-graph-deployment-name
-                            operator: In
-                            values:
-                              - q32b-1p1d-cloud-provider
-                          - key: nvidia.com/dynamo-component-type
-                            operator: In
-                            values:
-                              - worker
-                      topologyKey: topology.kubernetes.io/zone
+        components:
+          - name: DecodeWorker
+            podTemplate:
+              spec:
+                affinity:
+                  nodeAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                      nodeSelectorTerms:
+                        - matchExpressions:
+                            - key: node.kubernetes.io/instance-type
+                              operator: In
+                              values:
+                                - "p5.48xlarge"
+                                - "ml.p5.48xlarge"
+                  podAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                      - labelSelector:
+                          matchExpressions:
+                            - key: nvidia.com/dynamo-graph-deployment-name
+                              operator: In
+                              values:
+                                - q32b-1p1d-cloud-provider
+                            - key: nvidia.com/dynamo-component-type
+                              operator: In
+                              values:
+                                - worker
+                        topologyKey: topology.kubernetes.io/zone
+          - name: PrefillWorker
+            podTemplate:
+              spec:
+                affinity:
+                  nodeAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                      nodeSelectorTerms:
+                        - matchExpressions:
+                            - key: node.kubernetes.io/instance-type
+                              operator: In
+                              values:
+                                - "p5.48xlarge"
+                                - "ml.p5.48xlarge"
+                  podAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                      - labelSelector:
+                          matchExpressions:
+                            - key: nvidia.com/dynamo-graph-deployment-name
+                              operator: In
+                              values:
+                                - q32b-1p1d-cloud-provider
+                            - key: nvidia.com/dynamo-component-type
+                              operator: In
+                              values:
+                                - worker
+                        topologyKey: topology.kubernetes.io/zone

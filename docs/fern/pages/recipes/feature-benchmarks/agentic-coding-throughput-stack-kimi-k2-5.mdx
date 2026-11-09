@@ -110,7 +110,7 @@ kubectl apply -f recipes/kimi-k2.5/trtllm/<configuration>/perf.yaml -n ${NAMESPA
 
 - The manifests ship with a placeholder image tag (`nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:<IMAGE_TAG>`) — set a Dynamo TRT-LLM runtime image (v1.1.1~) that supports Kimi-K2.5 + Eagle3 in each `deploy.yaml` before applying.
 - Your HuggingFace token needs access to both `nvidia/Kimi-K2.5-NVFP4` and the `nvidia/Kimi-K2.5-Thinking-Eagle3` speculative-decoding head.
-- If you rename the ComputeDomain CR, mirror the change in every `deploy.yaml` under `extraPodSpec.resourceClaims` and `resources.claims`.
+- If you rename the ComputeDomain CR, mirror the change in every `deploy.yaml` under `podTemplate.spec.resourceClaims` and the container's `resources.claims`.
 - Source: [recipes/kimi-k2.5](https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.5)
 
 ## Winning Configuration
