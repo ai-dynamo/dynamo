@@ -970,7 +970,13 @@ mod tests {
                 .expect("first render started")
                 .expect("started");
             first.abort();
-            let _ = first.await;
+            let _ = tokio::time::timeout(Duration::from_secs(5), first)
+                .await
+                .expect("cancelled scrape settled");
+            assert!(
+                last.try_lock().is_err(),
+                "cancelling the request must not release the gate"
+            );
 
             // Two scrapes arrive during that render. They must wait on the gate,
             // leaving the pool's other thread free for unrelated work.
