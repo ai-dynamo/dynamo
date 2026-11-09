@@ -65,7 +65,7 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu13]==1.5.0",
-    "vllm[flashinfer,runai,otel]==0.32.0",
+    "vllm[flashinfer,runai,otel]==0.33.0",
     # vllm-omni is not part of ai-dynamo[vllm]: container builds inherit the
     # framework stack from vllm/vllm-openai, and pip/uv dependency resolution
     # for omni can override the vLLM torch stack.
@@ -84,6 +84,17 @@ sglang = [
     "blake3>=1.0.0,<2.0.0",
     "nixl[cu13]==1.5.0",
     "cupy-cuda13x>=13.6.0",
+]
+
+# NVTX profiling. Opt-in only: dynamo.common.utils.nvtx_utils imports `nvtx`
+# only when DYN_NVTX is on (1/true/on/yes), and is pure-Python no-ops when it is
+# off or unset, so the marker call sites throughout components/ carry no
+# dependency on this extra. Install it alongside DYN_NVTX=1 to record markers.
+# A range, not a pin: vllm pins its own nvtx, and an exact pin that differs from
+# it makes ai-dynamo[vllm,profiling] unresolvable. The container pin is in
+# container/deps/requirements.common.txt.
+profiling = [
+    "nvtx>=0.2.14,<0.3",
 ]
 
 [tool.uv]

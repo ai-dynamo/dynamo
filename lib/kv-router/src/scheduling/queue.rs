@@ -106,8 +106,9 @@ struct QueuedRequest {
 ///
 /// The actor selects from them only when it would build the same rows: the worker
 /// configuration, availability, and overload it reads at selection match the ones
-/// the rows were built from, and no rank is past the host's reject thresholds. Load
-/// inputs depend on the actor's earlier bookings, so it fills them at selection.
+/// the rows were built from. Load inputs and the ranks past the host's reject
+/// thresholds depend on the actor's earlier bookings, so it fills the loads and drops
+/// the rows of workers whose every rank is full at selection.
 struct PreparedAdmission {
     candidates: PreparedCandidates,
     /// Configuration generation, loaded before the configuration was read.
@@ -386,6 +387,27 @@ fn non_max_overlap_selection<C: WorkerConfigLike>(
         highest_overlap_blocks,
         selected_overlap_blocks,
     })
+}
+
+/// Highest raw cached-prefix tokens over workers eligible under `eligibility`, starting
+/// from the selector's own maximum. Workers with no overlap contribute zero, so only the
+/// workers present in the tier overlap maps are visited.
+fn best_eligible_raw_cached_tokens<C: WorkerConfigLike>(
+    workers: &HashMap<WorkerId, C>,
+    request: &SchedulingRequest,
+    eligibility: RoutingEligibility<'_>,
+    selector_max: usize,
+    block_size: u32,
+) -> usize {
+    let tiers = &request.overlap.tier_overlap_blocks;
+    tiers
+        .device
+        .keys()
+        .chain(tiers.host_pinned.keys())
+        .chain(tiers.disk.keys())
+        .filter(|&&worker| eligibility.validate_worker_rank(workers, worker).is_ok())
+        .map(|&worker| request.raw_cached_tokens_for(worker, block_size))
+        .fold(selector_max, usize::max)
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -2387,19 +2409,25 @@ impl<
                 .overloaded_worker_provider
                 .as_ref()
                 .and_then(|provider| provider());
+            let exclusive_affinity = self.selector.uses_exclusive_affinity_target();
             let eligibility = selection_eligibility(
                 request,
                 &workers,
                 overloaded_worker_ids.as_deref(),
                 available_worker_ids.as_deref(),
                 Some(&self.full_ranks),
-                self.selector.uses_exclusive_affinity_target(),
+                exclusive_affinity,
             );
+            // Selection drops full workers' rows from prepared rows. Preparation did not know
+            // which ranks are full, so an exclusive affinity target it found eligible may be
+            // full, and fetch sources span every row: those requests rebuild.
+            let prepared_rows_usable = self.full_ranks.is_empty()
+                || (!(exclusive_affinity && request.affinity_target.is_some())
+                    && request.kv_transfer_candidates.is_none());
             // Checked under the borrow selection uses: a change since the actor
-            // last advanced the generation is not counted in it yet. Prepared rows
-            // never skip full ranks, so any full rank means rebuilding them.
+            // last advanced the generation is not counted in it yet.
             let prepared = prepared
-                .filter(|_| !workers.has_changed() && self.full_ranks.is_empty())
+                .filter(|_| !workers.has_changed() && prepared_rows_usable)
                 .and_then(|prepared| {
                     prepared.into_current(
                         self.workers_generation.load(AtomicOrdering::Relaxed),
@@ -2423,14 +2451,44 @@ impl<
                     prepared,
                     trace,
                 )
-                .map(|(selection, selection_trace)| {
+                .map(|(mut selection, selection_trace)| {
+                    // Measure affinity selections against every eligible worker so cache
+                    // metrics still mean "best eligible worker". Explicit pins are not
+                    // widened, nor are selectors whose own filters may reject workers.
+                    let affinity_selected = request
+                        .affinity_target
+                        .is_some_and(|target| target.matches(selection.worker));
+                    let metrics_eligibility = if affinity_selected
+                        && !self.selector.applies_worker_filters()
+                    {
+                        let unconstrained = RoutingEligibility::new(
+                            request.allowed_worker_ids.as_ref(),
+                            overloaded_worker_ids.as_deref(),
+                            None,
+                            &request.routing_constraints,
+                        )
+                        .with_available_workers(available_worker_ids.as_deref())
+                        .with_full_worker_ranks(&self.full_ranks);
+                        if let Some(max_raw_cached_tokens) = &mut selection.max_raw_cached_tokens {
+                            *max_raw_cached_tokens = best_eligible_raw_cached_tokens(
+                                &workers,
+                                request,
+                                unconstrained,
+                                *max_raw_cached_tokens,
+                                self.block_size,
+                            );
+                        }
+                        unconstrained
+                    } else {
+                        eligibility
+                    };
                     let non_max_overlap_selection = if request.mode.is_tracked()
                         && self.non_max_overlap_selection_observer.get().is_some()
                     {
                         non_max_overlap_selection(
                             &workers,
                             request,
-                            eligibility,
+                            metrics_eligibility,
                             selection.worker,
                             selection.effective_overlap_blocks,
                         )
@@ -4534,6 +4592,10 @@ policy_classes:
             WorkerSelector::<SimpleWorkerConfig>::candidate_preparer(&self.inner)
         }
 
+        fn uses_exclusive_affinity_target(&self) -> bool {
+            WorkerSelector::<SimpleWorkerConfig>::uses_exclusive_affinity_target(&self.inner)
+        }
+
         fn select_worker_prepared(
             &self,
             input: WorkerSelectionInput<'_, SimpleWorkerConfig>,
@@ -4570,14 +4632,18 @@ policy_classes:
         }
     }
 
-    fn counting_policy(prepared_selections: &Arc<AtomicUsize>) -> CountingPreparedPolicy {
+    fn counting_policy(
+        prepared_selections: &Arc<AtomicUsize>,
+        exclusive_affinity: bool,
+    ) -> CountingPreparedPolicy {
         CountingPreparedPolicy {
             inner: crate::plugins::worker_selection::WorkerSelectionPolicy::new(
                 crate::KvRouterConfig::default(),
                 "test",
                 vec![],
                 Box::new(LeastLoaded),
-            ),
+            )
+            .with_exclusive_affinity(exclusive_affinity),
             prepared_selections: Arc::clone(prepared_selections),
         }
     }
@@ -4602,10 +4668,15 @@ policy_classes:
     }
 
     fn make_prepared_queue() -> PreparedQueue {
+        make_prepared_queue_with(1, false)
+    }
+
+    /// Two workers of `dp_size` ranks, each rank with a 64-token prefill budget.
+    fn make_prepared_queue_with(dp_size: u32, exclusive_affinity: bool) -> PreparedQueue {
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
             NoopSequencePublisher,
             16,
-            (0..2).map(|id| (id, (0, 1))).collect(),
+            (0..2).map(|id| (id, (0, dp_size))).collect(),
             false,
             0,
             "test",
@@ -4614,6 +4685,7 @@ policy_classes:
             .map(|id| {
                 let config = SimpleWorkerConfig {
                     max_num_batched_tokens: Some(64),
+                    data_parallel_size: dp_size,
                     ..Default::default()
                 };
                 (id, config)
@@ -4642,7 +4714,7 @@ policy_classes:
             cfg_rx,
             PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
             16,
-            counting_policy(&prepared_selections),
+            counting_policy(&prepared_selections, exclusive_affinity),
             None,
             None,
             Some(overloaded_provider),
@@ -4708,7 +4780,7 @@ policy_classes:
 
     #[tokio::test]
     async fn prepared_rows_are_rebuilt_when_selection_inputs_change() {
-        for change in ["configuration", "availability", "overload", "full rank"] {
+        for change in ["configuration", "availability", "overload"] {
             let prepared_queue = make_prepared_queue();
             let (request, rx) = make_request("request", 64);
             let prepared = prepared_queue.queue.prepare_candidates(&request);
@@ -4720,19 +4792,8 @@ policy_classes:
                 "availability" => {
                     *prepared_queue.available.lock().unwrap() = Some(Arc::new(HashSet::from([1])))
                 }
-                "overload" => {
-                    *prepared_queue.overloaded.lock().unwrap() = Some(Arc::new(HashSet::from([0])))
-                }
                 _ => {
-                    // Past half its 64-token prefill budget, worker 0's only rank is full.
-                    *prepared_queue.reject.lock().unwrap() = BusyThresholds {
-                        prefill_busy_threshold_frac: Some(0.5),
-                        ..Default::default()
-                    };
-                    let (mut held, held_rx) = make_request("held", 48);
-                    held.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
-                    prepared_queue.queue.enqueue(held).await;
-                    held_rx.await.unwrap().unwrap();
+                    *prepared_queue.overloaded.lock().unwrap() = Some(Arc::new(HashSet::from([0])))
                 }
             }
 
@@ -4743,13 +4804,107 @@ policy_classes:
         }
     }
 
+    /// Reject thresholds under which a rank past 32 tokens, half its prefill budget, is full.
+    fn half_budget_reject() -> BusyThresholds {
+        BusyThresholds {
+            prefill_busy_threshold_frac: Some(0.5),
+            ..Default::default()
+        }
+    }
+
+    /// Book `tokens` of prefill on `worker`, as a pinned request.
+    async fn hold_prefill(
+        queue: &SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, CountingPreparedPolicy>,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+        tokens: usize,
+    ) {
+        let (mut held, held_rx) = make_request(request_id, tokens);
+        held.pinned_worker = Some(worker);
+        queue.enqueue(held).await;
+        held_rx.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepared_rows_drop_only_workers_whose_every_rank_is_full() {
+        let prepared_queue = make_prepared_queue_with(2, false);
+        let queue = &prepared_queue.queue;
+        *prepared_queue.reject.lock().unwrap() = half_budget_reject();
+        let select = |request_id: &'static str| async move {
+            let (request, rx) = make_request(request_id, 16);
+            let prepared = queue.prepare_candidates(&request);
+            enqueue_prepared(queue, request, prepared).await;
+            rx.await.unwrap()
+        };
+
+        // One full rank leaves worker 0 eligible: its other rank is the least loaded.
+        hold_prefill(queue, "held-0-0", WorkerWithDpRank::new(0, 0), 48).await;
+        let selected = select("one-rank-full").await.unwrap().best_worker;
+        assert_eq!(selected, WorkerWithDpRank::new(0, 1));
+
+        // Both ranks full: worker 0's rows are dropped.
+        hold_prefill(queue, "held-0-1", WorkerWithDpRank::new(0, 1), 48).await;
+        let selected = select("worker-full").await.unwrap().best_worker;
+        assert_eq!(selected, WorkerWithDpRank::new(1, 0));
+
+        hold_prefill(queue, "held-1-0", WorkerWithDpRank::new(1, 0), 48).await;
+        hold_prefill(queue, "held-1-1", WorkerWithDpRank::new(1, 1), 48).await;
+        assert!(matches!(
+            select("all-full").await,
+            Err(KvSchedulerError::AllEligibleWorkersOverloaded)
+        ));
+        assert_eq!(prepared_queue.prepared_selections(), 3);
+    }
+
+    #[tokio::test]
+    async fn prepared_rows_are_rebuilt_for_an_exclusive_affinity_target_once_a_rank_is_full() {
+        let prepared_queue = make_prepared_queue_with(1, true);
+        let queue = &prepared_queue.queue;
+        *prepared_queue.reject.lock().unwrap() = half_budget_reject();
+        hold_prefill(queue, "held", WorkerWithDpRank::new(0, 0), 48).await;
+
+        // Preparation held only the full target's rows; selection, which sees the target
+        // full, routes like any request.
+        let (mut request, rx) = make_request("request", 16);
+        request.affinity_target = Some(crate::protocols::WorkerAffinityTarget::new(0, None));
+        let prepared = queue.prepare_candidates(&request);
+        assert!(prepared.is_some());
+        enqueue_prepared(queue, request, prepared).await;
+        assert_eq!(
+            rx.await.unwrap().unwrap().best_worker,
+            WorkerWithDpRank::new(1, 0)
+        );
+        assert_eq!(prepared_queue.prepared_selections(), 0);
+    }
+
+    #[tokio::test]
+    async fn prepared_rows_recount_the_best_cached_prefix_without_full_workers() {
+        let prepared_queue = make_prepared_queue();
+        let queue = &prepared_queue.queue;
+        *prepared_queue.reject.lock().unwrap() = half_budget_reject();
+        hold_prefill(queue, "held", WorkerWithDpRank::new(0, 0), 48).await;
+
+        // Worker 0 caches the longest prefix but is full, so only worker 1's prefix counts.
+        let (mut request, rx) = make_request("request", 64);
+        request.overlap.tier_overlap_blocks.device = FxHashMap::from_iter([
+            (WorkerWithDpRank::new(0, 0), 3),
+            (WorkerWithDpRank::new(1, 0), 1),
+        ]);
+        let prepared = queue.prepare_candidates(&request);
+        enqueue_prepared(queue, request, prepared).await;
+        let response = rx.await.unwrap().unwrap();
+        assert_eq!(response.best_worker, WorkerWithDpRank::new(1, 0));
+        assert_eq!(response.max_raw_cached_tokens, Some(16));
+        assert_eq!(prepared_queue.prepared_selections(), 1);
+    }
+
     #[tokio::test]
     async fn prepared_rows_recheck_config_under_selection_borrow() {
         let prepared_queue = make_prepared_queue();
         let mut actor = actor_with_selector_for_test(
             &prepared_queue.queue,
             &prepared_queue.slots,
-            counting_policy(&prepared_queue.prepared_selections),
+            counting_policy(&prepared_queue.prepared_selections, false),
         );
         let (request, mut rx) = make_request("request", 64);
         let prepared = prepared_queue.queue.prepare_candidates(&request);
@@ -5045,6 +5200,146 @@ policy_classes:
                     selected_overlap_blocks: 1.0,
                 },
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn affinity_pinned_selection_reports_non_max_overlap() {
+        let (queue, _slots) = make_queue(2, 16, 64, None);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let (observer_tx, mut observer_rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(queue.set_non_max_overlap_selection_observer(Arc::new(
+            move |request_id, event| {
+                observer_tx
+                    .send((request_id.to_string(), event))
+                    .expect("observer receiver should remain open");
+            }
+        )));
+        let pinned_request = |request_id: &str, affinity: bool| {
+            let (mut request, response_rx) = make_request(request_id, 64);
+            request
+                .overlap
+                .effective_overlap_blocks
+                .extend([(worker0, 8.0), (worker1, 2.0)]);
+            request.pinned_worker = Some(worker1);
+            request.affinity_target = affinity.then(|| worker1.into());
+            (request, response_rx)
+        };
+
+        // An explicit pin is the caller's choice, not a router decision: no event.
+        let (request, response_rx) = pinned_request("explicit-pin", false);
+        queue.enqueue(request).await;
+        assert_eq!(response_rx.await.unwrap().unwrap().best_worker, worker1);
+
+        let (request, response_rx) = pinned_request("affinity-pin", true);
+        queue.enqueue(request).await;
+        assert_eq!(response_rx.await.unwrap().unwrap().best_worker, worker1);
+
+        let event = tokio::time::timeout(Duration::from_secs(1), observer_rx.recv())
+            .await
+            .expect("observer did not run")
+            .expect("observer channel closed");
+        assert_eq!(event.1.overlap_blocks_lost(), 6.0);
+        assert_eq!(
+            event,
+            (
+                "affinity-pin".to_string(),
+                NonMaxOverlapSelection {
+                    selected_worker: worker1,
+                    highest_overlap_worker: worker0,
+                    highest_overlap_blocks: 8.0,
+                    selected_overlap_blocks: 2.0,
+                },
+            )
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), observer_rx.recv())
+                .await
+                .is_err(),
+            "explicit pin must not report a non-max-overlap selection"
+        );
+    }
+
+    #[tokio::test]
+    async fn affinity_pinned_selection_reports_best_eligible_raw_cache() {
+        let (queue, _slots) = make_queue(2, 16, 64, None);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let select = |request_id: &str, affinity: bool, allowed: Option<HashSet<WorkerId>>| {
+            let (mut request, response_rx) = make_request(request_id, 64);
+            request
+                .overlap
+                .tier_overlap_blocks
+                .device
+                .extend([(worker0, 4), (worker1, 1)]);
+            request.pinned_worker = Some(worker1);
+            request.affinity_target = affinity.then(|| worker1.into());
+            request.allowed_worker_ids = allowed;
+            let queue = Arc::clone(&queue);
+            async move {
+                queue.enqueue(request).await;
+                response_rx.await.unwrap().unwrap()
+            }
+        };
+
+        let response = select("affinity-pin", true, None).await;
+        assert_eq!(response.best_worker, worker1);
+        assert_eq!(response.selected_raw_cached_tokens, Some(16));
+        assert_eq!(response.max_raw_cached_tokens, Some(64));
+
+        // Explicit pins keep measuring against the pinned worker only.
+        let response = select("explicit-pin", false, None).await;
+        assert_eq!(response.selected_raw_cached_tokens, Some(16));
+        assert_eq!(response.max_raw_cached_tokens, Some(16));
+
+        // Routing eligibility still applies: a disallowed worker is not "best eligible".
+        let response = select(
+            "affinity-pin-disallowed-best",
+            true,
+            Some(HashSet::from([worker1.worker_id])),
+        )
+        .await;
+        assert_eq!(response.selected_raw_cached_tokens, Some(16));
+        assert_eq!(response.max_raw_cached_tokens, Some(16));
+    }
+
+    #[tokio::test]
+    async fn affinity_selection_is_not_widened_for_filtering_selectors() {
+        // A custom selector may reject workers through its own filters, so the host must not
+        // count a worker it never saw as the best eligible alternative.
+        let (queue, _slots) = make_queue_with_custom_selector(
+            2,
+            16,
+            64,
+            None,
+            MinDecodeSelector { rendezvous: None },
+        );
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let (observer_tx, mut observer_rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(queue.set_non_max_overlap_selection_observer(Arc::new(
+            move |request_id, event| {
+                observer_tx
+                    .send((request_id.to_string(), event))
+                    .expect("observer receiver should remain open");
+            }
+        )));
+        let (mut request, response_rx) = make_request("affinity-pin-custom", 64);
+        request
+            .overlap
+            .effective_overlap_blocks
+            .extend([(worker0, 8.0), (worker1, 2.0)]);
+        request.pinned_worker = Some(worker1);
+        request.affinity_target = Some(worker1.into());
+
+        queue.enqueue(request).await;
+        assert_eq!(response_rx.await.unwrap().unwrap().best_worker, worker1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), observer_rx.recv())
+                .await
+                .is_err(),
+            "a filtering selector's affinity pin must not report a non-max-overlap selection"
         );
     }
 
@@ -8055,7 +8350,7 @@ policy_classes:
             cfg_rx,
             PolicyProfile::synthetic(Some(0.0), RouterQueuePolicy::Fcfs),
             16,
-            counting_policy(&prepared_selections),
+            counting_policy(&prepared_selections, false),
             None,
             Some(Arc::clone(&refresher)),
             None,

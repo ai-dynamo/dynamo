@@ -2967,6 +2967,19 @@ impl OpenAIPreprocessor {
                 reasoning_parser = ?mdc.runtime_config.reasoning_parser,
                 "Selected model parser route"
             );
+            for (slot, parser) in [
+                ("tool_call_parser", tool_call_parser.as_deref()),
+                (
+                    "reasoning_parser",
+                    mdc.runtime_config.reasoning_parser.as_deref(),
+                ),
+            ] {
+                if let Some(warning) = parser.and_then(
+                    crate::protocols::openai::chat_completions::unified_parser::deprecated_alias_warning,
+                ) {
+                    tracing::warn!(model = %mdc.display_name, slot, "{warning}");
+                }
+            }
         }
         let parser_requires_special_tokens = mdc.model_type.supports_chat()
             && Self::parser_requires_special_tokens(
@@ -7254,11 +7267,13 @@ impl OpenAIPreprocessor {
     /// frames on an opt-in path rather than a silent stream — and closing it
     /// needs the guided-output derivation lifted out of the stream builder.
     ///
-    /// Known gap, the other direction: for MiniMax M3 the stream builder also
-    /// reads the rendered prompt, which the HTTP layer does not have. A
-    /// thinking-disabled request whose chat template does not render
-    /// `thinking_mode` still runs the reasoning parser, which may withhold
-    /// output, yet this predicate returns false for it.
+    /// MiniMax M3 keeps the heartbeat even when the request disables thinking.
+    /// The stream builder decides whether its parser runs from the rendered
+    /// prompt, which the HTTP layer does not have: a template that does not
+    /// render `thinking_mode` leaves reasoning open, so the parser still runs
+    /// and may withhold output. This is conservative in the same direction as
+    /// the guided-JSON gap: a template that does close the prompt gets extra
+    /// comment frames on an opt-in path.
     pub(crate) fn stream_can_defer_all_output(
         tool_call_parser: Option<&str>,
         reasoning_parser: Option<&str>,
@@ -7279,7 +7294,8 @@ impl OpenAIPreprocessor {
                 && Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args);
         has_reasoning_decoder
             && Self::wants_reasoning_as_content_when_empty(chat_template_args)
-            && !reasoning_disabled_by_request
+            && (Self::is_minimax_m3_reasoning_parser(reasoning_parser)
+                || !reasoning_disabled_by_request)
     }
 
     /// Parsers that begin streaming in reasoning mode (force_reasoning=true).
@@ -8588,11 +8604,6 @@ impl
             self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
         );
-        crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
-            &mut request,
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-        );
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
@@ -8853,6 +8864,14 @@ impl
             .await?;
 
         let mut common_request = builder.build()?;
+        // Backends can distinguish legacy completion defaults from chat defaults.
+        let extra_args = common_request
+            .extra_args
+            .get_or_insert_with(|| serde_json::json!({}));
+        let extra_args = extra_args
+            .as_object_mut()
+            .context("preprocessed extra_args must be an object")?;
+        extra_args.insert("request_type".to_string(), "completions".into());
         Self::validate_preprocessed_token_budget(&common_request, self.token_budget.as_ref())?;
         if let Some(tracked) = RequestMetrics::from_context(&context) {
             tracked.add_input_tokens(common_request.token_ids.len());
@@ -16137,6 +16156,56 @@ responses_tools: None,
         assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
     }
 
+    /// `/v1/completions` forwards an omitted or `null` `max_tokens` as `None`,
+    /// even when a token budget is published, so the backend applies its default.
+    #[tokio::test]
+    async fn test_completion_operator_forwards_omitted_max_tokens_as_none() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.context_length = Some(100);
+        mdc.runtime_config
+            .set_engine_specific(TOKEN_BUDGET_RUNTIME_KEY, token_budget(100, true, true))
+            .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+
+        for body in [
+            serde_json::json!({"model": "test-model", "prompt": [1, 2, 3], "max_tokens": null}),
+            serde_json::json!({"model": "test-model", "prompt": [1, 2, 3]}),
+        ] {
+            let request: NvCreateCompletionRequest = serde_json::from_value(body.clone()).unwrap();
+            let capture = Arc::new(PromptRecordingBackend::default());
+            let next: Arc<
+                dyn AsyncEngine<
+                        SingleIn<PreprocessedRequest>,
+                        ManyOut<Annotated<BackendOutput>>,
+                        Error,
+                    >,
+            > = capture.clone();
+
+            let result =
+                Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next)
+                    .await;
+            assert!(result.is_err(), "capture backend always fails: {body}");
+            let dispatched = capture
+                .requests
+                .lock()
+                .unwrap()
+                .pop()
+                .unwrap_or_else(|| panic!("request was not dispatched: {body}"));
+            assert_eq!(
+                dispatched.stop_conditions.max_tokens, None,
+                "request: {body}"
+            );
+            assert_eq!(
+                dispatched.extra_args.unwrap()["request_type"],
+                "completions"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn chat_operator_rejects_invalid_legacy_jail_request_before_dispatch() {
         let mut mdc = ModelDeploymentCard::load_from_disk(
@@ -16179,9 +16248,12 @@ responses_tools: None,
         assert!(dynamo_err.to_string().contains("legacy tool-call parsing"));
     }
 
-    /// Records each dispatched prompt's length, then fails before any output.
+    /// Records dispatched requests, then fails before any output.
     #[derive(Default)]
-    struct PromptRecordingBackend(std::sync::Mutex<Vec<usize>>);
+    struct PromptRecordingBackend {
+        requests: std::sync::Mutex<Vec<PreprocessedRequest>>,
+        embedding_prompt_lengths: std::sync::Mutex<Vec<usize>>,
+    }
 
     #[async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
@@ -16191,7 +16263,7 @@ responses_tools: None,
             &self,
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
-            self.0.lock().unwrap().push(request.token_ids.len());
+            self.requests.lock().unwrap().push(request.into_parts().0);
             anyhow::bail!("stop before any output")
         }
     }
@@ -16208,7 +16280,7 @@ responses_tools: None,
             &self,
             request: SingleIn<PreprocessedEmbeddingRequest>,
         ) -> Result<ManyOut<Annotated<EmbeddingsEngineOutput>>, Error> {
-            self.0
+            self.embedding_prompt_lengths
                 .lock()
                 .unwrap()
                 .extend(request.token_ids.iter().map(Vec::len));
@@ -16244,7 +16316,7 @@ responses_tools: None,
             panic!("the recording backend must stop before producing output");
         };
         assert_eq!(error.to_string(), "stop before any output");
-        assert_eq!(*backend.0.lock().unwrap(), [3, 2]);
+        assert_eq!(*backend.embedding_prompt_lengths.lock().unwrap(), [3, 2]);
         assert_eq!(awaiting_first_token_input_tokens(&metrics), 5);
         drop(inflight);
         assert_eq!(awaiting_first_token_input_tokens(&metrics), 0);
@@ -16292,12 +16364,19 @@ responses_tools: None,
         let result = Operator::generate(preprocessor.as_ref(), context, backend.clone()).await;
 
         assert!(result.is_err());
-        let dispatched = backend.0.lock().unwrap().clone();
+        let dispatched = backend.requests.lock().unwrap();
         assert_eq!(dispatched.len(), 1);
-        assert!(dispatched[0] > 0);
+        assert!(!dispatched[0].token_ids.is_empty());
+        assert!(
+            dispatched[0]
+                .extra_args
+                .as_ref()
+                .and_then(|args| args.get("request_type"))
+                .is_none()
+        );
         assert_eq!(
             awaiting_first_token_input_tokens(&metrics),
-            dispatched[0] as u64
+            dispatched[0].token_ids.len() as u64
         );
     }
 
@@ -19733,6 +19812,56 @@ responses_tools: None,
             None,
             Some("gemma4"),
             Some(&args),
+        ));
+    }
+
+    #[test]
+    fn minimax_m3_disabled_thinking_force_nonempty_stream_can_defer_all_output() {
+        let args = |pairs: &[(&str, serde_json::Value)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        let force = ("force_nonempty_content", serde_json::Value::Bool(true));
+        let disabled = ("thinking_mode", serde_json::json!("disabled"));
+
+        // The HTTP layer has no rendered prompt, and a template that ignores
+        // `thinking_mode` keeps the M3 parser on, so disabled still defers.
+        for parser in ["minimax_m3", "minimax-m3"] {
+            for template_args in [
+                args(&[force.clone(), disabled.clone()]),
+                args(std::slice::from_ref(&force)),
+                args(&[
+                    force.clone(),
+                    ("thinking_mode", serde_json::json!("adaptive")),
+                ]),
+            ] {
+                assert!(
+                    OpenAIPreprocessor::stream_can_defer_all_output(
+                        None,
+                        Some(parser),
+                        Some(&template_args),
+                    ),
+                    "{parser} {template_args:?}",
+                );
+            }
+            // Without force_nonempty_content nothing is held back.
+            assert!(!OpenAIPreprocessor::stream_can_defer_all_output(
+                None,
+                Some(parser),
+                Some(&args(std::slice::from_ref(&disabled))),
+            ));
+        }
+
+        // Other parsers still trust the request-only gate.
+        assert!(!OpenAIPreprocessor::stream_can_defer_all_output(
+            None,
+            Some("kimi_k25"),
+            Some(&args(&[
+                force.clone(),
+                ("enable_thinking", serde_json::Value::Bool(false)),
+            ])),
         ));
     }
 
