@@ -418,7 +418,7 @@ def _kimi_k3_named_tool_choice_message(
     request: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Build the K3 forced-call instruction for a named ``tool_choice``."""
-    tool_choice = request.get("tool_choice")
+    tool_choice: Any = request.get("tool_choice")
     if not _is_named_tool_choice(tool_choice):
         return None
 
