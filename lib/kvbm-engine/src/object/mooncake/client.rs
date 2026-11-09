@@ -29,6 +29,41 @@ pub(crate) fn format_storage_key(
     }
 }
 
+/// Unregisters every tracked buffer on drop unless [`commit`](Self::commit)
+/// was called, so a partially failed `register_layout` (error or panic) does
+/// not leak RDMA memory registrations.
+struct RegistrationGuard<'a> {
+    store: &'a mooncake_store::MooncakeStore,
+    addrs: Vec<*mut std::ffi::c_void>,
+}
+
+impl<'a> RegistrationGuard<'a> {
+    fn new(store: &'a mooncake_store::MooncakeStore) -> Self {
+        Self {
+            store,
+            addrs: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, addr: *mut std::ffi::c_void) {
+        self.addrs.push(addr);
+    }
+
+    fn commit(mut self) {
+        self.addrs.clear();
+    }
+}
+
+impl Drop for RegistrationGuard<'_> {
+    fn drop(&mut self) {
+        for addr in self.addrs.drain(..).rev() {
+            if let Err(e) = unsafe { self.store.unregister_buffer(addr) } {
+                tracing::warn!(addr = ?addr, error = %e, "rollback unregister_buffer failed");
+            }
+        }
+    }
+}
+
 /// Mooncake distributed KV store client for block operations.
 pub struct MooncakeObjectBlockClient {
     pub(crate) store: Arc<mooncake_store::MooncakeStore>,
@@ -95,33 +130,38 @@ impl MooncakeObjectBlockClient {
     /// This must be called before using zero-copy transfers on the layout.
     /// For fully-contiguous layouts, registers the single backing buffer.
     /// For layer-separate layouts, registers each layer's buffer individually.
+    ///
+    /// Registration is all-or-nothing: if any buffer fails to register, the
+    /// buffers registered so far are unregistered before the error is returned.
     pub fn register_layout(&self, layout: &PhysicalLayout) -> Result<()> {
+        let mut guard = RegistrationGuard::new(&self.store);
         for buffer in layout.layout().memory_regions() {
-            let addr = buffer.addr();
-            let size = buffer.size();
+            let addr = buffer.addr() as *mut std::ffi::c_void;
             unsafe {
                 self.store
-                    .register_buffer(addr as *mut std::ffi::c_void, size)
+                    .register_buffer(addr, buffer.size())
                     .map_err(|e| anyhow!("register_buffer failed: {}", e))?;
             }
+            guard.push(addr);
         }
+        guard.commit();
         Ok(())
     }
 
     /// Unregister a physical layout's buffers from Mooncake.
     ///
     /// Call this when the layout is no longer used for zero-copy transfers
-    /// to free RDMA registration resources.
+    /// to free RDMA registration resources. Every buffer is attempted even if
+    /// an earlier one fails; the first error is returned.
     pub fn unregister_layout(&self, layout: &PhysicalLayout) -> Result<()> {
+        let mut first_err = None;
         for buffer in layout.layout().memory_regions() {
-            let addr = buffer.addr();
-            unsafe {
-                self.store
-                    .unregister_buffer(addr as *mut std::ffi::c_void)
-                    .map_err(|e| anyhow!("unregister_buffer failed: {}", e))?;
+            let addr = buffer.addr() as *mut std::ffi::c_void;
+            if let Err(e) = unsafe { self.store.unregister_buffer(addr) } {
+                first_err.get_or_insert(anyhow!("unregister_buffer failed: {}", e));
             }
         }
-        Ok(())
+        first_err.map_or(Ok(()), Err)
     }
 
     // ------------------------------------------------------------------
