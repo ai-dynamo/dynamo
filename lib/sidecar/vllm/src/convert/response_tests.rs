@@ -56,7 +56,14 @@ fn encode_response_enforces_terminal_contract() {
 
 #[test]
 fn early_prompt_frames_retain_exact_native_metadata() {
-    for (has_prompt_logprobs, has_output) in [(false, false), (true, false), (true, true)] {
+    for (has_prompt_logprobs, has_output, has_mask) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, false),
+        (false, false, true),
+        (true, false, true),
+        (true, true, true),
+    ] {
         let mut request = request();
         request.output_options.prompt_logprobs = has_prompt_logprobs.then_some(1);
         let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
@@ -77,6 +84,7 @@ fn early_prompt_frames_retain_exact_native_metadata() {
                 pb::CandidateTokenInfo::default(),
             ],
         };
+        let expected = has_prompt_logprobs.then(|| json!({"prompt_logprobs": [null, {"22": {"logprob": -0.25, "rank": 1}, "23": {"logprob": -0.75, "rank": 2}}, {"33": {"logprob": -0.5, "rank": 2}}]}));
         let first = state
             .convert(pb::GenerateResponse {
                 prompt_info: Some(prompt),
@@ -84,9 +92,11 @@ fn early_prompt_frames_retain_exact_native_metadata() {
             })
             .unwrap();
         if has_output {
+            // The first output carries them, so a frontend stop string that
+            // ends the stream before vLLM's terminal cannot drop them.
             let first = first.unwrap();
             assert!(first.finish_reason.is_none());
-            assert!(first.engine_data.is_none());
+            assert_eq!(first.engine_data, expected);
         } else {
             assert!(first.is_none());
         }
@@ -99,9 +109,75 @@ fn early_prompt_frames_retain_exact_native_metadata() {
             .as_mut()
             .unwrap()
             .num_output_tokens = 1 + u32::from(has_output);
-        let result = state.convert(response).unwrap().unwrap();
+        if has_mask {
+            response.outputs.as_mut().unwrap().sampling_mask =
+                vec![pb::TokenIds { ids: vec![7, 11] }; 1 + usize::from(has_output)];
+        }
+        let mut result = state.convert(response).unwrap().unwrap();
         assert!(result.finish_reason.is_some());
-        assert_eq!(result.engine_data, has_prompt_logprobs.then(|| json!({"prompt_logprobs": [null, {"22": {"logprob": -0.25, "rank": 1}, "23": {"logprob": -0.75, "rank": 2}}, {"33": {"logprob": -0.5, "rank": 2}}]})));
+        if has_mask {
+            let data = result
+                .engine_data
+                .as_mut()
+                .unwrap()
+                .as_object_mut()
+                .unwrap();
+            assert_eq!(
+                data.remove("sampling_mask"),
+                Some(json!(vec![vec![7, 11]; 1 + usize::from(has_output)]))
+            );
+            if data.is_empty() {
+                result.engine_data = None;
+            }
+        }
+        assert_eq!(result.engine_data, if has_output { None } else { expected });
+    }
+}
+
+#[test]
+fn prompt_logprob_arrays_allow_only_complete_rows_or_unscored_single_tokens() {
+    for count in [1, 2] {
+        for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Prefill] {
+            for arrays in 0..8 {
+                let mut request = request();
+                request.token_ids = request.token_ids[..count].to_vec().into();
+                let mut state = ResponseState::new(&request, mode);
+                let result = state.convert(pb::GenerateResponse {
+                    prompt_info: Some(pb::PromptInfo {
+                        num_prompt_tokens: count as u32,
+                        token_ids: request.token_ids.to_vec(),
+                        logprobs: vec![-0.5; if arrays & 1 == 0 { 0 } else { count }],
+                        ranks: vec![1; if arrays & 2 == 0 { 0 } else { count }],
+                        candidate_tokens: vec![
+                            pb::CandidateTokenInfo::default();
+                            if arrays & 4 == 0 { 0 } else { count }
+                        ],
+                    }),
+                    outputs: None,
+                });
+                if arrays != 7 && !(count == 1 && arrays == 0) {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("prompt logprob array lengths")
+                    );
+                    continue;
+                }
+                assert!(result.unwrap().is_none());
+                let terminal = state
+                    .convert(sequence_response(true, true, Some(Default::default())))
+                    .unwrap()
+                    .unwrap();
+                let data = terminal.engine_data.unwrap();
+                let positions = data["prompt_logprobs"].as_array().unwrap();
+                assert_eq!(positions.len(), count);
+                assert!(positions[0].is_null());
+                if count == 2 {
+                    assert_eq!(positions[1]["22"], json!({"logprob": -0.5, "rank": 1}));
+                }
+            }
+        }
     }
 }
 
@@ -147,7 +223,7 @@ fn negative_infinity_logprobs_are_normalized() {
 }
 
 #[test]
-fn missing_outputs_and_buffered_text_preserve_native_semantics() {
+fn only_token_ids_are_forwarded() {
     let mut request = request();
     request.output_options = Default::default();
     let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
@@ -157,19 +233,21 @@ fn missing_outputs_and_buffered_text_preserve_native_semantics() {
             .unwrap()
             .is_none()
     );
+    // The fixture output carries vLLM text (" token"); only its IDs are kept.
     let first = state
         .convert(sequence_response(false, false, None))
         .unwrap()
         .unwrap();
-    assert_eq!(first.text.as_deref(), Some(" token"));
+    assert_eq!(first.token_ids, [42]);
+    assert!(first.text.is_none());
     let mut response = sequence_response(true, false, None);
     let output = response.outputs.as_mut().unwrap();
     output.token_ids = vec![43, 44];
     output.num_tokens = 2;
-    output.text = String::new();
     output.finish_info.as_mut().unwrap().num_output_tokens = 3;
     let terminal = state.convert(response).unwrap().unwrap();
-    assert_eq!(terminal.text.as_deref(), Some(""));
+    assert_eq!(terminal.token_ids, [43, 44]);
+    assert!(terminal.text.is_none());
 }
 
 #[test]

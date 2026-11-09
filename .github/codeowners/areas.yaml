@@ -10,6 +10,9 @@ areas:
   - components/src/dynamo/frontend/tests/
   - examples/chat_templates/
   - lib/bindings/python/rust/parsers.rs
+  - lib/generate-format-catalog/
+  - lib/llm/src/generate_format.rs
+  - lib/llm/src/generate_format/
   - lib/llm/src/entrypoint.rs
   - lib/llm/src/entrypoint/
   - lib/llm/src/entrypoint/input.rs
@@ -19,12 +22,15 @@ areas:
   - lib/llm/src/grpc/protos/
   - lib/llm/src/grpc/service.rs
   - lib/llm/src/grpc/service/
+  - lib/http-server/
   - lib/llm/src/http.rs
   - lib/llm/src/http/
   - lib/llm/src/http/service.rs
   - lib/llm/src/http/service/
   - lib/llm/src/lora.rs
   - lib/llm/src/lora/
+  - lib/llm/src/lora_routing.rs
+  - lib/lora/
   - lib/llm/src/preprocessor.rs
   - lib/llm/src/preprocessor/
   - lib/llm/src/preprocessor/tools/
@@ -41,7 +47,8 @@ areas:
   - tests/frontend/grpc/
 - label: agents
   github_team: '@ai-dynamo/dynamo-agents-codeowners'
-  path_globs: []
+  path_globs:
+  - examples/agents/
 - label: router
   github_team: '@ai-dynamo/dynamo-router-codeowners'
   path_globs:
@@ -60,6 +67,7 @@ areas:
   - lib/kv-router/tests/
   - lib/llm/src/kv_router.rs
   - lib/llm/src/kv_router/
+  - lib/llm/src/routing_policy.rs
   - lib/llm/src/kv_router/indexer/
   - lib/llm/src/kv_router/prefill_router/
   - lib/llm/src/kv_router/publisher/
@@ -71,15 +79,21 @@ areas:
 - label: global-router
   github_team: '@ai-dynamo/dynamo-global-router-codeowners'
   path_globs:
-  - components/src/dynamo/kv_dc_relay/
+  - lib/global-view-broadcaster/
+  - components/src/dynamo/pool_relay/
+  - container/global-discovery-service.yaml
+  - lib/global-view-receiver/
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
-  - docs/fern/pages/kubernetes/kv-aware-routing/kv-dc-relay.md
-  - docs/fern/pages/reference/components/kv-dc-relay-configuration.md
-  - lib/bindings/python/rust/llm/kv_dc_relay.rs
-  - lib/llm/src/kv_dc_relay.rs
-  - lib/llm/src/kv_dc_relay/
+  - lib/global-*/**
+  - docs/fern/pages/kubernetes/kv-aware-routing/pool-relay.md
+  - docs/fern/pages/kubernetes/kv-aware-routing/global-discovery-service-storage.md
+  - docs/fern/pages/reference/components/pool-relay-configuration.md
+  - docs/fern/pages/reference/components/global-discovery-service-configuration.md
+  - lib/bindings/python/rust/llm/pool_relay.rs
+  - lib/llm/src/pool_relay.rs
+  - lib/llm/src/pool_relay/
   - lib/llm/tests/fixtures/relay-sources-canonical.json
-  - tests/router/test_kv_dc_relay_e2e.py
+  - tests/router/test_pool_relay_e2e.py
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
   path_globs:
@@ -88,6 +102,7 @@ areas:
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
   - lib/sidecar/vllm/
+  - lib/generate-formats/vllm/
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
   path_globs:
@@ -111,11 +126,15 @@ areas:
   - examples/backends/sglang/
   - lib/mocker/servers/sglang/
   - lib/sidecar/sglang/
+  - lib/generate-formats/sglang/
 - label: backend-triton
   github_team: '@ai-dynamo/dynamo-backend-triton-codeowners'
   path_globs:
   - components/src/dynamo/triton/**
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/
+- label: sidecar
+  github_team: '@ai-dynamo/dynamo-sidecar-codeowners'
+  path_globs: []
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
   path_globs:
@@ -257,6 +276,7 @@ areas:
   - lib/backend-common/examples/
   - lib/sidecar/dynamo-sidecar
   - lib/sidecar/README.md
+  - lib/sidecar/SUPPORT_NOTES.md
   - lib/sidecar/common/
   - lib/sidecar/testkit/
   - lib/bindings/
@@ -271,7 +291,9 @@ areas:
   - lib/llm/src/discovery/
   - lib/llm/src/kernels/
   - lib/llm/src/local_model/
-  - lib/llm/src/lora/routing/
+  - lib/lora/src/huggingface.rs
+  - lib/lora/src/routing/
+  - lib/lora/tests/
   - lib/llm/src/model_card.rs
   - lib/llm/src/perf/
   - lib/llm/src/utils/
@@ -450,6 +472,7 @@ areas:
   path_globs:
   - deploy/operator/internal/controller/lpx/
   - deploy/operator/internal/dynamo/lpx/
+  - lib/sidecar/lpx/
 - label: gms
   github_team: '@ai-dynamo/dynamo-gms-codeowners'
   path_globs:
@@ -613,6 +636,14 @@ shared:
   owners:
   - process
   - agents
+- glob: .ai/metrics-guidelines.md
+  owners:
+  - process
+  - observability
+- glob: .ai/metrics-review.md
+  owners:
+  - process
+  - observability
 - glob: .github/workflows/fern-docs.yml
   owners:
   - ops
@@ -888,6 +919,14 @@ shared:
   owners:
   - planner
   - operator
+- glob: components/src/dynamo/aisimulate/tests/dgd/
+  owners:
+  - planner
+  - operator
+- glob: components/src/dynamo/aisimulate/output/dgdr_run/
+  owners:
+  - planner
+  - operator
 - glob: components/src/dynamo/planner/connectors/kubernetes.py
   owners:
   - planner
@@ -1017,6 +1056,10 @@ shared:
   owners:
   - observability
   - kv-memory
+- glob: examples/router/custom-policy-example/epp/
+  owners:
+  - router
+  - epp
 - glob: lib/backend-common/src/metrics.rs
   owners:
   - runtime
@@ -1034,6 +1077,19 @@ shared:
   - performance
   - router
   - global-router
+- glob: lib/kv-router/src/plugins/registry.rs
+  owners:
+  - router
+  - epp
+- glob: lib/kv-router/src/scheduling/config.rs
+  owners:
+  - router
+  - epp
+# Top-level files only: the selection core in core/ stays router-only.
+- glob: lib/kv-router/src/services/selection/*
+  owners:
+  - router
+  - epp
 - glob: lib/kv-router/src/services/shared_cache/
   owners:
   - router
@@ -1066,18 +1122,51 @@ shared:
   owners:
   - kv-memory
   - observability
+- glob: lib/llm/src/discovery/worker_monitor.rs
+  owners:
+  - runtime
+  - epp
+- glob: lib/llm/src/entrypoint.rs
+  owners:
+  - frontend
+  - epp
 - glob: lib/llm/src/http/service/busy_threshold.rs
   owners:
   - frontend
   - kv-memory
+  - epp
+- glob: lib/llm/src/http/service/error.rs
+  owners:
+  - frontend
+  - epp
 - glob: lib/llm/src/http/service/metrics.rs
   owners:
   - frontend
   - observability
+- glob: lib/http-server/src/metrics.rs
+  owners:
+  - frontend
+  - observability
+- glob: lib/llm/src/kv_router/README.md
+  owners:
+  - router
+  - epp
+- glob: lib/llm/src/kv_router/prefill_router/query.rs
+  owners:
+  - router
+  - epp
+- glob: lib/llm/src/kv_router/routing_load.rs
+  owners:
+  - router
+  - epp
 - glob: lib/llm/src/kv_router/shared_cache.rs
   owners:
   - router
   - kv-memory
+- glob: lib/llm/src/lora_routing.rs
+  owners:
+  - frontend
+  - router
 - glob: lib/llm/src/preprocessor/mm_routing/
   owners:
   - frontend
@@ -1099,10 +1188,16 @@ shared:
   owners:
   - performance
   - backend-sglang
+  - sidecar
 - glob: lib/mocker/servers/trtllm/
   owners:
   - performance
   - backend-trtllm
+  - sidecar
+- glob: lib/router-plugins/builtin/src/lib.rs
+  owners:
+  - router
+  - epp
 - glob: lib/runtime/src/nvtx.rs
   owners:
   - runtime
@@ -1111,10 +1206,85 @@ shared:
   owners:
   - runtime
   - backend-vllm
+  - sidecar
 - glob: lib/sidecar/testkit/tests/support/sglang.rs
   owners:
   - runtime
   - backend-sglang
+  - sidecar
+- glob: lib/sidecar/testkit/tests/support/lpx.rs
+  owners:
+  - runtime
+  - lpx
+  - sidecar
+- glob: components/src/dynamo/sglang/sidecar.py
+  owners:
+  - backend-sglang
+  - sidecar
+- glob: components/src/dynamo/trtllm/sidecar.py
+  owners:
+  - backend-trtllm
+  - sidecar
+- glob: components/src/dynamo/vllm/sidecar.py
+  owners:
+  - backend-vllm
+  - sidecar
+- glob: docs/fern/**/*sidecar*
+  owners:
+  - docs
+  - sidecar
+- glob: lib/bindings/python/tests/test_sidecar_startup.py
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/mocker/servers/
+  owners:
+  - performance
+  - sidecar
+- glob: lib/sidecar/Dockerfile
+  owners:
+  - ops
+  - sidecar
+- glob: lib/sidecar/README.md
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/SUPPORT_NOTES.md
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/common/
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/dynamo-sidecar
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/lpx/
+  owners:
+  - lpx
+  - sidecar
+- glob: lib/sidecar/sglang/
+  owners:
+  - backend-sglang
+  - sidecar
+- glob: lib/sidecar/testkit/
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/trtllm/
+  owners:
+  - backend-trtllm
+  - sidecar
+- glob: lib/sidecar/vllm/
+  owners:
+  - backend-vllm
+  - sidecar
+- glob: tests/serve/test_sidecar.py
+  owners:
+  - runtime
+  - sidecar
 - glob: tests/deploy/
   owners:
   - ops
@@ -1200,6 +1370,10 @@ shared:
   owners:
   - operator
   - backend-vllm
+- glob: container/Dockerfile.global-discovery-service
+  owners:
+  - global-router
+  - ops
 - glob: deploy/operator/Dockerfile
   owners:
   - operator
@@ -1445,10 +1619,6 @@ shared:
   owners:
   - runtime
   - ops
-- glob: tests/dependencies/test_kvbm_imports.py
-  owners:
-  - runtime
-  - kv-memory
 - glob: .github/workflows/pr-xpu.yaml
   owners:
   - xpu

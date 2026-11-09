@@ -53,6 +53,12 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
 </Tabs>
 </Card>
 
+## Generation limits
+
+For `/v1/completions`, an omitted or `null` `max_tokens` uses the model's generation limit or vLLM's sampling default (16 tokens when the model has no limit). A finite limit is bounded by the remaining context. Set `--override-generation-config '{"max_new_tokens": 64}'` on the vLLM worker to configure the model's default limit.
+
+Chat completions and Responses use the remaining context when the client and model specify no output limit. Explicit client limits take precedence over defaults and remain subject to context validation.
+
 ## Native KV event configuration
 
 `--kv-events-config` and `--enable-prefix-caching` are native vLLM engine arguments rather than `DynamoVllmConfig` fields, but they determine whether a worker publishes the cache events used by event-driven KV-aware routing.
@@ -126,6 +132,12 @@ These flags control which role this worker plays in a disaggregated deployment. 
   Run in headless mode for multi-node tensor-parallel or pipeline-parallel deployments. Secondary nodes run vLLM workers only with no Dynamo endpoints. See the vLLM multi-node data parallel documentation for details.
 
   Environment variable: `DYN_VLLM_HEADLESS`
+</ParamField>
+
+<ParamField path="--freeze-gc-after-init" type="boolean" default="false">
+  Collect and freeze tracked objects in the Dynamo worker process once the engine is initialized, before the model is registered. Later full (gen2) collections then skip the static heap (engine client, tokenizer, config), which otherwise causes multi-hundred-millisecond request stalls under load. vLLM already freezes its EngineCore, GPU-worker and API-server heaps; this covers the Dynamo process that replaces the API server. Reference counting still reclaims objects, but unreachable cycles among frozen objects remain until they are unfrozen or the process exits. Validate memory usage before enabling it. Not supported with `--headless` or `--disaggregation-mode=encode`.
+
+  Environment variable: `DYN_VLLM_FREEZE_GC_AFTER_INIT`
 </ParamField>
 
 ## Tokenizer and multimodal

@@ -53,7 +53,6 @@ func (r *DynamoGraphDeploymentReconciler) newDisaggregatedSetProgram() *disaggre
 			r.RestConfig,
 			r.DockerSecretRetriever,
 			r.SSHKeyManager,
-			r.RBACManager,
 		),
 		rollout:         rollout,
 		workloads:       r.newDisaggregatedSetWorkloadsReconciler(rollout),

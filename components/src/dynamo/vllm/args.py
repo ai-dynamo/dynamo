@@ -9,8 +9,13 @@ import os
 import socket
 from typing import Any, Dict, Optional
 
+from vllm.config import SpeculativeConfig
 from vllm.distributed.kv_events import KVEventsConfig
-from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.arg_utils import (
+    AsyncEngineArgs,
+    is_cloud_storage,
+    maybe_override_with_speculators,
+)
 
 try:
     from vllm.utils import FlexibleArgumentParser
@@ -169,6 +174,18 @@ def _parse_cli_args(argv: list[str] | None) -> tuple[Config, argparse.Namespace]
     # Consume the router flags before the engine parser sees the remainder.
     dynamo_config.router_advertisement, unknown = parse_worker_router_config(unknown)
 
+    # Name the frontend flag instead of failing with vLLM's generic parse error.
+    if any(
+        arg.split("=", 1)[0].split(".", 1)[0]
+        in ("--default-chat-template-kwargs", "--default_chat_template_kwargs")
+        for arg in unknown
+    ):
+        raise ValueError(
+            "--default-chat-template-kwargs has no effect on a Dynamo worker, because "
+            "the Dynamo frontend renders the chat template. Set "
+            "--default-chat-template-kwargs on the frontend (python -m dynamo.frontend)."
+        )
+
     vllm_args = vllm_parser.parse_args(unknown)
     # Set the model name from the command line arguments
     # model is defined in AsyncEngineArgs, but when AsyncEngineArgs.from_cli_args is called,
@@ -325,6 +342,8 @@ def _unsupported_fpm_trace_role(dynamo_config: Config) -> Optional[str]:
         return "embedding"
     if dynamo_config.classify_worker:
         return "classify"
+    if dynamo_config.transcription_worker:
+        return "transcription"
     if dynamo_config.headless:
         return "headless"
     if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:
@@ -368,6 +387,14 @@ def update_engine_config_with_dynamo(
                 "Pooling-family worker: defaulting --enable-prefix-caching to False"
             )
             engine_config.enable_prefix_caching = False
+        elif dynamo_config.transcription_worker:
+            # Whisper is an encoder-decoder model. vLLM does not support
+            # prefix caching for cross-attention KV caches, and enabling it
+            # causes the first transcription request to terminate EngineCore.
+            logger.debug(
+                "Transcription worker: defaulting --enable-prefix-caching to False"
+            )
+            engine_config.enable_prefix_caching = False
         else:
             logger.debug(
                 "--enable-prefix-caching or --no-enable-prefix-caching not specified. "
@@ -394,6 +421,8 @@ def update_engine_config_with_dynamo(
     kv_cfg = create_kv_events_config(engine_config)
     defaults["kv_events_config"] = kv_cfg
     dynamo_config.use_kv_events = kv_cfg is not None and kv_cfg.enable_kv_cache_events
+    if dynamo_config.use_kv_events:
+        _keep_legacy_block_hashes(engine_config)
 
     logger.info(
         f"Using kv_events_config for publishing vLLM kv events over zmq: {kv_cfg} "
@@ -609,6 +638,39 @@ def create_kv_events_config(
     return None
 
 
+def _keep_legacy_block_hashes(engine_config: AsyncEngineArgs) -> None:
+    """Default vLLM's EAGLE/MTP lookahead block hashes off for KV event publishers:
+    Dynamo's KV indexers hash only each block's own tokens."""
+    # vLLM 0.32 (CPU and XPU images); remove once they ship 0.33.
+    if "disable_lookahead_block_hashes" not in SpeculativeConfig.__dataclass_fields__:
+        return
+    spec = engine_config.speculative_config
+    if (
+        spec is None
+        and engine_config.spec_method is None
+        and not _is_speculators_checkpoint(engine_config)
+    ):
+        return
+    engine_config.speculative_config = {
+        "disable_lookahead_block_hashes": True,
+        **(spec or {}),
+    }
+
+
+def _is_speculators_checkpoint(engine_config: AsyncEngineArgs) -> bool:
+    """Whether vLLM will derive a speculative config from the model checkpoint."""
+    if is_cloud_storage(engine_config.model):
+        return False
+    _, _, spec = maybe_override_with_speculators(
+        model=engine_config.model,
+        tokenizer=engine_config.tokenizer,
+        trust_remote_code=engine_config.trust_remote_code,
+        revision=engine_config.revision,
+        hf_token=engine_config.hf_token,
+    )
+    return spec is not None
+
+
 def _set_state_agent_topic(
     engine_config: AsyncEngineArgs, events: KVEventsConfig
 ) -> None:
@@ -710,7 +772,7 @@ def _connector_to_kv_transfer_json(connectors: list[str], nixl_role: str) -> str
             "kv_connector": "PdConnector",
             "kv_role": "kv_both",
             "kv_connector_extra_config": {"connectors": multi_connectors},
-            "kv_connector_module_path": "kvbm.vllm_integration.connector",
+            "kv_connector_module_path": "dynamo.vllm.pd_connector",
         }
     )
 

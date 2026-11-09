@@ -18,7 +18,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/golden"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -30,7 +29,7 @@ const (
 )
 
 // Output-only metadata can be reviewed in goldens; generation selection and the
-// effective Grove pod templates are checked independently against historical state.
+// effective pod templates are checked independently against historical state.
 func upgradeSafetyError(generationChanged bool, before, after []unstructured.Unstructured) error {
 	if generationChanged {
 		return fmt.Errorf("operator-only takeover selected a new worker generation")
@@ -41,12 +40,12 @@ func upgradeSafetyError(generationChanged bool, before, after []unstructured.Uns
 	}
 	oldWorkloads, newWorkloads := 0, 0
 	for _, object := range before {
-		if object.GetKind() == upgradePodCliqueSetKind {
+		if isUpgradeWorkload(object.GetKind()) {
 			oldWorkloads++
 		}
 	}
 	for _, object := range after {
-		if object.GetKind() == upgradePodCliqueSetKind {
+		if isUpgradeWorkload(object.GetKind()) {
 			newWorkloads++
 		}
 	}
@@ -54,7 +53,7 @@ func upgradeSafetyError(generationChanged bool, before, after []unstructured.Uns
 		return fmt.Errorf("active workload inventory changed")
 	}
 	for _, old := range before {
-		if old.GetKind() != upgradePodCliqueSetKind && old.GetKind() != upgradeDynamoGraphDeploymentKind {
+		if !isUpgradeWorkload(old.GetKind()) && old.GetKind() != upgradeDynamoGraphDeploymentKind {
 			continue
 		}
 		current, ok := index[old.GetKind()+"/"+old.GetName()]
@@ -68,6 +67,24 @@ func upgradeSafetyError(generationChanged bool, before, after []unstructured.Uns
 			newOrigin, newExists := current.GetAnnotations()[origin]
 			if oldOrigin != newOrigin || oldExists != newExists {
 				return fmt.Errorf("historical origin changed")
+			}
+			// A golden refresh cannot approve a newly requested rollout or restart.
+			for _, key := range []string{"rollingUpdate", "restart"} {
+				a, _, err := unstructured.NestedFieldCopy(old.Object, "status", key)
+				if err != nil {
+					return err
+				}
+				b, _, err := unstructured.NestedFieldCopy(current.Object, "status", key)
+				if err != nil {
+					return err
+				}
+				if diff := cmp.Diff(a, b); diff != "" {
+					return fmt.Errorf("DGD rollout intent changed: %s", diff)
+				}
+			}
+		case "Deployment", "LeaderWorkerSet", "DisaggregatedSet":
+			if err := upgradeComponentWorkloadSafetyError(old, current); err != nil {
+				return err
 			}
 		case upgradePodCliqueSetKind:
 			a, err := upgradeWorkerTemplates(old)
@@ -92,6 +109,29 @@ func upgradeSafetyError(generationChanged bool, before, after []unstructured.Uns
 		}
 	}
 	return nil
+}
+
+// Component workloads preserve both their generation and complete effective spec.
+func upgradeComponentWorkloadSafetyError(old, current unstructured.Unstructured) error {
+	if old.GetGeneration() != current.GetGeneration() {
+		return fmt.Errorf("workload generation changed: %s/%s", old.GetKind(), old.GetName())
+	}
+	a, _, err := unstructured.NestedMap(old.Object, "spec")
+	if err != nil {
+		return err
+	}
+	b, _, err := unstructured.NestedMap(current.Object, "spec")
+	if err != nil {
+		return err
+	}
+	if diff := cmp.Diff(a, b); diff != "" {
+		return fmt.Errorf("effective worker template or rollout intent changed: %s", diff)
+	}
+	return nil
+}
+
+func isUpgradeWorkload(kind string) bool {
+	return kind == upgradePodCliqueSetKind || kind == "Deployment" || kind == "LeaderWorkerSet" || kind == "DisaggregatedSet"
 }
 
 func upgradeWorkerTemplates(object unstructured.Unstructured) (map[string]any, error) {
@@ -181,7 +221,12 @@ func TestUpgradeScenarioNamespaces(t *testing.T) {
 // Hash expectations come from the frozen golden spec, never from candidate output.
 func upgradeLatestVariables(t *testing.T, path, version string) golden.Variables {
 	t.Helper()
-	variables := golden.Variables{"operator-version": version, "worker-hash": "pending", "pcs-spec-hash": "pending"}
+	variables := golden.Variables{"operator-version": version, "worker-hash": "pending", "pcs-spec-hash": "pending", "ds-revision": "pending"}
+	raw, err := golden.ReadManifests(path)
+	require.NoError(t, err)
+	for _, object := range raw {
+		upgradeWorkerStringVariables(object.Object, "pending", variables)
+	}
 	objects, err := golden.ReadManifestsWithVariables(path, variables)
 	require.NoError(t, err)
 
@@ -191,10 +236,9 @@ func upgradeLatestVariables(t *testing.T, path, version string) golden.Variables
 		if object.GetKind() != upgradeDynamoGraphDeploymentKind {
 			continue
 		}
-		dgd := api.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+		dgd := api.DynamoGraphDeployment{
 			Name: object.GetName(), Namespace: object.GetNamespace(),
-			Labels: object.GetLabels(), Annotations: object.GetAnnotations(),
-		}}
+			Labels: object.GetLabels(), Annotations: object.GetAnnotations()}
 		spec, _, err := unstructured.NestedMap(object.Object, "spec")
 		require.NoError(t, err)
 		require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(spec, &dgd.Spec))
@@ -203,13 +247,21 @@ func upgradeLatestVariables(t *testing.T, path, version string) golden.Variables
 		found = true
 	}
 	require.True(t, found, "latest golden must include its DGD")
+	for _, object := range raw {
+		upgradeWorkerStringVariables(object.Object, variables["worker-hash"], variables)
+	}
 
-	// Rebind the golden PCS template before deriving its exact spec digest.
+	// Derive provider revisions from reviewed templates after rebinding worker identity.
 	objects, err = golden.ReadManifestsWithVariables(path, variables)
 	require.NoError(t, err)
 	for _, object := range objects {
 		if object.GetKind() == upgradePodCliqueSetKind {
 			variables["pcs-spec-hash"], err = common.GetSpecHash(&object)
+			require.NoError(t, err)
+		}
+		if object.GetKind() == "DisaggregatedSet" {
+			spec := unstructured.Unstructured{Object: map[string]any{"spec": object.Object["spec"]}}
+			variables["ds-revision"], err = disaggregatedSetTargetRevision(&spec)
 			require.NoError(t, err)
 		}
 	}
@@ -233,4 +285,22 @@ func TestUpgradeLatestVersionVariables(t *testing.T) {
 	changed := upgradeLatestVariables(t, updated, "1.7.0")
 	require.NotEqual(t, current["worker-hash"], changed["worker-hash"])
 	require.NotEqual(t, current["pcs-spec-hash"], changed["pcs-spec-hash"])
+}
+
+// Component names and status messages embed the version-dependent worker hash.
+func upgradeWorkerStringVariables(value any, hash string, variables golden.Variables) {
+	switch value := value.(type) {
+	case map[string]any:
+		for _, child := range value {
+			upgradeWorkerStringVariables(child, hash, variables)
+		}
+	case []any:
+		for _, child := range value {
+			upgradeWorkerStringVariables(child, hash, variables)
+		}
+	case string:
+		if name, found := strings.CutPrefix(value, "$var:worker-string:"); found {
+			variables["worker-string:"+name] = strings.ReplaceAll(name, "{{worker-hash}}", hash)
+		}
+	}
 }

@@ -47,14 +47,10 @@ func TestGmsWeightServerPodSpec(t *testing.T) {
 			Command: []string{"python3", "-m", "vllm.entrypoints.openai.api_server"},
 			Args:    []string{"--model", "meta-llama/Llama-3-8B"},
 			LivenessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{Path: "/health"},
-				},
+				HTTPGet: &corev1.HTTPGetAction{Path: "/health"},
 			},
 			ReadinessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{Path: "/ready"},
-				},
+				HTTPGet: &corev1.HTTPGetAction{Path: "/ready"},
 			},
 			Resources: corev1.ResourceRequirements{
 				Limits: corev1.ResourceList{
@@ -596,19 +592,13 @@ func intraPodFailoverPodSpec() corev1.PodSpec {
 					{Name: "system", ContainerPort: 9090, Protocol: corev1.ProtocolTCP},
 				},
 				StartupProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: httpPort},
-					},
+					HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: httpPort},
 				},
 				LivenessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: httpPort},
-					},
+					HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: httpPort},
 				},
 				ReadinessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: httpPort},
-					},
+					HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: httpPort},
 				},
 				Resources: corev1.ResourceRequirements{
 					Claims: []corev1.ResourceClaim{{Name: dra.ClaimName}},
