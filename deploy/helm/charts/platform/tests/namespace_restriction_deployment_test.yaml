@@ -115,3 +115,53 @@ tests:
         documentSelector:
           path: kind
           value: Deployment
+
+  - it: sets default resources on the crd-apply init container
+    template: charts/dynamo-operator/templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].resources
+          value:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 256Mi
+        documentSelector:
+          path: kind
+          value: Deployment
+
+  - it: overrides crd-apply init container resources independently of the manager
+    template: charts/dynamo-operator/templates/deployment.yaml
+    set:
+      dynamo-operator.controllerManager.crdApply.resources:
+        requests:
+          cpu: 200m
+          memory: 256Mi
+        limits:
+          memory: 512Mi
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].resources.limits.memory
+          value: 512Mi
+        documentSelector:
+          path: kind
+          value: Deployment
+      - equal:
+          path: spec.template.spec.containers[0].resources.requests.memory
+          value: 1Gi
+        documentSelector:
+          path: kind
+          value: Deployment
+
+  - it: renders no crd-apply resources when set to null
+    template: charts/dynamo-operator/templates/deployment.yaml
+    set:
+      dynamo-operator.controllerManager.crdApply.resources: null
+    asserts:
+      - isNullOrEmpty:
+          path: spec.template.spec.initContainers[0].resources
+        documentSelector:
+          path: kind
+          value: Deployment
