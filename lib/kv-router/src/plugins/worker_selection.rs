@@ -5,7 +5,7 @@
 
 mod config;
 mod context;
-mod inputs;
+pub(crate) mod inputs;
 mod runtime;
 
 pub(crate) use runtime::RuntimePolicyState;
@@ -14,10 +14,11 @@ pub use runtime::{
 };
 
 pub use context::WorkerSelectionContext;
-pub(crate) use inputs::{CacheSnapshot, CandidateData, WorkerCacheData};
+pub(crate) use inputs::{CacheSnapshot, CandidateData, WorkerCacheData, WorkerInputRows};
 pub use inputs::{
     ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
-    WorkerInputView, WorkerInputs, WorkerLoadInput,
+    WorkerCapacity, WorkerInfo, WorkerInputView, WorkerInputs, WorkerLoadInput,
+    WorkerTransferInput,
 };
 
 pub use super::registry::{
@@ -29,7 +30,7 @@ pub use crate::scheduling::{
     SessionContext, WorkerSelectionInputTrigger, WorkerSelectionPolicyError,
 };
 pub(crate) use config::RawWorkerSelectionConfig;
-pub use config::{WorkerSelectionConfig, WorkerSelectionInstance};
+pub use config::{WorkerSelectionConfig, WorkerSelectionInstance, WorkerSelectionPolicySelection};
 
 use crate::{KvRouterConfig, RoutingPartitionRef, WorkerType};
 use std::sync::Arc;
@@ -42,7 +43,10 @@ pub type WorkerSelectionPolicyFactory = Arc<
 >;
 
 /// Adds one finite cost contribution to each eligible worker.
-pub trait WorkerScorer: Send {
+///
+/// One instance may be called from several threads at once, and successive calls may run on
+/// different threads. Keep any state that changes between calls thread-safe.
+pub trait WorkerScorer: Send + Sync {
     /// Declare the worker-signal groups needed by this scorer.
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::NONE
@@ -57,7 +61,7 @@ pub trait WorkerScorer: Send {
     /// Write one finite, lower-is-better contribution to every slot. The host validates and adds
     /// each contribution to that row's total. The candidate view and cost slice may not be retained after this call.
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -67,7 +71,10 @@ pub trait WorkerScorer: Send {
 /// Filters run in declaration order for each candidate. Callback order across different
 /// candidates and scorers is unspecified; implementations must not depend on filters and scorers
 /// being interleaved.
-pub trait WorkerFilter: Send {
+///
+/// One instance may be called from several threads at once, and successive calls may run on
+/// different threads. Keep any state that changes between calls thread-safe.
+pub trait WorkerFilter: Send + Sync {
     /// Declare the worker-signal groups needed by this filter.
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::NONE
@@ -75,23 +82,27 @@ pub trait WorkerFilter: Send {
 
     /// Return `true` to keep an eligible worker in the policy candidate set.
     fn keep(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError>;
 }
 
 /// Selects one row after all filters and scorers run.
-pub trait WorkerPicker: Send {
+///
+/// One instance may be called from several threads at once, and successive calls may run on
+/// different threads. Keep any state that changes between calls thread-safe.
+pub trait WorkerPicker: Send + Sync {
     /// Declare the optional worker-signal columns needed by this picker.
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::NONE
     }
 
     /// Return one row index from the host-owned eligible candidate table. Row order is
-    /// unspecified; inspect candidate data instead of relying on a stable position.
+    /// unspecified unless [`WorkerInputView`] says otherwise; inspect candidate data instead
+    /// of relying on a stable position.
     fn pick(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError>;

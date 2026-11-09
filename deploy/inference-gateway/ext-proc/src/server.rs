@@ -11,7 +11,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
@@ -19,8 +21,11 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::envoy_helpers::{self, metadata};
+use crate::log_budget::LogBudget;
+use crate::metrics::{self, Stage};
 use crate::picker::{
-    CacheSaltForwarding, Endpoint, EndpointPicker, PickError, RequestInfo, ResponseUsage,
+    CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickTimings, RequestInfo,
+    ResponseUsage,
 };
 use crate::proto::envoy::service::ext_proc::v3::{
     self as ext_proc, ProcessingRequest, ProcessingResponse,
@@ -28,6 +33,7 @@ use crate::proto::envoy::service::ext_proc::v3::{
     processing_request,
 };
 use crate::proto::envoy::r#type::v3::StatusCode;
+use crate::tokio_runtime::{self, TaskKind};
 use dynamo_kv_router::zmq_wire::DYNAMO_CACHE_SALT_PREFIX;
 use serde_json::value::RawValue;
 
@@ -84,6 +90,18 @@ struct RequestContext {
 
     /// Incomplete trailing SSE bytes awaiting the next chunk / EOS.
     sse_usage_buf: Vec<u8>,
+
+    /// When the request headers arrived, for [`Stage::ReceiveBody`].
+    headers_received_at: Option<Instant>,
+    /// When the routing decision was ready, for [`Stage::FirstResponse`].
+    routed_at: Option<Instant>,
+
+    /// The gateway connection this stream arrived on, and how many streams
+    /// it carried at the time, for the routing and summary log lines.
+    connection_id: Option<u64>,
+    connection_streams: Option<usize>,
+    /// What happened on this stream, for the stream summary log line.
+    trace: StreamTrace,
 }
 
 impl RequestContext {
@@ -113,7 +131,26 @@ impl RequestContext {
             resp_trailer_resp: None,
             parsed_usage: None,
             sse_usage_buf: Vec::new(),
+            headers_received_at: None,
+            routed_at: None,
+            connection_id: None,
+            connection_streams: None,
+            trace: StreamTrace::default(),
         }
+    }
+
+    /// Time since the request headers arrived: the offsets in the stream
+    /// summary.
+    fn since_headers(&self) -> Option<Duration> {
+        self.headers_received_at.map(|received| received.elapsed())
+    }
+
+    /// Whether the response status is 2xx, or unknown because the gateway
+    /// sent no `:status`.
+    fn response_succeeded(&self) -> bool {
+        self.response_headers
+            .get(":status")
+            .is_none_or(|status| status.starts_with('2'))
     }
 
     /// Advance the state machine and collect responses that are ready to send.
@@ -194,6 +231,264 @@ impl RequestContext {
     }
 }
 
+/// How each stream ended, in the stream summary log line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    /// The response finished.
+    Complete,
+    /// The gateway ended the stream before the response finished.
+    ClosedEarly,
+    /// The gateway stopped reading the EPP's responses, so the request was
+    /// cancelled.
+    Cancelled,
+    /// No worker was picked; the EPP answered the request itself.
+    PickError,
+    /// A receive error or an unsupported protocol configuration.
+    StreamError,
+    /// The EPP evicted the request.
+    Evicted,
+}
+
+impl Outcome {
+    fn label(self) -> &'static str {
+        match self {
+            Outcome::Complete => "complete",
+            Outcome::ClosedEarly => "closed_early",
+            Outcome::Cancelled => "cancelled",
+            Outcome::PickError => "pick_error",
+            Outcome::StreamError => "stream_error",
+            Outcome::Evicted => "evicted",
+        }
+    }
+}
+
+/// A response chunk gap at least this long is counted in the stream summary.
+const NOTABLE_CHUNK_GAP: Duration = Duration::from_millis(40);
+/// A stream with a response chunk gap, or a routed-to-response-headers time,
+/// at least this long is slow.
+const SLOW_GAP: Duration = Duration::from_millis(100);
+/// A stream that took at least this long to receive its body, or to pick a
+/// worker, is slow.
+const SLOW_PHASE: Duration = Duration::from_secs(1);
+
+/// What happened on one ext_proc stream, on the EPP's clock, for the stream
+/// summary log line. Offsets are from the arrival of the request headers.
+#[derive(Default)]
+struct StreamTrace {
+    outcome: Option<Outcome>,
+    /// Request body messages received.
+    body_msgs: u32,
+    /// The end of the request body.
+    body_eos: Option<Duration>,
+    /// The routing decision and the forwarded body ready.
+    routed: Option<Duration>,
+    /// The response headers' arrival.
+    response_headers: Option<Duration>,
+    /// Whether the response streams. A unary response's headers wait for
+    /// the whole generation.
+    streamed: bool,
+    /// The first non-empty response chunk's arrival.
+    first_chunk: Option<Duration>,
+    rewrite: Option<Duration>,
+    body_bytes_out: usize,
+    timings: Option<PickTimings>,
+    /// Response body messages received, and the gaps between them.
+    chunks: u32,
+    last_chunk_at: Option<Instant>,
+    max_chunk_gap: Duration,
+    notable_chunk_gaps: u32,
+}
+
+impl StreamTrace {
+    fn record_chunk(&mut self, now: Instant) {
+        self.chunks += 1;
+        if let Some(last) = self.last_chunk_at.replace(now) {
+            let gap = now.saturating_duration_since(last);
+            self.max_chunk_gap = self.max_chunk_gap.max(gap);
+            if gap >= NOTABLE_CHUNK_GAP {
+                self.notable_chunk_gaps += 1;
+            }
+        }
+    }
+
+    /// Whether the stream stalled somewhere the EPP can see: a response chunk
+    /// held back, a slow trip from the routing decision to a streamed
+    /// response's headers, or a slow body or pick. `end` is the stream's end,
+    /// which bounds a pick that never finished, because the request was
+    /// cancelled or failed while it waited.
+    fn is_slow(&self, end: Option<Duration>) -> bool {
+        let elapsed = |from: Option<Duration>, to: Option<Duration>| {
+            from.zip(to).map(|(from, to)| to.saturating_sub(from))
+        };
+        let pick = elapsed(self.body_eos, self.routed.or(end));
+        self.max_chunk_gap >= SLOW_GAP
+            || (self.streamed
+                && elapsed(self.routed, self.response_headers).is_some_and(|d| d >= SLOW_GAP))
+            || self.body_eos.is_some_and(|d| d >= SLOW_PHASE)
+            || pick.is_some_and(|d| d >= SLOW_PHASE)
+    }
+}
+
+static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// One gateway connection to the ext_proc TLS port, shared by the task that
+/// serves it and every ext_proc stream on it. Its id and stream counts go into
+/// the connection's log lines and its streams' routing and summary lines.
+#[derive(Debug)]
+pub(crate) struct Connection {
+    id: u64,
+    open_streams: AtomicUsize,
+    streams_served: AtomicU64,
+    peak_streams: AtomicUsize,
+}
+
+impl Connection {
+    pub(crate) fn open() -> Arc<Self> {
+        Arc::new(Self {
+            id: NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed),
+            open_streams: AtomicUsize::new(0),
+            streams_served: AtomicU64::new(0),
+            peak_streams: AtomicUsize::new(0),
+        })
+    }
+
+    /// Process-unique id, for joining a connection's log lines with its
+    /// streams' lines.
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub(crate) fn streams_served(&self) -> u64 {
+        self.streams_served.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn peak_streams(&self) -> usize {
+        self.peak_streams.load(Ordering::Relaxed)
+    }
+}
+
+/// One ext_proc stream, counted on its gateway connection until dropped.
+struct OpenStream {
+    connection: Option<Arc<Connection>>,
+    connection_streams: Option<usize>,
+}
+
+impl OpenStream {
+    /// Start counting a stream. `connection` is `None` on the plaintext
+    /// listener, which does not track connections.
+    fn open(connection: Option<Arc<Connection>>) -> Self {
+        let connection_streams = connection.as_ref().map(|connection| {
+            let open = connection.open_streams.fetch_add(1, Ordering::Relaxed) + 1;
+            connection.streams_served.fetch_add(1, Ordering::Relaxed);
+            connection.peak_streams.fetch_max(open, Ordering::Relaxed);
+            open
+        });
+        Self {
+            connection,
+            connection_streams,
+        }
+    }
+
+    fn connection_id(&self) -> Option<u64> {
+        self.connection.as_ref().map(|connection| connection.id())
+    }
+
+    /// Streams open on this stream's connection when it started, itself
+    /// included: how many requests one stall of that connection holds.
+    fn connection_streams(&self) -> Option<usize> {
+        self.connection_streams
+    }
+}
+
+impl Drop for OpenStream {
+    fn drop(&mut self) {
+        if let Some(connection) = &self.connection {
+            connection.open_streams.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+fn micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+/// Environment variable choosing which streams get an INFO summary line:
+/// `slow` (default) for slow streams only, at most 20 lines per second;
+/// `all` for every stream, as a benchmark wants; `off` for none. Other
+/// streams' summaries are logged at DEBUG.
+pub const STREAM_SUMMARY_ENV: &str = "DYN_EPP_STREAM_SUMMARY";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SummaryMode {
+    All,
+    Slow,
+    Off,
+}
+
+static SUMMARY_MODE: LazyLock<SummaryMode> = LazyLock::new(|| {
+    match std::env::var(STREAM_SUMMARY_ENV)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "all" => SummaryMode::All,
+        "off" => SummaryMode::Off,
+        _ => SummaryMode::Slow,
+    }
+});
+
+/// Slow-stream summary lines per second, at most.
+static SLOW_SUMMARY_BUDGET: LogBudget = LogBudget::new(20);
+
+/// Log what happened on one stream, after its last response is queued.
+fn log_stream_summary(ctx: &RequestContext) {
+    let trace = &ctx.trace;
+    let outcome = trace.outcome.unwrap_or(if ctx.response_complete {
+        Outcome::Complete
+    } else {
+        Outcome::ClosedEarly
+    });
+    let end = ctx.since_headers();
+    let slow = trace.is_slow(end);
+    macro_rules! summary {
+        ($level:ident, $suppressed:expr) => {
+            tracing::$level!(
+                request_id = %ctx.request_id,
+                conn_id = ctx.connection_id,
+                conn_streams = ctx.connection_streams,
+                outcome = outcome.label(),
+                slow,
+                prompt_tokens = trace.timings.map(|t| t.prompt_tokens),
+                body_bytes_in = ctx.request_size,
+                body_bytes_out = trace.body_bytes_out,
+                body_msgs_in = trace.body_msgs,
+                body_eos_us = trace.body_eos.map(micros),
+                routed_us = trace.routed.map(micros),
+                resp_headers_us = trace.response_headers.map(micros),
+                streamed = trace.streamed,
+                first_chunk_us = trace.first_chunk.map(micros),
+                end_us = end.map(micros),
+                rewrite_us = trace.rewrite.map(micros),
+                chunks = trace.chunks,
+                max_chunk_gap_us = micros(trace.max_chunk_gap),
+                chunk_gaps_over_40ms = trace.notable_chunk_gaps,
+                suppressed = $suppressed,
+                "ext_proc stream summary"
+            )
+        };
+    }
+    match *SUMMARY_MODE {
+        SummaryMode::All => summary!(info, 0u64),
+        SummaryMode::Slow if slow => {
+            if let Some(suppressed) = SLOW_SUMMARY_BUDGET.take() {
+                summary!(info, suppressed);
+            }
+        }
+        _ => summary!(debug, 0u64),
+    }
+}
+
 /// The ext_proc gRPC server.
 ///
 /// Takes an `EndpointPicker` for endpoint selection, decoupling the ext-proc
@@ -217,6 +512,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
 
     /// Handle request headers phase.
     fn handle_request_headers(ctx: &mut RequestContext, hdr: &ext_proc::HttpHeaders) {
+        ctx.headers_received_at = Some(Instant::now());
         // Collect headers and resolve the request ID for every request,
         // including header-only (end_of_stream) requests such as GET /v1/models.
         // The body-less case is routed later via `handle_header_only_request`,
@@ -286,7 +582,10 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     ) -> Result<(), ExtProcError> {
         ctx.request_size = raw_body.len();
 
+        let probe_started = Instant::now();
         let model = extract_model_from_body(&raw_body);
+        let model_probe = probe_started.elapsed();
+        metrics::observe_stage(Stage::ModelProbe, model_probe);
         let candidate_subset = extract_candidate_subset(&ctx.request_metadata);
 
         let req_info = RequestInfo {
@@ -298,20 +597,40 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             candidate_subset,
         };
 
-        let result = picker
-            .pick(&req_info, endpoints)
-            .await
-            .map_err(ExtProcError::from_pick_error)?;
+        let picked = {
+            let started = Instant::now();
+            let picked = picker.pick(&req_info, endpoints).await;
+            metrics::observe_stage(Stage::Pick, started.elapsed());
+            picked
+        };
+        let result = picked.map_err(ExtProcError::from_pick_error)?;
 
         ctx.body_routed = true;
         ctx.booking_id = result.reservation_id.clone();
         ctx.target_endpoint = result.endpoint.clone();
         ctx.incoming_model_name = model;
         ctx.target_model_name = ctx.incoming_model_name.clone();
+        let timings = result.timings;
+        ctx.trace.timings = timings;
+        // One line per request, joinable with the client's records by
+        // `request_id`: which step of the pick took the time, and how many
+        // requests share this request's gateway connection.
         tracing::info!(
             request_id = %ctx.request_id,
             endpoint = %result.endpoint,
             picker_header_count = result.headers.len(),
+            conn_id = ctx.connection_id,
+            conn_streams = ctx.connection_streams,
+            prompt_tokens = timings.map(|t| t.prompt_tokens),
+            body_bytes_in = raw_body.len(),
+            receive_body_us = ctx.trace.body_eos.map(micros),
+            model_probe_us = micros(model_probe),
+            parse_us = timings.map(|t| micros(t.parse)),
+            blocking_wait_us = timings.and_then(|t| t.blocking_wait).map(micros),
+            template_us = timings.and_then(|t| t.template).map(micros),
+            tokenize_us = timings.and_then(|t| t.tokenize).map(micros),
+            select_us = timings.map(|t| micros(t.select)),
+            book_us = timings.map(|t| micros(t.book)),
             "Request routed"
         );
         for (k, v) in &result.headers {
@@ -339,12 +658,20 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             || result.token_ids.is_some()
             || cache_salt.is_some()
         {
-            match rewrite_forwarded_body(
-                &raw_body,
-                result.strip_nvext,
-                result.token_ids.as_deref(),
-                cache_salt,
-            ) {
+            let started = Instant::now();
+            // Scales with the prompt, so it runs off the async worker.
+            let rewritten = tokio_runtime::off_runtime(|| {
+                rewrite_forwarded_body(
+                    &raw_body,
+                    result.strip_nvext,
+                    result.token_ids.as_deref(),
+                    cache_salt,
+                )
+            });
+            let rewrite = started.elapsed();
+            metrics::observe_stage(Stage::Rewrite, rewrite);
+            ctx.trace.rewrite = Some(rewrite);
+            match rewritten {
                 Ok(modified) => {
                     tracing::trace!(
                         request_id = %ctx.request_id,
@@ -364,12 +691,15 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             raw_body.clone()
         };
 
+        ctx.trace.body_bytes_out = forwarded_body.len();
         ctx.req_body_resp = envoy_helpers::build_request_body_responses(&forwarded_body);
         tracing::debug!(
             has_header_resp = ctx.req_header_resp.is_some(),
             body_resp_count = ctx.req_body_resp.len(),
             "[MUTATION] Responses prepared, waiting for drain"
         );
+        ctx.routed_at = Some(Instant::now());
+        ctx.trace.routed = ctx.since_headers();
 
         Ok(())
     }
@@ -546,24 +876,44 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
         &self,
         request: Request<Streaming<ProcessingRequest>>,
     ) -> Result<Response<Self::ProcessStream>, Status> {
+        // Set by the TLS listener, which tracks gateway connections.
+        let connection = request.extensions().get::<Arc<Connection>>().cloned();
         let mut inbound = request.into_inner();
         let picker = self.picker.clone();
 
         let (tx, rx) = mpsc::channel::<Result<ProcessingResponse, Status>>(32);
         let output_stream = ReceiverStream::new(rx);
 
-        tokio::spawn(async move {
+        tokio_runtime::spawn(TaskKind::ExtProcStream, async move {
+            let stream = OpenStream::open(connection);
             let mut ctx = RequestContext::new();
+            ctx.connection_id = stream.connection_id();
+            ctx.connection_streams = stream.connection_streams();
             let mut body_buf: Vec<u8> = Vec::new();
             let mut resp_body_buf: Vec<u8> = Vec::new();
 
             let result: Result<(), Status> = async {
                 while let Some(req_result) = inbound.next().await {
-                    let req = req_result.map_err(|e| {
+                    let mut req = req_result.map_err(|e| {
                         Status::unknown(format!("Cannot receive stream request: {e}"))
                     })?;
 
-                    ctx.request_metadata = envoy_helpers::extract_metadata_values(&req);
+                    // Only the pick reads the routing metadata. The gateway can
+                    // resend it with every message, so take it from the request
+                    // phase only, by move, rather than copy it per token chunk.
+                    if matches!(
+                        req.request,
+                        Some(
+                            processing_request::Request::RequestHeaders(_)
+                                | processing_request::Request::RequestBody(_)
+                        )
+                    ) {
+                        ctx.request_metadata = req
+                            .metadata_context
+                            .take()
+                            .map(|metadata| metadata.filter_metadata)
+                            .unwrap_or_default();
+                    }
 
                     if let Some(ref pc) = req.protocol_config {
                         tracing::debug!(
@@ -598,6 +948,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                             request_id = %ctx.request_id,
                                             "ext_proc stream closed during selection; cancelling"
                                         );
+                                        ctx.trace.outcome = Some(Outcome::Cancelled);
                                         return Ok(());
                                     }
                                     result = ExtProcServer::handle_header_only_request(
@@ -607,6 +958,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                     ) => result,
                                 };
                                 if let Err(e) = routed {
+                                    ctx.trace.outcome = Some(Outcome::PickError);
                                     let resp = e.into_processing_response();
                                     let _ = tx.send(Ok(resp)).await;
                                     return Ok(());
@@ -620,8 +972,13 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 "[MSG-ORDER] Received RequestBody from Envoy"
                             );
                             body_buf.extend_from_slice(&body.body);
+                            ctx.trace.body_msgs += 1;
 
                             if body.end_of_stream {
+                                if let Some(received) = ctx.headers_received_at {
+                                    metrics::observe_stage(Stage::ReceiveBody, received.elapsed());
+                                }
+                                ctx.trace.body_eos = ctx.since_headers();
                                 // Freeze the accumulated body once into `Bytes`
                                 // (moves the Vec, no copy); downstream sharing is
                                 // by cheap refcount clone.
@@ -641,6 +998,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                             request_id = %ctx.request_id,
                                             "ext_proc stream closed during selection; cancelling"
                                         );
+                                        ctx.trace.outcome = Some(Outcome::Cancelled);
                                         return Ok(());
                                     }
                                     result = ExtProcServer::handle_request_body(
@@ -651,6 +1009,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                     ) => result,
                                 };
                                 if let Err(e) = routed {
+                                    ctx.trace.outcome = Some(Outcome::PickError);
                                     let resp = e.into_processing_response();
                                     let _ = tx.send(Ok(resp)).await;
                                     return Ok(());
@@ -660,8 +1019,19 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                         Some(processing_request::Request::RequestTrailers(_)) => {}
                         Some(processing_request::Request::ResponseHeaders(ref hdr)) => {
                             ExtProcServer::<P>::handle_response_headers(&mut ctx, hdr);
+                            // Like the first-token stages: a unary response's
+                            // headers wait for the whole generation.
+                            if ctx.model_server_streaming
+                                && ctx.response_succeeded()
+                                && let Some(routed) = ctx.routed_at
+                            {
+                                metrics::observe_stage(Stage::ResponseHeaders, routed.elapsed());
+                            }
+                            ctx.trace.response_headers = ctx.since_headers();
+                            ctx.trace.streamed = ctx.model_server_streaming;
                         }
                         Some(processing_request::Request::ResponseBody(ref body)) => {
+                            ctx.trace.record_chunk(Instant::now());
                             // Signal prefill completion on the first non-empty
                             // response body chunk (the first generated token).
                             // In streaming mode the upstream flushes HTTP
@@ -675,6 +1045,22 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 && !body.body.is_empty()
                             {
                                 ctx.prefill_complete_signaled = true;
+                                // A first token only in a streamed 2xx response:
+                                // a unary response's first chunk is the whole
+                                // answer, and an error body is no token.
+                                let routed = ctx.routed_at.take();
+                                if ctx.model_server_streaming && ctx.response_succeeded() {
+                                    if let Some(routed) = routed {
+                                        metrics::observe_stage(
+                                            Stage::FirstResponse,
+                                            routed.elapsed(),
+                                        );
+                                    }
+                                    if let Some(received) = ctx.headers_received_at {
+                                        metrics::observe_stage(Stage::EppTtft, received.elapsed());
+                                    }
+                                }
+                                ctx.trace.first_chunk = ctx.since_headers();
                                 // Hand back the picker's own booking id (falls
                                 // back to request_id if it booked nothing).
                                 let booking_id = ctx
@@ -733,11 +1119,13 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                     let responses = ctx.drain_pending_responses();
                     for resp in responses {
                         if tx.send(Ok(resp)).await.is_err() {
+                            ctx.trace.outcome = Some(Outcome::Cancelled);
                             return Ok(());
                         }
                     }
 
                     if ctx.state == StreamState::RequestEvicted {
+                        ctx.trace.outcome = Some(Outcome::Evicted);
                         break;
                     }
                 }
@@ -747,8 +1135,10 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
             .await;
 
             if let Err(e) = result {
+                ctx.trace.outcome = Some(Outcome::StreamError);
                 let _ = tx.send(Err(e)).await;
             }
+            log_stream_summary(&ctx);
 
             // TODO(epp-disconnect-semantics): Define how Envoy retries and backend
             // work continuing after an ext_proc disconnect affect booking ownership.
@@ -761,7 +1151,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                     .unwrap_or_else(|| ctx.request_id.clone());
                 let usage = ctx.parsed_usage.take();
                 if let Some(cached_tokens) = usage.as_ref().and_then(|u| u.cached_tokens) {
-                    crate::metrics::observe_cached_tokens(cached_tokens);
+                    metrics::observe_cached_tokens(cached_tokens);
                 }
                 picker
                     .on_request_complete_with_usage(&booking_id, usage)
@@ -779,7 +1169,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 
 /// Validate the gateway's `ProtocolConfiguration` against the protocol
 /// contract this EPP requires: `FULL_DUPLEX_STREAMED` on both body
-/// directions plus `send_body_without_waiting_for_header_response`.
+/// directions.
 ///
 /// **Request direction.** We build the `RequestHeaders` response only after
 /// receiving the request body, because:
@@ -789,12 +1179,19 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 ///   * The chosen worker becomes the value of `x-dynamo-worker-instance-id` /
 ///     `x-gateway-destination-endpoint` in the `RequestHeaders` response.
 ///
-/// That ordering — header response *after* body — is only legal under
-/// `BodySendMode::FULL_DUPLEX_STREAMED` with
-/// `send_body_without_waiting_for_header_response = true`. Under any other
-/// mode Envoy waits for our header response before sending body chunks while
-/// we wait for body chunks before producing the header response, which
-/// silently deadlocks until the ext_proc timeout fires.
+/// That ordering — header response *after* body — needs the data plane to
+/// send the body without waiting for our header response.
+/// `BodySendMode::FULL_DUPLEX_STREAMED` always does: the data plane streams
+/// the body as it arrives, and the server may hold every response until it
+/// has the whole body. In the other modes the data plane can wait for our
+/// header response before sending body chunks while we wait for body chunks
+/// before producing the header response, which silently deadlocks until the
+/// ext_proc timeout fires.
+///
+/// `send_body_without_waiting_for_header_response` is not checked. Envoy
+/// applies it only to `STREAMED` mode, which this EPP rejects anyway, and
+/// ignores it in every other mode. agentgateway 1.3 and later report it as
+/// `false` alongside `FULL_DUPLEX_STREAMED`.
 ///
 /// **Response direction.** `response_body_mode` defaults to `NONE` in Envoy,
 /// which delivers no `ResponseBody` messages at all. Three behaviours depend
@@ -830,18 +1227,15 @@ fn validate_protocol_config(
     let request_mode = BodySendMode::try_from(pc.request_body_mode).ok();
     let response_mode = BodySendMode::try_from(pc.response_body_mode).ok();
     let full_duplex = Some(BodySendMode::FullDuplexStreamed);
-    let flag_ok = pc.send_body_without_waiting_for_header_response;
 
-    if request_mode == full_duplex && response_mode == full_duplex && flag_ok {
+    if request_mode == full_duplex && response_mode == full_duplex {
         return Ok(());
     }
 
     let detail = format!(
-        "ext_proc filter must be configured with request_body_mode=FULL_DUPLEX_STREAMED, \
-         response_body_mode=FULL_DUPLEX_STREAMED and \
-         send_body_without_waiting_for_header_response=true; got \
-         request_body_mode={request_mode:?}, response_body_mode={response_mode:?}, \
-         send_body_without_waiting_for_header_response={flag_ok}. \
+        "ext_proc filter must be configured with request_body_mode=FULL_DUPLEX_STREAMED \
+         and response_body_mode=FULL_DUPLEX_STREAMED; got \
+         request_body_mode={request_mode:?}, response_body_mode={response_mode:?}. \
          The Rust EPP defers its RequestHeaders response until after it has tokenized \
          the body and selected a worker, and it reads response bodies to signal prefill \
          completion, parse token usage, and rewrite the model name."
@@ -849,7 +1243,6 @@ fn validate_protocol_config(
     tracing::error!(
         request_body_mode = pc.request_body_mode,
         response_body_mode = pc.response_body_mode,
-        send_body_without_waiting = flag_ok,
         "ProtocolConfiguration mismatch — failing stream"
     );
     Err(Status::failed_precondition(detail))
@@ -858,65 +1251,26 @@ fn validate_protocol_config(
 /// Rewrite the request body for the backend: drop the client's `nvext`
 /// (`strip_nvext`), add `nvext.token_data` (`token_ids`), and set the tagged
 /// top-level `cache_salt` (`cache_salt`), in that order.
+///
+/// The body is never parsed into a `Value` tree. Untouched top-level members
+/// are borrowed and re-emitted byte for byte, only `nvext` is parsed when
+/// tokens are injected, and the token ids are written straight from the
+/// slice. A tree would cost an allocation per message part and per token.
 fn rewrite_forwarded_body(
     body: &[u8],
     strip_nvext: bool,
     token_ids: Option<&[u32]>,
     cache_salt: Option<&str>,
 ) -> anyhow::Result<Vec<u8>> {
-    let Some(token_ids) = token_ids else {
-        return rewrite_top_level(body, strip_nvext, cache_salt);
-    };
-
-    // token_data lives inside `nvext`, so this path needs the parsed tree.
-    let mut parsed: serde_json::Value = serde_json::from_slice(body)?;
-
-    let obj = parsed
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("body is not a JSON object"))?;
-
-    if strip_nvext {
-        obj.remove("nvext");
-    }
-
-    let nvext = obj
-        .entry("nvext")
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-
-    let nvext_obj = nvext
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("nvext is not a JSON object"))?;
-
-    nvext_obj.insert(
-        "token_data".to_string(),
-        serde_json::Value::Array(
-            token_ids
-                .iter()
-                .map(|&t| serde_json::Value::Number(serde_json::Number::from(t)))
-                .collect(),
-        ),
-    );
-
-    if let Some(cache_salt) = cache_salt {
-        obj.insert(
-            "cache_salt".to_string(),
-            serde_json::Value::String(tagged_cache_salt(cache_salt)),
-        );
-    }
-
-    Ok(serde_json::to_vec(&parsed)?)
-}
-
-/// Strip-and-salt without parsing the body into a `Value` tree: untouched
-/// top-level members are borrowed and re-emitted byte-for-byte.
-fn rewrite_top_level(
-    body: &[u8],
-    strip_nvext: bool,
-    cache_salt: Option<&str>,
-) -> anyhow::Result<Vec<u8>> {
     let mut members: BTreeMap<String, &RawValue> = serde_json::from_slice(body)?;
     if strip_nvext {
         members.remove("nvext");
+    }
+    let nvext = token_ids
+        .map(|ids| nvext_with_token_data(members.get("nvext").copied(), ids))
+        .transpose()?;
+    if let Some(nvext) = &nvext {
+        members.insert("nvext".to_string(), nvext);
     }
     let salt = cache_salt
         .map(|salt| serde_json::value::to_raw_value(&tagged_cache_salt(salt)))
@@ -925,6 +1279,24 @@ fn rewrite_top_level(
         members.insert("cache_salt".to_string(), salt);
     }
     Ok(serde_json::to_vec(&members)?)
+}
+
+/// `nvext` with `token_data` set to `token_ids`, keeping its other fields
+/// byte for byte.
+fn nvext_with_token_data(
+    nvext: Option<&RawValue>,
+    token_ids: &[u32],
+) -> anyhow::Result<Box<RawValue>> {
+    let mut fields: BTreeMap<String, Box<RawValue>> = match nvext {
+        Some(raw) => serde_json::from_str(raw.get())
+            .map_err(|_| anyhow::anyhow!("nvext is not a JSON object"))?,
+        None => BTreeMap::new(),
+    };
+    fields.insert(
+        "token_data".to_string(),
+        serde_json::value::to_raw_value(token_ids)?,
+    );
+    Ok(serde_json::value::to_raw_value(&fields)?)
 }
 
 fn tagged_cache_salt(cache_salt: &str) -> String {
@@ -1042,6 +1414,30 @@ impl ExtProcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streams_are_counted_on_their_connection_until_dropped() {
+        let connection = Connection::open();
+        let first = OpenStream::open(Some(Arc::clone(&connection)));
+        let second = OpenStream::open(Some(Arc::clone(&connection)));
+        let plaintext = OpenStream::open(None);
+
+        assert_eq!(first.connection_id(), Some(connection.id()));
+        assert_eq!(first.connection_streams(), Some(1));
+        assert_eq!(second.connection_streams(), Some(2));
+        assert_eq!(plaintext.connection_id(), None);
+        assert_eq!(plaintext.connection_streams(), None);
+
+        drop(first);
+        let third = OpenStream::open(Some(Arc::clone(&connection)));
+        assert_eq!(
+            third.connection_streams(),
+            Some(2),
+            "a closed stream frees its slot"
+        );
+        assert_eq!(connection.streams_served(), 3);
+        assert_eq!(connection.peak_streams(), 2);
+    }
     use std::collections::HashSet;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -1074,6 +1470,11 @@ mod tests {
 
         let full_duplex = BodySendMode::FullDuplexStreamed as i32;
         assert!(validate_protocol_config(&protocol_config(full_duplex, full_duplex, true)).is_ok());
+        // Envoy ignores send_body_without_waiting_for_header_response outside
+        // STREAMED mode, and agentgateway 1.3+ reports it as false.
+        assert!(
+            validate_protocol_config(&protocol_config(full_duplex, full_duplex, false)).is_ok()
+        );
     }
 
     #[test]
@@ -1110,18 +1511,21 @@ mod tests {
     fn protocol_config_still_rejects_request_side_misconfiguration() {
         use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
 
+        // In these modes the data plane can hold the body until our header
+        // response, which we only send once the body has arrived.
         let full_duplex = BodySendMode::FullDuplexStreamed as i32;
-        assert!(
-            validate_protocol_config(&protocol_config(
-                BodySendMode::Streamed as i32,
-                full_duplex,
-                true
-            ))
-            .is_err()
-        );
-        assert!(
-            validate_protocol_config(&protocol_config(full_duplex, full_duplex, false)).is_err()
-        );
+        for request_mode in [
+            BodySendMode::None,
+            BodySendMode::Streamed,
+            BodySendMode::Buffered,
+            BodySendMode::BufferedPartial,
+        ] {
+            let pc = protocol_config(request_mode as i32, full_duplex, true);
+            assert!(
+                validate_protocol_config(&pc).is_err(),
+                "request_body_mode={request_mode:?} must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -1553,6 +1957,23 @@ mod tests {
         assert_eq!(t.free.load(Ordering::SeqCst), 0);
     }
 
+    /// agentgateway 1.3 and later put this `ProtocolConfiguration` on the first
+    /// message of every stream. The EPP must route the request rather than fail
+    /// the stream with FAILED_PRECONDITION.
+    #[tokio::test]
+    async fn test_agentgateway_protocol_config_is_routed() {
+        use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
+
+        let t = Arc::new(Tracker::agg());
+        let full_duplex = BodySendMode::FullDuplexStreamed as i32;
+        let mut requests = stream();
+        requests[0].protocol_config = Some(protocol_config(full_duplex, full_duplex, false));
+        run_stream(&mut connect(t.clone()).await, requests).await;
+
+        assert_eq!(t.add.load(Ordering::SeqCst), 1);
+        assert_eq!(t.free.load(Ordering::SeqCst), 1);
+    }
+
     /// Item 4 (queued disconnect / cancellation): when the ext-proc stream closes
     /// while a `pick` is still in flight, the server's biased `select!` on
     /// `tx.closed()` must drop the pick future (cancelling it) instead of
@@ -1786,10 +2207,10 @@ mod tests {
     /// Untouched values keep their exact bytes (whitespace, escapes, number
     /// formatting) and escaped keys survive; members come out in key order.
     #[test]
-    fn rewrite_top_level_copies_other_members_verbatim() {
+    fn rewrite_forwarded_body_copies_other_members_verbatim() {
         let body = r#"{ "model" : "m", "messages": [ {"role":"user","content":"café \"q\""} ],"nvext":{"agent_hints":{"osl":32}}, "temperature": 1.0e0, "k\"y": true , "cache_salt": "client"}"#;
 
-        let out = rewrite_top_level(body.as_bytes(), true, Some("tenant-a")).unwrap();
+        let out = rewrite_forwarded_body(body.as_bytes(), true, None, Some("tenant-a")).unwrap();
 
         assert_eq!(
             std::str::from_utf8(&out).unwrap(),
@@ -1797,9 +2218,165 @@ mod tests {
         );
     }
 
+    /// Injecting tokens keeps the same guarantee: other top-level members and
+    /// the other `nvext` fields keep their exact bytes, and a client
+    /// `token_data` is replaced.
     #[test]
-    fn rewrite_top_level_rejects_non_object_body() {
-        assert!(rewrite_top_level(br#"["not", "an", "object"]"#, true, None).is_err());
-        assert!(rewrite_top_level(br#"not json"#, true, None).is_err());
+    fn rewrite_forwarded_body_injects_tokens_without_reformatting() {
+        let body = r#"{ "model" : "m", "messages": [ {"role":"user","content":"café \"q\""} ], "nvext": { "agent_hints": {"osl": 32}, "token_data": [9, 9] }, "seed": 18446744073709551616 }"#;
+
+        let out =
+            rewrite_forwarded_body(body.as_bytes(), false, Some(&[1, 22, 333]), None).unwrap();
+
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            r#"{"messages":[ {"role":"user","content":"café \"q\""} ],"model":"m","nvext":{"agent_hints":{"osl": 32},"token_data":[1,22,333]},"seed":18446744073709551616}"#
+        );
+    }
+
+    /// The rewrite produces the same JSON as a `Value`-tree rewrite, for
+    /// every combination of inputs it serves.
+    #[test]
+    fn rewrite_forwarded_body_matches_a_value_tree_rewrite() {
+        fn by_tree(
+            body: &[u8],
+            strip_nvext: bool,
+            token_ids: Option<&[u32]>,
+            cache_salt: Option<&str>,
+        ) -> Option<serde_json::Value> {
+            let mut parsed: serde_json::Value = serde_json::from_slice(body).ok()?;
+            let obj = parsed.as_object_mut()?;
+            if strip_nvext {
+                obj.remove("nvext");
+            }
+            if let Some(ids) = token_ids {
+                let nvext = obj
+                    .entry("nvext")
+                    .or_insert_with(|| serde_json::json!({}))
+                    .as_object_mut()?;
+                nvext.insert("token_data".to_string(), serde_json::json!(ids));
+            }
+            if let Some(salt) = cache_salt {
+                obj.insert("cache_salt".to_string(), tagged_cache_salt(salt).into());
+            }
+            Some(parsed)
+        }
+
+        let bodies: [&[u8]; 7] = [
+            br#"{}"#,
+            br#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#,
+            br#"{"model":"m","nvext":{"extra_fields":["engine_data"],"cache_salt":"body"}}"#,
+            br#"{"model":"m","nvext":{"token_data":[7]},"cache_salt":"client"}"#,
+            br#"{"model":"m","nvext":null}"#,
+            br#"{"model":"m","nvext":"bad"}"#,
+            br#"["not","an","object"]"#,
+        ];
+        let token_choices: [Option<&[u32]>; 3] = [None, Some(&[]), Some(&[5, 151_000, 0])];
+        for body in bodies {
+            for strip_nvext in [false, true] {
+                for token_ids in token_choices {
+                    for cache_salt in [None, Some("tenant")] {
+                        let ours = rewrite_forwarded_body(body, strip_nvext, token_ids, cache_salt)
+                            .ok()
+                            .map(|out| serde_json::from_slice::<serde_json::Value>(&out).unwrap());
+                        let tree = by_tree(body, strip_nvext, token_ids, cache_salt);
+                        assert_eq!(
+                            ours,
+                            tree,
+                            "body={} strip={strip_nvext} tokens={token_ids:?} salt={cache_salt:?}",
+                            String::from_utf8_lossy(body)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rewrite_forwarded_body_rejects_non_object_body() {
+        for body in [br#"["not", "an", "object"]"#.as_slice(), br#"not json"#] {
+            assert!(rewrite_forwarded_body(body, true, None, None).is_err());
+            assert!(rewrite_forwarded_body(body, false, Some(&[1]), None).is_err());
+        }
+    }
+
+    #[test]
+    fn stream_trace_counts_response_chunk_gaps() {
+        let ms = Duration::from_millis;
+        let start = Instant::now();
+        let mut trace = StreamTrace::default();
+        for at in [0, 10, 60] {
+            trace.record_chunk(start + ms(at));
+        }
+        assert_eq!(trace.chunks, 3);
+        assert_eq!(trace.max_chunk_gap, ms(50));
+        assert_eq!(trace.notable_chunk_gaps, 1);
+        assert!(!trace.is_slow(None));
+
+        trace.record_chunk(start + ms(170));
+        assert!(
+            trace.is_slow(None),
+            "a 110 ms hold between chunks is a stall"
+        );
+    }
+
+    #[test]
+    fn slow_forward_path_or_pick_marks_the_stream_slow() {
+        let ms = Duration::from_millis;
+        let trace = |body_eos, routed, response_headers| StreamTrace {
+            body_eos: Some(ms(body_eos)),
+            routed: Some(ms(routed)),
+            response_headers: Some(ms(response_headers)),
+            streamed: true,
+            ..Default::default()
+        };
+        assert!(!trace(5, 20, 30).is_slow(None));
+        assert!(
+            trace(5, 20, 150).is_slow(None),
+            "slow trip to the sidecar and back"
+        );
+        let unary = StreamTrace {
+            streamed: false,
+            ..trace(5, 20, 5_000)
+        };
+        assert!(
+            !unary.is_slow(None),
+            "a unary response's headers wait for the generation"
+        );
+        assert!(trace(5, 1_200, 1_210).is_slow(None), "slow pick");
+        assert!(
+            trace(1_100, 1_110, 1_120).is_slow(None),
+            "slow request body"
+        );
+    }
+
+    /// A pick that never finishes, because the gateway gave up on it or it
+    /// failed, is as slow as the time it ran before the stream ended.
+    #[test]
+    fn an_unfinished_pick_marks_the_stream_slow() {
+        let ms = Duration::from_millis;
+        let waiting = StreamTrace {
+            body_eos: Some(ms(5)),
+            ..Default::default()
+        };
+        assert!(!waiting.is_slow(Some(ms(300))));
+        assert!(
+            waiting.is_slow(Some(ms(4_000))),
+            "a pick cancelled after 4 s is slow"
+        );
+    }
+
+    /// The first-token stages count only a 2xx response, or one whose status
+    /// the gateway did not send.
+    #[test]
+    fn only_a_2xx_or_missing_status_is_a_success() {
+        let mut ctx = RequestContext::new();
+        assert!(ctx.response_succeeded());
+        ctx.response_headers
+            .insert(":status".to_string(), "200".to_string());
+        assert!(ctx.response_succeeded());
+        ctx.response_headers
+            .insert(":status".to_string(), "503".to_string());
+        assert!(!ctx.response_succeeded());
     }
 }

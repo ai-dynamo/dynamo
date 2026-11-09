@@ -14,6 +14,8 @@ pub mod ingress;
 pub mod manager;
 pub mod quic_response;
 pub mod tcp;
+mod tombstones;
+pub mod velo_response;
 
 use crate::SystemHealth;
 use crate::error::{DynamoError, ErrorType};
@@ -59,6 +61,7 @@ pub enum ResponsePlaneMode {
     #[default]
     Tcp,
     Quic,
+    Velo,
 }
 
 impl ResponsePlaneMode {
@@ -77,8 +80,9 @@ impl ResponsePlaneMode {
         match value {
             None | Some("tcp") => Ok(Self::Tcp),
             Some("quic") => Ok(Self::Quic),
+            Some("velo") => Ok(Self::Velo),
             Some(other) => anyhow::bail!(
-                "invalid {} value '{other}'; expected 'tcp' or 'quic'",
+                "invalid {} value '{other}'; expected 'tcp', 'quic', or 'velo'",
                 crate::config::environment_names::response_plane::DYN_RESPONSE_PLANE
             ),
         }
@@ -88,6 +92,7 @@ impl ResponsePlaneMode {
         match transport {
             "tcp_server" => Ok(Self::Tcp),
             quic_response::TRANSPORT_NAME => Ok(Self::Quic),
+            velo_response::TRANSPORT_NAME => Ok(Self::Velo),
             other => anyhow::bail!("unsupported response transport '{other}'"),
         }
     }
@@ -96,6 +101,7 @@ impl ResponsePlaneMode {
         match self {
             Self::Tcp => "tcp",
             Self::Quic => "quic",
+            Self::Velo => "velo",
         }
     }
 }
@@ -485,6 +491,36 @@ pub trait ResponseService {
     async fn register(&self, options: StreamOptions) -> PendingConnections;
 }
 
+/// A response plane that registers each response stream by id and leaves any
+/// request stream to the TCP callback server. QUIC and Velo work this way.
+#[async_trait]
+pub(crate) trait RegisteredResponsePlane: Send + Sync {
+    /// QUIC ignores `defer_cancellation_until_prologue`.
+    fn register_stream(
+        self: Arc<Self>,
+        context: Arc<dyn AsyncEngineContext>,
+        defer_cancellation_until_prologue: bool,
+    ) -> Result<RegisteredStream<StreamReceiver>>;
+
+    /// Link a registration to its worker. Returns `false` and cancels the
+    /// registration when discovery has just removed that worker.
+    async fn associate_instance(
+        &self,
+        registration_id: uuid::Uuid,
+        instance: &crate::discovery::EndpointInstanceId,
+    ) -> bool;
+
+    async fn cancel_response(&self, registration_id: uuid::Uuid);
+
+    /// Cancel every registration linked to `instance` and tombstone it.
+    async fn cancel_instance_streams(
+        &self,
+        instance: &crate::discovery::EndpointInstanceId,
+    ) -> usize;
+
+    async fn clear_instance_tombstone(&self, instance: &crate::discovery::EndpointInstanceId);
+}
+
 #[cfg(test)]
 mod registered_stream_tests {
     use super::*;
@@ -683,7 +719,40 @@ impl StreamSender {
 }
 
 pub struct StreamReceiver {
-    rx: tokio::sync::mpsc::Receiver<Bytes>,
+    rx: ByteReceiver,
+}
+
+/// Existing socket queues and Velo anchors share the response decoder.
+/// Velo is polled directly; it needs no second data queue.
+enum ByteReceiver {
+    Channel(tokio::sync::mpsc::Receiver<Bytes>),
+    Velo(Box<velo_response::VeloResponseReceiver>),
+}
+
+impl From<tokio::sync::mpsc::Receiver<Bytes>> for ByteReceiver {
+    fn from(rx: tokio::sync::mpsc::Receiver<Bytes>) -> Self {
+        Self::Channel(rx)
+    }
+}
+
+impl ByteReceiver {
+    // TCP request streams and existing socket tests use the byte-only API.
+    async fn recv(&mut self) -> Option<Bytes> {
+        self.next().await.and_then(|result| result.ok())
+    }
+}
+
+impl futures::Stream for ByteReceiver {
+    type Item = Result<Bytes, DynamoError>;
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match self.get_mut() {
+            Self::Channel(rx) => rx.poll_recv(cx).map(|item| item.map(Ok)),
+            Self::Velo(rx) => std::pin::Pin::new(rx.as_mut()).poll_next(cx),
+        }
+    }
 }
 
 /// Connection Info is encoded as JSON and then again serialized has part of the Transport
@@ -898,6 +967,10 @@ mod tests {
         assert_eq!(
             ResponsePlaneMode::from_config_value(Some("quic")).unwrap(),
             ResponsePlaneMode::Quic
+        );
+        assert_eq!(
+            ResponsePlaneMode::from_config_value(Some("velo")).unwrap(),
+            ResponsePlaneMode::Velo
         );
         assert!(ResponsePlaneMode::from_config_value(Some("")).is_err());
         assert!(ResponsePlaneMode::from_config_value(Some("invalid")).is_err());
@@ -1144,12 +1217,26 @@ where
 }
 
 /// Result of encoding one response item for the request plane.
-pub struct EncodedResponseFrame {
-    pub bytes: Bytes,
+///
+/// `B` is `()` when the bytes went into the caller's buffer instead, through
+/// [`IngressResponseEncoder::encode_response_into`].
+pub struct EncodedResponseFrame<B = Bytes> {
+    pub bytes: B,
     pub is_error: bool,
     /// Stop consuming the engine stream after publishing this frame. The
     /// normal complete-final frame is still sent.
     pub stop_stream: bool,
+}
+
+impl<B> EncodedResponseFrame<B> {
+    /// The same frame, with `f` applied to its bytes.
+    pub fn map<C>(self, f: impl FnOnce(B) -> C) -> EncodedResponseFrame<C> {
+        EncodedResponseFrame {
+            bytes: f(self.bytes),
+            is_error: self.is_error,
+            stop_stream: self.stop_stream,
+        }
+    }
 }
 
 /// Converts request-plane bytes into the item consumed by an ingress engine.
@@ -1175,6 +1262,31 @@ where
         response: Option<U>,
         complete_final: bool,
     ) -> impl std::future::Future<Output = std::result::Result<EncodedResponseFrame, PipelineError>> + Send;
+
+    /// Encode a response like [`encode_response`](Self::encode_response), but
+    /// append its bytes to `buffer`, after the frame header a transport may
+    /// already have written there.
+    ///
+    /// The default copies `encode_response`'s bytes in. That is the one copy a
+    /// transport would otherwise make to frame them; an adapter that serializes
+    /// straight into `buffer` saves it.
+    fn encode_response_into(
+        &self,
+        payload_codec: RequestPlanePayloadCodec,
+        response: Option<U>,
+        complete_final: bool,
+        buffer: &mut Vec<u8>,
+    ) -> impl std::future::Future<
+        Output = std::result::Result<EncodedResponseFrame<()>, PipelineError>,
+    > + Send {
+        async move {
+            let frame = self
+                .encode_response(payload_codec, response, complete_final)
+                .await?;
+            buffer.extend_from_slice(&frame.bytes);
+            Ok(frame.map(drop))
+        }
+    }
 }
 
 /// Complete request/response payload adapter for an ingress engine.
@@ -1219,6 +1331,35 @@ where
     }
 }
 
+impl SerdeIngressPayloadAdapter {
+    fn serialize_response<U: Serialize + MaybeError>(
+        payload_codec: RequestPlanePayloadCodec,
+        response: Option<U>,
+        complete_final: bool,
+        buffer: &mut Vec<u8>,
+    ) -> std::result::Result<EncodedResponseFrame<()>, PipelineError> {
+        let is_error = response
+            .as_ref()
+            .is_some_and(|response| response.err().is_some());
+        let wrapper = NetworkStreamWrapper {
+            data: response,
+            complete_final,
+        };
+        payload_codec.encode_into(&wrapper, buffer).map_err(|err| {
+            PipelineError::SerializationError(format!(
+                "Failed serializing {} request-plane response: {}",
+                payload_codec.name(),
+                err
+            ))
+        })?;
+        Ok(EncodedResponseFrame {
+            bytes: (),
+            is_error,
+            stop_stream: false,
+        })
+    }
+}
+
 impl<U> IngressResponseEncoder<U> for SerdeIngressPayloadAdapter
 where
     U: Data + Serialize + MaybeError,
@@ -1231,29 +1372,26 @@ where
         complete_final: bool,
     ) -> impl std::future::Future<Output = std::result::Result<EncodedResponseFrame, PipelineError>> + Send
     {
-        let is_error = response
-            .as_ref()
-            .is_some_and(|response| response.err().is_some());
-        let wrapper = NetworkStreamWrapper {
-            data: response,
-            complete_final,
-        };
         let mut bytes = Vec::with_capacity(RESPONSE_ENCODE_CAPACITY_HINT);
-        let encoded = payload_codec
-            .encode_into(&wrapper, &mut bytes)
-            .map(|()| bytes)
-            .map_err(|err| {
-                PipelineError::SerializationError(format!(
-                    "Failed serializing {} request-plane response: {}",
-                    payload_codec.name(),
-                    err
-                ))
-            });
-        std::future::ready(encoded.map(|bytes| EncodedResponseFrame {
-            bytes: bytes.into(),
-            is_error,
-            stop_stream: false,
-        }))
+        let encoded = Self::serialize_response(payload_codec, response, complete_final, &mut bytes);
+        std::future::ready(encoded.map(|frame| frame.map(|()| bytes.into())))
+    }
+
+    fn encode_response_into(
+        &self,
+        payload_codec: RequestPlanePayloadCodec,
+        response: Option<U>,
+        complete_final: bool,
+        buffer: &mut Vec<u8>,
+    ) -> impl std::future::Future<
+        Output = std::result::Result<EncodedResponseFrame<()>, PipelineError>,
+    > + Send {
+        std::future::ready(Self::serialize_response(
+            payload_codec,
+            response,
+            complete_final,
+            buffer,
+        ))
     }
 }
 
@@ -1265,6 +1403,8 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayl
     /// Resolved response transport of the bound endpoint's runtime.
     response_plane: OnceLock<ResponsePlaneMode>,
     quic_response_client_pool: OnceLock<Arc<quic_response::QuicResponseClientPool>>,
+    velo_response_service: tokio::sync::OnceCell<Arc<velo_response::VeloResponseService>>,
+    velo_response_owner: OnceLock<std::sync::Weak<velo_response::RuntimeService>>,
     payload_adapter: Arc<Adapter>,
     lifecycle_operation_role: OnceLock<Arc<OnceLock<LifecycleOperationRole>>>,
 }
@@ -1312,6 +1452,8 @@ where
             endpoint_health_check_notifier: OnceLock::new(),
             response_plane: OnceLock::new(),
             quic_response_client_pool: OnceLock::new(),
+            velo_response_service: tokio::sync::OnceCell::new(),
+            velo_response_owner: OnceLock::new(),
             payload_adapter: Arc::new(payload_adapter),
             lifecycle_operation_role: OnceLock::new(),
         })
@@ -1355,6 +1497,29 @@ where
         }
         let pool = quic_response::process_client_pool_from_env()?;
         Ok(self.quic_response_client_pool.get_or_init(|| pool).clone())
+    }
+
+    async fn velo_response_service(
+        &self,
+    ) -> Result<&Arc<velo_response::VeloResponseService>, PipelineError> {
+        let owner = self
+            .velo_response_owner
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| {
+                PipelineError::Generic(
+                    "Velo ingress must be bound to a live runtime endpoint".into(),
+                )
+            })?;
+        if owner.is_closed() {
+            return Err(PipelineError::Generic(
+                "Velo response runtime is shut down".into(),
+            ));
+        }
+        self.velo_response_service
+            .get_or_try_init(|| owner.service())
+            .await
+            .map_err(|error| PipelineError::Generic(error.to_string()))
     }
 
     pub fn add_metrics(
@@ -1424,6 +1589,11 @@ where
 
     fn bind_endpoint_config(&self, endpoint: &crate::component::Endpoint) {
         let _ = self.response_plane.set(endpoint.drt().response_plane());
+        // Endpoint tasks retain this ingress. Keep a weak back-reference so
+        // those tasks cannot keep their own Tokio runtime alive.
+        let _ = self.velo_response_owner.set(Arc::downgrade(
+            &endpoint.drt().runtime().velo_response_service(),
+        ));
         // Keep an explicitly constructed ingress role; otherwise observe model
         // registration even when it happens after the endpoint starts serving.
         let _ = self

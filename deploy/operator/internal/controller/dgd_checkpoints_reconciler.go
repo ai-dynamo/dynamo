@@ -735,6 +735,7 @@ func (r *dgdCheckpointsReconciler) adoptCheckpointGMSResourceClaimTemplate(
 	return nil
 }
 
+// prepareCheckpointGMSPodTemplate requires non-nil podTemplate and gmsSpec.
 func prepareCheckpointGMSPodTemplate(
 	podTemplate *corev1.PodTemplateSpec,
 	targetContainerName string,
@@ -758,7 +759,7 @@ func prepareCheckpointGMSPodTemplate(
 			return fmt.Errorf("gpuMemoryService client container %q: %w", clientContainerName, err)
 		}
 	}
-	ensureCheckpointGMSPodClaim(&podTemplate.Spec, checkpointGMSResourceClaimTemplateName(checkpointID))
+	dra.ApplyPodClaim(&podTemplate.Spec, checkpointGMSResourceClaimTemplateName(checkpointID))
 	checkpoint.EnsureIntraPodGPUMemoryService(
 		&podTemplate.Spec,
 		[]*corev1.Container{targetContainer},
@@ -766,36 +767,6 @@ func prepareCheckpointGMSPodTemplate(
 		true,
 	)
 	return nil
-}
-
-func ensureCheckpointGMSPodClaim(podSpec *corev1.PodSpec, claimTemplateName string) {
-	foundToleration := false
-	for i := range podSpec.Tolerations {
-		toleration := podSpec.Tolerations[i]
-		if toleration.Key == consts.KubeResourceGPUNvidia && toleration.Effect == corev1.TaintEffectNoSchedule {
-			foundToleration = true
-			break
-		}
-	}
-	if !foundToleration {
-		podSpec.Tolerations = append(podSpec.Tolerations, corev1.Toleration{
-			Key:      consts.KubeResourceGPUNvidia,
-			Operator: corev1.TolerationOpExists,
-			Effect:   corev1.TaintEffectNoSchedule,
-		})
-	}
-
-	podClaim := corev1.PodResourceClaim{
-		Name:                      dra.ClaimName,
-		ResourceClaimTemplateName: &claimTemplateName,
-	}
-	for i := range podSpec.ResourceClaims {
-		if podSpec.ResourceClaims[i].Name == dra.ClaimName {
-			podSpec.ResourceClaims[i] = podClaim
-			return
-		}
-	}
-	podSpec.ResourceClaims = append(podSpec.ResourceClaims, podClaim)
 }
 
 func (r *dgdCheckpointsReconciler) deleteAutoCheckpointsForDGD(

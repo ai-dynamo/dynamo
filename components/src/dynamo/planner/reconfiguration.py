@@ -16,6 +16,7 @@ import stat
 import uuid
 import weakref
 from collections import OrderedDict
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,7 +24,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.control_api import _MinimumEndpointUnavailableError
+from dynamo.planner.core.budget import minimum_power_footprint_fits
 from dynamo.planner.offline.trace_data import extract_traffic_observations_from_bytes
+from dynamo.planner.retune.domains import PREDICTOR_KEYS, SCALING_POLICY_KEYS
 
 if TYPE_CHECKING:
     from dynamo.planner.core.base import NativePlannerBase
@@ -33,32 +36,30 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-PREDICTOR_FIELDS = frozenset(
-    {
-        "load_predictor",
-        "load_predictor_log1p",
-        "prophet_window_size",
-        "kalman_q_level",
-        "kalman_q_trend",
-        "kalman_r",
-        "kalman_min_points",
+PREDICTOR_FIELDS = frozenset(PREDICTOR_KEYS)
+# The scaling policy. A change re-registers the builtin plugins of the running
+# engine; see ``predictor_rebuild_required`` for when it also needs a new
+# load predictor.
+SCALING_POLICY_FIELDS = frozenset(SCALING_POLICY_KEYS)
+RUNTIME_FIELDS = (
+    PREDICTOR_FIELDS
+    | SCALING_POLICY_FIELDS
+    | {
+        "min_endpoint",
+        "prefill_min_endpoint",
+        "decode_min_endpoint",
+        "min_gpu_budget",
+        "max_gpu_budget",
+        "max_throughput_scaling_replicas",
+        "ttft_ms",
+        "itl_ms",
+        "load_scaling_down_sensitivity",
+        "prefill_scale_up_queue_tokens",
+        "prefill_scale_down_queue_tokens",
+        "decode_scale_up_kv_rate",
+        "decode_scale_down_kv_rate",
     }
 )
-RUNTIME_FIELDS = PREDICTOR_FIELDS | {
-    "min_endpoint",
-    "prefill_min_endpoint",
-    "decode_min_endpoint",
-    "min_gpu_budget",
-    "max_gpu_budget",
-    "max_throughput_scaling_replicas",
-    "ttft_ms",
-    "itl_ms",
-    "load_scaling_down_sensitivity",
-    "prefill_scale_up_queue_tokens",
-    "prefill_scale_down_queue_tokens",
-    "decode_scale_up_kv_rate",
-    "decode_scale_down_kv_rate",
-}
 PREPARATION_TIMEOUT_SECONDS = 120.0
 OPERATION_HISTORY_SIZE = 32
 MAX_WARMUP_TRACE_BYTES = 16 * 1024 * 1024
@@ -82,7 +83,13 @@ class ReconfigureRequest(BaseModel):
     cold_start: bool = False
 
 
-def _candidate_config(config: PlannerConfig, updates: dict[str, Any]) -> PlannerConfig:
+def candidate_config(config: PlannerConfig, updates: dict[str, Any]) -> PlannerConfig:
+    """Validate ``config`` with runtime ``updates`` applied, strictly.
+
+    Rejects unknown or mode-inactive fields and re-runs every
+    ``PlannerConfig`` validator on the full merged config.
+    """
+
     if not updates or (unknown := updates.keys() - RUNTIME_FIELDS):
         raise ValueError(
             f"provide supported runtime fields; unknown fields: {sorted(unknown) if updates else []}"
@@ -105,7 +112,7 @@ def _candidate_config(config: PlannerConfig, updates: dict[str, Any]) -> Planner
         )
     try:
         candidate = PlannerConfig.model_validate(
-            config.model_dump() | updates, strict=True
+            _dump_with_excluded(config) | updates, strict=True
         )
     except ValidationError as error:
         # Full PlannerConfig also contains credentials; never echo that input
@@ -115,14 +122,208 @@ def _candidate_config(config: PlannerConfig, updates: dict[str, Any]) -> Planner
     return candidate
 
 
+# Backward-compatible private name.
+_candidate_config = candidate_config
+
+
+def _dump_with_excluded(model: BaseModel) -> dict[str, Any]:
+    """``model.model_dump()`` with every ``exclude=True`` field kept.
+
+    Field-level ``exclude`` keeps secrets and environment-derived settings
+    out of serialized configs. A revalidated plain dump would lose them: a
+    ``batch_scheduling.redis.url`` written in the config file would fail the
+    non-advisory batch scheduling checks, and the other excluded fields would
+    be read from the environment again.
+    """
+
+    dumped = model.model_dump()
+    _restore_excluded(model, dumped)
+    return dumped
+
+
+def _restore_excluded(model: BaseModel, dumped: dict[str, Any]) -> None:
+    for name, info in type(model).model_fields.items():
+        value = getattr(model, name)
+        if info.exclude is True:
+            dumped[name] = value
+        elif isinstance(value, BaseModel):
+            _restore_excluded(value, dumped[name])
+        elif isinstance(value, list):
+            for item, item_dump in zip(value, dumped[name]):
+                if isinstance(item, BaseModel):
+                    _restore_excluded(item, item_dump)
+
+
+def runtime_configuration_errors(
+    prefill_min_endpoint: int | None,
+    decode_min_endpoint: int | None,
+    min_gpu_budget: int,
+    max_gpu_budget: int,
+    power_budget: int | None,
+    capabilities: WorkerCapabilities,
+) -> list[str]:
+    """Return why endpoint floors and budgets cannot run on ``capabilities``.
+
+    Checks budget ordering, the GPU footprint of the minimum endpoints against
+    ``max_gpu_budget`` and, when ``power_budget`` is set and per-replica watts
+    are known, their power footprint. An empty list means the values fit.
+    """
+
+    errors: list[str] = []
+
+    if min_gpu_budget >= 0 and max_gpu_budget >= 0 and min_gpu_budget > max_gpu_budget:
+        errors.append(
+            f"min_gpu_budget={min_gpu_budget} exceeds "
+            f"max_gpu_budget={max_gpu_budget}"
+        )
+
+    required_gpus = 0
+    if prefill_min_endpoint is not None and capabilities.prefill is not None:
+        p_gpu = capabilities.prefill.resolved_gpu_cost_per_replica
+        if p_gpu is not None:
+            required_gpus += prefill_min_endpoint * p_gpu
+    if decode_min_endpoint is not None and capabilities.decode is not None:
+        d_gpu = capabilities.decode.resolved_gpu_cost_per_replica
+        if d_gpu is not None:
+            required_gpus += decode_min_endpoint * d_gpu
+    if max_gpu_budget >= 0 and required_gpus > max_gpu_budget:
+        errors.append(
+            "minimum endpoint footprint requires "
+            f"{required_gpus} GPUs, exceeding max_gpu_budget="
+            f"{max_gpu_budget}"
+        )
+
+    if power_budget is not None:
+        p_watts = (
+            capabilities.prefill.power_watts_per_replica
+            if capabilities.prefill is not None
+            else None
+        )
+        d_watts = (
+            capabilities.decode.power_watts_per_replica
+            if capabilities.decode is not None
+            else None
+        )
+        power_known = (prefill_min_endpoint is None or p_watts is not None) and (
+            decode_min_endpoint is None or d_watts is not None
+        )
+        prefill_floor = prefill_min_endpoint or 0
+        decode_floor = decode_min_endpoint or 0
+        if power_known and not minimum_power_footprint_fits(
+            total_budget=power_budget,
+            prefill_min_endpoint=prefill_floor,
+            decode_min_endpoint=decode_floor,
+            p_watts=p_watts,
+            d_watts=d_watts,
+        ):
+            required_watts = prefill_floor * (p_watts or 0) + decode_floor * (
+                d_watts or 0
+            )
+            errors.append(
+                "minimum endpoint footprint requires "
+                f"{required_watts}W, exceeding total_gpu_power_limit="
+                f"{power_budget}W"
+            )
+    return errors
+
+
+def runtime_candidate_errors(
+    candidate: PlannerConfig, capabilities: WorkerCapabilities
+) -> list[str]:
+    """``runtime_configuration_errors`` for a full candidate configuration."""
+
+    prefill_min_endpoint, decode_min_endpoint = candidate.active_min_endpoints()
+    return runtime_configuration_errors(
+        prefill_min_endpoint,
+        decode_min_endpoint,
+        candidate.min_gpu_budget,
+        candidate.max_gpu_budget,
+        candidate.total_gpu_power_limit,
+        capabilities,
+    )
+
+
+def live_retune_sla_errors(
+    config: PlannerConfig, candidate: PlannerConfig
+) -> list[str]:
+    """Return why ``candidate`` cannot replace ``config`` under live retune.
+
+    The live retune controller and the supervisor's state fingerprint read
+    the scoring SLA only when they are built: at startup, or at a rebuild for
+    a spec, P4 or DGD change. A runtime change of an inherited ``ttft_ms`` or
+    ``itl_ms`` would leave the running controller scoring with the old SLA
+    until such a rebuild, which would then apply the new SLA and, through its
+    new fingerprint, reset the persisted retune state.
+    """
+
+    if config.retune is None or candidate.retune is None:
+        return []
+    current = config.retune.scoring_sla(config.ttft_ms, config.itl_ms)
+    proposed = candidate.retune.scoring_sla(candidate.ttft_ms, candidate.itl_ms)
+    changed = [
+        field
+        for field, old, new in zip(("ttft_ms", "itl_ms"), current, proposed)
+        if old != new
+    ]
+    if not changed:
+        return []
+    fields = " and ".join(changed)
+    overrides = " and ".join(f"retune.sla_{field}" for field in changed)
+    return [
+        f"cannot change {fields} at runtime while retune.executor is 'dgdr': "
+        f"live retune inherits its scoring SLA from {fields} ({overrides} unset); "
+        f"restart the planner with the new {fields}, or restart it with "
+        f"{overrides} set to keep {fields} changeable at runtime"
+    ]
+
+
+def predictor_rebuild_required(
+    current: PlannerConfig, candidate: PlannerConfig
+) -> bool:
+    """Whether activating ``candidate`` needs a newly prepared load predictor.
+
+    Only a candidate with throughput scaling has a predictor. It needs a new
+    one when throughput scaling turns on, when a predictor field changes, or
+    when ``throughput_adjustment_interval_seconds`` changes: the interval is
+    the predictor's step and the bucket length of its history.
+    """
+
+    if not candidate.enable_throughput_scaling:
+        return False
+    if not current.enable_throughput_scaling:
+        return True
+    return any(
+        getattr(candidate, field) != getattr(current, field)
+        for field in (*PREDICTOR_FIELDS, "throughput_adjustment_interval_seconds")
+    )
+
+
+def prepare_predictor(
+    config: PlannerConfig,
+    capabilities: WorkerCapabilities,
+    observations: Sequence[TrafficObservation] | None,
+) -> BuiltinLoadPredict:
+    """Build ``config``'s load predictor, warmed with ``observations``.
+
+    ``None`` cold-starts the predictor. A sequence warms it and raises when it
+    has too few effective points, so a predictor is never swapped in cold by
+    accident.
+    """
+
+    # Preserve the core's lazy plugin-loading boundary.
+    from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
+
+    predictor = BuiltinLoadPredict(config, capabilities)
+    if observations is not None:
+        predictor.prepare_reconfiguration(list(observations))
+    return predictor
+
+
 def _prepare_predictor(
     config: PlannerConfig,
     capabilities: WorkerCapabilities,
     trace: str | None,
 ) -> BuiltinLoadPredict:
-    # Preserve the core's lazy plugin-loading boundary.
-    from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
-
     observations = None
     if trace is not None:
         observations = _load_runtime_warmup(
@@ -130,10 +331,7 @@ def _prepare_predictor(
             config.throughput_adjustment_interval_seconds,
             config.runtime_warmup_trace_dir,
         )
-    predictor = BuiltinLoadPredict(config, capabilities)
-    if observations is not None:
-        predictor.prepare_reconfiguration(observations)
-    return predictor
+    return prepare_predictor(config, capabilities, observations)
 
 
 def _load_runtime_warmup(
@@ -214,7 +412,8 @@ class PlannerReconfiguration:
         self.planner = planner
         self.instance_id = str(uuid.uuid4())
         self._operations: OrderedDict[str, dict[str, Any]] = OrderedDict()
-        self._task: asyncio.Task[None] | None = None
+        # The update preparing or activating: a control API one or a decision's.
+        self._task: asyncio.Task[Any] | None = None
         self._preparation: asyncio.Task[BuiltinLoadPredict] | None = None
         self._closed = False
         self._registered_runtime: DistributedRuntime | None = None
@@ -251,10 +450,11 @@ class PlannerReconfiguration:
                 raise ConfigurationConflict(
                     "another configuration update is still preparing"
                 )
-            candidate = _candidate_config(self.planner.config, request.config)
+            candidate = candidate_config(self.planner.config, request.config)
             self.planner.validate_runtime_candidate(candidate)
             changed_predictor = (
-                any(
+                predictor_rebuild_required(self.planner.config, candidate)
+                or any(
                     getattr(candidate, field) != getattr(self.planner.config, field)
                     for field in PREDICTOR_FIELDS
                 )
@@ -275,7 +475,10 @@ class PlannerReconfiguration:
                     )
                 if request.warmup_trace is None and not request.cold_start:
                     raise ValueError(
-                        "predictor replacement requires warmup_trace or explicit cold_start: true"
+                        "predictor replacement requires warmup_trace or explicit "
+                        "cold_start: true (a predictor field or "
+                        "throughput_adjustment_interval_seconds changed, or "
+                        "throughput scaling turned on)"
                     )
             operation = {
                 "operation_id": request.request_id,
@@ -306,27 +509,107 @@ class PlannerReconfiguration:
             operation["state"] = (
                 "warming" if request.warmup_trace is not None else "preparing"
             )
-            capabilities = self.planner._build_worker_capabilities()
-            self._preparation = asyncio.create_task(
-                asyncio.to_thread(
-                    _prepare_predictor, candidate, capabilities, request.warmup_trace
+            predictor = await self._prepare(
+                _prepare_predictor,
+                candidate,
+                self.planner._build_worker_capabilities(),
+                request.warmup_trace,
+            )
+        operation["applied_revision"] = await self._activate(
+            candidate,
+            request.config.keys(),
+            predictor,
+            lambda: self._check_revision(request),
+        )
+        operation["state"] = "applied"
+
+    async def apply_decision(
+        self,
+        changes: Mapping[str, Any],
+        observations: Sequence[TrafficObservation] | None,
+    ) -> int:
+        """Activate a persisted live retune decision's Planner ``changes``;
+        the new revision.
+
+        The same two-phase path as a control API update: one update at a
+        time, a new load predictor prepared off the event loop on the
+        decision's ``observations`` and tracked past its deadline, and the
+        decision dropped (``ConfigurationConflict``) when another update
+        activates first. Raises on any failure; nothing changes then.
+        """
+
+        async with self.planner._bounded_config_lock():
+            if self._closed:
+                raise _MinimumEndpointUnavailableError("planner is shutting down")
+            if self._task is not None and not self._task.done():
+                raise ConfigurationConflict(
+                    "another configuration update is still preparing"
                 )
-            )
-            # A timed-out thread cannot be killed. Keep tracking it and reject a
-            # second preparation until it exits; it never owns active state.
-            self._preparation.add_done_callback(_consume_preparation_result)
-            predictor = await asyncio.wait_for(
-                asyncio.shield(self._preparation), PREPARATION_TIMEOUT_SECONDS
-            )
+            candidate = candidate_config(self.planner.config, dict(changes))
+            self.planner.validate_runtime_candidate(candidate)
+            rebuild = predictor_rebuild_required(self.planner.config, candidate)
+            if (
+                rebuild
+                and self._preparation is not None
+                and not self._preparation.done()
+            ):
+                raise ConfigurationConflict("another predictor is still preparing")
+            revision = self.planner._config_generation
+
+            def unchanged() -> None:
+                if self.planner._config_generation != revision:
+                    raise ConfigurationConflict(
+                        "the configuration changed while the predictor was "
+                        f"prepared (revision {revision} -> "
+                        f"{self.planner._config_generation})"
+                    )
+
+            async def apply() -> int:
+                predictor = None
+                if rebuild:
+                    predictor = await self._prepare(
+                        prepare_predictor,
+                        candidate,
+                        self.planner._build_worker_capabilities(),
+                        observations,
+                    )
+                return await self._activate(
+                    candidate, list(changes), predictor, unchanged
+                )
+
+            task = asyncio.create_task(apply())
+            self._task = task
+        return await task
+
+    async def _prepare(
+        self, prepare: Callable[..., BuiltinLoadPredict], *args: Any
+    ) -> BuiltinLoadPredict:
+        """Run ``prepare(*args)`` off the event loop within the deadline."""
+
+        self._preparation = asyncio.create_task(asyncio.to_thread(prepare, *args))
+        # A timed-out thread cannot be killed. Keep tracking it and reject a
+        # second preparation until it exits; it never owns active state.
+        self._preparation.add_done_callback(_consume_preparation_result)
+        return await asyncio.wait_for(
+            asyncio.shield(self._preparation), PREPARATION_TIMEOUT_SECONDS
+        )
+
+    async def _activate(
+        self,
+        candidate: PlannerConfig,
+        fields: Iterable[str],
+        predictor: BuiltinLoadPredict | None,
+        check: Callable[[], None],
+    ) -> int:
+        """Activate ``candidate`` between decisions if ``check()`` passes;
+        the new revision."""
+
         async with self.planner._effect_admission_lock:
             async with self.planner._bounded_config_lock():
-                self._check_revision(request)
+                check()
                 self.planner.validate_runtime_candidate(candidate)
-                self.planner.apply_runtime_candidate(
-                    candidate, request.config.keys(), predictor
-                )
-                operation["state"] = "applied"
-                operation["applied_revision"] = self.planner._config_generation
+                self.planner.apply_runtime_candidate(candidate, fields, predictor)
+                return self.planner._config_generation
 
     @staticmethod
     def _finish(task: asyncio.Task[None], operation: dict[str, Any]) -> None:
