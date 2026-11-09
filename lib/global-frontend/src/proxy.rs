@@ -18,6 +18,7 @@ use axum::http::{HeaderMap, HeaderName, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use dynamo_global_router::affinity::tenant_id;
 use dynamo_global_router::{InFlightTracker, PoolSelector, RoutingRequest};
 use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BODY_LIMIT_MB;
@@ -197,8 +198,20 @@ async fn forward(
     let session = headers
         .get(HEADER_DYNAMO_SESSION_ID)
         .and_then(|session| session.to_str().ok());
-    let request = RoutingRequest::new(&model).with_session(session);
-    let Some(target) = proxy.selector.select(&request, &candidates) else {
+    // Selection happens before the pool authorizes the request, so a session
+    // binding is not an admission decision and the Global Frontend does not
+    // validate the credential. Keying on a digest of it is what keeps two
+    // tenants that reuse one session ID off each other's bindings; the pool
+    // still rejects a request whose `authorization` it does not accept.
+    let tenant = tenant_id(
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|credential| credential.to_str().ok()),
+    );
+    let request = RoutingRequest::new(&model)
+        .with_session(session)
+        .with_tenant(&tenant);
+    let Some(target) = proxy.selector.select(&request, &candidates).await else {
         metrics.rejected(error_type::UNAVAILABLE);
         let message = format!("no pool can serve model {model}");
         return error(StatusCode::SERVICE_UNAVAILABLE, message);

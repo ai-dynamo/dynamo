@@ -61,12 +61,19 @@ from dynamo.planner.core.types import (
     WorkerCapabilities,
 )
 from dynamo.planner.reconfiguration import prepare_predictor
-from dynamo.planner.retune.domains import PredictorCandidate
+from dynamo.planner.retune.domains import (
+    ENABLE_THROUGHPUT,
+    PREDICTOR_KEYS,
+    THROUGHPUT_INTERVAL,
+    PredictorCandidate,
+    canonical_planner_point,
+)
 from dynamo.planner.retune.window import (
     ObservationBuckets,
     read_trace_history,
     read_trace_window,
 )
+from dynamo.planner.simulation.config import inner_planner_config
 from dynamo.planner.simulation.load_predictor import (
     Window,
     evaluate_preset,
@@ -88,8 +95,9 @@ _READ_TASK = "read-trace"
 _PRESWEEP_TASK = "predictor-presweep"
 _PREDICTOR_WARMUP_TASK = "predictor-warmup"
 _WINDOW_FILE = "window.jsonl"
-_OBSERVATIONS_FILE = "observations.json"
-_WARMUP_FILE = "warmup.json"
+# One file each per throughput interval: ``observations-<interval>.json``.
+_OBSERVATIONS_FILE = "observations"
+_WARMUP_FILE = "warmup"
 _WORKER_TEMP_DIR = "tmp"
 
 
@@ -171,6 +179,17 @@ class SweepRequest:
     ``retune.domains`` expands ``retune.planner.load_predictor``; its
     winner's predictor fields are fixed into every non-baseline candidate.
     ``objective`` is the metric ``score_summary`` scores each replay on.
+
+    The remaining fields are set only by a live controller (``launch_gate``
+    set) and keep their defaults in replay, where ``run_sweep`` ignores them:
+    ``router_domain`` is the controller's router domain (live knob name ->
+    values), ``deadline_s`` the absolute epoch deadline ``D_k = L_k +
+    timeout``, ``spec_replicas`` the DGD spec replicas by worker type the
+    gate reported, ``replicas_verified`` whether the recorded ready counts
+    cover the whole window (``False`` when the window began before the
+    controller started), and ``generation`` the launching controller's
+    generation. Abort events are passed to the sweep function, never stored
+    here, so the request stays picklable.
     """
 
     window_index: int
@@ -192,6 +211,15 @@ class SweepRequest:
     max_parallel: int
     timeout_s: float
     history_paths: tuple[str, ...] = ()
+    router_domain: dict[str, tuple[float, ...]] | None = None
+    deadline_s: float | None = None
+    spec_replicas: dict[str, int] | None = None
+    replicas_verified: bool = True
+    generation: int = 0
+    # Live only: the grid's distinct planner points (searched fields), the
+    # planner axis a DGDR sweep shards; ``None`` derives it from every
+    # candidate.
+    grid_planners: tuple[dict[str, Any], ...] | None = None
 
     def __post_init__(self) -> None:
         keys = [candidate.key() for candidate in self.candidates]
@@ -207,6 +235,8 @@ class SweepRequest:
             raise ValueError("max_parallel must be at least 1")
         if not self.timeout_s > 0:
             raise ValueError("timeout_s must be positive")
+        if self.deadline_s is not None and not math.isfinite(self.deadline_s):
+            raise ValueError("deadline_s must be finite")
         if self.predictor_candidates:
             labels = [label for label, _ in self.predictor_candidates]
             if len(set(labels)) != len(labels):
@@ -230,15 +260,25 @@ class SweepResult:
     carry the evaluated ``params`` (the candidate with any pre-sweep
     predictor fields) and either the evaluator's metrics or ``error``.
     ``predictor_presweep`` is ``{winner, fields, losses, eval_steps,
-    warmup_steps, wall_s}`` (plus ``errors`` when a candidate's task failed)
-    when the pre-sweep ran; ``winner`` and the ``losses`` keys are candidate
-    labels. ``warmup_observations`` covers history
-    and window, bucketed at the inner planner's throughput interval, for a
-    predictor swap. When the winner changes the predictor, the sweep
-    prepares it on ``warmup_observations`` as a host does before a swap;
-    ``predictor_warmup_error`` is that preparation's error, if any.
+    warmup_steps, wall_s, interval_seconds}`` (plus ``errors`` when a
+    candidate's task failed) when the pre-sweep ran at one throughput
+    interval; ``winner`` and the ``losses`` keys are candidate labels. With
+    candidates at several intervals it is ``{"by_interval": {"<interval>":
+    <that summary>}}`` (``presweep_fields`` reads either).
+    ``interval_observations`` maps each throughput interval a candidate (or
+    the inner planner) scales at to the history and window bucketed at that
+    interval, for a predictor swap; ``warmup_observations`` is the entry of
+    the inner planner's own interval. When the candidate at an interval
+    changes the predictor, the sweep prepares it on those observations as a
+    host does before a swap; ``predictor_warmup_errors`` holds each
+    preparation's error, and ``predictor_warmup_error`` the one at the inner
+    planner's interval.
     ``row_counts`` holds the window reader's counts and, when the history
-    was read, ``history_requests``.
+    was read, ``history_requests``. ``failure_reason`` is a stable,
+    machine-readable reason a live executor sets next to the free-text
+    ``error`` (``retune.live.contracts.NON_DECISION_FAILURES`` mean the
+    window was abandoned, not failed); ``details`` carries JSON-shaped
+    executor facts for the decision record. ``run_sweep`` sets neither.
     """
 
     status: SweepStatus
@@ -251,28 +291,127 @@ class SweepResult:
     predictor_warmup_error: str | None = None
     wall_s: float = 0.0
     error: str | None = None
+    failure_reason: str | None = None
+    details: dict[str, Any] = field(default_factory=dict)
+    interval_observations: dict[int, tuple[TrafficObservation, ...]] = field(
+        default_factory=dict
+    )
+    predictor_warmup_errors: dict[int, str] = field(default_factory=dict)
+
+    def observations_at(self, interval: int) -> tuple[TrafficObservation, ...] | None:
+        """The swap warmup at throughput ``interval`` (``None``: not read).
+
+        A result without per-interval observations (one interval) has only
+        ``warmup_observations``.
+        """
+
+        if self.interval_observations:
+            return self.interval_observations.get(int(interval))
+        return self.warmup_observations
+
+    def warmup_error_at(self, interval: int) -> str | None:
+        """The predictor preparation error at throughput ``interval``."""
+
+        if self.predictor_warmup_errors:
+            return self.predictor_warmup_errors.get(int(interval))
+        return self.predictor_warmup_error
 
 
-def with_predictor_fields(
+def presweep_fields(
+    presweep: Mapping[str, Any] | None, interval: int
+) -> dict[str, Any] | None:
+    """The winner's predictor fields of the pre-sweep at ``interval``.
+
+    ``None`` when the pre-sweep did not run at that interval. A single
+    summary without ``interval_seconds`` (written before intervals were
+    searched) applies at any interval.
+    """
+
+    if presweep is None:
+        return None
+    if "by_interval" in presweep:
+        summary = presweep["by_interval"].get(str(int(interval)))
+        return None if summary is None else summary.get("fields")
+    recorded = presweep.get("interval_seconds")
+    if recorded is not None and int(recorded) != int(interval):
+        return None
+    return presweep.get("fields")
+
+
+def _running_planner(
+    baseline: RetuneParams, base_planner: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    return {**(base_planner or {}), **baseline.planner}
+
+
+def scales_on_throughput(
+    planner: Mapping[str, Any], running: Mapping[str, Any]
+) -> int | None:
+    """The throughput interval ``planner`` (over ``running``) scales at, or
+    ``None`` without throughput scaling."""
+
+    if not planner.get(ENABLE_THROUGHPUT, running.get(ENABLE_THROUGHPUT)):
+        return None
+    return int(planner.get(THROUGHPUT_INTERVAL, running[THROUGHPUT_INTERVAL]))
+
+
+def evaluated_params(
     candidate: RetuneParams,
     baseline: RetuneParams,
-    fields: Mapping[str, Any] | None,
+    presweep: Mapping[str, Any] | None,
+    base_planner: Mapping[str, Any] | None,
 ) -> RetuneParams:
-    """The params a candidate is evaluated with after the predictor pre-sweep.
+    """The params a candidate is evaluated (and applied) with.
 
-    The baseline keeps the current predictor; every other candidate carries
-    the pre-sweep winner's predictor fields. Searched planner keys that a
-    candidate does not set (the predictor fields of a grid point) take the
-    baseline's values first. That leaves the inner planner unchanged, because
-    the base planner already holds the current values, but gives a candidate
-    equivalent to the baseline the baseline's key, so it is replayed once.
+    The baseline is evaluated as is. Every other candidate:
+
+    - takes the baseline's value for a searched planner key it does not set
+      (the predictor fields of a grid point);
+    - folds the fields its scaling modes make inactive to the baseline's
+      values (``canonical_planner_point``), so an inactive difference is
+      neither replayed nor applied;
+    - when it scales on throughput, carries the pre-sweep winner of its
+      throughput interval (``presweep_fields``), else the running
+      predictor, so candidates at one interval share one predictor.
+
+    That leaves the inner planner unchanged where the base planner already
+    holds the current values, and gives a candidate equivalent to the
+    baseline the baseline's key, so it is replayed once.
     """
 
     if candidate == baseline:
         return candidate
-    planner = {**baseline.planner, **candidate.planner, **(fields or {})}
+    planner = evaluated_planner(candidate.planner, baseline, presweep, base_planner)
     evaluated = RetuneParams(router=dict(candidate.router), planner=planner)
     return candidate if evaluated == candidate else evaluated
+
+
+def evaluated_planner(
+    planner_point: Mapping[str, Any],
+    baseline: RetuneParams,
+    presweep: Mapping[str, Any] | None,
+    base_planner: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """The planner part ``evaluated_params`` gives any candidate other than
+    the baseline whose planner point is ``planner_point``."""
+
+    planner = {**baseline.planner, **planner_point}
+    if planner and base_planner is not None:
+        running = _running_planner(baseline, base_planner)
+        planner = canonical_planner_point(planner, running)
+        interval = scales_on_throughput(planner, running)
+        if interval is not None:
+            fields = presweep_fields(presweep, interval)
+            if not fields:
+                # No winner at this interval: the predictor is not searched
+                # there, so the candidate keeps the running one.
+                fields = {
+                    key: running[key]
+                    for key in PREDICTOR_KEYS
+                    if key in planner and key in running
+                }
+            planner.update(fields)
+    return planner
 
 
 def score_summary(
@@ -505,19 +644,21 @@ def _changes_predictor(baseline: RetuneParams, fields: Mapping[str, Any]) -> boo
 class _SweepInputs(NamedTuple):
     """What the read task hands back; the files live in the sweep directory.
 
+    Each mapping is keyed by throughput interval (seconds), one entry per
+    interval the read spec bucketed (none without throughput scaling).
     ``observations`` are the history and window buckets ending at the window
-    end (``None`` without throughput scaling); ``observations_path`` is their
-    file, written only for the pre-sweep. ``warmup_path`` holds the history
-    buckets ending at the window start, the inner planner's warmup; it is
-    ``None`` when no history row was selected.
+    end; ``observations_paths`` are their files, written only for the
+    pre-sweep. ``warmup_paths`` hold the history buckets ending at the
+    window start, the inner planner's warmup; an interval is missing when no
+    history row was selected.
     """
 
     window_path: str
     num_requests: int
     row_counts: dict[str, int]
-    observations: tuple[TrafficObservation, ...] | None = None
-    observations_path: str | None = None
-    warmup_path: str | None = None
+    observations: dict[int, tuple[TrafficObservation, ...]]
+    observations_paths: dict[int, str]
+    warmup_paths: dict[int, str]
 
 
 @dataclass(frozen=True)
@@ -526,8 +667,9 @@ class _ReadSpec:
 
     Only what the readers need: the request also carries every candidate and
     the engine, which would make the task message large. ``buckets`` (empty)
-    is set for an inner planner that scales on throughput, the only one with
-    a load predictor to warm; the history is read only then.
+    holds one bucket set per throughput interval an inner planner or a
+    candidate scales at, the only ones with a load predictor to warm; the
+    history is read only then.
     """
 
     trace_paths: tuple[str, ...]
@@ -536,14 +678,14 @@ class _ReadSpec:
     window_end_ms: float
     history_start_ms: float
     as_of_ms: float
-    buckets: ObservationBuckets | None
+    buckets: dict[int, ObservationBuckets]
     write_observations: bool
 
     @classmethod
     def from_request(
         cls,
         request: SweepRequest,
-        buckets: ObservationBuckets | None,
+        buckets: Mapping[int, ObservationBuckets],
         *,
         write_observations: bool,
     ) -> _ReadSpec:
@@ -554,7 +696,7 @@ class _ReadSpec:
             window_end_ms=request.window_end_ms,
             history_start_ms=request.history_start_ms,
             as_of_ms=request.as_of_ms,
-            buckets=buckets,
+            buckets=dict(buckets),
             write_observations=write_observations,
         )
 
@@ -564,57 +706,68 @@ def _read_sweep_inputs(spec: _ReadSpec, work_dir: str) -> _SweepInputs:
 
     Runs as a sweep worker task, so the deadline and cancel kill a hung read.
     An empty window stops here: the history is not read. A history row goes
-    into ``spec.buckets``, as the window's rows do, and into buckets that end
-    at the window start, written as the inner planner's warmup: those never
-    take in a window request, wherever the window start falls on the grid of
-    ``spec.buckets``. Raises what the readers raise.
+    into each interval's ``spec.buckets``, as the window's rows do, and into
+    buckets that end at the window start, written as the inner planner's
+    warmup at that interval: those never take in a window request, wherever
+    the window start falls on the grid of ``spec.buckets``. Raises what the
+    readers raise.
     """
 
     directory = Path(work_dir)
-    buckets = spec.buckets
     window = read_trace_window(
         spec.trace_paths,
         spec.window_start_ms,
         spec.window_end_ms,
         spec.as_of_ms,
         directory / _WINDOW_FILE,
-        buckets=buckets,
+        buckets=tuple(spec.buckets.values()),
     )
     row_counts = dict(window.row_counts)
-    if window.num_requests == 0 or buckets is None:
-        return _SweepInputs(window.path, window.num_requests, row_counts)
+    if window.num_requests == 0 or not spec.buckets:
+        return _SweepInputs(window.path, window.num_requests, row_counts, {}, {}, {})
 
-    warmup_path = None
+    warmup_paths: dict[int, str] = {}
     if spec.history_start_ms < spec.window_start_ms:
-        warmup = ObservationBuckets(
-            end_ms=spec.window_start_ms,
-            interval_ms=buckets.interval_ms,
-            duration_s=buckets.duration_s,
-        )
+        warmups = {
+            interval: ObservationBuckets(
+                end_ms=spec.window_start_ms,
+                interval_ms=buckets.interval_ms,
+                duration_s=buckets.duration_s,
+            )
+            for interval, buckets in spec.buckets.items()
+        }
         row_counts["history_requests"] = read_trace_history(
             (*spec.trace_paths, *spec.history_paths),
             spec.history_start_ms,
             spec.window_start_ms,
             spec.as_of_ms,
-            buckets=(buckets, warmup),
+            buckets=(*spec.buckets.values(), *warmups.values()),
         )
-        if warmup.bucket_count():
-            warmup_path = _write_observations(
-                directory / _WARMUP_FILE, warmup.observations()
-            )
-    observations = tuple(buckets.observations())
-    observations_path = None
+        for interval, warmup in warmups.items():
+            if warmup.bucket_count():
+                warmup_paths[interval] = _write_observations(
+                    directory / f"{_WARMUP_FILE}-{interval}.json",
+                    warmup.observations(),
+                )
+    observations = {
+        interval: tuple(buckets.observations())
+        for interval, buckets in spec.buckets.items()
+    }
+    observations_paths: dict[int, str] = {}
     if spec.write_observations:
-        observations_path = _write_observations(
-            directory / _OBSERVATIONS_FILE, observations
-        )
+        observations_paths = {
+            interval: _write_observations(
+                directory / f"{_OBSERVATIONS_FILE}-{interval}.json", rows
+            )
+            for interval, rows in observations.items()
+        }
     return _SweepInputs(
         window_path=window.path,
         num_requests=window.num_requests,
         row_counts=row_counts,
         observations=observations,
-        observations_path=observations_path,
-        warmup_path=warmup_path,
+        observations_paths=observations_paths,
+        warmup_paths=warmup_paths,
     )
 
 
@@ -668,25 +821,20 @@ def _run_sweep(
     evaluator: Evaluator,
 ) -> SweepResult:
     deadline = started + request.timeout_s
-    interval_s = _inner_throughput_interval(request.base_planner)
-    buckets = (
-        None
-        if interval_s is None
-        else ObservationBuckets(
+    running = _running_planner(request.baseline, request.base_planner)
+    intervals = sweep_throughput_intervals(request)
+    buckets = {
+        interval: ObservationBuckets(
             end_ms=request.window_end_ms,
-            interval_ms=interval_s * 1000.0 * request.arrival_speedup_ratio,
-            duration_s=float(interval_s),
+            interval_ms=interval * 1000.0 * request.arrival_speedup_ratio,
+            duration_s=float(interval),
         )
-    )
+        for interval in intervals
+    }
     predictors = tuple(request.predictor_candidates or ())
-    # (bucket length in trace ms, planner interval in s) when the pre-sweep runs
-    presweep_interval = (
-        (buckets.interval_ms, interval_s)
-        if predictors and buckets is not None and interval_s
-        else None
-    )
+    presweep_intervals = intervals if predictors else []
     spec = _ReadSpec.from_request(
-        request, buckets, write_observations=presweep_interval is not None
+        request, buckets, write_observations=bool(presweep_intervals)
     )
 
     temp_dir = work_dir / _WORKER_TEMP_DIR
@@ -700,7 +848,7 @@ def _run_sweep(
         # Start every worker the later rounds can use now, so they import
         # while the first one reads instead of after it.
         pool.start(
-            max(len(request.candidates), len(predictors) if presweep_interval else 0)
+            max(len(request.candidates), len(predictors) * len(presweep_intervals))
         )
         read = pool.run([(_READ_TASK, _read_sweep_inputs, (spec, str(work_dir)))])
         ok, value = read[_READ_TASK]
@@ -729,28 +877,21 @@ def _run_sweep(
         inner_base = None
         if request.base_planner is not None:
             # The inner planner is the current one, warmed from the recorded
-            # history (the read task's warmup buckets) instead of the outer
-            # run's own warmup trace, never retuned, and without diagnostics
-            # reports (one HTML file per candidate). It always scales, even
-            # under an advisory outer planner: a candidate is scored on the
-            # replicas it would drive. Replay never runs batch scheduling, so
-            # it is off, which also drops the Redis settings an actuating
-            # planner would require.
-            inner_base = {
-                **request.base_planner,
-                "retune": None,
-                "load_predictor_warmup_trace": None,
-                "report_interval_hours": None,
-                "live_dashboard_port": 0,
-                "advisory": False,
-                "batch_scheduling": {"enabled": False},
-            }
-        if presweep_interval is not None:
-            presweep = _run_presweep(request, pool, inputs, *presweep_interval)
-        fields = None if presweep is None else presweep["fields"]
+            # history (the read task's warmup buckets).
+            inner_base = inner_planner_config(request.base_planner)
+        if presweep_intervals:
+            presweep = run_presweeps(
+                request,
+                pool,
+                inputs.observations,
+                inputs.observations_paths,
+                presweep_intervals,
+            )
         by_effective: dict[str, tuple[RetuneParams, list[str]]] = {}
         for candidate in request.candidates:
-            effective = with_predictor_fields(candidate, request.baseline, fields)
+            effective = evaluated_params(
+                candidate, request.baseline, presweep, request.base_planner
+            )
             entry = by_effective.setdefault(effective.key(), (effective, []))
             entry[1].append(candidate.key())
         tasks: list[tuple[str, Callable[..., Any], tuple[Any, ...]]] = [
@@ -764,7 +905,7 @@ def _run_sweep(
                     effective,
                     dict(request.replicas),
                     inner_base,
-                    inputs.warmup_path,
+                    _warmup_path(inputs, effective, running),
                     request.sla_ttft_ms,
                     request.sla_itl_ms,
                     request.window_s,
@@ -773,22 +914,18 @@ def _run_sweep(
             )
             for effective_key, (effective, _) in by_effective.items()
         ]
-        if (
-            fields
-            and inner_base is not None
-            and _changes_predictor(request.baseline, fields)
-        ):
-            # Prepare the winner's predictor here, beside the replays, rather
-            # than on the planner tick that decides to swap it in. It goes
-            # first, so an ARIMA or Prophet fit on days of history overlaps
-            # the replays instead of trailing them.
-            tasks.insert(
-                0,
-                (
-                    _PREDICTOR_WARMUP_TASK,
-                    _predictor_warmup_task,
-                    ({**inner_base, **fields}, inputs.observations_path),
-                ),
+        if inner_base is not None:
+            # Prepare each interval's new predictor here, beside the replays,
+            # rather than on the planner tick that decides to swap it in.
+            # They go first, so an ARIMA or Prophet fit on days of history
+            # overlaps the replays instead of trailing them.
+            tasks[:0] = predictor_swap_tasks(
+                request,
+                [effective for effective, _ in by_effective.values()],
+                inner_base,
+                inputs.observations,
+                inputs.observations_paths,
+                work_dir,
             )
         outcomes = pool.run(tasks)
     except _SweepInterrupted as interrupted:
@@ -808,8 +945,7 @@ def _run_sweep(
     finally:
         pool.close()
 
-    ok, value = outcomes.get(_PREDICTOR_WARMUP_TASK, (True, None))
-    predictor_warmup_error = None if ok else value
+    warmup_errors = predictor_swap_errors(outcomes)
     for effective_key, (effective, original_keys) in by_effective.items():
         ok, value = outcomes[effective_key]
         if ok:
@@ -834,6 +970,7 @@ def _run_sweep(
         wall_s,
         _nonzero(inputs.row_counts),
     )
+    base_interval = scales_on_throughput({}, running) if running else None
     return SweepResult(
         status="ok",
         num_requests=inputs.num_requests,
@@ -841,78 +978,202 @@ def _run_sweep(
         scores=scores,
         metrics=metrics,
         predictor_presweep=presweep,
-        warmup_observations=inputs.observations,
-        predictor_warmup_error=predictor_warmup_error,
+        warmup_observations=(
+            None if base_interval is None else inputs.observations.get(base_interval)
+        ),
+        predictor_warmup_error=(
+            None if base_interval is None else warmup_errors.get(base_interval)
+        ),
         wall_s=wall_s,
+        interval_observations=dict(inputs.observations),
+        predictor_warmup_errors=warmup_errors,
     )
+
+
+def _warmup_path(
+    inputs: _SweepInputs, effective: RetuneParams, running: Mapping[str, Any]
+) -> str | None:
+    """The inner planner warmup of ``effective``'s throughput interval."""
+
+    if not running:
+        return None
+    interval = scales_on_throughput(effective.planner, running)
+    return None if interval is None else inputs.warmup_paths.get(interval)
+
+
+def predictor_swap_tasks(
+    request: SweepRequest,
+    evaluated: Sequence[RetuneParams],
+    inner_base: Mapping[str, Any],
+    observations: Mapping[int, Sequence[TrafficObservation]],
+    observations_paths: Mapping[int, str],
+    work_dir: Path,
+) -> list[tuple[str, Callable[..., Any], tuple[Any, ...]]]:
+    """Worker tasks that prepare, per throughput interval, the predictor a
+    host would swap in for the ``evaluated`` candidates at that interval
+    (``_predictor_swaps``), on the observations of that interval; a missing
+    observations file is written to ``work_dir``. ``predictor_swap_errors``
+    reads their outcomes."""
+
+    running = _running_planner(request.baseline, request.base_planner)
+    tasks: list[tuple[str, Callable[..., Any], tuple[Any, ...]]] = []
+    for interval, planner in _predictor_swaps(
+        request.baseline, running, evaluated
+    ).items():
+        path = observations_paths.get(interval)
+        if path is None:
+            path = _write_observations(
+                work_dir / f"{_OBSERVATIONS_FILE}-{interval}.json",
+                observations.get(interval, ()),
+            )
+        tasks.append(
+            (
+                f"{_PREDICTOR_WARMUP_TASK}:{interval}",
+                _predictor_warmup_task,
+                ({**inner_base, **planner}, path),
+            )
+        )
+    return tasks
+
+
+def predictor_swap_errors(outcomes: Mapping[str, tuple[bool, Any]]) -> dict[int, str]:
+    """The failed ``predictor_swap_tasks`` outcomes, by throughput interval."""
+
+    errors: dict[int, str] = {}
+    for task_id, (ok, value) in outcomes.items():
+        if task_id.startswith(f"{_PREDICTOR_WARMUP_TASK}:") and not ok:
+            errors[int(task_id.rsplit(":", 1)[1])] = value
+    return errors
+
+
+def _predictor_swaps(
+    baseline: RetuneParams,
+    running: Mapping[str, Any],
+    evaluated: Sequence[RetuneParams],
+) -> dict[int, dict[str, Any]]:
+    """Per throughput interval, the planner fields of one candidate whose
+    predictor a host would have to prepare to swap it in.
+
+    A candidate at an interval needs a new predictor when the baseline does
+    not scale on throughput, scales at another interval, or has other
+    predictor fields (``reconfiguration.predictor_rebuild_required``). Every
+    candidate at an interval carries that interval's pre-sweep winner, so
+    one of them stands for all; its own planner fields keep the prepared
+    config valid (a load interval shorter than the throughput interval).
+    """
+
+    base_interval = scales_on_throughput({}, running)
+    swaps: dict[int, dict[str, Any]] = {}
+    for candidate in evaluated:
+        interval = scales_on_throughput(candidate.planner, running)
+        if interval is None or interval in swaps:
+            continue
+        predictor = {
+            key: value
+            for key, value in candidate.planner.items()
+            if key in PREDICTOR_KEYS
+        }
+        if interval == base_interval and not _changes_predictor(baseline, predictor):
+            continue
+        swaps[interval] = {**candidate.planner, ENABLE_THROUGHPUT: True}
+    return swaps
 
 
 def _nonzero(counts: Mapping[str, int]) -> dict[str, int]:
     return {key: value for key, value in counts.items() if value}
 
 
-def _inner_throughput_interval(base_planner: Mapping[str, Any] | None) -> int | None:
-    """The inner planner's predictor interval, when it scales on throughput."""
+def sweep_throughput_intervals(request: SweepRequest) -> list[int]:
+    """The throughput intervals an inner planner scales at: the base
+    planner's and every candidate's (``[]`` without an inner planner)."""
 
-    if base_planner is None or not base_planner.get("enable_throughput_scaling"):
-        return None
-    return int(base_planner["throughput_adjustment_interval_seconds"])
+    if request.base_planner is None:
+        return []
+    running = _running_planner(request.baseline, request.base_planner)
+    intervals = set()
+    for planner in (
+        {},
+        *(
+            {**request.baseline.planner, **candidate.planner}
+            for candidate in request.candidates
+        ),
+    ):
+        interval = scales_on_throughput(planner, running)
+        if interval is not None:
+            intervals.add(interval)
+    return sorted(intervals)
 
 
-def _run_presweep(
+def run_presweeps(
     request: SweepRequest,
     pool: _WorkerPool,
-    inputs: _SweepInputs,
-    interval_ms: float,
-    interval_s: int,
+    observations: Mapping[int, Sequence[TrafficObservation]],
+    observations_paths: Mapping[int, str],
+    intervals: Sequence[int],
 ) -> dict[str, Any]:
-    """Score every predictor candidate in its own worker task, then pick one.
+    """Score every predictor candidate at every throughput interval in its
+    own worker task, then pick one per interval.
 
-    ``inputs.observations`` are history and window buckets ending at the
-    window end; only the buckets wholly inside ``W_k`` are forecast and
-    scored, and the ones before them only warm the predictors. Each task
-    carries the path of the observations file, not the observations.
+    ``observations`` (by interval) are history and window buckets ending at
+    the window end, in the files ``observations_paths``; only the buckets
+    wholly inside ``W_k`` are forecast and scored, and the ones before them
+    only warm the predictors. Each task carries the path of the
+    observations file, not the observations. One interval gives its
+    summary (``SweepResult.predictor_presweep``); several give
+    ``{"by_interval": {...}}``.
     """
 
-    if inputs.observations is None or inputs.observations_path is None:
-        raise RuntimeError("the pre-sweep needs the read task's observations file")
     started = time.monotonic()
-    window_steps = int(
-        (request.window_end_ms - request.window_start_ms) / interval_ms + 1e-9
-    )
-    eval_steps = min(len(inputs.observations), window_steps)
-    warmup_steps = len(inputs.observations) - eval_steps
     candidates = tuple(request.predictor_candidates or ())
-    outcomes = pool.run(
-        [
+    tasks: list[tuple[str, Callable[..., Any], tuple[Any, ...]]] = []
+    steps: dict[int, tuple[int, int]] = {}
+    for interval in intervals:
+        path = observations_paths.get(interval)
+        rows = observations.get(interval)
+        if path is None or rows is None:
+            raise RuntimeError("the pre-sweep needs the read task's observations file")
+        interval_ms = interval * 1000.0 * request.arrival_speedup_ratio
+        window_steps = int(
+            (request.window_end_ms - request.window_start_ms) / interval_ms + 1e-9
+        )
+        eval_steps = min(len(rows), window_steps)
+        steps[interval] = (eval_steps, len(rows) - eval_steps)
+        tasks.extend(
             (
-                f"{_PRESWEEP_TASK}:{label}",
+                f"{_PRESWEEP_TASK}:{interval}:{label}",
                 _presweep_task,
-                (inputs.observations_path, entry, interval_s, eval_steps),
+                (path, entry, interval, eval_steps),
             )
             for label, entry in candidates
-        ]
-    )
-    losses: dict[str, float | None] = {}
-    errors: dict[str, str] = {}
-    for label, _ in candidates:
-        ok, value = outcomes[f"{_PRESWEEP_TASK}:{label}"]
-        if ok:
-            losses[label] = value
-        else:
-            # A failed candidate cannot win; the others still compete.
-            losses[label] = None
-            errors[label] = value
-    summary = _presweep_summary(
-        losses,
-        dict(candidates),
-        eval_steps,
-        warmup_steps,
-        time.monotonic() - started,
-    )
-    if errors:
-        summary["errors"] = errors
-    return summary
+        )
+    outcomes = pool.run(tasks)
+    summaries: dict[str, dict[str, Any]] = {}
+    for interval in intervals:
+        losses: dict[str, float | None] = {}
+        errors: dict[str, str] = {}
+        for label, _ in candidates:
+            ok, value = outcomes[f"{_PRESWEEP_TASK}:{interval}:{label}"]
+            if ok:
+                losses[label] = value
+            else:
+                # A failed candidate cannot win; the others still compete.
+                losses[label] = None
+                errors[label] = value
+        eval_steps, warmup_steps = steps[interval]
+        summary = _presweep_summary(
+            losses,
+            dict(candidates),
+            eval_steps,
+            warmup_steps,
+            time.monotonic() - started,
+        )
+        summary["interval_seconds"] = interval
+        if errors:
+            summary["errors"] = errors
+        summaries[str(interval)] = summary
+    if len(summaries) == 1:
+        return next(iter(summaries.values()))
+    return {"by_interval": summaries}
 
 
 @dataclass
@@ -1114,3 +1375,10 @@ def _worker_main(conn: Connection, temp_dir: str) -> None:
         except Exception as error:
             # An unpicklable result is reported as this task's failure.
             conn.send((False, f"unsendable result: {error}"))
+
+
+# Public names for the live DGDR executor, which prepares inner planners
+# with the same worker pool before it creates its Requests.
+WorkerPool = _WorkerPool
+SweepInterrupted = _SweepInterrupted
+write_observations = _write_observations

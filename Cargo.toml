@@ -4,6 +4,7 @@
 [workspace]
 members = [
     "lib/llm",
+    "lib/lora",
     "lib/rl",
     "lib/runtime",
     "lib/tokens",
@@ -18,6 +19,7 @@ members = [
     "lib/global-discovery-service",
     "lib/global-frontend",
     "lib/global-router",
+    "lib/global-router-store-dynamodb",
     "lib/global-view-broadcaster",
     "lib/global-view-receiver",
     "lib/router-plugins/catalog",
@@ -62,14 +64,16 @@ repository = "https://github.com/ai-dynamo/dynamo.git"
 keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
-dynamo-custom-policy-builtin = { path = "lib/router-plugins/builtin", version = "1.7.0" }
+dynamo-router-policies = { path = "lib/router-plugins/builtin", version = "1.7.0" }
 dynamo-generate-format-catalog = { path = "lib/generate-format-catalog", version = "1.7.0" }
 # Published separately by https://github.com/ai-dynamo/aisimulate.
 aisimulate-core = { version = "=0.13.0-dev.202610290000000087" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.7.0" }
+dynamo-global-discovery-client = { path = "lib/global-discovery-client", version = "1.7.0" }
 dynamo-llm = { path = "lib/llm", version = "1.7.0", default-features = false }
+dynamo-lora = { path = "lib/lora", version = "1.7.0" }
 dynamo-sglang-generate = { path = "lib/generate-formats/sglang", version = "1.7.0" }
 dynamo-vllm-generate = { path = "lib/generate-formats/vllm", version = "1.7.0" }
 dynamo-rl = { path = "lib/rl", version = "1.7.0" }
@@ -81,11 +85,12 @@ dynamo-data-gen = { path = "lib/data-gen", version = "1.7.0" }
 dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.7.0" }
 dynamo-global-common = { path = "lib/global-common", version = "1.7.0" }
 dynamo-global-router = { path = "lib/global-router", version = "1.7.0" }
+dynamo-global-router-store-dynamodb = { path = "lib/global-router-store-dynamodb", version = "1.7.0" }
 dynamo-http-server = { path = "lib/http-server", version = "1.7.0" }
 dynamo-memory = { path = "lib/memory", version = "1.7.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.7.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.7.0" }
-dynamo-protocols = { version = "=8.4.0" }
+dynamo-protocols = { version = "=8.5.0" }
 dynamo-decisions = { version = "=0.1.0", features = ["utoipa"] }
 dynamo-parsers = { version = "=10.2.2" }
 
@@ -107,6 +112,13 @@ lru = { version = "0.16" }
 async-nats = { version = "0.49.1", features = ["service"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
+# The SDK's default features add a legacy hyper 0.14 and rustls 0.21 client.
+# Without them it uses the rustls 0.23 (aws-lc-rs) client aws-config uses.
+aws-config = { version = "1.8.14" }
+aws-sdk-dynamodb = { version = "1.105.0", default-features = false, features = [
+    "default-https-client",
+    "rt-tokio",
+] }
 blake3 = { version = "1.8.7" }
 bytes = { version = "1.9" }
 chrono = { version = "0.4", default-features = false, features = [
@@ -231,7 +243,7 @@ codegen-units = 1
 lto = "thin"
 
 # Profiling profile: release-like but retains debug symbols for perf/flamegraph/Nsight.
-# Build: cargo build --profile profiling --features nvtx
+# Build: cargo build --profile profiling --features dynamo-runtime/nvtx
 [profile.profiling]
 inherits = "release"
 debug = true

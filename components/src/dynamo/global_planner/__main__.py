@@ -25,6 +25,9 @@ from dynamo.global_planner.argparse_config import (
     resolve_config,
 )
 from dynamo.global_planner.config import GlobalPlannerConfig
+from dynamo.global_planner.managed_controller import ManagedAllocationController
+from dynamo.global_planner.managed_handler import ManagedRequestHandler
+from dynamo.global_planner.managed_kubernetes import ManagedKubernetesCapacity
 from dynamo.global_planner.scale_handler import ScaleRequestHandler
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -72,17 +75,34 @@ async def main(runtime: DistributedRuntime, config: GlobalPlannerConfig):
     k8s_namespace = os.environ.get("POD_NAMESPACE", "default")
     logger.info(f"Running in Kubernetes namespace: {k8s_namespace}")
 
-    # Create scale request handler
-    handler = ScaleRequestHandler(
-        runtime=runtime,
-        managed_namespaces=config.managed_namespaces,
-        k8s_namespace=k8s_namespace,
-        no_operation=config.no_operation,
-        max_total_gpus=config.max_total_gpus,
-        min_total_gpus=config.min_total_gpus,
-        intent_cache_ttl_seconds=config.intent_cache_ttl_seconds,
-        priority_config=config.priority,
-    )
+    # Create the scale request handler: managed allocation is opt-in.
+    managed = config.managed_allocation
+    controller: ManagedAllocationController | None = None
+    handler: ManagedRequestHandler | ScaleRequestHandler
+    if managed is not None:
+        controller = ManagedAllocationController(
+            managed.policy,
+            ManagedKubernetesCapacity(managed.policy, k8s_namespace),
+            poll_interval_seconds=managed.poll_interval_seconds,
+            operation_timeout_seconds=managed.operation_timeout_seconds,
+        )
+        handler = managed_handler = ManagedRequestHandler(managed, controller)
+        authorized_namespaces: list[str] | str = list(
+            managed.caller_namespaces.values()
+        )
+    else:
+        authorized_namespaces = config.managed_namespaces or "all"
+        handler = ScaleRequestHandler(
+            runtime=runtime,
+            managed_namespaces=config.managed_namespaces,
+            k8s_namespace=k8s_namespace,
+            no_operation=config.no_operation,
+            max_total_gpus=config.max_total_gpus,
+            min_total_gpus=config.min_total_gpus,
+            intent_cache_ttl_seconds=config.intent_cache_ttl_seconds,
+            priority_config=config.priority,
+            gpu_cost_config=config.gpu_cost,
+        )
 
     logger.info("Serving endpoints...")
     scale_endpoint = runtime.endpoint(f"{namespace}.GlobalPlanner.scale_request")
@@ -94,11 +114,15 @@ async def main(runtime: DistributedRuntime, config: GlobalPlannerConfig):
             "status": "healthy",
             "component": "GlobalPlanner",
             "namespace": namespace,
-            "managed_namespaces": config.managed_namespaces or "all",
+            "managed_namespaces": authorized_namespaces,
+            "allocation_phase": controller.phase.value if controller else "legacy",
+            "allocation_reason": controller.reason if controller else None,
         }
 
     logger.info("  ✓ scale_request - Receives scaling requests from Planners")
     logger.info("  ✓ health - Health check endpoint")
+    if controller is not None:
+        logger.info("  ✓ allocation_status - Managed allocation status")
     logger.info("=" * 60)
     logger.info("GlobalPlanner is ready and waiting for scale requests")
     logger.info("=" * 60)
@@ -114,13 +138,32 @@ async def main(runtime: DistributedRuntime, config: GlobalPlannerConfig):
     # health-check target so system_health flips to Ready once the endpoint
     # is live. The payload shape matches HealthCheckRequest so if canary
     # probing is ever enabled it can deserialize cleanly.
-    await asyncio.gather(
+    operations = [
         scale_endpoint.serve_endpoint(handler.scale_request),
         health_endpoint.serve_endpoint(
             health_check,
             health_check_payload={"text": "health"},
         ),
-    )
+    ]
+    if controller is not None:
+        status_endpoint = runtime.endpoint(
+            f"{namespace}.GlobalPlanner.allocation_status"
+        )
+        operations.extend(
+            [
+                status_endpoint.serve_endpoint(managed_handler.allocation_status),
+                controller.run(),
+            ]
+        )
+    # Cancel the remaining operations when any one fails, so a stopped
+    # controller never leaves endpoints accepting demand it cannot serve.
+    tasks = [asyncio.ensure_future(operation) for operation in operations]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 if __name__ == "__main__":
