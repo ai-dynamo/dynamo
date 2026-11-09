@@ -14,6 +14,7 @@ import (
 	"time"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	lwscontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/lws"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,6 +40,10 @@ func TestFailureRecordsPersistUsesServerUIDAndResourceVersion(t *testing.T) {
 				ComponentName: "decode",
 				ComponentType: nvidiacomv1beta1.ComponentTypeDecode,
 				Replicas:      new(int32(1)),
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name:  consts.MainContainerName,
+					Image: "registry.example/dynamo-decode:test",
+				}}}},
 			},
 		},
 	}
@@ -130,6 +135,10 @@ func TestFailureRecordsRejectSameNameReplacementUID(t *testing.T) {
 				ComponentName: "decode",
 				ComponentType: nvidiacomv1beta1.ComponentTypeDecode,
 				Replicas:      new(int32(1)),
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name:  consts.MainContainerName,
+					Image: "registry.example/dynamo-decode:test",
+				}}}},
 			},
 		},
 	}
@@ -227,6 +236,10 @@ func TestFailureRecordsSimultaneousWritersPreserveUnion(t *testing.T) {
 				ComponentName: "decode",
 				ComponentType: nvidiacomv1beta1.ComponentTypeDecode,
 				Replicas:      new(int32(1)),
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name:  consts.MainContainerName,
+					Image: "registry.example/dynamo-decode:test",
+				}}}},
 			},
 		},
 	}

@@ -79,6 +79,150 @@ func TestMergeFailureRecordsIsolatesGroupsAndWorkers(t *testing.T) {
 	assert.Equal(t, 2, distinct.RecordCount)
 }
 
+func TestMergeFailureRecordsIdentityIsolationTable(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(obs *Observation)
+	}{
+		{name: "DCDGeneration", mut: func(obs *Observation) { obs.DCDGeneration = obs.DCDGeneration + 1 }},
+		{name: "LWSUID", mut: func(obs *Observation) { obs.LWSUID = "lws-uid-isolated" }},
+		{name: "LWSGeneration", mut: func(obs *Observation) { obs.LWSGeneration = obs.LWSGeneration + 1 }},
+		{name: "Revision", mut: func(obs *Observation) { obs.Revision = "rev-isolated" }},
+		{name: "GroupIndex", mut: func(obs *Observation) {
+			group := 1
+			obs.GroupIndex = &group
+		}},
+		{name: "LeaderUID", mut: func(obs *Observation) { obs.LeaderUID = "leader-uid-isolated" }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Seed one CurrentFailure, then change only " + tc.name)
+			f := newFixture()
+			seed := currentFailureObservation(f, f.leaderPod, 23)
+			first := MergeFailureRecords(f.dcd.UID, "", nil, []Observation{seed}, f.now)
+			require.False(t, first.Unavailable)
+			require.True(t, first.Changed)
+			require.Equal(t, 1, first.RecordCount)
+
+			var seeded failureRecordsDocument
+			require.NoError(t, json.Unmarshal([]byte(first.Encoded), &seeded))
+			require.Len(t, seeded.Entries, 1)
+			old := seeded.Entries[0]
+
+			second := seed
+			tc.mut(&second)
+			merged := MergeFailureRecords(f.dcd.UID, first.Encoded, map[string]string{
+				FailureRecordsAnnotationKey: first.Encoded,
+			}, []Observation{second}, f.now)
+			require.False(t, merged.Unavailable)
+			require.True(t, merged.Changed)
+			require.Equal(t, 2, merged.RecordCount)
+
+			var doc failureRecordsDocument
+			require.NoError(t, json.Unmarshal([]byte(merged.Encoded), &doc))
+			require.Len(t, doc.Entries, 2)
+			var preserved *failureRecordEntry
+			for i := range doc.Entries {
+				entry := &doc.Entries[i]
+				if entry.identity() == old.identity() {
+					preserved = entry
+					break
+				}
+			}
+			require.NotNil(t, preserved, "original identity must remain after isolation merge")
+			assert.Equal(t, old.PodUID, preserved.PodUID)
+			assert.Equal(t, old.PodName, preserved.PodName)
+			assert.Equal(t, old.PodResourceVersion, preserved.PodResourceVersion)
+			assert.Equal(t, old.FirstObservedAt.UTC(), preserved.FirstObservedAt.UTC())
+
+			t.Log("Replay the new identity later without rewriting the ledger")
+			later := MergeFailureRecords(f.dcd.UID, merged.Encoded, map[string]string{
+				FailureRecordsAnnotationKey: merged.Encoded,
+			}, []Observation{second}, f.now.Add(time.Minute))
+			assert.False(t, later.Changed)
+			assert.Equal(t, merged.Encoded, later.Encoded)
+			assert.Equal(t, 2, later.RecordCount)
+		})
+	}
+}
+
+func TestMergeFailureRecordsIndependentCapacityTable(t *testing.T) {
+	t.Run("16 partitions then seventeenth declined", func(t *testing.T) {
+		t.Log("Admit one record in each of 16 partitions through public Merge")
+		f := newFixture()
+		batch := make([]Observation, 0, failureRecordMaxGroups)
+		for i := 0; i < failureRecordMaxGroups; i++ {
+			obs := currentFailureObservation(f, f.leaderPod, 23)
+			group := i
+			obs.GroupIndex = &group
+			obs.LeaderUID = types.UID(fmt.Sprintf("partition-leader-%d", i))
+			obs.PodUID = types.UID(fmt.Sprintf("partition-pod-%d", i))
+			obs.PodName = fmt.Sprintf("decode-partition-%d", i)
+			batch = append(batch, obs)
+		}
+		first := MergeFailureRecords(f.dcd.UID, "", nil, batch, f.now)
+		require.False(t, first.Unavailable)
+		require.True(t, first.Changed)
+		require.Equal(t, failureRecordMaxGroups, first.RecordCount)
+		require.NotNil(t, first.NextExpiry)
+		wantExpiry := *first.NextExpiry
+
+		t.Log("A seventeenth partition under the total-entry limit is declined without eviction")
+		extra := currentFailureObservation(f, f.leaderPod, 23)
+		group := failureRecordMaxGroups
+		extra.GroupIndex = &group
+		extra.LeaderUID = "partition-leader-extra"
+		extra.PodUID = "partition-pod-extra"
+		extra.PodName = "decode-partition-extra"
+		out := MergeFailureRecords(f.dcd.UID, first.Encoded, map[string]string{
+			FailureRecordsAnnotationKey: first.Encoded,
+		}, []Observation{extra}, f.now)
+		assert.True(t, out.CoverageLimited)
+		assert.False(t, out.Unavailable)
+		assert.False(t, out.Changed)
+		assert.Equal(t, first.Encoded, out.Encoded)
+		assert.Equal(t, failureRecordMaxGroups, out.RecordCount)
+		require.NotNil(t, out.NextExpiry)
+		assert.Equal(t, wantExpiry, *out.NextExpiry)
+	})
+
+	t.Run("8 leaders in one partition then ninth declined", func(t *testing.T) {
+		t.Log("Admit eight distinct leaders in one partition through public Merge")
+		f := newFixture()
+		batch := make([]Observation, 0, failureRecordMaxPerGroup)
+		for i := 0; i < failureRecordMaxPerGroup; i++ {
+			obs := currentFailureObservation(f, f.leaderPod, 23)
+			obs.LeaderUID = types.UID(fmt.Sprintf("per-group-leader-%d", i))
+			obs.PodUID = types.UID(fmt.Sprintf("per-group-pod-%d", i))
+			obs.PodName = fmt.Sprintf("decode-per-group-%d", i)
+			batch = append(batch, obs)
+		}
+		first := MergeFailureRecords(f.dcd.UID, "", nil, batch, f.now)
+		require.False(t, first.Unavailable)
+		require.True(t, first.Changed)
+		require.Equal(t, failureRecordMaxPerGroup, first.RecordCount)
+		require.NotNil(t, first.NextExpiry)
+		wantExpiry := *first.NextExpiry
+
+		t.Log("A ninth leader in the same partition under the total-entry limit is declined")
+		extra := currentFailureObservation(f, f.leaderPod, 23)
+		extra.LeaderUID = "per-group-leader-extra"
+		extra.PodUID = "per-group-pod-extra"
+		extra.PodName = "decode-per-group-extra"
+		out := MergeFailureRecords(f.dcd.UID, first.Encoded, map[string]string{
+			FailureRecordsAnnotationKey: first.Encoded,
+		}, []Observation{extra}, f.now)
+		assert.True(t, out.CoverageLimited)
+		assert.False(t, out.Unavailable)
+		assert.False(t, out.Changed)
+		assert.Equal(t, first.Encoded, out.Encoded)
+		assert.Equal(t, failureRecordMaxPerGroup, out.RecordCount)
+		require.NotNil(t, out.NextExpiry)
+		assert.Equal(t, wantExpiry, *out.NextExpiry)
+	})
+}
+
 func TestMergeFailureRecordsTTLAndRewindGuard(t *testing.T) {
 	f := newFixture()
 	obs := currentFailureObservation(f, f.leaderPod, 23)
