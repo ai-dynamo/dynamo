@@ -24,6 +24,7 @@ from _tool_guidance_parity import (
     tool_choice_value,
 )
 from transformers import AutoTokenizer
+from vllm.reasoning import ReasoningParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
@@ -987,8 +988,6 @@ _M3_DISABLED_KWARGS = [
 
 
 def _minimax_m3_parser_class():
-    from vllm.reasoning import ReasoningParserManager
-
     return ReasoningParserManager.get_reasoning_parser("minimax_m3")
 
 
@@ -1026,8 +1025,6 @@ class TestMiniMaxM3DisabledThinking:
         )
 
     def test_request_gate_stays_open_only_for_minimax_m3(self):
-        from vllm.reasoning import ReasoningParserManager
-
         disabled = {"enable_thinking": False}
         assert prepost_module._reasoning_parser_enabled(
             _minimax_m3_parser_class(), disabled
@@ -1138,8 +1135,6 @@ class TestMiniMaxM3DisabledThinking:
 
     def test_other_parsers_keep_the_request_only_rule(self, m3_tokenizer):
         """#8636 behavior is unchanged for parsers other than MiniMax M3."""
-        from vllm.reasoning import ReasoningParserManager
-
         metadata = self._metadata(
             m3_tokenizer,
             self._request(m3_tokenizer),
@@ -1152,14 +1147,25 @@ class TestMiniMaxM3DisabledThinking:
         assert metadata.engine_reasoning_ended is True
 
     def _stream(self, tokenizer, prompt, kwargs, text, *, stream_response=True):
-        request = self._request(tokenizer)
+        # A non-streaming response with a tool parser buffers the whole output and
+        # splits reasoning from it in one extract_reasoning() call.
+        tool_parser = None
+        if stream_response:
+            request = self._request(tokenizer)
+        else:
+            request = self._request(
+                tokenizer, tools=TOOL_REQUEST["tools"], tool_choice="auto"
+            )
+            tool_parser = ToolParserManager.get_tool_parser("hermes")(
+                tokenizer, tools=request.tools
+            )
         metadata = self._metadata(tokenizer, request, prompt, kwargs)
         post = StreamingPostProcessor(
             tokenizer=tokenizer,
             request_for_sampling=request,
             sampling_params=SamplingParams(),
             prompt_token_ids=tokenizer.encode(prompt, add_special_tokens=False),
-            tool_parser=None,
+            tool_parser=tool_parser,
             reasoning_parser_class=_minimax_m3_parser_class(),
             chat_template_kwargs=kwargs,
             response_reasoning_ended=metadata.response_reasoning_ended,
@@ -1198,6 +1204,7 @@ class TestMiniMaxM3DisabledThinking:
         assert content == "Hello"
         assert reasoning == "plan"
         assert post.reasoning_parser is not None
+        assert post._should_buffer_for_non_streaming_tool_parse() is not stream_response
 
 
 class TestReasoningParserOutputCapability:
