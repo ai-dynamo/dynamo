@@ -1833,14 +1833,16 @@ def test_multimodal_build_sampling_params_maps_min_tokens():
         ({}, None),
         ({"logit_bias": {}}, {}),
         # The msgpack request plane delivers int keys; JSON delivers str keys.
-        ({"logit_bias": {3862: 4}}, {3862: 4.0}),
-        ({"logit_bias": {"3862": 4}}, {3862: 4.0}),
+        ({"logit_bias": {3862: 4}}, {"3862": 4.0}),
+        ({"logit_bias": {"3862": 4}}, {"3862": 4.0}),
+        ({"logit_bias": {"3862": 4, "18": -10}}, {"3862": 4.0, "18": -10.0}),
+        ({"logit_bias": {3862: 4, 18: -10}}, {"3862": 4.0, "18": -10.0}),
     ],
 )
-def test_multimodal_request_round_trip_keeps_logit_bias(raw_options, expected):
-    """Keep absent, empty, and populated bias maps through the encoder handoff."""
-    # Mirrors the encode worker: validate the frontend dict, then serialize the
-    # request to JSON for the PD or decode worker.
+def test_multimodal_logit_bias_survives_handoff_and_reaches_sampling_params(
+    raw_options, expected
+):
+    """Keep bias maps through the encoder handoff and forward non-empty maps."""
     preprocessed = PreprocessedRequest.model_validate(
         {
             "token_ids": [1, 2, 3],
@@ -1851,37 +1853,17 @@ def test_multimodal_request_round_trip_keeps_logit_bias(raw_options, expected):
     request = SglangMultimodalRequest.model_validate_json(
         SglangMultimodalRequest(request=preprocessed).model_dump_json()
     )
-
-    assert request.request.sampling_options.logit_bias == expected
-
-
-@pytest.mark.parametrize(
-    ("logit_bias", "expected"),
-    [
-        (None, None),
-        ({}, None),
-        ({"3862": 4}, {"3862": 4.0}),
-        ({"3862": 4, "18": -10}, {"3862": 4.0, "18": -10.0}),
-        ({3862: 4, 18: -10}, {"3862": 4.0, "18": -10.0}),
-    ],
-)
-def test_multimodal_build_sampling_params_forwards_logit_bias(logit_bias, expected):
-    """Forward non-empty bias maps with string keys and omit absent or empty maps."""
-    raw_options = {} if logit_bias is None else {"logit_bias": logit_bias}
-    request = SglangMultimodalRequest(
-        request=PreprocessedRequest(
-            token_ids=[1, 2, 3],
-            stop_conditions=StopConditions(max_tokens=2),
-            sampling_options=SamplingOptions.model_validate(raw_options),
-        )
+    expected_internal = (
+        None if expected is None else {int(key): bias for key, bias in expected.items()}
     )
+    assert request.request.sampling_options.logit_bias == expected_internal
 
     sampling_params = SglangUtils.build_sampling_params(request)
 
-    if expected is None:
-        assert "logit_bias" not in sampling_params
-    else:
+    if expected:
         assert sampling_params["logit_bias"] == expected
+    else:
+        assert "logit_bias" not in sampling_params
 
 
 @pytest.mark.parametrize("value", [True, "32", 1.0, -1, 2**32])
