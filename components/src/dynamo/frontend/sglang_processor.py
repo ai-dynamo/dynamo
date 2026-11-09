@@ -501,11 +501,16 @@ def _build_dynamo_preproc(
     else:
         routing = nvext_routing
 
-    # The HTTP layer has already validated keys and range. Copy so later edits
-    # to the preproc dict cannot change the caller's request, and map an empty
-    # dict to None like the Rust preprocessor's get_logit_bias.
+    # The HTTP layer has already rejected keys that are not u32 token IDs and
+    # values outside [-100, 100]. routed_engine.generate depythonizes this dict
+    # into PreprocessedRequest, whose logit_bias is HashMap<u32, f32>; that
+    # conversion rejects the str keys JSON gives us, so convert them to int.
+    # serde writes them back as string keys for the worker. The comprehension
+    # also copies the map, and an empty map becomes None like get_logit_bias.
     logit_bias = request.get("logit_bias")
-    logit_bias = dict(logit_bias) if logit_bias else None
+    logit_bias = (
+        {int(k): float(v) for k, v in logit_bias.items()} if logit_bias else None
+    )
 
     preproc = {
         "model": model_name,

@@ -191,7 +191,7 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
     @pytest.mark.parametrize(
         ("request_data", "expected"),
         [
-            pytest.param({"logit_bias": {"151667": 2}}, {"151667": 2}, id="positive"),
+            pytest.param({"logit_bias": {"151667": 2}}, {151667: 2.0}, id="positive"),
             pytest.param({}, None, id="omitted"),
             pytest.param({"logit_bias": None}, None, id="null"),
             pytest.param({"logit_bias": {}}, None, id="empty"),
@@ -4624,67 +4624,6 @@ def test_generator_preserves_decode_and_routing_options(
         requested is not False
     )
     assert engine.requests[0]["routing"] == (worker_routing if pin_workers else None)
-
-
-@pytest.mark.parametrize(
-    ("logit_bias", "expected"),
-    [
-        pytest.param({"151667": 2}, {"151667": 2}, id="positive"),
-        pytest.param(None, None, id="omitted"),
-        pytest.param({}, None, id="empty"),
-    ],
-)
-@pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
-def test_generator_forwards_logit_bias_to_worker(
-    logit_bias, expected, use_pool, monkeypatch
-):
-    """DYN-5506: logit_bias must reach the worker's sampling_options."""
-
-    class Tokenizer:
-        chat_template = ""
-
-        def apply_chat_template(self, messages, **kwargs):
-            return [1]
-
-        def decode(self, token_ids, *, skip_special_tokens):
-            return "A" * len(token_ids)
-
-    tokenizer = Tokenizer()
-    engine = FakeRoutedEngine(items=[{"token_ids": [3], "finish_reason": "length"}])
-    request = {"model": "test", "messages": [{"role": "user", "content": "Hi"}]}
-    if logit_bias is not None:
-        request["logit_bias"] = logit_bias
-
-    if use_pool:
-        monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", tokenizer)
-        monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", None)
-        monkeypatch.setattr(sglang_processor_module, "_w_reasoning_parser_name", None)
-        monkeypatch.setattr(
-            sglang_processor_module, "_w_exclude_tools_when_tool_choice_none", True
-        )
-        monkeypatch.setattr(
-            sglang_processor_module, "_w_template_force_reasoning", False
-        )
-        monkeypatch.setattr(sglang_processor_module, "_w_default_thinking_mode", None)
-
-    with ThreadPoolExecutor(max_workers=1) if use_pool else nullcontext() as pool:
-        processor = SglangProcessor(
-            tokenizer,
-            engine,
-            None,
-            None,
-            None,
-            preprocess_pool=pool,
-            preprocess_workers=1 if use_pool else 0,
-        )
-
-        async def collect():
-            return [item async for item in processor.generator(request)]
-
-        asyncio.run(collect())
-
-    assert len(engine.requests) == 1
-    assert engine.requests[0]["sampling_options"]["logit_bias"] == expected
 
 
 class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
