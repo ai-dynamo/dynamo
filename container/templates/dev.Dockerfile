@@ -340,12 +340,9 @@ COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /workspace/.venv/bin/matu
 
 {% if framework == "sglang" %}
 {% if device == "xpu" %}
-# SGLang XPU: reuse the upstream /opt/venv instead of a --system-site-packages
-# /opt/dynamo/venv, which points at the uv-managed Python and misses /opt/venv's
-# sglang/torch/nixl. chown for `maturin develop`; the /usr/local/bin/python
-# wrapper (not a symlink) keeps Python's venv context; uv is copied in because
-# the runtime leaves none on PATH for dynamo and every stage must share one uv
-# version for the build cache.
+# SGLang XPU: reuse the upstream /opt/venv rather than a --system-site-packages
+# /opt/dynamo/venv, which would miss its sglang/torch/nixl. The python wrapper
+# (not a symlink) preserves the venv context; uv must match every other stage.
 COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /tmp/uv-binary
 RUN chown -R dynamo:0 /opt/venv && \
     cp /tmp/uv-binary /opt/venv/bin/uv && \

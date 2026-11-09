@@ -103,9 +103,7 @@ COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linu
 COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
-# Install RDMA libraries required for UCX to find RDMA devices. UCX is built
-# --with-verbs for xpu but the published XPU base ships none, so the verbs
-# transports are compiled in yet cannot load.
+# Install RDMA libraries required for UCX to find RDMA devices
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libibverbs1 \
@@ -426,8 +424,7 @@ RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/
 
 {# oneAPI and /opt/venv come through Docker ENV (SETVARS_COMPLETED=1), which every
    process inherits -- do not move this into a bashrc, which only interactive
-   shells read. /sgl-workspace is the upstream WORKDIR on both devices, so the
-   symlink needs no mkdir. #}
+   shells read. #}
 RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
 {%- if device == "xpu" %}
@@ -486,7 +483,6 @@ ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
 {% if device == "xpu" %}
-{# The XPU base ships no nvidia_entrypoint.sh, so match its own bare CMD. #}
 CMD ["bash"]
 {% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
