@@ -199,7 +199,8 @@ impl RetainedFlow {
                 capture.observe(&mut item);
                 yield item;
             }
-            if capture.successful && !capture.invalid && !stream_context.is_killed()
+            if capture.successful && !capture.invalid
+                && !stream_context.is_stopped() && !stream_context.is_killed()
                 && self.current()
                 && let (Some(payload), Some(worker_id)) = (capture.payload, self.tracker.decode_worker_id())
             {
@@ -775,16 +776,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_or_killing_the_response_does_not_commit_the_export() {
-        for kill in [false, true] {
+    async fn dropping_or_cancelling_the_response_does_not_commit_the_export() {
+        for cancellation in ["drop", "kill", "stop"] {
             let fixture = fixture().await;
             let (flow, _) = flow(&fixture).await;
             let catalog = flow.catalog.clone();
             let scope = flow.scope.clone();
             let mut response = flow.observe(response(vec![terminal()]));
             assert!(response.next().await.is_some());
-            if kill {
-                response.context().kill();
+            if cancellation != "drop" {
+                if cancellation == "kill" {
+                    response.context().kill();
+                } else {
+                    response.context().stop_generating();
+                }
                 assert!(response.next().await.is_none());
             }
             drop(response);

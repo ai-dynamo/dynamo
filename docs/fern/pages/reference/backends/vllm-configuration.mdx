@@ -116,8 +116,9 @@ The earlier `--connector` flag is no longer accepted by the vLLM backend. Settin
 
 ## Server-managed retained KV reuse
 
-**Experimental.** The frontend can reuse retained decoder KV on a later OpenAI
-chat or completion request, including when prefill has evicted that prefix.
+**Experimental.** In disaggregated vLLM deployments, the frontend can reuse retained
+decoder KV on a later OpenAI chat or completion request, including when prefill
+has evicted that prefix.
 Clients send ordinary inference requests; they do not supply transfer addresses.
 Native Generate APIs are not required and should remain disabled on public frontends.
 
@@ -153,10 +154,18 @@ Reuse requires an exact token prefix covering the complete exported computed
 range. Edited history, chat-template changes, and omitted reasoning or special
 tokens can prevent a match. Unsupported inputs (including LoRA, multimodal,
 embeddings, native envelopes, and multiple choices) continue through ordinary inference.
-Parallelism and KV-layout compatibility remain governed by vLLM's NIXL connector.
+The current adapter requires one KV cache group confirmed by the engine at startup;
+unknown or multiple groups use ordinary inference because failed-read recovery in
+the pinned engine is not safe for every multi-group layout. This is independent of
+tensor-parallel size. Parallelism and KV-layout compatibility remain governed by
+vLLM's NIXL connector.
 
 Each model pipeline keeps at most 128 metadata entries and 64 MiB of logical entry
-data, with a maximum prefix of 131,072 tokens and a local age limit of 20 seconds.
+data, with a maximum prefix of 1,048,576 tokens and a default local age limit of 20 seconds.
+Set the frontend's `DYN_VLLM_RETAINED_KV_REUSE_MAX_AGE_SECS` to an integer from 1
+through 600 to change that age limit. Invalid values disable reuse. A finite worker
+`decoder_kv_blocks_ttl` caps each entry's age; increasing the frontend limit does
+not extend a worker's allocation lifetime.
 Entries are claimed once and invalidated on pipeline replacement. Engine source
 expiry remains authoritative. A miss, frontend restart, different frontend replica,
 or failed optional load recomputes instead of requiring client retries.

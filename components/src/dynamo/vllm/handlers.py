@@ -3735,9 +3735,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 kv_transfer_params,
                             )
                             if metadata is not None:
-                                out.setdefault("extra_args", {})[RETAINED_KV_KEY] = (
-                                    metadata
-                                )
+                                out.setdefault("extra_args", {})[
+                                    RETAINED_KV_KEY
+                                ] = metadata
                         # Emit the EFFECTIVE trim offset: clamp the requested
                         # routed_experts_prompt_start to the prompt length. vLLM
                         # clamps the returned routing rows the same way, so an

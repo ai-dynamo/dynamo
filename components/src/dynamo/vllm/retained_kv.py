@@ -11,6 +11,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from dynamo.vllm.cache_info import DYNAMO_KV_CACHE_GROUP_COUNT_KEY
 from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
     NixlConnectorProtocol,
@@ -19,7 +20,7 @@ from dynamo.vllm.kv_connector_protocols import (
 
 RETAINED_KV_KEY = "dynamo_retained_kv"
 _MAX_PARAMS_BYTES = 256 * 1024
-_MAX_PROMPT_TOKENS = 131_072
+_MAX_PROMPT_TOKENS = 1_048_576
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,12 @@ def _profile(
         return None
     outer = getattr(vllm_config, "kv_transfer_config", None)
     selected = getattr(protocol._vllm_config, "kv_transfer_config", None)
+    metadata = getattr(vllm_config, "additional_config", None)
+    group_count = (
+        metadata.get(DYNAMO_KV_CACHE_GROUP_COUNT_KEY)
+        if isinstance(metadata, dict)
+        else None
+    )
     if (
         outer is None
         or selected is None
@@ -98,6 +105,10 @@ def _profile(
         or getattr(outer, "kv_load_failure_policy", None) != "recompute"
         or getattr(selected, "kv_load_failure_policy", None) != "recompute"
         or selected.get_from_extra_config("bidirectional_kv_xfer", False) is not True
+        # Current NIXL can report ambiguous flat block failures for multiple
+        # scheduler groups, even when recompute is requested.
+        or type(group_count) is not int
+        or group_count != 1
     ):
         return None
     ttl = selected.get_from_extra_config("decoder_kv_blocks_ttl", None)

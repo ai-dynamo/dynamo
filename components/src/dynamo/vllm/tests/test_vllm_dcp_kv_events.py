@@ -27,7 +27,10 @@ from dynamo.llm import (  # noqa: E402
     register_model,
 )
 from dynamo.runtime import DistributedRuntime  # noqa: E402
-from dynamo.vllm.cache_info import configure_kv_event_block_size  # noqa: E402
+from dynamo.vllm.cache_info import (  # noqa: E402
+    DYNAMO_KV_CACHE_GROUP_COUNT_KEY,
+    configure_kv_event_block_size,
+)
 
 pytestmark = [
     pytest.mark.integration,
@@ -113,6 +116,7 @@ async def test_dcp_events_match_configured_block_size(monkeypatch, runtime):
         cache_config=SimpleNamespace(block_size=16), additional_config={}
     )
     block_size = await configure_kv_event_block_size(engine, config)
+    assert config.additional_config[DYNAMO_KV_CACHE_GROUP_COUNT_KEY] == 1
     tokens = list(range(1, 97))
     request = Request(
         request_id="dcp-prefix",

@@ -13,11 +13,14 @@ from test_vllm_worker_handler import (
     _make_decode_handler,
     _make_engine_response,
     _make_raw_frontend_request,
+)
+from test_vllm_worker_handler import (
     prefill_probe_handler as _shared_prefill_probe_handler,
 )
 from vllm.outputs import CompletionOutput, RequestOutput
 
 import dynamo.vllm.handlers as handlers
+from dynamo.vllm.cache_info import DYNAMO_KV_CACHE_GROUP_COUNT_KEY
 from dynamo.vllm.kv_connector_protocols import make_kv_connector_protocol
 from dynamo.vllm.multimodal_utils.request_processor import PreparedMultimodalInput
 from dynamo.vllm.retained_kv import (
@@ -39,14 +42,19 @@ pytestmark = [
 prefill_probe_handler = _shared_prefill_probe_handler
 
 
-def _config(*, policy="recompute", bidirectional=True, connector="NixlConnector"):
+def _config(
+    *, policy="recompute", bidirectional=True, connector="NixlConnector", group_count=1
+):
     extra = {"bidirectional_kv_xfer": bidirectional, "decoder_kv_blocks_ttl": 30}
     return SimpleNamespace(
+        additional_config={DYNAMO_KV_CACHE_GROUP_COUNT_KEY: group_count}
+        if group_count is not None
+        else {},
         kv_transfer_config=SimpleNamespace(
             kv_connector=connector,
             kv_load_failure_policy=policy,
             get_from_extra_config=lambda name, default: extra.get(name, default),
-        )
+        ),
     )
 
 
@@ -83,6 +91,10 @@ def _request(*, params=None):
         _config(bidirectional="true"),
         _config(connector="LMCacheMPConnector"),
         SimpleNamespace(kv_transfer_config=None),
+        _config(group_count=None),
+        _config(group_count=2),
+        _config(group_count=True),
+        _config(group_count="1"),
     ],
 )
 def test_capture_requires_supported_recompute_profile(config):
@@ -219,6 +231,21 @@ def test_malformed_optional_hints_fall_back(change):
     assert (
         retained_prefill_params(
             _request(params={**_params(), **change}),
+            config,
+            make_kv_connector_protocol(config),
+            SimpleNamespace(n=1),
+            lora_request=None,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("group_count", [None, 0, 2, True, "1"])
+def test_prefill_without_authoritative_single_group_uses_cold_path(group_count):
+    config = _config(group_count=group_count)
+    assert (
+        retained_prefill_params(
+            _request(params=_params()),
             config,
             make_kv_connector_protocol(config),
             SimpleNamespace(n=1),

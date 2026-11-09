@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 
 pub(super) const PRIVATE_KEY: &str = "dynamo_retained_kv";
 pub(super) const VERSION: u64 = 1;
-pub(super) const MAX_TOKENS: usize = 131_072;
+pub(super) const MAX_TOKENS: usize = 1_048_576;
 const MAX_ID_BYTES: usize = 1024;
 const MAX_SCOPE_BYTES: usize = 4096;
 const MAX_GROUPS: usize = 128;
@@ -28,7 +28,26 @@ pub(super) struct Config {
 
 impl Config {
     pub(super) fn from_env() -> Option<Self> {
-        Self::new(std::env::var("DYN_VLLM_RETAINED_KV_REUSE_TRUST_DOMAIN").ok()?)
+        let config = Self::new(std::env::var("DYN_VLLM_RETAINED_KV_REUSE_TRUST_DOMAIN").ok()?)?;
+        match std::env::var("DYN_VLLM_RETAINED_KV_REUSE_MAX_AGE_SECS") {
+            Ok(value) => config.with_max_age(&value).or_else(|| {
+                tracing::warn!(
+                    "Disabling retained KV reuse: MAX_AGE_SECS must be an integer from 1 to 600"
+                );
+                None
+            }),
+            Err(std::env::VarError::NotPresent) => Some(config),
+            Err(_) => None,
+        }
+    }
+
+    fn with_max_age(mut self, value: &str) -> Option<Self> {
+        let seconds = value.parse::<u64>().ok()?;
+        if !(1..=600).contains(&seconds) {
+            return None;
+        }
+        self.ttl = Duration::from_secs(seconds);
+        Some(self)
     }
 
     /// An explicit operator declaration; this value is never read from a request.
@@ -470,6 +489,34 @@ mod tests {
         }
         assert!(Config::new("x".repeat(257)).is_none());
         assert!(Config::new("domain".into()).is_some());
+    }
+
+    #[test]
+    fn configured_max_age_is_bounded_and_never_extends_the_worker_ttl() {
+        for invalid in ["", "0", "601", "-1", "1.5", " 20", "18446744073709551616"] {
+            assert!(
+                Config::new("domain".into())
+                    .unwrap()
+                    .with_max_age(invalid)
+                    .is_none()
+            );
+        }
+        let now = Instant::now();
+        for (configured, worker_hint, expected) in [("600", 5, 5), ("1", 600, 1)] {
+            let config = Config::new("domain".into())
+                .unwrap()
+                .with_max_age(configured)
+                .unwrap();
+            let catalog = Catalog::new(config);
+            let mut value = payload();
+            value["ttl_seconds"] = json!(worker_hint);
+            assert!(insert(&catalog, &value, now));
+            assert!(
+                catalog
+                    .claim(&scope(), &[1, 2, 3], now + Duration::from_secs(expected))
+                    .is_none()
+            );
+        }
     }
 
     #[test]
