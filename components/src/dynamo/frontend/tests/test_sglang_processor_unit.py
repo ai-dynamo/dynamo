@@ -188,6 +188,7 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert sampling["seed"] is None
         assert sampling["logit_bias"] is None
 
+    @pytest.mark.core
     @pytest.mark.parametrize(
         ("request_data", "expected"),
         [
