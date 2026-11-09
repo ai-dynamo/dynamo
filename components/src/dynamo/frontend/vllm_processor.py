@@ -44,7 +44,11 @@ from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
 from dynamo.vllm.errors import vllm_client_error_to_http_error
 
-from .prepost import StreamingPostProcessor, preprocess_chat_request
+from .prepost import (
+    StreamingPostProcessor,
+    is_gemma4_parser_pair,
+    preprocess_chat_request,
+)
 from .structural_tag_policy import (
     runtime_structural_tag_excludes_reasoning,
     runtime_structural_tag_options,
@@ -1169,6 +1173,9 @@ class VllmProcessor:
                     stream_response=bool(request.get("stream", False)),
                     uses_dynamo_json_tool_call_fallback=(
                         pre.uses_dynamo_json_tool_call_fallback
+                    ),
+                    gemma4_parser_pair=is_gemma4_parser_pair(
+                        self.tool_parser_class, self.reasoning_parser_class
                     ),
                 )
 
