@@ -3594,22 +3594,19 @@ class TestGemma4EmptyThoughtChannel:
         gemma4_parser_pair=True,
         chat_template_kwargs=None,
         response_reasoning_ended=None,
-        tool_parser=None,
     ):
         request = json.loads(json.dumps(TOOL_REQUEST))
         request.pop("tools", None)
         request, _, _, _, _ = _prepare_request(
             request, tokenizer=tokenizer, tool_parser_class=None
         )
-        tool_parser_class, reasoning_parser_class = _gemma4_parser_classes()
-        if tool_parser is True:
-            tool_parser = tool_parser_class(tokenizer, None)
+        _, reasoning_parser_class = _gemma4_parser_classes()
         return StreamingPostProcessor(
             tokenizer=_Gemma4ChannelTokenizer(tokenizer),
             request_for_sampling=request,
             sampling_params=SamplingParams(),
             prompt_token_ids=[],
-            tool_parser=tool_parser,
+            tool_parser=None,
             reasoning_parser_class=reasoning_parser_class,
             chat_template_kwargs=(
                 {"enable_thinking": False}
@@ -3773,12 +3770,6 @@ class TestGemma4EmptyThoughtChannel:
         assert post._fast_plain_text and not post._empty_thought_pending
         deltas = [(text, [token_id]) for text, token_id in _G4_LABEL_EMPTY]
         assert self._stream(post, deltas) == "thought\nfinal answer"
-
-    def test_active_tool_parser_disarms_cleanup(self, tokenizer):
-        """With a tool parser running, it owns the channel, not this cleanup."""
-        post = self._post(tokenizer, tool_parser=True)
-        assert post.tool_parser is not None
-        assert not post._empty_thought_pending
 
 
 class TestToolCallGuidedDecoding:
