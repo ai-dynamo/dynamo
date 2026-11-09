@@ -315,11 +315,13 @@ where
     Resp: PipelineIO,
     Adapter: Send + Sync + 'static,
 {
-    /// Encode one frame for `publisher`: into an item it sends as it is, when
-    /// it takes one, or else as bytes.
-    async fn encode_frame<U>(
+    /// Encode one frame into `item`, for a publisher that sends it as it is.
+    ///
+    /// Publishers that take bytes instead call the encoder directly: a
+    /// wrapper future would first move each response, ~1 KB, into itself.
+    async fn encode_into_item<U>(
         &self,
-        publisher: &impl ResponsePublisher,
+        mut item: ByteItemBuilder,
         payload_codec: RequestPlanePayloadCodec,
         response: Option<U>,
         complete_final: bool,
@@ -328,18 +330,11 @@ where
         U: Data,
         Adapter: IngressResponseEncoder<U>,
     {
-        if let Some(mut item) = publisher.new_item() {
-            let frame = self
-                .payload_adapter
-                .encode_response_into(payload_codec, response, complete_final, item.buffer())
-                .await?;
-            return Ok(frame.map(|()| ResponsePayload::Item(item)));
-        }
         let frame = self
             .payload_adapter
-            .encode_response(payload_codec, response, complete_final)
+            .encode_response_into(payload_codec, response, complete_final, item.buffer())
             .await?;
-        Ok(frame.map(ResponsePayload::Bytes))
+        Ok(frame.map(|()| ResponsePayload::Item(item)))
     }
 
     /// Pump every chunk from the engine's response stream out to the
@@ -371,10 +366,18 @@ where
             let _nvtx_chunk = dynamo_nvtx_range!("worker.egress.chunk");
             tracing::trace!("Sending response: {:?}", resp);
             let nvtx_encode = dynamo_nvtx_range!("worker.egress.encode");
-            let encoded = match self
-                .encode_frame(publisher, payload_codec, Some(resp), false)
-                .await
-            {
+            let frame = match publisher.new_item() {
+                Some(item) => {
+                    self.encode_into_item(item, payload_codec, Some(resp), false)
+                        .await
+                }
+                None => self
+                    .payload_adapter
+                    .encode_response(payload_codec, Some(resp), false)
+                    .await
+                    .map(|frame| frame.map(ResponsePayload::Bytes)),
+            };
+            let encoded = match frame {
                 Ok(encoded) => encoded,
                 Err(err) => {
                     tracing::error!(%err, "failed to encode request-plane response");
@@ -452,10 +455,15 @@ where
             send_complete_final = false;
         }
         if send_complete_final {
-            let encoded = match self
-                .encode_frame(publisher, payload_codec, None, true)
-                .await
-            {
+            let frame = match publisher.new_item() {
+                Some(item) => self.encode_into_item(item, payload_codec, None, true).await,
+                None => self
+                    .payload_adapter
+                    .encode_response(payload_codec, None, true)
+                    .await
+                    .map(|frame| frame.map(ResponsePayload::Bytes)),
+            };
+            let encoded = match frame {
                 Ok(encoded) => encoded,
                 Err(err) => {
                     tracing::error!(%err, "failed to encode request-plane final response");
