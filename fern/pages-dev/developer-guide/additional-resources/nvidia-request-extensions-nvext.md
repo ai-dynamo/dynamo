@@ -229,6 +229,8 @@ How it works:
 3. The constructed prompt is tokenized and sent as a `max_tokens=1` request to warm the KV cache on a worker.
 4. When the actual next request arrives, it benefits from the already-warm KV cache, reducing TTFT.
 
+Warmup rendering retains the current request's tool definitions, tool choice, response format, and effective chat-template arguments, including thinking controls. Cache reuse depends on the next request using compatible settings and on how the formatter renders completed history.
+
 ```json
 {
     "nvext": {
