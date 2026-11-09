@@ -3738,6 +3738,16 @@ def test_prefill_real_seed_explicit_value_overrides_layout(
     assert InstrumentedScheduler._bench_realseed_on(dense) is expected
 
 
+@pytest.mark.parametrize(("value", "expected"), [("auto", False), ("on", True)])
+def test_prefill_real_seed_auto_stays_off_under_attention_dp(
+    monkeypatch, value, expected
+):
+    monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", value)
+    hybrid = _realseed_layout_stub("FullAttentionSpec", "MambaSpec")
+    hybrid._bench_dp_size = 2
+    assert InstrumentedScheduler._bench_realseed_on(hybrid) is expected
+
+
 def test_seed_regime_for_prefill_rows():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     base = BenchmarkPoint(
