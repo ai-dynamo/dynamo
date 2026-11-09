@@ -963,6 +963,303 @@ class TestReasoningParserMetadata:
         }
 
 
+# MiniMax M3 fixture: the real vLLM parser over the Qwen3 tokenizer plus the two
+# M3 markers as ordinary vocabulary entries, as in the M3 tokenizer (vLLM's
+# parser refuses a tokenizer that lacks them). It keeps the parser's marker
+# handling and the decoded prompt tail; it leaves out the M3 chat template and
+# weights, which this gate does not read.
+@pytest.fixture(scope="module")
+def m3_tokenizer():
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    tokenizer.add_tokens(["<mm:think>", "</mm:think>"])
+    return tokenizer
+
+
+_M3_OPEN_PROMPT = "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
+_M3_OPEN_PROMPT_WITH_HISTORY = (
+    "<|im_start|>user\nA?<|im_end|>\n"
+    "<|im_start|>assistant\n<mm:think>a</mm:think>b<|im_end|>\n" + _M3_OPEN_PROMPT
+)
+_M3_CLOSED_PROMPT = _M3_OPEN_PROMPT + "</mm:think>\n\n"
+_M3_THINK_OPEN_PROMPT = _M3_OPEN_PROMPT + "<mm:think>\n"
+_M3_DISABLED_KWARGS = [
+    {"enable_thinking": False},
+    {"thinking_mode": "disabled"},
+    {"thinking": False, "enable_thinking": False, "thinking_mode": "disabled"},
+]
+
+
+def _minimax_m3_parser_class():
+    from vllm.reasoning import ReasoningParserManager
+
+    return ReasoningParserManager.get_reasoning_parser("minimax_m3")
+
+
+class TestMiniMaxM3DisabledThinking:
+    """MiniMax M3 with thinking disabled: the rendered prompt decides.
+
+    Mirrors the Rust preprocessor rule from #17120 and #18017. A chat template that
+    ignores the thinking control leaves the prompt open, and the model may still
+    write <mm:think>...</mm:think>; that must reach reasoning_content, not content.
+    """
+
+    @staticmethod
+    def _request(tokenizer, **overrides):
+        raw = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hi"}],
+            **overrides,
+        }
+        request, _, _, _, _ = _prepare_request(
+            raw, tokenizer=tokenizer, tool_parser_class=None
+        )
+        return request
+
+    @staticmethod
+    def _metadata(tokenizer, request, prompt, chat_template_kwargs, parser=None):
+        from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
+
+        return _build_reasoning_parser_metadata(
+            parser or _minimax_m3_parser_class(),
+            tokenizer,
+            chat_template_kwargs,
+            request,
+            tokenizer.encode(prompt, add_special_tokens=False) if prompt else [],
+            None,
+        )
+
+    def test_request_gate_stays_open_only_for_minimax_m3(self):
+        from vllm.reasoning import ReasoningParserManager
+
+        disabled = {"enable_thinking": False}
+        assert prepost_module._reasoning_parser_enabled(
+            _minimax_m3_parser_class(), disabled
+        )
+        assert not prepost_module._reasoning_parser_enabled(
+            ReasoningParserManager.get_reasoning_parser("qwen3"), disabled
+        )
+
+    @pytest.mark.parametrize("kwargs", _M3_DISABLED_KWARGS)
+    @pytest.mark.parametrize(
+        "prompt",
+        [_M3_OPEN_PROMPT, _M3_OPEN_PROMPT_WITH_HISTORY],
+        ids=["open", "open-after-closed-history"],
+    )
+    def test_open_prompt_keeps_the_parser(self, m3_tokenizer, prompt, kwargs):
+        """The history case is the one is_reasoning_end() gets wrong."""
+        metadata = self._metadata(
+            m3_tokenizer, self._request(m3_tokenizer), prompt, kwargs
+        )
+
+        assert metadata.response_reasoning_ended is False
+        assert metadata.engine_reasoning_ended is False
+        assert metadata.parser_kwargs == {"chat_template_kwargs": kwargs}
+
+    def test_open_prompt_without_include_reasoning_still_parses(self, m3_tokenizer):
+        metadata = self._metadata(
+            m3_tokenizer,
+            self._request(m3_tokenizer, include_reasoning=False),
+            _M3_OPEN_PROMPT,
+            {"thinking_mode": "disabled"},
+        )
+
+        assert metadata.response_reasoning_ended is False
+        assert metadata.engine_reasoning_ended is True
+
+    @pytest.mark.parametrize("kwargs", _M3_DISABLED_KWARGS)
+    @pytest.mark.parametrize(
+        "prompt", [_M3_CLOSED_PROMPT, ""], ids=["closed", "unknown"]
+    )
+    def test_closed_or_unknown_prompt_skips_the_parser(
+        self, m3_tokenizer, prompt, kwargs
+    ):
+        metadata = self._metadata(
+            m3_tokenizer, self._request(m3_tokenizer), prompt, kwargs
+        )
+
+        assert metadata.response_reasoning_ended is True
+        assert metadata.engine_reasoning_ended is True
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"response_format": {"type": "json_object"}},
+            {"tools": TOOL_REQUEST["tools"], "tool_choice": "required"},
+            {
+                "tools": TOOL_REQUEST["tools"],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                },
+            },
+            {"guided_json": {"type": "object"}},
+            {"structured_outputs": {"regex": "a+"}},
+        ],
+        ids=[
+            "response-format",
+            "required-tool",
+            "named-tool",
+            "guided-json",
+            "structured-outputs",
+        ],
+    )
+    def test_guided_output_on_open_prompt_skips_the_parser(
+        self, m3_tokenizer, overrides
+    ):
+        metadata = self._metadata(
+            m3_tokenizer,
+            self._request(m3_tokenizer, **overrides),
+            _M3_OPEN_PROMPT,
+            {"thinking_mode": "disabled"},
+        )
+
+        assert metadata.response_reasoning_ended is True
+        assert metadata.engine_reasoning_ended is True
+
+    def test_explicit_guidance_after_open_think_keeps_the_parser(self, m3_tokenizer):
+        """#18017: explicit guidance follows the reasoning the prompt opened."""
+        metadata = self._metadata(
+            m3_tokenizer,
+            self._request(m3_tokenizer, guided_json={"type": "object"}),
+            _M3_THINK_OPEN_PROMPT,
+            {"thinking_mode": "disabled"},
+        )
+
+        assert metadata.response_reasoning_ended is False
+        assert metadata.engine_reasoning_ended is False
+
+    def test_response_format_after_open_think_skips_the_parser(self, m3_tokenizer):
+        """Only explicit guided_*/structured_outputs earn the #18017 exception."""
+        metadata = self._metadata(
+            m3_tokenizer,
+            self._request(m3_tokenizer, response_format={"type": "json_object"}),
+            _M3_THINK_OPEN_PROMPT,
+            {"thinking_mode": "disabled"},
+        )
+
+        assert metadata.response_reasoning_ended is True
+
+    def test_other_parsers_keep_the_request_only_rule(self, m3_tokenizer):
+        """#8636 behavior is unchanged for parsers other than MiniMax M3."""
+        from vllm.reasoning import ReasoningParserManager
+
+        metadata = self._metadata(
+            m3_tokenizer,
+            self._request(m3_tokenizer),
+            _M3_OPEN_PROMPT,
+            {"enable_thinking": False},
+            parser=ReasoningParserManager.get_reasoning_parser("qwen3"),
+        )
+
+        assert metadata.response_reasoning_ended is True
+        assert metadata.engine_reasoning_ended is True
+
+    def test_thinking_enabled_is_unchanged(self, m3_tokenizer):
+        """Thinking-enabled M3 still asks the parser's is_reasoning_end()."""
+        metadata = self._metadata(
+            m3_tokenizer,
+            self._request(m3_tokenizer),
+            _M3_OPEN_PROMPT_WITH_HISTORY,
+            {"thinking_mode": "enabled"},
+        )
+
+        assert metadata.response_reasoning_ended is True
+
+    def _stream(self, tokenizer, prompt, kwargs, text, *, stream_response=True):
+        request = self._request(tokenizer)
+        metadata = self._metadata(tokenizer, request, prompt, kwargs)
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=tokenizer.encode(prompt, add_special_tokens=False),
+            tool_parser=None,
+            reasoning_parser_class=_minimax_m3_parser_class(),
+            chat_template_kwargs=kwargs,
+            response_reasoning_ended=metadata.response_reasoning_ended,
+            stream_response=stream_response,
+        )
+        ids = tokenizer.encode(text, add_special_tokens=False)
+        reasoning = content = ""
+        for n, tid in enumerate(ids):
+            choice = post.process_output(
+                SimpleNamespace(
+                    index=0,
+                    text=tokenizer.decode([tid]),
+                    token_ids=[tid],
+                    finish_reason="stop" if n == len(ids) - 1 else None,
+                    logprobs=None,
+                )
+            )
+            delta = (choice or {}).get("delta") or (choice or {}).get("message") or {}
+            reasoning += delta.get("reasoning_content") or ""
+            content += delta.get("content") or ""
+        return post, reasoning, content
+
+    @pytest.mark.parametrize("stream_response", [True, False])
+    @pytest.mark.parametrize("kwargs", _M3_DISABLED_KWARGS)
+    def test_open_prompt_splits_generated_reasoning(
+        self, m3_tokenizer, kwargs, stream_response
+    ):
+        post, reasoning, content = self._stream(
+            m3_tokenizer,
+            _M3_OPEN_PROMPT,
+            kwargs,
+            "<mm:think>plan</mm:think>Hello",
+            stream_response=stream_response,
+        )
+
+        assert content == "Hello"
+        assert reasoning == "plan"
+        assert post.reasoning_parser is not None
+
+    def test_open_prompt_drops_a_stray_leading_closer(self, m3_tokenizer):
+        _, reasoning, content = self._stream(
+            m3_tokenizer,
+            _M3_OPEN_PROMPT,
+            {"thinking_mode": "disabled"},
+            "</mm:think>Hi",
+        )
+
+        assert reasoning == ""
+        assert content == "Hi"
+
+    def test_closed_prompt_passes_text_through(self, m3_tokenizer):
+        post, reasoning, content = self._stream(
+            m3_tokenizer,
+            _M3_CLOSED_PROMPT,
+            {"thinking_mode": "disabled"},
+            "Hello there",
+        )
+
+        assert post.reasoning_parser is None
+        assert reasoning == ""
+        assert content == "Hello there"
+
+    @pytest.mark.asyncio
+    async def test_guidance_and_sampling_request_are_unchanged(self, m3_tokenizer):
+        """The open request gate runs M3's no-op adjust_request() only."""
+        result = await prepost_module.preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "response_format": {"type": "json_object"},
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            tokenizer=m3_tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=None,
+            reasoning_parser_class=_minimax_m3_parser_class(),
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+        assert result.request_for_sampling.skip_special_tokens is not False
+
+
 class TestReasoningParserOutputCapability:
     def test_harmony_note_only_for_gptoss(self):
         from dynamo.frontend.vllm_processor import (
