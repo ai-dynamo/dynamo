@@ -25,8 +25,8 @@ use dynamo_protocols::types::responses::{
     OutputTokenDetails, PromptCacheRetention, Reasoning, ReasoningItem, ReasoningItemContent,
     ReasoningTextContent, RefusalContent, RequestTool, RequestToolChoiceParam, Response,
     ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTierResponses, Status,
-    SummaryPart, SummaryTextContent, TextResponseFormatConfiguration, Tool, ToolChoiceAllowed,
-    ToolChoiceAllowedMode, ToolChoiceOptions, ToolSearchExecutionType, Truncation,
+    SummaryPart, TextResponseFormatConfiguration, Tool, ToolChoiceAllowed, ToolChoiceAllowedMode,
+    ToolChoiceOptions, ToolSearchExecutionType, Truncation,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -1432,13 +1432,6 @@ pub(crate) fn responses_incomplete_reason(
 }
 
 impl ResponseParams {
-    fn reasoning_summary_requested(&self) -> bool {
-        self.reasoning
-            .as_ref()
-            .and_then(|reasoning| reasoning.summary)
-            .is_some()
-    }
-
     /// The request defines tools and `tool_choice` is not `none`, so the model
     /// may follow text with a call.
     fn tools_callable(&self) -> bool {
@@ -1537,24 +1530,11 @@ fn make_text_message(id: String, text: String, phase: Option<MessagePhase>) -> O
     })
 }
 
-/// Build a reasoning item. The trace is always returned as `content`; a requested
-/// `reasoning.summary` mirrors it into `summary`.
-fn reasoning_item(
-    id: String,
-    text: String,
-    status: OutputStatus,
-    summary_requested: bool,
-) -> ReasoningItem {
-    let summary = if summary_requested {
-        vec![SummaryPart::SummaryText(SummaryTextContent {
-            text: text.clone(),
-        })]
-    } else {
-        vec![]
-    };
+/// No summarizer runs in this conversion, so raw reasoning stays in `content`.
+fn reasoning_item(id: String, text: String, status: OutputStatus) -> ReasoningItem {
     ReasoningItem {
         id: Some(id),
-        summary,
+        summary: vec![],
         content: Some(vec![ReasoningItemContent::ReasoningText(
             ReasoningTextContent { text },
         )]),
@@ -1593,7 +1573,6 @@ pub fn chat_completion_to_response(
                 format!("rs_{}", Uuid::new_v4().simple()),
                 reasoning_text,
                 OutputStatus::Completed,
-                params.reasoning_summary_requested(),
             )));
         }
 
@@ -1646,9 +1625,8 @@ pub fn chat_completion_to_response(
             }));
         }
         if !content.is_empty() {
-            // Without parser boundaries, a unary response does not say where text
-            // fell relative to the calls, so text alongside calls is commentary
-            // placed before them.
+            // An aggregate without retained parser events cannot locate text
+            // relative to calls, so it falls back to commentary before them.
             let phase = if function_calls.is_empty() {
                 MessagePhase::FinalAnswer
             } else {
@@ -1687,7 +1665,7 @@ pub fn chat_completion_to_response(
                     let OutputItem::Message(mut message) = make_text_message(
                         format!("msg_{}", Uuid::new_v4().simple()),
                         std::mem::take(text),
-                        phase,
+                        Some(phase.unwrap_or(MessagePhase::FinalAnswer)),
                     ) else {
                         unreachable!()
                     };
@@ -1721,10 +1699,15 @@ pub fn chat_completion_to_response(
                         phase = None;
                     }
                     ResponseOutputEvent::Reasoning(reasoning) => {
+                        let inferred_phase = if params.tools_callable() {
+                            MessagePhase::Commentary
+                        } else {
+                            MessagePhase::FinalAnswer
+                        };
                         flush(
                             &mut output,
                             &mut text,
-                            phase,
+                            Some(phase.unwrap_or(inferred_phase)),
                             OutputStatus::Completed,
                             &mut open,
                         );
@@ -1733,7 +1716,6 @@ pub fn chat_completion_to_response(
                                 format!("rs_{}", Uuid::new_v4().simple()),
                                 reasoning,
                                 OutputStatus::Completed,
-                                params.reasoning_summary_requested(),
                             )));
                         }
                     }
@@ -1742,7 +1724,7 @@ pub fn chat_completion_to_response(
                         flush(
                             &mut output,
                             &mut text,
-                            phase,
+                            Some(phase.unwrap_or(MessagePhase::Commentary)),
                             OutputStatus::Completed,
                             &mut open,
                         );
@@ -1838,28 +1820,15 @@ pub fn chat_completion_to_response(
     if incomplete_reason.is_some() {
         // The budget runs out once, inside the item the model was still writing.
         // Earlier output items were complete and must not be relabelled.
-        let terminal = output.iter().rposition(|item| {
-            matches!(
-                item,
-                OutputItem::Message(_)
-                    | OutputItem::FunctionCall(_)
-                    | OutputItem::CustomToolCall(_)
-                    | OutputItem::ToolSearchCall(_)
-            )
-        });
-        for (index, item) in output.iter_mut().enumerate() {
+        if let Some(item) = output.last_mut() {
             match item {
-                OutputItem::Message(message) if Some(index) == terminal => {
-                    message.status = OutputStatus::Incomplete
-                }
-                OutputItem::FunctionCall(call) if Some(index) == terminal => {
-                    call.status = Some(OutputStatus::Incomplete)
-                }
-                OutputItem::ToolSearchCall(call) if Some(index) == terminal => {
+                OutputItem::Message(message) => message.status = OutputStatus::Incomplete,
+                OutputItem::FunctionCall(call) => call.status = Some(OutputStatus::Incomplete),
+                OutputItem::ToolSearchCall(call) => {
                     call.status =
                         dynamo_protocols::types::responses::FunctionCallStatus::Incomplete;
                 }
-                OutputItem::Reasoning(reasoning) if terminal.is_none() => {
+                OutputItem::Reasoning(reasoning) => {
                     reasoning.status = Some(OutputStatus::Incomplete)
                 }
                 _ => {}
@@ -4048,10 +4017,7 @@ mod tests {
         let OutputItem::Reasoning(reasoning) = &wrapped.inner.output[0] else {
             panic!("Expected Reasoning output before the tool call");
         };
-        assert!(matches!(
-            reasoning.summary.as_slice(),
-            [SummaryPart::SummaryText(summary)] if summary.text == "Need the weather tool"
-        ));
+        assert!(reasoning.summary.is_empty());
         assert_eq!(reasoning_text(reasoning), "Need the weather tool");
         match &wrapped.inner.output[1] {
             OutputItem::FunctionCall(fc) => {
@@ -4636,7 +4602,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_text_is_returned_and_summary_follows_request() {
+    fn test_raw_reasoning_is_returned_without_fabricating_a_summary() {
         let unrequested = chat_completion_to_response(
             make_chat_resp_with_reasoning("raw reasoning"),
             &ResponseParams::default(),
@@ -4661,10 +4627,7 @@ mod tests {
         let OutputItem::Reasoning(reasoning) = &requested.inner.output[0] else {
             panic!("expected reasoning output");
         };
-        assert!(matches!(
-            reasoning.summary.as_slice(),
-            [SummaryPart::SummaryText(summary)] if summary.text == "summary"
-        ));
+        assert!(reasoning.summary.is_empty());
         assert_eq!(reasoning_text(reasoning), "summary");
     }
 
@@ -4723,7 +4686,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_summary_precedes_structured_tool_calls() {
+    fn test_requested_summary_keeps_raw_reasoning_before_tool_calls() {
         use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
 
         let mut chat_resp = make_chat_resp_with_reasoning("look up the weather");
@@ -5107,10 +5070,7 @@ mod tests {
         assert!(json["output"][0].get("id").is_some());
         assert!(json["output"][0].get("status").is_some());
         assert_eq!(json["output"][0]["type"], "reasoning");
-        assert_eq!(
-            json["output"][0]["summary"],
-            serde_json::json!([{"type": "summary_text", "text": "raw reasoning"}])
-        );
+        assert_eq!(json["output"][0]["summary"], serde_json::json!([]));
         assert_eq!(
             json["output"][0]["content"][0],
             serde_json::json!({"type": "reasoning_text", "text": "raw reasoning"})

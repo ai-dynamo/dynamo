@@ -147,6 +147,7 @@ pub struct DeltaAggregator {
     /// Unique identifier for the chat completion.
     response_events: Vec<ResponseOutputEvent>,
     has_message_phases: bool,
+    has_unordered_deltas: bool,
     recorded_calls: std::collections::HashSet<String>,
     id: String,
     /// Model name used for the chat completion.
@@ -461,6 +462,7 @@ impl DeltaAggregator {
         Self {
             response_events: Vec::new(),
             has_message_phases: false,
+            has_unordered_deltas: false,
             recorded_calls: std::collections::HashSet::new(),
             id: "".to_string(),
             model: "".to_string(),
@@ -472,6 +474,42 @@ impl DeltaAggregator {
             nvext: None,
             prompt_logprobs: None,
         }
+    }
+
+    fn response_events_match_choice(&self, choice: &DeltaChoice) -> bool {
+        if self.has_unordered_deltas || choice.refusal.is_some() || !choice.content_parts.is_empty()
+        {
+            return false;
+        }
+        let text_matches = self
+            .response_events
+            .iter()
+            .filter_map(|event| match event {
+                ResponseOutputEvent::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .flat_map(str::bytes)
+            .eq(choice.text.bytes());
+        let reasoning_matches = self
+            .response_events
+            .iter()
+            .filter_map(|event| match event {
+                ResponseOutputEvent::Reasoning(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .flat_map(str::bytes)
+            .eq(choice
+                .reasoning_content
+                .as_deref()
+                .unwrap_or_default()
+                .bytes());
+        let calls = choice.tool_calls.as_deref().unwrap_or_default();
+        text_matches
+            && reasoning_matches
+            && self.recorded_calls.len() == calls.len()
+            && calls
+                .iter()
+                .all(|call| self.recorded_calls.contains(&call.id))
     }
 
     /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
@@ -541,14 +579,19 @@ impl DeltaAggregator {
                         aggregator.response_events.push(ResponseOutputEvent::Boundary(boundary));
                     }
                     for choice in delta.inner.choices.iter().filter(|choice| choice.index == 0) {
-                        if let Some(reasoning) = &choice.delta.reasoning_content {
+                        let has_reasoning = choice.delta.reasoning_content.as_deref().is_some_and(|text| !text.is_empty());
+                        let has_text = matches!(&choice.delta.content, Some(ChatCompletionMessageContent::Text(text)) if !text.is_empty());
+                        let has_calls = choice.delta.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty());
+                        // Side-by-side fields do not describe their order within this delta.
+                        aggregator.has_unordered_deltas |= usize::from(has_reasoning) + usize::from(has_text) + usize::from(has_calls) > 1;
+                        if let Some(reasoning) = &choice.delta.reasoning_content && !reasoning.is_empty() {
                             if let Some(ResponseOutputEvent::Reasoning(previous)) = aggregator.response_events.last_mut() {
                                 previous.push_str(reasoning);
                             } else {
                                 aggregator.response_events.push(ResponseOutputEvent::Reasoning(reasoning.clone()));
                             }
                         }
-                        if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content {
+                        if let Some(ChatCompletionMessageContent::Text(text)) = &choice.delta.content && !text.is_empty() {
                             if let Some(ResponseOutputEvent::Text(previous)) = aggregator.response_events.last_mut() {
                                 previous.push_str(text);
                             } else {
@@ -556,6 +599,12 @@ impl DeltaAggregator {
                             }
                         }
                         for call in choice.delta.tool_calls.iter().flatten() {
+                            let previously_seen = aggregator.choices.get(&0).is_some_and(|choice| choice.tool_call_chunks.contains_key(&call.index));
+                            let name = call.function.as_ref().and_then(|function| function.name.as_deref())
+                                .or_else(|| call.custom.as_ref().and_then(|custom| custom.name.as_deref()));
+                            if !previously_seen && (call.id.as_deref().is_none_or(str::is_empty) || name.is_none_or(str::is_empty)) {
+                                aggregator.has_unordered_deltas = true;
+                            }
                             if let Some(id) = &call.id && aggregator.recorded_calls.insert(id.clone()) {
                                 aggregator.response_events.push(ResponseOutputEvent::ToolCall(id.clone()));
                             }
@@ -957,6 +1006,11 @@ impl DeltaAggregator {
         }
 
         // Extract aggregated choices and sort them by index.
+        let preserves_recorded_order = aggregator.has_message_phases
+            || aggregator
+                .choices
+                .get(&0)
+                .is_some_and(|choice| aggregator.response_events_match_choice(choice));
         let mut choices: Vec<_> = aggregator
             .choices
             .into_values()
@@ -967,7 +1021,7 @@ impl DeltaAggregator {
 
         // Construct the final response object.
         let response = NvCreateChatCompletionResponse {
-            response_events: if aggregator.has_message_phases {
+            response_events: if preserves_recorded_order {
                 aggregator.response_events
             } else {
                 Vec::new()

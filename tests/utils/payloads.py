@@ -2054,7 +2054,7 @@ class ResponsesPayload(BasePayload):
     endpoint: str = "/v1/responses"
 
     @staticmethod
-    def extract_content(response):
+    def extract_content(response: requests.Response) -> str:
         """Extract text content from a Responses API response."""
         response.raise_for_status()
         result = response.json()
@@ -2078,7 +2078,11 @@ class ResponsesPayload(BasePayload):
             messages
         ), f"Expected a message output item, got types {[item.get('type') for item in output]}"
         msg = next(
-            (item for item in messages if item.get("phase") == "final_answer"),
+            (
+                item
+                for item in reversed(messages)
+                if item.get("phase") == "final_answer"
+            ),
             messages[-1],
         )
         assert (
@@ -2108,10 +2112,8 @@ class ResponsesStreamPayload(BasePayload):
     http_stream: bool = True
 
     @staticmethod
-    def extract_content(response):
+    def extract_content(response: requests.Response) -> str:
         """Parse SSE stream and validate event structure."""
-        import json
-
         response.raise_for_status()
 
         events: list[tuple[str, Any]] = []
@@ -2168,11 +2170,21 @@ class ResponsesStreamPayload(BasePayload):
         for name, data in events:
             if name == "response.output_text.delta":
                 deltas.setdefault(data["item_id"], []).append(data["delta"])
+        done_items: set[str] = set()
         for name, data in events:
             if name == "response.output_text.done":
+                item_id = data["item_id"]
+                assert (
+                    item_id not in done_items
+                ), f"Duplicate output_text.done for item {item_id}"
+                done_items.add(item_id)
                 assert data["text"] == "".join(
-                    deltas.get(data["item_id"], [])
+                    deltas.get(item_id, [])
                 ), "Concatenated deltas don't match output_text.done text"
+        missing_done = deltas.keys() - done_items
+        assert (
+            not missing_done
+        ), f"Missing output_text.done for items {sorted(missing_done)}"
 
         return "".join("".join(parts) for parts in deltas.values())
 
