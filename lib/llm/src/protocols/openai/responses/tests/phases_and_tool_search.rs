@@ -234,8 +234,16 @@ async fn commentary_stream_lifecycle_and_unary_order_are_preserved() {
         events.extend(converter.emit_end_events());
         let events = stream_json(events).await;
         let completed = &events.last().unwrap()["response"];
-        let output = &completed["output"];
-        assert_eq!(output.as_array().unwrap().len(), 4, "{output}");
+        // Private reasoning is returned only as the leading reasoning item.
+        let (reasoning, output) = completed["output"]
+            .as_array()
+            .unwrap()
+            .split_first()
+            .unwrap();
+        assert_eq!(reasoning["type"], "reasoning");
+        assert_eq!(reasoning["content"][0]["text"], "Private.");
+        assert_eq!(output.len(), 4, "{output:?}");
+        assert!(!serde_json::to_string(output).unwrap().contains("Private."));
         assert_eq!(output[0]["phase"], "commentary");
         assert_eq!(output[0]["content"][0]["text"], "Checking.");
         assert_eq!(output[1]["type"], "function_call");
@@ -283,7 +291,6 @@ async fn commentary_stream_lifecycle_and_unary_order_are_preserved() {
             );
         }
 
-        assert!(!completed.to_string().contains("Private."));
         let unary = DeltaAggregator::apply(
             futures::stream::iter(chunks.into_iter().map(Annotated::from_data)),
             Default::default(),
@@ -294,7 +301,8 @@ async fn commentary_stream_lifecycle_and_unary_order_are_preserved() {
             chat_completion_to_response(unary, &Default::default(), None).unwrap(),
         )
         .unwrap();
-        let unary = unary["output"].as_array().unwrap();
+        let (unary_reasoning, unary) = unary["output"].as_array().unwrap().split_first().unwrap();
+        assert_eq!(unary_reasoning["content"], reasoning["content"]);
         for index in [0, 2, 3] {
             assert_eq!(unary[index]["phase"], output[index]["phase"]);
             assert_eq!(unary[index]["content"], output[index]["content"]);

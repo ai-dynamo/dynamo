@@ -24,6 +24,7 @@ expression: canonicalize(body)
       ],
       "id": "[ID-2]",
       "role": "assistant",
+      "phase": "final_answer",
       "status": "completed"
     }
   ],
