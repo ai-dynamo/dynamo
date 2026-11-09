@@ -27,10 +27,8 @@ import (
 func constructPVC(crd metav1.Object, pvcConfig v1alpha1.PVC) *corev1.PersistentVolumeClaim {
 	storageClassName := pvcConfig.StorageClass
 	return &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      getPvcName(crd, pvcConfig.Name),
-			Namespace: crd.GetNamespace(),
-		},
+		Name:      getPvcName(crd, pvcConfig.Name),
+		Namespace: crd.GetNamespace(),
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{pvcConfig.VolumeAccessMode},
 			Resources: corev1.VolumeResourceRequirements{

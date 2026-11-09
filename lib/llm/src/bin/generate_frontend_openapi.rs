@@ -3,9 +3,10 @@
 
 //! Helper binary to generate the Dynamo HTTP frontend OpenAPI specification.
 //!
-//! This allows CI and documentation tooling to obtain the exact same
-//! OpenAPI representation that is served at `/openapi.json` by the frontend
-//! without having to start the HTTP service and scrape the endpoint.
+//! This allows CI and documentation tooling to obtain the frontend API schemas
+//! without starting the HTTP service and scraping the endpoint. The export also
+//! lists `/docs` and `/openapi.json`: those documentation routes are registered
+//! after the served document's route list is captured, so the documents differ there.
 //!
 //! Usage (from the repository root):
 //! ```bash
@@ -61,9 +62,8 @@ fn main() -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Propagates service-construction, schema-invariant, serialization, and I/O errors. A failed write may
-/// leave a truncated file; created directories are not removed on failure.
-///
+/// Propagates service-construction, schema-invariant, serialization, and I/O errors.
+/// A failed write may leave a truncated file; created directories remain on failure.
 fn generate_openapi() -> anyhow::Result<()> {
     // Build an HttpService instance with all standard OpenAI-compatible
     // frontend endpoints enabled so that the generated OpenAPI document
@@ -78,6 +78,7 @@ fn generate_openapi() -> anyhow::Result<()> {
         .enable_responses_endpoints(true)
         .enable_anthropic_endpoints(true)
         .enable_batch_endpoints(true)
+        .enable_admin_api(true)
         .build()
         .context("failed to build HttpService for OpenAPI generation")?;
 

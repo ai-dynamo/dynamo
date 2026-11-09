@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
 	"sort"
 	"strconv"
@@ -352,7 +353,7 @@ func isNilClientObject[T client.Object](object T) bool {
 		value.Kind() == reflect.Func ||
 		value.Kind() == reflect.Interface ||
 		value.Kind() == reflect.Map ||
-		value.Kind() == reflect.Ptr ||
+		value.Kind() == reflect.Pointer ||
 		value.Kind() == reflect.Slice) && value.IsNil())
 }
 
@@ -360,7 +361,7 @@ func recordResourceEvent(
 	r Reconciler,
 	object client.Object,
 	eventType, reason, action, messageFmt string,
-	args ...interface{},
+	args ...any,
 ) {
 	if recorder := r.GetRecorder(); recorder != nil {
 		recorder.Eventf(object, nil, eventType, reason, action, messageFmt, args...)
@@ -381,8 +382,8 @@ var kubeEnvelopeFields = map[string]bool{
 
 // nonEnvelopeFields returns all top-level fields from an unstructured map
 // except the Kubernetes envelope (apiVersion, kind, metadata, status).
-func nonEnvelopeFields(obj map[string]interface{}) map[string]interface{} {
-	content := make(map[string]interface{}, len(obj))
+func nonEnvelopeFields(obj map[string]any) map[string]any {
+	content := make(map[string]any, len(obj))
 	for k, v := range obj {
 		if kubeEnvelopeFields[k] {
 			continue
@@ -433,9 +434,7 @@ func CopySpec(source, destination client.Object) error {
 		return runtime.DefaultUnstructuredConverter.FromUnstructured(destUnstructured.Object, destination)
 	}
 
-	for k, v := range nonEnvelopeFields(sourceUnstructured.Object) {
-		destUnstructured.Object[k] = v
-	}
+	maps.Copy(destUnstructured.Object, nonEnvelopeFields(sourceUnstructured.Object))
 
 	return runtime.DefaultUnstructuredConverter.FromUnstructured(destUnstructured.Object, destination)
 }
@@ -628,7 +627,7 @@ func GetResourceHash(obj any, opts ...SyncOption) (string, error) {
 		return fmt.Sprintf("%x", sha256.Sum256(objMap)), nil
 	}
 
-	var objData map[string]interface{}
+	var objData map[string]any
 	if err := json.Unmarshal(objMap, &objData); err != nil {
 		return "", err
 	}
@@ -649,24 +648,24 @@ func GetResourceHash(obj any, opts ...SyncOption) (string, error) {
 }
 
 // SortKeys consumes a JSON-decoded tree, ordering slices for consistent serialization.
-func SortKeys(obj interface{}) interface{} {
+func SortKeys(obj any) any {
 	switch obj := obj.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		if obj == nil {
-			return map[string]interface{}{}
+			return map[string]any{}
 		}
 		for k, v := range obj {
 			obj[k] = SortKeys(v)
 		}
 		return obj
-	case []interface{}:
+	case []any:
 		// Check if the slice contains maps and sort them by the "name" field or the first available field
 		if len(obj) > 0 {
 
-			if _, ok := obj[0].(map[string]interface{}); ok {
+			if _, ok := obj[0].(map[string]any); ok {
 				sort.SliceStable(obj, func(i, j int) bool {
-					iMap, iOk := obj[i].(map[string]interface{})
-					jMap, jOk := obj[j].(map[string]interface{})
+					iMap, iOk := obj[i].(map[string]any)
+					jMap, jOk := obj[j].(map[string]any)
 					if iOk && jOk {
 						// Try to sort by "name" if present
 						iName, iNameOk := iMap["name"].(string)
@@ -695,7 +694,7 @@ func SortKeys(obj interface{}) interface{} {
 }
 
 // Helper function to get the first key of a map (alphabetically sorted)
-func firstKey(m map[string]interface{}) string {
+func firstKey(m map[string]any) string {
 	var first string
 	firstSet := false
 	for k := range m {

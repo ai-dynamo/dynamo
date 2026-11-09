@@ -2,13 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import errno
 import logging
 from typing import Any, Awaitable, Dict, Final, List
 from urllib.parse import urlparse
 
 import numpy as np
 
-from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_bytes
+from dynamo.common.http import (
+    HttpConfigurationError,
+    HttpConnectionError,
+    HttpStatusError,
+    HttpTimeoutError,
+    fetch_bytes,
+)
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -56,13 +63,17 @@ async def read_decoded_media_via_nixl(*args: Any, **kwargs: Any) -> Any:
     return await _read_decoded_media_via_nixl(*args, **kwargs)
 
 
+class _VllmAudioMediaUnavailable(RuntimeError):
+    """vLLM's audio media components are not installed: a deployment fault."""
+
+
 def _require_vllm_audio_media() -> tuple[Any, Any]:
     """Return vLLM's audio media components, raising if not installed."""
     try:
         from vllm.multimodal.media import MediaConnector
         from vllm.multimodal.media.audio import AudioMediaIO
     except ImportError as exc:
-        raise RuntimeError(
+        raise _VllmAudioMediaUnavailable(
             "vLLM multimodal media components are required to decode `audio_url` "
             "inputs in the vLLM backend."
         ) from exc
@@ -98,7 +109,7 @@ class AudioLoader:
         self._vllm_media_connector = None
         if self._enable_frontend_decoding:
             self._nixl_connector = _create_nixl_connector()
-            run_async(self._nixl_connector.initialize)
+            run_async(self._nixl_connector.warmup)
 
     def _get_vllm_media_connector(self) -> Any:
         if self._vllm_media_connector is None:
@@ -163,6 +174,20 @@ class AudioLoader:
                 "URL rejected loading audio: '%s'", describe_media_source(audio_url)
             )
             raise
+        except (
+            HttpTimeoutError,
+            HttpConnectionError,
+            _VllmAudioMediaUnavailable,
+        ) as exc:
+            # A failed fetch or a missing vLLM says nothing about the audio:
+            # keep the type so it is not reported as a bad request (4xx), which
+            # the ValueError below and the batch's ValueError branch would do.
+            logger.error(
+                "%s loading audio: '%s'",
+                type(exc).__name__,
+                describe_media_source(audio_url),
+            )
+            raise
         except ImportError as exc:
             # The image ships no audio decoder (PyAV is deliberately omitted).
             # vLLM's own hint here is "pip install vllm[audio]", which drags in
@@ -175,6 +200,12 @@ class AudioLoader:
             )
             raise audio_decoder_missing("vllm", cause=str(exc)) from exc
         except Exception as exc:
+            # Host resource exhaustion is a server fault, not invalid audio.
+            if isinstance(exc, MemoryError) or (
+                isinstance(exc, OSError)
+                and exc.errno in (errno.EMFILE, errno.ENFILE, errno.ENOMEM)
+            ):
+                raise
             # Bound the URL like the branches above: a signed URL (GCS, S3,
             # Azure SAS) is a bearer credential, and its signature must reach
             # neither the log nor the client's error body.
@@ -246,6 +277,7 @@ class AudioLoader:
         status_error: HttpStatusError | None = None
         url_error: UrlValidationError | None = None
         decoder_error: MissingMediaDecoderError | None = None
+        value_error: ValueError | None = None
         for media_item, result in zip(audio_mm_items, results, strict=True):
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
@@ -265,6 +297,8 @@ class AudioLoader:
                     result, MissingMediaDecoderError
                 ):
                     decoder_error = result
+                elif value_error is None and isinstance(result, ValueError):
+                    value_error = result
                 continue
             loaded_audio.append(result)
 
@@ -277,6 +311,10 @@ class AudioLoader:
             # it, and a missing decoder is deployment configuration handlers
             # must be able to distinguish from a bad request.
             raise decoder_error
+        if value_error is not None:
+            # Bad client audio: the bindings map ValueError to InvalidArgument
+            # (4xx); the generic aggregate below would become Unknown (5xx).
+            raise value_error
 
         if collective_exceptions:
             raise Exception("".join(collective_exceptions))
