@@ -50,6 +50,10 @@ type DynamoComponentDeploymentSpec struct {
 	// Container-specific definitions take precedence. Semantic ordering is
 	// selected by the immutable operator origin; older origins retain legacy
 	// composition. No default is applied.
+	// For origins >= 1.8.0, names must be unique within this list. Admission
+	// permits an unchanged duplicate list on update only when the previous DCD
+	// already used semantic ordering. Otherwise, including when entering that
+	// contract, the entire list requires unique names. Component overrides remain allowed.
 	// +optional
 	Env []corev1.EnvVar `json:"env,omitempty"`
 

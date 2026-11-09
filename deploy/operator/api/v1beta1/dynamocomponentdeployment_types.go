@@ -64,6 +64,10 @@ type DynamoComponentDeploymentSpec struct {
 	// fail rendering. Graph-generated DCDs carry the DGD spec.env here so the
 	// original layers remain separate until operator defaults are available.
 	// Older origins retain legacy sorted composition. No default is applied.
+	// For origins >= 1.8.0, names must be unique within this list. Admission
+	// permits an unchanged duplicate list on update only when the previous DCD
+	// already used semantic ordering. Otherwise, including when entering that
+	// contract, the entire list requires unique names. Container overrides remain allowed.
 	// +optional
 	Env []corev1.EnvVar `json:"env,omitempty"`
 

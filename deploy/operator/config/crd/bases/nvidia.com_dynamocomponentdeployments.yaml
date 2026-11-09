@@ -841,6 +841,10 @@ spec:
                     Container-specific definitions take precedence. Semantic ordering is
                     selected by the immutable operator origin; older origins retain legacy
                     composition. No default is applied.
+                    For origins >= 1.8.0, names must be unique within this list. Admission
+                    permits an unchanged duplicate list on update only when the previous DCD
+                    already used semantic ordering. Otherwise, including when entering that
+                    contract, the entire list requires unique names. Component overrides remain allowed.
                   items:
                     description: EnvVar represents an environment variable present in a Container.
                     properties:
@@ -20245,6 +20249,10 @@ spec:
                     fail rendering. Graph-generated DCDs carry the DGD spec.env here so the
                     original layers remain separate until operator defaults are available.
                     Older origins retain legacy sorted composition. No default is applied.
+                    For origins >= 1.8.0, names must be unique within this list. Admission
+                    permits an unchanged duplicate list on update only when the previous DCD
+                    already used semantic ordering. Otherwise, including when entering that
+                    contract, the entire list requires unique names. Container overrides remain allowed.
                   items:
                     description: EnvVar represents an environment variable present in a Container.
                     properties:

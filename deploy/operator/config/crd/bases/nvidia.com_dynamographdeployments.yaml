@@ -77,6 +77,9 @@ spec:
                   description: |-
                     Envs are environment variables applied to all services in the deployment unless
                     overridden by service-specific configuration.
+                    Names must be unique within this list. Admission permits an unchanged
+                    pre-existing list with duplicates on update; changing the list requires
+                    unique names throughout. Same-named service overrides remain allowed.
                   items:
                     description: EnvVar represents an environment variable present in a Container.
                     properties:
@@ -37886,6 +37889,9 @@ spec:
                     within each source list and cross-layer references are topologically
                     ordered; cycles fail rendering. Earlier or missing origins retain legacy
                     sorted composition. Generated DCDs preserve this list as spec.env.
+                    Names must be unique within this list. Admission permits an unchanged
+                    pre-existing list with duplicates on update; changing the list requires
+                    unique names throughout. Same-named container overrides remain allowed.
                   items:
                     description: EnvVar represents an environment variable present in a Container.
                     properties:

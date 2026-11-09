@@ -33,6 +33,7 @@ import (
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,6 +70,7 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 	grovePathway            bool
 	grovePathwayRequirement string
 	oldComponents           map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	oldEnv                  []corev1.EnvVar
 	groveUpdateStrategy     grovev1alpha1.UpdateStrategyType
 	oldGroveUpdateStrategy  grovev1alpha1.UpdateStrategyType
 }
@@ -102,7 +104,13 @@ func (v *DynamoGraphDeploymentValidator) validate(
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
 	}
-	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha)...)
+
+	// Root env maps natively to alpha envs, including its full ordered old value.
+	var oldEnv []corev1.EnvVar
+	if oldDeployment != nil {
+		oldEnv = oldDeployment.Spec.Env
+	}
+	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(alpha, oldEnv)...)
 
 	return validation.warnings, invalidDynamoGraphDeploymentError(deployment, allErrs)
 }
@@ -229,6 +237,10 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		oldComponents:           oldComponents,
 		groveUpdateStrategy:     k8sptr.Deref(updateStrategy, grovev1alpha1.RollingRecreateStrategy),
 		oldGroveUpdateStrategy:  oldStrategy,
+	}
+	// Preserve the full ordered old list for root environment ratcheting.
+	if oldDGD != nil {
+		specOpts.oldEnv = oldDGD.Spec.Env
 	}
 	if grovePathway {
 		specOpts.pcsName = dynamo.PCSNameForDGD(
@@ -494,6 +506,11 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	if hasLPXComponent && independentEngineCount != lpxComponentCount && !(lpxComponentCount == 2 && independentEngineCount == 1) {
 		allErrs = append(allErrs, field.Forbidden(componentsPath, fmt.Sprintf(
 			"LPX components must each declare a conductor role or an agent %q sidecar, or form a shared draft and target pair", consts.RuntimeContainerName)))
+	}
+
+	// The source-alpha recursion owns its differently named root envs field.
+	if !v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+		allErrs = append(allErrs, v.validateEnvVars(spec.Env, opts.oldEnv, fldPath.Child("env"))...)
 	}
 
 	if spec.Restart != nil {

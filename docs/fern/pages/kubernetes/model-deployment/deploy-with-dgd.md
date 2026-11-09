@@ -583,7 +583,31 @@ Within a single list, Kubernetes' sequential semantics still apply: forward refe
 reordered and remain literal unless an external value is available. `$$(NAME)` is escaped, and
 shell syntax such as `$NAME` is not a Kubernetes reference. ConfigMap/Secret values, `envFrom`,
 and provider-injected variables remain runtime inputs; the operator does not fetch or expand them
-for ordering. Existing same-list duplicate-name validation is unchanged.
+for ordering.
+
+Use unique names within the DGD's root `spec.env` list (`spec.envs` in `v1alpha1`), regardless
+of origin. An update may retain an existing duplicate list only when the complete ordered list
+is unchanged. Changing any value, source, position, or member requires unique names throughout
+the list. Names are case-sensitive. Same-named entries in different layers remain valid overrides,
+as `BASE` demonstrates above. Root DCD `spec.env` follows the same rule only for origins 1.8.0
+and later; older or missing origins retain their previous validation behavior.
+Entering semantic ordering also revalidates a DCD's root list even if that list is unchanged.
+
+For example, this root list is rejected on create or when changed on update:
+
+```yaml
+spec:
+  env:
+    - name: BASE
+      value: /models
+    - name: BASE # Duplicate within one root list, not an override between layers.
+      value: /fast/models
+```
+
+Admission enforces this rule without changing the root list's OpenAPI merge semantics. Kubernetes
+does not [ratchet a change to list type or keys](https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#validation-ratcheting); adding those schema markers would reject
+unchanged legacy duplicate lists before the webhook could permit them. Container PodTemplate
+schemas and alpha service-level env conversion remain unchanged.
 
 In `v1alpha1`, `service.envs` and `extraPodSpec.mainContainer.env` are combined during API
 conversion. When both lists define the same name, the extra container value replaces the

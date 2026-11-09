@@ -116,6 +116,9 @@ type DynamoGraphDeploymentSpec struct {
 	Services map[string]*DynamoComponentDeploymentSharedSpec `json:"services,omitempty"`
 	// Envs are environment variables applied to all services in the deployment unless
 	// overridden by service-specific configuration.
+	// Names must be unique within this list. Admission permits an unchanged
+	// pre-existing list with duplicates on update; changing the list requires
+	// unique names throughout. Same-named service overrides remain allowed.
 	// +kubebuilder:validation:Optional
 	Envs []corev1.EnvVar `json:"envs,omitempty"`
 	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm").

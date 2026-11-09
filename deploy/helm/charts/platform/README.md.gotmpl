@@ -131,8 +131,7 @@ The operator does not fetch ConfigMaps or Secrets for sorting.
 **Action:** Review `spec.env` and each `podTemplate.spec.containers[*].env` list. Declare a source
 variable before dependent variables within the same list. Use component entries to override graph
 defaults; dependent entries in other layers will reference the effective override. Do not depend
-on retaining a lower-layer definition to expand a same-named self-reference. Existing same-list
-duplicate validation is unchanged. For example:
+on retaining a lower-layer definition to expand a same-named self-reference. For example:
 
 ```yaml
 spec:
@@ -153,6 +152,15 @@ spec:
 ```
 
 The effective `MODEL_ROOT` precedes `MODEL_PATH`, which expands to `/fast/models/model`.
+
+**Root-list validation:** DGD `spec.env` (`spec.envs` in `v1alpha1`) requires unique names on
+create and whenever that list changes, regardless of origin. DCD root `spec.env` applies this
+rule only when its effective operator origin is 1.8.0 or later. An update may retain a
+pre-existing duplicate list only when the complete ordered list is unchanged; changing a
+value, source, order, or member requires unique names throughout. Overrides between layers
+remain allowed. For DCDs, retaining an unchanged duplicate list also requires that the old DCD
+already used semantic ordering. The root OpenAPI list schema is unchanged so it does not reject
+unchanged legacy duplicates before webhook ratcheting runs.
 
 **Existing deployments:** DGDs created by an operator older than 1.8.0, or without the origin
 annotation, retain the legacy sorted and de-duplicated output. An operator-only upgrade does not

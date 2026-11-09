@@ -22,9 +22,25 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
+
+// dcdUsesOrderedEnvironment follows the origin selected by the workload renderer.
+// dcd must not be nil. Any semantic role consumes the shared root env list.
+func dcdUsesOrderedEnvironment(dcd *nvidiacomv1beta1.DynamoComponentDeployment) bool {
+	if dcd.GetParentGraphDeploymentName() == "" {
+		return compatibility.OrderedEnvironmentVariables.Enabled(dcd.Annotations)
+	}
+	for _, template := range dynamo.ComponentPodTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
+		if compatibility.OrderedEnvironmentVariables.Enabled(template.Annotations) {
+			return true
+		}
+	}
+	return false
+}
 
 // invalidDynamoComponentDeploymentError converts allErrs for dcd into an API error.
 // dcd must not be nil.

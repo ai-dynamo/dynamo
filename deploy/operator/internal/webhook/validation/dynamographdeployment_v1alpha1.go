@@ -19,12 +19,15 @@ package validation
 
 import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // validateDynamoGraphDeploymentV1alpha1 validates dgd. dgd must not be nil.
+// oldEnv is nil on create, otherwise it is the natively converted old root list.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentV1alpha1(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	oldEnv []corev1.EnvVar,
 ) field.ErrorList {
 	if !hasV1Alpha1CompatibilityFields(dgd) &&
 		!v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
@@ -35,15 +38,18 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentV1alpha1(
 		field.NewPath("spec"),
 		dgd.Name,
 		dgd.Namespace,
+		oldEnv,
 	)
 }
 
 // validateDynamoGraphDeploymentSpecV1alpha1 validates spec. spec and fldPath must not be nil.
+// oldEnv is nil on create, otherwise it is the natively converted old root list.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alpha1(
 	spec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec,
 	fldPath *field.Path,
 	dgdName string,
 	dgdNamespace string,
+	oldEnv []corev1.EnvVar,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	pvcsPath := fldPath.Child("pvcs")
@@ -63,6 +69,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alp
 		)...)
 	}
 	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+		allErrs = append(allErrs, v.validateEnvVars(spec.Envs, oldEnv, fldPath.Child("envs"))...)
 		allErrs = append(allErrs, validateRolePodTemplatesPlannerRuntimeV1Alpha1(spec, fldPath)...)
 	}
 	return allErrs
