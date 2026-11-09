@@ -1459,21 +1459,9 @@ impl ModelDeploymentCard {
                 // mdcsum regardless of `read_dir` order, and (b) the same
                 // bytes under different filenames don't collide — otherwise
                 // the frontend cache could serve a local_dir missing siblings.
-                // The copy `advertise_tekken_for_older_frontends` adds duplicates the
-                // tokenizer slot, so it leaves the checksum as the typed slot sets it.
-                let tekken = match &self.tokenizer {
-                    Some(TokenizerKind::TekkenJson(file)) => Some(file),
-                    _ => None,
-                };
                 let mut extras: Vec<(&str, &str)> = self
                     .extra_files
                     .iter()
-                    .filter(|cf| {
-                        tekken.is_none_or(|tekken| {
-                            cf.basename() != tekken.basename()
-                                || cf.checksum().hash() != tekken.checksum().hash()
-                        })
-                    })
                     .map(|cf| (cf.basename().unwrap_or(""), cf.checksum().hash()))
                     .collect();
                 extras.sort_unstable();
@@ -2986,11 +2974,8 @@ mod tests {
         let Some(TokenizerKind::TekkenJson(tekken)) = card.tokenizer.clone() else {
             panic!("mock checkpoint must load its tekken tokenizer");
         };
-        let plain = card.clone();
         card.advertise_tekken_for_older_frontends();
         card.advertise_tekken_for_older_frontends();
-        // The copy is the tokenizer slot again, so the cohort checksum stays put.
-        assert_eq!(card.mdcsum(), plain.mdcsum());
         assert_eq!(
             card.extra_files
                 .iter()

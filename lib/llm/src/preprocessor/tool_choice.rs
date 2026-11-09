@@ -852,6 +852,7 @@ pub(crate) fn guided_tool_constraint_with_effective_tools(
     request: &NvCreateChatCompletionRequest,
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
+    unified_family: Option<&str>,
     uses_structural_tag: bool,
     tools: &[ChatCompletionTool],
 ) -> Result<GuidedToolConstraint, DynamoError> {
@@ -862,7 +863,7 @@ pub(crate) fn guided_tool_constraint_with_effective_tools(
         request,
         tool_call_parser,
         reasoning_parser,
-        unified_parser::selected_family(tool_call_parser, reasoning_parser),
+        unified_family,
         tools,
     )
 }

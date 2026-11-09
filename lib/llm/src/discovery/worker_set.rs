@@ -263,6 +263,7 @@ pub struct WorkerSet {
     /// The `reasoning_effort` Anthropic disabled thinking selects on a native Mistral card,
     /// resolved from its `tekken.json` when the set is prepared.
     mistral_disabled_thinking_effort: Option<ReasoningEffort>,
+    unsupported_unified_family: Option<&'static str>,
 }
 
 impl WorkerSet {
@@ -298,6 +299,7 @@ impl WorkerSet {
             allocator_trim: None,
             allocator_trim_wrapped: false,
             mistral_disabled_thinking_effort: None,
+            unsupported_unified_family: None,
         }
     }
 
@@ -457,6 +459,10 @@ impl WorkerSet {
         self.mistral_disabled_thinking_effort = effort;
     }
 
+    pub(crate) fn set_unsupported_unified_family(&mut self, family: Option<&'static str>) {
+        self.unsupported_unified_family = family;
+    }
+
     /// Build ParsingOptions from this WorkerSet's card configuration.
     pub fn parsing_options(&self) -> crate::protocols::openai::ParsingOptions {
         crate::protocols::openai::ParsingOptions {
@@ -469,6 +475,7 @@ impl WorkerSet {
                 .map(str::to_string),
             native_mistral_renderer: self.card.uses_native_mistral_renderer(),
             mistral_disabled_thinking_effort: self.mistral_disabled_thinking_effort.clone(),
+            unsupported_unified_family: self.unsupported_unified_family.map(str::to_string),
             structural_tag: self.card.runtime_config.structural_tag.clone(),
             exclude_tools_when_tool_choice_none: self
                 .card
@@ -637,6 +644,7 @@ impl WorkerSet {
             allocator_trim_wrapped: false,
             // An adapter renders through the base model's chat engine and tokenizer.
             mistral_disabled_thinking_effort: self.mistral_disabled_thinking_effort.clone(),
+            unsupported_unified_family: self.unsupported_unified_family,
         };
         if self.allocator_trim.is_some() {
             view.enable_allocator_trim_on_teardown();
