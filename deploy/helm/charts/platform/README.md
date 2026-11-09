@@ -751,6 +751,7 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.controllerManager.affinity | object | `{}` | Affinity for controller manager pods |
 | dynamo-operator.controllerManager.leaderElection.id | string | `""` | Leader election ID for cluster-wide coordination. WARNING: All cluster-wide operators must use the SAME ID to prevent split-brain. Different IDs would allow multiple leaders simultaneously. |
 | dynamo-operator.controllerManager.leaderElection.namespace | string | `""` | Namespace for leader election leases (only used in cluster-wide mode). If empty, defaults to kube-system for cluster-wide coordination. All cluster-wide operators should use the SAME namespace for proper leader election. |
+| dynamo-operator.controllerManager.crdApply.resources | object | `{"limits":{"cpu":"1000m","memory":"256Mi"},"requests":{"cpu":"100m","memory":"128Mi"}}` | Resource requests/limits for the crd-apply init container. Set to null to omit. |
 | dynamo-operator.controllerManager.manager.image.repository | string | `"nvcr.io/nvidia/ai-dynamo/kubernetes-operator"` | Official NVIDIA Dynamo operator image repository |
 | dynamo-operator.controllerManager.manager.image.tag | string | `""` | Image tag (leave empty to use chart default) |
 | dynamo-operator.controllerManager.manager.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy - when to pull the image |
