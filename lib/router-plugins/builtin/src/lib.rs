@@ -87,9 +87,6 @@ worker_selection:
   aggregated: dynamo-two-tier-cost-fn
   prefill: dynamo-two-tier-cost-fn
   decode: dynamo-two-tier-cost-fn
-  instances:
-    - name: dynamo-two-tier-cost-fn
-      type: dynamo-two-tier-cost-fn
 "#,
         );
         let factory = resolved
@@ -111,14 +108,18 @@ worker_selection:
         let (config, resolved) = resolve(
             r#"
 worker_selection:
-  aggregated: sticky
-  prefill: sticky
-  decode: sticky
-  instances:
-    - name: sticky
-      type: dynamo-sticky-min-load
-      parameters:
-        max_idle_secs: 600
+  aggregated:
+    type: dynamo-sticky-min-load
+    parameters:
+      max_idle_secs: 600
+  prefill:
+    type: dynamo-sticky-min-load
+    parameters:
+      max_idle_secs: 600
+  decode:
+    type: dynamo-sticky-min-load
+    parameters:
+      max_idle_secs: 600
 "#,
         );
         let factory = resolved
@@ -141,12 +142,10 @@ worker_selection:
         let (_config, resolved) = resolve(
             r#"
 worker_selection:
-  aggregated: dynamo-two-tier-cost-fn
-  instances:
-    - name: dynamo-two-tier-cost-fn
-      type: dynamo-two-tier-cost-fn
-      parameters:
-        cache_affinity_threshold: 0.8
+  aggregated:
+    type: dynamo-two-tier-cost-fn
+    parameters:
+      cache_affinity_threshold: 0.8
 "#,
         );
 
@@ -175,12 +174,10 @@ worker_selection:
             let (_config, resolved) = resolve(&format!(
                 r#"
 worker_selection:
-  aggregated: mode
-  instances:
-    - name: mode
-      type: {policy_type}
-      parameters:
-        temperature: 0.5
+  aggregated:
+    type: {policy_type}
+    parameters:
+      temperature: 0.5
 "#
             ));
             let Err(error) = resolved else {
