@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Annotated, Any, List, Literal, Optional, Tuple, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
@@ -41,6 +41,8 @@ class SamplingOptions(BaseModel):
     use_beam_search: Optional[bool] = None
     length_penalty: Optional[float] = None
     seed: Optional[int] = None
+    # String token-id keys, as in JSON and SGLang's SamplingParams.logit_bias.
+    logit_bias: Optional[Dict[str, float]] = None
 
 
 class PreprocessedRequest(BaseModel):

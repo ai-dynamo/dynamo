@@ -1827,6 +1827,58 @@ def test_multimodal_build_sampling_params_maps_min_tokens():
     assert sampling_params["ignore_eos"] is True
 
 
+@pytest.mark.parametrize(
+    ("raw_options", "expected"),
+    [
+        ({}, None),
+        ({"logit_bias": {}}, {}),
+        ({"logit_bias": {"3862": 4}}, {"3862": 4.0}),
+    ],
+)
+def test_multimodal_request_round_trip_keeps_logit_bias(raw_options, expected):
+    # Mirrors the encode worker: validate the frontend dict, then serialize the
+    # request to JSON for the PD or decode worker.
+    preprocessed = PreprocessedRequest.model_validate(
+        {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 2},
+            "sampling_options": {"temperature": 0.0, **raw_options},
+        }
+    )
+    request = SglangMultimodalRequest.model_validate_json(
+        SglangMultimodalRequest(request=preprocessed).model_dump_json()
+    )
+
+    assert request.request.sampling_options.logit_bias == expected
+
+
+@pytest.mark.parametrize(
+    ("logit_bias", "expected"),
+    [
+        (None, None),
+        ({}, None),
+        ({"3862": 4}, {"3862": 4.0}),
+        ({"3862": 4, "18": -10}, {"3862": 4.0, "18": -10.0}),
+    ],
+)
+def test_multimodal_build_sampling_params_forwards_logit_bias(logit_bias, expected):
+    raw_options = {} if logit_bias is None else {"logit_bias": logit_bias}
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[1, 2, 3],
+            stop_conditions=StopConditions(max_tokens=2),
+            sampling_options=SamplingOptions.model_validate(raw_options),
+        )
+    )
+
+    sampling_params = SglangUtils.build_sampling_params(request)
+
+    if expected is None:
+        assert "logit_bias" not in sampling_params
+    else:
+        assert sampling_params["logit_bias"] == expected
+
+
 @pytest.mark.parametrize("value", [True, "32", 1.0, -1, 2**32])
 def test_multimodal_stop_conditions_reject_invalid_thinking_budget(value):
     with pytest.raises(ValidationError):

@@ -102,6 +102,9 @@ class SglangUtils:
             sampling_params["top_k"] = sampling_options.top_k
         if sampling_options.n is not None:
             sampling_params["n"] = sampling_options.n
+        # An empty map adds no key; SGLang validates token ids against the vocab.
+        if sampling_options.logit_bias:
+            sampling_params["logit_bias"] = sampling_options.logit_bias
         if stop_conditions.max_tokens:
             sampling_params["max_new_tokens"] = stop_conditions.max_tokens
         if stop_conditions.min_tokens:
