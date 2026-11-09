@@ -19,6 +19,9 @@ use crate::protocols::{
 };
 
 mod convert;
+mod dedup;
+#[cfg(test)]
+mod dedup_tests;
 mod deserialize;
 mod extra_keys;
 mod filter;
@@ -34,6 +37,7 @@ pub use convert::{
     StoredBlockOptions, convert_event, create_stored_block_from_parts, create_stored_blocks,
     normalize_mm_placeholder_runs, normalize_mm_token_runs,
 };
+pub use dedup::{EventDedupFilter, EventDedupPolicy};
 pub use extra_keys::{
     DYNAMO_CACHE_SALT_PREFIX, extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace,
     mark_mm_hash_for_extra_key, parse_mm_hash_from_extra_key,

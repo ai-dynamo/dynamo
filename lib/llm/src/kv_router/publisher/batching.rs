@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use dynamo_kv_router::indexer::LocalKvIndexer;
 use dynamo_kv_router::protocols::{KvCacheEventData, Placement, PlacementEvent, RouterEvent};
+use dynamo_kv_router::zmq_wire::{EventDedupFilter, EventDedupPolicy};
 
-use super::dedup::{EventDedupFilter, EventDedupPolicy};
 use super::sinks::emit;
 
 /// Pure accumulator for adjacent compatible placement mutations.

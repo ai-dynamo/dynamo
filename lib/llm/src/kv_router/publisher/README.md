@@ -14,7 +14,8 @@ processor publishes normalized events through the configured event plane.
   lost in that window is repaired at the next live gap (see `ZmqRecoveryConfig`).
 - `event_processor.rs`: owns the async receive loop and preserves event ordering.
 - `batching.rs`: coalesces adjacent store/remove events before publish.
-- `dedup.rs`: gates duplicate removes with per-rank, per-tier refcounts.
+- `EventDedupFilter` (`dynamo_kv_router::zmq_wire`): gates duplicate removes with
+  per-rank, per-tier refcounts.
 - `sinks.rs`: applies events to the local worker indexer and publishes them
   externally.
 - `worker_metrics.rs`: emits worker-local runtime metrics.
@@ -42,7 +43,7 @@ compatible tail at each native-list boundary. Compatible events inside that
 native list are still coalesced. With a positive timeout, the tail may remain
 pending across native lists until the deadline or another flush condition.
 
-`dedup.rs` is applied during flush. Stores update refcounts and still pass
+`EventDedupFilter` is applied during flush. Stores update refcounts and still pass
 through. Removes only pass through when the refcount for a block reaches zero;
 unknown removes pass through defensively.
 

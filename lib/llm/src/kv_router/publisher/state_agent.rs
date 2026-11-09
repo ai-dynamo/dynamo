@@ -31,6 +31,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use dynamo_kv_router::zmq_wire::{EventDedupFilter, EventDedupPolicy};
 use dynamo_kv_router::{
     identity::{CacheOwnerId, CanonicalIdentityMaterial, ExplicitIdentityMap, StableDpSlotId},
     indexer::{
@@ -72,7 +73,6 @@ use crate::{
 use super::{
     DEFAULT_MAX_BATCH_BLOCKS,
     batching::PlacementEventCoalescer,
-    dedup::{EventDedupFilter, EventDedupPolicy},
     sinks::{EventPlanePublisher, RouterEventBatchSink, admit_local_event},
     zmq_listener::{DecodedZmqKvBatch, decode_zmq_kv_batch},
 };
