@@ -25,7 +25,10 @@ KVBM G4 tier via the `ObjectBlockOps` trait.
 | RDMA | `use_zero_copy` flag | Zero-copy via `put_from`/`get_into` + `register_buffer` |
 
 The RDMA path requires calling `register_layout()` before transfers and
-falls back to the copy path for non-contiguous layouts.
+falls back to the copy path for non-contiguous layouts. `use_zero_copy`
+defaults to `false` and is a builder flag, not a config field — set it with
+`MooncakeObjectBlockClient::with_zero_copy(true)`. `create_object_client`
+does not set it.
 
 ## Configuration
 

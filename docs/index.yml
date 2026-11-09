@@ -367,6 +367,8 @@ navigation:
         path: integrations/lmcache-integration.md
       - page: FlexKV
         path: integrations/flexkv-integration.md
+      - page: Mooncake Store
+        path: integrations/mooncake-store-integration.md
       - page: KV Events for Custom Engines
         path: integrations/kv-events-custom-engines.md
 

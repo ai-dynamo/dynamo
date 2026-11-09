@@ -271,6 +271,43 @@ You can also specify exact block counts instead of GB:
 > [!NOTE] KVBM is a write-through cache and it is possible to misconfigure. Each of the capacities should increase as you enable more tiers. As an example, if you configure your GPU device to have 100GB of memory dedicated for KV cache storage, then configure
 `DYN_KVBM_CPU_CACHE_GB >= 100`. The same goes for configuring the disk cache; `DYN_KVBM_DISK_CACHE_GB >= DYN_KVBM_CPU_CACHE_GB`. If the cpu cache is configured to be less than the device cache, then _there will be no benefit from KVBM_. In many cases you will see performance degradation as KVBM will churn by offloading blocks from the GPU to CPU after every forward pass. To know what your minimum value for `DYN_KVBM_CPU_CACHE_GB` should be for your setup, consult your llm engine's kv cache configuration.
 
+### G4 Object Storage Tier (Mooncake)
+
+The tiers above cover GPU (G1), pinned host memory (G2) and local disk (G3). A fourth tier, **G4**, puts offloaded blocks in a shared object store so that a prefix cached by one worker is reusable by *any* worker connected to the same store. [Mooncake Store](https://github.com/kvcache-ai/Mooncake) is the distributed KV store backend for G4; S3-compatible storage is the other option.
+
+Mooncake is configured through the `object` section of the KVBM config, or the equivalent `KVBM_OBJECT_CLIENT_*` environment variables:
+
+```bash
+export KVBM_OBJECT_CLIENT_TYPE=mooncake
+export KVBM_OBJECT_CLIENT_METADATA_SERVER=http://127.0.0.1:8080/metadata
+export KVBM_OBJECT_CLIENT_MASTER_SERVER_ADDR=127.0.0.1:50051
+export KVBM_OBJECT_CLIENT_LOCAL_HOSTNAME=$(hostname)
+export KVBM_OBJECT_CLIENT_PROTOCOL=rdma
+export KVBM_OBJECT_CLIENT_DEVICE_NAME=mlx5_1,mlx5_2
+```
+
+KVBM must be built with the `mooncake` feature, which links against a local Mooncake checkout:
+
+```bash
+git clone https://github.com/kvcache-ai/Mooncake ../../Mooncake
+cargo build -p kvbm-engine --features mooncake
+```
+
+> [!IMPORTANT]
+> The G4 tier is currently reachable through the `kvbm-engine` Rust API only. The `KVBM_OBJECT_CLIENT_*` variables and the `object` config section configure `create_object_client` / `create_lock_manager`, which the embedding application calls when it builds the offload engine (`OffloadEngine::builder(...).with_object_ops(...).with_g2_to_g4_pipeline(...)`, or `.with_enable_remote_g4(true)` in a multi-worker deployment). They are not yet wired end-to-end through the Python connector path.
+
+The choice of transport dominates G4 performance. Measured on Qwen3-30B-A3B KV blocks (96 KiB/token, TP=1, 32K-token prefix = 3 GiB) against a 320 GiB Mooncake holder:
+
+| Path | put | get |
+|------|-----|-----|
+| TCP, copy (default) | 1658 ms | 1703 ms |
+| RDMA, zero-copy, 1 NIC | 119 ms | 116 ms |
+| RDMA, zero-copy, 4 NICs | 45 ms | 42 ms |
+
+RDMA zero-copy is roughly 30–40× lower latency than TCP for a 3 GiB prefix, so an RDMA-capable fabric is effectively a requirement for G4 to be worth enabling. Zero-copy also requires a fully contiguous layout; non-contiguous layouts silently fall back to the copy path.
+
+See [Mooncake Store Integration](../../integrations/mooncake-store-integration.md) for cluster bring-up, the full configuration reference, the RDMA zero-copy requirements, and troubleshooting.
+
 ### SSD Lifespan Protection
 
 When disk offloading is enabled, disk offload filtering is enabled by default to extend SSD lifespan. The current policy only offloads KV blocks from CPU to disk if the blocks have frequency ≥ 2. Frequency doubles on cache hit (initialized at 1) and decrements by 1 on each time decay step.
@@ -494,4 +531,5 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connect
 - [KVBM Design](../../design-docs/kvbm-design.md) for a deep dive into KVBM architecture
 - [LMCache Integration](../../integrations/lmcache-integration.md)
 - [FlexKV Integration](../../integrations/flexkv-integration.md)
+- [Mooncake Store Integration](../../integrations/mooncake-store-integration.md)
 - [SGLang HiCache](../../backends/sglang/sglang-hicache.md)
