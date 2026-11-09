@@ -56,9 +56,12 @@ sequenceDiagram
 - Each `PolicyClassQueue` owns ordering and accounting for one class such as `latency`, `agents`, or `batch`.
 - Within one strict-priority tier, deadline-bearing entries order earliest-due-first
   ahead of all non-deadline entries before the FCFS/LCFS/WSPT policy score applies.
-  Deadlines are indexed in an ordered due set and a conditional actor timer rejects
-  expired entries; all deadline math uses `tokio::time::Instant` so paused-clock tests
-  stay coherent.
+  An EDF class, the policy-class YAML default, ignores strict priority and the score:
+  it orders by the explicit deadline, else router ingress plus the class `slo_ttft_ms`,
+  then enqueue order. Only explicit deadlines are indexed in the ordered due set, where
+  a conditional actor timer rejects expired entries; class due times only order. Due-time
+  keys share one origin fixed at queue construction, and all deadline math uses
+  `tokio::time::Instant` so paused-clock tests stay coherent.
 - `SchedulerQueueActor::admit_one` performs final worker selection and reserves worker capacity after either path.
 - A single-class profile still uses `PolicyQueue`, but DRR has no cross-class effect.
 

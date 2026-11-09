@@ -3,13 +3,15 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::num::NonZeroU64;
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
 use thiserror::Error;
+use tokio::time::Instant;
 
 use super::KvSchedulerError;
 use super::config::RouterQueuePolicy;
@@ -45,9 +47,11 @@ pub struct PolicyClassConfig {
     pub name: String,
     pub queue_policy: RouterQueuePolicy,
     pub quantum: usize,
-    /// Time-to-first-token budget in whole milliseconds, or `None` when the class sets none.
-    /// Queue ordering, deadlines, and expiry do not read it.
-    pub slo_ttft_ms: Option<NonZeroU64>,
+    /// Time-to-first-token budget in whole milliseconds, at most `u32::MAX` (about 49.7 days),
+    /// or `None` when the class sets none. An EDF class orders a request without an explicit
+    /// deadline by its router ingress plus this budget; nothing rejects or expires a request
+    /// when the budget passes.
+    pub slo_ttft_ms: Option<NonZeroU32>,
     /// The limits this class waits on.
     pub busy_thresholds: BusyThresholds,
     pub request_queue_limit_per_worker: Option<usize>,
@@ -67,6 +71,14 @@ impl PolicyClassConfig {
         self.request_queue_limit_per_worker == Some(0)
             || self.raw_isl_token_queue_limit_per_worker == Some(0)
             || self.cached_token_queue_limit_per_worker == Some(0)
+    }
+
+    /// When this class's TTFT budget runs out for a request that entered the router at
+    /// `ingress_at`, or `None` when the class sets no budget.
+    pub fn slo_ttft_due_at(&self, ingress_at: Instant) -> Option<Instant> {
+        // The `u32` millisecond budget keeps the sum within the monotonic clock's range.
+        self.slo_ttft_ms
+            .map(|slo_ttft_ms| ingress_at + Duration::from_millis(u64::from(slo_ttft_ms.get())))
     }
 }
 
@@ -465,16 +477,21 @@ struct RawPolicyProfile {
 #[serde(deny_unknown_fields)]
 struct RawPolicyClassConfig {
     name: String,
-    #[serde(default)]
+    /// A configured class defaults to EDF; the synthetic class keeps the router-wide policy.
+    #[serde(default = "default_class_queue_policy")]
     queue_policy: RouterQueuePolicy,
     quantum: usize,
-    slo_ttft_ms: Option<u64>,
+    slo_ttft_ms: Option<u32>,
     prefill_busy_threshold: Option<usize>,
     prefill_busy_threshold_frac: Option<f64>,
     decode_busy_threshold_frac: Option<f64>,
     request_queue_limit_per_worker: Option<usize>,
     raw_isl_token_queue_limit_per_worker: Option<usize>,
     cached_token_queue_limit_per_worker: Option<usize>,
+}
+
+fn default_class_queue_policy() -> RouterQueuePolicy {
+    RouterQueuePolicy::Edf
 }
 
 fn resolve_profile(
@@ -538,7 +555,7 @@ fn resolve_policy_class(
     }
     if raw.queue_policy == RouterQueuePolicy::Lcfs {
         return Err(RouterPolicyConfigError::Validation(format!(
-            "{location} policy class {:?} queue_policy must be fcfs or wspt",
+            "{location} policy class {:?} queue_policy must be edf, fcfs, or wspt",
             raw.name
         )));
     }
@@ -558,7 +575,7 @@ fn resolve_policy_class(
     }
     let slo_ttft_ms = match raw.slo_ttft_ms {
         None => None,
-        Some(slo_ttft_ms) => Some(NonZeroU64::new(slo_ttft_ms).ok_or_else(|| {
+        Some(slo_ttft_ms) => Some(NonZeroU32::new(slo_ttft_ms).ok_or_else(|| {
             RouterPolicyConfigError::Validation(format!(
                 "{location} policy class {:?} slo_ttft_ms must be greater than zero",
                 raw.name
@@ -821,7 +838,8 @@ models:
                 .class(exact.resolve_class_index(Some("model-queued")).unwrap())
                 .queueing_enabled()
         );
-        assert_eq!(exact.default_class().queue_policy, RouterQueuePolicy::Fcfs);
+        // A configured class without queue_policy is EDF, whatever the router-wide policy.
+        assert_eq!(exact.default_class().queue_policy, RouterQueuePolicy::Edf);
         assert_eq!(
             exact.default_class().request_queue_limit_per_worker,
             Some(0)
@@ -1045,7 +1063,7 @@ policy_classes:
             ),
             (
                 "policy_classes:\n  - name: lcfs\n    queue_policy: lcfs\n    quantum: 1\n",
-                "root policy class \"lcfs\" queue_policy must be fcfs or wspt",
+                "root policy class \"lcfs\" queue_policy must be edf, fcfs, or wspt",
             ),
             (
                 "models:\n  m:\n    policy_classes:\n      - name: a\n        quantum: 1\n      - name: b\n        quantum: 1\n",
@@ -1119,12 +1137,17 @@ policy_classes:
         assert_eq!(slo_ttft_ms("    slo_ttft_ms: null\n").unwrap(), None);
         assert_eq!(
             slo_ttft_ms("    slo_ttft_ms: 1\n").unwrap(),
-            NonZeroU64::new(1)
+            NonZeroU32::new(1)
         );
+        // The maximum is u32::MAX milliseconds; one more is an ordinary parse error.
         assert_eq!(
-            slo_ttft_ms(&format!("    slo_ttft_ms: {}\n", u64::MAX)).unwrap(),
-            NonZeroU64::new(u64::MAX)
+            slo_ttft_ms(&format!("    slo_ttft_ms: {}\n", u32::MAX)).unwrap(),
+            NonZeroU32::new(u32::MAX)
         );
+        assert!(matches!(
+            slo_ttft_ms(&format!("    slo_ttft_ms: {}\n", u64::from(u32::MAX) + 1)),
+            Err(RouterPolicyConfigError::Parse { .. })
+        ));
 
         let error = slo_ttft_ms("    slo_ttft_ms: 0\n").unwrap_err().to_string();
         assert!(
@@ -1150,6 +1173,69 @@ policy_classes:
     }
 
     #[test]
+    fn slo_ttft_due_at_counts_the_budget_from_ingress() {
+        let class = |slo_ttft_ms| PolicyClassConfig {
+            slo_ttft_ms: NonZeroU32::new(slo_ttft_ms),
+            ..PolicyProfile::synthetic(None, RouterQueuePolicy::Edf)
+                .default_class()
+                .clone()
+        };
+        let ingress_at = Instant::now();
+        assert_eq!(class(0).slo_ttft_due_at(ingress_at), None);
+        assert_eq!(
+            class(1500).slo_ttft_due_at(ingress_at),
+            Some(ingress_at + Duration::from_millis(1500))
+        );
+        assert_eq!(
+            class(u32::MAX).slo_ttft_due_at(ingress_at),
+            Some(ingress_at + Duration::from_millis(u64::from(u32::MAX)))
+        );
+    }
+
+    #[test]
+    fn omitted_queue_policy_selects_edf_only_for_configured_classes() {
+        let queue_policy = |setting: &str| {
+            RouterPolicyConfig::from_yaml(&format!(
+                "policy_classes:\n  - name: c\n    quantum: 1\n{setting}"
+            ))
+            .map(|config| {
+                config
+                    .resolve_profile(None, None, RouterQueuePolicy::Wspt)
+                    .default_class()
+                    .queue_policy
+            })
+        };
+
+        assert_eq!(queue_policy("").unwrap(), RouterQueuePolicy::Edf);
+        for policy in [
+            RouterQueuePolicy::Edf,
+            RouterQueuePolicy::Fcfs,
+            RouterQueuePolicy::Wspt,
+        ] {
+            assert_eq!(
+                queue_policy(&format!("    queue_policy: {policy}\n")).unwrap(),
+                policy
+            );
+        }
+        assert!(queue_policy("    queue_policy: lcfs\n").is_err());
+
+        // The synthetic class keeps the router-wide policy: FCFS by default, LCFS included.
+        assert_eq!(RouterQueuePolicy::default(), RouterQueuePolicy::Fcfs);
+        for policy in [
+            RouterQueuePolicy::default(),
+            RouterQueuePolicy::Edf,
+            RouterQueuePolicy::Lcfs,
+        ] {
+            assert_eq!(
+                PolicyProfile::synthetic(None, policy)
+                    .default_class()
+                    .queue_policy,
+                policy
+            );
+        }
+    }
+
+    #[test]
     fn documented_sample_exercises_root_and_model_profiles() {
         let config = RouterPolicyConfig::from_yaml(include_str!(
             "../../../../examples/router/policy-class-queues.yaml"
@@ -1165,12 +1251,12 @@ policy_classes:
         assert_eq!(
             classes,
             [
-                ("priority", 800, NonZeroU64::new(1000)),
-                ("standard", 200, NonZeroU64::new(3000)),
+                ("priority", 800, NonZeroU32::new(1000)),
+                ("standard", 200, NonZeroU32::new(3000)),
             ]
         );
         assert!(root.classes().iter().all(|class| {
-            class.queue_policy == RouterQueuePolicy::Fcfs && class.queueing_enabled()
+            class.queue_policy == RouterQueuePolicy::Edf && class.queueing_enabled()
         }));
         assert_eq!(
             root.class(root.resolve_class_index(Some("priority")).unwrap())
