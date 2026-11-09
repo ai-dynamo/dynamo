@@ -39,19 +39,15 @@ impl StreamAggregable for NvImagesResponse {
         }
 
         let mut next_nvext = next.nvext;
-        if !next.data.is_empty() {
-            // Image-free chunks leave the step count alone. Once cleared, it
-            // stays cleared because `ImageAccounting::merge` sees `None != Some(n)`.
-            let had_images = !self.data.is_empty();
-            let current = self.nvext.as_mut().and_then(|nvext| nvext.usage.as_mut());
-            let reported = next_nvext.as_mut().and_then(|nvext| nvext.usage.as_mut());
-            match (current, reported) {
-                // These images have no step count.
-                (Some(current), None) => current.num_inference_steps = None,
-                // Earlier images had no step count.
-                (None, Some(reported)) if had_images => reported.num_inference_steps = None,
-                _ => {}
-            }
+        let had_images = !self.data.is_empty();
+        let current = self.nvext.as_mut().and_then(|nvext| nvext.usage.as_mut());
+        let reported = next_nvext.as_mut().and_then(|nvext| nvext.usage.as_mut());
+        match (current, reported) {
+            // These images have no step count.
+            (Some(current), None) if !next.data.is_empty() => current.num_inference_steps = None,
+            // Earlier images had no step count, even if this report carries no images.
+            (None, Some(reported)) if had_images => reported.num_inference_steps = None,
+            _ => {}
         }
         if let Some(next) = next_nvext {
             self.nvext.get_or_insert_with(Default::default).merge(next);
@@ -234,6 +230,7 @@ mod tests {
         chunk
     }
 
+    /// Start with no images or accounting so the first chunk also exercises `merge`.
     fn merge_all(chunks: Vec<NvImagesResponse>) -> NvImagesResponse {
         let mut merged = NvImagesResponse::empty();
         for chunk in chunks {
@@ -250,13 +247,21 @@ mod tests {
             .collect()
     }
 
+    /// Missing extensions and missing usage must keep steps absent through later reports.
     #[test]
     fn image_chunk_without_accounting_clears_step_count() {
         // A chunk can omit accounting with no `nvext` or with `nvext: {}`.
         let missing_shapes = [None, Some(ImagesResponseNvExt { usage: None })];
         for missing in missing_shapes {
             let reported = || Some(accounting(1, Some(4)));
+            let mut terminal = NvImagesResponse::empty();
+            terminal.nvext = reported();
             let cases = [
+                (
+                    "missing then image-free reporting",
+                    vec![image_chunk("a", missing.clone()), terminal],
+                    1,
+                ),
                 (
                     "reporting then missing",
                     vec![
