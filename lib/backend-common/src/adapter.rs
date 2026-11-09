@@ -471,11 +471,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             // so the per-chunk overhead is one timestamp + one Vec push.
             let mut itl_samples_ms: Vec<f64> = Vec::new();
             let mut last_token_at: Option<Instant> = None;
-            // A flag rather than the pending item, and the item rewritten in
-            // place only when it applies: each move of an item is a ~1 KB copy.
-            let mut shutdown_after = false;
+            // Moving an item is a ~1 KB copy: defer the error as a flag and
+            // edit `item` in place.
+            let mut needs_shutdown_error = false;
             loop {
-                let mut item = if shutdown_after {
+                let mut item = if needs_shutdown_error {
                     Err(engine_shutdown_error())
                 } else {
                     match inner.next().await {
@@ -485,16 +485,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 };
                 chunk_count += 1;
                 if ended_by_engine_cleanup(&item, &engine_cleanup, &*stream_ctx) {
-                    item = match item {
+                    match &mut item {
                         // Forward the chunk's tokens first: the migrated
                         // continuation resumes from the tokens it has seen.
-                        Ok(mut chunk) if !chunk.token_ids.is_empty() => {
+                        Ok(chunk) if !chunk.token_ids.is_empty() => {
                             chunk.finish_reason = None;
-                            shutdown_after = true;
-                            Ok(chunk)
+                            needs_shutdown_error = true;
                         }
-                        _ => Err(engine_shutdown_error()),
-                    };
+                        _ => item = Err(engine_shutdown_error()),
+                    }
                 }
                 match item {
                     Ok(mut chunk) => {
