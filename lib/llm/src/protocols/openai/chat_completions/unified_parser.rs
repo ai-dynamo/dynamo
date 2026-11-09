@@ -158,6 +158,7 @@ pub(crate) fn configured_family(
     reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
     match (tool_call_parser, reasoning_parser) {
+        (Some("hermes"), Some("basic")) => canonical_family("hermes"),
         (Some(tool), Some(reasoning)) => {
             let tool_family = canonical_family(tool)?;
             let reasoning_family = canonical_family(reasoning)?;
@@ -884,7 +885,7 @@ fn bare_json_starting_state(family: &str) -> UnifiedParserStartingState {
 fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserStartingState> {
     match family {
         "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "minimax_m3"
-        | "nemotron_v3" => {
+        | "nemotron_v3" | "hermes" => {
             let (opener_marker, closer_marker) = reasoning_marker_pair(family)
                 .expect("think-marker families have a configured reasoning pair");
             // Compare FIRST-occurrence positions, not mere presence: a prompt that
@@ -981,9 +982,8 @@ fn beam_prefill(content: &str) -> UnifiedParserStartingState {
 fn reasoning_marker_pair(family: &str) -> Option<(&'static str, &'static str)> {
     match family {
         "minimax_m3" => Some(("<mm:think>", "</mm:think>")),
-        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "nemotron_v3" => {
-            Some(("<think>", "</think>"))
-        }
+        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "nemotron_v3"
+        | "hermes" => Some(("<think>", "</think>")),
         "gemma4" => Some(("<|channel>", "<channel|>")),
         _ => None,
     }
@@ -4305,6 +4305,123 @@ pub(crate) mod tests {
     };
     use futures::FutureExt;
     use futures::stream;
+
+    #[test]
+    fn hermes_hookup_routes_basic_pair() {
+        assert_eq!(
+            configured_family(Some("hermes"), Some("basic")),
+            Some("hermes")
+        );
+        assert_eq!(configured_family(Some("hermes"), None), Some("hermes"));
+        assert_eq!(configured_family(Some("qwen3_coder"), Some("basic")), None);
+    }
+
+    #[tokio::test]
+    async fn hermes_hookup_prefilled_reasoning_streams_at_every_split() {
+        let input = r#"Plan.</think><tool_call>{"name":"get_weather","arguments":{"city":"Paris"}}</tool_call>Done."#;
+        for split in 0..=input.len() {
+            let output = apply_stream_with_policy(
+                stream::iter([chunk(&input[..split], false), chunk(&input[split..], true)]),
+                Some(weather_tools()),
+                GuidedToolConstraint::None,
+                stream_prefill("hermes", true),
+                "hermes",
+                true,
+                UnifiedRequestPolicy::default(),
+            )
+            .collect::<Vec<_>>()
+            .await;
+            assert!(
+                output.iter().all(|item| !item.is_error()),
+                "split {split}: {output:?}"
+            );
+            assert_eq!(
+                logical_events(&output),
+                vec![
+                    LogicalEvent::Reasoning("Plan.".into()),
+                    LogicalEvent::Tool {
+                        index: 0,
+                        name: Some("get_weather".into()),
+                        arguments: r#"{"city":"Paris"}"#.into()
+                    },
+                    LogicalEvent::Text("Done.".into()),
+                ],
+                "split {split}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn hermes_hookup_batch_and_guided_stream() {
+        let native = r#"Plan.</think><tool_call>{"name":"get_weather","arguments":{"city":"Paris"}}</tool_call>Done."#;
+        let batch = parse_complete_with_policy(
+            "hermes",
+            native,
+            &GuidedToolConstraint::None,
+            &weather_tools(),
+            UnifiedRequestPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(batch.reasoning, "Plan.");
+        assert_eq!(batch.text, "Done.");
+        assert_eq!(batch.tool_calls.len(), 1);
+        assert_eq!(batch.tool_calls[0].function.name, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&batch.tool_calls[0].function.arguments)
+                .unwrap(),
+            serde_json::json!({"city":"Paris"})
+        );
+        for (constraint, raw) in [
+            (
+                GuidedToolConstraint::GuidedJsonNamed {
+                    tool_name: "get_weather".into(),
+                },
+                r#"{"city":"Paris"}"#,
+            ),
+            (
+                GuidedToolConstraint::GuidedJsonRequired,
+                r#"[{"name":"get_weather","arguments":{"city":"Paris"}}]"#,
+            ),
+        ] {
+            let batch = parse_complete_with_policy(
+                "hermes",
+                raw,
+                &constraint,
+                &weather_tools(),
+                UnifiedRequestPolicy::default(),
+            )
+            .unwrap();
+            assert!(batch.reasoning.is_empty());
+            assert!(batch.text.is_empty());
+            assert_eq!(batch.tool_calls.len(), 1);
+            for split in 0..=raw.len() {
+                let output = apply_stream_with_policy(
+                    stream::iter([chunk(&raw[..split], false), chunk(&raw[split..], true)]),
+                    Some(weather_tools()),
+                    constraint.clone(),
+                    stream_prefill("hermes", true),
+                    "hermes",
+                    true,
+                    UnifiedRequestPolicy::default(),
+                )
+                .collect::<Vec<_>>()
+                .await;
+                assert!(
+                    output.iter().all(|item| !item.is_error()),
+                    "split {split}: {output:?}"
+                );
+                assert_eq!(
+                    logical_events(&output),
+                    vec![LogicalEvent::Tool {
+                        index: 0,
+                        name: Some("get_weather".into()),
+                        arguments: r#"{"city":"Paris"}"#.into()
+                    }],
+                    "split {split}"
+                );
+            }
+        }
+    }
 
     struct PartialCommitParser {
         recovered: String,
@@ -13546,10 +13663,23 @@ pub(crate) mod tests {
                 assert_eq!(selected_content_decoder_family(tool, reasoning), expected);
             }
         }
+        let hermes_expected = (selection != "1").then_some("hermes");
+        assert_eq!(
+            selected_family(Some("hermes"), Some("basic")),
+            hermes_expected
+        );
+        assert_eq!(
+            selected_batch_family(Some("hermes"), Some("basic")),
+            hermes_expected
+        );
+        assert_eq!(
+            selected_content_decoder_family(Some("hermes"), Some("basic")),
+            hermes_expected
+        );
         for (tool, reasoning) in [
             (Some("qwen3_coder"), Some("glm47")),
             (Some("qwen3_coder"), Some("deepseek_r1")),
-            (Some("hermes"), None),
+            (Some("qwen25"), None),
             (None, Some("deepseek_r1")),
             (None, None),
         ] {

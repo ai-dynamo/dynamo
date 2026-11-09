@@ -12211,7 +12211,7 @@ responses_tools: None,
         ) {
             return;
         }
-        for (tool, reasoning) in [("hermes", None), ("qwen3_coder", Some("hermes"))] {
+        for (tool, reasoning) in [("qwen25", None), ("qwen3_coder", Some("hermes"))] {
             let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
             let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
@@ -14477,7 +14477,7 @@ responses_tools: None,
                 true,
                 "gemma4 paired → required",
             ),
-            (Some("hermes"), None, false, "hermes → not required"),
+            (Some("hermes"), None, true, "hermes v2 → required"),
             (
                 Some("harmony"),
                 None,
@@ -14743,6 +14743,24 @@ responses_tools: None,
                 expected,
                 "FAILED: {desc}",
             );
+        }
+    }
+
+    #[test]
+    fn hermes_hookup_detects_prompt_prefilled_reasoning() {
+        for reasoning in [None, Some("basic")] {
+            let on = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+                Some("hermes"),
+                reasoning,
+                Some("assistant\n<think>\n"),
+            );
+            assert!(on.unified);
+            let off = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+                Some("hermes"),
+                reasoning,
+                Some("assistant\n<think></think>\n"),
+            );
+            assert!(!off.unified);
         }
     }
 
@@ -16213,7 +16231,7 @@ responses_tools: None,
             None,
         )
         .unwrap();
-        mdc.runtime_config.tool_call_parser = Some("hermes".to_string());
+        mdc.runtime_config.tool_call_parser = Some("qwen25".to_string());
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "test-model",

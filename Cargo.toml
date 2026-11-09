@@ -94,10 +94,10 @@ dynamo-protocols = { version = "=8.5.0" }
 dynamo-decisions = { version = "=0.1.0", features = ["utoipa"] }
 dynamo-parsers = { version = "=10.2.2" }
 
-# Published on crates.io. To see all available versions:
+# Pinned to frontend-crates#565 until Hermes V2 is released. Published versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
 #   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
-dynamo-parsers-v2 = { version = "=0.9.6" }
+dynamo-parsers-v2 = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "15e34901b1a938111616314df843f197256638f0", version = "=0.10.0" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.7.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.7.0" }
 
