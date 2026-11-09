@@ -72,10 +72,14 @@ compare aggregated vs. disaggregated layouts before committing.
 
 This guide uses a **single-node, multi-GPU** example — prefill and decode run on
 separate GPUs in the same node (for instance, a node with 8×H100 serving
-Qwen3-32B, one GPU per worker). On a single node the KV cache moves GPU-to-GPU
-over NVLink, so there is nothing extra to configure for the transport. Scaling
-prefill and decode across **multiple nodes** adds RDMA networking — see
-[Enable multi-node transfer](#enable-multi-node-transfer) at the end.
+Qwen3-32B, one GPU per worker). Each worker runs in its own pod. By default,
+Kubernetes isolation stops the KV cache from moving over NVLink between two pods,
+even on the same node, so the transfer uses RDMA if the pods request it and TCP
+otherwise. The [Enable KV transfer](#enable-kv-transfer) step explains why, and
+[Use NVLink between pods on one node](#use-nvlink-between-pods-on-one-node)
+describes the opt-in. Scaling prefill and decode across **multiple nodes** adds
+RDMA networking; see [Enable multi-node transfer](#enable-multi-node-transfer)
+at the end.
 
 ## Write the deployment
 
@@ -206,18 +210,36 @@ rather than prompt load.
 
 Because prefill and decode run on **different GPUs**, the KV cache prefill
 produces has to be copied into the decode worker's GPU memory before decode can
-generate. Dynamo's transfer layer, **NIXL**, does this automatically. On a
-single node it selects **CUDA IPC** and moves the cache GPU-to-GPU over NVLink —
-no network, no RDMA, nothing to configure for the transport itself.
+generate. Dynamo's transfer layer, **NIXL**, does this automatically, and with
+its UCX backend, UCX picks the transport.
 
-The one field you do set is shared memory, already in the worker specs above:
+UCX moves the cache GPU-to-GPU over NVLink with **CUDA IPC** only when both of
+these hold for the two worker processes:
+
+- **They share a PID namespace.** Starting with UCX 1.23
+  ([openucx/ucx#11514](https://github.com/openucx/ucx/pull/11514)), UCX treats
+  CUDA IPC as unreachable across PID namespaces unless both GPUs support fabric
+  handles (IMEX). HGX systems such as 8×H100 nodes do not have them.
+- **The importing process can see the peer GPU.** With the default one GPU per
+  pod, opening the peer's CUDA IPC handle fails.
+
+Default worker pods meet neither condition, even when they run on the same
+node. UCX then uses RDMA if the pods request RDMA devices, and TCP otherwise.
+NIXL logs no error when this happens. TCP is slow enough that transfers of long
+prompts can exceed the engine's KV transfer timeout, and requests fail. Setting
+`UCX_TLS` does not change this. To get NVLink between pods, see
+[Use NVLink between pods on one node](#use-nvlink-between-pods-on-one-node). To
+check which transport a deployment uses, see the next step.
+
+The field you always set is shared memory, already in the worker specs above:
 
 | Setting | Why |
 |---|---|
 | `sharedMemory.size: 16Gi` | NIXL stages transfer metadata through the pod's `/dev/shm`. The pod default (64 MB) is too small and NIXL fails to initialize. `16Gi` is comfortable headroom, not a tightly-computed per-request budget — it does not consume that memory unless needed. |
 
-That is the entire KV-transfer configuration for a single node: two workers
-tagged prefill/decode, matching `--model`, and enough shared memory for NIXL.
+With these fields the KV transfer works: two workers tagged prefill/decode,
+matching `--model`, and enough shared memory for NIXL. The transport it uses
+depends on the pod settings described above.
 
 </Step>
 
@@ -247,15 +269,35 @@ default. Symptoms of a broken transfer path include high TTFT despite free
 prefill capacity, decode workers sitting idle while prefill is busy, or
 disaggregated throughput falling below your aggregated baseline.
 
+This check does not show which transport UCX chose. To see it, add
+`UCX_PROTO_INFO=y` to the `env` of both workers, send a request, and read the
+protocol lines in the decode worker's log:
+
+```bash
+kubectl logs <decode-worker-pod> | grep -E "intra-node|inter-node|cuda_ipc|tcp/|rc_mlx5"
+```
+
+For a GPU-to-GPU KV read, `cuda_ipc` means NVLink, an RDMA device such as
+`rc_mlx5` means RDMA, and `tcp` means the transfer goes over TCP. For example,
+with vLLM, two default pods on one node show this line for the KV read:
+
+```text
+intra-node ... 0..inf | software emulation | tcp/eth0
+```
+
+Remove `UCX_PROTO_INFO` after the check; it adds log output for every new
+connection.
+
 </Step>
 
 <Step title="Enable multi-node transfer">
 
-Everything above keeps prefill and decode on **one node**, where the KV cache
-moves over NVLink. When a worker's parallelism exceeds the GPUs on a node, or you
-want prefill and decode pools on separate machines, the KV cache travels over the
-**network** instead — and that path needs **RDMA** (InfiniBand or RoCE). Without
-it, transfers fall back to TCP and KV movement can dominate TTFT and throughput.
+Everything above keeps prefill and decode on **one node**. When a worker's
+parallelism exceeds the GPUs on a node, or you want prefill and decode pools on
+separate machines, the KV cache travels over the **network**, and that path needs
+**RDMA** (InfiniBand or RoCE). Without it, transfers fall back to TCP and KV
+movement can dominate TTFT and throughput. The same RDMA setup also serves
+separate pods on one node when you do not use the NVLink opt-in.
 
 Multi-node adds RDMA fields to each worker (`rdma/ib` resource requests, the
 `IPC_LOCK` capability, and `UCX_*` transport env vars) plus an RDMA device plugin
@@ -267,6 +309,90 @@ for spanning workers across machines.
 </Step>
 
 </Steps>
+
+## Use NVLink between pods on one node
+
+To move the KV cache over NVLink between prefill and decode pods on the same
+node, each worker pod must share the host PID namespace and see the other
+worker's GPU. One pattern that does this and keeps GPU scheduling under the
+device plugin:
+
+> [!WARNING]
+> This pattern runs workers with `hostPID: true` and `privileged: true`. The
+> namespace must allow Pod Security level `privileged`, and each worker can see
+> every process and device on the host. It helps only when prefill and decode
+> run on the same node; across nodes you still need RDMA. Decide with your
+> cluster administrator whether this trade-off is acceptable.
+
+```yaml
+    decode:
+      componentType: worker
+      subComponentType: decode
+      resources:
+        limits:
+          gpu: "1"
+      sharedMemory:
+        size: 16Gi
+      extraPodSpec:
+        hostPID: true                 # share the host PID namespace
+        initContainers:
+          - name: gpu-ids             # record the GPUs the device plugin allocated
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+            command: ["sh", "-c", "nvidia-smi --query-gpu=uuid --format=csv,noheader | paste -sd, > /gpu-alloc/uuids"]
+            resources:
+              limits:
+                nvidia.com/gpu: "1"   # same count as the worker
+            volumeMounts:
+              - name: gpu-alloc
+                mountPath: /gpu-alloc
+        volumes:
+          - name: gpu-alloc
+            emptyDir: {}
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+          securityContext:
+            privileged: true          # make every GPU on the node visible
+          volumeMounts:
+            - name: gpu-alloc
+              mountPath: /gpu-alloc
+          command:
+            - bash
+            - -c
+            - |
+              # Pin CUDA back to the GPUs allocated to this pod
+              export CUDA_DEVICE_ORDER=PCI_BUS_ID
+              export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader \
+                | grep -F -f <(tr , '\n' < /gpu-alloc/uuids) | cut -d, -f1 | paste -sd,)
+              exec python3 -m dynamo.vllm "$@"
+            - worker
+          args:
+            - --model
+            - Qwen/Qwen3-32B
+            - --disaggregation-mode
+            - decode
+```
+
+Apply the same change to the prefill worker. The pieces work together:
+
+- `hostPID: true` lets UCX treat CUDA IPC as reachable between the two pods.
+- `privileged: true` makes the peer GPU visible, so the importing worker can
+  open its CUDA IPC handle.
+- The init container requests the same GPU count as the worker. The kubelet
+  gives the main container the same devices, so the init container's
+  `nvidia-smi` output lists the GPUs allocated to this pod.
+- The command wrapper sets `CUDA_VISIBLE_DEVICES` to those GPUs, so each worker
+  still uses only the GPUs the scheduler assigned to it.
+
+After you apply it, run the `UCX_PROTO_INFO=y` check from
+[Apply and verify the transfer path](#apply-and-verify-the-transfer-path). The
+GPU-to-GPU KV read should show `cuda_ipc`:
+
+```text
+intra-node ... 0..inf | zero-copy | cuda_ipc/cuda
+```
+
+[GitHub issue #16646](https://github.com/ai-dynamo/dynamo/issues/16646) has the
+measurements behind this pattern and tracks first-class support in the operator.
 
 ## Faster starting points
 
@@ -304,6 +430,9 @@ and [KV Cache Aware Routing](../../developer-guide/knowledge-base/modular-compon
 ## Before production
 
 - Confirm NIXL initialized on each worker (the log check above).
+- Confirm the KV transfer uses the transport you expect (`cuda_ipc`, RDMA, or
+  `tcp`) with the `UCX_PROTO_INFO=y` check above. Separate pods on one node use
+  TCP unless they request RDMA or use the NVLink opt-in.
 - Confirm prefill and decode workers agree on model, dtype, block size, and KV layout.
 - Confirm pods have the required GPU and shared memory.
 - Confirm frontend/router flags match your routing strategy.
