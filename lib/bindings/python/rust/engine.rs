@@ -461,7 +461,8 @@ where
         Some(
             Context::new(ctx.clone(), current_trace_context, None, metadata)
                 .with_session_affinity_from(&context)
-                .map_err(anyhow::Error::msg)?,
+                .map_err(anyhow::Error::msg)?
+                .with_response_headers_from(&context),
         )
     } else {
         None

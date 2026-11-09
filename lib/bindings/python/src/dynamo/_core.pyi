@@ -581,6 +581,20 @@ class Context:
         auto-fires on the first non-empty chunk in the response stream."""
         ...
 
+    def set_response_header(self, name: str, value: str) -> bool:
+        """Set an HTTP response header from a frontend chat engine.
+
+        Call it before the engine's first yield, or before it raises. Returns
+        ``False`` when this request's response cannot carry the header: the
+        response is already committed (a streaming request without
+        ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``, or a call after the first
+        yield of one with it), or the request is not a ``/v1/chat/completions``
+        request. Otherwise raises ``ValueError`` for a name or value that is
+        not a valid header, or for a header the HTTP layer owns
+        (``content-type``, ``content-length``, ``content-encoding``,
+        ``x-request-id``, hop-by-hop headers)."""
+        ...
+
     @property
     def metadata(self) -> ContextMetadata:
         """

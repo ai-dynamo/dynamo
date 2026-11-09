@@ -24,7 +24,7 @@ from typing import AsyncGenerator, Dict
 import aiohttp
 import pytest
 
-from dynamo._core import _raise_routed_http_error
+from dynamo._core import Context, _raise_routed_http_error
 from dynamo.frontend.utils import PromptLogprobsAccumulator
 from dynamo.llm import HttpAsyncEngine, HttpError, HttpService
 from dynamo.runtime import DistributedRuntime
@@ -34,6 +34,7 @@ MSG_CONTAINS_STATUS_ERROR = "This message contains a 415 status error."
 MSG_CONTAINS_INVALID_ARGUMENT = "This message contains an invalid argument."
 MSG_CONTAINS_INTERNAL_ERROR = "This message contains an internal server error."
 MSG_CONTAINS_ROUTED_ERROR = "This message contains a routed worker's error."
+MSG_SETS_RESPONSE_HEADER = "This message sets a response header."
 
 
 class _StatusLikeError(Exception):
@@ -71,6 +72,9 @@ class MockHttpEngine:
         if context.is_stopped():
             print(f"Request {context.id()} was cancelled before starting.")
             return
+
+        if MSG_SETS_RESPONSE_HEADER.lower() in user_message.lower():
+            context.set_response_header("x-mock-engine", "set")
 
         if MSG_CONTAINS_ERROR.lower() in user_message.lower():
             raise HttpError(code=400, message=MSG_CONTAINS_ERROR)
@@ -376,3 +380,49 @@ async def test_streaming_chat_completion_http_error_default_commits_200(http_ser
         f"the generator raised before its first yield, so the stream must "
         f"carry no content; got: {body}"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("http_server", "stream", "trigger", "status", "has_header"),
+    [
+        pytest.param(False, False, "", 200, True, id="unary"),
+        pytest.param(False, False, MSG_CONTAINS_ERROR, 400, True, id="unary_error"),
+        pytest.param(True, True, "", 200, True, id="stream_wait_for_first_item"),
+        pytest.param(False, True, "", 200, False, id="stream_default"),
+    ],
+    indirect=["http_server"],
+)
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_chat_engine_response_header(
+    http_server, stream: bool, trigger: str, status: int, has_header: bool
+):
+    """A header the engine sets through its context is on the response, error
+    responses included, when the service reads the engine's stream before it
+    commits the response. The default service commits a streaming response
+    first, so that response never carries the header."""
+    base_url, model_name = http_server
+    data = {
+        "model": model_name,
+        "messages": [
+            {"role": "user", "content": f"{MSG_SETS_RESPONSE_HEADER} {trigger}"}
+        ],
+        "stream": stream,
+    }
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10)
+    ) as session:
+        async with session.post(
+            f"{base_url}/v1/chat/completions", json=data
+        ) as response:
+            assert response.status == status
+            assert response.headers.get("x-mock-engine") == (
+                "set" if has_header else None
+            )
+            await response.read()
+
+
+def test_set_response_header_without_an_http_response():
+    # A context with no HTTP response behind it reports that nothing was set.
+    assert Context().set_response_header("x-mock-engine", "set") is False
