@@ -270,6 +270,7 @@ impl Capture {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::time::Duration;
 
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
