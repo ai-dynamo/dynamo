@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
 use pythonize::{depythonize, pythonize};
 use tokio_stream::StreamExt;
 use tracing::Instrument;
@@ -14,6 +17,7 @@ use dynamo_runtime::logging::{DistributedTraceContext, otel_parent_context_from_
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated as RsAnnotated;
 
+use super::py_convert;
 use crate::errors::routed_error_to_pyerr;
 use crate::to_pyerr;
 
@@ -26,6 +30,60 @@ impl RoutedEngine {
     pub fn new(inner: PrefillRoutedEngine) -> Self {
         Self { inner }
     }
+}
+
+/// The `PreprocessedRequest` a Python engine passes to [`RoutedEngine::generate`].
+///
+/// `token_ids` and `extra_args` can each hold a prompt-sized list of ints (a chat engine's
+/// capture plan, a multimodal prompt's expanded ids), and pythonize costs tens of ns per
+/// int on the event loop's thread. [`fast_preprocessed_request`] reads those two fields
+/// directly; any request it declines takes the full pythonize conversion, so results and
+/// errors for it are unchanged.
+fn preprocessed_request_from_py(obj: &Bound<'_, PyAny>) -> PyResult<PreprocessedRequest> {
+    if let Some(request) = fast_preprocessed_request(obj) {
+        return Ok(request);
+    }
+    depythonize(obj).map_err(to_pyerr)
+}
+
+/// An exact `dict` whose `token_ids` is an exact list of ints and whose `extra_args` is
+/// absent, `None` or plain JSON-shaped data, with those two fields read directly and the
+/// rest by pythonize. `None` for anything else, or if the rest fails to convert.
+fn fast_preprocessed_request(obj: &Bound<'_, PyAny>) -> Option<PreprocessedRequest> {
+    let dict = obj.downcast_exact::<PyDict>().ok()?;
+    let token_ids = py_convert::read_exact_u32_list(&dict.get_item("token_ids").ok()??)?;
+    let extra_args = match dict.get_item("extra_args").ok()? {
+        Some(value) if !value.is_none() => Some(py_convert::exact_json_value(&value)?),
+        _ => None,
+    };
+    // `token_ids` is required, so the copy keeps an empty one for pythonize to read.
+    let rest = dict.copy().ok()?;
+    rest.set_item("token_ids", PyList::empty(obj.py())).ok()?;
+    rest.set_item("extra_args", obj.py().None()).ok()?;
+    let mut request: PreprocessedRequest = depythonize(rest.as_any()).ok()?;
+    request.token_ids = Arc::new(token_ids);
+    request.extra_args = extra_args;
+    Some(request)
+}
+
+/// Test hook: the request [`RoutedEngine::generate`] builds from `preprocessed`, pythonized
+/// back. With `fast_path`, only the direct read (`None` when it declines); without, full
+/// pythonize. Tests compare the two.
+#[pyfunction]
+#[pyo3(signature = (preprocessed, fast_path))]
+pub fn _convert_preprocessed_request(
+    py: Python<'_>,
+    preprocessed: &Bound<'_, PyAny>,
+    fast_path: bool,
+) -> PyResult<Option<PyObject>> {
+    let request = if fast_path {
+        fast_preprocessed_request(preprocessed)
+    } else {
+        Some(depythonize::<PreprocessedRequest>(preprocessed).map_err(to_pyerr)?)
+    };
+    request
+        .map(|request| Ok(pythonize(py, &request).map_err(to_pyerr)?.unbind()))
+        .transpose()
 }
 
 fn copy_session_affinity(
@@ -47,7 +105,7 @@ impl RoutedEngine {
         preprocessed: PyObject,
         context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: PreprocessedRequest = depythonize(preprocessed.bind(py)).map_err(to_pyerr)?;
+        let request = preprocessed_request_from_py(preprocessed.bind(py))?;
         let request_context = if let Some(parent_context) = context.as_ref() {
             let parent_metadata = parent_context.metadata_snapshot();
             let parent_controller = parent_context.inner();

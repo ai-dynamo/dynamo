@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use super::{Preset, policy_for_role};
 
-/// Policy type of the `kvcr` preset, selected by `worker_selection.instances[].type`.
+/// Policy type of the `kvcr` preset, selected under a `worker_selection` role.
 pub const KVCR_POLICY_TYPE: &str = "kvcr";
 
 #[derive(Default, serde::Deserialize)]

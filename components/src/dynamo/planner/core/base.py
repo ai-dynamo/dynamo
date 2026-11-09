@@ -15,7 +15,7 @@ import asyncio
 import importlib
 import logging
 import time
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, Optional, Protocol
 
@@ -39,6 +39,7 @@ from dynamo.planner.core.types import (
     EngineCapabilities,
     FpmObservations,
     PlannerEffects,
+    RetuneDecision,
     ScheduledTick,
     TickDiagnostics,
     TickInput,
@@ -115,7 +116,10 @@ class LiveRetuneHandle(Protocol):
     async def stop(self) -> None:
         ...
 
-    def on_effects(self, effects: PlannerEffects) -> None:
+    def on_effects(self, effects: PlannerEffects) -> Sequence[RetuneDecision]:
+        """Take the tick's decisions; return the ones it queued to persist.
+        The Planner fields of each apply once it is persisted
+        (``retune_decision_persisted``)."""
         ...
 
 
@@ -263,6 +267,8 @@ class NativePlannerBase:
         self._legacy_retune_task: Optional[asyncio.Task[None]] = None
         self._legacy_retune_cleanup: Optional[RetuneCleanupHandle] = None
         self._retune_lease_found = asyncio.Event()
+        # Background applications of live retune Planner changes.
+        self._retune_apply_tasks: set[asyncio.Task[None]] = set()
 
     async def _async_init(self) -> None:
         # Shutdown is safe for a partially initialized environment and is
@@ -442,6 +448,11 @@ class NativePlannerBase:
         """Release initialized planner resources after normal or failed startup."""
 
         await self.reconfiguration.close()
+        applying = list(self._retune_apply_tasks)
+        for task in applying:
+            task.cancel()
+        if applying:
+            await asyncio.gather(*applying, return_exceptions=True)
 
         if not self._diagnostics_finalized:
             self._diagnostics_finalized = True
@@ -607,9 +618,63 @@ class NativePlannerBase:
         self._config_generation += 1
         self.prometheus_metrics.sla_target_ttft_ms.set(self.config.ttft_ms)
         self.prometheus_metrics.sla_target_itl_ms.set(self.config.itl_ms)
+        self._sync_fpm_max_age()
         logger.info(
             "Activated planner configuration revision %d", self._config_generation
         )
+
+    def _sync_fpm_max_age(self) -> None:
+        """Keep the live FPM freshness window at three load intervals after a
+        runtime change of ``load_adjustment_interval_seconds``; the
+        subscribers keep their samples."""
+        provider = getattr(self.environment, "fpm_provider", None)
+        setter = getattr(provider, "set_max_fpm_age_seconds", None)
+        if not callable(setter):
+            return
+        age = self.config.fpm_max_age_seconds
+        if getattr(provider, "max_fpm_age_seconds", None) != age:
+            setter(age)
+            logger.info("FPM freshness window is now %.1fs", age)
+
+    def retune_decision_persisted(self, decision: RetuneDecision) -> None:
+        """Apply a persisted live retune decision's Planner fields
+        (``LiveRetuneHost``).
+
+        In the background, through ``PlannerReconfiguration.apply_decision``,
+        the control API's two-phase path. The supervisor calls this only once
+        the decision is written under this process's term.
+        """
+
+        if decision.outcome != "applied" or not decision.planner_changes:
+            return
+        task = asyncio.create_task(
+            self._apply_retune_planner_changes(decision),
+            name=f"planner-retune-apply-{decision.decision_id}",
+        )
+        self._retune_apply_tasks.add(task)
+        task.add_done_callback(self._retune_apply_tasks.discard)
+
+    async def _apply_retune_planner_changes(self, decision: RetuneDecision) -> None:
+        changes = dict(decision.planner_changes)
+        try:
+            await self.reconfiguration.apply_decision(
+                changes, decision.predictor_warmup
+            )
+            logger.info(
+                "Retune %s applied planner changes %s",
+                decision.decision_id,
+                changes,
+            )
+        except Exception:
+            logger.exception(
+                "Retune %s could not apply planner changes %s; the Planner keeps "
+                "its configuration",
+                decision.decision_id,
+                changes,
+            )
+            controller = getattr(self._engine, "retune_controller", None)
+            if controller is not None:
+                controller.discard_planner_changes(changes)
 
     @asynccontextmanager
     async def _bounded_config_lock(self) -> AsyncIterator[None]:
@@ -1283,8 +1348,9 @@ class NativePlannerBase:
             effects = await engine.tick(tick, tick_input)
         if self._live_retune is not None:
             # Retune decisions go to the live supervisor's outbox, which
-            # persists them before actuating routers; _apply_effects never
-            # sees router parameters.
+            # persists them before actuating routers and before calling back
+            # retune_decision_persisted for the Planner fields; _apply_effects
+            # never sees router parameters.
             try:
                 self._live_retune.on_effects(effects)
             except Exception:
@@ -1314,14 +1380,23 @@ class NativePlannerBase:
     async def run(self) -> None:
         engine = self._ensure_engine()
         next_tick = engine.initial_tick(time.time())
-        poll_interval = self.config.load_adjustment_interval_seconds / 10
-        gpu_shape_retry_interval = min(
-            max(poll_interval, _GPU_SHAPE_RETRY_MIN_SECONDS),
-            _GPU_SHAPE_RETRY_MAX_SECONDS,
-        )
+        tick_generation = self._config_generation
 
         try:
             while True:
+                if tick_generation != self._config_generation:
+                    # An activation since the pending tick was planned may
+                    # change which loops it runs and what it pulls.
+                    tick_generation = self._config_generation
+                    if isinstance(engine, ReconfigurableEngineProtocol):
+                        next_tick = engine.next_scheduled_tick()
+                # Read every iteration: a runtime reconfiguration may change
+                # the load interval.
+                poll_interval = self.config.load_adjustment_interval_seconds / 10
+                gpu_shape_retry_interval = min(
+                    max(poll_interval, _GPU_SHAPE_RETRY_MIN_SECONDS),
+                    _GPU_SHAPE_RETRY_MAX_SECONDS,
+                )
                 now = time.time()
                 if now < next_tick.at_s:
                     await asyncio.sleep(min(next_tick.at_s - now, poll_interval))

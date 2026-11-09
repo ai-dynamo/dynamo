@@ -177,7 +177,7 @@ func RenderNodeLocal(
 					return nil, fmt.Errorf("stage %s: %w", stage, err)
 				}
 				if storagePath != modelStoragePath {
-					return nil, fmt.Errorf("stage %s must use the Conductor model-storage mount path %q", stage, modelStoragePath)
+					return nil, fmt.Errorf("stage %s must use the serving model-storage mount path %q", stage, modelStoragePath)
 				}
 			}
 

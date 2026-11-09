@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::kv_router::sequence::{RuntimeSequenceSubscriber, SequenceSubscriber};
-use crate::lora::LoadEstimator;
+use dynamo_lora::LoadEstimator;
 use dynamo_runtime::{component::Endpoint, traits::DistributedRuntimeProvider};
 use std::{sync::Arc, time::Duration};
 
