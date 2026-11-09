@@ -34,6 +34,7 @@ from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.health_check import HEALTH_CHECK_CACHE_SALT, TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
+from dynamo.trtllm.publisher import PrefillBacklog
 from dynamo.trtllm.request_handlers.handler_base import (
     BYPASS_REMOTE_PREFILL_ANNOTATION,
     HandlerBase,
@@ -1744,8 +1745,6 @@ class TestPrefillBacklogLifecycle:
     _PROMPT = [1, 2, 3, 4, 5]
 
     def _make_handler(self, mode, dp_rank=None):
-        from dynamo.trtllm.publisher import PrefillBacklog
-
         handler = TestGenerateLocally()._make_handler()
         handler.disaggregation_mode = mode
         handler.publisher = MagicMock()

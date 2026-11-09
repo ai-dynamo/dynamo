@@ -997,10 +997,11 @@ def _drain(backlog, dp_rank):
 async def test_kv_backpressure_publishes_prefill_backlog_engine_reports_as_zero(
     monkeypatch,
 ):
-    """DYN-5504: 8 prompts wait for prefill, the engine schedules one chunk,
-    reports an empty queue, then emits no rows while KV is exhausted. Real and
-    gap frames must carry the waiting prefill until it drains, and nothing may
-    be sent after that so the Rust idle heartbeat resumes."""
+    """Under KV backpressure, 8 prompts wait for prefill, the engine schedules
+    one chunk, reports an empty queue, then emits no rows while KV is
+    exhausted. Real and gap frames must carry the waiting prefill until it
+    drains, and nothing may be sent after that so the Rust idle heartbeat
+    resumes."""
     backlog = _backlog_with({0: 8})
     drained_at = 3.0
     stall_row = _build_fake_stat(ibs_overrides=_ENGINE_STALL_IBS)

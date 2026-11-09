@@ -1085,7 +1085,7 @@ class Publisher:
                     wall_time_secs=0.0,
                 )
             except Exception as e:
-                logging.warning(f"FPM backlog heartbeat publish failed: {e}")
+                logging.warning("FPM backlog heartbeat publish failed: %s", e)
             self._fpm_last_publish_time[dp_rank] = now
 
     async def _publish_kv_cache_events_task(self):
