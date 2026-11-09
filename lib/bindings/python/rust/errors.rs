@@ -117,7 +117,7 @@ macro_rules! define_dynamo_exceptions {
         /// Returns `Some((BackendError, message))` if the exception is a Dynamo
         /// exception, `None` otherwise. The caller decides how to wrap the
         /// `BackendError` into an `ErrorType`.
-        pub fn py_exception_to_backend_error(
+        fn py_exception_to_backend_error(
             py: Python<'_>,
             err: &PyErr,
         ) -> Option<(BackendError, String)> {
@@ -158,6 +158,10 @@ macro_rules! define_dynamo_exceptions {
                 m.py().get_type::<SelectionServiceError>(),
             )?;
             m.add("WorkerUnavailable", m.py().get_type::<WorkerUnavailable>())?;
+            m.add(
+                "DecodeRejectedBeforeKvReceiver",
+                m.py().get_type::<DecodeRejectedBeforeKvReceiver>(),
+            )?;
             $(
                 m.add(stringify!($name), m.py().get_type::<$name>())?;
             )*
@@ -188,6 +192,26 @@ define_dynamo_exceptions!(
     (StreamIncomplete, BackendError::StreamIncomplete),
     (WorkerOverloaded, BackendError::WorkerOverloaded),
 );
+
+pyo3::create_exception!(
+    dynamo._core,
+    DecodeRejectedBeforeKvReceiver,
+    InvalidArgument
+);
+
+pub(crate) fn dynamo_exception_to_error(py: Python<'_>, err: &PyErr) -> Option<DynamoError> {
+    let (backend, message) = py_exception_to_backend_error(py, err)?;
+    if err.is_instance_of::<DecodeRejectedBeforeKvReceiver>(py) {
+        return Some(DynamoError::reject_before_kv_receiver(message));
+    }
+    let mut builder = DynamoError::builder()
+        .error_type(ErrorClass::Backend(backend))
+        .message(message.clone());
+    if backend == BackendError::InvalidArgument {
+        builder = builder.public_message(message);
+    }
+    Some(builder.build())
+}
 
 /// Generic label for an InvalidRequest that carries no explicit
 /// public message.
@@ -335,6 +359,24 @@ mod tests {
             .message("no workers")
             .build();
         assert!(!is_worker_unavailable(&pool_unavailable));
+    }
+
+    #[test]
+    fn only_explicit_python_rejection_marks_missing_kv_receiver() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let message = "invalid sampling options";
+            let explicit = DecodeRejectedBeforeKvReceiver::new_err(message);
+            let ordinary = InvalidArgument::new_err(message);
+            assert!(explicit.is_instance_of::<InvalidArgument>(py));
+
+            let explicit = dynamo_exception_to_error(py, &explicit).unwrap();
+            let ordinary = dynamo_exception_to_error(py, &ordinary).unwrap();
+            assert!(explicit.rejected_before_kv_receiver());
+            assert!(!ordinary.rejected_before_kv_receiver());
+            assert_eq!(explicit.error_type(), ordinary.error_type());
+            assert_eq!(explicit.public_message(), ordinary.public_message());
+        });
     }
 
     #[test]

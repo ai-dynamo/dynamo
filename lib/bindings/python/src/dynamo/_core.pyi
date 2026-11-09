@@ -3343,6 +3343,8 @@ class InvalidArgument(DynamoException):
 
     ...
 
+class DecodeRejectedBeforeKvReceiver(InvalidArgument): ...
+
 class CannotConnect(DynamoException):
     """Failed to establish a connection."""
 

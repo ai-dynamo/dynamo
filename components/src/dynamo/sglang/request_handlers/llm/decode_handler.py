@@ -23,7 +23,11 @@ from dynamo.common.multimodal.image_loader import (
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.llm import HttpError
-from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
+from dynamo.llm.exceptions import (
+    DecodeRejectedBeforeKvReceiver,
+    EngineShutdown,
+    InvalidArgument,
+)
 from dynamo.sglang._compat import (
     cache_salt_kwargs,
     filter_supported_async_generate_kwargs,
@@ -743,7 +747,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             RuntimeError: If no bootstrap info received from prefill worker.
         """
         if self.serving_mode == DisaggregationMode.DECODE:
-            validate_disagg_parallel_sampling(request)
+            try:
+                validate_disagg_parallel_sampling(request)
+            except InvalidArgument as exc:
+                raise DecodeRejectedBeforeKvReceiver(str(exc)) from exc
         logging.debug(f"New Request ID: {context.id()}")
         routing = request.get("routing") or {}
         if self._first_token_source is not None:
@@ -801,7 +808,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             return
 
         priority_kwargs = self._priority_kwargs(priority)
-        sampling_params = self._build_sampling_params(request)
+        try:
+            sampling_params = self._build_sampling_params(request)
+        except InvalidArgument as exc:
+            if self.serving_mode == DisaggregationMode.DECODE:
+                raise DecodeRejectedBeforeKvReceiver(str(exc)) from exc
+            raise
         thinking_budget = sampling_params.get("custom_params", {}).get(
             "thinking_budget"
         )
