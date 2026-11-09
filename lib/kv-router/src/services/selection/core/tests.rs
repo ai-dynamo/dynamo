@@ -5040,10 +5040,8 @@ mod hint_policies {
             .await
             .expect("upsert");
         assert!(
-            record
-                .not_schedulable_reasons
-                .iter()
-                .any(|reason| reason.contains("no hint policy")),
+            record.not_schedulable_reasons.iter().any(|reason| reason
+                .contains("none of the hints in worker_selection.aggregated.hints sends them")),
             "{record:?}"
         );
     }

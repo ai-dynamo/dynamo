@@ -815,8 +815,35 @@ fn a_scorer_that_reads_copy_offers_commits_copies_that_a_consumer_sends() {
             matches!(error, PluginConfigError::UnsentCopies { role: "prefill" }),
             "{error}"
         );
-        assert!(error.to_string().contains("such as kv_fetch"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("none of the hints in worker_selection.prefill.hints sends them"),
+            "{error}"
+        );
     }
+
+    // Default hints that send no copies point at listing one instead.
+    let error = resolve_role(
+        WorkerType::Prefill,
+        &committing(),
+        role_policies(vec![("other", Recorder::new("other"))], true),
+        &KvRouterConfig::default(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            PluginConfigError::UnsentDefaultCopies { role: "prefill" }
+        ),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("none of its default hints sends them"),
+        "{error}"
+    );
 
     // Copy offers need an index that keeps the block chain.
     let error = resolve_role(

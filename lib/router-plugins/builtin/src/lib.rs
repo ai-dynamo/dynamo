@@ -29,8 +29,9 @@ pub fn default_registry() -> RouterPluginRegistry {
 
 /// `registry` plus what [`default_registry`] holds: the required default, each routing mode it
 /// doesn't already provide, the `kv_fetch` hint-policy type, and `kv_fetch` as the default hint
-/// policy of every role that `hint_policies` doesn't list. A host applies this to the catalog it
-/// installs, so `--router-mode` and `kv_fetch` resolve however that catalog was built.
+/// policy of every role whose `worker_selection` entry lists no `hints`. A host applies this to
+/// the catalog it installs, so `--router-mode` and `kv_fetch` resolve however that catalog was
+/// built.
 pub fn with_defaults(registry: RouterPluginRegistry) -> RouterPluginRegistry {
     let mut registry = registry.with_default_factory(default_factory());
     router_modes::register_missing(&mut registry);
@@ -172,7 +173,7 @@ worker_selection:
     }
 
     /// `kv_fetch` resolves by type name in every host registry, validates its parameters, and is
-    /// the default hint policy of every role the config doesn't list.
+    /// the default hint policy of every role whose entry lists no `hints`.
     #[test]
     fn resolves_kv_fetch_by_type_name_and_as_the_default() {
         let policy_file = tempfile::NamedTempFile::new().unwrap();
@@ -186,7 +187,17 @@ worker_selection:
         let registry = default_registry();
         let resolved = registry
             .resolve_hint_policies(&config(
-                "hint_policies:\n  prefill:\n    - type: kv_fetch\n      parameters: {min_additional_blocks: 2}\n  decode: []\n",
+                r#"
+worker_selection:
+  prefill:
+    type: dynamo-default-cost-fn
+    hints:
+      - type: kv_fetch
+        parameters: {min_additional_blocks: 2}
+  decode:
+    type: dynamo-default-cost-fn
+    hints: []
+"#,
             ))
             .unwrap();
         assert_eq!(resolved.names(WorkerType::Prefill), [kv_fetch::POLICY_TYPE]);
@@ -200,7 +211,7 @@ worker_selection:
 
         for parameters in ["{min_additional_blocks: 0}", "{min_blocks: 2}"] {
             let yaml = format!(
-                "hint_policies:\n  prefill:\n    - type: kv_fetch\n      parameters: {parameters}\n"
+                "worker_selection:\n  prefill:\n    type: dynamo-default-cost-fn\n    hints:\n      - type: kv_fetch\n        parameters: {parameters}\n"
             );
             assert!(
                 registry.resolve_hint_policies(&config(&yaml)).is_err(),
@@ -209,18 +220,18 @@ worker_selection:
         }
     }
 
-    /// `kvcr` commits copies, and the default `kv_fetch` sends them, so a role that lists no hint
-    /// policies resolves. Listing the role without a sender is rejected when the router is built.
+    /// `kvcr` commits copies, and the default `kv_fetch` sends them, so a role whose entry lists no
+    /// `hints` resolves. Listing `hints` without a sender is rejected when the router is built.
     #[test]
     fn kvcr_pairs_with_kv_fetch() {
         use dynamo_kv_router::plugins::{PluginConfigError, resolve_role};
 
         let policy_file = tempfile::NamedTempFile::new().unwrap();
-        let resolve = |hint_policies: &str| {
+        let resolve = |hints: &str| {
             std::fs::write(
                 policy_file.path(),
                 format!(
-                    "worker_selection:\n  prefill:\n    type: kvcr\n    parameters: {{shared_cache_multiplier: 0.5}}\n{hint_policies}"
+                    "worker_selection:\n  prefill:\n    type: kvcr\n    parameters: {{shared_cache_multiplier: 0.5}}\n{hints}"
                 ),
             )
             .unwrap();
@@ -247,9 +258,9 @@ worker_selection:
 
         let defaulted = resolve("").unwrap();
         assert!(defaulted.commit_kv_copy());
-        resolve("hint_policies:\n  prefill:\n    - type: kv_fetch\n").unwrap();
+        resolve("    hints:\n      - type: kv_fetch\n").unwrap();
         assert!(matches!(
-            resolve("hint_policies:\n  prefill: []\n"),
+            resolve("    hints: []\n"),
             Err(PluginConfigError::UnsentCopies { .. })
         ));
     }

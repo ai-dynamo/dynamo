@@ -4,9 +4,10 @@
 //! The `kv_fetch` hint policy and KVCR's `kv.fetch` action format.
 //!
 //! When the worker-selection policy committed the booked worker to a KV copy, as `kvcr` does,
-//! this policy sends that copy; if it can't, the booking fails. Otherwise it fetches best effort
-//! from the booked worker's copy source when the fetch adds at least `min_additional_blocks`,
-//! and skips a fetch whose source has become unreachable.
+//! this policy sends that copy. The router drops a committed copy whose source left before the
+//! booking, with a warning, so this policy never sees it. Otherwise it fetches best effort from
+//! the booked worker's copy source when the fetch adds at least `min_additional_blocks`, and
+//! skips a fetch whose source has become unreachable.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -20,7 +21,7 @@ use dynamo_kv_router::plugins::worker_selection::{Commitments, KvCopySource, Wor
 use dynamo_kv_router::protocols::ExternalSequenceBlockHash;
 use serde::{Deserialize, Serialize};
 
-/// Hint-policy type selected by `hint_policies.<role>[].type`.
+/// Hint-policy type listed as `worker_selection.<role>.hints[].type`.
 pub const POLICY_TYPE: &str = "kv_fetch";
 
 /// KVCR's point-to-point fetch action.
@@ -125,7 +126,7 @@ fn kvcr_fetch(
     .into_action())
 }
 
-/// The default `kv_fetch`, which roles that `hint_policies` doesn't list run: best-effort fetches
+/// The default `kv_fetch`, which roles whose entry lists no `hints` run: best-effort fetches
 /// of one block or more, and every committed copy.
 pub(crate) fn default_constructor() -> HintPolicyConstructor {
     HintPolicyConstructor::shared(KvFetch {
