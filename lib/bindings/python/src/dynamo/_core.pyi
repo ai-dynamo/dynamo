@@ -2093,6 +2093,16 @@ def _normalize_mocker_config(config: Mapping[str, Any] | str) -> Dict[str, Any]:
     """Validate canonical AISimulate config and materialize Dynamo runtime options."""
     ...
 
+def _convert_preprocessed_request(
+    preprocessed: Dict[str, Any], fast_path: bool
+) -> Optional[Dict[str, Any]]:
+    """Test hook: the request RoutedEngine.generate builds, pythonized back.
+
+    With fast_path, only the direct read of token_ids and extra_args (None when it
+    declines the input); without, full pythonize.
+    """
+    ...
+
 
 class WorkerType:
     """
