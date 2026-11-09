@@ -1619,37 +1619,47 @@ pub fn chat_completion_to_response(
     // carries them on the text part, so hold them until the output exists.
     let mut text_logprobs = Vec::new();
 
-    if let Some(choice) = choice {
+    if let Some(mut choice) = choice {
         incomplete_reason = responses_incomplete_reason(choice.finish_reason);
-        if params.logprobs_requested()
-            && let Some(entries) = choice
+        // The raw record moves out of the chat choice; only the ranges that reach
+        // the output are projected, so hidden reasoning and tool-call scores are
+        // never copied.
+        let raw_scores: Vec<ChatCompletionTokenLogprob> = if params.logprobs_requested() {
+            choice
                 .logprobs
-                .as_ref()
-                .and_then(|lp| lp.content.as_deref())
-        {
-            text_logprobs = chat_logprobs_to_output_text(entries);
-            // Scores on reasoning or tool-call chunks are not output text. The
-            // phase path drops them while placing scores; a response without
-            // phases carries only the score bookkeeping and is filtered here.
-            if !response_events.is_empty()
-                && response_events
-                    .iter()
-                    .all(super::chat_completions::ResponseOutputEvent::is_score)
-            {
-                let mut record = std::mem::take(&mut text_logprobs).into_iter();
-                for event in &response_events {
-                    match event {
-                        super::chat_completions::ResponseOutputEvent::Scores(count) => {
-                            text_logprobs.extend(record.by_ref().take(*count));
-                        }
-                        super::chat_completions::ResponseOutputEvent::HiddenScores(count) => {
-                            record.by_ref().take(*count).for_each(drop);
-                        }
-                        _ => {}
+                .take()
+                .and_then(|lp| lp.content)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let project = |start: usize, end: usize| {
+            let end = end.min(raw_scores.len());
+            chat_logprobs_to_output_text(&raw_scores[start.min(end)..end])
+        };
+        let only_score_events = !response_events.is_empty()
+            && response_events
+                .iter()
+                .all(super::chat_completions::ResponseOutputEvent::is_score);
+        if only_score_events {
+            // No message phases: the score bookkeeping alone says which ranges are
+            // output text.
+            let mut cursor = 0;
+            for event in &response_events {
+                match event {
+                    super::chat_completions::ResponseOutputEvent::Scores(count) => {
+                        text_logprobs.extend(project(cursor, cursor + count));
+                        cursor += count;
                     }
+                    super::chat_completions::ResponseOutputEvent::HiddenScores(count) => {
+                        cursor += count;
+                    }
+                    _ => {}
                 }
-                text_logprobs.extend(record);
             }
+            text_logprobs.extend(project(cursor, raw_scores.len()));
+        } else if response_events.is_empty() {
+            text_logprobs = project(0, raw_scores.len());
         }
 
         // Reasoning precedes tool calls so output order matches the decoded turn.
@@ -1744,7 +1754,7 @@ pub fn chat_completion_to_response(
             // Scores are consumed from the aggregated record in event order, so each
             // message carries the scores generated while it was open; scores from
             // reasoning or tool calls between messages ride on the next message.
-            let mut scores = std::mem::take(&mut text_logprobs).into_iter();
+            let mut score_cursor = 0;
             let mut pending_scores: Vec<LogProb> = Vec::new();
             let mut saw_scores = false;
             let flush = |output: &mut Vec<OutputItem>,
@@ -1776,11 +1786,12 @@ pub fn chat_completion_to_response(
                 match event {
                     ResponseOutputEvent::Scores(count) => {
                         saw_scores = true;
-                        pending_scores.extend(scores.by_ref().take(count));
+                        pending_scores.extend(project(score_cursor, score_cursor + count));
+                        score_cursor += count;
                     }
                     ResponseOutputEvent::HiddenScores(count) => {
                         saw_scores = true;
-                        scores.by_ref().take(count).for_each(drop);
+                        score_cursor += count;
                     }
                     ResponseOutputEvent::Boundary(MessageBoundary::Start(next)) => {
                         flush(
@@ -1863,7 +1874,7 @@ pub fn chat_completion_to_response(
             // Scores after the last message (the hidden EOS) complete the record of
             // the last text part. A record without score events (batch parsing)
             // stays whole for the first text part below.
-            pending_scores.extend(scores);
+            pending_scores.extend(project(score_cursor, raw_scores.len()));
             if saw_scores
                 && let Some(part) = output.iter_mut().rev().find_map(|item| match item {
                     OutputItem::Message(message) => {

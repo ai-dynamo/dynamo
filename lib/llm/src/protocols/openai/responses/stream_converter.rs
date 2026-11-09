@@ -262,6 +262,11 @@ impl ResponseStreamConverter {
                     .tool_calls
                     .as_ref()
                     .is_some_and(|calls| !calls.is_empty()));
+        // Known-hidden scores are dropped before any projection is built.
+        if hidden {
+            self.resolve_unclassified_logprobs(true);
+            return;
+        }
         let own = choice
             .logprobs
             .as_ref()
@@ -271,8 +276,6 @@ impl ResponseStreamConverter {
         if has_text {
             self.resolve_unclassified_logprobs(false);
             self.pending_logprobs.extend(own);
-        } else if hidden {
-            self.resolve_unclassified_logprobs(true);
         } else if end_boundary {
             let unclassified = std::mem::take(&mut self.unclassified_logprobs);
             self.pending_logprobs.extend(unclassified);
