@@ -24,6 +24,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -167,14 +168,19 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 		oldMeta = &oldDCD.ObjectMeta
 	}
 	allErrs := v.validateObjectMeta(&dcd.ObjectMeta, oldMeta, field.NewPath("metadata"))
-	return append(allErrs, v.validateDynamoComponentDeploymentSpec(&dcd.Spec, oldSpec, field.NewPath("spec"))...)
+	return append(allErrs, v.validateDynamoComponentDeploymentSpec(
+		&dcd.Spec, oldSpec, field.NewPath("spec"),
+		dcdUsesOrderedEnvironment(dcd), oldDCD != nil && dcdUsesOrderedEnvironment(oldDCD),
+	)...)
 }
 
 // validateDynamoComponentDeploymentSpec validates spec. spec and fldPath must not be nil.
+// oldSpec is nil on create; the booleans select the new and old rendering contracts.
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentSpec(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSpec,
 	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSpec,
 	fldPath *field.Path,
+	orderedEnvironment, oldOrderedEnvironment bool,
 ) field.ErrorList {
 	// Standalone DCDs use neither Grove nor live InferencePool discovery.
 	const (
@@ -185,7 +191,17 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 	if oldSpec != nil {
 		oldSharedSpec = &oldSpec.DynamoComponentDeploymentSharedSpec
 	}
-	allErrs := validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)
+
+	// Entering the semantic contract does not grandfather an ineligible legacy list.
+	var allErrs field.ErrorList
+	if orderedEnvironment {
+		var oldEnv []corev1.EnvVar
+		if oldSpec != nil && oldOrderedEnvironment {
+			oldEnv = oldSpec.Env
+		}
+		allErrs = append(allErrs, v.validateEnvVars(spec.Env, oldEnv, fldPath.Child("env"))...)
+	}
+	allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)...)
 	allErrs = append(allErrs, dynamo.ValidateSnapshotFailover(&spec.DynamoComponentDeploymentSharedSpec, fldPath, spec.BackendFramework)...)
 	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 		&spec.DynamoComponentDeploymentSharedSpec,

@@ -67,6 +67,9 @@ type DynamoGraphDeploymentSpec struct {
 	// within each source list and cross-layer references are topologically
 	// ordered; cycles fail rendering. Earlier or missing origins retain legacy
 	// sorted composition. Generated DCDs preserve this list as spec.env.
+	// Names must be unique within this list. Admission permits an unchanged
+	// pre-existing list with duplicates on update; changing the list requires
+	// unique names throughout. Same-named container overrides remain allowed.
 	// +optional
 	Env []corev1.EnvVar `json:"env,omitempty"`
 

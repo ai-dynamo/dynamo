@@ -173,6 +173,11 @@ Both fields retain their native hub/spoke conversion mapping. Converting between
   later, list order is preserved within each source and references between sources are
   topologically ordered; cycles fail rendering. Generated DCDs preserve this list separately in
   their own `spec.env`. Older or missing origins retain legacy sorted composition.
+  Admission requires unique names within this root list, regardless of origin. An existing
+  duplicate list can remain unchanged on update; changing any value, source, position, or member
+  requires unique names throughout. Names in different layers may still override one another.
+  The alpha root field is `spec.envs`. This webhook rule leaves the root list's OpenAPI merge
+  semantics unchanged so existing duplicate lists can be ratcheted.
   See [Environment Variable Order](../../kubernetes/model-deployment/deploy-with-dgd.md#environment-variable-order).
 
   <a href="https://pkg.go.dev/k8s.io/api/core/v1#EnvVar" target="_blank">core/v1.EnvVar</a>

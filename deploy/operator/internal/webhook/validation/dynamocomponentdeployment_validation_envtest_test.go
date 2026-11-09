@@ -45,6 +45,22 @@ const (
 	admissionTRTLLMBackend = "trtllm"
 )
 
+type dcdAdmissionTestCase struct {
+	name               string
+	deployment         runtime.Object
+	oldDeployment      runtime.Object
+	oldBeforeUpdate    runtime.Object
+	checkpointOff      bool
+	seedWithoutWebhook bool
+	wantSchemaErr      string
+	wantCELErr         string
+	wantWebhookErrs    []string
+	wantWarnings       []string
+	wantOriginVersion  *string
+	wantPodAnnotations map[string]string
+	wantRoleReplicas   map[string]int32
+}
+
 func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 	const updatedSidecarImage = "runtime:1.6.0"
 	const initialSidecarImage = "runtime:1.5.0"
@@ -61,21 +77,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		}
 	)
 
-	type dcdAdmissionTestCase struct {
-		name               string
-		deployment         runtime.Object
-		oldDeployment      runtime.Object
-		oldBeforeUpdate    runtime.Object
-		checkpointOff      bool
-		seedWithoutWebhook bool
-		wantSchemaErr      string
-		wantCELErr         string
-		wantWebhookErrs    []string
-		wantWarnings       []string
-		wantOriginVersion  *string
-		wantPodAnnotations map[string]string
-		wantRoleReplicas   map[string]int32
-	}
 	tests := []dcdAdmissionTestCase{
 		{name: "DGD-owned vLLM multi-GPU automatic candidate is admitted without checkpointRef", deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 			enableBetaSnapshotFailover(&dcd.Spec.DynamoComponentDeploymentSharedSpec, "vllm")
@@ -2174,6 +2175,9 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			})
 		}
 	}
+
+	t.Log("Add root environment uniqueness, origin selection and ratcheting cases in both APIs")
+	tests = append(tests, environmentDCDAdmissionCases(t)...)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
