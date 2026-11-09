@@ -26,6 +26,8 @@ import (
 	"maps"
 	"time"
 
+	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
+
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
@@ -340,6 +342,8 @@ func (r *DynamoComponentDeploymentReconciler) recordReconcileError(
 	}
 }
 
+// reconcileDeploymentResources syncs the DCD's Deployment and reports its
+// availability, including a crash-looping container among its Pods.
 func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
 	logger := log.FromContext(ctx)
 	deploymentModified, deployment, err := r.createOrUpdateOrDeleteDeployments(ctx, generateResourceOption{
@@ -391,6 +395,20 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 			status:               metav1.ConditionTrue,
 			reason:               "DeploymentReady",
 			message:              "Deployment is ready",
+			serviceReplicaStatus: serviceReplicaStatus,
+			gpuShape:             gpuShapeStatus,
+		}, nil
+	}
+	crashLoop, crashLooping, err := podcontroller.FindDeploymentCrashLoop(ctx, r.Client, deployment)
+	if err != nil {
+		return ComponentReconcileResult{}, err
+	}
+	if crashLooping {
+		return ComponentReconcileResult{
+			modified:             deploymentModified,
+			status:               metav1.ConditionFalse,
+			reason:               dcdReasonContainerCrashLooping,
+			message:              crashLoop.String(),
 			serviceReplicaStatus: serviceReplicaStatus,
 			gpuShape:             gpuShapeStatus,
 		}, nil
@@ -957,6 +975,15 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 
 // controllerBuilder shares the production watches and indexes with instrumented reconcilers.
 func (r *DynamoComponentDeploymentReconciler) controllerBuilder(mgr ctrl.Manager) (*builder.Builder, error) {
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&corev1.Pod{},
+		podcontroller.SelectorIndex,
+		podcontroller.SelectorIndexValues,
+	); err != nil {
+		return nil, fmt.Errorf("register Pod selector index: %w", err)
+	}
+
 	// Index native PodSnapshot references so dependency events can find affected DCDs.
 	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
 		if err := mgr.GetFieldIndexer().IndexField(
@@ -979,6 +1006,11 @@ func (r *DynamoComponentDeploymentReconciler) controllerBuilder(mgr ctrl.Manager
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
+		Watches(
+			&corev1.Pod{},
+			podcontroller.EnqueueOwners(podcontroller.DCDName),
+			builder.WithPredicates(podcontroller.CrashLoopPredicate(podcontroller.DCDName)),
+		).
 		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))

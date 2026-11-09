@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 # limit; it outranks the legacy DYN_ENGINE_REQUEST_LIMIT alias.
 _ENGINE_REQUEST_LIMIT_ENV = "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT"
 _FPM_TRACE_VALUES = {"1", "0", "true", "false", "on", "off", "yes", "no"}
+
+# Parser selectors that still work but are scheduled for removal, mapped to the
+# name to configure instead. `muse` predates Muse Spark Open and selects only
+# Muse Glimmer; the frontend emits the matching warning at model registration.
+_DEPRECATED_PARSER_ALIASES: dict[str, str] = {"muse": "muse_glimmer"}
 _fpm_trace_invalid_warning_emitted = False
 
 
@@ -115,6 +120,21 @@ class DynamoRuntimeConfig(ConfigBase):
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
         self.structural_tag = resolve_structural_tag_config(self)
+        for flag, value in (
+            ("--dyn-tool-call-parser", self.dyn_tool_call_parser),
+            ("--dyn-reasoning-parser", self.dyn_reasoning_parser),
+        ):
+            replacement = _DEPRECATED_PARSER_ALIASES.get(value or "")
+            if replacement is not None:
+                logger.warning(
+                    "%s=%s is a deprecated alias of %s and will be removed in a "
+                    "future release; configure %s instead. Muse Spark Open is a "
+                    "different parser: muse_spark_open.",
+                    flag,
+                    value,
+                    replacement,
+                    replacement,
+                )
 
         # The Rust FPM sink reads this setting from the process environment.
         # Canonicalize the resolved CLI/env value before the runtime or backend
@@ -295,7 +315,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--connector",
             env_var="DYN_CONNECTOR",
             default=[],
-            help="[Deprecated for vLLM] Use --kv-transfer-config instead. For TRT-LLM, options: nixl, lmcache, kvbm, null, none.",
+            help="[Deprecated for vLLM] Use --kv-transfer-config instead. TensorRT-LLM supports only none; KVBM integration has been removed.",
             nargs="*",
         )
 

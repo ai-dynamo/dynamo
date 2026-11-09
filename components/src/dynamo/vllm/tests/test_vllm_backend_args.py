@@ -574,6 +574,20 @@ class TestParseArgsLoraExclusivity:
         assert not config.engine_args.enable_lora
 
 
+@pytest.mark.usefixtures("vllm_cpu_platform_when_no_accelerator")
+@pytest.mark.parametrize(
+    "flag",
+    [
+        ["--default-chat-template-kwargs", '{"enable_thinking": false}'],
+        ['--default_chat_template_kwargs={"enable_thinking": false}'],
+        ["--default-chat-template-kwargs.enable_thinking", "false"],
+    ],
+)
+def test_default_chat_template_kwargs_points_to_the_frontend(flag):
+    with pytest.raises(ValueError, match="python -m dynamo.frontend"):
+        parse_args(["--model", "Qwen/Qwen3-0.6B", *flag])
+
+
 class TestValidateCustomEncoder:
     """--custom-encoder-class is an in-process, aggregated-only multimodal
     component, so validation must require --enable-multimodal and reject any
