@@ -115,22 +115,37 @@ fn strict_provider() -> HintPolicyProvider {
 
 // ---- YAML -------------------------------------------------------------------------------------
 
+/// The `hints` a role's `worker_selection` entry lists, parsed as the router policy file is.
+fn hints(yaml: &str, role: WorkerType) -> Option<Vec<HintPolicyEntry>> {
+    RouterPolicyConfig::from_yaml(yaml)
+        .unwrap()
+        .worker_selection()
+        .unwrap()
+        .hints(role)
+        .map(<[HintPolicyEntry]>::to_vec)
+}
+
 #[test]
-fn config_keeps_role_order_and_distinguishes_unlisted_from_empty() {
-    let config = RouterPolicyConfig::from_yaml(
-        r#"
-hint_policies:
+fn hints_keep_list_order_and_distinguish_omitted_from_empty() {
+    let yaml = r#"
+worker_selection:
   aggregated:
-    - type: compaction_cleanup
-      parameters:
-        enabled: true
-    - type: tool_priority
-  prefill: []
-"#,
-    )
-    .unwrap();
-    let hints = config.hint_policies().unwrap();
-    let aggregated = hints.role(WorkerType::Aggregated).unwrap();
+    type: dynamo-default-cost-fn
+    parameters:
+      router_temperature: 0.5
+    hints:
+      - type: compaction_cleanup
+        parameters:
+          enabled: true
+      - type: tool_priority
+  prefill:
+    type: dynamo-default-cost-fn
+    hints: []
+  decode:
+    type: dynamo-default-cost-fn
+  encode: dynamo-default-cost-fn
+"#;
+    let aggregated = hints(yaml, WorkerType::Aggregated).unwrap();
     let names: Vec<_> = aggregated.iter().map(HintPolicyEntry::name).collect();
     assert_eq!(names, ["compaction_cleanup", "tool_priority"]);
     assert_eq!(aggregated[0].policy_type(), "compaction_cleanup");
@@ -138,65 +153,72 @@ hint_policies:
         aggregated[0].parameters()["enabled"],
         serde_yaml::Value::Bool(true)
     );
-    // An empty list is a choice; an unlisted role takes the defaults.
-    assert_eq!(hints.role(WorkerType::Prefill), Some(&[][..]));
-    assert_eq!(hints.role(WorkerType::Decode), None);
+    assert_eq!(
+        aggregated[1].parameters(),
+        &serde_yaml::Value::Mapping(Default::default())
+    );
+    // An empty list is a choice; an entry without `hints`, or a bare entry, takes the defaults.
+    assert_eq!(hints(yaml, WorkerType::Prefill), Some(Vec::new()));
+    assert_eq!(hints(yaml, WorkerType::Decode), None);
+    assert_eq!(hints(yaml, WorkerType::Encode), None);
 }
 
 #[test]
 fn a_role_lists_one_type_twice_only_with_distinct_names() {
-    let config = RouterPolicyConfig::from_yaml(
+    let decode = hints(
         r#"
-hint_policies:
+worker_selection:
   decode:
-    - type: harness_prefetch
-      name: short
-    - type: harness_prefetch
-      name: long
+    type: dynamo-default-cost-fn
+    hints:
+      - type: harness_prefetch
+        name: short
+      - type: harness_prefetch
+        name: long
 "#,
+        WorkerType::Decode,
     )
     .unwrap();
-    let names: Vec<_> = config
-        .hint_policies()
-        .unwrap()
-        .role(WorkerType::Decode)
-        .unwrap()
-        .iter()
-        .map(HintPolicyEntry::name)
-        .collect();
+    let names: Vec<_> = decode.iter().map(HintPolicyEntry::name).collect();
     assert_eq!(names, ["short", "long"]);
 }
 
 #[test]
-fn config_rejects_invalid_hint_policies() {
+fn config_rejects_invalid_hints() {
+    let entry = |hints: &str| {
+        format!(
+            "worker_selection:\n  prefill:\n    type: dynamo-default-cost-fn\n    hints:\n{hints}"
+        )
+    };
     for (yaml, expected) in [
         (
-            "hint_policies:\n  aggregated:\n    - type: x\n    - type: x\n",
-            "distinct name",
+            entry("      - type: kv_fetch\n      - type: kv_fetch\n"),
+            r#"worker_selection.prefill.hints lists "kv_fetch" more than once; give each entry of the same type a distinct name"#,
         ),
         (
-            "hint_policies:\n  aggregated:\n    - type: x\n      parameters: [1]\n",
-            "must be a YAML mapping",
+            entry("      - type: kv_fetch\n        parameters: [1]\n"),
+            r#"worker_selection.prefill.hints entry "kv_fetch" parameters must be a YAML mapping"#,
+        ),
+        (entry("      - type: 'bad type'\n"), "must match"),
+        (entry("      - name: x\n"), "missing field `type`"),
+        // No bare names.
+        (
+            entry("      - kv_fetch\n"),
+            r#"worker_selection.prefill: invalid type: string "kv_fetch""#,
         ),
         (
-            "hint_policies:\n  aggregated:\n    - type: 'bad type'\n",
-            "must match",
+            entry("      - type: kv_fetch\n        hints: []\n"),
+            "unknown field `hints`",
         ),
+        // The deprecated `instances` form takes no hints.
         (
-            "hint_policies:\n  aggregated:\n    - name: x\n",
-            "missing field",
-        ),
-        (
-            "hint_policies:\n  aggregated:\n    - type: x\n      instances: []\n",
-            "unknown field",
-        ),
-        ("hint_policies:\n  unknown_role: []\n", "unknown field"),
-        (
-            "hint_policies:\n  instances:\n    - name: x\n      type: x\n",
-            "unknown field",
+            "worker_selection:\n  prefill: legacy\n  instances:\n    - name: legacy\n      type: dynamo-default-cost-fn\n      hints: []\n".to_string(),
+            "unknown field `hints`",
         ),
     ] {
-        let error = RouterPolicyConfig::from_yaml(yaml).unwrap_err().to_string();
+        let error = RouterPolicyConfig::from_yaml(&yaml)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains(expected), "{yaml}: {error}");
     }
 }
@@ -204,7 +226,7 @@ fn config_rejects_invalid_hint_policies() {
 // ---- Registry ---------------------------------------------------------------------------------
 
 #[test]
-fn unlisted_roles_run_the_defaults_and_listed_roles_replace_them() {
+fn roles_without_hints_run_the_defaults_and_listed_hints_replace_them() {
     let mut registry = RouterPluginRegistry::default()
         .with_default_hint_policies([(
             "fallback".to_string(),
@@ -214,15 +236,28 @@ fn unlisted_roles_run_the_defaults_and_listed_roles_replace_them() {
     registry
         .register_hint_policy("record", recorder_provider(Recorder::new("record")))
         .unwrap();
-    let (config, _file) =
-        config_with("hint_policies:\n  aggregated:\n    - type: record\n  prefill: []\n");
+    let (config, _file) = config_with(
+        r#"
+worker_selection:
+  aggregated:
+    type: alpha
+    hints:
+      - type: record
+  prefill:
+    type: alpha
+    hints: []
+  decode: alpha
+"#,
+    );
     let factory = registry.resolve_hint_policies(&config).unwrap();
     assert_eq!(factory.names(WorkerType::Aggregated), ["record"]);
     assert!(!factory.uses_defaults(WorkerType::Aggregated));
     assert!(factory.names(WorkerType::Prefill).is_empty());
     assert!(!factory.uses_defaults(WorkerType::Prefill));
-    assert_eq!(factory.names(WorkerType::Decode), ["fallback"]);
-    assert!(factory.uses_defaults(WorkerType::Decode));
+    for role in [WorkerType::Decode, WorkerType::Encode] {
+        assert_eq!(factory.names(role), ["fallback"]);
+        assert!(factory.uses_defaults(role));
+    }
 
     let partition = RoutingPartitionId::new("model", "default");
     let instances = factory.instances(&config, WorkerType::Decode, partition.as_ref());
@@ -257,7 +292,9 @@ fn resolution_reports_unknown_types_and_invalid_parameters() {
         .register_hint_policy("strict", strict_provider())
         .unwrap();
 
-    let (config, _file) = config_with("hint_policies:\n  aggregated:\n    - type: missing\n");
+    let (config, _file) = config_with(
+        "worker_selection:\n  aggregated:\n    type: alpha\n    hints:\n      - type: missing\n",
+    );
     let error = registry.resolve_hint_policies(&config).err().unwrap();
     assert!(
         matches!(&error, HintPolicyRegistryError::UnknownType { available, .. }
@@ -267,7 +304,7 @@ fn resolution_reports_unknown_types_and_invalid_parameters() {
 
     for parameters in ["{level: -1}", "{unknown: 1}"] {
         let (config, _file) = config_with(&format!(
-            "hint_policies:\n  aggregated:\n    - type: strict\n      parameters: {parameters}\n"
+            "worker_selection:\n  aggregated:\n    type: alpha\n    hints:\n      - type: strict\n        parameters: {parameters}\n"
         ));
         assert!(
             matches!(

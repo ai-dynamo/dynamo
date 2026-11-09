@@ -28,8 +28,8 @@ use crate::protocols::WorkerWithDpRank;
 use crate::scheduling::SessionContext;
 
 pub use crate::kv_hints::KvHintAction;
-pub(crate) use config::RawHintPolicyConfig;
-pub use config::{HintPolicyConfig, HintPolicyEntry};
+pub use config::HintPolicyEntry;
+pub(crate) use config::{RawHintPolicyEntry, resolve_hints};
 pub(crate) use registry::HintPolicyRegistry;
 pub use registry::{
     HintPolicyConstructor, HintPolicyFactory, HintPolicyParameters, HintPolicyProvider,

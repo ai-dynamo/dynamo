@@ -171,9 +171,9 @@ impl RouterPluginRegistry {
         self.hint_policies.register(name, provider)
     }
 
-    /// Supply the hint policies a role runs when `hint_policies` doesn't list it, the way
-    /// [`Self::with_default_factory`] supplies the default worker selection. Listing a role, even
-    /// as an empty list, replaces them.
+    /// Supply the hint policies a role runs when its `worker_selection` entry lists no `hints`, the
+    /// way [`Self::with_default_factory`] supplies the default worker selection. Listing `hints`,
+    /// even as an empty list, replaces them.
     ///
     /// Defaults are passive: the router starts no resources for what they read, and a non-KV routing
     /// mode skips them instead of failing, so they act only where the role's own configuration
@@ -186,8 +186,8 @@ impl RouterPluginRegistry {
         Ok(self)
     }
 
-    /// Resolve the configured hint policies once at startup. A role that `hint_policies` doesn't
-    /// list runs the default hint policies, if the host supplied any.
+    /// Resolve each role's hints once at startup, from its `worker_selection` entry. A role whose
+    /// entry lists no `hints` runs the default hint policies, if the host supplied any.
     pub fn resolve_hint_policies(
         &self,
         config: &KvRouterConfig,

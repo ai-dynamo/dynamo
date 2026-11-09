@@ -282,24 +282,28 @@ To write your own policy instead of using a built-in one, see
 
 Hint policies are experimental. They add engine-directed KV actions, such as a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), to the worker a booking selected. They never change which worker is selected. Hint policies are plugin types that a linked plugin crate registers.
 
-The `hint_policies` section of the same YAML file lists, for each worker role, the hint policies that role runs, in order. Each entry has a `type` and optional `parameters`. Add a `name` only when one role lists the same type twice:
+A role's `worker_selection` entry lists the hint policies that role runs, in order, under `hints`, next to its `type` and `parameters`. Each item has a `type` and optional `parameters`. Add a `name` only when one role lists the same type twice:
 
 ```yaml
-hint_policies:
+worker_selection:
   decode:
-    - type: harness_prefetch
-      name: short
-      parameters:
-        max_blocks: 64
-    - type: harness_prefetch
-      name: long
-      parameters:
-        max_blocks: 256
-  prefill: []
+    type: dynamo-default-cost-fn
+    hints:
+      - type: harness_prefetch
+        name: short
+        parameters:
+          max_blocks: 64
+      - type: harness_prefetch
+        name: long
+        parameters:
+          max_blocks: 256
+  prefill:
+    type: dynamo-default-cost-fn
+    hints: []
 ```
 
-- **A role that `hint_policies` doesn't list runs the default hint policies,** if the router image supplies any. Listing the role, even as an empty list, replaces them. Default hint policies are passive: they start no resources and don't change how the role is routed.
-- **Configured hint policies run only on the KV path,** because the router composes hints when it books a worker. Startup fails when a role with configured hint policies runs under a non-KV `--router-mode`. To use a routing mode's policy with hint policies, run `--router-mode kv` and name the routing type, such as `round-robin`, under `worker_selection` for that role.
+- **A role whose entry doesn't list `hints` runs the default hint policies,** if the router image supplies any. A bare entry such as `prefill: dynamo-default-cost-fn` can't list `hints`, and neither can a role that `worker_selection` doesn't list, so both run the defaults. To give the built-in selector hints, name it `dynamo-default-cost-fn`. Listing `hints`, even as an empty list, replaces the defaults. The deprecated `instances` form doesn't take `hints`. Default hint policies are passive: they start no resources and don't change how the role is routed.
+- **Configured hint policies run only on the KV path,** because the router composes hints when it books a worker. Startup fails when a role whose entry lists `hints` runs under a non-KV `--router-mode`. To use a routing mode's policy with hint policies, run `--router-mode kv` and name the routing type, such as `round-robin`, under `worker_selection` for that role.
 - **The router composes one hint per booking** and numbers its actions `a1`, `a2`, and so on. It sends the hint only to workers that advertise `router_hint`. A policy that fails drops only its own actions. A hint carries at most 32 actions.
 - **At most one hint policy per role may send the KV copies a worker-selection policy commits to.** Startup fails when two do. A hint policy that reads KV copy sources needs a local, event-driven KV index; startup fails without one.
 

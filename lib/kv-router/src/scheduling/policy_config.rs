@@ -15,7 +15,6 @@ use tokio::time::Instant;
 
 use super::KvSchedulerError;
 use super::config::RouterQueuePolicy;
-use crate::plugins::hint_policy::{HintPolicyConfig, RawHintPolicyConfig};
 use crate::plugins::request_classifier::RawRequestClassifierConfig;
 use crate::plugins::request_classifier::RequestClassifierConfig;
 use crate::plugins::worker_selection::{RawWorkerSelectionConfig, WorkerSelectionConfig};
@@ -338,7 +337,6 @@ pub struct RouterPolicyConfig {
     models: HashMap<String, PolicyProfile>,
     worker_selection: Option<WorkerSelectionConfig>,
     request_classifier: Option<RequestClassifierConfig>,
-    hint_policies: Option<HintPolicyConfig>,
 }
 
 impl RouterPolicyConfig {
@@ -396,11 +394,6 @@ impl RouterPolicyConfig {
         self.request_classifier.as_ref()
     }
 
-    /// Returns the process-wide hint-policy configuration, if present.
-    pub fn hint_policies(&self) -> Option<&HintPolicyConfig> {
-        self.hint_policies.as_ref()
-    }
-
     /// Whether this document configures queue policy profiles.
     pub fn has_routing_profiles(&self) -> bool {
         self.root.is_some() || !self.models.is_empty()
@@ -417,7 +410,6 @@ struct RawRouterPolicyConfig {
     models: HashMap<String, RawPolicyProfile>,
     worker_selection: Option<RawWorkerSelectionConfig>,
     request_classifier: Option<RawRequestClassifierConfig>,
-    hint_policies: Option<RawHintPolicyConfig>,
 }
 
 impl RawRouterPolicyConfig {
@@ -466,19 +458,14 @@ impl RawRouterPolicyConfig {
             .request_classifier
             .map(|config| config.resolve())
             .transpose()?;
-        let hint_policies = self
-            .hint_policies
-            .map(RawHintPolicyConfig::resolve)
-            .transpose()?;
         if self.router.is_none()
             && root.is_none()
             && models.is_empty()
             && worker_selection.is_none()
             && request_classifier.is_none()
-            && hint_policies.is_none()
         {
             return Err(RouterPolicyConfigError::Validation(
-                "router policy config must define router settings, a root profile, at least one model profile, worker_selection, request_classifier, or hint_policies".to_string(),
+                "router policy config must define router settings, a root profile, at least one model profile, worker_selection, or request_classifier".to_string(),
             ));
         }
 
@@ -488,7 +475,6 @@ impl RawRouterPolicyConfig {
             models,
             worker_selection,
             request_classifier,
-            hint_policies,
         })
     }
 }

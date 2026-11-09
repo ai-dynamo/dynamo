@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use super::HintPolicy;
 use crate::config::KvRouterConfig;
+use crate::plugins::worker_selection::WorkerSelectionPolicySelection;
 use crate::{RoutingPartitionRef, WorkerType};
 
 type Construct = dyn for<'a> Fn(&KvRouterConfig, WorkerType, RoutingPartitionRef<'a>) -> Arc<dyn HintPolicy>
@@ -94,10 +95,10 @@ pub enum HintPolicyRegistryError {
     EmptyName,
     #[error("hint-policy type {name:?} is already registered")]
     Duplicate { name: String },
-    #[error("could not load hint_policies from router_policy_config: {source}")]
+    #[error("could not load worker_selection hints: {source}")]
     Config {
         #[source]
-        source: crate::scheduling::RouterPolicyConfigError,
+        source: crate::scheduling::config::WorkerSelectionPolicyConfigError,
     },
     #[error("hint policy {name:?} is listed more than once")]
     DuplicateName { name: String },
@@ -121,7 +122,7 @@ struct ResolvedHintPolicy {
 #[derive(Clone, Default)]
 struct ResolvedRole {
     policies: Vec<ResolvedHintPolicy>,
-    /// `hint_policies` doesn't list the role, so it runs the registry's default hint policies.
+    /// The role's `worker_selection` entry lists no `hints`, so it runs the default hint policies.
     defaults: bool,
 }
 
@@ -166,8 +167,8 @@ impl HintPolicyFactory {
             .collect()
     }
 
-    /// Whether a worker role runs the registry's default hint policies, because `hint_policies`
-    /// doesn't list it.
+    /// Whether a worker role runs the default hint policies, because its `worker_selection` entry
+    /// lists no `hints`.
     pub fn uses_defaults(&self, worker_type: WorkerType) -> bool {
         self.role(worker_type).defaults
     }
@@ -273,8 +274,8 @@ const WORKER_TYPES: [WorkerType; 4] = [
     WorkerType::Encode,
 ];
 
-/// Linked hint-policy providers, and the default hint policies a role runs when `hint_policies`
-/// doesn't list it.
+/// Linked hint-policy providers, and the default hint policies a role runs when its
+/// `worker_selection` entry lists no `hints`.
 #[derive(Clone, Default)]
 pub(crate) struct HintPolicyRegistry {
     providers: HashMap<String, HintPolicyProvider>,
@@ -311,18 +312,27 @@ impl HintPolicyRegistry {
         Ok(())
     }
 
-    /// Resolve the configured hint policies once at startup. A role that `hint_policies` doesn't
-    /// list runs the default hint policies.
+    /// Resolve each role's hints once at startup, from the `worker_selection` entry the role runs.
+    /// A role whose entry lists no `hints` runs the default hint policies.
     pub(crate) fn resolve(
         &self,
         config: &KvRouterConfig,
     ) -> Result<HintPolicyFactory, HintPolicyRegistryError> {
-        let hint_config = config
-            .hint_policy_config()
+        let selected = config
+            .selected_worker_selection_policy_instances()
             .map_err(|source| HintPolicyRegistryError::Config { source })?;
         let mut roles: [ResolvedRole; 4] = Default::default();
         for worker_type in WORKER_TYPES {
-            let Some(entries) = hint_config.and_then(|config| config.role(worker_type)) else {
+            let selection = match worker_type {
+                WorkerType::Aggregated => &selected.aggregated,
+                WorkerType::Prefill => &selected.prefill,
+                WorkerType::Decode => &selected.decode,
+                WorkerType::Encode => &selected.encode,
+            };
+            let Some(entries) = selection
+                .as_ref()
+                .and_then(WorkerSelectionPolicySelection::hints)
+            else {
                 roles[role_index(worker_type)] = ResolvedRole {
                     policies: self.defaults.clone(),
                     defaults: true,
