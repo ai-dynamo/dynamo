@@ -268,6 +268,7 @@ STUB_MODULES = [
     "vllm.multimodal.inputs",
     "vllm.outputs",
     "vllm.reasoning",
+    "vllm.reasoning.glm47_moe_reasoning_parser",
     "vllm.reasoning.mistral_reasoning_parser",
     "vllm.reasoning.qwen3_engine_reasoning_parser",
     "vllm.renderers",

@@ -1547,6 +1547,151 @@ def test_kimi_k3_auto_tool_sets_reasoning_gate_pool(thinking, monkeypatch):
     assert result.dynamo_preproc["require_reasoning"] is thinking
 
 
+# A GLM-style template that ignores the thinking flags, so the rendered prompt,
+# not the request, decides whether generation starts inside reasoning. Qwen3's
+# tokenizer has GLM's <think>/</think> markers.
+_GLM_PROMPT_TEMPLATE = (
+    "{% for message in messages %}<|im_start|>{{ message.role }}\n"
+    "{{ message.content }}<|im_end|>\n{% endfor %}"
+    "{% if add_generation_prompt %}<|im_start|>assistant\n{{ GENERATION }}"
+    "{% endif %}"
+)
+_GLM_OPEN_GENERATION = "<think>\n"
+_GLM_CLOSED_GENERATION = "<think>\n\n</think>\n\n"
+
+
+def _glm_tokenizer(tokenizer, generation):
+    glm = copy.copy(tokenizer)
+    glm.chat_template = _GLM_PROMPT_TEMPLATE.replace("{{ GENERATION }}", generation)
+    return glm
+
+
+def _glm_request(request_fields, chat_template_kwargs):
+    return {
+        **_mistral_guided_request("auto"),
+        "reasoning_effort": None,
+        "chat_template_kwargs": chat_template_kwargs,
+        **request_fields,
+    }
+
+
+_GLM_GUIDED_REQUESTS = [
+    pytest.param({"response_format": {"type": "json_object"}}, id="json-object"),
+    pytest.param({"tool_choice": "required"}, id="required-tool"),
+]
+
+
+# Mirrors glm_generation_reasoning_follows_rendered_prompt in preprocessor.rs.
+@pytest.mark.parametrize("requested", [False, True])
+@pytest.mark.parametrize("prompt_open", [True, False], ids=["open", "closed"])
+@pytest.mark.parametrize("request_fields", _GLM_GUIDED_REQUESTS)
+def test_glm_reasoning_gate_follows_rendered_prompt(
+    tokenizer, request_fields, prompt_open, requested
+):
+    glm_tokenizer = _glm_tokenizer(
+        tokenizer, _GLM_OPEN_GENERATION if prompt_open else _GLM_CLOSED_GENERATION
+    )
+    request = _glm_request(request_fields, {"enable_thinking": requested})
+
+    result = preprocess_chat_request(
+        request,
+        tokenizer=glm_tokenizer,
+        tool_call_parser_name="glm45",
+        reasoning_parser_name="glm45",
+    )
+
+    assert result.force_reasoning is prompt_open
+    assert (
+        _guided_output_requires_reasoning(
+            request, result.force_reasoning, "glm45", result.guided_decoding
+        )
+        is prompt_open
+    )
+    if request_fields.get("tool_choice") == "required":
+        # A forced tool keeps its reasoning parser only while reasoning is open.
+        assert (result.reasoning_parser is not None) is prompt_open
+    # The kwargs that rendered the prompt are not rewritten.
+    assert result.request["chat_template_kwargs"] == {"enable_thinking": requested}
+
+
+# Mirrors glm_unknown_prompt_reasoning_preserves_request_controls.
+@pytest.mark.parametrize("requested", [False, True])
+@pytest.mark.parametrize(
+    ("parser_name", "generation"),
+    [("glm45", ""), ("qwen3", _GLM_OPEN_GENERATION)],
+    ids=["glm-marker-free", "non-glm-open"],
+)
+def test_reasoning_gate_keeps_request_controls_without_glm_prompt_state(
+    tokenizer, parser_name, generation, requested
+):
+    request = _glm_request(
+        {"response_format": {"type": "json_object"}}, {"enable_thinking": requested}
+    )
+
+    result = preprocess_chat_request(
+        request,
+        tokenizer=_glm_tokenizer(tokenizer, generation),
+        tool_call_parser_name=None,
+        reasoning_parser_name=parser_name,
+    )
+
+    assert result.force_reasoning is requested
+
+
+@pytest.mark.parametrize(
+    ("generation", "requested"),
+    [(_GLM_OPEN_GENERATION, False), (_GLM_CLOSED_GENERATION, True)],
+    ids=["open-flag-false", "closed-flag-true"],
+)
+@pytest.mark.parametrize("request_fields", _GLM_GUIDED_REQUESTS)
+def test_glm_rendered_prompt_sets_reasoning_gate_inline(
+    tokenizer, request_fields, generation, requested
+):
+    routed_engine = FakeRoutedEngine(items=[{"token_ids": [], "finish_reason": "stop"}])
+    processor = SglangProcessor(
+        tokenizer=_glm_tokenizer(tokenizer, generation),
+        routed_engine=routed_engine,
+        tool_call_parser_name="glm45",
+        reasoning_parser_name="glm45",
+        eos_token_ids=None,
+    )
+    request = _glm_request(request_fields, {"enable_thinking": requested})
+
+    async def collect():
+        return [item async for item in processor.generator(request)]
+
+    asyncio.run(collect())
+    assert routed_engine.requests[0]["require_reasoning"] is (not requested)
+
+
+@pytest.mark.parametrize(
+    ("generation", "requested"),
+    [(_GLM_OPEN_GENERATION, False), (_GLM_CLOSED_GENERATION, True)],
+    ids=["open-flag-false", "closed-flag-true"],
+)
+@pytest.mark.parametrize("request_fields", _GLM_GUIDED_REQUESTS)
+def test_glm_rendered_prompt_sets_reasoning_gate_pool(
+    tokenizer, request_fields, generation, requested, monkeypatch
+):
+    monkeypatch.setattr(
+        sglang_processor_module, "_w_tokenizer", _glm_tokenizer(tokenizer, generation)
+    )
+    monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", "glm45")
+    monkeypatch.setattr(sglang_processor_module, "_w_reasoning_parser_name", "glm45")
+    monkeypatch.setattr(
+        sglang_processor_module, "_w_exclude_tools_when_tool_choice_none", True
+    )
+    monkeypatch.setattr(sglang_processor_module, "_w_template_force_reasoning", False)
+
+    result = _preprocess_worker(
+        _glm_request(request_fields, {"enable_thinking": requested}),
+        MODEL,
+        eos_token_ids=None,
+    )
+    assert result.force_reasoning is (not requested)
+    assert result.dynamo_preproc["require_reasoning"] is (not requested)
+
+
 @pytest.mark.core
 @pytest.mark.parametrize(
     ("legacy_constraint", "expected"),

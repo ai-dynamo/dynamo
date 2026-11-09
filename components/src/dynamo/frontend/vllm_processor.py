@@ -44,7 +44,11 @@ from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import HttpError, InvalidArgument, WorkerUnavailable
 from dynamo.vllm.errors import vllm_client_error_to_http_error
 
-from .prepost import StreamingPostProcessor, preprocess_chat_request
+from .prepost import (
+    StreamingPostProcessor,
+    _glm_prompt_reasoning_open,
+    preprocess_chat_request,
+)
 from .structural_tag_policy import (
     runtime_structural_tag_excludes_reasoning,
     runtime_structural_tag_options,
@@ -582,6 +586,30 @@ def _build_reasoning_parser_metadata(
         return _ReasoningParserMetadata(None, None, None)
 
     parser_kwargs = {"chat_template_kwargs": chat_template_kwargs}
+    # A known GLM prompt state overrides the thinking flags, as in the Rust
+    # preprocessor. vLLM's GLM parser treats every marker as content when both
+    # flags are false, so its kwargs must follow the prompt too. The kwargs that
+    # rendered the prompt are left alone.
+    glm_open = _glm_prompt_reasoning_open(
+        prompt_token_ids,
+        tokenizer=tokenizer,
+        reasoning_parser_class=reasoning_parser_class,
+        request_for_sampling=request_for_sampling,
+    )
+    if glm_open is not None:
+        return _ReasoningParserMetadata(
+            True
+            if not getattr(request_for_sampling, "include_reasoning", True)
+            else not glm_open,
+            not glm_open,
+            {
+                "chat_template_kwargs": {
+                    **chat_template_kwargs,
+                    "thinking": glm_open,
+                    "enable_thinking": glm_open,
+                }
+            },
+        )
     if chat_template_kwargs.get("enable_thinking") is False:
         return _ReasoningParserMetadata(True, True, parser_kwargs)
     if getattr(request_for_sampling, "_grammar_from_tool_parser", False):
@@ -1161,7 +1189,13 @@ class VllmProcessor:
                     prompt_token_ids=tokens,
                     tool_parser=choice_tool_parser,
                     reasoning_parser_class=self.reasoning_parser_class,
-                    chat_template_kwargs=chat_template_kwargs,
+                    # Same kwargs as the worker's parser, which may follow
+                    # the rendered prompt rather than the request (GLM).
+                    chat_template_kwargs=(
+                        reasoning_metadata.parser_kwargs["chat_template_kwargs"]
+                        if reasoning_metadata.parser_kwargs is not None
+                        else chat_template_kwargs
+                    ),
                     model_config=self.input_processor.model_config,
                     response_reasoning_ended=(
                         reasoning_metadata.response_reasoning_ended

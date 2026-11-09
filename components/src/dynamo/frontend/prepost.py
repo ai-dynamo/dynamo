@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.reasoning import ReasoningParser
+from vllm.reasoning.glm47_moe_reasoning_parser import Glm47MoeParserReasoningAdapter
 from vllm.renderers import ChatParams
 from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.renderers.hf import resolve_chat_template
@@ -43,7 +44,10 @@ from .structural_tag_policy import (
     effective_tool_strict,
     should_attempt_structural_tag,
 )
-from .thinking import apply_default_thinking_mode_to_template_kwargs
+from .thinking import (
+    apply_default_thinking_mode_to_template_kwargs,
+    glm_prompt_reasoning_open,
+)
 from .utils import legacy_guided_decoding
 
 get_model_structural_tag: Any
@@ -530,9 +534,37 @@ def _reasoning_parser_enabled(
     See https://github.com/ai-dynamo/dynamo/issues/8636 for the enable_thinking
     half: when the chat template runs with enable_thinking=False the reasoning
     tags live in the prompt and the generated output carries none.
+
+    GLM is exempt from that half: its template may still open ``<think>`` with
+    the flag false, which is only known after render. The gate stays open and
+    the rendered prompt decides (see _glm_prompt_reasoning_open).
     """
     return reasoning_parser_class is not None and (
         chat_template_kwargs.get("enable_thinking") is not False
+        or issubclass(reasoning_parser_class, Glm47MoeParserReasoningAdapter)
+    )
+
+
+def _glm_prompt_reasoning_open(
+    prompt_token_ids: Sequence[int],
+    *,
+    tokenizer: TokenizerLike,
+    reasoning_parser_class: type[ReasoningParser] | None,
+    request_for_sampling: ChatCompletionRequest,
+) -> bool | None:
+    """The rendered GLM prompt's reasoning state, or None if unknown or not GLM.
+
+    vLLM maps both ``glm45`` and ``glm47`` to Glm47MoeParserReasoningAdapter.
+    """
+    if reasoning_parser_class is None or not issubclass(
+        reasoning_parser_class, Glm47MoeParserReasoningAdapter
+    ):
+        return None
+    return glm_prompt_reasoning_open(
+        prompt_token_ids,
+        tokenizer,
+        add_generation_prompt=request_for_sampling.add_generation_prompt,
+        continue_final_message=request_for_sampling.continue_final_message,
     )
 
 
@@ -547,6 +579,7 @@ def _prompt_leaves_reasoning_open(
     reasoning_parser_class: type[ReasoningParser] | None,
     chat_template_kwargs: dict[str, Any],
     model_config: ModelConfig | None,
+    request_for_sampling: ChatCompletionRequest,
 ) -> bool:
     """Whether the rendered prompt ends with an opened reasoning block.
 
@@ -555,6 +588,14 @@ def _prompt_leaves_reasoning_open(
     opening marker. A prompt without that marker, e.g. for models that emit
     their own opener, does not start in reasoning.
     """
+    glm_open = _glm_prompt_reasoning_open(
+        prompt_token_ids,
+        tokenizer=tokenizer,
+        reasoning_parser_class=reasoning_parser_class,
+        request_for_sampling=request_for_sampling,
+    )
+    if glm_open is not None:
+        return glm_open
     if not prompt_token_ids or not _reasoning_parser_enabled(
         reasoning_parser_class, chat_template_kwargs
     ):
@@ -866,6 +907,7 @@ async def preprocess_chat_request(
                 reasoning_parser_class=reasoning_parser_class,
                 chat_template_kwargs=chat_template_kwargs,
                 model_config=model_config,
+                request_for_sampling=request_for_sampling,
             )
         ),
     )
