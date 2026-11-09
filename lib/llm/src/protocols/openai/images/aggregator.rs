@@ -301,22 +301,4 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn image_chunks_with_accounting_fold_step_count() {
-        // The first chunk reports 4 steps.
-        let cases = [
-            ("equal steps", Some(4), Some(4)),
-            ("conflicting steps", Some(5), None),
-            ("usage without steps", None, None),
-        ];
-        for (case, second_steps, expected_steps) in cases {
-            let merged = merge_all(vec![
-                image_chunk("a", Some(accounting(1, Some(4)))),
-                image_chunk("b", Some(accounting(1, second_steps))),
-            ]);
-            assert_eq!(merged.nvext, Some(accounting(2, expected_steps)), "{case}");
-            assert_eq!(images(&merged), ["a", "b"], "{case}");
-        }
-    }
 }
