@@ -146,15 +146,17 @@ async fn anthropic_error_middleware(mut request: Request<Body>, next: Next) -> R
         let body_bytes = axum::body::to_bytes(body, get_body_limit())
             .await
             .unwrap_or_default();
-        if matches!(
-            parts.status,
-            StatusCode::UNPROCESSABLE_ENTITY | StatusCode::UNSUPPORTED_MEDIA_TYPE
-        ) {
-            parts.status = StatusCode::BAD_REQUEST;
-        }
         let mut body = match serde_json::from_slice::<AnthropicErrorResponse>(&body_bytes) {
-            Ok(error) => serde_json::to_value(error).expect("Anthropic error is serializable"),
-            Err(_) => {
+            Ok(error) if error.object_type == "error" => {
+                serde_json::to_value(error).expect("Anthropic error is serializable")
+            }
+            _ => {
+                if matches!(
+                    parts.status,
+                    StatusCode::UNPROCESSABLE_ENTITY | StatusCode::UNSUPPORTED_MEDIA_TYPE
+                ) {
+                    parts.status = StatusCode::BAD_REQUEST;
+                }
                 super::openai::record_local_failure(
                     if parts.status == StatusCode::PAYLOAD_TOO_LARGE {
                         ErrorClass::PayloadTooLarge
@@ -435,6 +437,23 @@ async fn handler_anthropic_messages(
         streaming,
         &request_id,
     );
+    if state.media_rejection().enabled() {
+        let content_type = request.media_content_type(&headers).map_err(|error| {
+            AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
+        })?;
+        if let Some(refusal) =
+            super::openai::media_refusal_for_content_type(&state, || content_type)
+        {
+            return Err(AnthropicHandlerError::new(
+                ErrorClass::UnsupportedMedia,
+                refusal.status,
+                "invalid_request_error",
+                refusal.message,
+                ErrorType::UnsupportedModality,
+            )
+            .into_marked_response(&mut inflight_guard));
+        }
+    }
     let mut request = request.into_request(&headers).map_err(|error| {
         AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
     })?;
@@ -562,8 +581,11 @@ async fn anthropic_messages(
 
     tracing::trace!("Received Anthropic messages request: {:?}", &*request);
 
-    // Look up engine and parsing options early so we know whether a reasoning
-    // parser is configured before converting the request.
+    let (orig_request, context) = request.into_parts();
+    let model_for_resp = orig_request.model.clone();
+
+    // Looked up after the media refusal so a refused request gets the
+    // configured status, not this lookup's 404/503.
     let (engine, parsing_options) = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
@@ -589,9 +611,6 @@ async fn anthropic_messages(
             )
             .into_marked_response(&mut inflight_guard),
         })?;
-
-    let (orig_request, context) = request.into_parts();
-    let model_for_resp = orig_request.model.clone();
 
     // Anthropic exposes input usage in `message_start`, before the backend's
     // authoritative count is available. Seed the stream with the same
