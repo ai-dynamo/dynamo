@@ -1871,10 +1871,8 @@ class OrchestratorEngineAdapter:
         publish_unchanged_demand = (
             self._config.global_planner_managed_allocation and not deployment_scaling
         )
-        # Managed demand also treats a RECONCILE SET as explicit: it is the
-        # role's final target even when PROPOSE omitted the role. RECONCILE
-        # AT_LEAST/AT_MOST are not: a non-binding bound returns only the
-        # ready-count baseline, which must never replace retained demand.
+        # Managed demand treats a RECONCILE SET as explicit even without PROPOSE;
+        # AT_LEAST/AT_MOST only echo the ready-count baseline, so they are not.
         reconcile_set_components = (
             frozenset(
                 ComponentKey(sub_component_type=target.sub_component_type)

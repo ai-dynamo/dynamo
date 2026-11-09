@@ -152,11 +152,8 @@ async def main(runtime: DistributedRuntime, config: GlobalPlannerConfig):
         operations.append(
             status_endpoint.serve_endpoint(managed_handler.allocation_status)
         )
-    # Stop everything once the endpoints have all returned (runtime shutdown,
-    # e.g. etcd lease loss), any endpoint fails, or the controller stops.
-    # A stopped controller never leaves endpoints accepting demand it cannot
-    # serve, and endpoints that are gone never leave the controller scaling;
-    # cancelling controller.run() freezes it.
+    # Stop everything once all endpoints return (runtime shutdown), one fails, or
+    # the controller stops, so neither keeps running without the other.
     tasks = [asyncio.ensure_future(operation) for operation in operations]
     endpoints_done = asyncio.gather(*tasks)
     waiters: list[asyncio.Future] = [endpoints_done]
