@@ -357,6 +357,7 @@ class VllmMultimodalRequestProcessor:
         use_unified_vision_chunk: Optional[bool] = None,
         trust_remote_code: bool = False,
     ) -> None:
+        """Bind the engine client, loaders, and model-specific multimodal policy."""
         self.model = model
         self.engine_client = engine_client
         self.enable_multimodal = enable_multimodal
@@ -374,7 +375,6 @@ class VllmMultimodalRequestProcessor:
         )
         self._mm_kwargs_receiver: Optional[MmKwargsNixlReceiver] = None
         self._cached_supported_modalities: Optional[frozenset[str]] = None
-        self._supported_modalities_known = False
         self._model_family = resolve_model_family(model)
         self._qwen_grid_params: Optional[QwenGridParams] = None
         self._k3_expansion: Optional[tuple[int, list[int]]] = None
@@ -512,7 +512,7 @@ class VllmMultimodalRequestProcessor:
         tower omits ``audio`` from its supported limits; using 999 decodes the
         clip and reports a missing decoder as HTTP 500.
         """
-        if self._supported_modalities_known:
+        if self._cached_supported_modalities is not None:
             return self._cached_supported_modalities
 
         model_config = getattr(
@@ -531,7 +531,6 @@ class VllmMultimodalRequestProcessor:
             modalities = frozenset(info.supported_mm_limits)
 
         self._cached_supported_modalities = modalities
-        self._supported_modalities_known = True
         return modalities
 
     @staticmethod
@@ -584,14 +583,14 @@ class VllmMultimodalRequestProcessor:
             count = len(items)
             if modality == "audio":
                 count += video_audio_count
-            # Compare the model modality, not the renamed vision-chunk key.
-            if supported is not None and modality not in supported:
-                if count > 0:
-                    raise InvalidArgument(f"Model does not support {modality} input.")
-                continue
+            # Kimi registers images as vision_chunk, so compare that key.
             limit_modality = _normalize_forwarded_mm_modality(
                 modality, self.use_unified_vision_chunk
             )
+            if supported is not None and limit_modality not in supported:
+                if count > 0:
+                    raise InvalidArgument(f"Model does not support {modality} input.")
+                continue
             limit = mm_config.get_limit_per_prompt(limit_modality)
             if count > limit:
                 raise InvalidArgument(

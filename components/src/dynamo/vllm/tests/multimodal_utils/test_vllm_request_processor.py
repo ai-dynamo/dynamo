@@ -2323,6 +2323,16 @@ def test_image_and_video_remain_allowed_when_audio_is_unsupported(monkeypatch):
     )
 
 
+def test_unified_vision_chunk_image_is_allowed(monkeypatch):
+    processor = _processor(unified_vision_chunk=True, media_limits={"vision_chunk": 8})
+    monkeypatch.setattr(
+        processor, "_supported_modalities", lambda: frozenset({"vision_chunk"})
+    )
+    processor.validate_multimodal_request(
+        {"multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]}}
+    )
+
+
 def test_zero_video_limit_rejects_before_any_media_loader():
     processor = _processor(media_limits={"image": 8, "video": 0})
     processor.embedding_loader = SimpleNamespace(load_multimodal_embeddings=AsyncMock())
