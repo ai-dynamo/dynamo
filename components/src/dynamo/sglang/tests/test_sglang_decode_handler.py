@@ -1838,6 +1838,7 @@ def test_multimodal_build_sampling_params_maps_min_tokens():
     ],
 )
 def test_multimodal_request_round_trip_keeps_logit_bias(raw_options, expected):
+    """Keep absent, empty, and populated bias maps through the encoder handoff."""
     # Mirrors the encode worker: validate the frontend dict, then serialize the
     # request to JSON for the PD or decode worker.
     preprocessed = PreprocessedRequest.model_validate(
@@ -1865,6 +1866,7 @@ def test_multimodal_request_round_trip_keeps_logit_bias(raw_options, expected):
     ],
 )
 def test_multimodal_build_sampling_params_forwards_logit_bias(logit_bias, expected):
+    """Forward non-empty bias maps with string keys and omit absent or empty maps."""
     raw_options = {} if logit_bias is None else {"logit_bias": logit_bias}
     request = SglangMultimodalRequest(
         request=PreprocessedRequest(
