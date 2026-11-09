@@ -453,7 +453,7 @@ func TestMergeFailureRecordsCapacityDoesNotEvict(t *testing.T) {
 func TestMergeFailureRecordsLargeDistinctBatchCoverageLimited(t *testing.T) {
 	f := newFixture()
 	existing := make([]failureRecordEntry, 0, failureRecordMaxEntries)
-	for i := 0; i < failureRecordMaxEntries; i++ {
+	for i := range failureRecordMaxEntries {
 		existing = append(existing, failureRecordEntry{
 			DCDGeneration:           2,
 			LWSName:                 "decode",
@@ -478,7 +478,7 @@ func TestMergeFailureRecordsLargeDistinctBatchCoverageLimited(t *testing.T) {
 
 	t.Log("A large distinct CurrentFailure batch declines without eviction or rewrite")
 	batch := make([]Observation, 0, failureRecordMaxEntries+8)
-	for i := 0; i < failureRecordMaxEntries+8; i++ {
+	for i := range failureRecordMaxEntries + 8 {
 		obs := currentFailureObservation(f, f.leaderPod, 23)
 		obs.LeaderUID = types.UID(fmt.Sprintf("batch-leader-%d", i))
 		obs.PodUID = types.UID(fmt.Sprintf("batch-pod-%d", i))
@@ -490,7 +490,7 @@ func TestMergeFailureRecordsLargeDistinctBatchCoverageLimited(t *testing.T) {
 	dup.LeaderUID = "dup-leader"
 	dup.PodUID = "dup-pod"
 	dup.PodName = "decode-dup"
-	for i := 0; i < 16; i++ {
+	for range 16 {
 		batch = append(batch, dup)
 	}
 
