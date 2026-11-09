@@ -4,14 +4,14 @@
 //! Envoy ext_proc protocol helpers: header extraction, metadata handling,
 //! body chunking, and response construction.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
 
 use crate::proto::envoy::config::core::v3::{
     HeaderMap, HeaderValue, HeaderValueOption, header_value_option::HeaderAppendAction,
 };
 use crate::proto::envoy::service::ext_proc::v3::{
     BodyMutation, BodyResponse, CommonResponse, HeaderMutation, HeadersResponse, ImmediateResponse,
-    ProcessingRequest, ProcessingResponse, StreamedBodyResponse, TrailersResponse,
+    ProcessingResponse, StreamedBodyResponse, TrailersResponse,
 };
 use crate::proto::envoy::r#type::v3::{HttpStatus, StatusCode};
 
@@ -103,13 +103,6 @@ pub fn extract_header_value(headers: &HeaderMap, key: &str) -> Option<String> {
         .iter()
         .find(|h| h.key.to_ascii_lowercase() == key_lower)
         .map(get_header_value)
-}
-
-pub fn extract_metadata_values(req: &ProcessingRequest) -> HashMap<String, prost_types::Struct> {
-    req.metadata_context
-        .as_ref()
-        .map(|m| m.filter_metadata.clone())
-        .unwrap_or_default()
 }
 
 /// Preserve the full header list from the incoming request, retaining
@@ -396,24 +389,118 @@ fn build_endpoint_metadata(endpoint: &str) -> prost_types::Struct {
 }
 
 /// Replace occurrences of the target (internal) model name with the incoming
-/// (client-facing) model name in the response body bytes. No-op when names
-/// match or either is empty.
-pub fn rewrite_model_name(body: &[u8], target_model: &str, incoming_model: &str) -> Vec<u8> {
+/// (client-facing) model name in the response body bytes. Borrows the body
+/// unchanged when the names match, when either is empty, or when the body
+/// does not name the target model, so a token chunk is copied once, into
+/// its ext_proc message, rather than twice.
+///
+/// Works on the bytes, not on a string: a streamed chunk can end inside a
+/// multi-byte character, and its bytes must reach the client as they came.
+pub fn rewrite_model_name<'a>(
+    body: &'a [u8],
+    target_model: &str,
+    incoming_model: &str,
+) -> Cow<'a, [u8]> {
     if target_model.is_empty() || incoming_model.is_empty() || target_model == incoming_model {
-        return body.to_vec();
+        return Cow::Borrowed(body);
     }
 
     let old = format!("\"model\":\"{target_model}\"");
     let new = format!("\"model\":\"{incoming_model}\"");
-
-    let body_str = String::from_utf8_lossy(body);
-    let replaced = body_str.replace(&old, &new);
-
-    if replaced.as_bytes() != body {
-        return replaced.into_bytes();
+    if let Some(rewritten) = replace_bytes(body, old.as_bytes(), new.as_bytes()) {
+        return Cow::Owned(rewritten);
     }
 
     let old_spaced = format!("\"model\": \"{target_model}\"");
     let new_spaced = format!("\"model\": \"{incoming_model}\"");
-    body_str.replace(&old_spaced, &new_spaced).into_bytes()
+    match replace_bytes(body, old_spaced.as_bytes(), new_spaced.as_bytes()) {
+        Some(rewritten) => Cow::Owned(rewritten),
+        None => Cow::Borrowed(body),
+    }
+}
+
+/// `haystack` with every `needle` replaced by `replacement`, or `None` when
+/// `needle` does not occur, so an unchanged chunk is never copied.
+fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Option<Vec<u8>> {
+    if needle.is_empty() {
+        return None;
+    }
+    let find = |within: &[u8]| {
+        within
+            .windows(needle.len())
+            .position(|window| window == needle)
+    };
+    let first = find(haystack)?;
+    let mut out = Vec::with_capacity(haystack.len() - needle.len() + replacement.len());
+    out.extend_from_slice(&haystack[..first]);
+    out.extend_from_slice(replacement);
+    let mut rest = &haystack[first + needle.len()..];
+    while let Some(at) = find(rest) {
+        out.extend_from_slice(&rest[..at]);
+        out.extend_from_slice(replacement);
+        rest = &rest[at + needle.len()..];
+    }
+    out.extend_from_slice(rest);
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrite_model_name_borrows_unchanged_chunks() {
+        let chunk = br#"data: {"model":"served","choices":[]}"#;
+        assert!(matches!(
+            rewrite_model_name(chunk, "served", "served"),
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            rewrite_model_name(chunk, "", "alias"),
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            rewrite_model_name(chunk, "other", "alias"),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn rewrite_model_name_replaces_the_target_model() {
+        assert_eq!(
+            rewrite_model_name(br#"{"model":"served","id":1}"#, "served", "alias").as_ref(),
+            br#"{"model":"alias","id":1}"#
+        );
+        assert_eq!(
+            rewrite_model_name(br#"{"model": "served"}"#, "served", "alias").as_ref(),
+            br#"{"model": "alias"}"#
+        );
+        assert_eq!(
+            rewrite_model_name(
+                br#"[{"model":"served"},{"model":"served"}]"#,
+                "served",
+                "alias"
+            )
+            .as_ref(),
+            br#"[{"model":"alias"},{"model":"alias"}]"#
+        );
+    }
+
+    /// A chunk can end inside a multi-byte character. Its bytes reach the
+    /// client unchanged, whether or not the chunk names the model.
+    #[test]
+    fn rewrite_model_name_keeps_bytes_that_are_not_utf8() {
+        // "€" is E2 82 AC; these chunks end after its first two bytes.
+        let unnamed = b"data: {\"delta\":\"\xE2\x82";
+        assert!(matches!(
+            rewrite_model_name(unnamed, "served", "alias"),
+            Cow::Borrowed(chunk) if chunk == unnamed
+        ));
+
+        let named = b"data: {\"model\":\"served\",\"delta\":\"\xE2\x82";
+        assert_eq!(
+            rewrite_model_name(named, "served", "alias").as_ref(),
+            b"data: {\"model\":\"alias\",\"delta\":\"\xE2\x82"
+        );
+    }
 }

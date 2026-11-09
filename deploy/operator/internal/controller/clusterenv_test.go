@@ -37,6 +37,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -47,6 +48,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/yaml"
 )
 
 var clusterTestEnv *clusterenv.Env
@@ -367,6 +369,26 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			t.Log("Allow the AISimulate Job Pod to run while preventing unrelated ReplicaSet workloads")
 			env.BlockReplicaSets()
 
+			t.Log("Write a trace scenario's trace to the claim file its Request names before applying it")
+			traceFixture := filepath.Join(scenarioDir, "trace.jsonl")
+			var trace clusterTestTraceFile
+			traceBefore := ""
+			if _, err := os.Stat(traceFixture); err == nil {
+				scenario := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{}
+				data, err := os.ReadFile(input)
+				require.NoError(t, err)
+				require.NoError(t, yaml.Unmarshal(data, scenario))
+				require.NotNil(t, scenario.Spec.Workload, "trace scenario input has no workload")
+				require.NotNil(t, scenario.Spec.Workload.Trace, "trace scenario input has no trace workload")
+				require.NotNil(t, scenario.Spec.Workload.Trace.Source.PersistentVolumeClaim, "trace scenario input has no trace claim")
+				trace = clusterTestTraceFile{
+					claim:   scenario.Spec.Workload.Trace.Source.PersistentVolumeClaim.ClaimName,
+					subPath: scenario.Spec.Workload.Trace.Source.PersistentVolumeClaim.SubPath,
+				}
+				createClusterTestTraceClaim(t, env, trace)
+				traceBefore = writeClusterTestTrace(t, env, trace, traceFixture, plannerImage)
+			}
+
 			t.Log("Apply the native v1beta2 Request through production admission")
 			objects := golden.ApplyManifests(t, filepath.Join(scenarioDir, "input.yaml"), env.Client(), env.Namespace())
 			if len(objects) != 1 || objects[0].GetKind() != "DynamoGraphDeploymentRequest" {
@@ -444,8 +466,8 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 
 			t.Log("Verify the Job consumed the immutable input recorded in Run status")
 			require.NotNil(t, completedRun.Status.JobRef, "completed Run has no Job reference")
-			require.NotNil(t, completedRun.Status.AISimulate, "completed Run has no AISimulate status")
-			require.NotNil(t, completedRun.Status.AISimulate.Input, "completed Run has no effective AISimulate input")
+			require.NotNil(t, completedRun.Status.AISim, "completed Run has no AISimulate status")
+			require.NotNil(t, completedRun.Status.AISim.Input, "completed Run has no effective AISimulate input")
 			key := types.NamespacedName{Namespace: env.Namespace(), Name: completedRun.Status.JobRef.Name}
 			var executionConfig corev1.ConfigMap
 			require.NoError(t, env.Client().Get(ctx, key, &executionConfig))
@@ -469,8 +491,8 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			})
 			configInput, err := dgdrRunStatusInput(executionConfig.Data[dgdrRunInputKey])
 			require.NoError(t, err)
-			require.JSONEq(t, string(completedRun.Status.AISimulate.Input.Raw), string(configInput.Raw))
-			require.Equal(t, int64(8), aisimulateHardwareBudget(t, completedRun.Status.AISimulate.Input.Raw),
+			require.JSONEq(t, string(completedRun.Status.AISim.Input.Raw), string(configInput.Raw))
+			require.Equal(t, int64(8), aisimulateHardwareBudget(t, completedRun.Status.AISim.Input.Raw),
 				"lowered AISimulate input lost the selected-shape budget")
 
 			t.Log("Verify the Candidate is a real API object controlled by the immutable Run")
@@ -480,12 +502,21 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			require.Len(t, candidates.Items, 1)
 			require.True(t, metav1.IsControlledBy(&candidates.Items[0], &completedRun), "Candidate is not controlled by its Run")
 			require.Equal(t, completedRun.Status.CandidateRefs[0].Name, candidates.Items[0].Name)
-			require.NotEmpty(t, candidates.Items[0].Spec.Components, "Candidate has no materialized DGD components")
+			var candidateSpec nvidiacomv1beta1.DynamoGraphDeploymentSpec
+			require.NoError(t, json.Unmarshal(candidates.Items[0].Spec.Raw, &candidateSpec))
+			require.NotEmpty(t, candidateSpec.Components, "Candidate has no materialized DGD components")
+			require.True(t, meta.IsStatusConditionTrue(candidates.Items[0].Status.Conditions, nvidiacomv1beta2.DGDCConditionValid))
 			require.LessOrEqual(t, candidateUsedGPUs(t, candidates.Items[0].Status.Metrics), int64(8),
 				"Candidate exceeds the selected-shape GPU budget")
 
 			t.Log("Match the published Candidate API contract against the reviewed golden")
 			golden.EventuallyMatchManifests(t, env.Client(), env.Namespace(), filepath.Join(scenarioDir, "output.yaml"))
+
+			if traceBefore != "" {
+				t.Log("The Run replayed the mounted trace file and left its contents, owner and mode unchanged")
+				requireClusterTestTraceInput(t, &completedRun, trace)
+				require.Equal(t, traceBefore, statClusterTestTrace(t, env, trace, "trace-after", plannerImage))
+			}
 		})
 	}
 }
