@@ -211,11 +211,6 @@ async fn forward(
         let message = "the request body must be a JSON object with a string `model`";
         return error(StatusCode::BAD_REQUEST, message.to_owned());
     };
-    // The router core's workers stay as `pools` shows them until the pick.
-    let catalog = match &proxy.selector {
-        Selector::Pool(_) => None,
-        Selector::SelectionCore(selection_core) => Some(selection_core.hold_catalog().await),
-    };
     let snapshot = proxy.pools.borrow().clone();
     let candidates = snapshot.pools_for(&model).collect::<Vec<_>>();
     if candidates.is_empty() {
@@ -254,7 +249,6 @@ async fn forward(
             selection_core.select(&request, &candidates).await
         }
     };
-    drop(catalog);
     metrics.selected(selecting);
     let Some((target, in_flight)) = selected else {
         metrics.rejected(error_type::UNAVAILABLE);

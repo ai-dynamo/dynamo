@@ -283,7 +283,18 @@ async fn run() -> Result<()> {
         // or early requests get a 503.
         let (mut applied, reconcile) =
             selection_core.reconcile_catalog(pools, shutdown.child_token());
-        tokio::spawn(reconcile);
+        // Without it the pools go stale, so shut down when it ends.
+        let reconciling = tokio::spawn(reconcile);
+        let stop = shutdown.clone();
+        tokio::spawn(async move {
+            if let Err(error) = reconciling.await {
+                tracing::error!(%error, "the pool catalog reconciler failed");
+            }
+            if !stop.is_cancelled() {
+                tracing::error!("the pool catalog reconciler stopped; shutting down");
+                stop.cancel();
+            }
+        });
         applied
             .changed()
             .await

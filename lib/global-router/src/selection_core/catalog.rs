@@ -4,13 +4,16 @@
 //! Pools as the router core's workers: one worker per reachable pool, keyed
 //! by a hash of the pool id.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
-use async_trait::async_trait;
 use dynamo_global_common::PoolId;
 use dynamo_kv_router::WorkerId;
-use dynamo_kv_router::services::selection::{WorkerCatalogSource, WorkerRequest};
-use tokio::sync::{OwnedRwLockWriteGuard, RwLock, watch};
+use dynamo_kv_router::services::selection::{CatalogReconciler, WorkerRequest};
+use tokio::sync::watch;
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::Pool;
@@ -47,55 +50,102 @@ fn workers(pools: &[Pool]) -> Vec<WorkerRequest> {
         .collect()
 }
 
-/// Feeds each pool snapshot to the core's `CatalogReconciler` and publishes
-/// it once applied. The reconciler asks for the next snapshot only after it
-/// has applied the last one, so the source holds `catalog` for writing from
-/// handing a snapshot out until that request: selects that hold it for
-/// reading see the published pools and the core's workers agree.
-pub(super) struct PoolCatalogSource<S> {
-    pools: watch::Receiver<Arc<S>>,
-    started: bool,
-    catalog: Arc<RwLock<()>>,
-    applying: Option<(Arc<S>, OwnedRwLockWriteGuard<()>)>,
+/// How long a pool that left the catalog stays a core worker after the pools
+/// without it are published, so a select that read the earlier pools never
+/// names a worker the core has dropped.
+pub(super) const RETIRE_AFTER: Duration = Duration::from_secs(5);
+
+/// Delay before a failed pass is applied again, as `CatalogReconciler::run`.
+const RETRY_AFTER: Duration = Duration::from_secs(5);
+
+/// Where a core worker stands against the published pools.
+enum Membership {
+    /// In the latest pools.
+    Wanted,
+    /// Left the latest pools, which are not published yet.
+    Left,
+    /// Left the published pools at this instant.
+    Retiring(Instant),
+}
+
+/// Applies each pool snapshot to the core, then publishes it to `applied`.
+/// Pools join the core before the snapshot naming them is published, and
+/// leave it [`RETIRE_AFTER`] after one without them is, so the core's workers
+/// always cover the published pools. A failed pass publishes nothing and is
+/// applied again after [`RETRY_AFTER`] or on the next snapshot. Returns once
+/// `pools` closes or `cancel` fires.
+pub(super) async fn reconcile<S>(
+    mut reconciler: CatalogReconciler,
+    mut pools: watch::Receiver<Arc<S>>,
     applied: watch::Sender<Arc<S>>,
-}
-
-impl<S> PoolCatalogSource<S> {
-    /// The receiver holds the pools the core has applied. It changes once the
-    /// first snapshot is applied; until then it holds the unapplied pools.
-    pub(super) fn new(
-        pools: watch::Receiver<Arc<S>>,
-        catalog: Arc<RwLock<()>>,
-    ) -> (Self, watch::Receiver<Arc<S>>) {
-        let (applied, applied_pools) = watch::channel(pools.borrow().clone());
-        let source = Self {
-            pools,
-            started: false,
-            catalog,
-            applying: None,
-            applied,
-        };
-        (source, applied_pools)
-    }
-}
-
-#[async_trait]
-impl<S> WorkerCatalogSource for PoolCatalogSource<S>
-where
-    S: AsRef<[Pool]> + Send + Sync,
+    cancel: CancellationToken,
+) where
+    S: AsRef<[Pool]>,
 {
-    async fn next_snapshot(&mut self) -> Option<Vec<WorkerRequest>> {
-        if let Some((pools, _applying)) = self.applying.take() {
-            self.applied.send_replace(pools);
+    let mut members: HashMap<WorkerId, (WorkerRequest, Membership)> = HashMap::new();
+    let mut snapshot = pools.borrow_and_update().clone();
+    loop {
+        let wanted = workers((*snapshot).as_ref());
+        for (_, membership) in members.values_mut() {
+            if matches!(membership, Membership::Wanted) {
+                *membership = Membership::Left;
+            }
         }
-        if std::mem::replace(&mut self.started, true) {
-            self.pools.changed().await.ok()?;
+        for worker in &wanted {
+            members.insert(worker.worker_id, (worker.clone(), Membership::Wanted));
         }
-        let applying = self.catalog.clone().write_owned().await;
-        let snapshot = self.pools.borrow_and_update().clone();
-        let workers = workers((*snapshot).as_ref());
-        self.applying = Some((snapshot, applying));
-        Some(workers)
+        let now = Instant::now();
+        members.retain(|_, (_, membership)| {
+            !matches!(membership, Membership::Retiring(since) if now >= *since + RETIRE_AFTER)
+        });
+        // From the snapshot itself, so the core still rejects two pools whose
+        // ids hash to one worker id.
+        let desired = wanted
+            .into_iter()
+            .chain(
+                members
+                    .values()
+                    .filter(|(_, membership)| !matches!(membership, Membership::Wanted))
+                    .map(|(worker, _)| worker.clone()),
+            )
+            .collect::<Vec<_>>();
+        let failed = match reconciler.apply(&desired).await {
+            Ok(()) => {
+                applied.send_replace(snapshot.clone());
+                let published = Instant::now();
+                for (_, membership) in members.values_mut() {
+                    if matches!(membership, Membership::Left) {
+                        *membership = Membership::Retiring(published);
+                    }
+                }
+                false
+            }
+            Err(error) => {
+                tracing::warn!(%error, retry_in = ?RETRY_AFTER, "the router core did not take the pools; keeping the last applied pools");
+                true
+            }
+        };
+        let wake = if failed {
+            Some(now + RETRY_AFTER)
+        } else {
+            members
+                .values()
+                .filter_map(|(_, membership)| match membership {
+                    Membership::Retiring(since) => Some(*since + RETIRE_AFTER),
+                    _ => None,
+                })
+                .min()
+        };
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            changed = pools.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                snapshot = pools.borrow_and_update().clone();
+            }
+            _ = tokio::time::sleep_until(wake.unwrap_or(now)), if wake.is_some() => {}
+        }
     }
 }
 
@@ -143,61 +193,5 @@ mod tests {
             [worker_id(&live.id)]
         );
         assert!(workers(&[]).is_empty());
-    }
-
-    #[tokio::test]
-    async fn snapshots_add_and_remove_workers() {
-        let blue = pool("blue", "qwen", &["http://blue:8000"]);
-        let green = pool("green", "qwen", &["http://green:8000"]);
-        let (catalog, pools) = watch::channel(Arc::new(vec![blue.clone()]));
-        let (mut source, _applied) = PoolCatalogSource::new(pools, Arc::default());
-
-        let first = source.next_snapshot().await.unwrap();
-        assert_eq!(ids(&first), [worker_id(&blue.id)]);
-
-        catalog.send_replace(Arc::new(vec![blue.clone(), green.clone()]));
-        let mut second = ids(&source.next_snapshot().await.unwrap());
-        second.sort_unstable();
-        let mut both = [worker_id(&blue.id), worker_id(&green.id)];
-        both.sort_unstable();
-        assert_eq!(second, both);
-
-        let mut blue_down = blue.clone();
-        blue_down.frontends.clear();
-        catalog.send_replace(Arc::new(vec![blue_down, green.clone()]));
-        let third = source.next_snapshot().await.unwrap();
-        assert_eq!(ids(&third), [worker_id(&green.id)]);
-
-        drop(catalog);
-        assert!(source.next_snapshot().await.is_none());
-    }
-
-    /// A snapshot is published only when the reconciler asks for the next
-    /// one, after it has applied this one.
-    #[tokio::test]
-    async fn snapshots_are_published_once_applied() {
-        let blue = Arc::new(vec![pool("blue", "qwen", &["http://blue:8000"])]);
-        let green = Arc::new(vec![pool("green", "qwen", &["http://green:8000"])]);
-        let (catalog, pools) = watch::channel(blue.clone());
-        let catalog_lock = Arc::new(RwLock::new(()));
-        let (mut source, mut applied) = PoolCatalogSource::new(pools, catalog_lock.clone());
-
-        source.next_snapshot().await.unwrap();
-        assert!(!applied.has_changed().unwrap());
-        assert!(
-            catalog_lock.try_read().is_err(),
-            "held while the core applies"
-        );
-
-        catalog.send_replace(green.clone());
-        assert!(Arc::ptr_eq(&applied.borrow(), &blue));
-        source.next_snapshot().await.unwrap();
-        assert!(Arc::ptr_eq(&applied.borrow_and_update(), &blue));
-        assert!(catalog_lock.try_read().is_err());
-
-        drop(catalog);
-        assert!(source.next_snapshot().await.is_none());
-        assert!(Arc::ptr_eq(&applied.borrow_and_update(), &green));
-        assert!(catalog_lock.try_read().is_ok(), "released once applied");
     }
 }

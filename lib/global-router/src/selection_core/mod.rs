@@ -20,13 +20,13 @@ use dynamo_kv_router::services::selection::{
     SelectionService, SelectionServiceBuilder,
 };
 use dynamo_kv_router::{WorkerId, WorkerType};
-use tokio::sync::{RwLock, RwLockReadGuard, watch};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::load::{InFlightGuard, InFlightTracker};
 use crate::selector::{Cursors, PoolTarget, reachable, target};
 use crate::{Pool, RoutingRequest};
-use catalog::{PoolCatalogSource, ROUTING_GROUP, worker_id};
+use catalog::{ROUTING_GROUP, reconcile, worker_id};
 
 /// How the core picks among a model's pools.
 #[derive(Clone, Debug)]
@@ -38,8 +38,6 @@ pub enum SelectionCorePolicy {
 /// Selects a pool through the router core, then rotates over its frontends.
 pub struct SelectionCoreSelector {
     service: Arc<SelectionService>,
-    /// Held for writing while a pool snapshot is applied to the core.
-    catalog: Arc<RwLock<()>>,
     frontends: Cursors<PoolId>,
     in_flight: Arc<InFlightTracker>,
 }
@@ -59,17 +57,16 @@ impl SelectionCoreSelector {
         let service = Arc::new(builder.build().await.context("build the router core")?);
         Ok(Self {
             service,
-            catalog: Arc::default(),
             frontends: Cursors::default(),
             in_flight,
         })
     }
 
-    /// Keeps the core's workers in sync with `pools`, as the local router's
-    /// `CatalogReconciler` does. The receiver holds the pools the core has
-    /// applied and changes once the first snapshot is applied. Select from
-    /// it under [`Self::hold_catalog`], so the pools and the core's workers
-    /// agree.
+    /// Keeps the core's workers in sync with `pools` through the local
+    /// router's `CatalogReconciler`. The receiver holds the pools the core has
+    /// applied and changes once the first snapshot is applied; select from
+    /// it, and the core has every pool it names. The future returns once
+    /// `pools` closes or `cancel` fires.
     pub fn reconcile_catalog<S>(
         &self,
         pools: watch::Receiver<Arc<S>>,
@@ -82,15 +79,8 @@ impl SelectionCoreSelector {
         S: AsRef<[Pool]> + Send + Sync + 'static,
     {
         let reconciler = CatalogReconciler::new(self.service.core().clone());
-        let (source, applied) = PoolCatalogSource::new(pools, self.catalog.clone());
-        let reconcile = async move { reconciler.run(source, cancel).await };
-        (applied, reconcile)
-    }
-
-    /// Holds the core's workers as they are: read the applied pools and
-    /// select under the guard, and drop it before forwarding.
-    pub async fn hold_catalog(&self) -> RwLockReadGuard<'_, ()> {
-        self.catalog.read().await
+        let (applied, applied_pools) = watch::channel(pools.borrow().clone());
+        (applied_pools, reconcile(reconciler, pools, applied, cancel))
     }
 
     /// The chosen pool and frontend, with the request's in-flight count.
@@ -169,6 +159,8 @@ fn config() -> KvRouterConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use url::Url;
 
     use crate::selector::tests::pool;
@@ -230,8 +222,8 @@ mod tests {
         assert_eq!(in_flight.get(&blue.id), 0);
     }
 
-    /// A pool replaced by another stays selectable throughout: the applied
-    /// pools and the core's workers agree under `hold_catalog`.
+    /// A pool replaced by another stays selectable throughout: the core has
+    /// every pool the applied pools name.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn replaced_pools_stay_selectable() {
         let blue = pool("blue", "qwen", &["http://blue-0:8000"]);
@@ -251,7 +243,6 @@ mod tests {
             let next = if round % 2 == 0 { &green } else { &blue };
             catalog.send_replace(Arc::new(vec![next.clone()]));
             for _ in 0..4 {
-                let _held = selection_core.hold_catalog().await;
                 let pools = applied.borrow().clone();
                 let candidates = pools.iter().collect::<Vec<_>>();
                 assert!(
@@ -260,5 +251,88 @@ mod tests {
                 );
             }
         }
+    }
+
+    async fn picks(selection_core: &SelectionCoreSelector, candidates: &[&Pool]) -> Option<PoolId> {
+        let request = RoutingRequest::new("qwen");
+        let (target, _in_flight) = selection_core.select(&request, candidates).await?;
+        Some(target.pool.id.clone())
+    }
+
+    /// A pass the core rejects publishes nothing: the applied pools stay
+    /// selectable, and the next snapshot is applied.
+    #[tokio::test]
+    async fn a_failed_apply_keeps_the_applied_pools() {
+        let blue = pool("blue", "qwen", &["http://blue-0:8000"]);
+        let green = pool("green", "qwen", &["http://green-0:8000"]);
+        let selection_core =
+            SelectionCoreSelector::new(SelectionCorePolicy::RoundRobin, Arc::default())
+                .await
+                .unwrap();
+        let (catalog, subscription) = watch::channel(Arc::new(vec![blue.clone()]));
+        let (mut applied, reconcile) =
+            selection_core.reconcile_catalog(subscription, CancellationToken::new());
+        let reconciling = tokio::spawn(reconcile);
+        applied.changed().await.unwrap();
+
+        // A pool listed twice is two workers with one id, as when two pool ids
+        // hash alike, which the core rejects.
+        catalog.send_replace(Arc::new(vec![green.clone(), green.clone()]));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !applied.has_changed().unwrap(),
+            "a failed pass is not published"
+        );
+        let pools = applied.borrow().clone();
+        assert_eq!(
+            pools.iter().map(|pool| &pool.id).collect::<Vec<_>>(),
+            [&blue.id]
+        );
+        assert_eq!(
+            picks(&selection_core, &[&blue]).await,
+            Some(blue.id.clone())
+        );
+
+        catalog.send_replace(Arc::new(vec![green.clone()]));
+        applied.changed().await.unwrap();
+        assert_eq!(
+            picks(&selection_core, &[&green]).await,
+            Some(green.id.clone())
+        );
+
+        drop(catalog);
+        reconciling.await.unwrap();
+    }
+
+    /// A pool that leaves stays a core worker for `RETIRE_AFTER` after the
+    /// pools without it are published, then leaves the core.
+    #[tokio::test(start_paused = true)]
+    async fn a_removed_pool_retires_after_the_pools_without_it_are_published() {
+        let blue = pool("blue", "qwen", &["http://blue-0:8000"]);
+        let green = pool("green", "qwen", &["http://green-0:8000"]);
+        let selection_core =
+            SelectionCoreSelector::new(SelectionCorePolicy::RoundRobin, Arc::default())
+                .await
+                .unwrap();
+        let (catalog, subscription) = watch::channel(Arc::new(vec![blue.clone()]));
+        let (mut applied, reconcile) =
+            selection_core.reconcile_catalog(subscription, CancellationToken::new());
+        tokio::spawn(reconcile);
+        applied.changed().await.unwrap();
+
+        catalog.send_replace(Arc::new(vec![green.clone()]));
+        applied.changed().await.unwrap();
+        // A select that read the earlier pools still finds blue.
+        assert_eq!(
+            picks(&selection_core, &[&blue]).await,
+            Some(blue.id.clone())
+        );
+
+        tokio::time::sleep(catalog::RETIRE_AFTER + Duration::from_millis(100)).await;
+        assert_eq!(picks(&selection_core, &[&blue]).await, None);
+        assert_eq!(
+            picks(&selection_core, &[&green]).await,
+            Some(green.id.clone())
+        );
     }
 }
