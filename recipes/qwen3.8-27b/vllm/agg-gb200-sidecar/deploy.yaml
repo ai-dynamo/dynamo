@@ -31,7 +31,8 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.1
+              # Nightly until Dynamo 1.7.0 ships: 1.6.1 has no engine reasoning gate (the vllm-rs flag below).
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20261107-403ead2
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:
@@ -61,7 +62,7 @@ spec:
         spec:
           initContainers:
             - name: runtime
-              image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:1.6.1
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar-nightly:20261107-403ead2
               imagePullPolicy: IfNotPresent
               restartPolicy: Always
               command: [dynamo-vllm-sidecar]
@@ -89,7 +90,7 @@ spec:
                   readOnly: true
           containers:
             - name: main
-              image: vllm/vllm-openai:v0.32.0
+              image: vllm/vllm-openai:v0.33.0
               imagePullPolicy: IfNotPresent
               securityContext:
                 runAsUser: 0
@@ -97,8 +98,8 @@ spec:
                 capabilities:
                   add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
               command: [vllm-rs]
-              # The 1.6.1 sidecar refuses an engine reasoning parser. Set `--reasoning-parser qwen3` with
-              # Dynamo 1.7.0 and vLLM 0.32.1 or later (vllm-proto 0.6), which pass the reasoning gate.
+              # The engine reasoning parser matches --dyn-reasoning-parser, so tool and JSON grammars start
+              # after reasoning. Dynamo sends the per-request reasoning gate (vllm-proto 0.6 and later).
               args:
                 - serve
                 - $(MODEL_NAME)
@@ -115,7 +116,7 @@ spec:
                 - --tool-call-parser
                 - none
                 - --reasoning-parser
-                - none
+                - qwen3
                 - --
                 - --dtype
                 - bfloat16
