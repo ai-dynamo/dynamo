@@ -48,6 +48,9 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 Repository = "https://github.com/ai-dynamo/dynamo.git"
 
 [project.optional-dependencies]
+delta-tokenizer = [
+    "toktier==0.3.0",
+]
 artifact-delivery = [
     "opendal==0.47.10",
 ]
