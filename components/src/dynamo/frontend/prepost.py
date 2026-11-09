@@ -629,6 +629,9 @@ def _prepare_request(
         if validated_request is not None
         else _validate_chat_completion_request(request)
     )
+    # vLLM renders from the unadjusted request, and parsers that compile
+    # response_format into a grammar clear it; the prompt needs the caller's value.
+    render_response_format = request_for_sampling.response_format
 
     tool_parser: ToolParser | None = None
     # With enable_auto_tool_choice the model may emit tool calls even when the
@@ -755,6 +758,7 @@ def _prepare_request(
             "documents": request_for_sampling.documents,
             "tokenize": tokenize_in_template,
         },
+        response_format=render_response_format,
     )
 
     return (

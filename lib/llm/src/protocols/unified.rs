@@ -481,6 +481,10 @@ impl OAIChatLikeRequest for UnifiedRequest {
         OAIChatLikeRequest::template_tools(&self.inner)
     }
 
+    fn raw_tools(&self) -> Option<minijinja::value::Value> {
+        OAIChatLikeRequest::raw_tools(&self.inner)
+    }
+
     fn tool_choice(&self) -> Option<minijinja::value::Value> {
         OAIChatLikeRequest::tool_choice(&self.inner)
     }

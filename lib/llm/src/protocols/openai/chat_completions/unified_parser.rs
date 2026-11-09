@@ -56,6 +56,7 @@ use futures::{Stream, StreamExt};
 use uuid::Uuid;
 
 use crate::protocols::openai::GuidedToolConstraint;
+use crate::tokenizers::traits::Tokenizer;
 
 use super::NvCreateChatCompletionStreamResponse;
 
@@ -86,6 +87,11 @@ pub(crate) const MUSE_SPARK_UNIFIED_FAMILY: &str = "muse_spark";
 /// Qwen3-Coder XML tool grammar. Model cards pair `--dyn-tool-call-parser qwen3_coder`
 /// with `--dyn-reasoning-parser nemotron_v3`.
 pub(crate) const NEMOTRON_V3_UNIFIED_FAMILY: &str = "nemotron_v3";
+/// The `dynamo-parsers-v2` unified family for Mistral v11+ (`[TOOL_CALLS]NAME[ARGS]{json}`).
+/// The `mistral` parser name maps to it through [`DYNAMO_FAMILY_ALIASES`], and
+/// [`FAMILY_REQUIRED_TOKENS`] keeps pre-v11 tokenizers on the v1 `mistral` parser.
+pub(crate) const MISTRAL_UNIFIED_FAMILY: &str = "mistral_4";
+const MISTRAL_REASONING_START: &str = "[THINK]";
 
 /// Dynamo's `--dyn-tool-call-parser` name that pairs into [`QWEN3_UNIFIED_FAMILY`].
 const QWEN3_TOOL_CALL_PARSER: &str = "qwen3_coder";
@@ -111,6 +117,7 @@ const DYNAMO_FAMILY_ALIASES: &[(&str, &str)] = &[
     ("gemma-4", GEMMA4_UNIFIED_FAMILY),
     ("glm45", GLM47_UNIFIED_FAMILY),
     ("kimi_k25", KIMI_K2_UNIFIED_FAMILY),
+    ("mistral", MISTRAL_UNIFIED_FAMILY),
 ];
 
 /// Canonical family names and aliases share one route for registration, stream, and batch.
@@ -244,6 +251,46 @@ pub(crate) fn selected_request_family(
 /// Whether the operator explicitly selected V2 parsing.
 pub(crate) fn parsers_v2_selected() -> bool {
     super::tool_parser_v2::enabled()
+}
+
+/// Vocabulary tokens a unified family's call format needs. A tokenizer without them
+/// predates that format, so `auto` falls back to the v1 parser of the same name;
+/// every family listed here must also name a v1 parser. A `mistral` vocabulary
+/// without `[ARGS]` is pre-v11 and writes `[TOOL_CALLS]` followed by a JSON array,
+/// upstream vLLM's `_is_pre_v11_tokeniser` vocabulary check.
+const FAMILY_REQUIRED_TOKENS: &[(&str, &str)] = &[(MISTRAL_UNIFIED_FAMILY, "[ARGS]")];
+
+/// The configured unified family this tokenizer cannot serve, if any. Model setup
+/// resolves it once, and [`supported_family`] applies it to every selection.
+pub(crate) fn unsupported_family(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+    tokenizer: &dyn Tokenizer,
+) -> anyhow::Result<Option<&'static str>> {
+    let Some(family) = configured_family(tool_call_parser, reasoning_parser) else {
+        return Ok(None);
+    };
+    for &(required_by, token) in FAMILY_REQUIRED_TOKENS {
+        if required_by == family
+            && tokenizer
+                .token_to_id(token)
+                .map_err(|error| error.context(format!("look up {token} for {family}")))?
+                .is_none()
+        {
+            return Ok(Some(family));
+        }
+    }
+    Ok(None)
+}
+
+/// A selected unified family, unless the model's tokenizer cannot serve it: `auto`
+/// then keeps the v1 parser, while an explicit `DYN_PARSER_VERSION=2` keeps the
+/// operator's choice.
+pub(crate) fn supported_family(
+    selected: Option<&'static str>,
+    unsupported: Option<&'static str>,
+) -> Option<&'static str> {
+    selected.filter(|family| Some(*family) != unsupported || parsers_v2_selected())
 }
 
 /// Request facts for parser initialization and response interpretation.
@@ -567,6 +614,18 @@ impl JsonPrefillProbe {
                 return Some(UnifiedParserStartingState::None);
             }
             if !terminal && !text.is_empty() && HEADER.starts_with(text) {
+                return None;
+            }
+        }
+        // Mistral output starts in content and `[THINK]` opens reasoning, which looks
+        // like a JSON array root; hand it to the native parser instead, and hold a
+        // split opener until it is complete or disproved.
+        if family == MISTRAL_UNIFIED_FAMILY {
+            let text = self.text.trim_start_matches([' ', '\r', '\n', '\t']);
+            if text.starts_with(MISTRAL_REASONING_START) {
+                return Some(UnifiedParserStartingState::None);
+            }
+            if !terminal && MISTRAL_REASONING_START.starts_with(text) {
                 return None;
             }
         }
@@ -943,6 +1002,11 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
         "gpt_oss" => Ok(UnifiedParserStartingState::None),
         "muse_glimmer" | "muse_spark" => Ok(infer_marker_prefill(content, "<|start|>", "<|eom|>")),
         BEAM_UNIFIED_FAMILY => Ok(beam_prefill(content)),
+        MISTRAL_UNIFIED_FAMILY => Ok(infer_marker_prefill(
+            content,
+            MISTRAL_REASONING_START,
+            "[/THINK]",
+        )),
         other => anyhow::bail!("no prefill detector for unified parser family '{other}'"),
     }
 }
@@ -13619,6 +13683,97 @@ pub(crate) mod tests {
         assert_eq!(configured_family(Some("qwen3_coder"), Some("glm47")), None);
     }
 
+    /// v11+ tokenizers keep Unified `mistral`; a pre-v11 tokenizer, which has
+    /// `[TOOL_CALLS]` but no `[ARGS]`, keeps the v1 parser under `auto`.
+    #[test]
+    fn mistral_batch_output_splits_reasoning_text_and_calls() {
+        let parsed = parse_complete(
+            MISTRAL_UNIFIED_FAMILY,
+            "[THINK]plan[/THINK]answer",
+            &GuidedToolConstraint::None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            (parsed.reasoning.as_str(), parsed.text.as_str()),
+            ("plan", "answer")
+        );
+
+        let parsed = parse_complete(
+            MISTRAL_UNIFIED_FAMILY,
+            "answer",
+            &GuidedToolConstraint::None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            (parsed.reasoning.as_str(), parsed.text.as_str()),
+            ("", "answer")
+        );
+
+        let parsed = parse_complete(
+            MISTRAL_UNIFIED_FAMILY,
+            "[THINK]look it up[/THINK][TOOL_CALLS]get_weather[ARGS]{\"city\":\"Paris\"}",
+            &GuidedToolConstraint::None,
+            &weather_tools(),
+        )
+        .unwrap();
+        assert_eq!(parsed.reasoning, "look it up");
+        assert!(parsed.text.is_empty());
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert_eq!(parsed.tool_calls[0].function.name, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&parsed.tool_calls[0].function.arguments)
+                .unwrap(),
+            serde_json::json!({"city": "Paris"})
+        );
+    }
+
+    #[test]
+    fn unified_mistral_requires_the_args_token() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::unified_mistral_requires_the_args_token"),
+            &[],
+        ) {
+            return;
+        }
+        let tekken = crate::tokenizers::TekkenTokenizer::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/sample-models/mock-mistral-tekken/tekken.json"
+        ))
+        .unwrap();
+        let pre_v11: tokenizers::Tokenizer = serde_json::from_value(serde_json::json!({
+            "version": "1.0", "truncation": null, "padding": null,
+            "added_tokens": [{"id": 1, "content": "[TOOL_CALLS]", "special": true,
+                "single_word": false, "lstrip": false, "rstrip": false, "normalized": false}],
+            "normalizer": null, "pre_tokenizer": null, "post_processor": null, "decoder": null,
+            "model": {"type": "BPE", "vocab": {"a": 0, "[TOOL_CALLS]": 1}, "merges": []}
+        }))
+        .unwrap();
+        let pre_v11 = crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(pre_v11);
+
+        let mistral = Some(MISTRAL_UNIFIED_FAMILY);
+        for (tool, reasoning) in [(Some("mistral"), Some("mistral")), (Some("mistral"), None)] {
+            assert_eq!(unsupported_family(tool, reasoning, &tekken).unwrap(), None);
+            assert_eq!(
+                unsupported_family(tool, reasoning, &pre_v11).unwrap(),
+                mistral
+            );
+        }
+        // Families without required tokens are always supported.
+        assert_eq!(
+            unsupported_family(Some("qwen3_coder"), None, &pre_v11).unwrap(),
+            None
+        );
+
+        assert_eq!(supported_family(mistral, None), mistral);
+        assert_eq!(supported_family(mistral, mistral), None);
+        // Only the unsupported family is dropped, even when the parser names change
+        // after setup.
+        let qwen3 = Some(QWEN3_UNIFIED_FAMILY);
+        assert_eq!(supported_family(qwen3, mistral), qwen3);
+    }
+
     #[test]
     fn default_v2_routing_in_isolated_processes() {
         use dynamo_runtime::config::environment_names::llm::{
@@ -14205,6 +14360,82 @@ pub(crate) mod tests {
                 .collect();
             assert_eq!(text, raw, "JSON prefix must progress before terminal");
         }
+    }
+
+    #[tokio::test]
+    async fn structured_mistral_think_opener_is_not_a_json_root() {
+        let policy = UnifiedRequestPolicy {
+            structured_response: true,
+            ..Default::default()
+        };
+        for (chunks, want_content, want_reasoning) in [
+            (
+                vec!["[THINK]", "Need JSON.", "[/THINK]", "{\"answer\":4}"],
+                "{\"answer\":4}",
+                "Need JSON.",
+            ),
+            (
+                vec!["[TH", "INK]Need JSON.[/THINK]{\"answer\":4}"],
+                "{\"answer\":4}",
+                "Need JSON.",
+            ),
+            (
+                vec!["\n[TH", "INK]Need JSON.[/THINK]{\"answer\":4}"],
+                "\n{\"answer\":4}",
+                "Need JSON.",
+            ),
+            (vec!["[", "1, 2]"], "[1, 2]", ""),
+        ] {
+            let mut input: Vec<_> = chunks.iter().map(|text| chunk(text, false)).collect();
+            input.push(chunk("", true));
+            let output = apply_stream_with_policy(
+                futures::stream::iter(input),
+                None,
+                GuidedToolConstraint::None,
+                UnifiedParserStartingState::None,
+                MISTRAL_UNIFIED_FAMILY,
+                true,
+                policy,
+            )
+            .collect::<Vec<_>>()
+            .await;
+            let choices = collect_choices(&output);
+            let content: String = choices
+                .iter()
+                .filter_map(|c| match &c.delta.content {
+                    Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let reasoning: String = choices
+                .iter()
+                .filter_map(|c| c.delta.reasoning_content.as_deref())
+                .collect();
+            assert_eq!(content, want_content, "{chunks:?}");
+            assert_eq!(reasoning, want_reasoning, "{chunks:?}");
+        }
+
+        // A split opener that arrives with the finish is decided, not held past it.
+        let output = apply_stream_with_policy(
+            futures::stream::iter([chunk("[", true)]),
+            None,
+            GuidedToolConstraint::None,
+            UnifiedParserStartingState::None,
+            MISTRAL_UNIFIED_FAMILY,
+            true,
+            policy,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = collect_choices(&output);
+        let content_at = choices.iter().position(|c| {
+            matches!(&c.delta.content, Some(ChatCompletionMessageContent::Text(text)) if text == "[")
+        });
+        let finish_at = choices.iter().position(|c| c.finish_reason.is_some());
+        assert!(
+            content_at.is_some() && content_at <= finish_at,
+            "{choices:?}"
+        );
     }
 
     #[test]
