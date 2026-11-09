@@ -52,6 +52,9 @@ ACCEPTED = [
 DECLINED = [
     {"model": "m", "token_ids": TokenList([1, 2])},
     request(token_ids=[True, 2]),
+    request(token_ids=[1, -1]),
+    request(extra_args={"s": {1, 2}}),
+    request(extra_args={1: "x"}),
     request(extra_args={"big": 2**64}),
     request(extra_args={"$serde_json::private::RawValue": "[1]"}),
 ]

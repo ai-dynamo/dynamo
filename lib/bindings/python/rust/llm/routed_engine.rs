@@ -92,10 +92,8 @@ impl RoutedEngine {
         context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let preprocessed = preprocessed.bind(py);
-        let request = match fast_preprocessed_request(preprocessed) {
-            Some(request) => request,
-            None => depythonize(preprocessed).map_err(to_pyerr)?,
-        };
+        let request = fast_preprocessed_request(preprocessed)
+            .map_or_else(|| depythonize(preprocessed).map_err(to_pyerr), Ok)?;
         let request_context = if let Some(parent_context) = context.as_ref() {
             let parent_metadata = parent_context.metadata_snapshot();
             let parent_controller = parent_context.inner();
