@@ -1186,7 +1186,6 @@ mod tests {
 #[cfg(test)]
 mod tests_non_nixl {
     use super::*;
-    use dynamo_memory::nixl::AgentConfig;
 
     fn assert_invalid_argument_in_chain(error: &(dyn std::error::Error + 'static)) {
         let mut current = Some(error);
@@ -1740,10 +1739,7 @@ mod tests_non_nixl {
         };
         // These arms return before NIXL registration, so an agent without the UCX
         // backend suffices; `MediaLoader::new` needs UCX, which some hosts lack.
-        let nixl_agent = match NixlAgent::new_with_config(
-            "media-loader-unsupported-test",
-            &AgentConfig::default(),
-        ) {
+        let nixl_agent = match NixlAgent::new("media-loader-unsupported-test") {
             Ok(agent) => agent,
             Err(e) => {
                 println!(
@@ -1800,7 +1796,7 @@ mod tests_non_nixl {
             assert_eq!(dynamo_error.public_message(), Some(expected), "{part}");
             // The operator-facing cause stays in the internal message.
             assert!(
-                dynamo_error.message().len() > expected.len(),
+                dynamo_error.message().starts_with(&format!("{expected}: ")),
                 "{part}: {error:#}"
             );
         }
