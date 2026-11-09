@@ -1832,7 +1832,9 @@ def test_multimodal_build_sampling_params_maps_min_tokens():
     [
         ({}, None),
         ({"logit_bias": {}}, {}),
-        ({"logit_bias": {"3862": 4}}, {"3862": 4.0}),
+        # The msgpack request plane delivers int keys; JSON delivers str keys.
+        ({"logit_bias": {3862: 4}}, {3862: 4.0}),
+        ({"logit_bias": {"3862": 4}}, {3862: 4.0}),
     ],
 )
 def test_multimodal_request_round_trip_keeps_logit_bias(raw_options, expected):
@@ -1859,6 +1861,7 @@ def test_multimodal_request_round_trip_keeps_logit_bias(raw_options, expected):
         ({}, None),
         ({"3862": 4}, {"3862": 4.0}),
         ({"3862": 4, "18": -10}, {"3862": 4.0, "18": -10.0}),
+        ({3862: 4, 18: -10}, {"3862": 4.0, "18": -10.0}),
     ],
 )
 def test_multimodal_build_sampling_params_forwards_logit_bias(logit_bias, expected):

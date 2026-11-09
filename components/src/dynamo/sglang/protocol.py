@@ -41,8 +41,8 @@ class SamplingOptions(BaseModel):
     use_beam_search: Optional[bool] = None
     length_penalty: Optional[float] = None
     seed: Optional[int] = None
-    # String token-id keys, as in JSON and SGLang's SamplingParams.logit_bias.
-    logit_bias: Optional[Dict[str, float]] = None
+    # Keys arrive as int on the msgpack request plane and as str on JSON; lax mode coerces both.
+    logit_bias: Optional[Dict[int, float]] = None
 
 
 class PreprocessedRequest(BaseModel):
