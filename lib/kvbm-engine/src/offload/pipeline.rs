@@ -2049,7 +2049,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_transfer_partial_failure() {
-        use crate::offload::handle::{TransferState, TransferStatus};
+        use crate::offload::handle::TransferState;
 
         let hash_ok_1 = test_hash(1);
         let hash_fail = test_hash(2);
@@ -2127,7 +2127,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_transfer_all_success() {
-        use crate::offload::handle::{TransferState, TransferStatus};
+        use crate::offload::handle::TransferState;
 
         let hash1 = test_hash(1);
         let hash2 = test_hash(2);
@@ -2194,7 +2194,7 @@ mod tests {
     /// Mixed batch: two transfer_ids, one partially fails, the other fully succeeds.
     #[tokio::test]
     async fn test_execute_transfer_mixed_transfers() {
-        use crate::offload::handle::{TransferState, TransferStatus};
+        use crate::offload::handle::TransferState;
 
         let hash_a1 = test_hash(10);
         let hash_a2_fail = test_hash(20); // transfer A, will fail
@@ -2298,7 +2298,7 @@ mod tests {
     /// but NOT for failed hashes in the partial-failure path.
     #[tokio::test]
     async fn test_execute_transfer_emits_events_for_successful_hashes() {
-        use crate::offload::handle::{TransferState, TransferStatus};
+        use crate::offload::handle::TransferState;
 
         let hash_ok_1 = test_hash(10);
         let hash_fail = test_hash(20);
@@ -2319,7 +2319,7 @@ mod tests {
         };
 
         let transfer_id = crate::offload::handle::TransferId::new();
-        let (mut state, handle) = TransferState::new(transfer_id, vec![100, 200, 300]);
+        let (mut state, _handle) = TransferState::new(transfer_id, vec![100, 200, 300]);
         state.add_passed(vec![100, 200, 300]);
         state.mark_in_flight(vec![100, 200, 300]);
         let state_arc = Arc::new(std::sync::Mutex::new(state));
