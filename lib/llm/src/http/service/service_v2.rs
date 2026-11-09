@@ -3153,6 +3153,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn track_inflight_inference_preserves_trailers() {
+        use http_body_util::{BodyExt, StreamBody};
+        use tower::ServiceExt;
+
+        let service = HttpService::builder().build().unwrap();
+        let router = axum::Router::new()
+            .route(
+                "/",
+                axum::routing::get(|| async {
+                    let mut trailers = axum::http::HeaderMap::new();
+                    trailers.insert("x-checksum", header::HeaderValue::from_static("done"));
+                    let frames = futures::stream::iter([
+                        Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from_static(b"data"))),
+                        Ok(Frame::trailers(trailers)),
+                    ]);
+                    Body::new(StreamBody::new(frames))
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(InferenceReadinessState {
+                    state: service.state_clone(),
+                    mounted_protocols: HashMap::new(),
+                }),
+                track_inflight_inference,
+            ));
+
+        let response = router
+            .oneshot(axum::http::Request::new(Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let mut body = response.into_body();
+        let data = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        assert_eq!(data, "data");
+        let trailers = body
+            .frame()
+            .await
+            .expect("middleware dropped the trailer frame")
+            .unwrap()
+            .into_trailers()
+            .unwrap();
+        assert_eq!(trailers["x-checksum"], "done");
+    }
+
+    #[tokio::test]
     async fn test_admin_routes_only_on_admin_listener() {
         // Off by default, and bound to loopback when enabled.
         assert!(HttpService::builder().build().unwrap().admin.is_none());
