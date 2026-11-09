@@ -271,6 +271,13 @@ inter-token latency or output throughput per user.
 
 ## Expected Performance
 
+<Note>
+The B200 and GB200 rows were measured on the `1.4.0` images with
+`--moe-runner-backend flashinfer_cutlass`. The recipes now use the `1.6.0` images with
+`flashinfer_cutedsl` and `--moe-a2a-backend none`, and these two rows have not been
+measured again with that configuration.
+</Note>
+
 Measured with 64K input tokens, 400 output tokens, and 90% KV reuse at concurrency 32
 with 3,541 trace requests. MTP runs with simulated acceptance, `acc_len=3.3153` from
 SpeedBench coding, not acceptance measured on this agentic trace. The 32-request warmup
@@ -292,6 +299,11 @@ is a separate pass and is not included in these figures:
 ## Expected Accuracy
 
 GPQA Diamond (`gpqa_diamond_aa_v3`) via NVIDIA Eval Factory
+
+<Note>
+The B200 and GB200 GPQA results come from the same earlier `1.4.0` and
+`flashinfer_cutlass` configuration and have not been measured again.
+</Note>
 
 <div className="dynamo-target-table">
 <table>

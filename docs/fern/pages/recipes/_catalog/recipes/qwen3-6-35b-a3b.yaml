@@ -36,8 +36,8 @@ targets:
   deploy:
     asset: recipes/qwen3.6-35b-a3b/sglang/agg-b200-mtp/deploy.yaml
   expected_performance:
-    available: true
-    summary: 2988.50 output tok/s/GPU, 111.98 user tok/s P50, TTFT P50 286.90 ms at concurrency 32 (3,541-request agentic trace, simulated acc_len=3.3153 from SpeedBench coding)
+    available: false
+    summary: Not yet measured with flashinfer_cutedsl on sglang-runtime:1.6.0. The earlier measurement with flashinfer_cutlass on 1.4.0 was 2988.50 output tok/s/GPU, 111.98 user tok/s P50, TTFT P50 286.90 ms at concurrency 32 (3,541-request agentic trace, simulated acc_len=3.3153 from SpeedBench coding)
 - id: sglang-gb200-agg-agentic
   recommended: false
   hardware:
@@ -56,8 +56,8 @@ targets:
   deploy:
     asset: recipes/qwen3.6-35b-a3b/sglang/agg-gb200-mtp/deploy.yaml
   expected_performance:
-    available: true
-    summary: 3035.98 output tok/s/GPU, 111.47 user tok/s P50, TTFT P50 156.07 ms at concurrency 32 (3,541-request agentic trace, simulated acc_len=3.3153 from SpeedBench coding)
+    available: false
+    summary: Not yet measured with flashinfer_cutedsl on sglang-runtime:1.6.0. The earlier measurement with flashinfer_cutlass on 1.4.0 was 3035.98 output tok/s/GPU, 111.47 user tok/s P50, TTFT P50 156.07 ms at concurrency 32 (3,541-request agentic trace, simulated acc_len=3.3153 from SpeedBench coding)
 - id: sglang-h200-agg-agentic
   recommended: false
   hardware:
