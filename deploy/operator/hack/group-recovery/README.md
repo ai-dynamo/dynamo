@@ -88,6 +88,11 @@ Get/List itself fails, the operator logs
 `LeaderWorkerSet Pod observation unavailable` and leaves Available / Ready
 unchanged.
 
+The manager cache is not an atomic snapshot across resource kinds, and the
+logged revision identifies the observed Pod and matching StatefulSet
+templates. It does not prove that the Pod uses the newest desired rollout
+revision or that the rollout has completed.
+
 Identity fields on the success path include `namespace`, `dcdName`,
 `dcdUID`, `dcdGeneration`, `lwsName`, `lwsUID`, `lwsGeneration`,
 `groupIndex`, `revision`, `leaderUID`, `podName`, `podUID`,
@@ -97,8 +102,10 @@ the current level fact for that reconcile, not a recovery counter or
 durable history. The operator currently enables debug by default; the
 manager binary accepts `--zap-log-level=debug` and `--zap-encoder=json`.
 
-Production CPU results for this observation path remain pending. Do not
-treat the native counts above as operator validation.
+The native counts above do not validate the operator observation path.
+Validate that path with production operator observations and independently
+captured owner and revision identities. Recorded results belong in the PR
+description.
 
 ## Prerequisites
 

@@ -531,7 +531,6 @@ func logLeaderWorkerSetObservations(ctx context.Context, observations []lwscontr
 	}
 }
 
-
 func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplicaStatus(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment, componentReconcileResult ComponentReconcileResult) error {
 	if componentReconcileResult.serviceReplicaStatus != nil {
 		componentReconcileResult.serviceReplicaStatus.GPUsPerEngine = nil

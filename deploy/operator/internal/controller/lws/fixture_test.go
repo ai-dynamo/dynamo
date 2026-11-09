@@ -144,7 +144,7 @@ func newFixture() *fixture {
 	}
 }
 
-func (f *fixture) reader(objects ...client.Object) client.Client {
+func (f *fixture) reader(objects ...client.Object) client.WithWatch {
 	s := runtime.NewScheme()
 	_ = scheme.AddToScheme(s)
 	_ = nvidiacomv1beta1.AddToScheme(s)

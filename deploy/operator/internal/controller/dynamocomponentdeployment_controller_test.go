@@ -22,6 +22,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
 	"strings"
@@ -2429,16 +2430,36 @@ func Test_reconcileLeaderWorkerSetResources_ObservesWithoutChangingReadiness(t *
 	}
 
 	var logs bytes.Buffer
-	ctx := ctrl.LoggerInto(t.Context(), zap.New(zap.WriteTo(&logs), zap.UseDevMode(true)))
+	ctx := ctrl.LoggerInto(t.Context(), zap.New(zap.WriteTo(&logs), zap.UseDevMode(true), zap.JSONEncoder()))
 
 	t.Log("Reconcile and keep Available/Ready based on LWS status despite Pod failure evidence")
 	result, err := reconciler.reconcileLeaderWorkerSetResources(ctx, dcd)
 	require.NoError(t, err)
 	assert.Equal(t, metav1.ConditionTrue, result.status)
 	assert.Equal(t, "LeaderWorkerSetReady", result.reason)
-	assert.Contains(t, logs.String(), "Observed LeaderWorkerSet Pod failure evidence")
-	assert.Contains(t, logs.String(), `"podUID":"pod-uid"`)
-	assert.Contains(t, logs.String(), `"revision":"rev-1"`)
+
+	t.Log("Parse the structured failure evidence line for witness identity")
+	foundFailure := false
+	for _, line := range strings.Split(logs.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		msg, _ := entry["msg"].(string)
+		if msg != "Observed LeaderWorkerSet Pod failure evidence" {
+			continue
+		}
+		foundFailure = true
+		assert.Equal(t, "pod-uid", entry["podUID"])
+		assert.Equal(t, "rev-1", entry["revision"])
+		assert.Equal(t, string(lwscontroller.VerdictCurrentFailure), entry["verdict"])
+		assert.Equal(t, lwscontroller.ReadOriginManagerCache, entry["readOrigin"])
+	}
+	require.True(t, foundFailure, "missing CurrentFailure observation log; logs=%s", logs.String())
 }
 
 func Test_reconcileLeaderWorkerSetResources_ObservationReadErrorKeepsReadiness(t *testing.T) {
@@ -2478,7 +2499,7 @@ func Test_reconcileLeaderWorkerSetResources_ObservationReadErrorKeepsReadiness(t
 	}
 
 	var logs bytes.Buffer
-	ctx := ctrl.LoggerInto(t.Context(), zap.New(zap.WriteTo(&logs), zap.UseDevMode(true)))
+	ctx := ctrl.LoggerInto(t.Context(), zap.New(zap.WriteTo(&logs), zap.UseDevMode(true), zap.JSONEncoder()))
 
 	t.Log("Observation unavailable must log and leave the original Ready result unchanged")
 	result, err := reconciler.reconcileLeaderWorkerSetResources(ctx, dcd)

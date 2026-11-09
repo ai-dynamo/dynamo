@@ -362,6 +362,8 @@ The operator maintains observed state under `status`.
 
   For LeaderWorkerSet-backed DCDs, the operator also writes per-reconcile Pod observations at debug verbosity. The observations identify a current non-zero exit of the `main` container only when the Pod is not being deleted, has a Ready condition of False, and its timestamps, controller-owner chain, and template revision can be verified. Missing or inconsistent evidence is reported as unknown. A read failure is logged explicitly and does not change component conditions. These logs do not change the workload's recovery policy and do not count repeated recovery attempts or preserve history across reconciles or operator restarts.
 
+  The manager cache is not an atomic snapshot across resource kinds, and the logged revision identifies the observed Pod and matching StatefulSet templates. It does not prove that the Pod uses the newest desired rollout revision or that the rollout has completed.
+
   The operator currently enables debug logging by default. Its manager binary accepts `--zap-log-level=debug`; use `--zap-encoder=json` for JSON-formatted output.
 
   <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#Condition" target="_blank">metav1.Condition</a>
