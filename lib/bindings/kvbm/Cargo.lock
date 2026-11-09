@@ -2144,9 +2144,6 @@ dependencies = [
  "async-nats",
  "async-stream",
  "async-trait",
- "aws-config",
- "aws-credential-types",
- "aws-types",
  "axum",
  "base64 0.22.1",
  "bincode 2.0.1",
@@ -2164,6 +2161,7 @@ dependencies = [
  "dynamo-decisions",
  "dynamo-global-discovery-client",
  "dynamo-kv-router",
+ "dynamo-lora",
  "dynamo-memory",
  "dynamo-mocker",
  "dynamo-parsers",
@@ -2240,6 +2238,36 @@ dependencies = [
  "validator",
  "xxhash-rust",
  "zmq",
+]
+
+[[package]]
+name = "dynamo-lora"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-types",
+ "blake3",
+ "dashmap",
+ "dynamo-kv-router",
+ "dynamo-runtime",
+ "futures",
+ "hf-hub",
+ "object_store 0.12.5",
+ "parking_lot",
+ "prometheus",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -2337,9 +2365,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "8.4.0"
+version = "8.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3105191d378178513e101572dedf09b5e171eec0371861ca8b303d9cb224aed"
+checksum = "834c27ac7acebd32a223e36eec6e17d39abb4b1fc4db7610748d245f51af6b26"
 dependencies = [
  "async-openai",
  "derive_builder",
