@@ -145,3 +145,128 @@ func TestFrontendStartupProbeOriginPropagation(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyFrontendDrainBudget(t *testing.T) {
+	const propagationEnv = "DYN_FRONTEND_PROPAGATION_DELAY_SECS"
+	const drainEnv = "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS"
+
+	drainValue := func(container corev1.Container) (string, bool) {
+		for _, env := range container.Env {
+			if env.Name == drainEnv {
+				return env.Value, true
+			}
+		}
+		return "", false
+	}
+
+	tests := []struct {
+		name          string
+		componentType v1beta1.ComponentType
+		grace         *int64
+		env           []corev1.EnvVar
+		wantDrain     string // expected derived drain value; "" means no drain env expected
+		wantInjected  bool
+	}{
+		{
+			name:          "O1 default grace and propagation derive 50",
+			componentType: v1beta1.ComponentTypeFrontend,
+			grace:         nil, // default 60
+			wantDrain:     "50",
+			wantInjected:  true,
+		},
+		{
+			name:          "O2 larger grace period derives 110",
+			componentType: v1beta1.ComponentTypeFrontend,
+			grace:         new(int64(120)),
+			wantDrain:     "110",
+			wantInjected:  true,
+		},
+		{
+			name:          "O3 user-set propagation shrinks the derived drain",
+			componentType: v1beta1.ComponentTypeFrontend,
+			grace:         new(int64(60)),
+			env:           []corev1.EnvVar{{Name: propagationEnv, Value: "15"}},
+			wantDrain:     "40",
+			wantInjected:  true,
+		},
+		{
+			name:          "O4 user-set drain is never overridden",
+			componentType: v1beta1.ComponentTypeFrontend,
+			grace:         new(int64(60)),
+			env:           []corev1.EnvVar{{Name: drainEnv, Value: "200"}},
+			wantDrain:     "200",
+			wantInjected:  true,
+		},
+		{
+			name:          "O5 grace period smaller than the derived minimum leaves the frontend default",
+			componentType: v1beta1.ComponentTypeFrontend,
+			grace:         new(int64(8)),
+			wantInjected:  false,
+		},
+		{
+			name:          "grace period just large enough derives a 1s drain",
+			componentType: v1beta1.ComponentTypeFrontend,
+			grace:         new(int64(11)),
+			wantDrain:     "1",
+			wantInjected:  true,
+		},
+		{
+			name:          "Grove-sized pod grace period leaves the frontend default",
+			componentType: v1beta1.ComponentTypeFrontend,
+			grace:         new(int64(10)),
+			wantInjected:  false,
+		},
+		{
+			name:          "non-frontend components are unchanged",
+			componentType: v1beta1.ComponentTypeWorker,
+			grace:         new(int64(60)),
+			wantInjected:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Render a single-container pod spec with the test's grace period and env")
+			podSpec := &corev1.PodSpec{
+				TerminationGracePeriodSeconds: tt.grace,
+				Containers: []corev1.Container{
+					{Name: commonconsts.MainContainerName, Env: tt.env},
+				},
+			}
+
+			t.Log("Apply the frontend drain budget")
+			applyFrontendDrainBudget(podSpec, tt.componentType)
+
+			t.Log("Check the derived or preserved drain timeout")
+			value, present := drainValue(podSpec.Containers[0])
+			require.Equal(t, tt.wantInjected, present)
+			if tt.wantInjected {
+				require.Equal(t, tt.wantDrain, value)
+			}
+		})
+	}
+}
+
+func TestApplyFrontendDrainBudgetIgnoresValueFrom(t *testing.T) {
+	t.Log("A drain timeout sourced from valueFrom is left untouched")
+	podSpec := &corev1.PodSpec{
+		TerminationGracePeriodSeconds: new(int64(60)),
+		Containers: []corev1.Container{
+			{
+				Name: commonconsts.MainContainerName,
+				Env: []corev1.EnvVar{
+					{
+						Name:      "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS",
+						ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}},
+					},
+				},
+			},
+		},
+	}
+
+	applyFrontendDrainBudget(podSpec, v1beta1.ComponentTypeFrontend)
+
+	t.Log("The env keeps its single valueFrom entry; no literal drain is appended")
+	require.Len(t, podSpec.Containers[0].Env, 1)
+	require.NotNil(t, podSpec.Containers[0].Env[0].ValueFrom)
+}

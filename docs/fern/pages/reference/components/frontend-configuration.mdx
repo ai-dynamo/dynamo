@@ -98,9 +98,24 @@ The Rust HTTP server also reads these environment variables, which are not expos
   or, depending on the host's TCP settings, fail.
 </ParamField>
 
-<ParamField path="DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS" type="integer" default="5">
-  Maximum time the Frontend waits for admitted HTTP response bodies and `/v1/realtime` WebSocket
-  tasks to finish after shutdown begins. New inference requests are rejected while draining.
+<ParamField path="DYN_FRONTEND_PROPAGATION_DELAY_SECS" type="integer" default="5">
+  How long the Frontend keeps serving **every** request after a shutdown signal, so that
+  endpoint updates can propagate to load balancers before it stops accepting new work. Readiness
+  is withdrawn immediately (`/health` returns 503), but requests are still admitted during this
+  window. Set to `0` to disable the window and start draining at once. The operator sizes the
+  drain timeout around this value, so raise it rather than lowering the drain when a load balancer
+  registers pods directly and needs longer to notice the change.
+</ParamField>
+
+<ParamField path="DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS" type="integer" default="50">
+  Maximum time the Frontend lets admitted HTTP, gRPC, and `/v1/realtime` WebSocket exchanges
+  finish once the propagation window has ended. New inference requests are rejected while
+  draining. The drain ends early as soon as every connection has closed. The default is sized so
+  that the propagation window, the drain, and a 5-second margin fit the operator's default
+  60-second `terminationGracePeriodSeconds`; the operator overrides it from the pod's actual grace
+  period. At the deadline, exchanges still running are aborted so they cannot look complete (no SSE
+  `[DONE]`, HTTP/2 `RST_STREAM`, gRPC `grpc-status: 14`). A second shutdown signal skips both the
+  window and the drain.
 </ParamField>
 
 <ParamField path="DYN_HTTP_OVERLOAD_STATUS_CODE" type="integer" default="529">

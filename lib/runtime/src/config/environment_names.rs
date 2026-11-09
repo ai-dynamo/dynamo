@@ -389,6 +389,12 @@ pub mod llm {
     /// Listen backlog of the frontend HTTP/HTTPS socket (default 4096).
     pub const DYN_HTTP_LISTEN_BACKLOG: &str = "DYN_HTTP_LISTEN_BACKLOG";
 
+    /// How long the frontend keeps serving every request after a shutdown signal, so that
+    /// endpoint updates can propagate to load balancers (default 5 seconds; 0 disables it).
+    pub const DYN_FRONTEND_PROPAGATION_DELAY_SECS: &str = "DYN_FRONTEND_PROPAGATION_DELAY_SECS";
+
+    /// How long the frontend lets admitted HTTP, gRPC and WebSocket exchanges finish once the
+    /// propagation window has ended (default 50 seconds).
     pub const DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
 
@@ -1233,6 +1239,7 @@ mod tests {
             llm::DYN_BATCH_MAX_FILE_TRANSFERS,
             llm::DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS,
             llm::DYN_HTTP_LISTEN_BACKLOG,
+            llm::DYN_FRONTEND_PROPAGATION_DELAY_SECS,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             llm::DYN_HTTP_WRITE_IDLE_TIMEOUT_SECS,
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,

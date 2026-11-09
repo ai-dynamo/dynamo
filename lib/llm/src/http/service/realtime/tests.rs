@@ -150,7 +150,7 @@ async fn client_close_and_shutdown_cancel_a_connecting_replacement() {
             Some(Duration::from_secs(60)),
         ));
         let mut session = session(engine.clone(), 1);
-        let cancel = session.cancel.clone();
+        let shutdown_token = session.shutdown.clone();
         let (tx, rx) = mpsc::channel(1);
         let mut incoming = ReceiverStream::new(rx).map(Ok);
         let outgoing =
@@ -164,7 +164,7 @@ async fn client_close_and_shutdown_cancel_a_connecting_replacement() {
             _ = engine.connecting.notified() => {},
         }
         if shutdown {
-            cancel.cancel();
+            shutdown_token.cancel();
         } else {
             tx.try_send(Message::Close(None)).unwrap();
         }

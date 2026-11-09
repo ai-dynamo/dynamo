@@ -88,17 +88,31 @@ generate_endpoint.serve_endpoint(
 
 ### Frontend HTTP Draining
 
-The Frontend uses a separate HTTP drain state before it cancels the distributed runtime:
+The Frontend runs a staged shutdown, shared by every listener (HTTP/1.1, HTTP/2, HTTPS, gRPC/KServe,
+`/v1/realtime` WebSocket, admin, and RL), before it cancels the distributed runtime. One controller
+drives the stages:
 
-1. Mark the server as draining.
-2. Return `503 Service Unavailable` from `/health` and reject new OpenAI-compatible requests with 503.
-3. Keep `/live` at `200 OK` so liveness probes do not restart the process while requests drain.
-4. Wait for admitted response bodies, including streaming responses, to complete.
-5. Continue tracking accepted `/v1/realtime` WebSocket sessions until their tasks exit, even though the HTTP upgrade response has completed.
-6. After `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` expires (default `5` seconds), enter the stopping state and cancel runtime state.
+1. **Propagating** (`DYN_FRONTEND_PROPAGATION_DELAY_SECS`, default `5` seconds). Readiness is
+   withdrawn at once: `/health` returns `503`, `/live` stays `200`, and `ServerReady` is false. The
+   listener stays open and **every** request is still admitted and served, so endpoint updates can
+   reach the load balancers before traffic stops. HTTP/1.x responses carry `Connection: close`.
+2. **Draining** (`DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`, default `50` seconds, counted from the
+   end of the window). The listener closes, so new connections are refused. Open connections are
+   retired with the protocol's own mechanism: HTTP/1.1 keep-alive is turned off, HTTP/2 and gRPC get
+   a GOAWAY. Admitted response bodies, including streaming responses, finish, and accepted
+   `/v1/realtime` sessions are tracked until their tasks exit. A straggler that reaches the
+   application after the window gets `503` with `Retry-After: 1`. The drain ends early as soon as
+   every connection has closed.
+3. **At the deadline**, exchanges still running are aborted so they cannot look complete: an SSE
+   stream ends without `[DONE]` or the chunk terminator, HTTP/2 streams get `RST_STREAM`, gRPC gets
+   trailers `grpc-status: 14`, and WebSocket sessions get a `1012` close. The remaining sockets are
+   then dropped and the Frontend enters the stopping state and cancels runtime state.
+
+A second `SIGTERM`/`SIGINT` forces the shutdown: the Frontend skips the remaining window and drain,
+aborts in-flight exchanges, and proceeds to runtime teardown.
 
 This separates readiness from liveness: traffic is removed promptly without turning an intentional
-drain into a restart loop.
+drain into a restart loop, and long streams finish instead of being cut short.
 
 ### Migration Integration
 

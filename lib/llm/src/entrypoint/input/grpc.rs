@@ -107,6 +107,9 @@ pub async fn run(
 
     // Run both HTTP (for metrics) and gRPC servers concurrently
     let http_service = grpc_service.http_service().clone();
+    // A second shutdown signal makes both the gRPC and metrics listeners skip the
+    // propagation window and the drain and abort in-flight exchanges.
+    http_service.set_force_shutdown_token(distributed_runtime.force_shutdown_token());
     let _graceful_task = distributed_runtime.register_graceful_task();
     let shutdown_token = distributed_runtime.child_token();
 

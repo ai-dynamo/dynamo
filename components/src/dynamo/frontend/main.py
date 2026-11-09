@@ -368,9 +368,9 @@ def _export_transport_tls_env(config: FrontendConfig) -> None:
     if config.tcp_tls_client_key_path:
         os.environ["DYN_TCP_TLS_CLIENT_KEY_PATH"] = config.tcp_tls_client_key_path
     if config.tcp_tls_client_ca_cert_path:
-        os.environ[
-            "DYN_TCP_TLS_CLIENT_CA_CERT_PATH"
-        ] = config.tcp_tls_client_ca_cert_path
+        os.environ["DYN_TCP_TLS_CLIENT_CA_CERT_PATH"] = (
+            config.tcp_tls_client_ca_cert_path
+        )
     if config.nats_tls_ca_cert_path:
         os.environ["NATS_TLS_CA_CERT_PATH"] = config.nats_tls_ca_cert_path
     if config.nats_tls_insecure:
@@ -433,8 +433,19 @@ async def async_main():
         response_plane=config.response_plane,
     )
 
+    shutdown_requested = False
+
     def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime))
+        # The first signal starts the graceful shutdown: the frontend serves
+        # through its propagation window, then drains. A second signal forces it,
+        # skipping the window and drain and aborting in-flight exchanges.
+        nonlocal shutdown_requested
+        if shutdown_requested:
+            logger.info("Second shutdown signal received; forcing shutdown")
+            asyncio.create_task(force_shutdown(runtime))
+        else:
+            shutdown_requested = True
+            asyncio.create_task(graceful_shutdown(runtime))
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
@@ -534,6 +545,16 @@ async def graceful_shutdown(runtime: DistributedRuntime) -> None:
         runtime: The DistributedRuntime instance to shut down.
     """
     runtime.shutdown()
+
+
+async def force_shutdown(runtime: DistributedRuntime) -> None:
+    """Force a shutdown already in progress: abort in-flight work instead of
+    waiting for it to drain.
+
+    Args:
+        runtime: The DistributedRuntime instance to force down.
+    """
+    runtime.force_shutdown()
 
 
 def main() -> None:

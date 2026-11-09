@@ -256,6 +256,8 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for WriteTimeoutIo<I> {
 #[cfg(test)]
 mod tests {
     use super::super::server::serve;
+    use super::super::service_v2::ServiceObserver;
+    use super::super::shutdown::{ShutdownController, ShutdownTimings};
     use super::*;
     use axum::{
         Router,
@@ -263,10 +265,43 @@ mod tests {
         routing::get,
     };
     use std::net::SocketAddr;
+    use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_rustls::TlsAcceptor;
     use tokio_util::sync::CancellationToken;
     use tokio_util::task::AbortOnDropHandle;
+
+    /// A controller with no propagation window and the given drain timeout, for
+    /// serving a connection in these connection-level deadline tests.
+    fn test_controller(drain: Duration) -> Arc<ShutdownController> {
+        Arc::new(ShutdownController::new(
+            Arc::new(ServiceObserver::default()),
+            ShutdownTimings {
+                propagation: Duration::ZERO,
+                drain,
+                close: Duration::from_secs(1),
+            },
+            CancellationToken::new(),
+        ))
+    }
+
+    /// Serve `router` on `listener`, draining when `trigger` fires. The returned
+    /// task represents the full lifecycle: it ends once the controller stops.
+    fn spawn_serve(
+        listener: tokio::net::TcpListener,
+        tls: Option<TlsAcceptor>,
+        router: Router,
+        idle: Duration,
+        trigger: CancellationToken,
+        drain: Duration,
+    ) -> AbortOnDropHandle<()> {
+        let controller = test_controller(drain);
+        AbortOnDropHandle::new(tokio::spawn(async move {
+            controller.start(trigger, CancellationToken::new());
+            serve(listener, tls, router, idle, &controller).await;
+            controller.stopped_token().cancelled().await;
+        }))
+    }
 
     #[tokio::test(start_paused = true)]
     async fn completed_transfers_remove_their_connection_deadline() {
@@ -368,15 +403,12 @@ mod tests {
                         Duration::from_millis(100)
                     };
                     let stop = CancellationToken::new();
-                    let stopped = stop.clone().cancelled_owned();
                     let (addr, frontend) = spawn_frontend(
                         upstream,
                         tls.then(|| tls_acceptor(&cert)),
                         idle,
-                        async move {
-                            stopped.await;
-                            Duration::from_millis(100)
-                        },
+                        stop.clone(),
+                        Duration::from_millis(100),
                     )
                     .await;
                     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -444,7 +476,8 @@ mod tests {
                         upstream,
                         tls.then(|| tls_acceptor(&cert)),
                         Duration::from_secs(30),
-                        std::future::pending(),
+                        CancellationToken::new(),
+                        Duration::from_secs(1),
                     )
                     .await;
                     let client = reqwest::Client::builder()
@@ -502,16 +535,26 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let idle = Duration::from_secs(30);
-        let server = serve(listener, None, router, idle, std::future::pending());
-        (addr, released, AbortOnDropHandle::new(tokio::spawn(server)))
+        // Never triggered: the upstream serves until its handle is dropped.
+        let server = spawn_serve(
+            listener,
+            None,
+            router,
+            idle,
+            CancellationToken::new(),
+            Duration::from_secs(1),
+        );
+        (addr, released, server)
     }
 
-    /// Serves the batch proxy for `upstream` on the frontend's accept loop.
+    /// Serves the batch proxy for `upstream` on the frontend's accept loop,
+    /// draining when `trigger` fires.
     async fn spawn_frontend(
         upstream: SocketAddr,
         tls: Option<TlsAcceptor>,
         write_idle_timeout: Duration,
-        shutdown: impl Future<Output = Duration> + Send + 'static,
+        trigger: CancellationToken,
+        drain: Duration,
     ) -> (SocketAddr, AbortOnDropHandle<()>) {
         let (_, router) = super::super::batch_proxy::router(
             &format!("http://{upstream}"),
@@ -524,8 +567,8 @@ mod tests {
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = serve(listener, tls, router, write_idle_timeout, shutdown);
-        (addr, AbortOnDropHandle::new(tokio::spawn(server)))
+        let server = spawn_serve(listener, tls, router, write_idle_timeout, trigger, drain);
+        (addr, server)
     }
 
     fn tls_acceptor(cert: &rcgen::CertifiedKey) -> TlsAcceptor {
@@ -548,14 +591,14 @@ mod tests {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = serve(
+        let _server = spawn_serve(
             listener,
             Some(tls_acceptor(&cert)),
             Router::new(),
             Duration::from_secs(30),
-            std::future::pending(),
+            CancellationToken::new(),
+            Duration::from_secs(1),
         );
-        let _server = AbortOnDropHandle::new(tokio::spawn(server));
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
         let started = tokio::time::Instant::now();
         let mut buf = [0; 1];

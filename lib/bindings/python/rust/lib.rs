@@ -1540,6 +1540,13 @@ impl DistributedRuntime {
         self.inner.shutdown();
     }
 
+    /// Force the shutdown already started by `shutdown()` (starting it first if
+    /// needed): drained work is aborted instead of being waited on. A frontend
+    /// skips its propagation window and drain and ends in-flight exchanges.
+    fn force_shutdown(&self) {
+        self.inner.force_shutdown();
+    }
+
     fn event_loop(&self) -> PyObject {
         self.event_loop.clone()
     }

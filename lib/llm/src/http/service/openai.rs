@@ -4952,8 +4952,13 @@ pub fn validate_responses_fields(request: &NvCreateResponse) -> Result<(), Error
 }
 
 // todo - abstract this to the top level lib.rs to be reused
+//
+// Admission gate shared by the inference handlers. It mirrors the
+// `track_inflight_inference` middleware: requests are admitted while the frontend
+// is admitting (Ready or serving inside the propagation window) and rejected with
+// 503 once it is draining, so the propagation window keeps serving new requests.
 pub(crate) fn check_ready(state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
-    if !state.is_ready() {
+    if !state.is_admitting() {
         return Err(ErrorMessage::_service_unavailable());
     }
     Ok(())

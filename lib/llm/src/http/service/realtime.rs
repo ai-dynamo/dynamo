@@ -101,51 +101,115 @@ async fn realtime_ws_handler(
     upgrade: WebSocketUpgrade,
 ) -> Response {
     let permit = state.acquire_inflight();
-    // Count the upgrade attempt before the readiness gate so shutdown cannot
+    // Count the upgrade attempt before the admission gate so shutdown cannot
     // observe zero inflight while this WebSocket admission is in progress.
-    if !state.is_ready() {
+    if !state.is_admitting() {
         drop(permit);
-        return super::openai::ErrorMessage::_service_unavailable().into_response();
+        return upgrade_rejection();
     }
+    // Close the race where draining starts after the admission check.
+    if !state.is_admitting() {
+        drop(permit);
+        return upgrade_rejection();
+    }
+
+    // Retire the session under the shared shutdown controller when the service is
+    // serving one: the session body runs on the controller's tracker (so the
+    // drain's early exit covers it) and is dropped at the hard deadline. The
+    // `shutdown` token fires when Draining starts, so an idle session gets its
+    // 1012 then rather than at the very end of the drain.
+    let controller = state.shutdown_controller().cloned();
+    let shutdown = controller
+        .as_ref()
+        .map(|c| c.stop_accepting_token())
+        .unwrap_or_else(|| state.cancel_token().clone());
+    let abort = state.abort_token();
+    let close_timeout = controller
+        .as_ref()
+        .map(|c| c.timings().close)
+        .unwrap_or(CLOSE_DRAIN_TIMEOUT);
 
     upgrade
         .on_upgrade(move |socket| async move {
-            let (mut ws_tx, mut ws_rx) = socket.split();
-            let close_reason = Mutex::new(None);
-            let cancel = state.cancel_token();
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => {},
-                _ = handle_socket(&mut ws_tx, &mut ws_rx, &state, &close_reason) => {},
+            let session = realtime_session(socket, state, shutdown, abort, close_timeout, permit);
+            match controller {
+                // on_upgrade spawns this future detached, so run the session body
+                // on the tracker to keep it inside the drain's accounting.
+                Some(controller) => {
+                    let _ = controller.spawn_connection(session).await;
+                }
+                None => session.await,
             }
-            // The session can also finish by observing cancellation itself.
-            let message = if cancel.is_cancelled() {
-                close_message(close_code::RESTART, "service restarting")
-            } else {
-                close_reason
-                    .into_inner()
-                    .unwrap_or_else(|| close_message(close_code::NORMAL, "stream complete"))
-            };
-            // At the deadline, attempt the close once without waiting on a backpressured peer.
-            tokio::select! {
-                biased;
-                _ = async {
-                    // Flush the automatic reply even if sending after a peer Close fails.
-                    let _ = ws_tx.send(message).await;
-                    let _ = ws_tx.close().await;
-                } => {},
-                _ = cancel.cancelled() => {},
-                _ = tokio::time::sleep(CLOSE_DRAIN_TIMEOUT) => {},
-            }
-            drop(permit);
         })
         .into_response()
+}
+
+/// Rejection for a WebSocket upgrade that arrives once the frontend is draining:
+/// an OpenAI-shaped 503 with `Retry-After` and `Connection: close` so the client
+/// retries elsewhere instead of reusing this connection.
+fn upgrade_rejection() -> Response {
+    let mut response = super::openai::ErrorMessage::_service_unavailable().into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONNECTION,
+        axum::http::HeaderValue::from_static("close"),
+    );
+    response.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from_static("1"),
+    );
+    response
+}
+
+/// Drive one realtime WebSocket session to completion, then close it.
+///
+/// The session ends when the engine stream finishes, the client closes, the
+/// frontend starts draining (after any response in progress), or the shutdown
+/// controller aborts at the deadline. It always ends with a Close frame, bounded
+/// by `close_timeout` so a backpressured peer cannot hold the connection open.
+async fn realtime_session(
+    socket: WebSocket,
+    state: Arc<service_v2::State>,
+    shutdown: CancellationToken,
+    abort: CancellationToken,
+    close_timeout: Duration,
+    permit: service_v2::InflightPermit,
+) {
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let close_reason = Mutex::new(None);
+    tokio::select! {
+        biased;
+        // The abort deadline ends a session whose engine stream never completes.
+        _ = abort.cancelled() => {},
+        _ = handle_socket(&mut ws_tx, &mut ws_rx, &state, &shutdown, &close_reason) => {},
+    }
+    // A session ended by shutdown or the abort deadline closes with 1012 so the
+    // client reconnects elsewhere; otherwise it carries the session's own reason.
+    let message = if shutdown.is_cancelled() || abort.is_cancelled() {
+        close_message(close_code::RESTART, "service restarting")
+    } else {
+        close_reason
+            .into_inner()
+            .unwrap_or_else(|| close_message(close_code::NORMAL, "stream complete"))
+    };
+    // At the deadline, attempt the close once without waiting on a backpressured peer.
+    tokio::select! {
+        biased;
+        _ = async {
+            // Flush the automatic reply even if sending after a peer Close fails.
+            let _ = ws_tx.send(message).await;
+            let _ = ws_tx.close().await;
+        } => {},
+        _ = abort.cancelled() => {},
+        _ = tokio::time::sleep(close_timeout) => {},
+    }
+    drop(permit);
 }
 
 async fn handle_socket(
     writer: &mut SplitSink<WebSocket, Message>,
     ws_rx: &mut SplitStream<WebSocket>,
     state: &service_v2::State,
+    shutdown: &CancellationToken,
     close_reason: &Mutex<Option<Message>>,
 ) {
     // OpenAI Realtime spec requires `session.created` to be the first server
@@ -175,8 +239,9 @@ async fn handle_socket(
         return;
     }
 
-    let Some((engine, session_update)) = select_engine(ws_rx, writer, state).await else {
-        // Client disconnected before an engine was selected.
+    let Some((engine, session_update)) = select_engine(ws_rx, writer, state, shutdown).await else {
+        // Client disconnected, or the frontend started draining, before an engine
+        // was selected.
         return;
     };
 
@@ -184,7 +249,7 @@ async fn handle_socket(
         engine,
         &session_update,
         state.migration_limit,
-        state.cancel_token().clone(),
+        shutdown.clone(),
     );
     if let Err(error) = session
         .run(ws_rx, writer, close_reason, session_update)
@@ -227,7 +292,14 @@ struct RealtimeSession {
     engine: RealtimeBidirectionalEngine,
     recovery: RealtimeRecovery,
     incoming: Option<DynamoRealtimeClientEvent>,
-    cancel: CancellationToken,
+    /// Fires when the frontend starts draining. The session stops reading new
+    /// client input and, once any response in progress has been delivered,
+    /// ends so the connection can close with 1012.
+    shutdown: CancellationToken,
+    /// Whether the worker is mid-response (a `response.created` has been
+    /// delivered and its `response.done` has not). The drain waits for this to
+    /// clear before closing, so a reply is not cut mid-stream.
+    response_in_progress: bool,
 }
 
 impl RealtimeSession {
@@ -235,14 +307,21 @@ impl RealtimeSession {
         engine: RealtimeBidirectionalEngine,
         session: &RealtimeClientEventSessionUpdate,
         migration_limit: u32,
-        cancel: CancellationToken,
+        shutdown: CancellationToken,
     ) -> Self {
         Self {
             engine,
             recovery: RealtimeRecovery::new(session, migration_limit),
             incoming: None,
-            cancel,
+            shutdown,
+            response_in_progress: false,
         }
+    }
+
+    /// End the session at drain once no response is being delivered. Used as a
+    /// select guard, so the branch stays disabled while a reply is in flight.
+    fn should_end_for_shutdown(&self) -> bool {
+        self.shutdown.is_cancelled() && !self.response_in_progress
     }
 
     /// Keep the client connection across worker attempts, retrying only eligible failures.
@@ -305,7 +384,8 @@ impl RealtimeSession {
         tokio::pin!(connecting);
         loop {
             tokio::select! {
-                _ = self.cancel.cancelled() => return Ok(None),
+                // No response is in progress yet, so draining ends the session now.
+                _ = self.shutdown.cancelled() => return Ok(None),
                 _ = wait_for_deadline(self.recovery.deadline()) => anyhow::bail!("realtime recovery timed out"),
                 response = &mut connecting => return response.map(Some),
                 msg = ws_rx.next(), if self.incoming.is_none() => {
@@ -344,7 +424,9 @@ impl RealtimeSession {
                 }
             }
             tokio::select! {
-                _ = self.cancel.cancelled() => return Ok(()),
+                // Draining ends the session once the worker is between responses,
+                // so a reply in flight is delivered in full before the 1012.
+                _ = self.shutdown.cancelled(), if self.should_end_for_shutdown() => return Ok(()),
                 _ = wait_for_deadline(self.recovery.deadline()) => anyhow::bail!("realtime recovery timed out"),
                 _ = wait_for_deadline(sender_deadline) => return Err(UnexpectedEnd.into()),
                 response = responses.next() => {
@@ -354,6 +436,7 @@ impl RealtimeSession {
                     if let Some(error) = annotated.error { return Err(error.into()); }
                     let Some(mut event) = annotated.data else { continue; };
                     if !self.recovery.reconcile(&mut event)? { continue; }
+                    self.track_response_progress(&event);
                     if !self.write_client_event(ws_rx, ws_tx, close_reason, &event).await? {
                         return Ok(());
                     }
@@ -401,13 +484,26 @@ impl RealtimeSession {
         tokio::pin!(writing);
         loop {
             tokio::select! {
-                _ = self.cancel.cancelled() => return Ok(false),
+                // Let an in-flight response frame finish writing even during the
+                // drain; the write is bounded by SOCKET_WRITE_TIMEOUT, and the
+                // controller's abort deadline interrupts the whole session.
                 _ = wait_for_deadline(self.recovery.deadline()) => anyhow::bail!("realtime recovery timed out"),
                 result = &mut writing => return Ok(matches!(result, Ok(Ok(())))),
                 msg = ws_rx.next(), if self.incoming.is_none() => {
                     if !queue_client_message(msg, &mut self.incoming, close_reason) { return Ok(false); }
                 }
             }
+        }
+    }
+
+    /// Track whether the worker is mid-response so the drain delivers a reply in
+    /// full before closing. `response.created` opens a response and
+    /// `response.done` closes it.
+    fn track_response_progress(&mut self, event: &RealtimeServerEvent) {
+        match event {
+            RealtimeServerEvent::ResponseCreated(_) => self.response_in_progress = true,
+            RealtimeServerEvent::ResponseDone(_) => self.response_in_progress = false,
+            _ => {}
         }
     }
 }
@@ -461,6 +557,7 @@ async fn select_engine<S, T>(
     ws_rx: &mut S,
     ws_tx: &mut T,
     state: &service_v2::State,
+    shutdown: &CancellationToken,
 ) -> Option<(
     RealtimeBidirectionalEngine,
     RealtimeClientEventSessionUpdate,
@@ -469,7 +566,15 @@ where
     S: futures::Stream<Item = Result<Message, axum::Error>> + Unpin,
     T: futures::Sink<Message, Error = axum::Error> + Unpin,
 {
-    while let Some(msg) = ws_rx.next().await {
+    loop {
+        // No response is in progress during engine selection, so draining ends
+        // the session at once.
+        let msg = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return None,
+            msg = ws_rx.next() => msg,
+        };
+        let Some(msg) = msg else { break };
         // Parse socket messages.
         let msg = match msg {
             Ok(m) => m,

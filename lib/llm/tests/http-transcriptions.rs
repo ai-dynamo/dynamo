@@ -136,6 +136,7 @@ struct TestService {
     base_url: String,
     client: reqwest::Client,
     metrics: Arc<Metrics>,
+    state: Arc<dynamo_llm::http::service::service_v2::State>,
     cancel: CancellationToken,
     join: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
@@ -176,7 +177,8 @@ impl TestService {
             service.model_manager().register_alias(ALIAS, MODEL),
             "failed to register transcription model alias"
         );
-        let metrics = service.state_clone().metrics_clone();
+        let state = service.state_clone();
+        let metrics = state.metrics_clone();
 
         let cancel = CancellationToken::new();
         let join = service.spawn_with_listener(cancel.clone(), listener).await;
@@ -206,12 +208,15 @@ impl TestService {
             base_url,
             client,
             metrics,
+            state,
             cancel,
             join,
         }
     }
 
     async fn shutdown(self) {
+        // Force the drain so teardown skips the propagation window.
+        self.state.force_shutdown();
         self.cancel.cancel();
         tokio::time::timeout(Duration::from_secs(2), self.join)
             .await

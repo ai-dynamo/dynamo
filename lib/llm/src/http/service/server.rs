@@ -8,7 +8,6 @@
 //! [`CancellationToken`]s, whose lock and `Notify` no other connection touches. A shared
 //! `tokio::sync::Notify` would lock its waiter list on every poll of a pending waiter.
 
-use std::future::Future;
 use std::pin::pin;
 use std::time::Duration;
 
@@ -20,19 +19,21 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 
+use super::shutdown::ShutdownController;
 use super::write_timeout::{ConnectionDeadline, ConnectionService, WriteTimeoutIo};
 
 /// The handshake timeout of axum-server's rustls acceptor, which served the frontend before.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Serves `router` on `listener` until `shutdown` resolves with a grace period.
+/// Serves `router` on `listener`, driven by the shared [`ShutdownController`].
 ///
-/// Then it stops accepting connections and lets open ones finish their requests; any still
-/// open after the grace period are closed, dropping their response bodies. Returning, or
-/// being dropped, closes every connection that was not upgraded. An upgraded connection,
-/// such as a WebSocket session, runs on its own task and stays open after `serve` returns.
+/// The accept loop runs until the controller stops accepting (Draining), then drops the
+/// listener so new connections are refused at once. Each connection runs on the
+/// controller's tracker: it retires with the protocol's own mechanism (HTTP/1.1 keep-alive
+/// off, HTTP/2 GOAWAY) when the controller stops accepting, finishes its in-flight
+/// exchanges, and is dropped if still open at the controller's hard deadline. An upgraded
+/// connection, such as a WebSocket session, stays on the tracker after `serve` returns.
 ///
 /// Every connection is wrapped in [`WriteTimeoutIo`], and every request on it carries the
 /// connection's [`ConnectionDeadline`].
@@ -41,20 +42,16 @@ pub(super) async fn serve(
     tls: Option<TlsAcceptor>,
     router: Router,
     write_idle_timeout: Duration,
-    shutdown: impl Future<Output = Duration>,
+    controller: &ShutdownController,
 ) {
     // Build each route's handler once, as `Router::into_make_service` does, not per request.
     let router = router.with_state(());
-    let graceful = CancellationToken::new();
-    let hard = CancellationToken::new();
-    let _close_connections = hard.clone().drop_guard();
-    let connections = TaskTracker::new();
+    let stop_accepting = controller.stop_accepting_token();
 
-    let mut shutdown = pin!(shutdown);
-    let grace_period = loop {
+    loop {
         let stream = tokio::select! {
             biased;
-            grace_period = &mut shutdown => break grace_period,
+            _ = stop_accepting.cancelled() => break,
             stream = accept(&listener) => stream,
         };
         let connection = serve_connection(
@@ -62,16 +59,18 @@ pub(super) async fn serve(
             tls.clone(),
             router.clone(),
             write_idle_timeout,
-            graceful.child_token(),
+            controller.stop_accepting_token(),
+            controller.remaining(),
         );
-        connections.spawn(hard.child_token().run_until_cancelled_owned(connection));
-    };
+        // The hard deadline drops the connection future; the tracker lets the
+        // controller observe when every connection has ended (early exit).
+        controller.spawn_connection(connection);
+    }
 
-    // Refuse new connections at once instead of leaving them in the backlog.
+    // Refuse new connections at once instead of leaving them in the backlog. The
+    // controller then drives graceful retirement, abort and hard close across
+    // every connection it tracks.
     drop(listener);
-    graceful.cancel();
-    connections.close();
-    let _ = tokio::time::timeout(grace_period, connections.wait()).await;
 }
 
 async fn accept(listener: &TcpListener) -> TcpStream {
@@ -101,11 +100,17 @@ async fn serve_connection(
     router: Router,
     write_idle_timeout: Duration,
     graceful: CancellationToken,
+    remaining_budget: Option<Duration>,
 ) {
     let Some(tls) = tls else {
         return serve_io(stream, router, write_idle_timeout, graceful).await;
     };
-    match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, tls.accept(stream)).await {
+    // Bound the handshake by the shorter of the fixed timeout and whatever is left of
+    // the shutdown budget, so a client stalling mid-handshake cannot outlast the drain.
+    let handshake_timeout = remaining_budget
+        .map(|remaining| remaining.min(TLS_HANDSHAKE_TIMEOUT))
+        .unwrap_or(TLS_HANDSHAKE_TIMEOUT);
+    match tokio::time::timeout(handshake_timeout, tls.accept(stream)).await {
         Ok(Ok(stream)) => serve_io(stream, router, write_idle_timeout, graceful).await,
         Ok(Err(error)) => tracing::debug!(%error, "TLS handshake failed"),
         Err(_) => tracing::debug!("TLS handshake timed out"),
