@@ -21,6 +21,7 @@ pub mod fpm_trace;
 pub mod frontend_config;
 mod frontend_load;
 pub mod grpc;
+mod hf_runtime;
 pub mod http;
 pub mod hub;
 // pub mod key_value_store;

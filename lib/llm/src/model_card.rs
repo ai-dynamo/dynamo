@@ -1550,12 +1550,16 @@ impl ModelDeploymentCard {
                     Vec::new()
                 };
 
-                // Merge already applied above; just wrap. Embedding
-                // tokenizers use the HF post-processor to apply BOS/EOS when
-                // requested; normal tokenizers keep their existing defaults.
+                // Convert the prepared configuration in memory. The serving adapter
+                // owns only the RC pipeline; conversion failures never use legacy HF.
                 let wrap_hf = |hf: HfTokenizer| {
-                    let tokenizer = crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
-                    crate::tokenizers::traits::Tokenizer::with_options(tokenizer, options)
+                    let tokenizer = crate::hf_runtime::HfRuntimeTokenizer::from_tokenizer(
+                        hf,
+                        format!("model '{}' ({})", self.name(), p.display()),
+                    )?;
+                    Ok::<_, anyhow::Error>(crate::tokenizers::traits::Tokenizer::with_options(
+                        tokenizer, options,
+                    ))
                 };
 
                 // Pick the inner backend.
@@ -1563,7 +1567,9 @@ impl ModelDeploymentCard {
                     Arc<dyn crate::tokenizers::traits::Tokenizer>,
                     TokenizerBackend,
                 ) = match tokenizer_backend {
-                    TokenizerBackend::Default => (Arc::new(wrap_hf(hf)), TokenizerBackend::Default),
+                    TokenizerBackend::Default => {
+                        (Arc::new(wrap_hf(hf)?), TokenizerBackend::Default)
+                    }
                     TokenizerBackend::Fastokens => {
                         if let Some(path_str) = p.to_str() {
                             match crate::tokenizers::FastTokenizer::from_file(path_str) {
@@ -1581,7 +1587,7 @@ impl ModelDeploymentCard {
                                         %e,
                                         "Failed to load fastokens, falling back to HuggingFace"
                                     );
-                                    (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
+                                    (Arc::new(wrap_hf(hf)?), TokenizerBackend::Default)
                                 }
                             }
                         } else {
@@ -1595,7 +1601,7 @@ impl ModelDeploymentCard {
                                 path = %p.display(),
                                 "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
                             );
-                            (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
+                            (Arc::new(wrap_hf(hf)?), TokenizerBackend::Default)
                         }
                     }
                     TokenizerBackend::Basetenkenizer => {
@@ -1615,7 +1621,7 @@ impl ModelDeploymentCard {
                                         %e,
                                         "Failed to load basetenkenizer, falling back to HuggingFace"
                                     );
-                                    (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
+                                    (Arc::new(wrap_hf(hf)?), TokenizerBackend::Default)
                                 }
                             }
                         } else {
@@ -1629,7 +1635,7 @@ impl ModelDeploymentCard {
                                 path = %p.display(),
                                 "Tokenizer path contains non-UTF-8 characters, skipping basetenkenizer; falling back to HuggingFace"
                             );
-                            (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
+                            (Arc::new(wrap_hf(hf)?), TokenizerBackend::Default)
                         }
                     }
                 };
@@ -2614,6 +2620,77 @@ mod tests {
     use super::{HFConfig, ModelDeploymentCard};
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    #[serial_test::serial]
+    fn test_hf_rc_embedding_bos_eos_bypasses_prefix_cache() {
+        temp_env::with_vars([("DYN_TOKENIZER_CACHE", Some("1"))], || {
+            let mut legacy = tokenizers::Tokenizer::from_file(
+                "tests/data/sample-models/TinyLlama_v1.1/tokenizer.json",
+            )
+            .unwrap();
+            legacy
+                .add_special_tokens([
+                    tokenizers::AddedToken::from("<bos>", true),
+                    tokenizers::AddedToken::from("<eos>", true),
+                ])
+                .unwrap();
+            let bos = legacy.token_to_id("<bos>").unwrap();
+            let eos = legacy.token_to_id("<eos>").unwrap();
+            legacy.with_post_processor(Some(
+                tokenizers::processors::template::TemplateProcessing::builder()
+                    .try_single("<bos> $A <eos>")
+                    .unwrap()
+                    .special_tokens(vec![("<bos>", bos), ("<eos>", eos)])
+                    .build()
+                    .unwrap(),
+            ));
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("tokenizer.json");
+            legacy.save(&path, false).unwrap();
+            let mut card = ModelDeploymentCard::with_name_only("embedding-bos-eos");
+            card.tokenizer = Some(super::TokenizerKind::HfTokenizerJson(
+                super::CheckedFile::from_disk(path).unwrap(),
+            ));
+            card.runtime_config.tokenizer_backend =
+                Some(crate::local_model::runtime_config::TokenizerBackend::Basetenkenizer);
+            let rc = card
+                .embedding_tokenizer_with_options(crate::tokenizers::TokenizerOptions {
+                    add_special_tokens: true,
+                })
+                .unwrap();
+            assert!(rc.validate_prefix_cache().is_err());
+            for input in ["", "hello", "<bos>hello<eos>"] {
+                let actual = rc.encode(input).unwrap();
+                assert!(matches!(actual, crate::tokenizers::Encoding::Sp(_)));
+                assert_eq!(
+                    actual.token_ids(),
+                    legacy.encode(input, true).unwrap().get_ids()
+                );
+                assert_eq!(actual.token_ids().first(), Some(&bos));
+                assert_eq!(actual.token_ids().last(), Some(&eos));
+            }
+
+            // Segmented encoding adds BOS/EOS once, around the joined segments.
+            let oracle = crate::tokenizers::traits::Tokenizer::with_options(
+                crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(legacy.clone()),
+                crate::tokenizers::TokenizerOptions {
+                    add_special_tokens: true,
+                },
+            );
+            let segments = [
+                crate::tokenizers::EncodeSegment::new("<bos>he", true),
+                crate::tokenizers::EncodeSegment::new("llo<eos>", false),
+            ];
+            assert_eq!(
+                rc.encode_segments(&segments).unwrap().token_ids(),
+                crate::tokenizers::traits::Encoder::encode_segments(&oracle, &segments)
+                    .unwrap()
+                    .token_ids()
+            );
+            assert_eq!(rc.num_special_tokens_added().unwrap(), 2);
+        });
+    }
 
     #[test]
     fn tokenizer_cache_token_observer_records_per_model_totals() {

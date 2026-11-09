@@ -5,14 +5,341 @@ use dynamo_llm::common::checked_file::CheckedFile;
 use dynamo_llm::local_model::runtime_config::TokenizerBackend;
 use dynamo_llm::model_card::{ModelDeploymentCard, PromptFormatterArtifact, TokenizerKind};
 use dynamo_llm::tokenizers::{
-    BasetenTokenizer, EncodeSegment, HuggingFaceTokenizer, TikTokenTokenizer, traits::Encoder,
+    BasetenTokenizer, DecodeStream, EncodeSegment, HuggingFaceTokenizer, TikTokenTokenizer,
+    traits::{Decoder, Encoder, Tokenizer as _},
 };
+use serde_json::json;
 use std::path::PathBuf;
 use tempfile::{TempDir, tempdir};
 use tokenizers::models::bpe::{BPE, Vocab};
 
 const HF_PATH: &str = "tests/data/sample-models/TinyLlama_v1.1";
 const TIKTOKEN_PATH: &str = "tests/data/sample-models/mock-tiktoken";
+
+fn byte_level_tokenizer() -> tokenizers::Tokenizer {
+    let mut alphabet: Vec<_> = tokenizers::pre_tokenizers::byte_level::ByteLevel::alphabet()
+        .into_iter()
+        .collect();
+    alphabet.sort_unstable();
+    let mut vocab = Vocab::from_iter(
+        alphabet
+            .into_iter()
+            .enumerate()
+            .map(|(id, c)| (c.to_string(), id as u32)),
+    );
+    let merges = [("h", "e"), ("l", "l"), ("he", "ll"), ("hell", "o")];
+    for (left, right) in merges {
+        vocab.insert(format!("{left}{right}"), vocab.len() as u32);
+    }
+    let bpe = BPE::builder()
+        .vocab_and_merges(
+            vocab,
+            merges.map(|(a, b)| (a.to_owned(), b.to_owned())).to_vec(),
+        )
+        .build()
+        .unwrap();
+    let mut tokenizer = tokenizers::Tokenizer::new(bpe);
+    tokenizer.with_pre_tokenizer(Some(
+        tokenizers::pre_tokenizers::byte_level::ByteLevel::new(false, true, true),
+    ));
+    tokenizer.with_decoder(Some(tokenizers::decoders::byte_level::ByteLevel::default()));
+    tokenizer
+}
+
+fn card_for_tokenizer(
+    tokenizer: &tokenizers::Tokenizer,
+    name: &str,
+) -> (TempDir, ModelDeploymentCard) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("tokenizer.json");
+    tokenizer.save(&path, false).unwrap();
+    let mut card = ModelDeploymentCard::with_name_only(name);
+    card.tokenizer = Some(TokenizerKind::HfTokenizerJson(
+        CheckedFile::from_disk(path).unwrap(),
+    ));
+    (dir, card)
+}
+
+#[test]
+#[serial_test::serial]
+fn test_hf_rc_encode_decode_parity() {
+    // The prefix cache is on, as in production, so encodes run through it.
+    temp_env::with_vars([("DYN_TOKENIZER_CACHE", Some("1"))], || {
+        let mut cases = vec![
+            ("byte-level BPE", byte_level_tokenizer()),
+            (
+                "byte-fallback BPE",
+                tokenizers::Tokenizer::from_file(format!("{HF_PATH}/tokenizer.json")).unwrap(),
+            ),
+        ];
+        for (name, model, pre_tokenizer, decoder) in [
+            (
+                "WordPiece",
+                json!({"type":"WordPiece", "unk_token":"[UNK]", "continuing_subword_prefix":"##", "max_input_chars_per_word":100,
+                "vocab":{"[UNK]":0,"hello":1,"world":2,"##s":3,"café":4,"北":5,"京":6,"😀":7}}),
+                json!({"type":"Whitespace"}),
+                json!({"type":"WordPiece","prefix":"##","cleanup":true}),
+            ),
+            (
+                "WordLevel",
+                json!({"type":"WordLevel", "unk_token":"[UNK]", "vocab":{"[UNK]":0,"hello":1,"world":2,"café":3,"北京":4,"😀":5}}),
+                json!({"type":"Whitespace"}),
+                json!(null),
+            ),
+            (
+                "Unigram",
+                json!({"type":"Unigram", "unk_id":0, "byte_fallback":false,
+                "vocab":[["<unk>",0.0],["hello",-1.0],["world",-1.0],[" ",-1.0],["café",-1.0],["北",-1.0],["京",-1.0],["😀",-1.0]]}),
+                json!(null),
+                json!({"type":"Fuse"}),
+            ),
+        ] {
+            cases.push((name, tokenizers::Tokenizer::from_bytes(serde_json::to_vec(&json!({
+                "version":"1.0", "model":model, "pre_tokenizer":pre_tokenizer, "decoder":decoder,
+                "added_tokens":[], "normalizer":null, "post_processor":null, "padding":null, "truncation":null,
+            })).unwrap()).unwrap()));
+        }
+
+        for (name, mut legacy) in cases {
+            legacy
+                .add_special_tokens([tokenizers::AddedToken::from("<special>", true)])
+                .unwrap();
+            let (_dir, card) = card_for_tokenizer(&legacy, name);
+            let rc = card.tokenizer().unwrap();
+            let inputs = [
+                "",
+                "hello world",
+                "hello worlds",
+                "café 北京 😀",
+                "e\u{301}\n\t",
+                "<special>hello<special>",
+            ];
+            let batch = rc.encode_batch(&inputs).unwrap();
+            assert_eq!(batch.len(), inputs.len(), "{name}");
+            assert!(rc.encode_batch(&[]).unwrap().is_empty(), "{name}");
+            for (input, batch_encoding) in inputs.iter().zip(batch) {
+                let expected = legacy.encode(*input, false).unwrap();
+                let actual = rc.encode(input).unwrap();
+                assert_eq!(actual.token_ids(), expected.get_ids(), "{name}: {input:?}");
+                assert_eq!(
+                    batch_encoding.token_ids(),
+                    expected.get_ids(),
+                    "{name}: batch {input:?}"
+                );
+                for skip in [false, true] {
+                    assert_eq!(
+                        rc.decode(actual.token_ids(), skip).unwrap().as_str(),
+                        legacy.decode(expected.get_ids(), skip).unwrap(),
+                        "{name}: decode {input:?}, skip={skip}"
+                    );
+                }
+            }
+            for (id, token) in legacy.get_added_tokens_decoder() {
+                assert_eq!(
+                    rc.encode(&token.content).unwrap().token_ids(),
+                    legacy.encode(token.content, false).unwrap().get_ids(),
+                    "{name}: added token {id}"
+                );
+                for skip in [false, true] {
+                    assert_eq!(
+                        rc.decode(&[id], skip).unwrap().as_str(),
+                        legacy.decode(&[id], skip).unwrap(),
+                        "{name}: added token {id}, skip={skip}"
+                    );
+                }
+            }
+
+            let oracle = HuggingFaceTokenizer::from_tokenizer(legacy.clone());
+            for allow_special in [true, false] {
+                let segments = [
+                    EncodeSegment::new("<special>hello", true),
+                    EncodeSegment::new(" world<special>", allow_special),
+                ];
+                assert_eq!(
+                    rc.encode_segments(&segments).unwrap().token_ids(),
+                    oracle.encode_segments(&segments).unwrap().token_ids(),
+                    "{name}: segments, allow_special={allow_special}"
+                );
+            }
+            assert_eq!(rc.vocab_size(), oracle.vocab_size(), "{name}");
+            for token in ["hello", "<special>", "<missing>"] {
+                assert_eq!(
+                    rc.token_to_id(token).unwrap(),
+                    oracle.token_to_id(token).unwrap(),
+                    "{name}: {token}"
+                );
+            }
+            assert_eq!(
+                rc.special_token_ids().unwrap(),
+                oracle.special_token_ids().unwrap(),
+                "{name}"
+            );
+        }
+    });
+}
+
+#[test]
+#[serial_test::serial]
+fn test_hf_rc_streaming_utf8_and_prompt_context() {
+    temp_env::with_vars([("DYN_TOKENIZER_CACHE", Some("0"))], || {
+        let mut saw_unstable = false;
+        for legacy in [
+            byte_level_tokenizer(),
+            tokenizers::Tokenizer::from_file(format!("{HF_PATH}/tokenizer.json")).unwrap(),
+        ] {
+            let (_dir, card) = card_for_tokenizer(&legacy, "streaming-parity");
+            let rc = card.tokenizer().unwrap();
+            let oracle = std::sync::Arc::new(HuggingFaceTokenizer::from_tokenizer(legacy.clone()));
+            let ids = legacy
+                .encode("hello 😀 北京!", false)
+                .unwrap()
+                .get_ids()
+                .to_vec();
+            let mut saw_partial = false;
+            for end in 1..=ids.len() {
+                let expected = legacy.decode(&ids[..end], false).unwrap();
+                let decoded = rc.decode(&ids[..end], false).unwrap();
+                assert_eq!(decoded.as_str(), expected);
+                assert_eq!(decoded.is_partial(), expected.ends_with('\u{fffd}'));
+                saw_partial |= decoded.is_partial();
+                let unstable = rc.has_unstable_suffix(&ids[..end], false);
+                assert_eq!(unstable, oracle.has_unstable_suffix(&ids[..end], false));
+                saw_unstable |= unstable;
+            }
+            assert!(
+                saw_partial,
+                "fixture must split at least one UTF-8 character"
+            );
+            // Test empty, complete, and incomplete UTF-8 prompt contexts.
+            for prompt_len in 0..ids.len() {
+                let mut actual = rc.decode_stream(&ids[..prompt_len], false);
+                let mut expected = DecodeStream::new(oracle.clone(), &ids[..prompt_len], false);
+                for &id in &ids[prompt_len..] {
+                    assert_eq!(
+                        actual.step(id).unwrap(),
+                        expected.step(id).unwrap(),
+                        "prompt length {prompt_len}"
+                    );
+                }
+            }
+        }
+        assert!(
+            saw_unstable,
+            "fixture must end a prefix inside a byte-fallback run"
+        );
+    });
+}
+
+#[test]
+#[serial_test::serial]
+fn test_hf_rc_rejects_unsupported_configurations_without_legacy_fallback() {
+    temp_env::with_vars(
+        [
+            ("DYN_TOKENIZER_CACHE", Some("0")),
+            ("DYN_TOKENIZER_FALLBACK", Some("1")),
+        ],
+        || {
+            let mut config: serde_json::Value =
+                serde_json::from_str(&byte_level_tokenizer().to_string(false).unwrap()).unwrap();
+            let byte_level = config["decoder"].clone();
+            let from_config = |config: &serde_json::Value| {
+                tokenizers::Tokenizer::from_bytes(serde_json::to_vec(config).unwrap()).unwrap()
+            };
+
+            // A sequence holding only ByteLevel is accepted and decodes like legacy.
+            config["decoder"] = json!({"type":"Sequence","decoders":[byte_level.clone()]});
+            let legacy = from_config(&config);
+            let (_dir, card) = card_for_tokenizer(&legacy, "byte-level-sequence");
+            let ids = legacy.encode("hello", false).unwrap().get_ids().to_vec();
+            assert_eq!(
+                card.tokenizer()
+                    .unwrap()
+                    .decode(&ids, false)
+                    .unwrap()
+                    .as_str(),
+                legacy.decode(&ids, false).unwrap()
+            );
+
+            // The RC decodes byte-level BPE straight from bytes, skipping the Replace.
+            config["decoder"] = json!({"type":"Sequence","decoders":[byte_level,
+                {"type":"Replace","pattern":{"String":"h"},"content":"x"}]});
+            let replace_decoder = from_config(&config);
+
+            // Legacy reloads a sparse added ID the way the RC does, numbering the
+            // token from the model vocabulary length, so the two agree.
+            let mut sparse_added_id = from_config(&json!({
+                "version":"1.0", "truncation":null, "padding":null, "normalizer":null,
+                "pre_tokenizer":{"type":"Whitespace"}, "post_processor":null, "decoder":null,
+                "added_tokens":[{"id":100, "content":"<s>", "special":true, "single_word":false,
+                    "lstrip":false, "rstrip":false, "normalized":false}],
+                "model":{"type":"WordLevel", "unk_token":"[UNK]",
+                    "vocab":{"[UNK]":0, "hello":1, "<s>":100}},
+            }));
+            sparse_added_id
+                .add_special_tokens([tokenizers::AddedToken::from("<new>", true)])
+                .unwrap();
+            assert_eq!(sparse_added_id.token_to_id("<new>"), Some(101));
+            let (dir, card) = card_for_tokenizer(&sparse_added_id, "sparse-added-id");
+            let reloaded =
+                tokenizers::Tokenizer::from_file(dir.path().join("tokenizer.json")).unwrap();
+            let ids = reloaded.encode("hello <s> <new>", false).unwrap();
+            assert_eq!(ids.get_ids(), [1, 100, 3]);
+            assert_eq!(
+                card.tokenizer()
+                    .unwrap()
+                    .encode("hello <s> <new>")
+                    .unwrap()
+                    .token_ids(),
+                ids.get_ids()
+            );
+
+            // The RC keys a normalized added token by its normalized form: the
+            // original spelling has no ID, and a special one is skipped where
+            // legacy leaves its normalized text in the output.
+            let mut normalized_added = byte_level_tokenizer();
+            normalized_added
+                .with_normalizer(Some(tokenizers::normalizers::Lowercase))
+                .unwrap();
+            normalized_added
+                .add_special_tokens(
+                    [tokenizers::AddedToken::from("CONTROL", true).normalized(true)],
+                )
+                .unwrap();
+            let control = normalized_added.token_to_id("CONTROL").unwrap();
+            assert_eq!(
+                normalized_added.decode(&[control], true).unwrap(),
+                "control"
+            );
+
+            for (name, legacy, expected) in [
+                (
+                    "replace-decoder",
+                    replace_decoder,
+                    "unsupported byte-level BPE decoder",
+                ),
+                (
+                    "normalized-added-token",
+                    normalized_added,
+                    "unsupported added token",
+                ),
+            ] {
+                let (dir, card) = card_for_tokenizer(&legacy, name);
+                let error = format!(
+                    "{:#}",
+                    card.tokenizer()
+                        .err()
+                        .expect("RC must reject at startup, without legacy fallback")
+                );
+                assert!(
+                    error.contains(expected)
+                        && error.contains(name)
+                        && error.contains(dir.path().to_str().unwrap()),
+                    "{name}: {error}"
+                );
+            }
+        },
+    );
+}
 
 fn unsupported_alternate_tokenizer() -> (TempDir, PathBuf) {
     let dir = tempdir().unwrap();
@@ -302,6 +629,11 @@ fn test_hf_model_card_disables_serialized_padding_and_truncation() {
             &[1, 2, 3],
             "online tokenization must not apply serialized padding or truncation"
         );
+        let batch = tokenizer
+            .encode_batch(&["hello world again", "hello"])
+            .unwrap();
+        assert_eq!(batch[0].token_ids(), &[1, 2, 3]);
+        assert_eq!(batch[1].token_ids(), &[1]);
     });
 }
 
