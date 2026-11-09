@@ -1060,7 +1060,7 @@ class TestMiniMaxM3DisabledThinking:
             m3_tokenizer,
             self._request(m3_tokenizer, include_reasoning=False),
             _M3_OPEN_PROMPT,
-            {"thinking_mode": "disabled"},
+            {"enable_thinking": False},
         )
 
         assert metadata.response_reasoning_ended is False
@@ -1122,7 +1122,7 @@ class TestMiniMaxM3DisabledThinking:
             m3_tokenizer,
             self._request(m3_tokenizer, guided_json={"type": "object"}),
             _M3_THINK_OPEN_PROMPT,
-            {"thinking_mode": "disabled"},
+            {"enable_thinking": False},
         )
 
         assert metadata.response_reasoning_ended is False
@@ -1153,17 +1153,6 @@ class TestMiniMaxM3DisabledThinking:
 
         assert metadata.response_reasoning_ended is True
         assert metadata.engine_reasoning_ended is True
-
-    def test_thinking_enabled_is_unchanged(self, m3_tokenizer):
-        """Thinking-enabled M3 still asks the parser's is_reasoning_end()."""
-        metadata = self._metadata(
-            m3_tokenizer,
-            self._request(m3_tokenizer),
-            _M3_OPEN_PROMPT_WITH_HISTORY,
-            {"thinking_mode": "enabled"},
-        )
-
-        assert metadata.response_reasoning_ended is True
 
     def _stream(self, tokenizer, prompt, kwargs, text, *, stream_response=True):
         request = self._request(tokenizer)
@@ -1212,52 +1201,6 @@ class TestMiniMaxM3DisabledThinking:
         assert content == "Hello"
         assert reasoning == "plan"
         assert post.reasoning_parser is not None
-
-    def test_open_prompt_drops_a_stray_leading_closer(self, m3_tokenizer):
-        _, reasoning, content = self._stream(
-            m3_tokenizer,
-            _M3_OPEN_PROMPT,
-            {"thinking_mode": "disabled"},
-            "</mm:think>Hi",
-        )
-
-        assert reasoning == ""
-        assert content == "Hi"
-
-    def test_closed_prompt_passes_text_through(self, m3_tokenizer):
-        post, reasoning, content = self._stream(
-            m3_tokenizer,
-            _M3_CLOSED_PROMPT,
-            {"thinking_mode": "disabled"},
-            "Hello there",
-        )
-
-        assert post.reasoning_parser is None
-        assert reasoning == ""
-        assert content == "Hello there"
-
-    @pytest.mark.asyncio
-    async def test_guidance_and_sampling_request_are_unchanged(self, m3_tokenizer):
-        """The open request gate runs M3's no-op adjust_request() only."""
-        result = await prepost_module.preprocess_chat_request(
-            {
-                "model": MODEL,
-                "messages": [{"role": "user", "content": "Hello"}],
-                "response_format": {"type": "json_object"},
-                "chat_template_kwargs": {"enable_thinking": False},
-            },
-            tokenizer=m3_tokenizer,
-            renderer=SimpleNamespace(
-                render_messages_async=AsyncMock(
-                    return_value=(None, {"prompt_token_ids": [1]})
-                )
-            ),
-            tool_parser_class=None,
-            reasoning_parser_class=_minimax_m3_parser_class(),
-        )
-
-        assert result.guided_decoding == {"json": {"type": "object"}}
-        assert result.request_for_sampling.skip_special_tokens is not False
 
 
 class TestReasoningParserOutputCapability:

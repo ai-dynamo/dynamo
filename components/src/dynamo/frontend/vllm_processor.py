@@ -647,7 +647,6 @@ def _minimax_m3_disabled_thinking_skips_parser(
         explicit_guided
         or _is_forced_tool_choice(getattr(request_for_sampling, "tool_choice", None))
         or _has_structured_response_format(request_for_sampling)
-        or getattr(request_for_sampling, "_grammar_from_tool_parser", False)
     ):
         return True
     return not prompt_token_ids or _prompt_tail_ends_with(
