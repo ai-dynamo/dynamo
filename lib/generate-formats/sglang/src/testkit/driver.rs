@@ -210,6 +210,11 @@ fn drive(
             }
             Arc::make_mut(&mut request.token_ids).extend(&ids);
             delivered += ids.len();
+            // Rebase the canonical budgets as Dynamo's migration does.
+            let stop = &mut request.stop_conditions;
+            let generated = ids.len() as u32;
+            stop.max_tokens = stop.max_tokens.map(|n| n.saturating_sub(generated));
+            stop.min_tokens = stop.min_tokens.map(|n| n.saturating_sub(generated));
             exchange
                 .chunk(inspected.output, false, &mut |value| {
                     client.push(value.clone())
@@ -228,20 +233,11 @@ fn drive(
         if attempt > 16 {
             return Err("too many attempts".to_string());
         }
-        match exchange.migrate(delivered, &mut request) {
-            Ok(None) => {}
-            Ok(Some(output)) => {
-                exchange
-                    .chunk(output, false, &mut |value| client.push(value.clone()))
-                    .map_err(|e| e.to_string())?;
-                break;
-            }
-            Err(reason) => {
-                return Ok(Outcome::Failed {
-                    chunks: client,
-                    reason,
-                });
-            }
+        if let Err(reason) = exchange.migrate(delivered, &mut request) {
+            return Ok(Outcome::Failed {
+                chunks: client,
+                reason,
+            });
         }
     }
     let unary = exchange.finish().map_err(|e| e.to_string())?;

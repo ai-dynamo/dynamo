@@ -69,8 +69,8 @@ async fn streaming_events_preserve_native_json() {
             &mut self,
             _: usize,
             _: &mut crate::protocols::common::llm_backend::PreprocessedRequest,
-        ) -> Result<Option<LLMEngineOutput>, String> {
-            Ok(None)
+        ) -> Result<(), String> {
+            Ok(())
         }
 
         fn finish(&mut self) -> Result<Option<Value>, DynamoError> {

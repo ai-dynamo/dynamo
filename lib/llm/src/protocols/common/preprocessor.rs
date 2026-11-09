@@ -403,11 +403,12 @@ pub struct PreprocessedRequest {
     #[serde(skip)]
     pub(crate) migration_state: Option<MigrationState>,
 
-    /// Rebuilds the request for a migration retry when its engine-native
-    /// format owns state the canonical fields do not carry. Frontend-only.
+    /// Updates the engine-native body for a migration retry, or says why the
+    /// request cannot migrate. `None` for requests the canonical replay fully
+    /// describes. Frontend-only.
     #[builder(default)]
     #[serde(skip)]
-    pub(crate) continuation: Option<Arc<dyn crate::migration::RequestContinuation>>,
+    pub(crate) continuation: Option<Result<Arc<dyn crate::migration::RequestContinuation>, String>>,
 
     /// Set when remote prefill has staged KV blocks that only this request's
     /// decode worker can release, so the decode leg must reach that worker even

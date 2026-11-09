@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 
+use dynamo_llm::protocols::common::StopConditions;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -131,23 +132,23 @@ impl Continuation {
         })
     }
 
-    pub(super) fn returns_logprobs(&self) -> bool {
-        self.original.get("return_logprob") == Some(&Value::Bool(true))
+    /// The effective `max_new_tokens` and `min_new_tokens`, including the
+    /// engine's defaults, as canonical stop conditions.
+    pub(super) fn budgets(&self) -> (Option<u32>, Option<u32>) {
+        (Some(self.max_new_tokens), Some(self.min_new_tokens))
     }
 
-    /// The body after `delivered` tokens, rebuilt from the original so repeated
-    /// migrations never compound; `None` when the budget is spent.
+    /// The body for the canonical budgets `remaining` after a failed attempt,
+    /// rebuilt from the original so repeated migrations never compound.
     pub(super) fn retry(
         &self,
         rules: &RequestRules,
-        delivered: usize,
+        remaining: &StopConditions,
         prompt_delivered: bool,
-    ) -> Option<Map<String, Value>> {
-        let delivered = u32::try_from(delivered).unwrap_or(u32::MAX);
-        let remaining = self.max_new_tokens.saturating_sub(delivered);
-        if remaining == 0 {
-            return None;
-        }
+    ) -> Result<Map<String, Value>, String> {
+        let max_new_tokens = remaining
+            .max_tokens
+            .ok_or("the request has no canonical token budget")?;
         let mut body = self.original.clone();
         let sampling = body.entry("sampling_params").or_insert(Value::Null);
         if !sampling.is_object() {
@@ -156,15 +157,15 @@ impl Continuation {
         let sampling = sampling
             .as_object_mut()
             .expect("sampling_params is an object");
-        sampling.insert("max_new_tokens".into(), remaining.into());
+        sampling.insert("max_new_tokens".into(), max_new_tokens.into());
         sampling.insert(
             "min_new_tokens".into(),
-            self.min_new_tokens.saturating_sub(delivered).into(),
+            remaining.min_tokens.unwrap_or(0).into(),
         );
         if prompt_delivered {
             body.extend(rules.migration.retry_without_prompt_outputs.clone());
         }
-        Some(body)
+        Ok(body)
     }
 }
 
@@ -173,6 +174,16 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// The canonical budgets after `delivered` tokens, as the replay rebases them.
+    fn rebased(continuation: &Continuation, delivered: u32) -> StopConditions {
+        let (max, min) = continuation.budgets();
+        StopConditions {
+            max_tokens: max.map(|n| n.saturating_sub(delivered)),
+            min_tokens: min.map(|n| n.saturating_sub(delivered)),
+            ..Default::default()
+        }
+    }
 
     fn continuation(body: Value, engine_info: Value) -> Result<Continuation, String> {
         let body = body.as_object().unwrap();
@@ -221,7 +232,7 @@ mod tests {
             )
             .unwrap();
             let retry = policy
-                .retry(&super::super::REQUEST_RULES, 6, false)
+                .retry(&super::super::REQUEST_RULES, &rebased(&policy, 6), false)
                 .unwrap();
             assert_eq!(retry["sampling_params"]["max_new_tokens"], 3);
             // Zero must override the engine's preferred minimum on the next attempt.
@@ -263,18 +274,33 @@ mod tests {
             "sampling_params": {"max_new_tokens": 10, "min_new_tokens": 4}});
         let continuation = continuation(body, Value::Null).unwrap();
         let rules = &super::super::REQUEST_RULES;
-        let first = continuation.retry(rules, 3, false).unwrap();
+        let first = continuation
+            .retry(rules, &rebased(&continuation, 3), false)
+            .unwrap();
         assert_eq!(
             first["sampling_params"],
             json!({"max_new_tokens": 7, "min_new_tokens": 1})
         );
         assert_eq!(first["logprob_start_len"], 0);
-        let second = continuation.retry(rules, 6, true).unwrap();
+        let second = continuation
+            .retry(rules, &rebased(&continuation, 6), true)
+            .unwrap();
         assert_eq!(
             second["sampling_params"],
             json!({"max_new_tokens": 4, "min_new_tokens": 0})
         );
         assert_eq!(second["logprob_start_len"], -1);
-        assert!(continuation.retry(rules, 10, true).is_none());
+        let spent = continuation
+            .retry(rules, &rebased(&continuation, 10), true)
+            .unwrap();
+        assert_eq!(
+            spent["sampling_params"],
+            json!({"max_new_tokens": 0, "min_new_tokens": 0})
+        );
+        assert!(
+            continuation
+                .retry(rules, &StopConditions::default(), true)
+                .is_err()
+        );
     }
 }

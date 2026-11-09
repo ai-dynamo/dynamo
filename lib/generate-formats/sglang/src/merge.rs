@@ -49,7 +49,7 @@ use dynamo_llm::generate_format::{
 };
 use dynamo_llm::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use dynamo_llm::protocols::common::preprocessor::RoutingHints;
-use dynamo_llm::protocols::common::{FinishReason, OutputOptions, SamplingOptions, StopConditions};
+use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use dynamo_llm::protocols::response_merge::prefill_annotations;
 
 /// Shared with the SGLang contract test.
@@ -208,7 +208,6 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
         let (input_ids, body) = request.into_worker_envelope(&request_id);
         let rules = self.rules.clone();
         let prefill_need = rules.prefill_need(&body);
-        let prompt_tokens = input_ids.len();
         let codec = self.codec.clone();
         Ok(Opened {
             model: None,
@@ -218,10 +217,15 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
             validation,
             bind: Box::new(move |worker| {
                 let continuation = Continuation::new(&REQUEST_RULES, &body, worker.engine_info);
+                let mut limits = limits?;
+                if let Ok(continuation) = &continuation {
+                    // The canonical replay rebases these on a retry.
+                    (limits.max_tokens, limits.min_tokens) = continuation.budgets();
+                }
                 let request = PreprocessedRequest::builder()
                     .model(worker.model.to_string())
                     .token_ids(input_ids)
-                    .stop_conditions(limits?)
+                    .stop_conditions(limits)
                     .sampling_options(SamplingOptions {
                         n: Some(1),
                         ..Default::default()
@@ -258,7 +262,6 @@ impl<C: ClientCodec> GenerateFormat for SglangFormat<C> {
                         delivered: 0,
                         request_id,
                         stream,
-                        prompt_tokens,
                     }),
                 })
             }),
@@ -298,7 +301,6 @@ struct Exchange<C: ClientCodec> {
     delivered: usize,
     request_id: String,
     stream: bool,
-    prompt_tokens: usize,
 }
 
 impl<C: ClientCodec> GenerateExchange for Exchange<C> {
@@ -355,7 +357,7 @@ impl<C: ClientCodec> GenerateExchange for Exchange<C> {
         &mut self,
         delivered_tokens: usize,
         request: &mut PreprocessedRequest,
-    ) -> Result<Option<LLMEngineOutput>, String> {
+    ) -> Result<(), String> {
         let continuation = self.continuation.as_ref().map_err(Clone::clone)?;
         if delivered_tokens != self.delivered {
             return Err(format!(
@@ -363,33 +365,14 @@ impl<C: ClientCodec> GenerateExchange for Exchange<C> {
                 self.delivered
             ));
         }
-        let prompt_delivered = self.assembler.prompt_delivered();
+        let body = continuation.retry(
+            &REQUEST_RULES,
+            &request.stop_conditions,
+            self.assembler.prompt_delivered(),
+        )?;
         self.assembler.migrate(delivered_tokens as u64);
-        let Some(body) = continuation.retry(&REQUEST_RULES, delivered_tokens, prompt_delivered)
-        else {
-            // The budget is spent: an attempt that generates nothing, whose
-            // counts the join rebases onto the delivered tokens.
-            let mut response = json!({
-                "output_ids": [],
-                "meta_info": {
-                    "id": self.request_id,
-                    "finish_reason": {"type": "length", "length": 0},
-                    "prompt_tokens": self.prompt_tokens,
-                    "completion_tokens": 0,
-                },
-            });
-            if continuation.returns_logprobs() {
-                response["meta_info"]["output_token_logprobs"] = json!([]);
-                response["meta_info"]["output_token_logprobs_length"] = json!(0);
-            }
-            return Ok(Some(LLMEngineOutput {
-                finish_reason: Some(FinishReason::Length),
-                engine_data: Some(json!({ RESPONSE_KEY: response })),
-                ..Default::default()
-            }));
-        };
         request.extra_args = Some(json!({ PAYLOAD_KEY: body }));
-        Ok(None)
+        Ok(())
     }
 
     fn finish(&mut self) -> Result<Option<Value>, DynamoError> {

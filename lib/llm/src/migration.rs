@@ -43,14 +43,13 @@ pub(crate) mod realtime;
 /// lets it stamp the failed worker's span onto the next attempt's
 /// `migration_link`; `decoder_checkpoint` carries the Backend's in-process incremental
 /// decoder state so a retry can restore withheld text and buffered token IDs;
-/// `completion_usage_mut` lets it remove replayed tokens from a retried prompt.
-pub(crate) trait HasTokenIds: Sized {
+/// `completion_usage_mut` lets it take the replayed tokens back out of a retried
+/// attempt's reported prompt.
+pub(crate) trait HasTokenIds {
     fn token_ids(&self) -> &[TokenIdType];
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink>;
     fn decoder_checkpoint(&self) -> Option<&DecoderCheckpoint>;
     fn completion_usage_mut(&mut self) -> Option<&mut CompletionUsage>;
-    /// A response a [`RequestContinuation`] produced instead of a retry.
-    fn from_engine_output(output: LLMEngineOutput) -> Option<Self>;
 }
 
 impl HasTokenIds for BackendOutput {
@@ -65,9 +64,6 @@ impl HasTokenIds for BackendOutput {
     }
     fn completion_usage_mut(&mut self) -> Option<&mut CompletionUsage> {
         self.completion_usage.as_mut()
-    }
-    fn from_engine_output(_output: LLMEngineOutput) -> Option<Self> {
-        None
     }
 }
 
@@ -84,22 +80,19 @@ impl HasTokenIds for LLMEngineOutput {
     fn completion_usage_mut(&mut self) -> Option<&mut CompletionUsage> {
         self.completion_usage.as_mut()
     }
-    fn from_engine_output(output: LLMEngineOutput) -> Option<Self> {
-        Some(output)
-    }
 }
 
 /// Rebuilds a request whose engine-native format owns state the canonical
 /// fields do not carry, such as a `/generate` body's own token budget.
 pub(crate) trait RequestContinuation: Send + Sync {
-    /// Prepare `request` for the attempt after `delivered_tokens` generated
-    /// tokens. `Ok(Some(output))` ends the request with `output` instead of
-    /// dispatching; `Err` says why the request cannot continue.
+    /// Update the engine-native body for the attempt after `delivered_tokens`
+    /// generated tokens, once the canonical fields have been rebased; `Err`
+    /// says why the request cannot continue.
     fn next_attempt(
         &self,
         delivered_tokens: usize,
         request: &mut PreprocessedRequest,
-    ) -> Result<Option<LLMEngineOutput>, String>;
+    ) -> Result<(), String>;
 }
 
 /// A classifier decision is terminal even when its client-visible error type
@@ -263,9 +256,6 @@ pub struct Migration {
     max_seq_len: Option<u32>,
     model_name: Arc<String>,
     metrics: Arc<Metrics>,
-    /// Only requests with a [`RequestContinuation`] may migrate: their
-    /// engine-native payload is opaque to the canonical replay.
-    continuation_required: bool,
 }
 
 impl Migration {
@@ -286,24 +276,6 @@ impl Migration {
             max_seq_len,
             model_name: Arc::new(model_name),
             metrics,
-            continuation_required: false,
-        })
-    }
-
-    /// Migration for engine-native Generate requests, which migrate only
-    /// through their format's [`RequestContinuation`].
-    pub fn for_generate(
-        mdc: &ModelDeploymentCard,
-        migration_limit: u32,
-        max_seq_len: Option<u32>,
-        metrics: Arc<Metrics>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            migration_limit,
-            max_seq_len,
-            model_name: Arc::new(mdc.display_name.clone()),
-            metrics,
-            continuation_required: true,
         })
     }
 
@@ -367,18 +339,12 @@ where
             .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .map_err(Error::msg)?
             .map(|session_id| session_id.as_ref().clone());
-        let migration_limit =
-            if self.continuation_required && preprocessed_request.continuation.is_none() {
-                0
-            } else {
-                self.migration_limit
-            };
         let retry_manager = RetryManager::build(
             engine_ctx,
             context.metadata().clone(),
             preprocessed_request,
             next,
-            migration_limit,
+            self.migration_limit,
             self.max_seq_len,
             self.model_name.clone(),
             self.metrics.clone(),
@@ -500,6 +466,12 @@ where
                 tracing::warn!(
                     "n>1 request: migration disabled - per-choice generation state is not transferable"
                 );
+            }
+            retries_left = 0;
+        }
+        if let Some(Err(reason)) = &preprocessed_request.continuation {
+            if retries_left > 0 {
+                tracing::debug!(%reason, "Generate request: migration disabled by its format");
             }
             retries_left = 0;
         }
@@ -627,45 +599,20 @@ where
             self.abort_request_lifecycle(error.as_ref());
             return Err(error);
         }
-        // The failure that scheduled the next retry, returned if its format
-        // cannot continue.
-        let mut retry_error: Option<Error> = None;
         while let Some(attempt) = self.attempts.take() {
             if attempt > 0
-                && let Some(continuation) = self.request.continuation.clone()
+                && let Some(Ok(continuation)) = self.request.continuation.clone()
+                && let Err(reason) =
+                    continuation.next_attempt(self.completed_tokens, &mut self.request)
             {
-                match continuation.next_attempt(self.completed_tokens, &mut self.request) {
-                    Ok(None) => {}
-                    Ok(Some(output)) => {
-                        let Some(response) = Resp::from_engine_output(output) else {
-                            return Err(Error::msg("continuation output has the wrong type"));
-                        };
-                        self.pending_migration = None;
-                        self.record_migration_outcome(
-                            migration_event.as_ref(),
-                            frontend_service::migration_outcome::SUCCESS,
-                        );
-                        let response = Annotated::from_data(response);
-                        self.next_stream = Some(ResponseStream::new(
-                            Box::pin(stream::once(async move { response })),
-                            self.context.clone(),
-                        ));
-                        return Ok(());
-                    }
-                    Err(reason) => {
-                        tracing::warn!(%reason, "request cannot continue on another worker");
-                        self.pending_migration = None;
-                        self.record_migration_outcome(
-                            migration_event.as_ref(),
-                            frontend_service::migration_outcome::FAILURE,
-                        );
-                        let error = retry_error.take().unwrap_or_else(|| {
-                            Error::msg(format!("request cannot migrate: {reason}"))
-                        });
-                        self.abort_request_lifecycle(error.as_ref());
-                        return Err(error);
-                    }
-                }
+                self.pending_migration = None;
+                self.record_migration_outcome(
+                    migration_event.as_ref(),
+                    frontend_service::migration_outcome::FAILURE,
+                );
+                let error = Error::msg(format!("request cannot migrate: {reason}"));
+                self.abort_request_lifecycle(error.as_ref());
+                return Err(error);
             }
             // Once any chunks have arrived from a previous attempt, stamp
             // that worker's span as `migration_link` so the next worker's
@@ -806,7 +753,6 @@ where
                     }
                     self.queue_migration(reason, Some(route_trace));
                     tracing::warn!(error = %err, "Creating new stream, retrying");
-                    retry_error = Some(err);
                 }
                 Err(err) => {
                     let outcome =

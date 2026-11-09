@@ -191,7 +191,7 @@ async fn a_request_migrated_mid_stream_returns_what_an_unbroken_one_does() {
             let card = dynamo_llm::model_card::ModelDeploymentCard::with_name_only("test-model");
             let metrics = Arc::new(dynamo_llm::http::service::metrics::Metrics::new());
             let migration =
-                dynamo_llm::migration::Migration::for_generate(&card, 3, max_seq_len, metrics);
+                dynamo_llm::migration::Migration::from_mdc(&card, 3, max_seq_len, metrics);
             let state = service_v2::HttpService::builder()
                 .build()
                 .unwrap()

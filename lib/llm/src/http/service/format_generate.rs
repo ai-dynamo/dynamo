@@ -374,10 +374,7 @@ async fn handler(
     };
     request.tracker = Some(tracker.clone());
     let exchange: SharedExchange = Arc::new(Mutex::new(exchange));
-    match migration {
-        Ok(()) => request.continuation = Some(exchange.clone()),
-        Err(reason) => tracing::debug!(%request_id, %reason, "generate request cannot migrate"),
-    }
+    request.continuation = Some(migration.map(|()| exchange.clone() as _));
 
     let context: Context<PreprocessedRequest> =
         match preprocessed_context_from_headers(request, request_id.clone(), &headers) {

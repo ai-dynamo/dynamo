@@ -632,7 +632,6 @@ async fn run_branch(
         .ok_or_else(|| DispatchError::malformed("native request was already consumed"))?;
     native["cache_salt"] = serde_json::Value::String(cache_salt);
     let branch_id = format!("{request_id}-{}", prepared.index);
-    // Scoring generates no tokens, so a failed branch is retried whole, not migrated.
     let Bound {
         request: mut preprocessed,
         exchange,
@@ -654,6 +653,9 @@ async fn run_branch(
         pin_to_placement(&mut preprocessed, placement);
     }
     preprocessed.tracker = Some(tracker.clone());
+    preprocessed.continuation = Some(Err(
+        "scoring generates no tokens, so a failed branch is retried whole".to_string(),
+    ));
     let context: Context<PreprocessedRequest> =
         Context::with_id_and_metadata(preprocessed, branch_id, Default::default());
     let branch_context = context.context();
