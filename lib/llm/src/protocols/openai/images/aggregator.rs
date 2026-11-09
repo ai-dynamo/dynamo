@@ -40,11 +40,8 @@ impl StreamAggregable for NvImagesResponse {
 
         let mut next_nvext = next.nvext;
         if !next.data.is_empty() {
-            // Only this function knows which chunks carry images, so it
-            // applies the per-image rule; an image-free chunk without
-            // accounting still leaves the aggregate alone. Once cleared, the
-            // step count stays cleared: `ImageAccounting::merge` sees
-            // `None != Some(n)`.
+            // Image-free chunks leave the step count alone. Once cleared, it
+            // stays cleared because `ImageAccounting::merge` sees `None != Some(n)`.
             let had_images = !self.data.is_empty();
             let current = self.nvext.as_mut().and_then(|nvext| nvext.usage.as_mut());
             let reported = next_nvext.as_mut().and_then(|nvext| nvext.usage.as_mut());
