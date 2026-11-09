@@ -359,6 +359,7 @@ areas:
   - .clang-format
   - .coderabbit.yaml
   - .coveragerc
+  - .cursor/
   - .devcontainer/
   - .dockerignore
   - .gitattributes
