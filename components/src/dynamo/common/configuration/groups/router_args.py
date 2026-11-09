@@ -506,11 +506,13 @@ def build_router_config(
 
     mode = getattr(RouterMode, mode_attr)
     if mode != RouterMode.KV and (roles := config.hint_policy_roles()):
-        # Hint policies run when the KV path books a worker; other modes would drop them.
+        # Hints run when the KV path books a worker; other modes would drop them.
         raise ValueError(
-            f"hint_policies for {', '.join(roles)} run only on the KV path, but "
-            f"--router-mode {router_mode} routes without it; use --router-mode kv, "
-            "or remove those roles' hint_policies from --router-policy-config"
+            f"the hints in worker_selection for {', '.join(roles)} run only on the KV "
+            f"path, but --router-mode {router_mode} routes without it; use --router-mode "
+            "kv, or remove "
+            + ", ".join(f"worker_selection.{role}.hints" for role in roles)
+            + " from --router-policy-config"
         )
     # Only KV routing consults KvRouterConfig; passing it for other modes would
     # imply tuning that is never read.
