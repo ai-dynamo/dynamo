@@ -88,7 +88,7 @@ class SglangUtils:
         engine: Any | None = None,
     ) -> dict:
         """Build sampling parameters for SGLang engine (generic functionality)"""
-        sampling_params = {}
+        sampling_params: dict[str, Any] = {}
 
         # Extract sampling options from request
         sampling_options = request.request.sampling_options
