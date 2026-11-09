@@ -149,6 +149,10 @@ The field traces through the four phases as follows:
    and checks that the field exists, so a backend upgrade fails visibly instead of silently dropping
    the constraint. A mapping test that inspects the sampling parameters proves delivery. A
    behavioral test that generates tokens under the constraint is still needed to prove the effect.
+   A Python chat processor (`--dyn-chat-processor vllm` or `sglang`) replaces the Rust
+   preprocessor, so it is a second delivery path: it receives the named passthrough fields as
+   top-level keys of its request, and the vLLM processor copies this one to the same
+   `extra_args.sampling_options` key.
 4. **Return the outcome:** The option adds no dedicated response field. Generated text is the
    client-visible result, while validation or backend compatibility failures surface as errors.
    Streaming and non-streaming responses otherwise retain their normal shapes.

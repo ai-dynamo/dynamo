@@ -108,6 +108,17 @@ where
     Ok(fields)
 }
 
+/// The named passthrough fields present in a request's extra fields.
+///
+/// Unknown fields kept by `DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS` are skipped.
+pub fn passthrough_extra_fields(
+    extra_fields: &std::collections::HashMap<String, serde_json::Value>,
+) -> impl Iterator<Item = (&'static str, &serde_json::Value)> {
+    PASSTHROUGH_EXTRA_FIELDS
+        .iter()
+        .filter_map(|key| extra_fields.get(*key).map(|value| (*key, value)))
+}
+
 static IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS));
 
@@ -1303,6 +1314,24 @@ mod tests {
     #[test]
     fn validate_no_unsupported_fields_ignores_unknown_fields_when_configured() {
         validate_no_unsupported_fields_with_ignore(&unknown_fields(), true).unwrap();
+    }
+
+    #[test]
+    fn passthrough_extra_fields_skips_ignored_unknown_fields() {
+        let extra_fields = HashMap::from([
+            ("experimental_field".to_string(), json!("value")),
+            ("stop_token_ids".to_string(), json!([7])),
+            ("allowed_token_ids".to_string(), json!([10, 11])),
+        ]);
+
+        let fields: Vec<_> = passthrough_extra_fields(&extra_fields).collect();
+        assert_eq!(
+            fields,
+            vec![
+                ("stop_token_ids", &json!([7])),
+                ("allowed_token_ids", &json!([10, 11])),
+            ]
+        );
     }
 
     #[test]

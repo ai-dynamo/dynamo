@@ -682,6 +682,27 @@ def _normalize_vllm_image_parts(messages: list[Any]) -> None:
                 image_url["detail"] = "auto"
 
 
+# Request fields the vLLM worker applies from extra_args.sampling_options, sent
+# as the client wrote them. Keep in step with the Rust preprocessor's
+# `sampling_passthrough_args` (lib/llm/src/preprocessor.rs).
+_SAMPLING_PASSTHROUGH_FIELDS = (
+    "detokenize",
+    "allowed_token_ids",
+    "bad_words_token_ids",
+    "logprob_token_ids",
+    "vllm_xargs",
+)
+
+
+def _sampling_passthrough_args(request: dict[str, Any]) -> dict[str, Any]:
+    """The request's passthrough fields for the worker's sampling options."""
+    return {
+        key: request[key]
+        for key in _SAMPLING_PASSTHROUGH_FIELDS
+        if request.get(key) is not None
+    }
+
+
 def _disabled_as_unset(value: Any, requested: Any) -> Any:
     """Send a disabled top_k or min_p as unset unless the client disabled it.
 
@@ -1014,6 +1035,10 @@ class VllmProcessor:
             request_for_sampling.logprobs,
             getattr(request_for_sampling, "top_logprobs", None),
         )
+        # Explicit logprob_token_ids set the width, so vLLM's verify rejects a
+        # top-k count next to them; the worker nulls it the same way.
+        if getattr(sampling_params, "logprob_token_ids", None):
+            sampling_params.logprobs = None
         # Response metadata is opt-in, even if generation_config enables it.
         if request.get("prompt_logprobs") is None or (
             request.get("stream") is True
@@ -1098,6 +1123,10 @@ class VllmProcessor:
         }
         if guided_decoding is not None:
             dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding
+        if sampling_passthrough := _sampling_passthrough_args(request):
+            dynamo_preproc.setdefault("extra_args", {})[
+                "sampling_options"
+            ] = sampling_passthrough
         if reasoning_metadata.engine_reasoning_ended is not None:
             dynamo_preproc[
                 "reasoning_ended"
