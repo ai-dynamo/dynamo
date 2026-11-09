@@ -3,6 +3,7 @@
 
 import asyncio
 import base64
+import binascii
 import functools
 import importlib
 import inspect
@@ -2593,7 +2594,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def _resolve_lora_request(self, model_name: str | None) -> LoRARequest | None:
         """Return a LoRARequest for loaded adapters, or None for base model names.
 
-        Raises ValueError for unknown non-base names when LoRA is enabled.
+        Raises InvalidArgument for unknown non-base names when LoRA is enabled.
 
         **Contract for subclasses**: This method requires the following attributes
         to be defined by subclasses:
@@ -2791,7 +2792,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "rejecting the request",
                     lora_request.lora_name,
                 )
-                raise ValueError(
+                raise InvalidArgument(
                     f"unknown model or LoRA adapter: '{lora_request.lora_name}'"
                 )
             self._track_lora_request_activation(admitted_lora_request)
@@ -3294,9 +3295,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             torch.Tensor: Decoded prompt embeddings with dim == 2
 
         Raises:
-            ValueError: If the input is not a string
-            InvalidArgument: If the payload cannot be decoded as a PyTorch tensor
+            InvalidArgument: If the payload is not valid base64 or the loader
+                rejects it as a client input fault.
+            ValueError: If the input is not a string (internal contract)
+            RuntimeError: If ModelConfig is unavailable.
         """
+        from vllm.exceptions import VLLMClientError
+
         if not isinstance(prompt_embeds_base64, str):
             raise ValueError(
                 f"Prompt embeds must be base64 encoded string. Got {type(prompt_embeds_base64)}."
@@ -3315,13 +3320,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # Resource failures are server-side faults. Preserve their type so
             # the bindings return a retryable 5xx instead of a client 400.
             raise
+        except VLLMClientError as e:
+            raise InvalidArgument(f"Invalid prompt_embeds: {e}") from e
+        except binascii.Error as e:
+            raise InvalidArgument("prompt_embeds is not valid base64") from e
         except Exception as e:
-            logger.error(f"Failed to decode prompt_embeds: {e}")
-            # Static message keeps library-internal decoder text (logged above)
-            # private; a plain ValueError would reach the client as "Invalid request".
-            raise InvalidArgument(
-                "Failed to decode prompt_embeds as PyTorch tensor"
-            ) from e
+            raise ValueError(f"Failed to decode prompt_embeds: {e}") from e
 
     def _create_prompt_from_embeddings(
         self, prompt_embeds_base64: str
@@ -3375,8 +3379,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             The vLLM prompt built from prompt embeddings or token IDs.
 
         Raises:
-            InvalidArgument: Prompt embeddings are disabled or cannot be decoded.
-            ValueError: Prompt embeddings fail type or shape validation.
+            InvalidArgument: Prompt embeddings are disabled or fail payload
+                validation.
         """
         if "prompt_embeds" in request and request["prompt_embeds"]:
             if not self.config.engine_args.enable_prompt_embeds:
@@ -5010,7 +5014,7 @@ class EmbeddingWorkerHandler:
         messages = None if is_tokens_path else request.get("messages")
         input_field = token_ids_batch if is_tokens_path else request.get("input")
         if input_field is None and messages is None:
-            raise ValueError(
+            raise InvalidArgument(
                 "Embedding request missing required 'input' or 'token_ids' field"
             )
 
@@ -5031,11 +5035,11 @@ class EmbeddingWorkerHandler:
         if dimensions is not None and (
             not isinstance(dimensions, int) or isinstance(dimensions, bool)
         ):
-            raise TypeError(
+            raise InvalidArgument(
                 f"Invalid 'dimensions' type {type(dimensions).__name__}; expected int"
             )
         if dimensions is not None and dimensions < 1:
-            raise ValueError(f"dimensions must be >= 1, got {dimensions}")
+            raise InvalidArgument(f"dimensions must be >= 1, got {dimensions}")
 
         # Rust's preprocessed request represents an omitted client format as
         # ``None``. Treat both an absent key and an explicit internal null as
@@ -5044,7 +5048,7 @@ class EmbeddingWorkerHandler:
         if encoding_format is None:
             encoding_format = "float"
         if encoding_format not in ("float", "base64"):
-            raise ValueError(
+            raise InvalidArgument(
                 f"Invalid 'encoding_format' value {encoding_format!r}; "
                 "expected 'float' or 'base64'"
             )
@@ -5055,12 +5059,12 @@ class EmbeddingWorkerHandler:
             if not isinstance(truncate_prompt_tokens, int) or isinstance(
                 truncate_prompt_tokens, bool
             ):
-                raise TypeError(
+                raise InvalidArgument(
                     "Invalid 'truncate_prompt_tokens' type "
                     f"{type(truncate_prompt_tokens).__name__}; expected int"
                 )
             if truncate_prompt_tokens < -1:
-                raise ValueError(
+                raise InvalidArgument(
                     "truncate_prompt_tokens must be >= -1, "
                     f"got {truncate_prompt_tokens}"
                 )
@@ -5069,7 +5073,7 @@ class EmbeddingWorkerHandler:
         add_special_tokens = request.get("add_special_tokens")
         if add_special_tokens is not None:
             if not isinstance(add_special_tokens, bool):
-                raise TypeError(
+                raise InvalidArgument(
                     "Invalid 'add_special_tokens' type "
                     f"{type(add_special_tokens).__name__}; expected bool"
                 )
@@ -5187,7 +5191,7 @@ class EmbeddingWorkerHandler:
                     else len(_pooling_output_to_list(embedding_row))
                 )
                 if actual_dim < dimensions:
-                    raise ValueError(
+                    raise InvalidArgument(
                         f"dimensions={dimensions} exceeds model embedding "
                         f"dimension {actual_dim}"
                     )
@@ -5259,24 +5263,24 @@ def _classify_embedding_input(input_field: Any) -> list[Any]:
       - ``list[int]``  — wrapped in ``TokensPrompt`` by the caller.
 
     Rejects mixed lists (e.g. ``["foo", 42]`` or ``[[1, 2], "bar"]``) with
-    a clear ``TypeError`` rather than silently coercing.
+    a clear ``InvalidArgument`` rather than silently coercing.
     """
     if isinstance(input_field, str):
         return [input_field]
     if not isinstance(input_field, list):
-        raise TypeError(
+        raise InvalidArgument(
             f"Invalid 'input' type {type(input_field).__name__}; "
             "expected str, list[str], list[int], or list[list[int]]"
         )
     if not input_field:
-        raise ValueError("Embedding request 'input' must be non-empty")
+        raise InvalidArgument("Embedding request 'input' must be non-empty")
 
     first = input_field[0]
     if isinstance(first, str):
         texts: list[str] = []
         for item in input_field:
             if not isinstance(item, str):
-                raise TypeError(
+                raise InvalidArgument(
                     "'input' list mixes str and non-str entries; pass either "
                     "all strings or all token-id arrays"
                 )
@@ -5286,7 +5290,7 @@ def _classify_embedding_input(input_field: Any) -> list[Any]:
         token_ids: list[int] = []
         for item in input_field:
             if not _is_token_id(item):
-                raise TypeError(
+                raise InvalidArgument(
                     "'input' list mixes int and non-int entries; for tokenized "
                     "input pass all integers (single prompt) or list[list[int]]"
                 )
@@ -5297,21 +5301,21 @@ def _classify_embedding_input(input_field: Any) -> list[Any]:
         prompts: list[list[int]] = []
         for i, item in enumerate(input_field):
             if not isinstance(item, list):
-                raise TypeError(
+                raise InvalidArgument(
                     f"'input' list element at index {i} must be a list of "
                     "ints (token IDs); mixed batches are not supported"
                 )
             inner: list[int] = []
             for x in item:
                 if not _is_token_id(x):
-                    raise TypeError(
+                    raise InvalidArgument(
                         f"'input' list element at index {i} must be a list of "
                         "ints (token IDs); mixed batches are not supported"
                     )
                 inner.append(x)
             prompts.append(inner)
         return prompts
-    raise TypeError(
+    raise InvalidArgument(
         f"Unsupported 'input' element type {type(first).__name__}; "
         "expected str, int, or list[int]"
     )
