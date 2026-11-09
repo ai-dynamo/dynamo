@@ -1184,6 +1184,9 @@ pub struct ResponseMetricCollector {
     metrics: Arc<Metrics>,
     request: Arc<RequestMetrics>,
     model: String,
+    // The span the request summary is recorded on in `Drop`. The collector is dropped while
+    // the response body is polled, where the request span is not entered.
+    span: tracing::Span,
     // Per-model metric handles cached for the request. Most are resolved at construction;
     // ITL is resolved lazily on its first observation so requests that never produce ITL
     // do not allocate a local histogram. Caching avoids re-hashing the `model` label on
@@ -2144,6 +2147,25 @@ impl Metrics {
         streaming: bool,
         request_id: &str,
     ) -> InflightGuard {
+        self.create_inflight_guard_in(
+            tracing::Span::current(),
+            model,
+            endpoint,
+            streaming,
+            request_id,
+        )
+    }
+
+    /// Like [`Self::create_inflight_guard`], for a request whose span is `span` rather than the
+    /// current span.
+    pub(crate) fn create_inflight_guard_in(
+        self: Arc<Self>,
+        span: tracing::Span,
+        model: &str,
+        endpoint: Endpoint,
+        streaming: bool,
+        request_id: &str,
+    ) -> InflightGuard {
         let request_type = if streaming {
             RequestType::Stream
         } else {
@@ -2152,6 +2174,7 @@ impl Metrics {
 
         InflightGuard::new(
             self.clone(),
+            span,
             model.to_string(),
             endpoint,
             request_type,
@@ -2291,6 +2314,7 @@ impl Drop for HttpQueueGuard {
 impl InflightGuard {
     fn new(
         metrics: Arc<Metrics>,
+        span: tracing::Span,
         model: String,
         endpoint: Endpoint,
         request_type: RequestType,
@@ -2301,9 +2325,10 @@ impl InflightGuard {
         metrics.inc_inflight_gauge(&model);
         metrics.inc_request_started_counter(&model, &endpoint, &request_type);
 
-        tracing::Span::current().record("model", model.as_str());
+        span.record("model", model.as_str());
 
         tracing::info!(
+            parent: &span,
             request_id = %request_id,
             model = %model,
             endpoint = %endpoint,
@@ -2321,7 +2346,7 @@ impl InflightGuard {
             error_type: ErrorType::Internal,
             timer,
             request_id,
-            span: tracing::Span::current(),
+            span,
         }
     }
 
@@ -2344,6 +2369,12 @@ impl InflightGuard {
         self.timer.elapsed().as_millis()
     }
 
+    /// The span current when the guard was created. A streamed response body is polled outside
+    /// it, so events emitted there name it as their parent.
+    pub(crate) fn span(&self) -> &tracing::Span {
+        &self.span
+    }
+
     pub(crate) fn request_metrics(&self) -> &Arc<RequestMetrics> {
         &self.request
     }
@@ -2354,6 +2385,7 @@ impl InflightGuard {
             self.metrics.clone(),
             self.model.clone(),
             self.request.clone(),
+            self.span.clone(),
         )
     }
 
@@ -2546,7 +2578,12 @@ impl std::fmt::Display for ErrorType {
 }
 
 impl ResponseMetricCollector {
-    fn new(metrics: Arc<Metrics>, model: String, request: Arc<RequestMetrics>) -> Self {
+    fn new(
+        metrics: Arc<Metrics>,
+        model: String,
+        request: Arc<RequestMetrics>,
+        span: tracing::Span,
+    ) -> Self {
         // Resolve the per-model handles once (cheap clones of the vec entries) so the
         // per-chunk / per-token hot path in `observe_response` does no label hashing.
         let time_to_first_token = metrics.time_to_first_token.with_label_values(&[&model]);
@@ -2562,6 +2599,7 @@ impl ResponseMetricCollector {
             metrics,
             request,
             model,
+            span,
             time_to_first_token,
             inter_token_latency: None,
             input_sequence_length,
@@ -2869,9 +2907,7 @@ impl Drop for ResponseMetricCollector {
                 .observe(self.osl as f64);
         }
 
-        // Record request summary on the enclosing span.
-        // InflightGuard::Drop and on_response logs will inherit these.
-        let span = tracing::Span::current();
+        let span = &self.span;
         span.record("input_tokens", self.isl as u32);
         span.record("output_tokens", self.osl as u32);
         // Only record once observed, so requests that never carried a metrics
@@ -3190,6 +3226,7 @@ mod tests {
             metrics.clone(),
             model.to_string(),
             Arc::new(RequestMetrics::new(metrics, model)),
+            tracing::Span::none(),
         )
     }
 

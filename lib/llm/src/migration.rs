@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use anyhow::{Error, Result};
 use futures::{Stream, stream::StreamExt};
+use tracing::Instrument;
 
 use crate::{
     http::service::metrics::Metrics,
@@ -416,10 +417,14 @@ where
                     else {
                         unreachable!("matched above");
                     };
-                    *this = Migrated::Migrating(Box::pin(async move {
-                        let failure = manager.migrate_on(response).await;
-                        (manager, failure)
-                    }));
+                    let span = manager.span.clone();
+                    *this = Migrated::Migrating(Box::pin(
+                        async move {
+                            let failure = manager.migrate_on(response).await;
+                            (manager, failure)
+                        }
+                        .instrument(span),
+                    ));
                 }
                 Migrated::Migrating(future) => {
                     let (manager, failure) = ready!(future.as_mut().poll(cx));
@@ -478,6 +483,9 @@ where
     /// Delivered tokens replayed in the active attempt's prompt. The worker counts them in its
     /// `prompt_tokens` although the client received them as completion.
     replayed_tokens: u32,
+    /// The span current when the request was dispatched. The response body polls this stream
+    /// without entering the request span, so a mid-stream retry runs in this one.
+    span: tracing::Span,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -575,6 +583,7 @@ where
             pending_migration: None,
             prompt_len,
             replayed_tokens: 0,
+            span: tracing::Span::current(),
         };
         slf.new_stream(None).await?;
         slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
@@ -1015,6 +1024,7 @@ where
             let total_len = self.request.token_ids.len() as u32 + new_output_len;
             if total_len > max_seq_len {
                 tracing::warn!(
+                    parent: &self.span,
                     "Sequence length {} exceeds migration max_seq_len {}, \
                      disabling migration",
                     total_len,
@@ -3874,6 +3884,96 @@ mod tests {
         );
 
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 2);
+    }
+
+    /// The HTTP response body polls the migration stream without entering the request span.
+    /// A mid-stream retry, its events and its dispatch must still run in the span the request
+    /// was dispatched in.
+    #[tokio::test]
+    async fn mid_stream_retry_runs_in_the_dispatch_span() {
+        use std::sync::Mutex;
+        use tracing_subscriber::layer::{Context as LayerContext, Layer, SubscriberExt};
+        use tracing_subscriber::registry::LookupSpan;
+
+        /// The span each event from `migration.rs` is emitted in.
+        struct EventSpans(Arc<Mutex<Vec<Option<&'static str>>>>);
+
+        impl<S> Layer<S> for EventSpans
+        where
+            S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_event(&self, event: &tracing::Event<'_>, ctx: LayerContext<'_, S>) {
+                if event.metadata().module_path() == Some("dynamo_llm::migration") {
+                    let span = ctx.event_span(event).map(|span| span.name());
+                    self.0.lock().unwrap().push(span);
+                }
+            }
+        }
+
+        /// Fails its first stream after one token; records the span each dispatch runs in.
+        #[derive(Default)]
+        struct FailOnceEngine {
+            dispatch_spans: Mutex<Vec<Option<&'static str>>>,
+        }
+
+        #[async_trait]
+        impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+            for FailOnceEngine
+        {
+            async fn generate(
+                &self,
+                request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                let mut dispatch_spans = self.dispatch_spans.lock().unwrap();
+                dispatch_spans.push(tracing::Span::current().metadata().map(|m| m.name()));
+                let first = dispatch_spans.len() == 1;
+                let responses = async_stream::stream! {
+                    yield create_mock_output(101);
+                    if first {
+                        yield Annotated::from_err(
+                            DynamoError::builder()
+                                .error_type(ErrorType::Disconnected)
+                                .message("worker disconnected")
+                                .build(),
+                        );
+                    }
+                };
+                Ok(ResponseStream::new(Box::pin(responses), request.context()))
+            }
+        }
+
+        let event_spans = Arc::new(Mutex::new(Vec::new()));
+        let _interest = crate::test_utils::tracing_interest_guard();
+        let _subscriber = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(EventSpans(event_spans.clone())),
+        );
+        let engine = Arc::new(FailOnceEngine::default());
+        let request = Context::with_id_and_metadata(
+            create_mock_request(10),
+            uuid::Uuid::new_v4().to_string(),
+            BTreeMap::new(),
+        );
+        let migration = Migration::new(1, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+        let stream = migration
+            .generate(request, engine.clone())
+            .instrument(tracing::info_span!("http-request"))
+            .await
+            .unwrap();
+        event_spans.lock().unwrap().clear();
+        let responses: Vec<_> = stream.collect().await;
+
+        assert_eq!(responses.len(), 2);
+        assert!(responses.iter().all(|response| response.error.is_none()));
+        assert_eq!(
+            *engine.dispatch_spans.lock().unwrap(),
+            [Some("http-request"), Some("http-request")]
+        );
+        let event_spans = event_spans.lock().unwrap();
+        assert!(!event_spans.is_empty());
+        assert!(
+            event_spans.iter().all(|span| *span == Some("http-request")),
+            "{event_spans:?}"
+        );
     }
 
     /// The `migration retries exhausted` event must name the attempt that
