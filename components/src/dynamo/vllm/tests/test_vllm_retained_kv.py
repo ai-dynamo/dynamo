@@ -62,7 +62,7 @@ def _params():
     return {
         "do_remote_decode": False,
         "do_remote_prefill": True,
-        "remote_block_ids": [[0, 7], [4]],
+        "remote_block_ids": [[0, 7]],
         "remote_engine_id": "donor-engine",
         "remote_request_id": "donor-request",
         "remote_host": "donor.internal",
@@ -217,6 +217,7 @@ async def test_existing_prefill_configuration_errors_remain_visible(
     "change",
     [
         {"remote_block_ids": []},
+        {"remote_block_ids": [[0, 7], [4]]},
         {"remote_block_ids": [[True]]},
         {"remote_num_tokens": None},
         {"remote_port": 0},
@@ -377,6 +378,13 @@ async def test_existing_native_coordinate_export_is_preserved():
     ]
     assert chunks[-1]["engine_data"]["kv_transfer_params"] == _params()
     assert RETAINED_KV_KEY not in chunks[-1].get("extra_args", {})
+
+
+def test_inconsistent_multi_group_native_export_is_not_retained():
+    params = {**_params(), "remote_block_ids": [[0, 7], [4]]}
+    assert (
+        retained_terminal_metadata(RetainedKvCapture(30), [1, 2, 3, 4], params) is None
+    )
 
 
 def test_metadata_without_prompt_provenance_is_not_exported():

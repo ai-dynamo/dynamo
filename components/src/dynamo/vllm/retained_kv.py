@@ -147,7 +147,7 @@ def _validated_params(params: Any) -> dict[str, Any] | None:
     groups = params.get("remote_block_ids")
     if (
         not isinstance(groups, (list, tuple))
-        or not 0 < len(groups) <= 128
+        or len(groups) != 1
         or not any(groups)
         or sum(len(group) for group in groups if isinstance(group, (list, tuple)))
         > 65536
