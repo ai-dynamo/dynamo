@@ -119,9 +119,9 @@ vllm:
     # the Dynamo build adds.
     enterprise:
       cuda13.0:
-        runtime_image: nvcr.io/nim/nvidia/vllm-base-enterprise-nightly
-        runtime_image_tag: 20261102-bd4a968
-        baseline_sbom: vllm-base-enterprise-nightly@ac44b31f
+        runtime_image: nvcr.io/nim/nvidia/vllm-enterprise-base
+        runtime_image_tag: 1.7.0-cuda13
+        baseline_sbom: vllm-enterprise-base@589bc3cf
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu

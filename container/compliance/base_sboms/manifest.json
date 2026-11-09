@@ -150,23 +150,23 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:ac44b31ffdbbd86fcb0e2414192517ff6bd5753e42bdd02563975e420a785788",
-      "baseline_image": "nvcr.io/nim/nvidia/vllm-base-enterprise-nightly",
-      "baseline_sbom": "vllm-base-enterprise-nightly@ac44b31f-amd64.cdx.json",
-      "baseline_tag": "20261102-bd4a968",
-      "from_digest": "sha256:ac44b31ffdbbd86fcb0e2414192517ff6bd5753e42bdd02563975e420a785788",
-      "from_image": "nvcr.io/nim/nvidia/vllm-base-enterprise-nightly",
-      "from_tag": "20261102-bd4a968",
+      "baseline_digest": "sha256:589bc3cfcf9e1a00317d7cc4a9333710c11b6bbbabc23b59ec022aa8b08b4b82",
+      "baseline_image": "nvcr.io/nim/nvidia/vllm-enterprise-base",
+      "baseline_sbom": "vllm-enterprise-base@589bc3cf-amd64.cdx.json",
+      "baseline_tag": "1.7.0-cuda13",
+      "from_digest": "sha256:589bc3cfcf9e1a00317d7cc4a9333710c11b6bbbabc23b59ec022aa8b08b4b82",
+      "from_image": "nvcr.io/nim/nvidia/vllm-enterprise-base",
+      "from_tag": "1.7.0-cuda13",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:ac44b31ffdbbd86fcb0e2414192517ff6bd5753e42bdd02563975e420a785788",
-      "baseline_image": "nvcr.io/nim/nvidia/vllm-base-enterprise-nightly",
-      "baseline_sbom": "vllm-base-enterprise-nightly@ac44b31f-arm64.cdx.json",
-      "baseline_tag": "20261102-bd4a968",
-      "from_digest": "sha256:ac44b31ffdbbd86fcb0e2414192517ff6bd5753e42bdd02563975e420a785788",
-      "from_image": "nvcr.io/nim/nvidia/vllm-base-enterprise-nightly",
-      "from_tag": "20261102-bd4a968",
+      "baseline_digest": "sha256:589bc3cfcf9e1a00317d7cc4a9333710c11b6bbbabc23b59ec022aa8b08b4b82",
+      "baseline_image": "nvcr.io/nim/nvidia/vllm-enterprise-base",
+      "baseline_sbom": "vllm-enterprise-base@589bc3cf-arm64.cdx.json",
+      "baseline_tag": "1.7.0-cuda13",
+      "from_digest": "sha256:589bc3cfcf9e1a00317d7cc4a9333710c11b6bbbabc23b59ec022aa8b08b4b82",
+      "from_image": "nvcr.io/nim/nvidia/vllm-enterprise-base",
+      "from_tag": "1.7.0-cuda13",
       "platform": "linux/arm64"
     }
   ],
