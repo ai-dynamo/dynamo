@@ -1070,7 +1070,7 @@ func TestDCD_RoundTrip_PreservesLWSFailureRecordsAnnotation(t *testing.T) {
 		Namespace: "ns",
 		Annotations: map[string]string{
 			"nvidia.com/lws-failure-records": ledger,
-			"example.com/foreign":           "keep-me",
+			"example.com/foreign":            "keep-me",
 		},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			BackendFramework: "vllm",
