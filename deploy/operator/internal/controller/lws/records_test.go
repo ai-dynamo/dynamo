@@ -184,7 +184,7 @@ func TestMergeFailureRecordsIndependentCapacityTable(t *testing.T) {
 		assert.Equal(t, first.Encoded, out.Encoded)
 		assert.Equal(t, failureRecordMaxGroups, out.RecordCount)
 		require.NotNil(t, out.NextExpiry)
-		assert.Equal(t, wantExpiry, *out.NextExpiry)
+		assert.True(t, wantExpiry.Equal(*out.NextExpiry), "next expiry instant mismatch: want %v got %v", wantExpiry, *out.NextExpiry)
 	})
 
 	t.Run("8 leaders in one partition then ninth declined", func(t *testing.T) {
@@ -219,7 +219,7 @@ func TestMergeFailureRecordsIndependentCapacityTable(t *testing.T) {
 		assert.Equal(t, first.Encoded, out.Encoded)
 		assert.Equal(t, failureRecordMaxPerGroup, out.RecordCount)
 		require.NotNil(t, out.NextExpiry)
-		assert.Equal(t, wantExpiry, *out.NextExpiry)
+		assert.True(t, wantExpiry.Equal(*out.NextExpiry), "next expiry instant mismatch: want %v got %v", wantExpiry, *out.NextExpiry)
 	})
 }
 

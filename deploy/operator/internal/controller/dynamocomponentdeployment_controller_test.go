@@ -2221,6 +2221,14 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 					UpdatedReplicas: 1,
 					Replicas:        1,
 				},
+				lwsObservations: []lwscontroller.Observation{{
+					Verdict:    lwscontroller.VerdictUnknown,
+					Reason:     lwscontroller.ReasonMissingRootIdentity,
+					Namespace:  "default",
+					DCDName:    "test-component",
+					LWSName:    "test-component-0",
+					ReadOrigin: lwscontroller.ReadOriginManagerCache,
+				}},
 			},
 		},
 		{
@@ -2258,6 +2266,14 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 					UpdatedReplicas: 2,
 					Replicas:        3,
 				},
+				lwsObservations: []lwscontroller.Observation{{
+					Verdict:    lwscontroller.VerdictUnknown,
+					Reason:     lwscontroller.ReasonMissingRootIdentity,
+					Namespace:  "default",
+					DCDName:    "test-component",
+					LWSName:    "test-component-0",
+					ReadOrigin: lwscontroller.ReadOriginManagerCache,
+				}},
 			},
 		},
 		{
@@ -2295,6 +2311,14 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 					UpdatedReplicas: 3,
 					Replicas:        3,
 				},
+				lwsObservations: []lwscontroller.Observation{{
+					Verdict:    lwscontroller.VerdictUnknown,
+					Reason:     lwscontroller.ReasonMissingRootIdentity,
+					Namespace:  "default",
+					DCDName:    "test-component",
+					LWSName:    "test-component-0",
+					ReadOrigin: lwscontroller.ReadOriginManagerCache,
+				}},
 			},
 		},
 	}
@@ -2712,10 +2736,11 @@ func TestFailureRecordsAnnotationDoesNotAffectRenderHashOrChildSync(t *testing.T
 	require.NoError(t, err)
 
 	ledger := `{"version":1,"dcdUID":"dcd-uid","entries":[]}`
-	dcd.Annotations = map[string]string{
-		lwscontroller.FailureRecordsAnnotationKey: ledger,
-		"example.com/foreign":                     "keep",
+	if dcd.Annotations == nil {
+		dcd.Annotations = map[string]string{}
 	}
+	dcd.Annotations[lwscontroller.FailureRecordsAnnotationKey] = ledger
+	dcd.Annotations["example.com/foreign"] = "keep"
 	afterAnns := dynamo.GetDCDKubeAnnotations(dcd)
 	afterLWS, _, err := reconciler.generateLeaderWorkerSet(t.Context(), generateResourceOption{dynamoComponentDeployment: dcd})
 	require.NoError(t, err)
@@ -2729,11 +2754,10 @@ func TestFailureRecordsAnnotationDoesNotAffectRenderHashOrChildSync(t *testing.T
 	t.Log("SyncObservedResource keeps ledger bytes across a child DCD bookkeeping update")
 	observed := dcd.DeepCopy()
 	observed.ResourceVersion = "5"
-	observed.Annotations = map[string]string{
-		lwscontroller.FailureRecordsAnnotationKey: ledger,
-		"example.com/foreign":                     "keep",
-		controller_common.NvidiaAnnotationHashKey: "oldhash",
+	if observed.Annotations == nil {
+		observed.Annotations = map[string]string{}
 	}
+	observed.Annotations[controller_common.NvidiaAnnotationHashKey] = "oldhash"
 	desired := observed.DeepCopy()
 	desired.Annotations = map[string]string{
 		"example.com/foreign": "keep",
