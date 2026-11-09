@@ -3,19 +3,22 @@
 
 """End-to-end tests for the Dynamo frontend, dynamo-triton-sidecar, and a real
 tritonserver subprocess, covering the OpenAI `/v1/classify` and `/v1/embeddings`
-paths against the shipped `classifier` and `embedder` example models."""
+paths and the KServe v2 gRPC tensor path against the shipped `classifier` and
+`embedder` example models."""
 
 import base64
 import hashlib
 import logging
 import struct
 
+import numpy as np
 import pytest
 import requests
 
 from tests.utils.triton_sidecar import sidecar_stack
 
 pytest.importorskip("tritonserver")
+tritonclient_grpc = pytest.importorskip("tritonclient.grpc")
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +34,13 @@ def _expected_vector(prompt: str) -> list[float]:
     return [byte / 255.0 for byte in digest[:_EMBEDDING_DIM]]
 
 
+def _expected_classifier_probs(prompt: str) -> list[float]:
+    expected_class = sum(ord(c) for c in prompt) % _NUM_CLASSES
+    probs = [0.0] * _NUM_CLASSES
+    probs[expected_class] = 1.0
+    return probs
+
+
 @pytest.fixture(scope="function")
 def sidecar_classify_stack(request, tmp_path, start_services_with_http):
     yield from sidecar_stack(
@@ -42,6 +52,14 @@ def sidecar_classify_stack(request, tmp_path, start_services_with_http):
 def sidecar_embeddings_stack(request, tmp_path, start_services_with_http):
     yield from sidecar_stack(
         request, tmp_path, start_services_with_http, "--embeddings", _EMBEDDER_MODEL
+    )
+
+
+@pytest.fixture(scope="function")
+def sidecar_tensor_stack(request, tmp_path, start_services_with_grpc):
+    # The sidecar serves `--export` models as raw KServe v2 tensor models.
+    yield from sidecar_stack(
+        request, tmp_path, start_services_with_grpc, "--export", _CLASSIFIER_MODEL
     )
 
 
@@ -70,12 +88,9 @@ def test_classify_returns_deterministic_probabilities(sidecar_classify_stack):
 
     assert len(body["data"]) == 1
     row = body["data"][0]
-    expected_class = sum(ord(c) for c in prompt) % _NUM_CLASSES
-    expected_probs = [0.0] * _NUM_CLASSES
-    expected_probs[expected_class] = 1.0
     assert row["index"] == 0
     assert row["num_classes"] == _NUM_CLASSES
-    assert row["probs"] == expected_probs
+    assert row["probs"] == _expected_classifier_probs(prompt)
     # The shipped model has no `label_filename`, so the sidecar reports no label.
     assert row["label"] is None
 
@@ -134,3 +149,26 @@ def test_embeddings_base64_round_trips_to_the_same_vector(sidecar_embeddings_sta
     decoded = base64.standard_b64decode(row["embedding"])
     floats = list(struct.unpack(f"<{_EMBEDDING_DIM}f", decoded))
     assert floats == pytest.approx(_expected_vector(prompt), rel=1e-6)
+
+
+@pytest.mark.e2e
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.triton
+@pytest.mark.parallel
+@pytest.mark.timeout(360)
+def test_tensor_kserve_v2_round_trips_through_grpc(sidecar_tensor_stack):
+    """Guards the raw KServe v2 gRPC tensor passthrough end-to-end."""
+    frontend_port, model = sidecar_tensor_stack
+    prompt = "hello"
+
+    client = tritonclient_grpc.InferenceServerClient(f"localhost:{frontend_port}")
+    text_in = tritonclient_grpc.InferInput("TEXT", [1, 1], "BYTES")
+    text_in.set_data_from_numpy(np.array([[prompt]], dtype=object))
+    probs_out = tritonclient_grpc.InferRequestedOutput("probs")
+
+    response = client.infer(model_name=model, inputs=[text_in], outputs=[probs_out])
+    probs = response.as_numpy("probs")
+
+    assert probs.shape == (1, _NUM_CLASSES)
+    assert probs.tolist()[0] == _expected_classifier_probs(prompt)
