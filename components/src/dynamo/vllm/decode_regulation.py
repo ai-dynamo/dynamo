@@ -74,7 +74,7 @@ import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Optional
 
 from prometheus_client import CollectorRegistry, Counter, Gauge
 
@@ -456,7 +456,15 @@ def vllm_skip_unsupported(scheduler_cls: Any, request_cls: Any) -> str:
     return ""
 
 
-class DecodeRegulationMixin:
+if TYPE_CHECKING:
+    # The mixin is only used on top of a vLLM scheduler; type-check it as one
+    # without importing vLLM here.
+    _SchedulerHost = Any
+else:
+    _SchedulerHost = object
+
+
+class DecodeRegulationMixin(_SchedulerHost):
     """Applies ``DecodeRegulationPolicy`` to a vLLM (Async)Scheduler; mix in before the scheduler.
 
     Expects the host to provide ``running``, ``current_step``, ``schedule()`` and
@@ -639,11 +647,14 @@ class DecodeRegulationMixin:
 
     def _reg_write_trace(self, line: Optional[str]) -> None:
         """Write a trace line (None: flush); a trace I/O error must not stop the engine."""
+        trace = self._reg_trace
+        if trace is None:
+            return
         try:
             if line is None:
-                self._reg_trace.flush()
+                trace.flush()
             else:
-                self._reg_trace.write(line)
+                trace.write(line)
         except OSError as e:
             logger.warning("decode_regulation trace disabled: %s", e)
             self._reg_trace = None
@@ -776,8 +787,8 @@ class _Stats:
         self.regulated = 0  # regulated request-steps seen while engaged
         self.seen_interactive = self.seen_regulated = 0  # request-steps, all steps
         self.max_skip_run = 0
-        self.err = []
-        self.overhead_us = []
+        self.err: list[float] = []
+        self.overhead_us: list[float] = []
         self.disabled = getattr(self, "disabled", False)
 
     def on_decision(self, d: Decision, policy: DecodeRegulationPolicy) -> None:

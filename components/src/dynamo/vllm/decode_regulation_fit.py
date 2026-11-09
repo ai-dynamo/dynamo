@@ -58,10 +58,10 @@ def fit(rows: list[Row]) -> tuple[float, float, float]:
             f = a[r][col] / a[col][col]
             for k in range(col, 4):
                 a[r][k] -= f * a[col][k]
-    x = [0.0, 0.0, 0.0]
+    beta = [0.0, 0.0, 0.0]
     for r in (2, 1, 0):
-        x[r] = (a[r][3] - sum(a[r][k] * x[k] for k in range(r + 1, 3))) / a[r][r]
-    return x[0], x[1], x[2] / 1000.0
+        beta[r] = (a[r][3] - sum(a[r][k] * beta[k] for k in range(r + 1, 3))) / a[r][r]
+    return beta[0], beta[1], beta[2] / 1000.0
 
 
 def mape(c: tuple[float, float, float], rows: list[Row]) -> float:
