@@ -728,15 +728,6 @@ async fn anthropic_messages(
         crate::request_trace::ClientToolCallIds(crate::protocols::anthropic::types::tool_use_id),
     );
 
-    // Computed before `request` moves into `generate`. Only a stream that can
-    // withhold every data frame needs forced keep-alive frames.
-    let stream_can_defer_all_output =
-        crate::preprocessor::OpenAIPreprocessor::stream_can_defer_all_output(
-            parsing_options.tool_call_parser.as_deref(),
-            parsing_options.reasoning_parser.as_deref(),
-            request.chat_template_args.as_ref(),
-        );
-
     let mut response_collector = inflight_guard.response_collector();
     inflight_guard.request_metrics().attach_to(&mut request);
 
@@ -958,7 +949,9 @@ async fn anthropic_messages(
             }
         };
 
-        let keep_alive = state.sse_keep_alive_for_response(stream_can_defer_all_output);
+        // Tool ordering can defer data in every display mode, including already
+        // structured worker output without configured frontend parsers.
+        let keep_alive = state.sse_keep_alive_for_response(true);
         let stream = monitor_for_disconnects_with_activity_and_error_signal(
             full_stream,
             ctx,

@@ -111,8 +111,10 @@ The Rust HTTP server also reads these environment variables, which are not expos
 </ParamField>
 
 <ParamField path="DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS" type="integer" default="0">
-  Interval in milliseconds between SSE comment frames while a streaming response has no data.
-  Unset, `0`, invalid, or unrepresentable values disable keep-alive comments.
+  Frontend interval in milliseconds between SSE comment frames while a streaming response has no
+  data. A positive, representable value overrides the automatic interval. Unset, `0`, invalid, or
+  unrepresentable values use the 15-second fallback for Messages streams and other responses that
+  can buffer all output; they disable keep-alive comments for other streams.
 </ParamField>
 
 ## Router
@@ -938,6 +940,33 @@ Before conversion, the frontend validates these
 - `top_k` must fit the backend's signed 32-bit field (at most 2,147,483,647).
 
 For `system`, `metadata`, `tool_choice`, and `thinking`, `null` is treated as omission.
+
+#### Tool Failures and Thinking Display
+
+For client tool results, `is_error: true` prepends `[Tool execution failed]` and a
+newline to the model-visible tool content. Text, images, their order, and the
+`tool_use_id` remain intact. An omitted or false `is_error` leaves the content
+unchanged. Non-null, non-boolean values return HTTP 400. This text marker is necessary because the internal chat tool-message
+format has no separate error flag.
+
+Set `thinking: {"type": "adaptive", "display": "omitted"}` to suppress readable
+reasoning identified by the backend in both JSON and streaming responses. This
+requires a reasoning parser when the worker emits reasoning inline with text; ordinary
+answer text is not filtered. Each omitted thinking block has empty text and one empty
+streaming delta; tool calls and token usage are preserved.
+Thinking that resumes after text or tool calls starts a new block. An omitted `display` or `"summarized"` preserves the backend's readable
+reasoning output; Dynamo does not generate a separate summary. Display is valid
+only with `enabled` or `adaptive` thinking; other mode combinations return HTTP 400.
+Anthropic's beta `display: "updates"` also returns HTTP 400, even with its beta header:
+Dynamo cannot yet distinguish progress-update blocks from reasoning blocks.
+
+Display controls only returned reasoning text. It does not disable reasoning or
+provide Anthropic-compatible encrypted signatures for conversation continuation.
+
+Messages streams send SSE comment heartbeats after 15 seconds without a data event, regardless of
+thinking display or parser configuration. This keeps connections active while tool ordering buffers
+output or omitted thinking suppresses it. A positive `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` value
+overrides the interval; unset, `0`, invalid, or unrepresentable values retain the 15-second fallback.
 
 ### Infrastructure
 
