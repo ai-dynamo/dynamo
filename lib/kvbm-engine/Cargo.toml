@@ -79,5 +79,10 @@ name = "bench_engine"
 path = "bin/bench_engine.rs"
 required-features = ["bench"]
 
+[[bin]]
+name = "bench_mooncake"
+path = "bin/bench_mooncake.rs"
+required-features = ["bench", "mooncake"]
+
 [package.metadata.cargo-machete]
 ignored = ["rayon"]

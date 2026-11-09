@@ -725,7 +725,12 @@ mod tests {
 /// without requiring a NIXL agent. For use in environments where NIXL
 /// is unavailable (stub mode).
 pub fn create_fc_layout_system(num_blocks: usize) -> PhysicalLayout {
-    let config = standard_config(num_blocks);
+    create_fc_layout_system_with_config(standard_config(num_blocks))
+}
+
+/// Create a fully contiguous system-memory layout with a custom config,
+/// without requiring a NIXL agent.
+pub fn create_fc_layout_system_with_config(config: LayoutConfig) -> PhysicalLayout {
     let total_size = config.num_blocks
         * config.num_layers
         * config.outer_dim
@@ -746,7 +751,12 @@ pub fn create_fc_layout_system(num_blocks: usize) -> PhysicalLayout {
 /// Create a layer-separate physical layout backed by system memory,
 /// without requiring a NIXL agent.
 pub fn create_lw_layout_system(num_blocks: usize) -> PhysicalLayout {
-    let config = standard_config(num_blocks);
+    create_lw_layout_system_with_config(standard_config(num_blocks))
+}
+
+/// Create a layer-separate system-memory layout with a custom config,
+/// without requiring a NIXL agent.
+pub fn create_lw_layout_system_with_config(config: LayoutConfig) -> PhysicalLayout {
     let per_layer = config.num_blocks
         * config.outer_dim
         * config.page_size
