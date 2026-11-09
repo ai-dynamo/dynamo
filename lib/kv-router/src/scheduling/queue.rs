@@ -2758,7 +2758,6 @@ impl<
         Admission::Refused
     }
 
-    /// Report one request's queue wait as it leaves the queue for admission.
     fn observe_queue_wait(&self, class_index: usize, wait: Duration, path: QueueWaitPath) {
         if let Some(observer) = self.queue_wait_observer.get() {
             observer(QueueWait {
@@ -4184,7 +4183,6 @@ policy_classes:
                 .send(wait)
                 .expect("observer receiver should remain open");
         })));
-        // Only one observer can be installed.
         assert!(!queue.set_queue_wait_observer(Arc::new(|_| {})));
 
         // An uncontended request enters its class queue and leaves it in the same actor

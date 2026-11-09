@@ -1816,6 +1816,19 @@ dynamo_frontend_worker_active_requests{dp_rank=\"0\",request_phase=\"prefill\",w
                 &[labels::MODEL, labels::WORKER_TYPE, "policy_class", "reason"],
             )
             .unwrap(),
+            queue_wait_seconds: HistogramVec::new(
+                HistogramOpts::new(
+                    format!(
+                        "{}_{}",
+                        name_prefix::FRONTEND,
+                        frontend_service::ROUTER_QUEUE_WAIT_SECONDS
+                    ),
+                    "Time a request waited in the router scheduler queue",
+                )
+                .buckets(ROUTER_QUEUE_WAIT_BUCKETS.to_vec()),
+                &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
+            )
+            .unwrap(),
         };
         registry
             .register(Box::new(metrics.pending_requests.clone()))
