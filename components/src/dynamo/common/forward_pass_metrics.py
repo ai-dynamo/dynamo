@@ -162,7 +162,8 @@ class ForwardPassMetrics(
     second, which includes while a long forward pass is still running.
     A heartbeat has wall_time=0 and empty scheduled_requests. vLLM heartbeats
     carry its latest waiting-queue snapshot; empty heartbeats are suppressed
-    while scheduler-visible requests or scheduled batches remain. Other
+    while scheduler-visible requests, scheduled batches, or pending connector
+    work remain. Other
     publishers may still emit empty heartbeats during work. Heartbeats alone
     do not establish EngineCore idleness or clear Planner's cached idle frame.
     """

@@ -73,7 +73,8 @@ and empty ``scheduled_requests``, and carry the latest waiting-queue snapshot.
 Extra snapshots run on the scheduler thread at most once per heartbeat
 interval, plus when an empty snapshot first gains waiting work. Completed
 passes reuse their existing scan. Empty heartbeats are
-suppressed while scheduler-visible requests or scheduled batches remain.
+suppressed while scheduler-visible requests, scheduled batches, or pending
+connector work remain.
 This does not establish EngineCore idleness or invalidate an idle frame
 already cached by Planner.
 
@@ -2507,7 +2508,12 @@ class InstrumentedScheduler(AsyncScheduler):
         else:
             queued = self._heartbeat_queued
         self._heartbeat_queued = queued
-        active = waiting or bool(self.running) or bool(self._inflight_outputs)
+        active = (
+            waiting
+            or bool(self.running)
+            or bool(self._inflight_outputs)
+            or super().has_requests()
+        )
         self._publisher.set_heartbeat_state(queued, active)
 
     def shutdown(self) -> None:

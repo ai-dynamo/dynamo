@@ -1701,6 +1701,10 @@ def heartbeat_scheduler(monkeypatch):
     stub.waiting = deque()
     stub.skipped_waiting = deque()
     stub.running = []
+    stub.requests = {}
+    stub.finished_req_ids = set()
+    stub.connector = None
+    stub.ec_connector = None
     stub._bench_active = False
     stub._bench_phase = _BenchPhase.IDLE
     stub._schedule_times = deque()
@@ -1749,6 +1753,16 @@ def heartbeat_scheduler(monkeypatch):
         instrumented_scheduler_module.AsyncScheduler,
         "add_request",
         lambda self, request: self.waiting.append(request),
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "has_unfinished_requests",
+        lambda self: bool(self.running or self.waiting or self.skipped_waiting),
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "get_request_counts",
+        lambda self: (len(self.running), len(self.waiting) + len(self.skipped_waiting)),
     )
 
     def heartbeat():
@@ -1844,6 +1858,48 @@ def test_abort_does_not_forget_inflight_batch(heartbeat_scheduler):
     assert heartbeat() == []
     stub.update_from_output(output, object())
     assert heartbeat()[-1].is_idle()
+
+
+@pytest.mark.parametrize("pending_work", ["retained_request", "kv_push", "ec_push"])
+def test_connector_work_prevents_idle_until_drained(heartbeat_scheduler, pending_work):
+    """Connector cleanup and pushes remain busy after the last batch returns."""
+    stub, _, heartbeat = heartbeat_scheduler
+    request = _make_request(RequestStatus.WAITING, num_tokens=30000)
+    stub.add_request(request)
+    output = stub.schedule()
+    stub.running.clear()
+
+    connector = SimpleNamespace(has_pending_push_work=lambda: False)
+    if pending_work == "retained_request":
+        request.status = RequestStatus.FINISHED_STOPPED
+        stub.requests[request.request_id] = request
+        stub.connector = connector
+    else:
+        connector.has_pending_push_work = lambda: True
+        if pending_work == "kv_push":
+            stub.connector = connector
+        else:
+            stub.ec_connector = connector
+
+    stub.update_from_output(output, object())
+    assert not stub.waiting and not stub.running and not stub._inflight_outputs
+    frames = heartbeat()
+    assert len(frames) == 1
+    assert frames[0].wall_time > 0
+    assert not frames[0].is_idle()
+    assert heartbeat() == []
+
+    stub.requests.clear()
+    connector.has_pending_push_work = lambda: False
+    stub.update_from_output(SimpleNamespace(total_num_scheduled_tokens=0), object())
+    frames = heartbeat()
+    assert len(frames) == 1
+    assert frames[0].is_idle()
+    assert frames[0].wall_time == 0
+    assert (
+        frames[0].scheduled_requests
+        == instrumented_scheduler_module.ScheduledRequestMetrics()
+    )
 
 
 def test_failed_output_processing_keeps_heartbeat_busy(
