@@ -3,11 +3,11 @@
 
 //! Router plugins Dynamo ships.
 //!
-//! Routing hosts always link the default through `default_registry`, which also installs the
-//! `kv_fetch` hint policy as the default hint policy. The optional custom catalog adds the named
-//! default, `kvcr`, two-tier, and ThunderAgent providers through `register`. The default itself
-//! uses the same public candidate inputs and scorer/picker dispatch as external policies.
-//! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
+//! Routing hosts always link the default through `default_registry`. The optional custom catalog
+//! adds the named default, `kvcr` with its `kv_fetch` hint policy, two-tier, and ThunderAgent
+//! providers through `register`. The default itself uses the same public candidate inputs and scorer/picker
+//! dispatch as external policies. Sequence tracking, eligibility, and admission remain in
+//! dynamo-kv-router.
 
 mod default;
 pub mod kv_fetch;
@@ -27,27 +27,15 @@ pub fn default_registry() -> RouterPluginRegistry {
     with_defaults(RouterPluginRegistry::default())
 }
 
-/// `registry` plus what [`default_registry`] holds: the required default, each routing mode it
-/// doesn't already provide, the `kv_fetch` hint-policy type, and `kv_fetch` as the default hint
-/// policy of every role whose `worker_selection` entry lists no `hints`. A host applies this to
-/// the catalog it installs, so `--router-mode` and `kv_fetch` resolve however that catalog was
-/// built.
+/// `registry` plus what [`default_registry`] holds: the required default and each routing mode it
+/// doesn't already provide. A host applies this to the catalog it installs, so `--router-mode`
+/// resolves however that catalog was built.
 pub fn with_defaults(registry: RouterPluginRegistry) -> RouterPluginRegistry {
     let mut registry = registry.with_default_factory(default_factory());
     router_modes::register_missing(&mut registry);
-    match kv_fetch::register(&mut registry) {
-        Ok(()) | Err(HintPolicyRegistryError::Duplicate { .. }) => {}
-        Err(error) => unreachable!("kv_fetch has a valid type name: {error}"),
-    }
     registry
-        .with_default_hint_policies([(
-            kv_fetch::POLICY_TYPE.to_string(),
-            kv_fetch::default_constructor(),
-        )])
-        .expect("one default hint policy has a unique name")
 }
 
-use dynamo_kv_router::plugins::hint_policy::HintPolicyRegistryError;
 use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError};
 
 /// Register the named providers Dynamo ships, without changing the host's default factory.
@@ -57,6 +45,8 @@ use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError}
 /// than overriding it.
 pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginRegistryError> {
     default::register(registry)?;
+    // kv_fetch runs only under kvcr, so it registers with it.
+    kv_fetch::register(registry)?;
     sticky_min_load::register(registry)?;
     two_tier_cost_fn::register(registry)?;
     thunderagent::register(registry)?;
@@ -172,10 +162,12 @@ worker_selection:
         );
     }
 
-    /// `kv_fetch` resolves by type name in every host registry, validates its parameters, and is
-    /// the default hint policy of every role whose entry lists no `hints`.
+    /// `kv_fetch` runs only under `kvcr`, where it is the default: a `kvcr` role runs it without
+    /// listing it, other policies run no hints, and listing it under another policy is rejected.
     #[test]
-    fn resolves_kv_fetch_by_type_name_and_as_the_default() {
+    fn kv_fetch_runs_only_under_kvcr() {
+        use dynamo_kv_router::plugins::hint_policy::HintPolicyRegistryError;
+
         let policy_file = tempfile::NamedTempFile::new().unwrap();
         let config = |yaml: &str| {
             std::fs::write(policy_file.path(), yaml).unwrap();
@@ -184,34 +176,42 @@ worker_selection:
                 ..Default::default()
             }
         };
-        let registry = default_registry();
+        let mut registry = default_registry();
+        register(&mut registry).unwrap();
         let resolved = registry
             .resolve_hint_policies(&config(
                 r#"
 worker_selection:
   prefill:
-    type: dynamo-default-cost-fn
+    type: kvcr
     hints:
       - type: kv_fetch
         parameters: {min_additional_blocks: 2}
-  decode:
-    type: dynamo-default-cost-fn
-    hints: []
+  decode: kvcr
+  aggregated: dynamo-default-cost-fn
 "#,
             ))
             .unwrap();
         assert_eq!(resolved.names(WorkerType::Prefill), [kv_fetch::POLICY_TYPE]);
         assert!(!resolved.uses_defaults(WorkerType::Prefill));
-        assert!(resolved.names(WorkerType::Decode).is_empty());
-        assert_eq!(
-            resolved.names(WorkerType::Aggregated),
-            [kv_fetch::POLICY_TYPE]
+        assert_eq!(resolved.names(WorkerType::Decode), [kv_fetch::POLICY_TYPE]);
+        assert!(resolved.uses_defaults(WorkerType::Decode));
+        assert!(resolved.names(WorkerType::Aggregated).is_empty());
+        assert!(resolved.names(WorkerType::Encode).is_empty());
+
+        let Err(error) = registry.resolve_hint_policies(&config(
+            "worker_selection:\n  prefill:\n    type: dynamo-default-cost-fn\n    hints:\n      - type: kv_fetch\n",
+        )) else {
+            panic!("kv_fetch must not run under dynamo-default-cost-fn");
+        };
+        assert!(
+            matches!(error, HintPolicyRegistryError::Unsupported { .. }),
+            "{error}"
         );
-        assert!(resolved.uses_defaults(WorkerType::Aggregated));
 
         for parameters in ["{min_additional_blocks: 0}", "{min_blocks: 2}"] {
             let yaml = format!(
-                "worker_selection:\n  prefill:\n    type: dynamo-default-cost-fn\n    hints:\n      - type: kv_fetch\n        parameters: {parameters}\n"
+                "worker_selection:\n  prefill:\n    type: kvcr\n    hints:\n      - type: kv_fetch\n        parameters: {parameters}\n"
             );
             assert!(
                 registry.resolve_hint_policies(&config(&yaml)).is_err(),

@@ -14,12 +14,14 @@ use std::sync::Arc;
 
 use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::plugins::hint_policy::{
-    HintContext, HintPolicy, HintPolicyConstructor, HintPolicyError, HintPolicyProviderError,
-    HintPolicyRegistryError, KvHintAction,
+    HintContext, HintDefault, HintHost, HintPolicy, HintPolicyConstructor, HintPolicyError,
+    HintPolicyProviderError, HintPolicyRegistryError, KvHintAction,
 };
 use dynamo_kv_router::plugins::worker_selection::{Commitments, KvCopySource, WorkerInputs};
 use dynamo_kv_router::protocols::ExternalSequenceBlockHash;
 use serde::{Deserialize, Serialize};
+
+use crate::KVCR_POLICY_TYPE;
 
 /// Hint-policy type listed as `worker_selection.<role>.hints[].type`.
 pub const POLICY_TYPE: &str = "kv_fetch";
@@ -126,14 +128,9 @@ fn kvcr_fetch(
     .into_action())
 }
 
-/// The default `kv_fetch`, which roles whose entry lists no `hints` run: best-effort fetches
-/// of one block or more, and every committed copy.
-pub(crate) fn default_constructor() -> HintPolicyConstructor {
-    HintPolicyConstructor::shared(KvFetch {
-        min_additional_blocks: Parameters::default().min_additional_blocks,
-    })
-}
-
+/// Register `kv_fetch` under the `kvcr` worker-selection policy, on by default, so a `kvcr` role
+/// whose entry lists no `hints` sends every committed copy, and best-effort fetches of one block or
+/// more when `kvcr` commits none. Other policies can't list it.
 pub(crate) fn register(registry: &mut RouterPluginRegistry) -> Result<(), HintPolicyRegistryError> {
     registry.register_hint_policy(
         POLICY_TYPE,
@@ -150,6 +147,10 @@ pub(crate) fn register(registry: &mut RouterPluginRegistry) -> Result<(), HintPo
                 min_additional_blocks,
             }))
         }),
+        [(
+            HintHost::worker_selection(KVCR_POLICY_TYPE),
+            HintDefault::On,
+        )],
     )
 }
 
