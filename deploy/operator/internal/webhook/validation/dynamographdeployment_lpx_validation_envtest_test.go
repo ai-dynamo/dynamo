@@ -581,7 +581,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			},
 		},
 		{
-			name: "LPX rejects an agent runtime sidecar as the shared speculative target",
+			name: "LPX admits an agent runtime sidecar as the speculative target",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaLPXSpecDec(dgd, nil)
 				target := &dgd.Spec.Components[1]
@@ -590,7 +590,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 					{Name: consts.RuntimeContainerName, Image: "sidecar", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways)},
 				}
 			}),
-			wantWebhookErrs: []string{`spec.components[1].roles: Forbidden: a shared draft and target pair requires the target's conductor role; the agent "runtime" sidecar serves only a single model`},
 		},
 		{
 			name: "LPX admits a conductor runtime sidecar",

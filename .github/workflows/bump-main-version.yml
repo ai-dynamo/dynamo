@@ -1,0 +1,333 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# After a stable release/X.Y.Z branch is created, open a PR that moves main
+# from X.Y.0 to X.(Y+1).0; a patch cut finds main already ahead. The only push
+# is chore/bump-version-X.Y.Z, with the release bot's app token. That app is
+# not a bypass actor on main's rulesets, so this can never write or merge main.
+
+name: Bump Main Version
+
+on:
+  push:
+    branches:
+      - 'release/[0-9]+.[0-9]+.[0-9]+'
+  schedule:
+    - cron: '17 15 * * *'  # daily, 15:17 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Show the bump and the PR text in the run summary; push nothing'
+        type: boolean
+        default: false
+      recreate:
+        description: 'Open a new bump PR even though an earlier one for this version was closed'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # A push runs the release branch's frozen copy of this file, so it only
+  # starts the run on main.
+  start-on-main:
+    name: Start the bump on main
+    if: github.event_name == 'push' && github.event.created
+    runs-on: test-runner
+    timeout-minutes: 5
+    permissions:
+      actions: write   # gh workflow run
+    steps:
+      - name: Dispatch Bump Main Version on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run bump-main-version.yml --ref main
+
+  # OPS GATE — a person's dispatch and every re-run need an active devops or
+  # release-managers member. The schedule and start-on-main's dispatch (actor
+  # github-actions[bot]) run unattended and ignore the inputs. The steps are
+  # anchors, repeated in bump so "re-run failed jobs" re-checks whoever re-ran it.
+  authorize:
+    name: Ops gate
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    runs-on: prod-default-small-v2
+    environment: automated-release
+    permissions:
+      contents: read
+    steps:
+      - &ops-token
+        name: Mint app token (ops gate)
+        if: ${{ github.run_attempt != '1' || (github.event_name == 'workflow_dispatch' && github.actor != 'github-actions[bot]') }}
+        id: ops-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-members: read
+      - &ops-check
+        name: Require release-ops team membership
+        if: ${{ github.run_attempt != '1' || (github.event_name == 'workflow_dispatch' && github.actor != 'github-actions[bot]') }}
+        env:
+          GH_TOKEN: ${{ steps.ops-token.outputs.token }}
+          ORG: ${{ github.repository_owner }}
+          TEAMS: devops release-managers
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          case "${EVENT}" in
+            workflow_dispatch|schedule) ;;
+            *) echo "::error::Bump Main Version only runs from a dispatch or the schedule (got '${EVENT}')."; exit 1 ;;
+          esac
+          USERS=("${TRIGGERING_ACTOR}")
+          if [[ "${EVENT}" == workflow_dispatch && "${ACTOR}" != 'github-actions[bot]' ]]; then
+            USERS+=("${ACTOR}")
+          fi
+          for USER in $(printf '%s\n' "${USERS[@]}" | sort -u); do
+            OK=""
+            for TEAM in ${TEAMS}; do
+              HTTP=$(curl -sS -o "${RUNNER_TEMP}/membership.json" -w '%{http_code}' \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/orgs/${ORG}/teams/${TEAM}/memberships/${USER}")
+              if [ "${HTTP}" = "200" ] && grep -Eq '"state"[[:space:]]*:[[:space:]]*"active"' "${RUNNER_TEMP}/membership.json"; then
+                OK="${TEAM}"
+                break
+              fi
+              echo "@${USER} is not an active member of ${ORG}/${TEAM} (HTTP ${HTTP})"
+            done
+            if [ -z "${OK}" ]; then
+              echo "::error::@${USER} is not an active member of devops or release-managers; only they may run or re-run this workflow by hand."
+              exit 1
+            fi
+            echo "@${USER} authorized via ${ORG}/${OK}"
+          done
+
+  bump:
+    name: Bump main after branch cut
+    needs: [authorize]
+    runs-on: test-runner
+    timeout-minutes: 10
+    environment: automated-release
+    permissions:
+      contents: read
+    # Job level, so the skipped push runs never queue in the group.
+    concurrency:
+      group: bump-main-version
+      cancel-in-progress: false
+    steps:
+      # Re-verify the ops gate in-job (see authorize): blocks re-run bypass.
+      - *ops-token
+      - *ops-check
+
+      - name: Checkout main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Decide whether main needs a bump
+        id: plan
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/bump_main_version.py plan \
+            | tee /dev/stderr \
+            | jq -er '"release=\(.release)", "current=\(.current)", "target=\(.target)", "bump_needed=\(.bump_needed)", "operator_app=\(.operator_app_version)"' \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Main is up to date
+        if: steps.plan.outputs.bump_needed == 'false'
+        env:
+          RELEASE: ${{ steps.plan.outputs.release }}
+          CURRENT: ${{ steps.plan.outputs.current }}
+        run: |
+          echo "The newest release branch is release/${RELEASE}, and main is already at ${CURRENT}." \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Mint app token
+        id: app-token
+        if: steps.plan.outputs.bump_needed == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Open or refresh the bump PR
+        id: publish
+        if: steps.plan.outputs.bump_needed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE: ${{ steps.plan.outputs.release }}
+          CURRENT: ${{ steps.plan.outputs.current }}
+          TARGET: ${{ steps.plan.outputs.target }}
+          OPERATOR_APP: ${{ steps.plan.outputs.operator_app }}
+          # Inputs count only on a person's dispatch; unattended runs ignore them.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.actor != 'github-actions[bot]' && inputs.dry_run }}
+          RECREATE: ${{ github.event_name == 'workflow_dispatch' && github.actor != 'github-actions[bot]' && inputs.recreate }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # The PR issue-link check does not exempt the release bot.
+          TRACKING_ISSUE: "17151"
+        run: |
+          set -euo pipefail
+          BOT_LOGIN="aidynamo-release-bot[bot]"
+          BRANCH="chore/bump-version-${TARGET}"
+          if [[ ! "$BRANCH" =~ ^chore/bump-version-[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Refusing to push ${BRANCH}"
+            exit 1
+          fi
+          LINE="${RELEASE%.*}"
+          TITLE="chore: bump version to ${TARGET} post ${LINE}.0 branch cut"
+
+          # Owner-scoped head, so fork PRs reusing the branch name cannot hide ours.
+          PRS=$(gh api --paginate "repos/${GH_REPO}/pulls?head=${GH_REPO%%/*}:${BRANCH}&base=main&state=all&per_page=100" \
+                  --jq '.[] | {number, state: (.state | ascii_upcase), url: .html_url, headRefOid: .head.sha}' \
+                | jq -s .)
+          OPEN=$(jq -c 'map(select(.state == "OPEN")) | .[0] // empty' <<<"$PRS")
+          PR=""
+          if [[ -n "$OPEN" ]]; then
+            PR=$(jq -r .number <<<"$OPEN")
+            URL=$(jq -r .url <<<"$OPEN")
+            if [[ "$(gh pr view "$PR" --json mergeable --jq .mergeable)" != CONFLICTING ]]; then
+              echo "::notice::The bump PR is already open: ${URL}"
+              echo "The bump PR is already open: ${URL}" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            # A conflicting PR is rebuilt from main, not merged with it, because
+            # Cargo.lock is generated. Only when every non-merge commit is the
+            # bot's (author and committer); otherwise a person owns it.
+            AUTHORS=$(gh api --paginate "repos/${GH_REPO}/pulls/${PR}/commits" \
+                        --jq '.[] | select((.parents | length) == 1) | "\(.author.login // "unknown")/\(.committer.login // "unknown")"' \
+                      | sort -u | paste -sd, -)
+            if [[ "$AUTHORS" != "${BOT_LOGIN}/${BOT_LOGIN}" ]]; then
+              echo "::warning::${URL} conflicts with main and has commits by others (author/committer: ${AUTHORS}). Resolve it by hand."
+              exit 0
+            fi
+            LEASE=$(jq -r .headRefOid <<<"$OPEN")
+          elif [[ "$(jq length <<<"$PRS")" -gt 0 && "$RECREATE" != true ]]; then
+            URL=$(jq -r '.[0].url' <<<"$PRS")
+            echo "::warning::${URL} is closed, but main is still below ${TARGET}. Reopen it, or run this workflow with recreate."
+            exit 0
+          else
+            # Empty when the branch does not exist, which the lease then requires.
+            # ls-remote matches ref tails, so keep only the exact ref.
+            LEASE=$(git ls-remote origin "refs/heads/${BRANCH}" \
+                      | awk -v ref="refs/heads/${BRANCH}" '$2 == ref {print $1}')
+          fi
+
+          python3 .github/scripts/bump_main_version.py apply --release-version "$RELEASE" \
+            | tee /dev/stderr > "$RUNNER_TEMP/apply.json"
+          git config user.name "$BOT_LOGIN"
+          git config user.email "292185679+${BOT_LOGIN}@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add -u
+          git commit -s -q -m "$TITLE"
+          SHA=$(git rev-parse HEAD)
+
+          FILES=$(jq -r '.changed[] | "- `\(.)`"' "$RUNNER_TEMP/apply.json")
+          NOTES=""
+          if [[ -n "$OPERATOR_APP" && "$OPERATOR_APP" != "$TARGET" ]]; then
+            NOTES+="The operator chart's \`appVersion\` stays at ${OPERATOR_APP} on purpose. The operator code owners move it to ${TARGET} after capturing the v${LINE}.0 upgrade history, as the \"Provenance and release boundaries\" section of \`deploy/operator/internal/controller/testdata/upgrade/README.md\` describes. That has to land before \`release/${TARGET}\` is cut."$'\n\n'
+          fi
+
+          cat > "$RUNNER_TEMP/body.md" <<EOF
+          ## Summary
+
+          \`release/${RELEASE}\` is the newest release branch, so main moves from ${CURRENT} to ${TARGET}. Nightly wheels, crates and charts take their version from \`pyproject.toml\`, so until this merges, nightlies built from main sort below the ${CURRENT} release.
+
+          ## Details
+
+          Opened by the [Bump Main Version](${RUN_URL}) workflow with \`.github/scripts/bump_main_version.py\`. Changed files:
+
+          ${FILES}
+
+          ${NOTES}If this PR conflicts with main, do not merge main into it. The workflow rebuilds it from main on its next daily run, or you can run it now from the Actions tab.
+
+          ## Validation
+
+          Commits from the release bot are unsigned, so a maintainer must comment \`/ok to test ${SHA}\` before full CI runs.
+
+          ## Related Issues
+
+          Part of #${TRACKING_ISSUE}
+          EOF
+
+          if [[ "$DRY_RUN" == true ]]; then
+            {
+              echo "### Dry run: nothing was pushed"
+              echo
+              if [[ -n "$PR" ]]; then
+                echo "Would rebuild ${URL} from main as \`${BRANCH}\` at ${SHA}."
+              else
+                echo "Would push \`${BRANCH}\` at ${SHA} and open: ${TITLE}"
+              fi
+              echo
+              echo '```'
+              git show --stat --format=%s HEAD
+              echo '```'
+              echo
+              cat "$RUNNER_TEMP/body.md"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Body before push: if the push fails, the PR still conflicts and the
+          # next run redoes both. After the push it no longer would.
+          if [[ -n "$PR" ]]; then
+            gh pr edit "$PR" --body-file "$RUNNER_TEMP/body.md"
+          fi
+          git push --force-with-lease="refs/heads/${BRANCH}:${LEASE}" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git" "HEAD:refs/heads/${BRANCH}"
+          if [[ -n "$PR" ]]; then
+            gh pr comment "$PR" --body "Rebuilt from main because it conflicted. A maintainer needs to comment \`/ok to test ${SHA}\` again." \
+              || echo "::warning::Could not comment on ${URL}; its body names ${SHA}."
+            echo "::notice::Rebuilt ${URL} from main"
+          else
+            URL=$(gh pr create --base main --head "$BRANCH" --title "$TITLE" --body-file "$RUNNER_TEMP/body.md")
+            echo "::notice::Opened ${URL}"
+            { echo "opened=${URL}"; echo "title=${TITLE}"; echo "sha=${SHA}"; } >> "$GITHUB_OUTPUT"
+          fi
+          echo "Bump PR: ${URL}" >> "$GITHUB_STEP_SUMMARY"
+
+      # Best effort, like nightly-ci.yml's notify-slack-start: the PR already exists.
+      - name: Notify Slack — bump PR opened
+        if: steps.publish.outputs.opened != ''
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+          OPS_SUPPORT_GROUP_ID: ${{ secrets.OPS_SUPPORT_SLACK_GROUP_ID }}
+          URL: ${{ steps.publish.outputs.opened }}
+          TITLE: ${{ steps.publish.outputs.title }}
+          SHA: ${{ steps.publish.outputs.sha }}
+          CURRENT: ${{ steps.plan.outputs.current }}
+          TARGET: ${{ steps.plan.outputs.target }}
+        run: |
+          set -euo pipefail
+          MSG=":arrow_up: *Bump Main Version* opened <${URL}|${TITLE}>. Main moves from ${CURRENT} to ${TARGET}. <!subteam^${OPS_SUPPORT_GROUP_ID}> please comment \`/ok to test ${SHA}\`, get it reviewed, and merge it."
+          curl -sSf --retry 3 --retry-all-errors -X POST -H "Content-Type: application/json" \
+            -d "$(jq -n --arg t "$MSG" '{text: $t}')" "${SLACK_WEBHOOK_URL}"
+
+  # The shared notify-slack.yml mentions a fixed person, so this tags
+  # ops_support itself.
+  notify-slack:
+    name: Notify Slack
+    needs: [start-on-main, authorize, bump]
+    if: failure()
+    runs-on: test-runner
+    timeout-minutes: 5
+    steps:
+      - name: Tag ops_support
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+          OPS_SUPPORT_GROUP_ID: ${{ secrets.OPS_SUPPORT_SLACK_GROUP_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          MSG=":alert: *GitHub Bump Main Version Pipeline Failure*  <${RUN_URL}|Workflow Summary>  <!subteam^${OPS_SUPPORT_GROUP_ID}> main was not moved to the next version; please take a look."
+          curl -sSf --retry 3 --retry-all-errors -X POST -H "Content-Type: application/json" \
+            -d "$(jq -n --arg t "$MSG" '{text: $t}')" "${SLACK_WEBHOOK_URL}"

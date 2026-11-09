@@ -1502,6 +1502,9 @@ mod structural_tests {
             .await;
         flush_and_settle(&index).await;
 
+        // All three decode stores took the one-lock tail append.
+        let tail_appends = &index.backend().bench_metrics.tail_appends;
+        assert_eq!(tail_appends.load(std::sync::atomic::Ordering::Relaxed), 3);
         assert_score(&index, &[1, 2, 3, 4, 5, 6], worker, 6).await;
         assert_eq!(index.backend().raw_child_edge_count(), 1);
         assert_eq!(
@@ -1979,6 +1982,31 @@ mod reclamation_tests {
         assert_eq!(dead_node_count(&index), 0);
     }
 
+    #[test]
+    fn the_sweep_waits_for_deaths_in_proportion_to_the_tree_it_last_walked() {
+        // Fifteen root leaves; deaths are never drained, so only the sweep unlinks them.
+        let index = ConcurrentRadixTreeCompressed::new().with_sweep_schedule(None, 1, HOUR);
+        let mut lookup = direct_lookup();
+        for hash in 1..=15 {
+            apply(&index, &mut lookup, make_store_event(0, &[hash]));
+        }
+        let mut kill = |hash| apply(&index, &mut lookup, make_remove_event(0, &[hash]));
+
+        // Before any sweep, one death meets the threshold. The walk visits 16 nodes: the
+        // root and its 15 leaves.
+        kill(1);
+        index.sweep_if_due();
+        assert_eq!(dead_node_count(&index), 0);
+
+        // Now the sweep waits for 16 / SWEEP_VISITS_PER_DEATH = 2 deaths.
+        kill(2);
+        index.sweep_if_due();
+        assert_eq!(dead_node_count(&index), 1);
+        kill(3);
+        index.sweep_if_due();
+        assert_eq!(dead_node_count(&index), 0);
+    }
+
     #[tokio::test]
     async fn the_maintenance_thread_sweeps_a_leaf_the_lane_cannot_place() {
         // One death meets a threshold of one, so a tick sweeps it.
@@ -2439,5 +2467,67 @@ mod fused_lookup_validation_tests {
         apply_direct(&index, &mut lookup, continuation);
         assert_eq!(shared_anchor.edge_len_for_test(), 1);
         assert_eq!(shared_anchor.children_snapshot().len(), 1);
+    }
+}
+
+mod tail_append_tests {
+    use super::*;
+
+    /// An anchor in the worker's lookup, covered after an empty store under it, still
+    /// never extends.
+    #[test]
+    fn an_anchor_parent_gets_a_child() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lookup = direct_lookup();
+        let anchor_id = remove_hashes_with_parent(&[], &[1, 2])[1];
+        index
+            .apply_anchor(
+                worker(1),
+                AnchorTask {
+                    anchor_id,
+                    anchor_local_hash: LocalBlockHash(2),
+                    anchor_depth: 2,
+                },
+            )
+            .unwrap();
+        apply_direct(
+            &index,
+            &mut lookup,
+            make_store_event_with_parent(3, &[1, 2], &[]),
+        );
+        apply_direct(
+            &index,
+            &mut lookup,
+            make_store_event_with_parent(3, &[1, 2], &[5]),
+        );
+
+        let anchor = index.anchor_nodes.get(&anchor_id).unwrap().clone();
+        assert_eq!(anchor.edge_len_for_test(), 1);
+        assert_eq!(anchor.children_snapshot().len(), 1);
+    }
+
+    /// An entry for a tail the worker does not cover, which a race can leave behind, is
+    /// rejected by the general path rather than extended.
+    #[test]
+    fn an_uncovered_tail_is_rejected() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lookup0 = direct_lookup();
+        let mut lookup1 = direct_lookup();
+        apply_direct(&index, &mut lookup0, make_store_event(0, &[1, 2, 3]));
+        let leaf = index.root.child_snapshot(LocalBlockHash(1)).unwrap();
+        let tail = remove_hashes_with_parent(&[], &[1, 2, 3])[2];
+        lookup1.insert(worker(1), tail, &leaf);
+
+        let result = index.apply_event(
+            &mut lookup1,
+            make_store_event_with_parent(1, &[1, 2, 3], &[4]),
+            None,
+        );
+
+        assert!(matches!(
+            result,
+            Err(KvCacheEventError::ParentBlockNotFound)
+        ));
+        assert_eq!(leaf.edge_len_for_test(), 3);
     }
 }
