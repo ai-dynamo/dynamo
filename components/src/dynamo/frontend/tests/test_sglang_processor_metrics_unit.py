@@ -1,7 +1,7 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-"""Metrics-focused SGLang processor tests with lightweight SGLang stubs."""
+"""SGLang processor tests with lightweight SGLang stubs."""
 
 import asyncio
 import importlib
@@ -402,3 +402,79 @@ def test_sparse_usage_survives_flushes(
             assert usage["completion_tokens"] == count
             assert usage["total_tokens"] == 3 + count
             assert usage["prompt_tokens_details"] == {"cached_tokens": expected_cache}
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        ({"combined_limit": 10, "reject_prompt_overflow": True}, (10, True, False)),
+        ({"combined_limit": True}, None),
+        (None, None),
+    ],
+)
+def test_reads_worker_token_budget(module_stubs, metadata, expected):
+    module = _load_processor_module(module_stubs)
+    mdc = types.SimpleNamespace(
+        runtime_config=lambda: {"runtime_data": {"token_budget": metadata}}
+    )
+
+    budget = module._runtime_token_budget(mdc)
+
+    assert budget == (module.TokenBudget(*expected) if expected else None)
+
+
+@pytest.mark.parametrize(
+    ("prompt_len", "max_tokens", "reject_prompt", "reject_total", "media", "reject"),
+    [
+        (10, None, True, True, None, True),
+        (9, None, True, True, None, False),
+        (6, 4, True, True, None, False),
+        (6, 5, True, True, None, True),
+        (6, 5, True, False, None, False),
+        (10, 5, False, True, None, False),
+        (
+            10,
+            5,
+            True,
+            True,
+            {"image_url": [{"Url": "https://example.com/image.png"}]},
+            False,
+        ),
+    ],
+)
+def test_token_budget_before_dispatch(
+    module_stubs, prompt_len, max_tokens, reject_prompt, reject_total, media, reject
+):
+    module = _load_processor_module(module_stubs)
+    engine = FakeRoutedEngine(items=[{"token_ids": [42], "finish_reason": "stop"}])
+    processor = module.SglangProcessor(
+        tokenizer=None,
+        routed_engine=engine,
+        tool_call_parser_name=None,
+        reasoning_parser_name=None,
+        eos_token_ids=None,
+        token_budget=module.TokenBudget(10, reject_prompt, reject_total),
+    )
+    preprocessed = {"multi_modal_data": media}
+    if max_tokens is not None:
+        preprocessed["stop_conditions"] = {"max_tokens": max_tokens}
+
+    async def collect():
+        return [
+            item
+            async for item in processor._generate_and_stream(
+                "req",
+                {"model": "test"},
+                preprocessed,
+                [1] * prompt_len,
+                _PostProcessor(),
+            )
+        ]
+
+    if reject:
+        with pytest.raises(module.InvalidArgument):
+            asyncio.run(collect())
+        assert engine.requests == []
+    else:
+        assert asyncio.run(collect())
+        assert engine.requests == [preprocessed]
