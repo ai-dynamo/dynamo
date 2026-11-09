@@ -144,7 +144,7 @@ Two more hints change serving behavior without being about priority:
 | Hint | Description |
 |---|---|
 | `osl` | Expected output length in tokens. The router uses it for output block tracking and load-balancing accuracy when `--router-track-output-blocks` is enabled. |
-| `speculative_prefill` | When `true`, Dynamo prefills the predicted prefix of the next turn after the current turn completes, to warm the KV cache. On SGLang this is a `max_tokens=1` prefill. |
+| `speculative_prefill` | When `true`, Dynamo prefills the predicted prefix of the next turn after the current turn completes, to warm the KV cache. On SGLang this is a `max_tokens=1` prefill. Only the default `dynamo` chat processor schedules it; with `--dyn-chat-processor sglang` or `vllm`, no warmup is sent. |
 
 Hints and session IDs are separate. A session ID is passive identity for traces and optional policies. Hints are active serving intent. Neither enables session affinity; see [Maintain session affinity](session-affinity.md).
 

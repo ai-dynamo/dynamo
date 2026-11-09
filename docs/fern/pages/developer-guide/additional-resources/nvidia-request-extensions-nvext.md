@@ -152,7 +152,7 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 | `priority` | `i32` | `None` | Unified soft request priority. Used for router policy scoring and backend scheduling/eviction. |
 | `strict_priority` | `u32` | `None` | Router pending-queue tier for `fcfs`, `lcfs` (synthetic fallback class only), and `wspt` classes. Higher values always precede lower values; see [Priority Scheduling](../../use-cases/agents/priority-scheduling.mdx) for due-time ordering within a tier. Unset is equivalent to `0`. The `edf` queue policy, the default for configured policy classes, ignores it. |
 | `osl` | `u32` | `None` | Expected output sequence length (tokens). Used for output block tracking and resource estimation. |
-| `speculative_prefill` | `bool` | `false` | When `true`, speculatively prefills the predicted next-turn prompt after the current turn completes to warm the KV cache. |
+| `speculative_prefill` | `bool` | `false` | When `true`, speculatively prefills the predicted next-turn prompt after the current turn completes to warm the KV cache. Applies to `/v1/chat/completions` with the default `dynamo` chat processor; no warmup is scheduled with `--dyn-chat-processor sglang` or `vllm`. |
 
 ### `priority`
 
@@ -220,6 +220,8 @@ Expected output sequence length — the estimated number of output tokens the re
 ### `speculative_prefill`
 
 When set to `true`, the system speculatively prefills the predicted next-turn prompt after the current assistant turn completes. This is designed for multi-turn agentic workloads where the next request's prefix is predictable.
+
+The frontend's default `dynamo` [chat processor](../../use-cases/tool-calling-and-reasoning/chat-processors.mdx) schedules this warmup for `/v1/chat/completions` requests. With `--dyn-chat-processor sglang` or `--dyn-chat-processor vllm`, the hint is accepted and the request completes normally, but no warmup is scheduled.
 
 How it works:
 

@@ -121,6 +121,8 @@ request arrives.
 
 ## How speculative prefill works
 
+These steps describe the frontend's default `dynamo` chat processor. With `--dyn-chat-processor sglang` or `vllm`, no warmup is sent, so this benchmark's speculative-prefill mode shows no effect there.
+
 1. The client sends `{"nvext": {"agent_hints": {"speculative_prefill": true}}}` in each request.
 2. As the assistant response streams back, the frontend accumulates the full response text.
 3. Once `finish_reason` is set, a background task constructs the next-turn prompt (conversation history + assistant response, thinking content stripped) and sends a `max_tokens=1` prefill-only request through the pipeline.
