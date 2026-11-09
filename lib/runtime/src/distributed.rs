@@ -632,7 +632,8 @@ impl DistributedRuntime {
                 crate::pipeline::network::quic_response::QuicResponseServer::new(
                     address,
                     address,
-                    self.runtime.child_token(),
+                    // In-flight responses must outlive the graceful drain.
+                    self.runtime.primary_token(),
                 )
                 .map_err(anyhow::Error::from)
             })
