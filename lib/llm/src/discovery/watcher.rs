@@ -677,6 +677,8 @@ impl ModelWatcher {
                     router_config.router_mode,
                     card.runtime_config
                         .supports_runtime_capability(DISAGG_PREFILL_CANCEL_ANYTIME_V1),
+                    card.runtime_config
+                        .supports_runtime_capability(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
                     card.kv_cache_block_size,
                     Some(prefill_config),
                     self.plugins.selection_policy(),

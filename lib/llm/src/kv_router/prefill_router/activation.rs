@@ -140,6 +140,7 @@ impl PrefillRouter {
             model_manager,
             decode_router_mode,
             false,
+            false,
             kv_cache_block_size,
             kv_router_config,
             SelectionPolicySource::Registry,
@@ -194,6 +195,7 @@ impl PrefillRouter {
         model_manager: Arc<ModelManager>,
         decode_router_mode: RouterMode,
         decode_supports_prefill_cancellation: bool,
+        decode_supports_retained_kv: bool,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         selection_policy: SelectionPolicySource,
@@ -219,7 +221,9 @@ impl PrefillRouter {
 
         let router = Arc::new(Self {
             binding: Arc::new(arc_swap::ArcSwapOption::empty()),
-            retained_kv: super::retained_kv::Config::from_env()
+            retained_kv: decode_supports_retained_kv
+                .then(super::retained_kv::Config::from_env)
+                .flatten()
                 .map(super::retained_kv::Catalog::new)
                 .map(Arc::new),
             target: parking_lot::Mutex::new(None),
@@ -949,6 +953,7 @@ mod tests {
             Arc::new(ModelManager::new()),
             RouterMode::RoundRobin,
             false,
+            false,
             16,
             None,
             SelectionPolicySource::Registry,
@@ -1256,6 +1261,7 @@ mod tests {
             None,
             Arc::new(ModelManager::new()),
             RouterMode::KV,
+            false,
             false,
             64,
             None,
@@ -1574,6 +1580,7 @@ mod tests {
             None,
             Arc::new(ModelManager::new()),
             RouterMode::KV,
+            false,
             false,
             64,
             None,

@@ -270,8 +270,8 @@ pub struct PrefillRouter {
     retained_kv: Option<Arc<retained_kv::Catalog>>,
     target: Mutex<Option<WorkerSetTargetId>>,
     target_tx: Option<watch::Sender<Option<WorkerSetTarget>>>,
-    /// Decode routing owns conditional-disagg planning and dispatch. This is
-    /// installed after the frontend constructs its one decode `RoutingHost`.
+    /// Admitted decoder membership and conditional-disagg dispatch.
+    /// Installed after the frontend constructs its decode `RoutingHost`.
     decode_routing_host: OnceLock<Arc<RoutingHost>>,
     selection_policy: Option<SelectionPolicySource>,
     model_manager: Arc<ModelManager>,
@@ -809,6 +809,10 @@ fn independent_prefill_context(
 }
 
 impl PrefillRouter {
+    pub(crate) fn retained_kv_enabled(&self) -> bool {
+        self.retained_kv.is_some()
+    }
+
     pub(crate) fn conditional_disagg_enabled(&self) -> bool {
         self.conditional_disagg_policy.is_enabled()
     }

@@ -276,7 +276,6 @@ mod tests {
         component::Client,
         distributed::DistributedConfig,
         pipeline::{RouterMode, SingleIn},
-        traits::DistributedRuntimeProvider,
     };
 
     use super::*;
@@ -418,6 +417,11 @@ mod tests {
         });
         router.binding.store(Some(binding.clone()));
         router.set_decode_routing_host(host).unwrap();
+        // Initial endpoint monitoring can publish its empty discovery snapshot
+        // while the async routing setup runs. Install the synthetic workers last.
+        tokio::task::yield_now().await;
+        client.override_discovered_instances(vec![7]);
+        client.override_instance_avail(vec![7]);
         Fixture {
             router,
             binding,
@@ -447,6 +451,48 @@ mod tests {
             router: fixture.binding.router.clone(),
             prefill_router_mode: RouterMode::RoundRobin,
         })));
+    }
+
+    #[tokio::test]
+    async fn round_robin_pipeline_installs_decode_membership_for_retained_reuse() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let fixture = fixture().await;
+            let mut router = PrefillRouter::disabled_with_session_affinity_mode(
+                fixture.router.model_manager.clone(),
+                RouterMode::RoundRobin,
+                None,
+                SessionAffinityMode::Hard,
+            );
+            Arc::get_mut(&mut router).unwrap().retained_kv = fixture.router.retained_kv.clone();
+            assert!(router.decode_routing_host.get().is_none());
+            let load = RoutingLoadContext::start(
+                fixture.client.clone(),
+                RouterLoadSource::Decode,
+                LoadThresholdHandle::new(Default::default()),
+                &fixture._distributed.child_token(),
+                None,
+            )
+            .await
+            .unwrap();
+
+            let _pipeline = crate::entrypoint::input::build_preprocessed_routing(
+                &fixture.client,
+                fixture.router.model_manager.clone(),
+                RouterMode::RoundRobin,
+                load,
+                None,
+                Some(router.clone()),
+                None,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+
+            assert!(router.decode_routing_host.get().is_some());
+        })
+        .await
+        .expect("round-robin routing pipeline construction timed out");
     }
 
     #[test]
