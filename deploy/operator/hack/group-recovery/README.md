@@ -97,15 +97,23 @@ Identity fields on the success path include `namespace`, `dcdName`,
 `dcdUID`, `dcdGeneration`, `lwsName`, `lwsUID`, `lwsGeneration`,
 `groupIndex`, `revision`, `leaderUID`, `podName`, `podUID`,
 `podResourceVersion`, `container`, `exitCode`, `finishedAt`, `ready`,
-`readyLastTransitionTime`, `reason`, and `readOrigin`. Repeated lines are
-the current level fact for that reconcile, not a recovery counter or
-durable history. The operator currently enables debug by default; the
-manager binary accepts `--zap-log-level=debug` and `--zap-encoder=json`.
+`readyLastTransitionTime`, `reason`, and `readOrigin`. Repeated debug
+lines are the current reconcile fact only, not a recovery counter.
 
-The native counts above do not validate the operator observation path.
-Validate that path with production operator observations and independently
-captured owner and revision identities. Recorded results belong in the PR
-description.
+Separately, after a successful status write the operator may persist a
+finite durable set of confirmed `CurrentFailure` incarnations on the DCD
+top-level annotation `nvidia.com/lws-failure-records` (version 1, exact
+DCD UID, source `FinishedAt` one-hour window, bounded capacity). That
+store is not these log lines and does not change Ready or recovery
+policy. Curated limits and caveats:
+<https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-component-deployment.mdx>.
+The operator currently enables debug by default; the manager binary
+accepts `--zap-log-level=debug` and `--zap-encoder=json`.
+
+The native counts above do not validate the operator observation or
+record path. Validate those with production operator observations and
+independently captured owner and revision identities. Recorded results
+belong in the PR description.
 
 ## Prerequisites
 
@@ -367,7 +375,14 @@ kubectl --context "$CONTEXT" --request-timeout=60s \
 
 ## Deferred
 
-Not this fixture: DynamoComponentDeployment, DisaggregatedSet, and Grove paths;
-durable recovery accounting and reset semantics; manager and cache
-reconstruction; performance around 10,000 Pods. No operator restart was
-validated. The native LeaderWorkerSets are not owned by the Dynamo operator.
+Native fixture limits (unchanged historical truth for the 2026-11-06 run):
+DynamoComponentDeployment, DisaggregatedSet, and Grove paths; manager and
+cache reconstruction; performance around 10,000 Pods. No operator restart
+was validated on that fixture. The native LeaderWorkerSets are not owned
+by the Dynamo operator.
+
+Production item 1 source now retains bounded persisted failure records on
+LeaderWorkerSet-backed DCDs after status write. Still deferred there:
+repeated-failure diagnosis and healthy reset, DisaggregatedSet and Grove
+paths, and scale. Latest acceptance evidence belongs in the PR
+description, not in this historical fixture record.

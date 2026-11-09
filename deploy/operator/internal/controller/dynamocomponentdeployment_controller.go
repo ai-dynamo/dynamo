@@ -265,6 +265,28 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		return ctrl.Result{}, fmt.Errorf("failed to set status condition and service replica status: %w", err)
 	}
 
+	// Persist LWS failure records only after the normal status write succeeds.
+	persistResult, persistErr := lwscontroller.PersistFailureRecords(
+		ctx,
+		r.Client,
+		dynamoComponentDeployment,
+		componentReconcileResult.lwsObservations,
+		time.Now(),
+	)
+	if persistErr != nil {
+		logs.Error(persistErr, "LeaderWorkerSet failure record persistence failed",
+			"namespace", dynamoComponentDeployment.Namespace,
+			"dcdName", dynamoComponentDeployment.Name,
+			"dcdUID", dynamoComponentDeployment.UID,
+		)
+		// Keep readiness success; request a bounded retry for the metadata write.
+		result.RequeueAfter = lwscontroller.FailureRecordConflictRequeue
+		return
+	}
+	if persistResult.RequeueAfter > 0 {
+		result.RequeueAfter = persistResult.RequeueAfter
+	}
+
 	return
 }
 
@@ -293,6 +315,9 @@ type ComponentReconcileResult struct {
 	message              string
 	serviceReplicaStatus *nvidiacomv1beta1.ComponentReplicaStatus
 	gpuShape             *dynamo.GPUShape
+	// lwsObservations is the immutable Observe batch for post-status persistence.
+	// nil means observation failed and persistence must be skipped; empty means no evidence.
+	lwsObservations []lwscontroller.Observation
 }
 
 func (r *DynamoComponentDeploymentReconciler) recordReconcileError(
@@ -438,6 +463,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 	// Observe current Pod evidence before readiness returns; provider Ready may lag.
 	// Observation read errors stay visible logs and must not change Available/Ready handling.
 	observations, observeErr := lwscontroller.Observe(ctx, r.Client, dynamoComponentDeployment, lwsObj, time.Now())
+	var observationBatch []lwscontroller.Observation
 	if observeErr != nil {
 		log.FromContext(ctx).Error(observeErr, "LeaderWorkerSet Pod observation unavailable",
 			"namespace", dynamoComponentDeployment.Namespace,
@@ -448,6 +474,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 			"readOrigin", lwscontroller.ReadOriginManagerCache,
 		)
 	} else {
+		observationBatch = observations
 		logLeaderWorkerSetObservations(ctx, observations)
 	}
 
@@ -480,6 +507,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 			message:              "LeaderWorkerSet is ready",
 			serviceReplicaStatus: &lwsReplicaStatus,
 			gpuShape:             gpuShapeStatus,
+			lwsObservations:      observationBatch,
 		}, nil
 	}
 
@@ -490,6 +518,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 		message:              "LeaderWorkerSet is not ready",
 		serviceReplicaStatus: &lwsReplicaStatus,
 		gpuShape:             gpuShapeStatus,
+		lwsObservations:      observationBatch,
 	}, nil
 }
 

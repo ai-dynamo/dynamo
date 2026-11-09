@@ -1061,3 +1061,77 @@ func TestDCD_JSONRoundTrip_Bytes(t *testing.T) {
 		t.Errorf("JSON byte-level round-trip mismatch:\nwant: %s\ngot:  %s", wantBytes, gotBytes)
 	}
 }
+
+func TestDCD_RoundTrip_PreservesLWSFailureRecordsAnnotation(t *testing.T) {
+	t.Log("Carry exact failure-record bytes through alpha↔beta conversion")
+	ledger := `{"version":1,"dcdUID":"dcd-uid","entries":[{"dcdGeneration":2,"lwsName":"decode","lwsUID":"lws","lwsGeneration":2,"revision":"rev","groupIndex":0,"leaderUID":"leader","podName":"decode-0","podUID":"pod","podResourceVersion":"1","container":"main","exitCode":23,"finishedAt":"2026-11-09T12:00:00Z","readyLastTransitionTime":"2026-11-09T11:59:00Z","firstObservedAt":"2026-11-09T12:00:30Z"}]}`
+	src := &v1beta1.DynamoComponentDeployment{
+		Name:      "decode",
+		Namespace: "ns",
+		Annotations: map[string]string{
+			"nvidia.com/lws-failure-records": ledger,
+			"example.com/foreign":           "keep-me",
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: "vllm",
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+				ComponentType: v1beta1.ComponentTypeDecode,
+				Replicas:      new(int32(1)),
+			},
+		},
+	}
+	original := src.DeepCopy()
+
+	alpha := &DynamoComponentDeployment{}
+	if err := alpha.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	if diff := cmp.Diff(original.Annotations, src.Annotations); diff != "" {
+		t.Fatalf("ConvertFrom mutated source annotations (-want +got):\n%s", diff)
+	}
+	if got := alpha.Annotations["nvidia.com/lws-failure-records"]; got != ledger {
+		t.Fatalf("alpha lost ledger bytes: got %q", got)
+	}
+	if got := alpha.Annotations["example.com/foreign"]; got != "keep-me" {
+		t.Fatalf("alpha lost foreign annotation: got %q", got)
+	}
+	alphaInput := alpha.DeepCopy()
+
+	hub := &v1beta1.DynamoComponentDeployment{}
+	if err := alpha.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	if diff := cmp.Diff(alphaInput.Annotations, alpha.Annotations); diff != "" {
+		t.Fatalf("ConvertTo mutated alpha annotations (-want +got):\n%s", diff)
+	}
+	if got := hub.Annotations["nvidia.com/lws-failure-records"]; got != ledger {
+		t.Fatalf("hub lost ledger bytes: got %q", got)
+	}
+	if got := hub.Annotations["example.com/foreign"]; got != "keep-me" {
+		t.Fatalf("hub lost foreign annotation: got %q", got)
+	}
+	hubInput := hub.DeepCopy()
+
+	alphaAgain := &DynamoComponentDeployment{}
+	if err := alphaAgain.ConvertFrom(hub); err != nil {
+		t.Fatalf("second ConvertFrom: %v", err)
+	}
+	if diff := cmp.Diff(hubInput.Annotations, hub.Annotations); diff != "" {
+		t.Fatalf("second ConvertFrom mutated hub annotations (-want +got):\n%s", diff)
+	}
+	alphaAgainInput := alphaAgain.DeepCopy()
+	hubAgain := &v1beta1.DynamoComponentDeployment{}
+	if err := alphaAgain.ConvertTo(hubAgain); err != nil {
+		t.Fatalf("second ConvertTo: %v", err)
+	}
+	if diff := cmp.Diff(alphaAgainInput.Annotations, alphaAgain.Annotations); diff != "" {
+		t.Fatalf("second ConvertTo mutated alpha annotations (-want +got):\n%s", diff)
+	}
+	if got := hubAgain.Annotations["nvidia.com/lws-failure-records"]; got != ledger {
+		t.Fatalf("beta→alpha→beta lost ledger bytes: got %q", got)
+	}
+	if diff := cmp.Diff(original.Annotations, src.Annotations); diff != "" {
+		t.Fatalf("source annotations mutated after round trips (-want +got):\n%s", diff)
+	}
+}
