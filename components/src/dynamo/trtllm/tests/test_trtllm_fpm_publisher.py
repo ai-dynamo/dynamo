@@ -875,18 +875,14 @@ async def test_polling_loop_chains_handler_failure_from_fetch_failure():
     assert drained_batches == []
 
 
-# ---------------------------------------------------------------------------
 # Queued prefill while the engine under-reports or stalls
-# ---------------------------------------------------------------------------
 
 # Matches IDLE_HEARTBEAT_INTERVAL in lib/llm/src/fpm_publisher.rs: any publish
 # gap this long is filled with an all-zero idle heartbeat.
 _RUST_IDLE_HEARTBEAT_SEC = 1.0
 
-# What TRT-LLM 1.4.0rc2 reports for a prefill worker under KV backpressure: one
-# 1024-token chunk scheduled and an empty queue, because its queued counters
-# only see the executor request queue, which it drains into its waiting queue
-# on every loop pass.
+# TRT-LLM 1.4.0rc2 under KV backpressure: one chunk scheduled, empty queue, as its
+# queued counters only see the executor request queue it drains every loop pass.
 _ENGINE_STALL_IBS = {
     "numContextRequests": 1,
     "numCtxTokens": 1024,

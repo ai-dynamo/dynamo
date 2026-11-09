@@ -1308,10 +1308,8 @@ class HandlerBase(BaseGenerativeHandler):
             # attention-DP dummy requests match against.
             cache_salt = HEALTH_CHECK_CACHE_SALT
 
-        # Set while this request is counted in the publisher's prefill backlog:
-        # from submission until its first engine output, only when this worker
-        # runs the context phase. A context-only result arrives when prefill
-        # ends, before the decode worker pulls the KV.
+        # Counted in the prefill backlog from submission until first output; a
+        # context-only result arrives when prefill ends, before decode pulls KV.
         prefill_backlog: Optional[PrefillBacklog] = None
         backlog_rank = dp_rank if dp_rank is not None else 0
         backlog_tokens = 0

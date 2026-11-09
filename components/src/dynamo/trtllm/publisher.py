@@ -58,10 +58,8 @@ _KV_EVENTS_TIMEOUT_SEC = 0.0
 _PUBLISH_MIN_SLEEP_SEC = 0.01
 _PUBLISH_MAX_SLEEP_SEC = 0.1
 _PUBLISH_BACKOFF_FACTOR = 2.0
-# TRT-LLM emits no IterationStats while it cannot schedule a batch (for example
-# a prefill worker under KV backpressure). FpmDirectPublisher fills any 1 s gap
-# (IDLE_HEARTBEAT_INTERVAL in lib/llm/src/fpm_publisher.rs) with an all-zero
-# idle heartbeat, so ranks with a prefill backlog publish well inside that window.
+# The Rust FPM publisher zero-fills any 1 s gap (IDLE_HEARTBEAT_INTERVAL in
+# lib/llm/src/fpm_publisher.rs), so ranks with a prefill backlog publish sooner.
 _FPM_BACKLOG_HEARTBEAT_SEC = 0.5
 # Keep a continuously ready TRT-LLM iterator from starving its batch handler.
 _POLLING_BATCH_MAX_ITEMS = 256
@@ -1008,12 +1006,8 @@ class Publisher:
                     dp_rank = (
                         int(attention_dp_rank) if attention_dp_rank is not None else 0
                     )
-                    # The engine counters miss requests in its waiting queue
-                    # (see PrefillBacklog), so take the worker-side backlog
-                    # minus what this iteration scheduled, with the engine
-                    # value as a floor. The token estimate also keeps the
-                    # unprocessed remainder of chunks being prefilled now;
-                    # that is real pending prefill, bounded by the batch.
+                    # Engine counters miss its waiting queue (see PrefillBacklog):
+                    # use the backlog minus this iteration, engine value as floor.
                     backlog_num, backlog_tokens = self.prefill_backlog.snapshot(dp_rank)
                     waiting_num = backlog_num - sched_num_prefill
                     if waiting_num > 0:
