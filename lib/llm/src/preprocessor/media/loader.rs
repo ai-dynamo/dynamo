@@ -1769,6 +1769,7 @@ mod tests_non_nixl {
             image: None,
             #[cfg(feature = "media-ffmpeg")]
             video: None,
+            ..Default::default()
         };
         // These arms return before NIXL registration, so an agent without the UCX
         // backend suffices; `MediaLoader::new` needs UCX, which some hosts lack.
