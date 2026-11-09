@@ -64,6 +64,8 @@ func newLPXHandoffFixture(t *testing.T, fixture string) (*v1alpha1.LPXGraphDeplo
 	return child, source, kube
 }
 
+// TestGroveComponentSelectionDoesNotMutateDGD checks that ordinary Grove
+// readiness and restart observation preserve the complete LPX source graph.
 func TestGroveComponentSelectionDoesNotMutateDGD(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -578,6 +580,8 @@ func TestLPXHandoffOrdinaryScalingPreservesReadiness(t *testing.T) {
 	require.Equal(t, v1beta1.DGDStatePending, pending.State)
 }
 
+// TestSpecDecodeRestartRollsTheSharedChildOnce checks that one graph restart
+// reaches the shared draft and target child once, including read retries.
 func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 	for _, scenario := range []struct {
 		name     string

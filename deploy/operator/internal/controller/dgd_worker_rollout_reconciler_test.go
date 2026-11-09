@@ -2424,6 +2424,8 @@ func TestComponentWorkloadsReconciler_GetExistingRestartAnnotationsDCD(t *testin
 	})
 }
 
+// TestComponentRestartProgressResolver_CheckComponentFullyUpdated checks
+// ready restarted DCDs under stored worker hashes and stable component names.
 func TestComponentRestartProgressResolver_CheckComponentFullyUpdated(t *testing.T) {
 	t.Run("worker with hash suffix - finds DCD", func(t *testing.T) {
 		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{

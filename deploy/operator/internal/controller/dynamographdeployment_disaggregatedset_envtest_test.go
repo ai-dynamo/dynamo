@@ -470,6 +470,8 @@ type restartWriteConflictClient struct {
 	failWrite bool
 }
 
+// injectConflict rejects real writes of the selected workload kind while
+// allowing dry runs and unrelated resources to reach the underlying client.
 func (c *restartWriteConflictClient) injectConflict(object client.Object, dryRun []string) error {
 	if !c.failWrite || len(dryRun) > 0 {
 		return nil

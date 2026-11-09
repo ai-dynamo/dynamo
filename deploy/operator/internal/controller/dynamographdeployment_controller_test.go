@@ -1699,6 +1699,8 @@ func TestGroveWorkloadRendererRenderKeepsNativeWorkerSelectors(t *testing.T) {
 	g.Expect(prefill.Labels[commonconsts.KubeLabelDynamoComponentType]).To(gomega.Equal(commonconsts.ComponentTypePrefill))
 }
 
+// TestDGDRestartReconciler_ComputeStatus checks restart transitions across
+// component and Grove workloads, including readiness and generation delays.
 func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 	ctx := context.Background()
 	newID := "restart-1"

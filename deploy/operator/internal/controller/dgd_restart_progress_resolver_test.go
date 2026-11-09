@@ -31,6 +31,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
+// TestComponentRestartAppliedRequiresEveryTemplate checks that a restart cannot
+// advance while any rendered DCD template still carries the previous ID.
 func TestComponentRestartAppliedRequiresEveryTemplate(t *testing.T) {
 	for _, tc := range []struct {
 		name                  string
@@ -71,6 +73,8 @@ func TestComponentRestartAppliedRequiresEveryTemplate(t *testing.T) {
 	}
 }
 
+// TestGroveRestartAppliedRequiresEverySelectedClique checks that a matching
+// restart on another component cannot hide an old or missing selected clique.
 func TestGroveRestartAppliedRequiresEverySelectedClique(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
