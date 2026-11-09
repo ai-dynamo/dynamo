@@ -2221,7 +2221,6 @@ _BASE_SCHEDULE_TAKES_THROTTLE = (
 
 
 def _uses_inline_async_launch(vllm_config: "VllmConfig") -> bool:
-    """Select engines whose grammar hook follows inline model submission."""
     parallel = vllm_config.parallel_config
     return (
         vllm_config.scheduler_config.async_scheduling is True
@@ -2234,8 +2233,6 @@ def _uses_inline_async_launch(vllm_config: "VllmConfig") -> bool:
 
 
 class InstrumentedScheduler(AsyncScheduler):
-    _adjust_fpm_host_launch: bool = False
-
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -2245,7 +2242,6 @@ class InstrumentedScheduler(AsyncScheduler):
         hash_block_size: int | None = None,
         **kwargs,
     ) -> None:
-        """Initialize FPM publication, engine-specific timing and benchmark state."""
         super().__init__(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
@@ -2264,9 +2260,9 @@ class InstrumentedScheduler(AsyncScheduler):
 
         self._schedule_times: deque[float] = deque()
         self._last_update_time: float = 0.0
-        self._adjust_fpm_host_launch = _uses_inline_async_launch(vllm_config)
+        self._needs_launch_correction = _uses_inline_async_launch(vllm_config)
         self._pending_fpm_launch: tuple[SchedulerOutput, float] | None = None
-        self._fpm_launch_durations: dict[int, float] = {}
+        self._fpm_launches: deque[tuple[SchedulerOutput, float]] = deque()
         self._prompt_len_per_req: dict[str, int] = {}
         self._bench_active: bool = False
         self._bench_phase: _BenchPhase = _BenchPhase.IDLE
@@ -2399,7 +2395,6 @@ class InstrumentedScheduler(AsyncScheduler):
     def _schedule_and_record_time(
         self, throttle_prefills: bool = False
     ) -> SchedulerOutput:
-        """Record the batch start after scheduling and benchmark synchronization."""
         # vLLM added `throttle_prefills` to Scheduler.schedule() after some of
         # the runtime images were built; pass it only when the base accepts it
         # so one overlay works across both.
@@ -2421,7 +2416,7 @@ class InstrumentedScheduler(AsyncScheduler):
                     raise
             scheduled_at = time.monotonic()
             self._schedule_times.append(scheduled_at)
-            if self._adjust_fpm_host_launch and not self._bench_active:
+            if self._needs_launch_correction and not self._bench_active:
                 # A deferred grammar callback also spans a previous output wait.
                 self._pending_fpm_launch = (
                     None
@@ -2433,14 +2428,13 @@ class InstrumentedScheduler(AsyncScheduler):
     def get_grammar_bitmask(
         self, scheduler_output: SchedulerOutput
     ) -> GrammarOutput | None:
-        """Close eligible host-submission timing before building the grammar."""
-        if self._adjust_fpm_host_launch and not self._bench_active:
+        if self._needs_launch_correction and not self._bench_active:
             pending = self._pending_fpm_launch
             self._pending_fpm_launch = None
             if pending is not None and pending[0] is scheduler_output:
                 # UniProc execute_model has returned, but sampling has not run.
-                self._fpm_launch_durations[id(scheduler_output)] = (
-                    time.monotonic() - pending[1]
+                self._fpm_launches.append(
+                    (scheduler_output, time.monotonic() - pending[1])
                 )
         return super().get_grammar_bitmask(scheduler_output)
 
@@ -2480,24 +2474,23 @@ class InstrumentedScheduler(AsyncScheduler):
         scheduler_output: SchedulerOutput,
         model_runner_output: "ModelRunnerOutput",
     ):
-        """Attribute the host interval to this output and publish its FPM."""
         model_output_arrival = (
             time.monotonic() if scheduler_output.total_num_scheduled_tokens > 0 else 0.0
         )
         result = super().update_from_output(scheduler_output, model_runner_output)
 
         if scheduler_output.total_num_scheduled_tokens > 0:
-            if self._adjust_fpm_host_launch and not self._bench_active:
+            if self._needs_launch_correction and not self._bench_active:
                 if (
                     self._pending_fpm_launch is not None
                     and self._pending_fpm_launch[0] is scheduler_output
                 ):
                     self._pending_fpm_launch = None
-                self._fpm_launch_durations.pop(id(scheduler_output), None)
-                # Remaining entries belong to later outputs in the batch queue.
-                # Shift both ends of the inter-output interval; the tail repays
-                # the last submission, preserving the busy episode's total time.
-                model_output_arrival -= sum(self._fpm_launch_durations.values())
+                if self._fpm_launches and self._fpm_launches[0][0] is scheduler_output:
+                    self._fpm_launches.popleft()
+                # UniProc's two-entry batch queue leaves at most one later launch.
+                if self._fpm_launches:
+                    model_output_arrival -= self._fpm_launches[0][1]
             t_sched = self._schedule_times.popleft() if self._schedule_times else 0.0
             scheduled = self._extract_scheduled(scheduler_output)
             is_benchmark_point = self._bench_active and (

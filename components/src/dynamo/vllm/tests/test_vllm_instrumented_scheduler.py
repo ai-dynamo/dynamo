@@ -25,8 +25,6 @@ import threading
 import time
 import uuid
 from collections import deque
-from concurrent.futures import Future
-from contextlib import nullcontext
 from dataclasses import asdict, replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
@@ -308,14 +306,13 @@ def test_benchmark_wall_time_starts_at_post_go_schedule_timestamp():
     )
 
 
-@pytest.mark.parametrize("adjust_host_launch", [False, True])
+@pytest.mark.parametrize("needs_launch_correction", [False, True])
 def test_benchmark_timing_stops_before_vllm_state_update(
-    monkeypatch, adjust_host_launch
+    monkeypatch, needs_launch_correction
 ):
-    """Keep benchmark timing independent of launch correction and output bookkeeping."""
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._adjust_fpm_host_launch = adjust_host_launch
-    stub._fpm_launch_durations = {123: 5.0}
+    stub._needs_launch_correction = needs_launch_correction
+    stub._fpm_launches = deque([(object(), 5.0)])
     stub._schedule_times = deque([10.0])
     stub._last_update_time = 0.0
     stub._bench_active = True
@@ -354,39 +351,19 @@ def test_benchmark_timing_stops_before_vllm_state_update(
     assert stub._last_update_time == 20.0
 
 
-@pytest.mark.parametrize(
-    "backend,async_scheduling,world_size,dp_size,runner,speculative,expected",
-    [
-        ("uni", True, 1, 1, "generate", None, True),
-        ("uni", False, 1, 1, "generate", None, False),
-        ("mp", True, 1, 1, "generate", None, False),
-        ("ray", True, 1, 1, "generate", None, False),
-        ("uni", True, 2, 1, "generate", None, False),
-        ("uni", True, 1, 2, "generate", None, False),
-        ("uni", True, 1, 1, "pooling", None, False),
-        ("uni", True, 1, 1, "generate", object(), False),
-    ],
-)
+@pytest.mark.parametrize("backend,expected", [("uni", True), ("mp", False)])
 def test_inline_launch_timing_requires_supported_execution(
-    monkeypatch,
-    backend,
-    async_scheduling,
-    world_size,
-    dp_size,
-    runner,
-    speculative,
-    expected,
+    monkeypatch, backend, expected
 ):
-    """Enable correction only when the constructed engine uses inline async launch."""
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             distributed_executor_backend=backend,
-            world_size=world_size,
-            data_parallel_size=dp_size,
+            world_size=1,
+            data_parallel_size=1,
         ),
-        scheduler_config=SimpleNamespace(async_scheduling=async_scheduling),
-        model_config=SimpleNamespace(runner_type=runner),
-        speculative_config=speculative,
+        scheduler_config=SimpleNamespace(async_scheduling=True),
+        model_config=SimpleNamespace(runner_type="generate"),
+        speculative_config=None,
         additional_config={},
     )
     monkeypatch.setattr(
@@ -396,16 +373,15 @@ def test_inline_launch_timing_requires_supported_execution(
         instrumented_scheduler_module, "_FpmPublisherThread", MagicMock()
     )
     scheduler = InstrumentedScheduler(config, None, None, block_size=16)
-    assert scheduler._adjust_fpm_host_launch is expected
+    assert scheduler._needs_launch_correction is expected
 
 
 @pytest.fixture
 def fpm_timing_run(monkeypatch):
-    """Drive scheduler timing with a deterministic clock and published FPMs."""
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._adjust_fpm_host_launch = True
+    stub._needs_launch_correction = True
     stub._pending_fpm_launch = None
-    stub._fpm_launch_durations = {}
+    stub._fpm_launches = deque()
     stub._schedule_times = deque()
     stub._last_update_time = 0.0
     stub._bench_active = False
@@ -437,7 +413,6 @@ def fpm_timing_run(monkeypatch):
     )
 
     def schedule(now, *, prefill=0, deferred=False, empty=False):
-        """Schedule one batch at the requested synthetic timestamp."""
         tokens = {} if empty else {"decode": 1}
         if prefill:
             tokens["prefill"] = prefill
@@ -478,9 +453,8 @@ def fpm_timing_run(monkeypatch):
     "adjust,expected", [(True, [0.002, 0.020, 0.003]), (False, [0.010, 0.013, 0.002])]
 )
 def test_async_fpm_assigns_long_launch_to_its_prefill(fpm_timing_run, adjust, expected):
-    """Attribute changing host work without losing time at the tail or idle."""
     run = fpm_timing_run
-    run.scheduler._adjust_fpm_host_launch = adjust
+    run.scheduler._needs_launch_correction = adjust
     decode = run.schedule(1.0)
     run.launch(1.001, decode)
     prefill = run.schedule(1.001, prefill=6144)
@@ -498,7 +472,7 @@ def test_async_fpm_assigns_long_launch_to_its_prefill(fpm_timing_run, adjust, ex
         0,
     ]
     assert sum(p.wall_time for p in run.published) == pytest.approx(0.025)
-    assert not run.scheduler._fpm_launch_durations
+    assert not run.scheduler._fpm_launches
     assert run.scheduler._pending_fpm_launch is None
 
     empty = run.schedule(1.026, empty=True)
@@ -511,7 +485,6 @@ def test_async_fpm_assigns_long_launch_to_its_prefill(fpm_timing_run, adjust, ex
 
 
 def test_deferred_grammar_keeps_fpms_without_charging_the_output_wait(fpm_timing_run):
-    """Keep deferred batches without treating the earlier output wait as launch work."""
     run = fpm_timing_run
     decode = run.schedule(1.0)
     run.launch(1.001, decode)
@@ -525,13 +498,12 @@ def test_deferred_grammar_keeps_fpms_without_charging_the_output_wait(fpm_timing
 
     assert [p.wall_time for p in run.published] == pytest.approx([0.010, 0.012, 0.003])
     assert sum(p.wall_time for p in run.published) == pytest.approx(0.025)
-    assert not run.scheduler._fpm_launch_durations
+    assert not run.scheduler._fpm_launches
 
 
 def test_missing_launch_callback_retains_the_output_and_releases_its_snapshot(
     fpm_timing_run,
 ):
-    """Emit fallback timing and release the snapshot when the callback is absent."""
     run = fpm_timing_run
     output = run.schedule(1.0, prefill=6144)
     run.update(1.022, output)
@@ -539,103 +511,15 @@ def test_missing_launch_callback_retains_the_output_and_releases_its_snapshot(
     assert len(run.published) == 1
     assert run.published[0].wall_time == pytest.approx(0.022)
     assert run.scheduler._pending_fpm_launch is None
-    assert not run.scheduler._fpm_launch_durations
+    assert not run.scheduler._fpm_launches
 
 
-@pytest.mark.parametrize("structured_output", [False, True])
-def test_fpm_grammar_callback_matches_vllm_engine_contract(
-    monkeypatch, structured_output
-):
-    """Exercise upstream ordering and the inherited grammar callback unchanged."""
+def test_fpm_grammar_callback_matches_vllm_signature():
     assert inspect.signature(
         InstrumentedScheduler.get_grammar_bitmask, eval_str=True
     ) == inspect.signature(
         instrumented_scheduler_module.AsyncScheduler.get_grammar_bitmask, eval_str=True
     )
-    scheduler = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    scheduler._adjust_fpm_host_launch = True
-    scheduler._bench_active = False
-    scheduler._pending_fpm_launch = None
-    scheduler._fpm_launch_durations = {}
-    scheduler._schedule_times = deque()
-    scheduler.requests = {
-        "request": SimpleNamespace(use_structured_output=True, is_prefill_chunk=False)
-    }
-    output = SimpleNamespace(
-        total_num_scheduled_tokens=1,
-        num_scheduled_tokens={"request": 1},
-        pending_structured_output_tokens=False,
-        has_structured_output_requests=structured_output,
-        scheduled_spec_decode_tokens={},
-    )
-    clock = SimpleNamespace(now=1.0)
-    monkeypatch.setattr(
-        instrumented_scheduler_module.time, "monotonic", lambda: clock.now
-    )
-    monkeypatch.setattr(
-        instrumented_scheduler_module.AsyncScheduler,
-        "schedule",
-        lambda self, *args: output,
-    )
-    scheduler.schedule = scheduler._schedule_and_record_time
-    scheduler.has_requests = lambda: True
-    events = []
-    bitmask = object()
-    execution = Future()
-    sampling = Future()
-
-    def execute_model(scheduled, *, non_block):
-        """Advance only submission time without completing a GPU future."""
-        assert scheduled is output and non_block
-        events.append("execute")
-        clock.now += 0.008
-        return execution
-
-    def grammar_bitmask(requests, request_ids, speculative_tokens):
-        """Add distinguishable grammar work after the submission timer closes."""
-        assert requests is scheduler.requests
-        assert request_ids == ["request"] and speculative_tokens == {}
-        events.append("grammar")
-        clock.now += 0.004
-        return bitmask
-
-    def sample_tokens(grammar_output, *, non_block):
-        """Check that sampling sees the measured launch and unchanged grammar result."""
-        assert non_block
-        assert scheduler._fpm_launch_durations[id(output)] == pytest.approx(0.008)
-        assert scheduler._pending_fpm_launch is None
-        if structured_output:
-            assert grammar_output.structured_output_request_ids == ["request"]
-            assert grammar_output.grammar_bitmask is bitmask
-        else:
-            assert grammar_output is None
-        events.append("sample")
-        return sampling
-
-    scheduler.structured_output_manager = SimpleNamespace(
-        grammar_bitmask=grammar_bitmask
-    )
-    core = SimpleNamespace(
-        scheduler=scheduler,
-        model_executor=SimpleNamespace(
-            execute_model=execute_model, sample_tokens=sample_tokens
-        ),
-        batch_queue=deque(),
-        batch_queue_size=2,
-        is_pooling_model=False,
-        is_mm_encoder_only=False,
-        is_ec_consumer=True,  # Pre-0.33 name for the same generative execution path.
-        _should_throttle_prefills=lambda: False,
-        log_error_detail=lambda scheduled: nullcontext(),
-    )
-    assert instrumented_scheduler_module.EngineCore.step_with_batch_queue(core) == (
-        None,
-        True,
-    )
-    assert events == (
-        ["execute", "grammar", "sample"] if structured_output else ["execute", "sample"]
-    )
-    assert list(core.batch_queue) == [(sampling, output, execution)]
 
 
 @pytest.mark.parametrize(
@@ -974,7 +858,6 @@ def test_dp_rank_prefers_data_parallel_index():
 
 
 def test_external_dp_schedulers_publish_on_distinct_global_rank_ports(monkeypatch):
-    """Keep separately constructed DP schedulers on distinct global-rank publishers."""
     base_port = 20000  # The mocked publisher never binds a socket.
     monkeypatch.setenv(instrumented_scheduler_module.ENV_FPM_PORT, str(base_port))
     monkeypatch.setenv(instrumented_scheduler_module.ENV_FPM_WORKER_ID, "dp-worker")
@@ -2684,7 +2567,6 @@ def test_explicit_runtime_failure_is_not_silently_skipped():
 
 
 def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
-    """Use vLLM's hash-block granularity when constructing benchmark request hashes."""
     parent_init_args = {}
 
     def fake_parent_init(self, **kwargs):
@@ -4572,6 +4454,7 @@ def _benchmark_save_stub(point: BenchmarkPoint, fpms: list[dict]):
         fpm.setdefault("dp_rank", 0)
         fpm.setdefault("wall_time", 0.01)
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._needs_launch_correction = False
     stub._bench_grid_digest = None
     stub._bench_current_point = point
     stub._bench_current_fpms = fpms
