@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! When the Unified `mistral` family installs its grammar.
+//! When the Unified `mistral_4` family installs its grammar.
 //!
 //! The grammar is mistral-common's, which upstream vLLM installs for v11+ tekken
 //! tokenizers: it forces the call for forced choices, keeps every call's
