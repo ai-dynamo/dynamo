@@ -1084,9 +1084,6 @@ async def init_llm_worker(
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
-                # Called from the publisher's stats thread. A plain int read is
-                # atomic under the GIL; a value one poll stale is harmless.
-                publisher.has_inflight_requests = lambda: handler._inflight_requests > 0
                 if config.load_format == "gms":
                     _register_memory_routes(runtime, handler)
 

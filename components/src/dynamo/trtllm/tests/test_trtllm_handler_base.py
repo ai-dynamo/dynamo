@@ -1736,6 +1736,155 @@ class TestGenerateLocally:
         assert kwargs["streaming"] is False
 
 
+class TestPrefillBacklogLifecycle:
+    """The handler counts a request in the publisher's prefill backlog from
+    submission until its first engine output, only when this worker runs the
+    request's context phase, and releases it however the request ends."""
+
+    _PROMPT = [1, 2, 3, 4, 5]
+
+    def _make_handler(self, mode, dp_rank=None):
+        from dynamo.trtllm.publisher import PrefillBacklog
+
+        handler = TestGenerateLocally()._make_handler()
+        handler.disaggregation_mode = mode
+        handler.publisher = MagicMock()
+        handler.publisher.check_error_queue.return_value = None
+        handler.publisher.prefill_backlog = PrefillBacklog()
+        params = (
+            SimpleNamespace(request_type="generation_only", disagg_request_id=None)
+            if mode == DisaggregationMode.DECODE
+            else None
+        )
+        handler._setup_disaggregated_params_for_mode = MagicMock(
+            return_value=(params, None, {})
+        )
+        handler._encode_and_pack_disaggregated_params = MagicMock(return_value=None)
+        handler._initiate_shutdown = mock.AsyncMock()
+        request = {
+            "token_ids": list(self._PROMPT),
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        if dp_rank is not None:
+            request["routing"] = {"dp_rank": dp_rank}
+        return handler, request
+
+    @staticmethod
+    def _engine_result(backlog, dp_rank, seen, error=None):
+        """GenerationResult that records the backlog before its first output
+        and after the caller has taken it, or raises ``error`` instead."""
+        output = MagicMock()
+        output.token_ids = [42]
+        output.finish_reason = "stop"
+        output.stop_reason = None
+        output.request_perf_metrics = None
+        output.prompt_logprobs = []
+        res = MagicMock()
+        res.outputs = [output]
+        res.finished = True
+
+        async def aiter(_self):
+            seen.append(backlog.snapshot(dp_rank))
+            if error is not None:
+                raise error
+            yield res
+            seen.append(backlog.snapshot(dp_rank))
+
+        result = MagicMock()
+        result.abort = MagicMock()
+        result.__aiter__ = aiter
+        return result
+
+    async def _run(self, handler, request, dp_rank):
+        backlog = handler.publisher.prefill_backlog
+        seen: list[tuple[int, int]] = []
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._engine_result(backlog, dp_rank, seen)
+        )
+        chunks = [
+            c
+            async for c in handler.generate_locally(
+                request, TestGenerateLocally()._make_context()
+            )
+        ]
+        assert chunks
+        assert backlog.nonempty() == {}
+        return seen
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "mode",
+        [DisaggregationMode.PREFILL, DisaggregationMode.AGGREGATED],
+        ids=["prefill", "aggregated"],
+    )
+    async def test_counted_until_first_output(self, mode):
+        handler, request = self._make_handler(mode, dp_rank=1)
+
+        seen = await self._run(handler, request, dp_rank=1)
+
+        assert seen == [(1, len(self._PROMPT)), (0, 0)]
+
+    @pytest.mark.asyncio
+    async def test_decode_counts_only_requests_that_bypass_remote_prefill(self):
+        handler, remote = self._make_handler(DisaggregationMode.DECODE, dp_rank=1)
+        _, bypass = self._make_handler(DisaggregationMode.DECODE, dp_rank=1)
+        bypass["annotations"] = [BYPASS_REMOTE_PREFILL_ANNOTATION]
+
+        assert await self._run(handler, remote, dp_rank=1) == [(0, 0), (0, 0)]
+        assert await self._run(handler, bypass, dp_rank=1) == [
+            (1, len(self._PROMPT)),
+            (0, 0),
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [RequestError("request failed"), asyncio.CancelledError(), RuntimeError("x")],
+        ids=["request-error", "cancelled", "fatal-error"],
+    )
+    async def test_released_when_request_ends_without_output(self, error):
+        handler, request = self._make_handler(DisaggregationMode.PREFILL)
+        backlog = handler.publisher.prefill_backlog
+        seen: list[tuple[int, int]] = []
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._engine_result(backlog, 0, seen, error=error)
+        )
+
+        async for _ in handler.generate_locally(
+            request, TestGenerateLocally()._make_context()
+        ):
+            pass
+
+        assert seen == [(1, len(self._PROMPT))]
+        assert backlog.nonempty() == {}
+
+    @pytest.mark.asyncio
+    async def test_released_when_engine_rejects_before_submission(self):
+        handler, request = self._make_handler(DisaggregationMode.PREFILL)
+        backlog = handler.publisher.prefill_backlog
+        seen: list[tuple[int, int]] = []
+
+        def reject(**_kwargs):
+            seen.append(backlog.snapshot(0))
+            raise ValueError("prompt too long")
+
+        handler.engine.llm.generate_async = MagicMock(side_effect=reject)
+
+        chunks = [
+            c
+            async for c in handler.generate_locally(
+                request, TestGenerateLocally()._make_context()
+            )
+        ]
+
+        assert chunks == [
+            {"finish_reason": {"error": "prompt too long"}, "token_ids": []}
+        ]
+        assert seen == [(1, len(self._PROMPT))]
+        assert backlog.nonempty() == {}
+
+
 class TestDefaultMaxTokens:
     """Unit tests for HandlerBase._default_max_tokens (omitted max_tokens sizing)."""
 

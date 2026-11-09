@@ -67,7 +67,7 @@ from dynamo.trtllm.health_check import HEALTH_CHECK_CACHE_SALT
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
-from dynamo.trtllm.publisher import Publisher
+from dynamo.trtllm.publisher import PrefillBacklog, Publisher
 from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
@@ -1308,6 +1308,14 @@ class HandlerBase(BaseGenerativeHandler):
             # attention-DP dummy requests match against.
             cache_salt = HEALTH_CHECK_CACHE_SALT
 
+        # Set while this request is counted in the publisher's prefill backlog:
+        # from submission until its first engine output, only when this worker
+        # runs the context phase. A context-only result arrives when prefill
+        # ends, before the decode worker pulls the KV.
+        prefill_backlog: Optional[PrefillBacklog] = None
+        backlog_rank = dp_rank if dp_rank is not None else 0
+        backlog_tokens = 0
+
         try:
             # NEW: Updated engine call to include multimodal data
             # Only pass conversation_params in affinity mode — older TRT-LLM builds'
@@ -1331,6 +1339,23 @@ class HandlerBase(BaseGenerativeHandler):
                 "priority": priority,
                 "cache_salt": cache_salt,
             }
+            if self.publisher is not None and (
+                self.disaggregation_mode != DisaggregationMode.DECODE
+                or bypass_remote_prefill
+            ):
+                prompt_token_ids = (
+                    processed_input.get("prompt_token_ids")
+                    if isinstance(processed_input, dict)
+                    else None
+                )
+                if prompt_token_ids is None:
+                    prompt_token_ids = request.get("token_ids")
+                if expanded_prompt_len is not None:
+                    backlog_tokens = int(expanded_prompt_len)
+                elif prompt_token_ids is not None:
+                    backlog_tokens = len(prompt_token_ids)
+                prefill_backlog = self.publisher.prefill_backlog
+                prefill_backlog.add(backlog_rank, backlog_tokens)
             generate_async = self.engine.llm.generate_async
             try:
                 generation_result = generate_async(**generate_kwargs)
@@ -1401,6 +1426,10 @@ class HandlerBase(BaseGenerativeHandler):
                 abort_guard or generation_result, context
             ):
                 async for res in generation_result:
+                    if prefill_backlog is not None:
+                        prefill_backlog.remove(backlog_rank, backlog_tokens)
+                        prefill_backlog = None
+
                     # Signal first token to deferred abort guard
                     if abort_guard is not None:
                         abort_guard.signal_first_token()
@@ -1638,6 +1667,11 @@ class HandlerBase(BaseGenerativeHandler):
 
             # Initiate graceful shutdown
             await self._initiate_shutdown(e)
+
+        finally:
+            # Ended before any output: rejected, cancelled, or failed.
+            if prefill_backlog is not None:
+                prefill_backlog.remove(backlog_rank, backlog_tokens)
 
     @staticmethod
     def _request_has_images(processed_input) -> bool:
