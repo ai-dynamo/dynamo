@@ -704,7 +704,7 @@ pub struct RouterQueueMetrics {
     pub backpressure_total: IntCounterVec,
     pub received_total: IntCounterVec,
     pub rejected_total: IntCounterVec,
-    /// Queue wait of every attempt that reached admission; zero for direct admissions.
+    /// Scheduler queue wait per request leaving the queue; zero for direct admissions.
     pub queue_wait_seconds: HistogramVec,
 }
 

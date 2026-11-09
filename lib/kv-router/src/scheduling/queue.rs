@@ -36,8 +36,8 @@ use super::selector::{
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, AvailableWorkerIds,
     KvSchedulerError, NonMaxOverlapSelection, NonMaxOverlapSelectionObserver,
-    OverloadedWorkerProvider, QueueWait, QueueWaitObserver, QueueWaitPath, SchedulingContext,
-    SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider, WorkerIdSet,
+    OverloadedWorkerProvider, QueueWaitObserver, SchedulingContext, SchedulingRequest,
+    SchedulingResponse, WorkerAvailabilityProvider, WorkerIdSet,
 };
 use crate::plugins::request_classifier::ClassifyRequest;
 use crate::plugins::worker_selection::{
@@ -1075,11 +1075,11 @@ impl<
             .is_ok()
     }
 
-    /// Install the observer for queue waits of requests that reach admission.
+    /// Install the observer for queue waits.
     ///
-    /// The observer runs inline on the scheduler actor, once per admitted attempt: with the
-    /// measured wait for a request extracted from a class queue, and with a zero wait for a
-    /// request that took a direct-admission carve-out.
+    /// The observer runs inline on the scheduler actor each time a request leaves the queue
+    /// toward selection: with the measured wait for a request extracted from a class queue,
+    /// and with a zero wait for a request that took a direct-admission carve-out.
     ///
     /// Returns `false` when an observer is already installed.
     pub fn set_queue_wait_observer(&self, observer: QueueWaitObserver) -> bool {
@@ -1753,7 +1753,7 @@ impl<
         // `queue_rejection` would reject with `limit: 0`. Admit directly instead
         // so selection reports the real condition, `NoEndpoints`.
         if self.workers_with_configs.borrow().is_empty() {
-            self.observe_queue_wait(class_index, Duration::ZERO, QueueWaitPath::Direct);
+            self.observe_queue_wait(class_index, Duration::ZERO);
             return self.admit_one(context, request, decay_now, prepared) == Admission::Booked;
         }
         // A class with any zero per-worker limit never queues: keep the direct
@@ -1778,7 +1778,7 @@ impl<
                     )
                 });
             if !should_queue {
-                self.observe_queue_wait(class_index, Duration::ZERO, QueueWaitPath::Direct);
+                self.observe_queue_wait(class_index, Duration::ZERO);
                 return self.admit_one(context, request, decay_now, prepared) == Admission::Booked;
             }
             // The availability check and load projection can take time. Judge this request's
@@ -2269,7 +2269,7 @@ impl<
                     attempt_tx: queued.attempt_tx,
                     lifecycle_transfer: queued.lifecycle_transfer,
                 };
-                self.observe_queue_wait(class_index, queue_wait, QueueWaitPath::Queued);
+                self.observe_queue_wait(class_index, queue_wait);
                 self.admit_one(context, queued.request, Instant::now(), prepared)
             };
             self.pending.settle(charge, admission != Admission::Refused);
@@ -2758,13 +2758,9 @@ impl<
         Admission::Refused
     }
 
-    fn observe_queue_wait(&self, class_index: usize, wait: Duration, path: QueueWaitPath) {
+    fn observe_queue_wait(&self, class_index: usize, wait: Duration) {
         if let Some(observer) = self.queue_wait_observer.get() {
-            observer(QueueWait {
-                class_index,
-                wait,
-                path,
-            });
+            observer(class_index, wait);
         }
     }
 
@@ -4178,22 +4174,23 @@ policy_classes:
     async fn queued_request_reports_its_queue_wait() {
         let (queue, slots) = make_queue(1, 16, 64, Some(0.0));
         let (observer_tx, mut observer_rx) = tokio::sync::mpsc::unbounded_channel();
-        assert!(queue.set_queue_wait_observer(Arc::new(move |wait| {
-            observer_tx
-                .send(wait)
-                .expect("observer receiver should remain open");
-        })));
-        assert!(!queue.set_queue_wait_observer(Arc::new(|_| {})));
+        assert!(
+            queue.set_queue_wait_observer(Arc::new(move |class_index, wait| {
+                observer_tx
+                    .send((class_index, wait))
+                    .expect("observer receiver should remain open");
+            }))
+        );
+        assert!(!queue.set_queue_wait_observer(Arc::new(|_, _| {})));
 
         // An uncontended request enters its class queue and leaves it in the same actor
-        // turn, so its wait is reported on the queued path with no elapsed time.
+        // turn, so its wait is reported with no elapsed time.
         let (active, active_rx) = make_request("active", 64);
         queue.enqueue(active).await;
         active_rx.await.unwrap().unwrap();
-        let first = observer_rx.recv().await.expect("observer channel closed");
-        assert_eq!(first.class_index, 0);
-        assert_eq!(first.path, QueueWaitPath::Queued);
-        assert!(first.wait < Duration::from_millis(1), "{first:?}");
+        let (class_index, wait) = observer_rx.recv().await.expect("observer channel closed");
+        assert_eq!(class_index, 0);
+        assert!(wait < Duration::from_millis(1), "{wait:?}");
 
         // The worker is busy, so the next request parks and nothing is reported yet.
         let (parked, parked_rx) = make_request("parked", 64);
@@ -4211,12 +4208,11 @@ policy_classes:
         queue.update().await;
         parked_rx.await.unwrap().unwrap();
 
-        let second = observer_rx.recv().await.expect("observer channel closed");
-        assert_eq!(second.class_index, 0);
-        assert_eq!(second.path, QueueWaitPath::Queued);
+        let (class_index, wait) = observer_rx.recv().await.expect("observer channel closed");
+        assert_eq!(class_index, 0);
         assert!(
-            second.wait >= Duration::from_millis(250) && second.wait < Duration::from_millis(260),
-            "{second:?}"
+            wait >= Duration::from_millis(250) && wait < Duration::from_millis(260),
+            "{wait:?}"
         );
         assert_eq!(queue.pending_count(), 0);
     }
@@ -4224,14 +4220,16 @@ policy_classes:
     #[tokio::test]
     async fn direct_admission_reports_zero_queue_wait() {
         // With zero discovered workers every request is admitted directly so selection can
-        // report `NoEndpoints`; the observer still sees one zero-wait report per attempt.
+        // report `NoEndpoints`; the observer still sees one zero-wait report.
         let (queue, _slots) = make_queue(0, 16, 64, None);
         let (observer_tx, mut observer_rx) = tokio::sync::mpsc::unbounded_channel();
-        assert!(queue.set_queue_wait_observer(Arc::new(move |wait| {
-            observer_tx
-                .send(wait)
-                .expect("observer receiver should remain open");
-        })));
+        assert!(
+            queue.set_queue_wait_observer(Arc::new(move |class_index, wait| {
+                observer_tx
+                    .send((class_index, wait))
+                    .expect("observer receiver should remain open");
+            }))
+        );
 
         let (request, response_rx) = make_request("no-workers", 64);
         queue.enqueue(request).await;
@@ -4239,15 +4237,8 @@ policy_classes:
             response_rx.await.unwrap(),
             Err(KvSchedulerError::NoEndpoints)
         ));
-        let wait = observer_rx.recv().await.expect("observer channel closed");
-        assert_eq!(
-            wait,
-            QueueWait {
-                class_index: 0,
-                wait: Duration::ZERO,
-                path: QueueWaitPath::Direct,
-            }
-        );
+        let observed = observer_rx.recv().await.expect("observer channel closed");
+        assert_eq!(observed, (0, Duration::ZERO));
     }
 
     #[tokio::test(start_paused = true)]
