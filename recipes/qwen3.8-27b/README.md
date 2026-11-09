@@ -8,8 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 Serve computer-use agents on Qwen3.8-27B with the experimental
 [Dynamo vLLM sidecar](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md)
 beside each GPU's `vllm-rs` (vLLM's Rust server). The multimodal-aware KV router (two-tier policy)
-sends most requests to the worker that caches their prompt and screenshot, so cache reuse
-matches per-session pinning without a client session ID.
+sends most requests to the worker caching their prompt and screenshot; clients need no session
+ID.
 
 ## Results
 
@@ -18,20 +18,22 @@ without image `uuid`s, 128 concurrent agent sessions, 8 GB200s, run back to back
 
 | Serving path | Throughput (req/s) | Prompt tokens from cache |
 |--------------|--------------------|--------------------------|
-| **This recipe (no session ID)** | 7.17 | 88.6% |
-| Python `vllm serve`, client-pinned sessions | 7.09 | 88.7% |
-| `vllm-rs` alone, client-pinned sessions | 7.10 | 88.7% |
+| **This recipe (no session ID)** | 7.19 | 88.6% |
+| Dynamo, client session-ID routing | 7.20 | 88.7% |
+| Dynamo, round robin | 5.85 | 61.2% |
+| Python `vllm serve`, client-pinned sessions | 7.10 | 88.7% |
+| `vllm-rs` alone, client-pinned sessions | 7.08 | 88.7% |
 
-Throughput is within about 1%. Per session turn, mean end-to-end latency is 0.23 s and
-0.24 s lower than `vllm serve` and `vllm-rs` alone, and mean time to first token (373 ms) is
-41 ms lower than `vllm serve` (95% intervals exclude zero). October 2026 main
-builds, launched manually, 300 s warm-up dropped.
+Against round robin, the recipe has 23% more throughput and, per session turn, 271 ms lower
+mean time to first token and 4.3 s lower end-to-end latency. Its end-to-end latency is also 0.31 s
+and 0.34 s lower than `vllm serve` and `vllm-rs` alone (95% intervals exclude zero). The other
+rows' throughput is within 2%. October 2026 main builds, launched manually, 300 s warm-up dropped.
 
 ## Deploy
 
-You need 8 GB200 GPUs, Kubernetes 1.29+, Dynamo operator 1.6.0+, and the
-[`hf-token-secret`](../README.md#prerequisites) Secret. Set `storageClassName` in
-`model-cache/model-cache.yaml`, then run here:
+You need 8 GB200 GPUs, Kubernetes 1.29+, Dynamo operator 1.6.0+, the
+[`hf-token-secret`](../README.md#prerequisites) Secret, and a `storageClassName` in
+`model-cache/model-cache.yaml`. Run here:
 
 ```bash
 export NAMESPACE=<your-namespace>
