@@ -1327,7 +1327,7 @@ mod tests {
         assert!(dynamo_error.message().contains("`root`"));
     }
 
-    // DYN-5502: these reached SGLang, which aborted the request with HTTP 500.
+    // Engines accept these grammars but cannot complete any output for them.
     #[test]
     fn test_guided_grammar_without_base_case_rejected() {
         for grammar in [
@@ -1377,5 +1377,13 @@ mod tests {
 
         assert!(validate_grammar(&format!("{grammar}\nr{rules} ::= \"end\"")).is_ok());
         assert_grammar_rejected(&format!("{grammar}\nr{rules} ::= r0"));
+    }
+
+    // The `]` inside each literal lowers the byte-level nesting count, so only the
+    // scanner's own group limit keeps this from overflowing the stack.
+    #[test]
+    fn test_guided_grammar_deep_groups_hidden_by_literals_accepted() {
+        let grammar = format!("root ::= {}", "(\"]\" ".repeat(100_000));
+        assert!(validate_grammar(&grammar).is_ok());
     }
 }

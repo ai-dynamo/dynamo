@@ -11,6 +11,8 @@
 
 use std::collections::HashMap;
 
+use super::MAX_GRAMMAR_NESTING_DEPTH;
+
 /// Start rule name used by xgrammar and the engines.
 pub(super) const ROOT_RULE: &str = "root";
 
@@ -45,9 +47,13 @@ enum Token<'a> {
     Required,
 }
 
+/// Gives no verdict when `(` groups nest deeper than `MAX_GRAMMAR_NESTING_DEPTH`. That
+/// bounds the parser's recursion; the caller's byte-level nesting check does not, because
+/// brackets inside literals lower its count.
 fn tokenize(grammar: &str) -> Option<Vec<Token<'_>>> {
     let bytes = grammar.as_bytes();
     let mut tokens = Vec::new();
+    let mut group_depth: usize = 0;
     let mut i = 0;
     while i < bytes.len() {
         let token = match bytes[i] {
@@ -94,8 +100,17 @@ fn tokenize(grammar: &str) -> Option<Vec<Token<'_>>> {
             b'(' | b')' | b'|' | b'*' | b'?' | b'+' => {
                 i += 1;
                 match bytes[i - 1] {
-                    b'(' => Token::Open,
-                    b')' => Token::Close,
+                    b'(' => {
+                        group_depth += 1;
+                        if group_depth > MAX_GRAMMAR_NESTING_DEPTH {
+                            return None;
+                        }
+                        Token::Open
+                    }
+                    b')' => {
+                        group_depth = group_depth.saturating_sub(1);
+                        Token::Close
+                    }
                     b'|' => Token::Pipe,
                     b'+' => Token::Required,
                     _ => Token::Optional,
@@ -188,7 +203,7 @@ impl<'t, 'a> Parser<'t, 'a> {
         }
     }
 
-    /// Recursion depth is bounded by `MAX_GRAMMAR_NESTING_DEPTH`, checked before this runs.
+    /// Recursion depth is bounded by the group depth limit in `tokenize`.
     fn sequence(&mut self) -> Option<Vec<usize>> {
         let mut required = Vec::new();
         loop {
