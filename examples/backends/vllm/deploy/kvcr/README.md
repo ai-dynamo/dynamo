@@ -41,11 +41,22 @@ available in a Dynamo release image, build that image from matching Dynamo,
 KVCR, and vLLM revisions. This example targets KVCR **0.2.0** at
 [`7ce17c358b867bd89f40a4a42bee9c76839506d0`](https://github.com/ai-dynamo/kvcr/commit/7ce17c358b867bd89f40a4a42bee9c76839506d0)
 and vLLM's 0.2.0 adapter at
-[`fed7de909f894fbee0c45130376aed2e2c9bf0d3`](https://github.com/vllm-project/vllm/commit/fed7de909f894fbee0c45130376aed2e2c9bf0d3).
+[`fed7de909f894fbee0c45130376aed2e2c9bf0d3`](https://github.com/vllm-project/vllm/commit/fed7de909f894fbee0c45130376aed2e2c9bf0d3)
+([vLLM #64224](https://github.com/vllm-project/vllm/pull/64224)).
+vLLM 0.33.0 and earlier releases, which current Dynamo vLLM runtime images
+use, ship the KVCR 0.1.x adapter. With KVCR 0.2.0 that adapter stops the engine
+at startup with `ModuleNotFoundError: No module named 'kvcr.control_channels'`,
+so installing KVCR 0.2.0 into such an image is not enough.
 KVCR requires NIXL 1.5.0 and the runtime's UCX, CUDA, and `libatomic` libraries.
 Record the Dynamo, vLLM, and KVCR revisions and image digest for each deployment;
 these source pins alone do not establish that an existing image contains a
-compatible stack.
+compatible stack. Before deploying, check that the image imports the KVCR 0.2.0
+API and its vLLM adapter:
+
+```bash
+docker run --rm "$DYNAMO_VLLM_IMAGE" python3 -c \
+  'from kvcr import ZmqPeerControlChannel; import vllm.v1.kv_offload.tiering.kvcr.manager'
+```
 
 `DYNAMO_KVCR_COMPATIBILITY_DIGEST` is an opaque layout version shared by the
 engine and memory service. Change it whenever model, dtype, block layout, or
@@ -73,7 +84,9 @@ The script mounts it through `PYTHONPATH` in both containers; it does not instal
 packages, update vLLM, or change image environment settings. Rebuild the image
 for native dependency or vLLM changes. Without `KVCR_WHEEL`, the installed KVCR
 must be compatible with this example. A wheel overlay does not upgrade an old
-vLLM adapter to the 0.2.0 API. For pinned registration, ensure
+vLLM adapter to the 0.2.0 API; to run the check above with the wheel, add
+`-v "$KVCR_WHEEL:/tmp/kvcr.whl:ro" -e PYTHONPATH=/tmp/kvcr.whl` to `docker run`.
+For pinned registration, ensure
 `UCX_REG_NONBLOCK_MEM_TYPES` and `UCX_IB_ODP_PREFETCH` are unset in both containers.
 
 `deploy.sh` applies an immutable, content-addressed ConfigMap containing
