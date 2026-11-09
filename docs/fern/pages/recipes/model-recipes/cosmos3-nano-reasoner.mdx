@@ -84,6 +84,7 @@ export CONTEXT="<your-kubernetes-context>"
 export NAMESPACE="<your-namespace>"
 
 kubectl --context "$CONTEXT" create namespace "$NAMESPACE"
+: "${NGC_API_KEY:?Set NGC_API_KEY to your NGC API key}"
 kubectl --context "$CONTEXT" -n "$NAMESPACE" create secret generic ngc-api-secret \
   --from-literal=NGC_API_KEY="$NGC_API_KEY"
 ```
@@ -158,6 +159,8 @@ with a ReadWriteMany-capable storage class. Then run:
 ```bash
 kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
   -f recipes/cosmos3-nano-reasoner/model-cache/model-cache.yaml
+kubectl --context "$CONTEXT" -n "$NAMESPACE" delete job \
+  cosmos3-nano-reasoner-model-download --ignore-not-found
 kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
   -f recipes/cosmos3-nano-reasoner/model-cache/model-download.yaml
 kubectl --context "$CONTEXT" -n "$NAMESPACE" wait \

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 id: cosmos3-super-reasoner
@@ -12,6 +12,7 @@ status: experimental
 targets:
 - id: agg-h200-round-robin
   recommended: false
+  badge: functional
   hardware:
     gpu: H200
     count: 8
@@ -36,6 +37,7 @@ targets:
     summary: 12.65 requests/s and 1,619 output tokens/s at concurrency 16; TTFT p50 124 ms
 - id: agg-h200-session-affinity
   recommended: true
+  badge: optimized
   hardware:
     gpu: H200
     count: 8

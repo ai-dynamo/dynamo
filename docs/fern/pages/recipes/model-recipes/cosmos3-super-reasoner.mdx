@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Cosmos3 Super Reasoner
 subtitle: Compare round-robin routing with per-video session affinity on eight H200 GPUs.
@@ -84,6 +84,7 @@ export CONTEXT="<your-kubernetes-context>"
 export NAMESPACE="<your-namespace>"
 
 kubectl --context "$CONTEXT" create namespace "$NAMESPACE"
+: "${NGC_API_KEY:?Set NGC_API_KEY to your NGC API key}"
 kubectl --context "$CONTEXT" -n "$NAMESPACE" create secret generic ngc-api-secret \
   --from-literal=NGC_API_KEY="$NGC_API_KEY"
 ```
@@ -158,6 +159,8 @@ with a ReadWriteMany-capable storage class. Then run:
 ```bash
 kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
   -f recipes/cosmos3-super-reasoner/model-cache/model-cache.yaml
+kubectl --context "$CONTEXT" -n "$NAMESPACE" delete job \
+  cosmos3-super-reasoner-model-download --ignore-not-found
 kubectl --context "$CONTEXT" -n "$NAMESPACE" apply \
   -f recipes/cosmos3-super-reasoner/model-cache/model-download.yaml
 kubectl --context "$CONTEXT" -n "$NAMESPACE" wait \

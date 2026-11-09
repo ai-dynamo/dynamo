@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # AIPerf video benchmark for the Cosmos3 Super Reasoner recipe.
@@ -212,8 +212,16 @@ spec:
               video_server_pid=$!
               cleanup() { kill "$video_server_pid" 2>/dev/null || true; }
               trap cleanup EXIT
-              until curl -fsS http://127.0.0.1:8080/ >/dev/null; do sleep 1; done
-              until curl -fsS "$VIDEO_SERVER_URL/" >/dev/null; do sleep 1; done
+              wait_for_url() {
+                for _ in $(seq 120); do
+                  curl -fsS "$1" >/dev/null && return 0
+                  sleep 1
+                done
+                echo "Timed out waiting for $1" >&2
+                return 1
+              }
+              wait_for_url http://127.0.0.1:8080/
+              wait_for_url "$VIDEO_SERVER_URL/"
 
               echo "Waiting for model '$TARGET_MODEL' at http://$ENDPOINT/v1/models"
               until curl -fsS "http://$ENDPOINT/v1/models" |
