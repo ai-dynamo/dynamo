@@ -56,11 +56,11 @@ else:
 
 _MiniMaxM3ReasoningParser: type[ReasoningParser] | None
 try:
-    from vllm.reasoning.minimax_m3_reasoning_parser import (
-        MiniMaxM3ReasoningParser as _MiniMaxM3ReasoningParser,
-    )
+    from vllm.reasoning import minimax_m3_reasoning_parser
 except ImportError:  # Older supported vLLM releases do not ship this parser.
     _MiniMaxM3ReasoningParser = None
+else:
+    _MiniMaxM3ReasoningParser = minimax_m3_reasoning_parser.MiniMaxM3ReasoningParser
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
