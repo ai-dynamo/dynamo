@@ -19,8 +19,8 @@ without image `uuid`s, 128 concurrent agent sessions, 8 GB200s, run back to back
 | Serving path | Throughput (req/s) | Prompt tokens from cache |
 |--------------|--------------------|--------------------------|
 | **This recipe (no session ID)** | 7.17 | 88.6% |
-| Python `vllm serve`, client-pinned | 7.09 | 88.7% |
-| `vllm-rs` alone, client-pinned | 7.10 | 88.7% |
+| Python `vllm serve`, client-pinned sessions | 7.09 | 88.7% |
+| `vllm-rs` alone, client-pinned sessions | 7.10 | 88.7% |
 
 Throughput is within about 1%. Per session turn, mean end-to-end latency is 0.23 s and
 0.24 s lower than `vllm serve` and `vllm-rs` alone, and mean time to first token (373 ms) is
@@ -31,7 +31,7 @@ builds, launched manually, 300 s warm-up dropped.
 
 You need 8 GB200 GPUs, Kubernetes 1.29+, Dynamo operator 1.6.0+, and the
 [`hf-token-secret`](../README.md#prerequisites) Secret. Set `storageClassName` in
-`model-cache/model-cache.yaml`, then run from here:
+`model-cache/model-cache.yaml`, then run here:
 
 ```bash
 export NAMESPACE=<your-namespace>
@@ -59,7 +59,7 @@ curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -
 
 ## Benchmark
 
-Pin the unreleased AIPerf commit behind these numbers and strip screenshot `uuid`s:
+Pin the unreleased AIPerf commit behind these numbers; strip screenshot `uuid`s:
 
 ```bash
 pip install "aiperf @ git+https://github.com/ai-dynamo/aiperf@59087bab509fc88336a932851b3ed33bf13405c2"
