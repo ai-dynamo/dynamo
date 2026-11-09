@@ -6,6 +6,8 @@ package power
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"testing"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -207,6 +209,41 @@ func TestPropagateMixedPodOutcomes(t *testing.T) {
 				want = retryAfter
 			}
 			require.Equal(t, want, requeueAfter)
+		})
+	}
+}
+
+func TestPropagateFailureMessageIgnoresListOrder(t *testing.T) {
+	for _, reversed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reversed=%t", reversed), func(t *testing.T) {
+			t.Log("Two labeled workers are both denied with errors that name the Pod")
+			dgd := testDGD("default", "component")
+			dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
+			first := testWorkerPod(dgd, "component")
+			first.Name, first.UID = "a-pod", "a-uid"
+			second := first.DeepCopy()
+			second.Name, second.UID = "b-pod", "b-uid"
+			c := testClient(t).WithObjects(dgd, first, second).WithInterceptorFuncs(interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if err := c.List(ctx, list, opts...); err != nil {
+						return err
+					}
+					if pods, ok := list.(*corev1.PodList); ok && reversed {
+						slices.Reverse(pods.Items)
+					}
+					return nil
+				},
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					return apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, obj.GetName(), errors.New("denied by policy"))
+				},
+			}).Build()
+			r := &Reconciler{client: c}
+			condition, requeueAfter := r.propagate(t.Context(), dgd, dynamo.DesiredWorkerPowerCaps(dgd))
+
+			t.Log("The condition names the same Pod in every cache list order, so a retry writes no new message")
+			require.Equal(t, "PodPatchFailed", condition.Reason)
+			require.Contains(t, condition.Message, `"a-pod"`)
+			require.Equal(t, failureRetryAfter, requeueAfter)
 		})
 	}
 }

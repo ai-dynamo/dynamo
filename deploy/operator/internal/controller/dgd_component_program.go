@@ -109,12 +109,19 @@ func (p *componentProgram) Reconcile(
 		"lwsEnabled", p.lwsEnabled,
 	)
 
+	// Preservation never applies without caps, during an active or failed rollout, or before a worker hash is
+	// recorded, so the rollout then progresses ahead of shared resources as it does for an uncapped graph.
+	// Otherwise only the hash migration, which never rolls workers, precedes the preservation decision.
 	previousRolloutPhase := rollingUpdatePhase(programResult.Status.RollingUpdate)
-	if len(caps) == 0 {
+	rolloutFirst := len(caps) == 0 || powerCapRolloutBlocked(req.DGD.Status.RollingUpdate) || currentWorkerHashes(req.DGD).empty()
+	if rolloutFirst {
 		if err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status); err != nil {
 			return programResult, err
 		}
 		p.recordRollingUpdateTransition(req.DGD, previousRolloutPhase, &programResult)
+	} else if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, req.DGD); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
+		return programResult, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
 	checkpoints, err := p.sharedResources.Reconcile(ctx, req.DGD)
 	if checkpoints.Statuses != nil {
@@ -136,7 +143,7 @@ func (p *componentProgram) Reconcile(
 	}
 	// Resolve the cap exception before rollout; restart then applies in place to retained workers.
 	var retained *componentPowerCapPreservation
-	if len(caps) > 0 {
+	if !rolloutFirst {
 		retained, err = p.workloads.resolvePowerCapPreservation(ctx, req.DGD, checkpoints.Infos)
 		if err != nil {
 			return programResult, err

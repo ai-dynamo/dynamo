@@ -1598,9 +1598,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1beta1 existing worker power annotation change is accepted",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: "def456"}
 				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: "def456"}
 				setBetaWorkerPowerInputs(dgd, "350", "1", 2)
 			}),
 		},
@@ -1716,9 +1718,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name: "v1alpha1 existing worker power annotation change is accepted after conversion",
 			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: "def456"}
 				setAlphaWorkerPowerInputs(dgd, "300", "1", 2)
 			}),
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: "def456"}
 				setAlphaWorkerPowerInputs(dgd, "350", "1", 2)
 			}),
 		},

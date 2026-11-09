@@ -80,16 +80,26 @@ func powerCapTestOwners(dgd *v1beta1.DynamoGraphDeployment, provider string) ([]
 }
 
 func TestPowerCapComponentPreservation(t *testing.T) {
-	for _, key := range []string{consts.AnnotationCurrentWorkerHash, consts.AnnotationCurrentWorkerHashV2} {
-		t.Run(key, func(t *testing.T) { testPowerCapComponentPreservation(t, key) })
+	for _, recorded := range []string{"v1", "v2", "migrated-v1-and-v2"} {
+		t.Run(recorded, func(t *testing.T) { testPowerCapComponentPreservation(t, recorded) })
 	}
 }
 
-func testPowerCapComponentPreservation(t *testing.T, hashKey string) {
+// testPowerCapComponentPreservation records the active generation as a v1 hash, a v2 hash, or a migrated
+// generation whose opaque v1 hash names the DCDs while the v2 hash describes the same spec.
+func testPowerCapComponentPreservation(t *testing.T, recorded string) {
 	t.Log("Render and store one active worker generation at 300 W")
 	dgd := powerCapTestDGD(t, "component")
-	hash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	specHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	require.NoError(t, err)
+	hash, hashKey := specHash, consts.AnnotationCurrentWorkerHashV2
+	switch recorded {
+	case "v1":
+		hashKey = consts.AnnotationCurrentWorkerHash
+	case "migrated-v1-and-v2":
+		hash, hashKey = "opaque-v1", consts.AnnotationCurrentWorkerHash
+		dgd.Annotations[consts.AnnotationCurrentWorkerHashV2] = specHash
+	}
 	dgd.Annotations[hashKey] = hash
 	dcds, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, dynamo.RollingUpdateContext{NewWorkerHash: hash})
 	require.NoError(t, err)
@@ -137,7 +147,7 @@ func testPowerCapComponentPreservation(t *testing.T, hashKey string) {
 	retained, err = workloads.resolvePowerCapPreservation(context.Background(), dgd, nil)
 	require.NoError(t, err)
 	require.Nil(t, retained)
-	if hashKey == consts.AnnotationCurrentWorkerHash {
+	if recorded == "v1" {
 		return // Legacy hash migration precedes the ordinary rollout writer in the full program.
 	}
 	_, err = workloads.Reconcile(t.Context(), dgd, nil, nil, nil)

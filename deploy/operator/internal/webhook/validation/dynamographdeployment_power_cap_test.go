@@ -20,13 +20,14 @@ func powerCapAdmissionCases() []dgdAdmissionTestCase {
 		"Pending", "InProgress", "Failed", "Completed", "None", "non-worker", "type-transition", "image-and-cap",
 		"lpx-mixed", "lpx-added", "lpx-removed", "graph-cap-old", "graph-cap-new", "auto-checkpoint",
 		"legacy-v1-component", "legacy-v1-grove", "migrated-component", "migrated-grove",
+		"no-hash-component", "no-hash-grove", "empty-v2-component", "empty-v2-grove",
 	} {
 		old := betaDGDForAdmission(nil)
 		old.Annotations = map[string]string{consts.KubeAnnotationWorkloadProvider: "component", consts.KubeAnnotationEnableGrove: "false"}
 		setBetaWorkerPowerInputs(old, "300", "1", 2)
 		old.Spec.Components[1].Multinode = nil
 		switch scenario {
-		case "grove", "lpx-mixed", "lpx-added", "lpx-removed", "legacy-v1-grove", "migrated-grove":
+		case "grove", "lpx-mixed", "lpx-added", "lpx-removed", "legacy-v1-grove", "migrated-grove", "no-hash-grove", "empty-v2-grove":
 			old.Annotations[consts.KubeAnnotationWorkloadProvider] = "grove"
 			delete(old.Annotations, consts.KubeAnnotationEnableGrove)
 		}
@@ -56,13 +57,19 @@ func powerCapAdmissionCases() []dgdAdmissionTestCase {
 			old.Spec.Components[1].Experimental = &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true}}
 		}
 
-		// Preservation needs the additive v2 hash; migration is incomplete while only v1 is recorded.
+		// A reconciled graph has recorded its v2 worker hash; these scenarios withhold, blank or bridge it.
+		old.Annotations[consts.AnnotationCurrentWorkerHashV2] = "def456"
 		switch scenario {
 		case "legacy-v1-component", "legacy-v1-grove":
 			old.Annotations[consts.AnnotationCurrentWorkerHash] = "abc123"
+			delete(old.Annotations, consts.AnnotationCurrentWorkerHashV2)
 		case "migrated-component", "migrated-grove":
 			old.Annotations[consts.AnnotationCurrentWorkerHash] = "abc123"
-			old.Annotations[consts.AnnotationCurrentWorkerHashV2] = "def456"
+		case "no-hash-component", "no-hash-grove":
+			delete(old.Annotations, consts.AnnotationCurrentWorkerHashV2)
+		case "empty-v2-component", "empty-v2-grove":
+			old.Annotations[consts.AnnotationCurrentWorkerHash] = "abc123"
+			old.Annotations[consts.AnnotationCurrentWorkerHashV2] = ""
 		}
 		updated := old.DeepCopy()
 		updated.Spec.Components[1].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
@@ -140,8 +147,8 @@ func powerCapAdmissionWant(scenario string) (webhookErrs []string, celErr string
 		detail += ": live power-cap updates are unsupported for worker worker with automatic checkpoints"
 	case "alpha-service-cap":
 		detail += ": live power-cap updates are unsupported when the v1alpha1 annotations of service inherited set dynamo.nvidia.com/gpu-power-limit"
-	case "legacy-v1-component", "legacy-v1-grove":
-		detail = "cannot change power cap until the operator records nvidia.com/current-worker-hash-v2: worker hash migration is incomplete; retry after the DGD is reconciled"
+	case "legacy-v1-component", "legacy-v1-grove", "no-hash-component", "no-hash-grove", "empty-v2-component", "empty-v2-grove":
+		detail = "cannot change power cap until the operator records nvidia.com/current-worker-hash-v2: the worker hash is initialized or migrated on reconciliation; retry after the DGD is reconciled"
 	}
 	webhookErrs = []string{capPath + detail}
 	switch scenario {

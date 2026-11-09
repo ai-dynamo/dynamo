@@ -450,11 +450,10 @@ func livePowerCapUpdateDetail(newDGD, oldDGD *nvidiacomv1beta1.DynamoGraphDeploy
 		}
 	}
 
-	// Preservation requires the additive v2 worker hash; the legacy sentinel graduates only through a rollout.
-	_, hasV1 := oldDGD.Annotations[consts.AnnotationCurrentWorkerHash]
-	_, hasV2 := oldDGD.Annotations[consts.AnnotationCurrentWorkerHashV2]
-	if hasV1 && !hasV2 {
-		return "cannot change power cap until the operator records " + consts.AnnotationCurrentWorkerHashV2 + ": worker hash migration is incomplete; retry after the DGD is reconciled"
+	// Preservation proves a cap-only edit against the recorded v2 worker hash. Without one, a legacy Grove
+	// PodCliqueSet would roll and a v1-only graph has not migrated, so every graph waits for its first record.
+	if oldDGD.Annotations[consts.AnnotationCurrentWorkerHashV2] == "" {
+		return "cannot change power cap until the operator records " + consts.AnnotationCurrentWorkerHashV2 + ": the worker hash is initialized or migrated on reconciliation; retry after the DGD is reconciled"
 	}
 	return ""
 }
