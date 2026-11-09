@@ -2895,59 +2895,61 @@ mod tests {
         }
     }
 
+    /// A KV router for `role` whose policy classes come from `router_policy_config`.
+    async fn policy_class_kv_router(
+        drt: &DistributedRuntime,
+        role: WorkerType,
+        router_policy_config: Option<String>,
+    ) -> dynamo_llm::kv_router::KvRouter {
+        use dynamo_kv_router::config::KvRouterConfig;
+        use dynamo_llm::kv_router::{KvRouter, SelectionPolicySource};
+        use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
+
+        let endpoint = drt
+            .namespace(format!("epp-policy-class-{}", Uuid::new_v4()))
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        let (_workers_tx, workers_rx) = tokio::sync::watch::channel(HashMap::from([
+            (7, ModelRuntimeConfig::default()),
+            (8, ModelRuntimeConfig::default()),
+        ]));
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            skip_initial_worker_wait: true,
+            router_policy_config,
+            ..Default::default()
+        };
+        KvRouter::new_with_worker_role(
+            endpoint,
+            client,
+            workers_rx,
+            None,
+            16,
+            SelectionPolicySource::Registry,
+            Some(config),
+            None,
+            Some(role),
+            role.as_str(),
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+    }
+
     /// Prefill can run under its own advertised router configuration. Here prefill has no
     /// policy file, so its synthetic profile has no `priority`, while decode configures one.
     #[tokio::test]
     async fn unknown_prefill_class_fails_the_pick_instead_of_falling_back() {
-        use dynamo_kv_router::config::KvRouterConfig;
         use dynamo_kv_router::scheduling::KvSchedulerError;
         use dynamo_llm::kv_router::prefill_router::PrefillError;
-        use dynamo_llm::kv_router::{KvRouter, SelectionPolicySource};
-        use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
         use dynamo_runtime::distributed::DistributedConfig;
-
-        async fn kv_router(
-            drt: &DistributedRuntime,
-            role: WorkerType,
-            router_policy_config: Option<String>,
-        ) -> KvRouter {
-            let endpoint = drt
-                .namespace(format!("epp-policy-class-{}", Uuid::new_v4()))
-                .unwrap()
-                .component("workers".to_string())
-                .unwrap()
-                .endpoint("generate");
-            let client = endpoint.client().await.unwrap();
-            let (_workers_tx, workers_rx) = tokio::sync::watch::channel(HashMap::from([
-                (7, ModelRuntimeConfig::default()),
-                (8, ModelRuntimeConfig::default()),
-            ]));
-            let config = KvRouterConfig {
-                use_kv_events: false,
-                router_track_active_blocks: false,
-                skip_initial_worker_wait: true,
-                router_policy_config,
-                ..Default::default()
-            };
-            KvRouter::new_with_worker_role(
-                endpoint,
-                client,
-                workers_rx,
-                None,
-                16,
-                SelectionPolicySource::Registry,
-                Some(config),
-                None,
-                Some(role),
-                role.as_str(),
-                None,
-                false,
-                None,
-                None,
-            )
-            .await
-            .unwrap()
-        }
 
         let runtime = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
@@ -2959,13 +2961,13 @@ mod tests {
             "default_policy_class: standard\npolicy_classes:\n  - name: standard\n    quantum: 1\n  - name: priority\n    quantum: 1\n",
         )
         .unwrap();
-        let decode = kv_router(
+        let decode = policy_class_kv_router(
             &drt,
             WorkerType::Decode,
             Some(policy_file.path().display().to_string()),
         )
         .await;
-        let prefill = kv_router(&drt, WorkerType::Prefill, None).await;
+        let prefill = policy_class_kv_router(&drt, WorkerType::Prefill, None).await;
         let tokens = [1u32; 64];
 
         // Decode accepts `priority`, so an aggregated fallback would route the request.
@@ -3040,6 +3042,116 @@ mod tests {
                 prefill_disaggregated(&Err::<(), _>(wrapped)),
                 Ok(false)
             ));
+        }
+    }
+
+    /// A deprecated policy-family profile resolves EPP picks through the shared scheduler: a
+    /// family, an explicit class, a family-bound class, an unknown name, or none enters a class
+    /// for decode selection and the prefill reservation alike, where a flat profile rejects
+    /// an unknown name.
+    #[tokio::test]
+    async fn deprecated_family_profile_resolves_epp_classes_through_shared_scheduling() {
+        use dynamo_runtime::distributed::DistributedConfig;
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let family_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            family_file.path(),
+            "default_policy_family: standard\nuncached_isl_buckets:\n  - min_tokens: 0\n    bucket: cached\n  - min_tokens: 32\n    bucket: uncached\npolicy_classes:\n  - name: cached\n    policy_family: standard\n    cache_bucket: cached\n    quantum: 1\n  - name: uncached\n    policy_family: standard\n    cache_bucket: uncached\n    quantum: 1\n  - name: priority\n    quantum: 1\n",
+        )
+        .unwrap();
+        let flat_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            flat_file.path(),
+            "policy_classes:\n  - name: standard\n    quantum: 1\n",
+        )
+        .unwrap();
+        let family_path = Some(family_file.path().display().to_string());
+        let decode = policy_class_kv_router(&drt, WorkerType::Decode, family_path.clone()).await;
+        let prefill = policy_class_kv_router(&drt, WorkerType::Prefill, family_path).await;
+        let flat = policy_class_kv_router(
+            &drt,
+            WorkerType::Decode,
+            Some(flat_file.path().display().to_string()),
+        )
+        .await;
+        let tokens = [1u32; 64];
+
+        // Called as `route_decode` calls it.
+        async fn decode_pick(
+            router: &dynamo_llm::kv_router::KvRouter,
+            tokens: &[u32],
+            policy_class: Option<&str>,
+        ) -> anyhow::Result<FindBestMatchOutcome> {
+            router
+                .find_best_match_details_with_policy_class(
+                    None,
+                    tokens,
+                    None,
+                    None,
+                    false,
+                    false,
+                    None,
+                    None,
+                    0.0,
+                    0,
+                    policy_class.map(str::to_string),
+                    None,
+                    None,
+                    None,
+                    None,
+                    RoutingConstraints::default(),
+                )
+                .await
+        }
+        assert!(decode_pick(&flat, &tokens, Some("unknown")).await.is_err());
+
+        for (index, policy_class) in [
+            None,
+            Some("standard"),
+            Some("priority"),
+            Some("cached"),
+            Some("unknown"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                matches!(
+                    decode_pick(&decode, &tokens, policy_class).await,
+                    Ok(FindBestMatchOutcome::Routed { .. })
+                ),
+                "{policy_class:?}"
+            );
+            // Called as `reserve_prefill_worker` calls it.
+            let reserved = prefill
+                .find_best_match_details_with_policy_class_admitted(
+                    Some(&format!("epp-prefill/family-{index}")),
+                    &tokens,
+                    None,
+                    None,
+                    true,
+                    false,
+                    None,
+                    None,
+                    0.0,
+                    0,
+                    policy_class.map(str::to_string),
+                    None,
+                    None,
+                    None,
+                    None,
+                    RoutingConstraints::default(),
+                )
+                .await
+                .map_err(prefill_reservation_error);
+            assert!(
+                matches!(prefill_disaggregated(&reserved), Ok(true)),
+                "{policy_class:?}"
+            );
         }
     }
 }

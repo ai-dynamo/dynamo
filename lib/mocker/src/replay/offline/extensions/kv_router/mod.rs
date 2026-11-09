@@ -1021,9 +1021,22 @@ impl OfflineReplayRouter {
         now_ms: f64,
     ) -> Result<RouterEffects> {
         let decay_now = self.decay_now(now_ms);
-        let class_index = self
+        let (class_index, snapshot) = match self
             .profile
-            .resolve_class_index(pending.policy_class.as_deref())?;
+            .direct_class_index(pending.policy_class.as_deref())?
+        {
+            Some(class_index) => (class_index, None),
+            None => {
+                let snapshot = self.snapshot_for(&mut pending);
+                (
+                    self.profile.resolve_class_index_for_uncached_tokens(
+                        pending.policy_class.as_deref(),
+                        snapshot.uncached_tokens,
+                    )?,
+                    Some(snapshot),
+                )
+            }
+        };
         let class = self.profile.class(class_index);
         let should_queue = class.queueing_enabled()
             && (self.pending.has_backlog(class_index)
@@ -1035,7 +1048,7 @@ impl OfflineReplayRouter {
                 ));
 
         if should_queue {
-            let snapshot = self.snapshot_for(&mut pending);
+            let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&mut pending));
             let placement = pending
                 .affinity_hold
                 .as_ref()
@@ -2807,6 +2820,207 @@ models:
         assert_eq!(rejection.current, 2);
         assert_eq!(rejection.limit, 1);
         assert_eq!(router.pending_count(), 2);
+    }
+
+    #[test]
+    fn family_bucket_mapping_and_model_selection_use_shared_replay_queue_logic() {
+        let path =
+            std::env::temp_dir().join(format!("dynamo-replay-policy-{}.yaml", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            r#"
+default_policy_family: root
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: root
+    policy_family: root
+    cache_bucket: all
+    quantum: 1
+models:
+  replay-model:
+    default_policy_family: latency
+    uncached_isl_buckets:
+      - min_tokens: 0
+        bucket: cached
+      - min_tokens: 32
+        bucket: uncached
+    policy_classes:
+      - name: latency_cached
+        policy_family: latency
+        cache_bucket: cached
+        quantum: 1
+        prefill_busy_threshold: 0
+        request_queue_limit_per_worker: 1
+      - name: latency_uncached
+        policy_family: latency
+        cache_bucket: uncached
+        quantum: 1
+        prefill_busy_threshold: 0
+        request_queue_limit_per_worker: 0
+      - name: batch_cached
+        policy_family: batch
+        cache_bucket: cached
+        quantum: 4
+        prefill_busy_threshold: 1024
+      - name: batch_uncached
+        policy_family: batch
+        cache_bucket: uncached
+        quantum: 4
+        prefill_busy_threshold: 1024
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(path.display().to_string()),
+            ..KvRouterConfig::default()
+        }
+        .with_policy_model_name(Some("replay-model".to_string()));
+        let mut router = OfflineReplayRouter::new(&queueing_args(), Some(config), None, 1).unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        let mut active = request(1, 1);
+        active.policy_class = Some("latency".to_string());
+        assert_eq!(
+            router
+                .on_request_arrival(&active, None, 0.0)
+                .unwrap()
+                .admissions
+                .len(),
+            1
+        );
+
+        let mut mapped_batch = request(2, 2);
+        mapped_batch.policy_class = Some("batch".to_string());
+        assert_eq!(
+            router
+                .on_request_arrival(&mapped_batch, None, 0.0)
+                .unwrap()
+                .admissions
+                .len(),
+            1,
+            "the batch family should select batch_uncached and use its higher busy threshold"
+        );
+
+        let mut cached_latency = request(3, 3);
+        cached_latency.policy_class = Some("latency".to_string());
+        let cached_hashes =
+            ReplayRequestHashes::from_tokens(&cached_latency.tokens, router.block_size);
+        router
+            .on_kv_events(vec![store_event(
+                0,
+                1,
+                cached_hashes.local_block_hashes[0],
+                StorageTier::Device,
+            )])
+            .unwrap();
+        assert!(
+            router
+                .on_request_arrival(&cached_latency, Some(cached_hashes.clone()), 0.0)
+                .unwrap()
+                .admissions
+                .is_empty(),
+            "the latency family should select latency_cached from observed cache state"
+        );
+
+        let mut ordinary_class_name = request(4, 4);
+        ordinary_class_name.policy_class = Some("latency_cached".to_string());
+        let error = router
+            .on_request_arrival(&ordinary_class_name, None, 0.0)
+            .unwrap_err();
+        let rejection = error
+            .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+            .expect("replay should preserve the typed queue rejection");
+        assert_eq!(rejection.policy_class, "latency_uncached");
+        assert_eq!(rejection.current, 0);
+        assert_eq!(rejection.limit, 0);
+
+        router.add_worker(1, false).unwrap();
+        let mut scaled_latency = request(5, 3);
+        scaled_latency.policy_class = Some("latency".to_string());
+        assert!(
+            router
+                .on_request_arrival(&scaled_latency, Some(cached_hashes.clone()), 0.0)
+                .unwrap()
+                .admissions
+                .is_empty(),
+            "a second discovered worker should raise the effective queue limit"
+        );
+        assert_eq!(router.pending_count(), 2);
+
+        router.remove_worker(1).unwrap();
+        let mut rejected_after_shrink = request(6, 3);
+        rejected_after_shrink.policy_class = Some("latency".to_string());
+        let error = router
+            .on_request_arrival(&rejected_after_shrink, Some(cached_hashes), 0.0)
+            .unwrap_err();
+        let rejection = error
+            .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+            .expect("worker removal should retain the typed queue rejection");
+        assert_eq!(rejection.current, 2);
+        assert_eq!(rejection.limit, 1);
+        assert_eq!(router.pending_count(), 2);
+    }
+
+    #[test]
+    fn replay_cache_bucket_ignores_removed_worker_entries() {
+        let path =
+            std::env::temp_dir().join(format!("dynamo-replay-policy-{}.yaml", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: cached
+  - min_tokens: 32
+    bucket: uncached
+policy_classes:
+  - name: cached
+    policy_family: standard
+    cache_bucket: cached
+    quantum: 1
+    prefill_busy_threshold: 0
+  - name: uncached
+    policy_family: standard
+    cache_bucket: uncached
+    quantum: 1
+    prefill_busy_threshold: 1024
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(path.display().to_string()),
+            ..KvRouterConfig::default()
+        };
+        let mut router = OfflineReplayRouter::new(&queueing_args(), Some(config), None, 2).unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        let target = request(2, 2);
+        let target_hashes = ReplayRequestHashes::from_tokens(&target.tokens, router.block_size);
+        router
+            .on_kv_events(vec![store_event(
+                1,
+                1,
+                target_hashes.local_block_hashes[0],
+                StorageTier::Device,
+            )])
+            .unwrap();
+        router.remove_worker(1).unwrap();
+
+        router
+            .on_request_arrival(&request(1, 1), None, 0.0)
+            .unwrap();
+        let effects = router
+            .on_request_arrival(&target, Some(target_hashes), 0.0)
+            .unwrap();
+        assert_eq!(
+            effects.admissions.len(),
+            1,
+            "cache state from a removed worker must not select the cached queue"
+        );
+        assert_eq!(router.pending_count(), 0);
     }
 
     #[test]
