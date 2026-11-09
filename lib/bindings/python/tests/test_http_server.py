@@ -24,6 +24,7 @@ from typing import AsyncGenerator, Dict
 import aiohttp
 import pytest
 
+from dynamo._core import _raise_routed_http_error
 from dynamo.frontend.utils import PromptLogprobsAccumulator
 from dynamo.llm import HttpAsyncEngine, HttpError, HttpService
 from dynamo.runtime import DistributedRuntime
@@ -32,6 +33,7 @@ MSG_CONTAINS_ERROR = "This message contains an 400error."
 MSG_CONTAINS_STATUS_ERROR = "This message contains a 415 status error."
 MSG_CONTAINS_INVALID_ARGUMENT = "This message contains an invalid argument."
 MSG_CONTAINS_INTERNAL_ERROR = "This message contains an internal server error."
+MSG_CONTAINS_ROUTED_ERROR = "This message contains a routed worker's error."
 
 
 class _StatusLikeError(Exception):
@@ -78,6 +80,10 @@ class MockHttpEngine:
             raise ValueError(MSG_CONTAINS_INVALID_ARGUMENT)
         elif MSG_CONTAINS_INTERNAL_ERROR.lower() in user_message.lower():
             raise RuntimeError("Simulated internal error")
+        elif MSG_CONTAINS_ROUTED_ERROR.lower() in user_message.lower():
+            # A worker's HttpError(503) as a routed engine raises it; escaping
+            # the engine keeps the worker's status.
+            _raise_routed_http_error(503, MSG_CONTAINS_ROUTED_ERROR)
 
         # Stream a mock response
         created = int(time.time())
@@ -262,6 +268,12 @@ HTTP_ERROR_CASES = (
         500,
         "Internal server error",
         "Internal Server Error",
+    ),
+    (
+        MSG_CONTAINS_ROUTED_ERROR,
+        503,
+        "Internal server error",
+        "Service Unavailable",
     ),
 )
 

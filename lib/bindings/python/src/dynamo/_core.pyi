@@ -2099,6 +2099,14 @@ def _convert_preprocessed_request(
     """Test hook: the fast path's request (None if it declines) or pythonize's, pythonized back."""
     ...
 
+def _raise_routed_http_error(
+    code: int, message: str, routed_engine: bool = True
+) -> None:
+    """Test hook: raise what a response stream raises for a backend
+    `HttpError(code, message)`: a `RoutedEngine`'s stream by default, any other
+    with `routed_engine=False`."""
+    ...
+
 
 class WorkerType:
     """
@@ -3389,6 +3397,17 @@ class WorkerUnavailable(DynamoException):
 
     Raised by `RoutedEngine.generate`, for example while prefill routing is
     still activating. Re-raise it unchanged to keep the 503.
+    """
+
+    ...
+
+class RoutedEngineError(ValueError):
+    """A backend error raised by `RoutedEngine.generate` and its response stream.
+
+    Raised for every classified error except a validation error, which raises
+    `InvalidArgument`. A chat engine that lets it escape answers with the
+    backend's status, because the original error is restored. `Client` and
+    `KvRouter` streams raise a plain `ValueError` instead.
     """
 
     ...
