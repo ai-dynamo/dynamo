@@ -305,6 +305,8 @@ async fn streaming_text_baseline() {
     .await;
 }
 
+/// Refusal fragments reach unary text and streaming deltas, with ordinary
+/// content first when both are present and the stop reason unchanged.
 #[tokio::test]
 #[serial]
 async fn refusal_fragments_reach_messages_content_and_events() {
