@@ -15,9 +15,9 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/apimachinery/pkg/api/meta"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
@@ -32,41 +32,24 @@ var podMembershipLabels = []string{
 // Setup registers the power-cap propagation controller. The caller registers the
 // podcontroller.ComponentIndex Pod index the controller queries. config and runtimeConfig must be non-nil.
 func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runtimeConfig *commoncontroller.RuntimeConfig) error {
-	r := &Reconciler{client: mgr.GetClient(), groveEnabled: runtimeConfig.Gate.Enabled(features.Grove)}
+	r := &reconciler{client: mgr.GetClient(), groveEnabled: runtimeConfig.Gate.Enabled(features.Grove)}
 
 	// No timed retry covers waiting, so every input that can change the outcome wakes the DGD.
-	// A change to the controller's own condition wakes it too: a pass that read a stale cached
-	// condition and skipped its write then re-observes the persisted one.
 	b := ctrl.NewControllerManagedBy(mgr).
 		Named("dynamographdeployment-power").
 		For(&v1beta1.DynamoGraphDeployment{}, builder.WithPredicates(predicate.Or(
 			predicate.GenerationChangedPredicate{},
 			predicate.AnnotationChangedPredicate{},
-			conditionChangedPredicate(),
 		))).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(config, runtimeConfig)).
 		Watches(&corev1.Pod{}, podcontroller.EnqueueOwners(podcontroller.DGDName), builder.WithPredicates(podPredicate()))
 	if r.groveEnabled {
-		b = b.Owns(&grovev1alpha1.PodCliqueSet{}, builder.WithPredicates(podCliqueSetPredicate()))
+		b = b.Watches(&grovev1alpha1.PodCliqueSet{}, podcontroller.EnqueueOwners(func(obj client.Object) (string, bool) {
+			name := obj.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName]
+			return name, name != ""
+		}), builder.WithPredicates(podCliqueSetPredicate()))
 	}
 	return b.Complete(r)
-}
-
-// conditionChangedPredicate admits DGD updates that change the PowerCapPropagationReady condition.
-func conditionChangedPredicate() predicate.Predicate {
-	return predicate.Funcs{
-		CreateFunc:  func(event.CreateEvent) bool { return false },
-		DeleteFunc:  func(event.DeleteEvent) bool { return false },
-		GenericFunc: func(event.GenericEvent) bool { return false },
-		UpdateFunc: func(e event.UpdateEvent) bool {
-			oldDGD, oldOK := e.ObjectOld.(*v1beta1.DynamoGraphDeployment)
-			newDGD, newOK := e.ObjectNew.(*v1beta1.DynamoGraphDeployment)
-			if !oldOK || !newOK {
-				return false
-			}
-			return !apiequality.Semantic.DeepEqual(meta.FindStatusCondition(oldDGD.Status.Conditions, ConditionType), meta.FindStatusCondition(newDGD.Status.Conditions, ConditionType))
-		},
-	}
 }
 
 // podPredicate admits Pod changes that can change label membership, the cap or terminality.
@@ -95,7 +78,7 @@ func podCliqueSetPredicate() predicate.Predicate {
 				return false
 			}
 			return oldPCS.Generation != newPCS.Generation ||
-				!apiequality.Semantic.DeepEqual(oldPCS.OwnerReferences, newPCS.OwnerReferences) ||
+				oldPCS.Labels[consts.KubeLabelDynamoGraphDeploymentName] != newPCS.Labels[consts.KubeLabelDynamoGraphDeploymentName] ||
 				!apiequality.Semantic.DeepEqual(oldPCS.Status.ObservedGeneration, newPCS.Status.ObservedGeneration) ||
 				!apiequality.Semantic.DeepEqual(oldPCS.Status.UpdateProgress, newPCS.Status.UpdateProgress)
 		},

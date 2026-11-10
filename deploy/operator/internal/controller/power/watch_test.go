@@ -6,12 +6,10 @@ package power
 import (
 	"testing"
 
-	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 )
@@ -28,6 +26,9 @@ func TestPodCliqueSetPredicateAdmitsStatusOnlyBarrierChanges(t *testing.T) {
 		}, want: true},
 		{name: "update ended", change: func(pcs *grovev1alpha1.PodCliqueSet) {
 			pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Unix(1, 0), UpdateEndedAt: new(metav1.Unix(2, 0))}
+		}, want: true},
+		{name: "graph label", change: func(pcs *grovev1alpha1.PodCliqueSet) {
+			pcs.Labels = map[string]string{consts.KubeLabelDynamoGraphDeploymentName: "other"}
 		}, want: true},
 		{name: "unrelated status", change: func(pcs *grovev1alpha1.PodCliqueSet) { pcs.Status.Replicas = 2 }},
 		{name: "unrelated metadata", change: func(pcs *grovev1alpha1.PodCliqueSet) { pcs.Labels = map[string]string{"unrelated": "change"} }},
@@ -71,36 +72,6 @@ func TestPodPredicateFollowsLabelsNotOwners(t *testing.T) {
 
 			t.Log("Label membership, the cap and terminality wake the controller; owner references do not")
 			require.Equal(t, tc.want, podPredicate().Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after}))
-		})
-	}
-}
-
-func TestConditionChangedPredicateAdmitsOnlyThePowerCondition(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		change func(*v1beta1.DynamoGraphDeployment)
-		want   bool
-	}{
-		{name: "power condition changed", change: func(dgd *v1beta1.DynamoGraphDeployment) {
-			meta.SetStatusCondition(&dgd.Status.Conditions, metav1.Condition{Type: ConditionType, Status: metav1.ConditionFalse, Reason: "PodAnnotationMismatch"})
-		}, want: true},
-		{name: "power condition removed", change: func(dgd *v1beta1.DynamoGraphDeployment) {
-			meta.RemoveStatusCondition(&dgd.Status.Conditions, ConditionType)
-		}, want: true},
-		{name: "other condition changed", change: func(dgd *v1beta1.DynamoGraphDeployment) {
-			meta.SetStatusCondition(&dgd.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: "Pending"})
-		}},
-		{name: "other status changed", change: func(dgd *v1beta1.DynamoGraphDeployment) { dgd.Status.State = v1beta1.DGDStateSuccessful }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Change the status of a DGD that carries the power condition")
-			before := &v1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "default", Generation: 2}
-			meta.SetStatusCondition(&before.Status.Conditions, metav1.Condition{Type: ConditionType, Status: metav1.ConditionTrue, Reason: "PodAnnotationsMatch"})
-			after := before.DeepCopy()
-			tc.change(after)
-
-			t.Log("Only the controller's own condition wakes it, so a write skipped on a stale cache is re-observed")
-			require.Equal(t, tc.want, conditionChangedPredicate().Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after}))
 		})
 	}
 }

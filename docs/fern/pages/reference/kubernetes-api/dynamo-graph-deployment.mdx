@@ -277,18 +277,20 @@ The operator maintains observed state under `status`.
     `nvidia.com/dynamo-component-type` labels associate a Pod with the graph's
     worker component, whichever workload created it.
   - `PodAnnotationMismatch` (`False`): annotations are being repaired.
-  - `WaitingForWorkerUpdate` (`False`): Grove has not acknowledged or finished an
-    update of the graph's `PodCliqueSet`; no Pods are patched until it does.
-  - `PodObservationFailed` (`Unknown`): worker Pods or the graph's `PodCliqueSet`
+  - `WaitingForWorkerUpdate` (`False`): Grove has not acknowledged or finished the
+    updates of all `PodCliqueSet`s in the namespace labeled with
+    `nvidia.com/dynamo-graph-deployment-name` for this graph, regardless of name or owner;
+    no Pods are patched until every matching update finishes.
+  - `PodObservationFailed` (`Unknown`): worker Pods or the graph-labeled `PodCliqueSet`s
     could not be observed.
   - `PodPatchFailed` (`False`): a repair failed, including a conflicting
     concurrent Pod update.
 
   When Pods disagree, the condition reports the most severe reason. A separate
   power-cap controller writes this condition and no other status field. It reacts to
-  changes of the DGD, including this condition, its worker Pods and its
-  `PodCliqueSet`, retries conflicts after about 2 seconds, and retries other
-  observation or repair failures after about 10 seconds. These outcomes never change the DGD's
+  desired-input changes of the DGD, relevant worker Pod events and graph-labeled
+  `PodCliqueSet` events. Observation and repair failures, including conflicts, are
+  returned as errors and retried with the controller's rate-limited backoff. These outcomes never change the DGD's
   `Ready` condition, state, or `observedGeneration`, and DGD workload failures do not
   stop propagation. The condition is removed when the graph leaves this scope. It
   does not prove GPU hardware enforcement.

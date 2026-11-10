@@ -19,16 +19,12 @@ import (
 const fieldManager = "dynamo-power-cap"
 
 // applyCondition server-side applies the controller's only DGD status field. A nil condition applies
-// an empty list, which removes the entry this field manager owns. An unchanged condition is not written,
-// and an unchanged status keeps its lastTransitionTime. dgd must be non-nil.
+// an empty list, which removes the entry this field manager owns. Every pass applies the condition;
+// an unchanged cached status keeps its lastTransitionTime. dgd must be non-nil.
 func applyCondition(ctx context.Context, c client.Client, dgd *v1beta1.DynamoGraphDeployment, condition *metav1.Condition) error {
 	conditions := []any{}
 	if condition != nil {
 		current := meta.FindStatusCondition(dgd.Status.Conditions, ConditionType)
-		if current != nil && current.Status == condition.Status && current.Reason == condition.Reason &&
-			current.Message == condition.Message && current.ObservedGeneration == condition.ObservedGeneration {
-			return nil
-		}
 		desired := *condition
 		desired.LastTransitionTime = metav1.Now()
 		if current != nil && current.Status == condition.Status {

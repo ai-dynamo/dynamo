@@ -47,33 +47,36 @@ func (r *componentRestartProgressResolver) Resolve(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	inProgress []string,
 ) []string {
-	logger := log.FromContext(ctx)
-	updatedInProgress := make([]string, 0, len(inProgress))
-	for _, componentName := range inProgress {
-		isFullyUpdated, reason := r.checkComponentFullyUpdated(ctx, dgd, componentName)
-		if !isFullyUpdated {
-			logger.V(1).Info("component not fully updated", "componentName", componentName, "reason", reason)
-			updatedInProgress = append(updatedInProgress, componentName)
-		}
-	}
-	return updatedInProgress
+	return r.resolve(ctx, dgd, inProgress, nil)
 }
 
-// retainedResolver observes restart progress on the worker generation a cap-only edit retains,
-// instead of the generation the edited spec would select.
+// retainedResolver pins restart observations to the retained worker generation.
 func (r *componentRestartProgressResolver) retainedResolver(workerHash string) restartProgressResolver {
 	return func(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
-		logger := log.FromContext(ctx)
-		updatedInProgress := make([]string, 0, len(inProgress))
-		for _, componentName := range inProgress {
-			isFullyUpdated, reason := r.checkComponentReadyAtWorkerHashes(ctx, dgd, componentName, []string{workerHash})
-			if !isFullyUpdated {
-				logger.V(1).Info("component not fully updated", "componentName", componentName, "reason", reason)
-				updatedInProgress = append(updatedInProgress, componentName)
-			}
-		}
-		return updatedInProgress
+		return r.resolve(ctx, dgd, inProgress, []string{workerHash})
 	}
+}
+
+// resolve filters unfinished components; nil hashes select the ordinary worker generation.
+func (r *componentRestartProgressResolver) resolve(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment, inProgress, hashes []string) []string {
+	logger := log.FromContext(ctx)
+	remaining := make([]string, 0, len(inProgress))
+
+	// Use the same readiness filter for ordinary and retained worker generations.
+	for _, name := range inProgress {
+		var ready bool
+		var reason string
+		if hashes == nil {
+			ready, reason = r.checkComponentFullyUpdated(ctx, dgd, name)
+		} else {
+			ready, reason = r.checkComponentReadyAtWorkerHashes(ctx, dgd, name, hashes)
+		}
+		if !ready {
+			logger.V(1).Info("component not fully updated", "componentName", name, "reason", reason)
+			remaining = append(remaining, name)
+		}
+	}
+	return remaining
 }
 
 func (r *componentRestartProgressResolver) checkComponentFullyUpdated(

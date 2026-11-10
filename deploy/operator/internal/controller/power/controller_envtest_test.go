@@ -7,6 +7,7 @@ package power
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -14,16 +15,19 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	podcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/pods"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 const (
@@ -119,7 +123,7 @@ func TestControllerWaitsForGroveUpdate(t *testing.T) {
 	require.NoError(t, c.Create(t.Context(), dgd))
 
 	t.Log("Grove has not acknowledged the DGD's PodCliqueSet; its worker Pod still carries 300 W")
-	pcs := &grovev1alpha1.PodCliqueSet{Name: dynamo.PCSNameForDGD(dgd, (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController), Namespace: env.Namespace(), OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}}
+	pcs := &grovev1alpha1.PodCliqueSet{Name: "legacy-pcs", Namespace: env.Namespace(), Labels: map[string]string{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name}}
 	require.NoError(t, c.Create(t.Context(), pcs))
 	pod := testPod(dgd, "worker")
 	require.NoError(t, c.Create(t.Context(), pod))
@@ -195,4 +199,106 @@ func TestApplyConditionCoexistsWithDGDStatusUpdate(t *testing.T) {
 	require.Nil(t, meta.FindStatusCondition(dgd.Status.Conditions, ConditionType))
 	require.Equal(t, "Ready", meta.FindStatusCondition(dgd.Status.Conditions, "Ready").Reason)
 	require.Equal(t, v1beta1.DGDStateSuccessful, dgd.Status.State)
+}
+
+func TestReconcileReturnsAPIErrors(t *testing.T) {
+	for _, scenario := range []string{"list", "conflict", "rejection", "status-too"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Log("Create a graph and a worker needing repair")
+			env := sharedEnv.ForTest(t)
+			c := env.Client()
+			dgd := testDGD(env.Namespace(), "component")
+			dgd.UID, dgd.Generation = "", 0
+			dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
+			require.NoError(t, c.Create(t.Context(), dgd))
+			watchClient, err := client.NewWithWatch(env.RESTConfig(), client.Options{Scheme: c.Scheme()})
+			require.NoError(t, err)
+			podReader := testClient(t).WithObjects(testWorkerPod(dgd, "component")).Build()
+			propagationErr := errors.New("API denied")
+			if scenario == "conflict" {
+				propagationErr = apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, "worker", propagationErr)
+			}
+			statusErr := errors.New("status denied")
+			wrapped := interceptor.NewClient(watchClient, interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if scenario == "list" {
+						return propagationErr
+					}
+					return podReader.List(ctx, list, opts...)
+				},
+				Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+					return propagationErr
+				},
+				SubResourceApply: func(ctx context.Context, c client.Client, sub string, obj runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption) error {
+					if scenario == "status-too" {
+						return statusErr
+					}
+					return c.SubResource(sub).Apply(ctx, obj, opts...)
+				},
+			})
+
+			t.Log("The reconcile reports errors for rate-limited retry after attempting the condition")
+			result, err := (&reconciler{client: wrapped}).Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dgd)})
+			require.ErrorIs(t, err, propagationErr)
+			require.Zero(t, result)
+			if scenario == "status-too" {
+				require.ErrorIs(t, err, statusErr)
+			} else {
+				require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(dgd), dgd))
+				condition := meta.FindStatusCondition(dgd.Status.Conditions, ConditionType)
+				require.NotNil(t, condition)
+				wantReason := "PodPatchFailed"
+				if scenario == "list" {
+					wantReason = "PodObservationFailed"
+				}
+				require.Equal(t, wantReason, condition.Reason)
+			}
+		})
+	}
+}
+
+func TestReconcileRestoresConditionWithStaleCache(t *testing.T) {
+	t.Log("Cache a converged graph, then overwrite the stored condition")
+	env := sharedEnv.ForTest(t)
+	c := env.Client()
+	dgd := testDGD(env.Namespace(), "component")
+	dgd.UID, dgd.Generation = "", 0
+	require.NoError(t, c.Create(t.Context(), dgd))
+	podReaderInitial := testClient(t).Build()
+	initialClient, err := client.NewWithWatch(env.RESTConfig(), client.Options{Scheme: c.Scheme()})
+	require.NoError(t, err)
+	r := &reconciler{client: interceptor.NewClient(initialClient, interceptor.Funcs{List: func(ctx context.Context, _ client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+		return podReaderInitial.List(ctx, list, opts...)
+	}})}
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dgd)}
+	_, err = r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	require.NoError(t, c.Get(t.Context(), req.NamespacedName, dgd))
+	cached := dgd.DeepCopy()
+	want := *meta.FindStatusCondition(cached.Status.Conditions, ConditionType)
+	meta.SetStatusCondition(&dgd.Status.Conditions, metav1.Condition{Type: ConditionType, Status: metav1.ConditionFalse, Reason: "Stale"})
+	meta.SetStatusCondition(&dgd.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Ready"})
+	require.NoError(t, c.Status().Update(t.Context(), dgd))
+	watchClient, err := client.NewWithWatch(env.RESTConfig(), client.Options{Scheme: c.Scheme()})
+	require.NoError(t, err)
+	podReader := testClient(t).Build()
+	r.client = interceptor.NewClient(watchClient, interceptor.Funcs{List: func(ctx context.Context, _ client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+		return podReader.List(ctx, list, opts...)
+	}, Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+		if graph, ok := obj.(*v1beta1.DynamoGraphDeployment); ok {
+			*graph = *cached.DeepCopy()
+			return nil
+		}
+		return c.Get(ctx, key, obj, opts...)
+	}})
+
+	t.Log("Repeated reconciles restore persisted status without a manager or self-condition watch")
+	for i := range 3 {
+		t.Logf("pass %d", i)
+		_, err := r.Reconcile(t.Context(), req)
+		require.NoError(t, err)
+		require.NoError(t, c.Get(t.Context(), req.NamespacedName, dgd))
+		require.Equal(t, want, *meta.FindStatusCondition(dgd.Status.Conditions, ConditionType))
+		require.Equal(t, "Ready", meta.FindStatusCondition(dgd.Status.Conditions, "Ready").Reason)
+	}
 }
