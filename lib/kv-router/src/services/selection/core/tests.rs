@@ -248,6 +248,7 @@ fn lease_operation<'a>(
     track_active_blocks: bool,
 ) -> SelectionOperation<'a> {
     SelectionOperation {
+        accounting_attribution: Default::default(),
         key: default_key(),
         prompt,
         router_config_override: None,
@@ -1115,6 +1116,151 @@ async fn injected_lora_filter_narrows_candidates() {
         request.prompt.lora_name = Some("adapter-a".to_string());
         let response = core.select(request).await.expect("select");
         assert_eq!(response.worker_id, 2);
+    }
+}
+
+#[tokio::test]
+async fn explicit_reservation_preserves_legacy_adapter_attribution() {
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+    let (inbound_tx, inbound_rx) = mpsc::channel(16);
+    let channels = parking_lot::Mutex::new(Some(HostReplicaChannels {
+        outbound: Some(outbound_tx),
+        inbound_tx,
+        inbound_rx,
+        process_id: 7,
+        ingress_observer: None,
+    }));
+    let core = core_with_host(SelectionHost {
+        replication: HostReplication {
+            channels: Some(Arc::new(move |_| channels.lock().take())),
+            ..HostReplication::default()
+        },
+        ..SelectionHost::default()
+    });
+    core.upsert_worker(worker(2)).await.unwrap();
+    let name = "dynamo-lora-legacy-alias";
+    let mut prompt = prompt();
+    prompt.lora_name = Some(name.into());
+    core.create_reservation(ReservationRequest {
+        worker_id: Some(2),
+        prompt,
+        ..replay_reservation("explicit-accounting")
+    })
+    .await
+    .unwrap();
+    let added = tokio::time::timeout(Duration::from_secs(5), outbound_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        added.data,
+        ActiveSequenceEventData::AddRequest { .. }
+    ));
+    assert_eq!(added.lora_name.as_deref(), Some(name));
+    let scheduler = &core.entry(&default_key()).unwrap().scheduler;
+    assert_eq!(scheduler.get_active_lora_counts().get(name), Some(&1));
+    core.free_reservation("explicit-accounting").await.unwrap();
+    let freed = tokio::time::timeout(Duration::from_secs(5), outbound_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(freed.data, ActiveSequenceEventData::Free));
+    assert_eq!(freed.lora_name.as_deref(), Some(name));
+    assert!(scheduler.get_active_lora_counts().is_empty());
+}
+
+#[tokio::test]
+async fn accounting_attribution_preserves_routing_identity_and_reservation_replay() {
+    use crate::scheduling::AccountingAttribution;
+
+    struct AdapterFilter;
+    impl LoraWorkerFilter for AdapterFilter {
+        fn filter_worker_ids_for_lora(&self, name: &str, available: &[WorkerId]) -> Vec<WorkerId> {
+            assert_eq!(name, "dynamo-lora-legacy-alias");
+            available.iter().copied().filter(|id| *id == 2).collect()
+        }
+    }
+
+    for attribution in [
+        AccountingAttribution::UseRoutingName,
+        AccountingAttribution::Exclude,
+    ] {
+        for replay in [false, true] {
+            let (outbound_tx, mut outbound_rx) = mpsc::channel(16);
+            let (inbound_tx, inbound_rx) = mpsc::channel(16);
+            let channels = parking_lot::Mutex::new(Some(HostReplicaChannels {
+                outbound: Some(outbound_tx),
+                inbound_tx,
+                inbound_rx,
+                process_id: 7,
+                ingress_observer: None,
+            }));
+            let core = core_with_host(SelectionHost {
+                eligibility: HostEligibility {
+                    lora_worker_filter: Some(Arc::new(AdapterFilter)),
+                },
+                replication: HostReplication {
+                    channels: Some(Arc::new(move |_| channels.lock().take())),
+                    ..HostReplication::default()
+                },
+                ..SelectionHost::default()
+            });
+            core.upsert_worker(worker(1)).await.unwrap();
+            core.upsert_worker(worker(2)).await.unwrap();
+            let mut prompt = prompt();
+            prompt.lora_name = Some("dynamo-lora-legacy-alias".into());
+            let expected_hashes = prompt.view().block_hashes_for_indexer(4, false).unwrap();
+            let mut operation = lease_operation(prompt.view(), "accounting", true);
+            operation.accounting_attribution = attribution;
+            operation.return_routing_hashes = true;
+            operation.admission = if replay {
+                SelectionAdmission::Query {
+                    request_id: Some("accounting".into()),
+                }
+            } else {
+                SelectionAdmission::Book {
+                    selection_id: "accounting".into(),
+                }
+            };
+            operation.replay_id = replay.then(|| "accounting".into());
+            let SelectionOutcome::Selected(selected) =
+                core.run_selection(operation).await.result.unwrap()
+            else {
+                panic!("selection must succeed");
+            };
+            assert_eq!(selected.response.best_worker.worker_id, 2);
+            assert_eq!(selected.routing_hashes, Some(expected_hashes));
+            if replay {
+                assert!(outbound_rx.try_recv().is_err());
+                core.create_reservation(replay_reservation("accounting"))
+                    .await
+                    .unwrap();
+            }
+            let expected_name = (attribution == AccountingAttribution::UseRoutingName)
+                .then(|| "dynamo-lora-legacy-alias".to_string());
+            let added = tokio::time::timeout(Duration::from_secs(5), outbound_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                added.data,
+                ActiveSequenceEventData::AddRequest { .. }
+            ));
+            assert_eq!(added.lora_name, expected_name);
+            let scheduler = &core.entry(&default_key()).unwrap().scheduler;
+            assert_eq!(
+                scheduler.get_active_lora_counts().len(),
+                usize::from(expected_name.is_some())
+            );
+            core.free_reservation("accounting").await.unwrap();
+            let freed = tokio::time::timeout(Duration::from_secs(5), outbound_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(freed.data, ActiveSequenceEventData::Free));
+            assert_eq!(freed.lora_name, expected_name);
+            assert!(scheduler.get_active_lora_counts().is_empty());
+        }
     }
 }
 

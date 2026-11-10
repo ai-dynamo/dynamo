@@ -298,11 +298,13 @@ fn completion_logprobs_match_typed_wire_shape() {
         bytes: Some(b"token_id:100".to_vec()),
         top_logprobs: vec![
             dynamo_protocols::types::TopLogprobs {
+                token_id: None,
                 token: "token_id:7".to_string(),
                 logprob: -9999.0,
                 bytes: Some(b"token_id:7".to_vec()),
             },
             dynamo_protocols::types::TopLogprobs {
+                token_id: None,
                 token: "token_id:100".to_string(),
                 logprob: -9999.0,
                 bytes: Some(b"token_id:100".to_vec()),
