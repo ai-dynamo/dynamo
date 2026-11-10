@@ -1046,11 +1046,14 @@ func Test_reconcileLeaderWorkerSetResources_DeletesOversizedLegacyLeaderWorkerSe
 			t.Log("Check legacy ownership and serving groups still control cleanup")
 			if tt.ownedByDCD && !tt.failReplacementLWS && !tt.wantLegacyGone {
 				require.Equal(t, []string{legacyName}, result.serviceReplicaStatus.ComponentNames)
-				t.Log("Scale past group index 9 without renaming the existing legacy LWS")
+			}
+
+			if !tt.failReplacementLWS {
+				t.Log("Scale past group index 9 without renaming the selected LWS")
 				dcd.Spec.Replicas = new(int32(11))
 				again, err := r.reconcileLeaderWorkerSetResources(ctx, dcd)
 				require.NoError(t, err)
-				require.Equal(t, []string{legacyName}, again.serviceReplicaStatus.ComponentNames)
+				require.Equal(t, result.serviceReplicaStatus.ComponentNames, again.serviceReplicaStatus.ComponentNames)
 			}
 			err = r.Get(ctx, types.NamespacedName{Name: legacyName, Namespace: "default"}, &leaderworkersetv1.LeaderWorkerSet{})
 			if tt.wantLegacyGone {
