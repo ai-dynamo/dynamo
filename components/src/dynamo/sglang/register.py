@@ -260,17 +260,8 @@ async def _register_model_with_runtime_config(
     """
     runtime_config = await get_runtime_config(engine, server_args, dynamo_args)
     if runtime_config is not None and forwards_kv_hints:
-        state_agent = bool(inventory_sources(engine))
-        # A state-agent worker's cache owner serves its blocks, so it advertises no
-        # source endpoint, as vLLM does in state-agent mode.
-        publish_kvcr_hint_capabilities(
-            runtime_config,
-            engine,
-            server_args,
-            worker_type,
-            publish_source_endpoints=not state_agent,
-        )
-        if state_agent:
+        publish_kvcr_hint_capabilities(runtime_config, engine, server_args, worker_type)
+        if inventory_sources(engine):
             runtime_config.kv_event_source_mode = "state_agent_v2"
 
     if dynamo_args.use_sglang_tokenizer and not (

@@ -10,7 +10,6 @@ import pytest
 
 from dynamo.common import kv_state_agent
 from dynamo.common.constants import (
-    KV_HINT_TRANSFER_CAPABILITY_KEY,
     KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
     DisaggregationMode,
 )
@@ -176,10 +175,9 @@ def test_linker_registration_uses_state_agent(monkeypatch):
         )
     )
     assert runtime.kv_event_source_mode == "state_agent_v2"
-    # The cache owner serves a state-agent worker's blocks, so the worker remains a hint
-    # target but advertises no source endpoint.
-    assert values[KV_HINT_TRANSFER_CAPABILITY_KEY] is True
-    assert KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY not in values
+    assert values[KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY] == {
+        "0": source["source_control_endpoint"]
+    }
 
 
 @pytest.mark.parametrize(

@@ -623,18 +623,15 @@ async fn the_default_policy_gives_copies_no_credit() {
 }
 
 #[tokio::test]
-async fn workers_without_a_source_endpoint_are_not_router_hint_sources() {
+async fn state_agent_workers_are_not_router_hint_sources() {
     let (core, _entry, tokens) = hint_fixture(|request| {
         hint_capable(request);
         if request.worker_id == 1 {
-            // A state-agent worker's cache owner serves its blocks, so it
-            // advertises no source endpoint.
             request.kv_event_source_mode = Some("state_agent_v2".to_string());
-            request.router_hint_source_control_endpoints.clear();
         }
     })
     .await;
-    // Worker 1 holds the prefix but advertises no source endpoint.
+    // Worker 1 holds the prefix but reports through a state agent.
     let response = reserve_pinned(&core, "to-worker-2", &tokens, 2).await;
     assert!(response.kv_hint.is_none());
 }
@@ -4087,8 +4084,7 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
     use crate::protocols::{
         ResidencyOwner, ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
     };
-    // A state-agent worker advertises no source endpoint; its cache owner serves its blocks.
-    let mut stale = hint_config("prefill", &[]);
+    let mut stale = hint_config("prefill", &[(0, "tcp://stale-worker:23280")]);
     stale.kv_event_source_mode = Some("state_agent_v2".to_string());
     let configs = HashMap::from([(7, hint_config("prefill", &[])), (8, stale)]);
     let owner = CacheOwnerId::new(

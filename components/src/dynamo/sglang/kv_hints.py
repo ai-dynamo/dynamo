@@ -125,13 +125,9 @@ def kvcr_hint_endpoints(
 
 
 def publish_kvcr_hint_capabilities(
-    runtime_config, engine, server_args, worker_type, *, publish_source_endpoints=True
+    runtime_config, engine, server_args, worker_type
 ) -> None:
-    """Publish KVCR sources explicitly reported by a supported SGLang worker.
-
-    A state-agent worker passes ``publish_source_endpoints=False``: its cache owner
-    serves its blocks, so it remains a hint target but never a source.
-    """
+    """Publish KVCR sources explicitly reported by a supported SGLang worker."""
     server_args = resolved_server_args(server_args)
     linker = is_supported_kvcr_linker_topology(server_args)
     if (
@@ -151,13 +147,9 @@ def publish_kvcr_hint_capabilities(
     )
     if not endpoints:
         return
-    values: list[tuple[str, object]] = [
-        (KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, str(worker_type))
-    ]
-    if publish_source_endpoints:
-        values.append(
-            (KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY, endpoints)
-        )
-    values.append((KV_HINT_TRANSFER_CAPABILITY_KEY, True))
-    for key, value in values:
+    for key, value in (
+        (KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, str(worker_type)),
+        (KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY, endpoints),
+        (KV_HINT_TRANSFER_CAPABILITY_KEY, True),
+    ):
         runtime_config.set_engine_specific(key, json.dumps(value))
