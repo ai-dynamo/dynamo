@@ -349,10 +349,9 @@ where
 
 /// Migration's response stream.
 ///
-/// A stream that reads the active attempt's items where the attempt's stream returned them, in
-/// place of `unfold` and `fuse` over [`RetryManager::next`], which moved the manager and the
-/// item (about 1 KB) through a new future on every item. Only a migration, which awaits the
-/// next attempt's dispatch, runs as a future, and that future owns the manager until it ends.
+/// It reads each item of the active attempt where the attempt's stream returned it. Only a
+/// migration, which awaits the next attempt's dispatch, runs as a future, and that future owns
+/// the manager until it ends.
 // The large variant is the one every item is read through. Boxing the manager to shrink the
 // enum would cost an allocation per request and an indirection per item, for the sake of the
 // rare variants.
@@ -363,22 +362,16 @@ where
 {
     /// Reading the active attempt.
     Streaming(RetryManager<Resp>),
-    /// Migrating on a failure of the active attempt, or reading after the manager lost its
-    /// attempt: [`RetryManager::migrate_on`] and [`RetryManager::next`] in a future. Its output
-    /// gives the manager back with the next item, or with `None` at the end.
+    /// Migrating on a failure of the active attempt: [`RetryManager::migrate_on`] in a future.
+    /// Its output gives the manager back, with the failure when no next attempt started.
     Migrating(MigrationFuture<Resp>),
-    /// Ended. The manager, and with it the attempt's stream, is dropped when the stream ends,
-    /// as `unfold` dropped it, rather than when its caller drops the stream.
+    /// Ended. The manager, and with it the attempt's stream, drops when the stream ends.
     Ended,
 }
 
 /// The future of [`Migrated::Migrating`].
 type MigrationFuture<Resp> =
     Pin<Box<dyn Future<Output = (RetryManager<Resp>, Option<Annotated<Resp>>)> + Send>>;
-
-// Nothing in the stream is pinned: the manager is moved freely, as `unfold` moved it, and the
-// future is boxed.
-impl<Resp> Unpin for Migrated<Resp> where Resp: Data + HasTokenIds {}
 
 impl<Resp> Stream for Migrated<Resp>
 where
@@ -394,58 +387,47 @@ where
         loop {
             match this {
                 Migrated::Streaming(manager) => {
-                    if let Some(stream) = manager.next_stream.as_mut() {
-                        // Edit the item inside the `Poll` the attempt's stream returned, and
-                        // return that same value: taking it out and wrapping it again would
-                        // move it twice more.
-                        let mut poll = stream.poll_next_unpin(cx);
-                        match &mut poll {
-                            Poll::Pending => return poll,
-                            Poll::Ready(None) => {
-                                *this = Migrated::Ended;
+                    let Some(stream) = manager.next_stream.as_mut() else {
+                        // `RetryManager::build` starts an attempt, and nothing clears it.
+                        tracing::error!("Migration has no active attempt");
+                        *this = Migrated::Ended;
+                        return Poll::Ready(Some(Annotated::from_error("next_stream is None")));
+                    };
+                    // Edit the item inside the `Poll` the attempt's stream returned, and
+                    // return that same value: taking it out and wrapping it again would
+                    // move it twice more.
+                    let mut poll = stream.poll_next_unpin(cx);
+                    match &mut poll {
+                        Poll::Pending => return poll,
+                        Poll::Ready(None) => {
+                            *this = Migrated::Ended;
+                            return poll;
+                        }
+                        Poll::Ready(Some(response)) => {
+                            if manager.accept(response) {
                                 return poll;
                             }
-                            Poll::Ready(Some(response)) => {
-                                if manager.accept(response) {
-                                    return poll;
-                                }
-                            }
                         }
-                        let Poll::Ready(Some(response)) = poll else {
-                            unreachable!("only a failure to migrate on gets here");
-                        };
-                        let Migrated::Streaming(mut manager) =
-                            std::mem::replace(this, Migrated::Ended)
-                        else {
-                            unreachable!("matched above");
-                        };
-                        *this = Migrated::Migrating(Box::pin(async move {
-                            let next = match manager.migrate_on(response).await {
-                                Some(response) => Some(response),
-                                None => manager.next().await,
-                            };
-                            (manager, next)
-                        }));
-                    } else {
-                        // `next` reports a manager without an attempt as an error item.
-                        let Migrated::Streaming(mut manager) =
-                            std::mem::replace(this, Migrated::Ended)
-                        else {
-                            unreachable!("matched above");
-                        };
-                        *this = Migrated::Migrating(Box::pin(async move {
-                            let next = manager.next().await;
-                            (manager, next)
-                        }));
                     }
+                    let Poll::Ready(Some(response)) = poll else {
+                        unreachable!("only a failure to migrate on gets here");
+                    };
+                    let Migrated::Streaming(mut manager) = std::mem::replace(this, Migrated::Ended)
+                    else {
+                        unreachable!("matched above");
+                    };
+                    *this = Migrated::Migrating(Box::pin(async move {
+                        let failure = manager.migrate_on(response).await;
+                        (manager, failure)
+                    }));
                 }
                 Migrated::Migrating(future) => {
-                    let (manager, next) = ready!(future.as_mut().poll(cx));
-                    *this = match next {
-                        Some(_) => Migrated::Streaming(manager),
-                        None => Migrated::Ended,
-                    };
-                    return Poll::Ready(next);
+                    let (manager, failure) = ready!(future.as_mut().poll(cx));
+                    *this = Migrated::Streaming(manager);
+                    if failure.is_some() {
+                        return Poll::Ready(failure);
+                    }
+                    // Read the next attempt's items in place, from the top.
                 }
                 Migrated::Ended => return Poll::Ready(None),
             }
@@ -596,7 +578,10 @@ where
         Ok(slf)
     }
 
-    pub async fn next(&mut self) -> Option<Annotated<Resp>> {
+    /// The next response, read as [`Migrated`] reads it: the tests drive the manager through
+    /// this.
+    #[cfg(test)]
+    async fn next(&mut self) -> Option<Annotated<Resp>> {
         loop {
             let response_stream = match self.next_stream.as_mut() {
                 Some(stream) => stream,
@@ -641,10 +626,9 @@ where
     /// attempt and return `None`, so the caller reads on from it. When no attempt can start,
     /// return `response` to the client.
     async fn migrate_on(&mut self, mut response: Annotated<Resp>) -> Option<Annotated<Resp>> {
-        let err = response
-            .error
-            .as_ref()
-            .expect("migrate_on is called with a failure");
+        let Some(err) = response.error.as_ref() else {
+            return Some(response);
+        };
         // Check if this is a migratable error that should trigger stream recreation.
         let Some(migration_error) = migratable_error_in_chain(err) else {
             tracing::warn!(error = %err, "Migration eligibility had no semantic error");
@@ -2171,6 +2155,74 @@ mod tests {
             "the attempt's stream must be dropped when Migration's stream ends"
         );
         assert!(stream.next().await.is_none(), "an ended stream stays ended");
+    }
+
+    /// `inner`, with each response stream returning `Pending` once before each item.
+    struct PendingEngine {
+        inner: Arc<MockEngine>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for PendingEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+            let stream = self.inner.generate(request).await?;
+            let context = stream.context();
+            let stream = stream.then(|response| async move {
+                tokio::task::yield_now().await;
+                response
+            });
+            Ok(ResponseStream::new(Box::pin(stream), context))
+        }
+    }
+
+    /// A mid-stream migration gives the same responses when the attempts' streams are pending
+    /// before each item as when they are always ready.
+    #[tokio::test]
+    async fn migration_output_is_the_same_when_the_attempt_is_pending_between_items() {
+        async fn tokens(pending: bool) -> (Vec<Vec<u32>>, u32) {
+            let context_id = uuid::Uuid::new_v4().to_string();
+            let mock = Arc::new(MockEngine::new(
+                MockBehavior::MidStreamFail { fail_after: 5 },
+                10,
+                100,
+                context_id.clone(),
+            ));
+            let calls = mock.call_count.clone();
+            let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+                if pending {
+                    Arc::new(PendingEngine { inner: mock })
+                } else {
+                    mock
+                };
+            let request =
+                Context::with_id_and_metadata(create_mock_request(10), context_id, BTreeMap::new());
+            let migration =
+                Migration::new(3, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+            let tokens = migration
+                .generate(request, engine)
+                .await
+                .unwrap()
+                .map(|response| {
+                    assert!(response.err().is_none(), "{response:?}");
+                    response.data.map(|data| data.token_ids).unwrap_or_default()
+                })
+                .collect()
+                .await;
+            (tokens, calls.load(Ordering::SeqCst))
+        }
+
+        let ready = tokens(false).await;
+        assert_eq!(
+            ready.0,
+            (101..=110).map(|token| vec![token]).collect::<Vec<_>>()
+        );
+        assert_eq!(ready.1, 2, "one migration");
+        assert_eq!(tokens(true).await, ready);
     }
 
     #[tokio::test]
