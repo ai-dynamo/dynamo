@@ -181,6 +181,30 @@ def resolve_model_family(model_name: str) -> Optional[ModelFamily]:
     return None
 
 
+# Encoder-only needs only enough KV for vLLM's init lifecycle.
+_ENCODER_KV_CACHE_MEMORY_BYTES = 64 * 1024 * 1024
+
+
+def _encoder_kv_cache_memory_bytes() -> int:
+    """KV cache bytes for the encoder-only engine.
+
+    vLLM carves its frontend multimodal (GPU video decoder) budget out of the
+    KV cache. The encoder-only engine never decodes media, so add that budget
+    back on top of the default; the KV cache vLLM allocates is unchanged.
+    """
+    override = os.getenv("DYN_VLLM_ENCODER_KV_CACHE_MEMORY_BYTES")
+    if override is not None:
+        return int(override)
+    try:
+        from vllm.config import MultiModalConfig
+        from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
+    except ImportError:
+        return _ENCODER_KV_CACHE_MEMORY_BYTES
+    probe = 1 << 50
+    reserved = probe - reserve_mm_ipc_gpu_memory(probe, MultiModalConfig())
+    return _ENCODER_KV_CACHE_MEMORY_BYTES + reserved
+
+
 def load_vision_model(
     model_id: str, enforce_eager: bool = False, trust_remote_code: bool = False
 ) -> torch.nn.Module:
@@ -208,12 +232,7 @@ def load_vision_model(
                 gpu_memory_utilization=float(
                     os.getenv("DYN_VLLM_ENCODER_GPU_MEMORY_UTILIZATION", "0.2")
                 ),
-                kv_cache_memory_bytes=int(
-                    os.getenv(
-                        "DYN_VLLM_ENCODER_KV_CACHE_MEMORY_BYTES",
-                        str(1024 * 1024 * 64),
-                    )
-                ),  # Encoder-only needs only enough KV for vLLM's init lifecycle.
+                kv_cache_memory_bytes=_encoder_kv_cache_memory_bytes(),
                 max_num_seqs=int(os.getenv("DYN_VLLM_ENCODER_MAX_NUM_SEQS", "64")),
                 max_model_len=1,
                 mm_encoder_only=True,

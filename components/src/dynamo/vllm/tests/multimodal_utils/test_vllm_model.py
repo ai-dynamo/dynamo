@@ -77,6 +77,23 @@ class TestLoadVisionModel:
         assert kwargs["mm_device_do_normalize"] is False
         assert loaded is fake_visual
 
+    @pytest.mark.parametrize(
+        "backend", ["pynvvideocodec", "opencv"], ids=["gpu-decoder", "cpu-decoder"]
+    )
+    def test_encoder_kv_cache_survives_decoder_reservation(self, monkeypatch, backend):
+        from vllm.config import MultiModalConfig
+        from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
+
+        monkeypatch.delenv("DYN_VLLM_ENCODER_KV_CACHE_MEMORY_BYTES", raising=False)
+        monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", backend)
+
+        requested = model_module._encoder_kv_cache_memory_bytes()
+
+        assert (
+            reserve_mm_ipc_gpu_memory(requested, MultiModalConfig())
+            == model_module._ENCODER_KV_CACHE_MEMORY_BYTES
+        )
+
     def test_encoder_kernel_warmup_patch_is_scoped(self, monkeypatch):
         worker_module = import_module("vllm.v1.worker.gpu_worker")
         original_kernel_warmup = worker_module.kernel_warmup
