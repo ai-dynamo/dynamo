@@ -3713,15 +3713,8 @@ impl OpenAIPreprocessor {
         // survives into output for the parser to consume. See PR #9778.
         let mut visible_tool_parser_end_token_ids = Vec::new();
         if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
-            visible_tool_parser_end_token_ids = self
-                .remove_tool_parser_end_tokens_from_hidden_stops(
-                    request,
-                    stop_tokens,
-                    stop_conditions
-                        .stop_token_ids
-                        .as_deref()
-                        .unwrap_or_default(),
-                )?;
+            visible_tool_parser_end_token_ids =
+                self.remove_tool_parser_end_tokens_from_hidden_stops(request, stop_tokens)?;
         }
         if !visible_tool_parser_end_token_ids.is_empty() {
             let visible_stops = stop_conditions
@@ -3868,7 +3861,6 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
         hidden_stop_token_ids: &mut Vec<TokenIdType>,
-        user_stop_token_ids: &[TokenIdType],
     ) -> Result<Vec<TokenIdType>> {
         let has_tools = Self::request_has_effective_tools(request);
         let tool_choice_none = request
@@ -3899,13 +3891,6 @@ impl OpenAIPreprocessor {
                     "Failed to encode tool-call end token {end_token:?} for parser {tool_call_parser:?}"
                 )
             })?;
-            if encoded
-                .token_ids()
-                .iter()
-                .any(|id| user_stop_token_ids.contains(id))
-            {
-                continue;
-            }
             let was_hidden_eos =
                 Self::remove_single_token_marker(hidden_stop_token_ids, encoded.token_ids());
             if !was_hidden_eos {
@@ -13171,7 +13156,7 @@ responses_tools: None,
         let preprocessor = hidden_stop_preprocessor();
         let mut dynamic_hidden = vec![HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID, 7];
         let dynamic_visible = preprocessor
-            .remove_tool_parser_end_tokens_from_hidden_stops(&dynamic, &mut dynamic_hidden, &[])
+            .remove_tool_parser_end_tokens_from_hidden_stops(&dynamic, &mut dynamic_hidden)
             .unwrap();
         assert_eq!(
             dynamic_visible,
@@ -13181,7 +13166,7 @@ responses_tools: None,
 
         let mut none_hidden = vec![HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID, 7];
         let none_visible = preprocessor
-            .remove_tool_parser_end_tokens_from_hidden_stops(&none, &mut none_hidden, &[])
+            .remove_tool_parser_end_tokens_from_hidden_stops(&none, &mut none_hidden)
             .unwrap();
         assert!(none_visible.is_empty());
         assert_eq!(
@@ -13225,23 +13210,12 @@ responses_tools: None,
                 }))
                 .unwrap();
             let mut hidden = vec![HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID, 7];
-            let user_stops = request
-                .extract_stop_conditions()
-                .unwrap()
-                .stop_token_ids
-                .unwrap_or_default();
             let visible = preprocessor
-                .remove_tool_parser_end_tokens_from_hidden_stops(&request, &mut hidden, &user_stops)
+                .remove_tool_parser_end_tokens_from_hidden_stops(&request, &mut hidden)
                 .unwrap();
             if tool_choice == "none" {
                 assert!(visible.is_empty());
                 assert_eq!(hidden, [HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID, 7]);
-            } else if user_stops.contains(&HARMONY_RETURN_TOKEN_ID) {
-                assert_eq!(visible, [HARMONY_CALL_TOKEN_ID]);
-                assert_eq!(hidden, [HARMONY_RETURN_TOKEN_ID, 7]);
-            } else if user_stops.contains(&HARMONY_CALL_TOKEN_ID) {
-                assert_eq!(visible, [HARMONY_RETURN_TOKEN_ID]);
-                assert_eq!(hidden, [HARMONY_CALL_TOKEN_ID, 7]);
             } else {
                 assert_eq!(visible, [HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID]);
                 assert_eq!(hidden, [7]);
@@ -13252,7 +13226,7 @@ responses_tools: None,
     #[tokio::test]
     async fn gpt_oss_tool_endings_survive_stop_decoder_and_aggregation() {
         const CHILD: &str = "DYNAMO_GPT_OSS_TOOL_ENDINGS_CHILD";
-        let Ok(version) = std::env::var(CHILD) else {
+        let Ok(_version) = std::env::var(CHILD) else {
             let (_, test_name) = concat!(
                 module_path!(),
                 "::gpt_oss_tool_endings_survive_stop_decoder_and_aggregation"
@@ -13294,7 +13268,7 @@ responses_tools: None,
         ] {
             let mut hidden = vec![HARMONY_CALL_TOKEN_ID, HARMONY_RETURN_TOKEN_ID];
             let visible = preprocessor
-                .remove_tool_parser_end_tokens_from_hidden_stops(&request, &mut hidden, user_stops)
+                .remove_tool_parser_end_tokens_from_hidden_stops(&request, &mut hidden)
                 .unwrap();
             let mut decoder = Decoder::new(
                 crate::tokenizers::DecodeStream::new(preprocessor.tokenizer.clone(), &[], false),
@@ -13334,11 +13308,9 @@ responses_tools: None,
                 .unwrap()
                 .collect()
                 .await;
-            let completed = ending.is_some() && user_stops.is_empty();
+            let completed = ending.is_some();
             let expected_finish = if completed {
                 FinishReason::ToolCalls
-            } else if version == "1" && ending.is_some() {
-                FinishReason::Stop
             } else {
                 FinishReason::Length
             };
