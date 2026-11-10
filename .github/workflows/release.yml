@@ -1317,6 +1317,28 @@ jobs:
           fi
           echo "All selected container images copied."
 
+      - name: Describe the staged nightly frontend for advisory replay
+        if: ${{ always() && env.NIGHTLY == 'true' }}
+        continue-on-error: true
+        env:
+          SOURCE_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
+          NGC_VERSION_TAG: ${{ needs.prepare-release.outputs.ngc_version_tag }}
+          FRONTEND_STAGED: ${{ steps.copy_images.outputs.frontend_staged }}
+          STAGING_REFERENCE: nvcr.io/${{ secrets.NGC_PUBLISH_ORG }}/ai-dynamo/dynamo-frontend-nightly:${{ needs.prepare-release.outputs.ngc_version_tag }}
+        run: |
+          python3 .github/scripts/frontend_replay_publication.py record \
+            --output "${RUNNER_TEMP}/frontend-replay-publication/publication.json"
+
+      - name: Upload advisory replay publication descriptor
+        if: ${{ always() && env.NIGHTLY == 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: frontend-replay-publication
+          path: ${{ runner.temp }}/frontend-replay-publication/publication.json
+          if-no-files-found: warn
+          retention-days: 30
+
   # ============================================================================
   # ARTIFACTORY STAGING: extract wheels from the dynamo-runtime image in ECR
   # and upload them to JFrog Artifactory so consumers can pip-install them.

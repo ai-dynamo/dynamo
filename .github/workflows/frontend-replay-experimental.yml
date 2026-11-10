@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Experimental Frontend Replay
+
+on:
+  workflow_run:
+    workflows: ['Nightly CI Pipeline']
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publication_run_id:
+        description: 'Nightly workflow run ID containing the publication descriptor'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: frontend-replay-${{ github.event.workflow_run.id || inputs.publication_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  replay:
+    name: Five public DeepSeek V4 traces (advisory)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      REPLAY_CORPUS: tests/frontend/trace_replay/fixtures/deepseek_v4/manifest.json
+    steps:
+      - name: Checkout the reviewed harness
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set isolated output paths
+        run: |
+          echo "REPLAY_OUTPUT=${RUNNER_TEMP}/frontend-replay" >> "${GITHUB_ENV}"
+          echo "REPLAY_ASSETS=${RUNNER_TEMP}/frontend-replay-assets" >> "${GITHUB_ENV}"
+
+      - name: Download this nightly's publication descriptor
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: frontend-replay-publication
+          path: ${{ runner.temp }}/frontend-replay-publication
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id || inputs.publication_run_id }}
+
+      - name: Wait for the identical artifact to reach the public registry
+        id: target
+        run: |
+          python3 .github/scripts/frontend_replay_publication.py resolve \
+            --descriptor "${RUNNER_TEMP}/frontend-replay-publication/publication.json" \
+            --output "${RUNNER_TEMP}/frontend-replay-target/target.json" \
+            --wait-seconds 600
+
+      - name: Pull the immutable CPU frontend image
+        env:
+          IMAGE: ${{ steps.target.outputs.image }}
+        run: docker pull "${IMAGE}"
+
+      - name: Prepare sealed tokenizer assets
+        env:
+          IMAGE: ${{ steps.target.outputs.image }}
+        run: |
+          mkdir -p "${REPLAY_ASSETS}" "${REPLAY_OUTPUT}"
+          docker run --rm --entrypoint /bin/bash \
+            --user "$(id -u):$(id -g)" --cpus 4 --memory 8g \
+            --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/replay,readonly" \
+            --mount "type=bind,src=${REPLAY_ASSETS},dst=/assets" \
+            --env HOME=/tmp --env PYTHONPATH=/replay \
+            --env "CORPUS=/replay/${REPLAY_CORPUS}" \
+            "${IMAGE}" -c \
+            '/opt/dynamo/venv/bin/python3 -m tests.frontend.trace_replay prepare-assets --corpus "$CORPUS" --model-dir /assets'
+
+      - name: Replay both frontend boundaries without modifying the product
+        env:
+          IMAGE: ${{ steps.target.outputs.image }}
+          HARNESS_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          docker run --rm --entrypoint /bin/bash \
+            --user "$(id -u):$(id -g)" --cpus 4 --memory 8g \
+            --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/replay,readonly" \
+            --mount "type=bind,src=${REPLAY_ASSETS},dst=/assets,readonly" \
+            --mount "type=bind,src=${REPLAY_OUTPUT},dst=/output" \
+            --env HOME=/tmp --env PYTHONPATH=/replay \
+            --env HF_HUB_OFFLINE=1 --env TRANSFORMERS_OFFLINE=1 \
+            --env "CORPUS=/replay/${REPLAY_CORPUS}" \
+            --env "DYN_REPLAY_HARNESS_REVISION=${HARNESS_SHA}" \
+            --env "DYN_REPLAY_IMAGE_DIGEST=${IMAGE}" \
+            "${IMAGE}" -c \
+            '/opt/dynamo/venv/bin/python3 -m tests.frontend.trace_replay run --corpus "$CORPUS" --model-dir /assets --output-dir /output --modes unary,sse --schedules whole,one_token --concurrency 1'
+
+      - name: Preserve incomplete execution as an infrastructure result
+        if: always()
+        run: |
+          python3 .github/scripts/frontend_replay_publication.py ensure-report \
+            --directory "${REPLAY_OUTPUT}"
+          cat "${REPLAY_OUTPUT}/summary.json" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload replay evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: frontend-replay-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/frontend-replay
+            ${{ runner.temp }}/frontend-replay-target
+            ${{ runner.temp }}/frontend-replay-publication
+          retention-days: 30

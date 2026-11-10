@@ -1,0 +1,79 @@
+{
+  "schema": "dynamo-frontend-replay/v1",
+  "profile": {
+    "name": "deepseek-v4-flash-0731-bfcl",
+    "model_name": "deepseek-v4-flash",
+    "model": {
+      "repo_id": "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "revision": "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+      "assets": {
+        "config.json": "6c8f3d2d3b48707541b88f32f22ef3f0f8a6b57d8523281e2b8d3cdb0ae9a023",
+        "generation_config.json": "5fccff80f55a4d455bbe516bdd552edf3e9623df95e99fbf2a3c3389fdf91af0",
+        "tokenizer.json": "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf",
+        "tokenizer_config.json": "6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f50d8547"
+      }
+    },
+    "runtime_config": {
+      "tool_call_parser": "deepseek_v4",
+      "reasoning_parser": "deepseek_v4",
+      "context_length": 32768
+    }
+  },
+  "traces": [
+    {
+      "path": "cases.jsonl",
+      "sha256": "63f6f44cc120b8cd40951fa8bf92b66dec497a7fa93869636fa411cd4f877859",
+      "count": 5
+    }
+  ],
+  "provenance": {
+    "benchmark": {
+      "name": "Berkeley Function Calling Leaderboard",
+      "revision": "6ea57973c7a6097fd7c5915698c54c17c5b1b6c8",
+      "license": "Apache-2.0",
+      "selection": "first turn (question[0]); both captured thinking settings in full corpus"
+    },
+    "capture": {
+      "run_id": "20261010T222013Z-gb300-agg-tp4-vllm",
+      "engine": "vLLM 0.31.0",
+      "count": 5,
+      "engine_image": {
+        "image_ref": "vllm/vllm-openai:v0.31.0-aarch64",
+        "image_digest": "sha256:3f7dd5b777d34d1724456ce71f87385dca288c3bb23029ab27dee358f5d2b971"
+      },
+      "recorded": [
+        "request bytes (SHA-256)",
+        "prompt token IDs",
+        "output token IDs including EOS",
+        "terminal evidence"
+      ],
+      "request_adaptations": [
+        "BFCL source adaptations are retained per record in reference.capture.bfcl",
+        "remove capture-only return_token_ids",
+        "select unary or SSE transport at execution time"
+      ],
+      "worker_schedule": "synthetic rechunking of captured output IDs; original streaming timing is not asserted",
+      "terminal_normalization": "EOS token 1 plus API stop/tool_calls => worker stop; API length => worker length"
+    },
+    "golden_review": {
+      "ids": [
+        "bfcl.simple_python_245.thinking-disabled",
+        "bfcl.multiple_2.thinking-enabled",
+        "bfcl.parallel_82.thinking-enabled",
+        "bfcl.parallel_multiple_48.thinking-disabled",
+        "bfcl.irrelevance_28.thinking-disabled"
+      ],
+      "method": "independent pinned vendor encoder and tokenizer, never candidate Dynamo output",
+      "encoder": {
+        "path": "encoding/encoding_dsv4.py",
+        "repo_id": "deepseek-ai/DeepSeek-V4-Flash-0731",
+        "revision": "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+        "sha256": "abc0d26120250dda0ae077dc64aa28836026e61e970854aaeb792445e6a0dde6"
+      },
+      "tokenizers_version": "0.21.4",
+      "prompt_check": "all 9,392 capture prompt ID arrays independently reproduced with zero mismatches; attach tools to system message; preserve thinking kwargs",
+      "response_check": "all five completion parse/render byte roundtrips include EOS; consume structural two-newline DSML separator; project empty content/reasoning to null",
+      "reference_policy": "peer messages are diagnostic; response expectations absent outside five reviewed cases"
+    }
+  }
+}
