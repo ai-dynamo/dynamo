@@ -807,6 +807,9 @@ struct SchedulerQueueActor<
     /// Ranks the current request's load projection found past the host's reject thresholds,
     /// counted per worker. Refilled by `with_projected_loads`; empty while nothing is full.
     full_ranks: FullRankCounts,
+    /// Whether `projected_loads` counts each rank's overlap with the request's active
+    /// prompts, which only `LOAD` rows read. Set by `with_projected_loads`.
+    projected_overlap: bool,
     block_size: u32,
     selector: Sel,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
@@ -1010,6 +1013,7 @@ impl<
             turn_prepared: None,
             projected_loads: FxHashMap::default(),
             full_ranks: FullRankCounts::default(),
+            projected_overlap: true,
             block_size,
             selector,
             prefill_load_estimator,
@@ -2379,8 +2383,15 @@ impl<
                 None
             }
         };
+        // Each rank's overlap with the request's active prompts walks the prompt trie, and
+        // only `LOAD` rows read it. Without them, only the selected rank's is computed.
+        let project_overlap = self
+            .selector
+            .required_worker_inputs()
+            .contains(WorkerInputs::LOAD);
+        self.projected_overlap = project_overlap;
         self.slots.project_worker_loads_into(
-            request.token_seq.as_deref(),
+            request.token_seq.as_deref().filter(|_| project_overlap),
             decay_now,
             &mut request.worker_loads,
             full_ranks,
@@ -2452,6 +2463,19 @@ impl<
                     trace,
                 )
                 .map(|(mut selection, selection_trace)| {
+                    if !self.projected_overlap
+                        && let Some(token_seq) = request.token_seq.as_deref()
+                        && let Some(&load) = request.worker_loads.get(&selection.worker)
+                    {
+                        let load = WorkerLoadProjection {
+                            additional_active_blocks: self
+                                .slots
+                                .additional_active_blocks(token_seq, selection.worker),
+                            ..load
+                        };
+                        selection.potential_decode_blocks =
+                            request.potential_decode_blocks_with_load(load, self.block_size);
+                    }
                     // Measure affinity selections against every eligible worker so cache
                     // metrics still mean "best eligible worker". Explicit pins are not
                     // widened, nor are selectors whose own filters may reject workers.
@@ -4559,6 +4583,7 @@ policy_classes:
             turn_prepared: None,
             projected_loads: FxHashMap::with_capacity_and_hasher(8, Default::default()),
             full_ranks: FullRankCounts::default(),
+            projected_overlap: true,
             block_size: 16,
             selector,
             prefill_load_estimator: None,
@@ -4633,6 +4658,72 @@ policy_classes:
                 })
                 .unwrap())
         }
+    }
+
+    /// Picks `target`'s row, declaring `inputs`.
+    struct PickWorker {
+        inputs: WorkerInputs,
+        target: WorkerWithDpRank,
+    }
+
+    impl crate::plugins::worker_selection::WorkerPicker for PickWorker {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            self.inputs
+        }
+
+        fn pick(
+            &self,
+            _context: &crate::plugins::worker_selection::WorkerSelectionContext<'_>,
+            input: crate::plugins::worker_selection::WorkerInputView<'_>,
+        ) -> Result<usize, crate::WorkerSelectionPolicyError> {
+            Ok(input
+                .candidates()
+                .iter()
+                .position(|candidate| candidate.worker() == self.target)
+                .unwrap())
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_worker_decode_blocks_count_active_overlap_without_load_rows() {
+        let block_size = 16;
+        let target = WorkerWithDpRank::new(0, 0);
+        let mut decode_blocks = Vec::new();
+        for inputs in [WorkerInputs::LOAD, WorkerInputs::ACTIVE_REQUESTS] {
+            let policy = crate::plugins::worker_selection::WorkerSelectionPolicy::new(
+                crate::KvRouterConfig::default(),
+                "test",
+                vec![],
+                Box::new(PickWorker { inputs, target }),
+            );
+            let (queue, slots) = make_queue_with_custom_selector(2, block_size, 64, None, policy);
+            // Four active blocks on the target, the first three shared with the probe.
+            slots
+                .add_request(
+                    SequenceRequest {
+                        request_id: "active".to_string(),
+                        token_sequence: Some(vec![1, 2, 3, 9]),
+                        track_prefill_tokens: true,
+                        expected_output_tokens: None,
+                        prefill_load_hint: None,
+                        worker: target,
+                        lora_name: None,
+                    },
+                    decay_now(),
+                )
+                .unwrap();
+            let (mut probe, _rx) = make_request("probe", 4 * block_size as usize);
+            probe.token_seq = Some(vec![1, 2, 3, 4]);
+            let response = queue
+                .select_without_admission(probe)
+                .await
+                .unwrap()
+                .response;
+            assert_eq!(response.best_worker, target);
+            decode_blocks.push(response.potential_decode_blocks);
+        }
+        // Four active blocks plus the probe's one block not active on the target.
+        assert_eq!(decode_blocks, [5, 5]);
     }
 
     fn counting_policy(

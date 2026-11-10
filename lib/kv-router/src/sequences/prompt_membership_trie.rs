@@ -443,16 +443,7 @@ impl PromptMembershipTrie {
             {
                 let guard = child.read();
                 edge_len = guard.edge.len();
-                let walk_len = edge_len.min(query.len() - query_pos);
-
-                let mut match_len = 1usize;
-                for i in 1..walk_len {
-                    if guard.edge[i] != query[query_pos + i] {
-                        break;
-                    }
-                    match_len += 1;
-                }
-                edge_match_len = match_len;
+                edge_match_len = Self::edge_match_len(&guard.edge, &query[query_pos..]);
 
                 let prev_depth = depth;
                 if first_node {
@@ -524,6 +515,49 @@ impl PromptMembershipTrie {
         }
 
         matched_depth
+    }
+
+    /// `worker`'s entry in [`Self::compute_overlap_depths`], walking only the query's path.
+    pub(super) fn overlap_depth_for(
+        &self,
+        query: &[SequenceHash],
+        worker: WorkerWithDpRank,
+    ) -> usize {
+        let Some(first) = query.first() else {
+            return 0;
+        };
+        let mut next_child = self.root.read().children.get(first).cloned();
+        let mut query_pos = 0usize;
+        let mut depth = 0usize;
+        while let Some(child) = next_child.take() {
+            let guard = child.read();
+            let edge_match_len = Self::edge_match_len(&guard.edge, &query[query_pos..]);
+            if !guard.full_edge_workers.contains(&worker) {
+                let cutoff = guard.worker_cutoffs.get(&worker).copied().unwrap_or(0);
+                return depth + cutoff.min(edge_match_len);
+            }
+            depth += edge_match_len;
+            query_pos += edge_match_len;
+            if edge_match_len < guard.edge.len() || query_pos >= query.len() {
+                break;
+            }
+            next_child = guard.children.get(&query[query_pos]).cloned();
+        }
+        depth
+    }
+
+    /// Length of the common prefix of `edge` and `query`, counting the first hash as a match:
+    /// a child is only reached through its first hash.
+    fn edge_match_len(edge: &[SequenceHash], query: &[SequenceHash]) -> usize {
+        let walk_len = edge.len().min(query.len());
+        let mut match_len = 1usize;
+        for i in 1..walk_len {
+            if edge[i] != query[i] {
+                break;
+            }
+            match_len += 1;
+        }
+        match_len
     }
 
     #[cfg(test)]
@@ -767,13 +801,16 @@ mod tests {
         let workers = [worker(1, 0), worker(2, 0), worker(2, 1)];
         // Every hash denotes exactly one lineage position. Shared prefixes
         // reuse hashes; branches and unrelated roots use distinct hashes.
+        // Prompts that end inside another prompt's edge leave partial coverage.
         let prompts = [
             vec![1, 2, 3, 4],
             vec![1, 2, 3, 5],
             vec![1, 2, 6],
             vec![1, 7],
+            vec![1, 2],
             vec![8, 9, 10],
             vec![8, 9, 11],
+            vec![8],
             vec![12],
         ];
         let mut active: FxHashMap<WorkerWithDpRank, Vec<Vec<SequenceHash>>> = FxHashMap::default();
@@ -837,11 +874,19 @@ mod tests {
                 .collect();
             assert_eq!(trie.worker_hashes(), expected_hashes, "step {step}");
             for query in &prompts {
+                let expected = expected_depths(&active, query);
                 assert_eq!(
                     trie.compute_overlap_depths(Some(query)),
-                    expected_depths(&active, query),
+                    expected,
                     "step {step}, query {query:?}"
                 );
+                for worker in workers {
+                    assert_eq!(
+                        trie.overlap_depth_for(query, worker),
+                        expected.get(&worker).copied().unwrap_or(0),
+                        "step {step}, query {query:?}, {worker:?}"
+                    );
+                }
             }
         }
     }

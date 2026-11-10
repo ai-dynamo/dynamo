@@ -661,12 +661,20 @@ impl SchedulingRequest {
         worker: WorkerWithDpRank,
         block_size: u32,
     ) -> usize {
+        self.potential_decode_blocks_with_load(self.worker_load_for(worker), block_size)
+    }
+
+    /// [`Self::potential_decode_blocks_after_admission`] for the admitted worker's `load`.
+    pub(crate) fn potential_decode_blocks_with_load(
+        &self,
+        load: WorkerLoadProjection,
+        block_size: u32,
+    ) -> usize {
         let request_blocks = self.request_blocks(block_size) as usize;
         let tracked_request_blocks = self.token_seq.as_ref().map_or(0, Vec::len);
         let untracked_request_blocks = request_blocks.saturating_sub(tracked_request_blocks);
 
-        self.worker_load_for(worker)
-            .potential_decode_blocks()
+        load.potential_decode_blocks()
             .saturating_add(untracked_request_blocks)
     }
 
