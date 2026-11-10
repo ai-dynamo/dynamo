@@ -440,6 +440,27 @@ impl SessionPrefixIndexer {
         updated
     }
 
+    /// Keep only the observed part of this request's prefix for one session.
+    /// Returns blocks no remaining indexed session uses, across all owners/tiers.
+    pub fn retain_session_prefix(
+        &self,
+        session_id: &str,
+        request_hashes: &[ExternalSequenceBlockHash],
+    ) -> Vec<ExternalSequenceBlockHash> {
+        let mut state = self.state.write();
+        let orphaned = state.retain_session_prefix(session_id, Some(request_hashes));
+        state.maybe_cleanup();
+        orphaned
+    }
+
+    /// Remove one session and return blocks no remaining indexed session uses.
+    pub fn close_session(&self, session_id: &str) -> Vec<ExternalSequenceBlockHash> {
+        let mut state = self.state.write();
+        let orphaned = state.retain_session_prefix(session_id, None);
+        state.maybe_cleanup();
+        orphaned
+    }
+
     pub fn node_count(&self) -> usize {
         self.state.read().nodes.len()
     }
@@ -454,6 +475,65 @@ fn valid_session_id(session_id: &str) -> bool {
 }
 
 impl IndexState {
+    fn retain_session_prefix(
+        &mut self,
+        session_id: &str,
+        request_hashes: Option<&[ExternalSequenceBlockHash]>,
+    ) -> Vec<ExternalSequenceBlockHash> {
+        let Some(entry) = self.session_to_worker_frontiers.get(session_id) else {
+            return Vec::new();
+        };
+        let frontiers: Vec<_> = entry
+            .worker_frontiers
+            .iter()
+            .flat_map(|(&key, nodes)| nodes.iter().map(move |&node| (key, node)))
+            .collect();
+        let old_nodes: FxHashSet<_> = frontiers
+            .iter()
+            .flat_map(|&(_, node)| self.path_to_root(node))
+            .collect();
+
+        if let Some(request_hashes) = request_hashes {
+            for (key, frontier) in frontiers {
+                let path = self.path_to_root(frontier);
+                let retained = path.first().and_then(|root| {
+                    let start = request_hashes
+                        .iter()
+                        .position(|hash| *hash == self.nodes[*root].block_hash)?;
+                    path.iter()
+                        .zip(&request_hashes[start..])
+                        .take_while(|(node, hash)| self.nodes[**node].block_hash == **hash)
+                        .map(|(&node, _)| node)
+                        .last()
+                });
+                if retained == Some(frontier) {
+                    continue;
+                }
+                self.remove_frontier_binding(session_id, key, frontier);
+                if let Some(node) = retained {
+                    self.advance_frontier(session_id, key, node);
+                }
+            }
+            self.touch_session(session_id);
+        } else {
+            self.drop_session_bindings(session_id);
+        }
+
+        let used_nodes: FxHashSet<_> = self
+            .session_to_worker_frontiers
+            .values()
+            .flat_map(|entry| entry.worker_frontiers.values())
+            .flat_map(|frontiers| frontiers.iter())
+            .flat_map(|&frontier| self.path_to_root(frontier))
+            .collect();
+        let mut orphaned: Vec<_> = old_nodes
+            .difference(&used_nodes)
+            .map(|&node| self.nodes[node].block_hash)
+            .collect();
+        orphaned.sort_unstable();
+        orphaned
+    }
+
     fn insert_node(
         &mut self,
         block_hash: ExternalSequenceBlockHash,
@@ -1129,6 +1209,78 @@ mod tests {
             .expect("lineage query without an anchor cannot fail");
         lineages.sort();
         lineages
+    }
+
+    #[test]
+    fn update_and_close_session_release_only_unshared_prefixes() {
+        let chain = hashes(vec![1, 2, 3]);
+        let index = SessionPrefixIndexer::new();
+        let mooncake = SessionResidencyOwner::SharedCache(SharedCacheBackend::Mooncake);
+        for session in ["s1", "s2"] {
+            index
+                .update_session_from_stored_blocks_in_tier(
+                    session,
+                    mooncake,
+                    StorageTier::HostPinned,
+                    None,
+                    &chain[..if session == "s1" { 3 } else { 2 }],
+                )
+                .unwrap();
+        }
+        index
+            .update_session_from_stored_blocks("s1", worker(1), None, &chain)
+            .unwrap();
+
+        assert_eq!(
+            index.retain_session_prefix("s1", &chain[..2]),
+            vec![chain[2]]
+        );
+        assert_eq!(lineage_of(&index, "s1"), vec![chain[..2].to_vec()]);
+        assert!(index.retain_session_prefix("s1", &chain[..2]).is_empty());
+        assert!(index.close_session("s1").is_empty());
+        assert_eq!(index.close_session("s2"), chain[..2]);
+        assert!(index.close_session("s2").is_empty());
+    }
+
+    #[test]
+    fn update_session_discards_obsolete_branches() {
+        let trunk = hashes(vec![1]);
+        let branches = hashes(vec![2, 3]);
+        let index = SessionPrefixIndexer::new();
+        index
+            .update_session_from_stored_blocks("s1", worker(1), None, &trunk)
+            .unwrap();
+        for branch in &branches {
+            index
+                .update_session_from_stored_blocks("s1", worker(1), Some(trunk[0]), &[*branch])
+                .unwrap();
+        }
+
+        assert_eq!(
+            index.retain_session_prefix("s1", &[trunk[0], branches[0]]),
+            vec![branches[1]]
+        );
+        assert_eq!(lineage_of(&index, "s1"), vec![vec![trunk[0], branches[0]]]);
+    }
+
+    #[test]
+    fn update_session_keeps_store_root_observed_after_missing_ancestors() {
+        let chain = hashes(vec![1, 2, 3]);
+        let index = SessionPrefixIndexer::new();
+        let mooncake = SessionResidencyOwner::SharedCache(SharedCacheBackend::Mooncake);
+        index
+            .update_session_from_stored_blocks_in_tier(
+                "s1",
+                mooncake,
+                StorageTier::HostPinned,
+                None,
+                &chain[1..],
+            )
+            .unwrap();
+
+        assert!(index.retain_session_prefix("s1", &chain).is_empty());
+        assert_eq!(index.session_count(), 1);
+        assert_eq!(index.close_session("s1"), chain[1..]);
     }
 
     #[test]
