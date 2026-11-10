@@ -83,6 +83,7 @@ async fn test_pick_result_translates_to_ext_proc_mutations() {
         cache_salt_forwarding: Default::default(),
         strip_nvext: false,
         reservation_id: None,
+        timings: None,
     };
 
     let observed_headers = Arc::new(Mutex::new(Vec::new()));

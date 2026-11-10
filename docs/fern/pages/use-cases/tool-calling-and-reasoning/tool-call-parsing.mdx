@@ -418,7 +418,7 @@ The **Upstream name** field shows where the vLLM or SGLang parser name differs f
   <Accordion title="Muse">
     <AccordionGroup>
       <Accordion title="Muse Glimmer">
-        **Parser:** `muse_glimmer` (Dynamo alias `muse`)
+        **Parser:** `muse_glimmer`. `muse` is a deprecated alias of `muse_glimmer` and will be removed in a future release.
 
         **Upstream name:** Check your engine version's `--help`
 

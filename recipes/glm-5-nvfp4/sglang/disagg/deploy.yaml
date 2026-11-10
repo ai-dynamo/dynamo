@@ -126,7 +126,6 @@ spec:
               --disaggregation-mode decode
               --disaggregation-transfer-backend nixl
               --disaggregation-bootstrap-port 30001
-              --prefill-round-robin-balance
               --watchdog-timeout 3600
           env:
             - name: POD_UID
