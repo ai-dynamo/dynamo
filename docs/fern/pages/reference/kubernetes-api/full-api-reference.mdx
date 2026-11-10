@@ -5424,7 +5424,7 @@ See [ObjectiveMetric](#objectivemetric).
 </ParamField>
 
 <ParamField path="metrics" type="ObjectiveMetric array">
-Metrics selects the two objectives for a Pareto search. Required when mode is Pareto; ignored otherwise. When omitted in Pareto mode, AISimulate uses its default Pareto objectives.
+Metrics selects the two objectives for a Pareto search. Ignored when mode is not Pareto. When omitted in Pareto mode, AISimulate uses its default objectives [ThroughputPerGPU, ThroughputPerUser]. When set, the pair must be exactly [ThroughputPerGPU, ThroughputPerUser]; other pairs are unsupported.
 See [ObjectiveMetric](#objectivemetric).
 **Validation:** Enum: [Throughput ThroughputPerGPU ThroughputPerUser TTFT E2ELatency Goodput GoodputPerGPU]  MaxItems: 2  MinItems: 2  Optional: \&#123;\&#125;
 </ParamField>

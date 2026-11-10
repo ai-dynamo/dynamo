@@ -1593,7 +1593,7 @@ func TestDGDRRunInputIsParetoFollowsEffectiveTarget(t *testing.T) {
 			}
 			run := dgdrRunForTest(t, map[string]any{})
 			run.Spec.Objective = &nvidiacomv1beta2.ObjectiveSpec{Mode: tt.objectiveMode, Metric: tt.metric}
-			run.Spec.AISimulate = &nvidiacomv1beta2.AISimulateSpec{InputOverrides: &runtime.RawExtension{Raw: raw}}
+			run.Spec.AISim = &nvidiacomv1beta2.AISimSpec{InputOverrides: &runtime.RawExtension{Raw: raw}}
 
 			t.Log("Lower the effective input through the real lowering/merge path")
 			input, err := dgdrRunInput(run, "example.com/dynamo-planner:1.7.0", "1.7.0")
