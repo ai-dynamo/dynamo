@@ -155,6 +155,7 @@ fn make_request(
 ) {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let req = SchedulingRequest {
+        accounting_attribution: Default::default(),
         mode: ScheduleMode::Tracked {
             request_id: request_id.to_string(),
         },

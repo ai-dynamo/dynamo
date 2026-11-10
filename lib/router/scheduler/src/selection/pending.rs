@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use dynamo_tokens::SequenceHash;
 use parking_lot::Mutex;
 
+use crate::AccountingAttribution;
 use crate::identity::RoutingPartitionId;
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
@@ -57,6 +58,7 @@ pub(super) struct PendingSelection {
     pub expected_output_tokens: Option<u32>,
     pub track_prefill_tokens: bool,
     pub lora_name: Option<String>,
+    pub accounting_attribution: AccountingAttribution,
     /// Public block hashes retained only when the partition indexer records
     /// routing decisions, so the replayed booking can be recorded too.
     pub routing_hashes: Option<Vec<LocalBlockHash>>,
@@ -269,6 +271,7 @@ mod tests {
 
     fn pending(worker_id: u64) -> PendingSelection {
         PendingSelection {
+            accounting_attribution: Default::default(),
             key: key(),
             worker: WorkerWithDpRank::new(worker_id, 0),
             sequence_hashes: vec![1, 2, 3],

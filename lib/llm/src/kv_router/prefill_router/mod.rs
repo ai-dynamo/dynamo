@@ -483,6 +483,8 @@ impl
             return next.generate(context.map(|_| req)).await;
         }
 
+        crate::routing_policy::check_stage(&req, crate::routing_policy::ExecutionStage::Prefill)?;
+
         let session_affinity = context
             .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .map_err(|message| anyhow::anyhow!("invalid session affinity context: {message}"))?;

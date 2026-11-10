@@ -125,6 +125,7 @@ mod tests {
 
     fn request(target: WorkerWithDpRank) -> SchedulingRequest {
         SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("request".into()),
             },

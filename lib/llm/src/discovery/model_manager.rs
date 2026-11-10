@@ -2487,7 +2487,8 @@ impl ModelManager {
             model_name,
             is_eagle,
             shared_cache,
-            self.lora_enabled.then(|| lora_domain.filter.clone()),
+            self.lora_enabled
+                .then(|| crate::lora_routing::LoraKvPolicy::kv(lora_domain.filter.clone())),
             scheduler_load,
             cancellation_token,
         )

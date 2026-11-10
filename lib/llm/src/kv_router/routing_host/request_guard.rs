@@ -5,7 +5,6 @@ use std::{collections::HashMap, sync::Arc};
 
 use prometheus::IntCounter;
 
-use crate::routing_policy::AttemptLease;
 use crate::{
     kv_router::{
         KvRouter,
@@ -20,6 +19,7 @@ use crate::{
         preprocessor::MigrationState,
         timing::{RequestPhase, RequestTracker},
     },
+    routing_policy::AttemptLease,
 };
 use dynamo_admission::host::AbortCause;
 use dynamo_kv_hashing::multimodal::BlockExtraInfo;
@@ -654,7 +654,10 @@ impl RequestGuard {
             output_hashes,
             record_itl_at_completion: false,
             prefill_marked: false,
-            migration_state: request.migration_state.clone(),
+            migration_state: request
+                .migration_state
+                .clone()
+                .filter(|_| crate::routing_policy::execution_requirements(request).allows_replay),
             kv_hit,
             affinity_lease: None,
             _attempt_lease: None,
@@ -685,7 +688,10 @@ impl RequestGuard {
             output_hashes: None,
             record_itl_at_completion: true,
             prefill_marked: false,
-            migration_state: request.migration_state.clone(),
+            migration_state: request
+                .migration_state
+                .clone()
+                .filter(|_| crate::routing_policy::execution_requirements(request).allows_replay),
             kv_hit: None,
             affinity_lease: None,
             _attempt_lease: attempt_lease,

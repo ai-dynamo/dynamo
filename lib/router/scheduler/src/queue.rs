@@ -2663,7 +2663,9 @@ impl<
             expected_output_tokens: request.expected_output_tokens,
             prefill_load_hint,
             worker: selected.selection.worker,
-            lora_name: request.lora_name.take(),
+            lora_name: request
+                .accounting_attribution
+                .accounting_name(request.lora_name.take()),
         };
         self.book_and_respond(
             context,
@@ -3705,6 +3707,7 @@ mod tests {
     ) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::Tracked {
                 request_id: request_id.to_string(),
             },

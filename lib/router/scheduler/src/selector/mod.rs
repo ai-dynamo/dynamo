@@ -912,6 +912,7 @@ mod test_support {
 
     pub(super) fn base_request(isl_tokens: usize) -> SchedulingRequest {
         SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },

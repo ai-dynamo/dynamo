@@ -42,6 +42,7 @@ use crate::{
         preprocessor::owned_abort_error,
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
+    routing_policy::{HostedCandidatePolicy, check_candidate_policy},
     session_affinity::{
         AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
         explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
@@ -56,7 +57,6 @@ mod kv_selection;
 mod occupancy;
 mod request_guard;
 
-use crate::routing_policy::HostedCandidatePolicy;
 pub(crate) use builder::hosted_picker;
 pub use builder::{LlmDispatch, MultimodalCache, RoutingHostBuilder};
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};

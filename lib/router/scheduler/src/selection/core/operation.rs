@@ -14,7 +14,7 @@ use crate::identity::RoutingPartitionId;
 use crate::kv_hints::KvHint;
 use crate::protocols::RoutingConstraints;
 use crate::queue::BookingHandle;
-use crate::{AdvisoryWorkerLoad, SchedulingResponse, SessionContext};
+use crate::{AccountingAttribution, AdvisoryWorkerLoad, SchedulingResponse, SessionContext};
 use dynamo_admission::queue::QueueRejection;
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
@@ -30,6 +30,8 @@ use super::super::input::PromptView;
 pub struct SelectionOperation<'a> {
     pub key: RoutingPartitionId,
     pub prompt: PromptView<'a>,
+    /// Attribute booking events independently of routing and cache identity.
+    pub accounting_attribution: AccountingAttribution,
     pub router_config_override: Option<RouterConfigOverride>,
     pub expected_output_tokens: Option<u32>,
     pub priority_jump: f64,

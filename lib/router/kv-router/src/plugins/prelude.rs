@@ -51,7 +51,9 @@ pub use dynamo_scheduler::overlap::OverlapSignals;
 pub use dynamo_scheduler::protocols::{
     RoutingConstraints, WorkerConfigLike, WorkerSelectionResult,
 };
-pub use dynamo_scheduler::{KvSchedulerError, ScheduleMode, SchedulingRequest, WorkerIdSet};
+pub use dynamo_scheduler::{
+    AccountingAttribution, KvSchedulerError, ScheduleMode, SchedulingRequest, WorkerIdSet,
+};
 pub use dynamo_session_affinity::{
     MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES, WorkerAffinityTarget,
 };

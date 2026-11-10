@@ -6,6 +6,7 @@
 //! release them.
 
 use super::*;
+use crate::AccountingAttribution;
 use crate::queue::BookingHandle;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -22,6 +23,7 @@ struct ReservationBooking {
     expected_output_tokens: Option<u32>,
     track_prefill_tokens: bool,
     lora_name: Option<String>,
+    accounting_attribution: AccountingAttribution,
     /// Public block hashes to record into an approximate indexer once booked.
     routing_hashes: Option<Vec<LocalBlockHash>>,
     session_id: Option<String>,
@@ -245,6 +247,7 @@ impl SelectionCore {
                 expected_output_tokens: pending.expected_output_tokens,
                 track_prefill_tokens,
                 lora_name: pending.lora_name.clone(),
+                accounting_attribution: pending.accounting_attribution,
                 routing_hashes: pending.routing_hashes.clone(),
                 session_id: pending.session_id.clone(),
             },
@@ -353,6 +356,8 @@ impl SelectionCore {
                 expected_output_tokens: req.expected_output_tokens,
                 track_prefill_tokens,
                 lora_name: req.prompt.lora_name,
+                // Explicit reservations carry only legacy routing identity, not runtime metadata.
+                accounting_attribution: AccountingAttribution::default(),
                 routing_hashes,
                 session_id: None,
             },
@@ -378,6 +383,7 @@ impl SelectionCore {
             expected_output_tokens,
             track_prefill_tokens,
             lora_name,
+            accounting_attribution,
             routing_hashes,
             session_id,
         } = booking;
@@ -404,7 +410,7 @@ impl SelectionCore {
                 expected_output_tokens,
                 prefill_load_hint,
                 worker,
-                lora_name,
+                lora_name: accounting_attribution.accounting_name(lora_name),
             })?;
         let affinity_lease = match session {
             Some((table, session_id, hold)) => {

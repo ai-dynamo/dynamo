@@ -45,10 +45,23 @@ pub fn supports_runtime_lora<
         && config
             .taints()
             .contains(RUNTIME_LORA_CAPABILITY_TAINT.as_str())
-        && runtime_lora_worker_schemes(config).is_some()
+        && runtime_lora_worker_schemes_view(config).is_some()
 }
 
-pub fn runtime_lora_worker_schemes(config: &impl RuntimeLoraWorkerFacts) -> Option<Vec<String>> {
+struct RuntimeLoraSchemes<'a>(&'a [serde_json::Value]);
+
+impl PartialEq for RuntimeLoraSchemes<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        // Scheme order and duplicate advertisements do not change resolver policy.
+        self.0 == other.0
+            || (self.0.iter().all(|scheme| other.0.contains(scheme))
+                && other.0.iter().all(|scheme| self.0.contains(scheme)))
+    }
+}
+
+fn runtime_lora_worker_schemes_view(
+    config: &impl RuntimeLoraWorkerFacts,
+) -> Option<RuntimeLoraSchemes<'_>> {
     if config
         .runtime_value(RUNTIME_LORA_SUPPORT_RUNTIME_KEY)
         .and_then(serde_json::Value::as_bool)
@@ -56,28 +69,46 @@ pub fn runtime_lora_worker_schemes(config: &impl RuntimeLoraWorkerFacts) -> Opti
     {
         return None;
     }
-    let versions =
-        Vec::<u32>::deserialize(config.runtime_value(RUNTIME_LORA_VERSIONS_RUNTIME_KEY)?).ok()?;
-    if !versions.contains(&u32::from(RUNTIME_LORA_PROTOCOL_VERSION)) {
+    let versions = config
+        .runtime_value(RUNTIME_LORA_VERSIONS_RUNTIME_KEY)?
+        .as_array()?;
+    let mut supported = false;
+    for version in versions {
+        let version = u32::try_from(version.as_u64()?).ok()?;
+        supported |= version == u32::from(RUNTIME_LORA_PROTOCOL_VERSION);
+    }
+    if !supported {
         return None;
     }
-    let mut schemes =
-        Vec::<String>::deserialize(config.runtime_value(RUNTIME_LORA_SCHEMES_RUNTIME_KEY)?).ok()?;
+    let schemes = config
+        .runtime_value(RUNTIME_LORA_SCHEMES_RUNTIME_KEY)?
+        .as_array()?;
+    (!schemes.is_empty() && schemes.iter().all(serde_json::Value::is_string))
+        .then_some(RuntimeLoraSchemes(schemes))
+}
+
+pub fn runtime_lora_worker_schemes(config: &impl RuntimeLoraWorkerFacts) -> Option<Vec<String>> {
+    let mut schemes: Vec<_> = runtime_lora_worker_schemes_view(config)?
+        .0
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect();
     schemes.sort_unstable();
     schemes.dedup();
-    (!schemes.is_empty()).then_some(schemes)
+    Some(schemes)
 }
 
 pub fn runtime_lora_workers_have_homogeneous_resolvers<C: RuntimeLoraWorkerFacts>(
     worker_ids: &[WorkerId],
     worker_configs: &HashMap<WorkerId, C>,
 ) -> bool {
-    let mut expected: Option<Vec<String>> = None;
+    let mut expected = None;
     for worker_id in worker_ids {
         let Some(config) = worker_configs.get(worker_id) else {
             return false;
         };
-        let Some(schemes) = runtime_lora_worker_schemes(config) else {
+        let Some(schemes) = runtime_lora_worker_schemes_view(config) else {
             return false;
         };
         match &expected {
@@ -109,10 +140,14 @@ pub fn constrain_runtime_lora_workers<
     eligible.retain(|worker_id| {
         live_worker_ids.contains(worker_id)
             && worker_configs.get(worker_id).is_some_and(|config| {
-                if !routing_constraints.is_compatible_with_worker_taints(config.taints()) {
+                if !config
+                    .taints()
+                    .contains(RUNTIME_LORA_CAPABILITY_TAINT.as_str())
+                    || !routing_constraints.is_compatible_with_worker_taints(config.taints())
+                {
                     return false;
                 }
-                let Some(schemes) = runtime_lora_worker_schemes(config) else {
+                let Some(schemes) = runtime_lora_worker_schemes_view(config) else {
                     malformed_workers += 1;
                     return false;
                 };
@@ -271,6 +306,26 @@ fn validate_opaque_source(source_uri: &str) -> Result<(), RuntimeLoraError> {
     Ok(())
 }
 
+pub fn validate_runtime_lora_identity(
+    model: &str,
+    base: &str,
+    source: &str,
+    key: &str,
+) -> Result<(), RuntimeLoraError> {
+    if base.is_empty()
+        || base.len() > MAX_RUNTIME_BASE_MODEL_BYTES
+        || contains_forbidden_character(base)
+        || model != base
+    {
+        return Err(RuntimeLoraError::InvalidModelId);
+    }
+    validate_opaque_source(source)?;
+    if adapter_key(base, source) != key {
+        return Err(RuntimeLoraError::InvalidModelId);
+    }
+    Ok(())
+}
+
 pub fn resolve_runtime_lora_model<K, F, B>(
     requested_model: &str,
     config: &RuntimeLoraConfig,
@@ -336,11 +391,11 @@ where
 mod tests {
     use super::*;
 
-    struct TestWorker(serde_json::Value, std::cell::Cell<usize>, HashSet<String>);
+    struct TestWorker(serde_json::Value, HashSet<String>, std::cell::Cell<usize>);
 
     impl RuntimeLoraWorkerFacts for TestWorker {
         fn runtime_value(&self, key: &str) -> Option<&serde_json::Value> {
-            self.1.set(self.1.get() + 1);
+            self.2.set(self.2.get() + 1);
             self.0.get(key)
         }
     }
@@ -359,7 +414,7 @@ mod tests {
             None
         }
         fn taints(&self) -> &HashSet<String> {
-            &self.2
+            &self.1
         }
     }
 
@@ -370,9 +425,36 @@ mod tests {
                 "runtime_lora_protocol_versions": [2],
                 "runtime_lora_schemes": schemes,
             }),
+            HashSet::from([RUNTIME_LORA_CAPABILITY_TAINT.to_string()]),
             Default::default(),
-            HashSet::from(["dynamo.runtime-lora/v2".into()]),
         )
+    }
+
+    #[test]
+    fn runtime_identity_validation_preserves_opaque_sources() {
+        let source = "wandb-artifact:///entity/model|version";
+        let key = adapter_key("base", source);
+        assert!(validate_runtime_lora_identity("base", "base", source, &key).is_ok());
+        assert!(validate_runtime_lora_identity("other", "base", source, &key).is_err());
+        assert!(validate_runtime_lora_identity("base", "base", source, "wrong").is_err());
+        for invalid in ["", "x\n", &"a".repeat(MAX_RUNTIME_SOURCE_URI_BYTES + 1)] {
+            let matching_key = adapter_key("base", invalid);
+            assert!(
+                validate_runtime_lora_identity("base", "base", invalid, &matching_key).is_err()
+            );
+        }
+        for invalid in ["", "x\0", &"a".repeat(MAX_RUNTIME_BASE_MODEL_BYTES + 1)] {
+            let matching_key = adapter_key(invalid, source);
+            assert!(
+                validate_runtime_lora_identity(invalid, invalid, source, &matching_key).is_err()
+            );
+        }
+        let max_base = "b".repeat(MAX_RUNTIME_BASE_MODEL_BYTES);
+        let max_source = "s".repeat(MAX_RUNTIME_SOURCE_URI_BYTES);
+        let max_key = adapter_key(&max_base, &max_source);
+        assert!(
+            validate_runtime_lora_identity(&max_base, &max_base, &max_source, &max_key).is_ok()
+        );
     }
 
     #[test]
@@ -391,12 +473,8 @@ mod tests {
             serde_json::json!({"supports_runtime_lora_resolution": true, "runtime_lora_protocol_versions": [2], "runtime_lora_schemes": [null]}),
         ] {
             assert!(
-                runtime_lora_worker_schemes(&TestWorker(
-                    facts,
-                    Default::default(),
-                    Default::default()
-                ))
-                .is_none()
+                runtime_lora_worker_schemes(&TestWorker(facts, HashSet::new(), Default::default()))
+                    .is_none()
             );
         }
     }
@@ -414,20 +492,42 @@ mod tests {
                 None,
                 &live,
                 &configs,
-                &RoutingConstraints::default(),
+                &RoutingConstraints::default()
             ),
             Some(live)
         );
         for worker in configs.values() {
-            assert_eq!(worker.1.get(), 3, "read each capability field once");
+            assert_eq!(worker.2.get(), 3, "read each capability field once");
         }
+    }
+
+    #[test]
+    fn capability_view_borrows_current_discovery_values() {
+        let mut worker = capable_worker(&["a", "b"]);
+        let schemes = runtime_lora_worker_schemes_view(&worker).unwrap();
+        assert!(std::ptr::eq(
+            schemes.0,
+            worker.0[RUNTIME_LORA_SCHEMES_RUNTIME_KEY]
+                .as_array()
+                .unwrap()
+                .as_slice()
+        ));
+        assert_eq!(worker.2.get(), 3);
+
+        worker.0[RUNTIME_LORA_SCHEMES_RUNTIME_KEY] = serde_json::json!(["updated"]);
+        assert_eq!(
+            runtime_lora_worker_schemes_view(&worker).unwrap().0,
+            &[serde_json::json!("updated")]
+        );
+        worker.0[RUNTIME_LORA_SUPPORT_RUNTIME_KEY] = serde_json::json!(false);
+        assert!(runtime_lora_worker_schemes_view(&worker).is_none());
     }
 
     #[test]
     fn runtime_restriction_requires_requested_capability_taint() {
         let capable = capable_worker(&["custom"]);
         let mut missing_taint = capable_worker(&["custom"]);
-        missing_taint.2.clear();
+        missing_taint.1.clear();
         assert!(supports_runtime_lora(&capable, true, true, true));
         assert!(!supports_runtime_lora(&missing_taint, true, true, true));
         let configs = HashMap::from([(1, capable), (2, missing_taint)]);
@@ -446,7 +546,7 @@ mod tests {
             Some(HashSet::from([1]))
         );
         assert_eq!(
-            configs[&2].1.get(),
+            configs[&2].2.get(),
             0,
             "reject missing taint before capability decoding"
         );
@@ -483,6 +583,34 @@ mod tests {
         );
         assert_eq!(
             constrain_runtime_lora_workers(false, None, &live, &configs, &constraints),
+            None
+        );
+    }
+
+    #[test]
+    fn runtime_restriction_requires_capability_taint_without_caller_constraints() {
+        let mut untainted = capable_worker(&["a"]);
+        untainted.1.clear();
+        let configs = HashMap::from([(1, capable_worker(&["a"])), (2, untainted)]);
+        let live = HashSet::from([1, 2]);
+        assert_eq!(
+            constrain_runtime_lora_workers(
+                true,
+                None,
+                &live,
+                &configs,
+                &RoutingConstraints::default()
+            ),
+            Some(HashSet::from([1]))
+        );
+        assert_eq!(
+            constrain_runtime_lora_workers(
+                false,
+                None,
+                &live,
+                &configs,
+                &RoutingConstraints::default()
+            ),
             None
         );
     }
